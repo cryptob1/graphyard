@@ -21,7 +21,7 @@ export const controlPlanePermissions: readonly PermissionRequirement[] = [
   { permission: 'actions', level: 'write', feature: 'check-rerun', reason: 'rerun failed workflow jobs on the unchanged candidate' },
   { permission: 'metadata', level: 'read', feature: 'repository', reason: 'read the managed repository' },
   { permission: 'contents', level: 'read', feature: 'observation', reason: 'read commits, trees and pull request files' },
-  { permission: 'contents', level: 'write', feature: 'merge-queue', reason: 'push base refreshes, branch restores and main-guard revert branches onto the managed repository' },
+  { permission: 'contents', level: 'write', feature: 'merge-queue', reason: 'push base refreshes and main-guard revert branches onto the managed repository' },
   { permission: 'pull_requests', level: 'read', feature: 'observation', reason: 'read pull requests and reviews' },
   { permission: 'pull_requests', level: 'write', feature: 'review-dispatch', reason: 'post review request comments' },
   { permission: 'issues', level: 'read', feature: 'comment-events', reason: 'receive `issue_comment` webhooks carrying review results' },

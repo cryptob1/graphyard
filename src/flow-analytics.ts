@@ -2,7 +2,6 @@ import type pg from 'pg';
 import type { Store } from './store.js';
 import { advisoryLocks } from './store/locks.js';
 import { stages, type Stage, type Work } from './model.js';
-import { queueSequencingReason } from './merge-queue.js';
 import { conflictHotspots, conflictHotspotWindowMs, ledgerConflicts, type ConflictOccurrence } from './model/conflict-hotspots.js';
 import { eventHistoryLimits } from './events-history.js';
 
@@ -228,12 +227,10 @@ export function deriveFacts(event: LedgerEvent, state: ProjectionState): FlowFac
   const firstUnmet = gates.find(g => !g.passed);
   const dependencyWaiting = (gates.find(g => g.name === 'ready')?.reasons ?? [])
     .flatMap(reason => { const match = /^Dependency (\S+) is unfinished$/.exec(reason); return match ? [match[1]] : []; });
-  // The merge queue owns the last hop: a proven candidate holds a queue entry while it waits
-  // its turn and its speculative tip. Those sequencing reasons are recorded apart from real
-  // merge refusals (protection, mergeability, freshness, escalation, ejection) so the wait
-  // classification can tell "queued and ready" from "blocked" without reading live state.
-  const queued = !!work.queue;
-  const mergeBlockers = (gates.find(g => g.name === 'merge')?.reasons ?? []).filter(reason => !queueSequencingReason(reason)).length;
+  // Graphyard's merge queue is gone (GY-1236): nothing is queued, and every merge-gate reason is a
+  // real refusal. Both are still recorded so new gate facts keep the shape earlier ones read by.
+  const queued = false;
+  const mergeBlockers = (gates.find(g => g.name === 'merge')?.reasons ?? []).length;
   // The recorded refusal reasons are part of the identity: a gate that keeps refusing for a
   // different reason (protection, then freshness) is a new durable fact, so refusal history
   // never keeps reporting a reason the evaluator has already replaced.

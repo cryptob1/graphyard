@@ -92,8 +92,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
   // Browser administration beside the work it unblocks: a pending sudo code, and who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
-  // Candidate session status, conflict probe, merge queue and timing failure qualification (GY-1157)
-  const { mergeQueue, probe, status: pipelined, delivery } = await buildPipelineStatus(root, master, snapshot, coordinator, runtime, credentials, containment, reviews, producers, dispatch.failures, retries, daemonState, cycling, launches, masterApi, sections);
+  // Candidate session status, conflict probe and timing failure qualification (GY-1157)
+  const { probe, status: pipelined, delivery } = await buildPipelineStatus(root, master, snapshot, coordinator, runtime, credentials, containment, reviews, producers, dispatch.failures, retries, daemonState, cycling, launches, masterApi, sections);
   // A failed check a since-fixed base breakage explains names the refresh that clears it (GY-793).
   const status = nameBaseBreaks(pipelined, snapshot.work);
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device.
@@ -142,7 +142,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       ...backlog,
       attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + triage.length + ahead.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length + delivery.attention.length } }, snapshot.work);
   const sectionsReport = await assembleStatusSections({
-    master, snapshot, coordinator, cli, mergeQueue, probe, observation, health, hs,
+    master, snapshot, coordinator, cli, probe, observation, health, hs,
     merger, setup, administration, daemon, dispatch, reviewRecords, producerRecords,
     owed, executors, releases, lag, status, disk, managedRoot, inventory, reclaimPlan,
     runtime, reviewRuntime, humanOnly, masterApi, decisions, approvals: cycling?.approvals ?? [],

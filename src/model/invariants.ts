@@ -167,17 +167,16 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
   } else judge('lingering-sessions', `no session open ${limits.sessionAfterSettleMinutes} min after its item is delivered or its decision settled`, 'the session runtime could not be read this cycle', true, [], false);
 
   // 3. No candidate base-refreshed past its bound without a head change of its own (GY-375). A base
-  //    refresh the control plane recorded, or a queue tip it merged the base into, is one refresh;
-  //    a head that is neither the refresh's nor the tip's output is the worker's own and starts over.
+  //    refresh the control plane recorded is one refresh; a head that is not the refresh's output is
+  //    the worker's own and starts over.
   const live = new Set<string>();
   for (const item of work.filter(entry => open(entry) && !!entry.candidate)) {
     live.add(item.id);
-    const head = item.candidate!.sha, refresh = item.baseRefresh ?? null, tip = item.queue?.speculation ?? null;
+    const head = item.candidate!.sha, refresh = item.baseRefresh ?? null;
     const entry = record.refreshes[item.id] ?? { head, count: 0, seen: [] };
-    const produced = new Set([refresh?.head, tip?.tip].filter((sha): sha is string => !!sha));
-    if (entry.head !== head && !produced.has(head)) entry.count = 0; // the refreshes already seen stay seen: only a new one counts
+    if (entry.head !== head && refresh?.head !== head) entry.count = 0; // the refreshes already seen stay seen: only a new one counts
     entry.head = head;
-    const events = [refresh ? `refresh:${refresh.base}:${refresh.at}` : null, tip?.merge ? `tip:${tip.tip}:${tip.base}` : null].filter((event): event is string => !!event);
+    const events = refresh ? [`refresh:${refresh.base}:${refresh.at}`] : [];
     for (const event of events) if (!entry.seen.includes(event)) { entry.count += 1; entry.seen = [...entry.seen, event].slice(-20); }
     record.refreshes[item.id] = entry;
   }

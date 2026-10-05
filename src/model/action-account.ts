@@ -22,12 +22,11 @@ import type { Work } from './work.js';
  * left as silence:
  *
  * - `dependency` — another item's action moves this one. Its key is on `on`.
- * - `queue` — the merge ahead of it in the queue moves it; that entry's key is on `on`.
  * - `session` — a live session is already doing exactly what the gate waits for.
  * - `human` — one of the three decisions the project reserves for a person (AGENTS.md).
  * - `settled` — no gate refuses: the item is delivered, or merged and awaiting its record.
  */
-export const waitKinds = ['dependency', 'queue', 'session', 'human', 'settled'] as const;
+export const waitKinds = ['dependency', 'session', 'human', 'settled'] as const;
 export type WaitKind = typeof waitKinds[number];
 export interface ActionWait {
   kind: WaitKind;

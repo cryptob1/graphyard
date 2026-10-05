@@ -44,6 +44,12 @@ export interface CoordinationOmissions { evidence: number; dispatchHistory: numb
 
 const absent = (value: unknown) => value === null || value === undefined || typeof value !== 'object';
 /**
+ * A document as stored, with the merge-queue fields an item written before GY-1236 may still hold
+ * (`retiredQueueFields`). The coordination view reads them only to agree with its SQL form in
+ * src/store/coordination-sql.ts, which projects stored documents unchanged.
+ */
+const stored = (work: Work) => work as Work & { queue?: unknown; queueHistory?: unknown[] };
+/**
  * A delivery nothing is owed for any more (GY-203): done, with no next action, queue entry, lease,
  * containment quarantine, action row or running session. The loop reads such an item only for what
  * it is — delivered, its delivery record, its gates — so the view keeps none of its histories, no
@@ -54,7 +60,7 @@ const absent = (value: unknown) => value === null || value === undefined || type
  * is the SQL form; the two must agree), so the coordination snapshot serves it without reading its
  * document.
  */
-export const deliverySettled = (work: Work) => work.stage === 'done' && absent(work.nextAction) && absent(work.queue) && absent(work.lease) && absent(work.containmentQuarantine)
+export const deliverySettled = (work: Work) => work.stage === 'done' && absent(work.nextAction) && absent(stored(work).queue) && absent(work.lease) && absent(work.containmentQuarantine)
   && !(Array.isArray(work.actionQueue?.actions) && work.actionQueue.actions.length)
   && !(Array.isArray(work.sessions) && work.sessions.some(handle => handle?.state === 'running'));
 const recent = <T>(entries: T[], keep: number) => entries.slice(Math.max(0, entries.length - keep));
@@ -69,8 +75,9 @@ export function coordinationWork(work: Work, omitted: CoordinationOmissions): Wo
     .map(({ artifacts: _artifacts, scopeFiles: _scopeFiles, provenance: _provenance, ...entry }: any) => entry);
   omitted.evidence += (work.evidence?.length ?? 0) - evidence.length;
   omitted.dispatchHistory += history.length - recentHistory.length;
-  const queueHistory = work.queueHistory && recent(work.queueHistory, keep);
-  omitted.queueHistory += (work.queueHistory?.length ?? 0) - (queueHistory?.length ?? 0);
+  const legacyHistory = stored(work).queueHistory;
+  const queueHistory = legacyHistory && recent(legacyHistory, keep);
+  omitted.queueHistory += (legacyHistory?.length ?? 0) - (queueHistory?.length ?? 0);
   const observation = work.observation ? (({ scopeFiles: _scopeFiles, ...rest }) => rest)(work.observation) as Work['observation'] : work.observation;
   const actions = work.actionQueue;
   const actionHistory = actions && recent(actions.history, keep)

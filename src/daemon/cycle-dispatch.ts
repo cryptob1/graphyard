@@ -349,10 +349,7 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     const target = pending ? { head: item.candidate!.sha, base: pending.baseTip } : refresh ? { head: refresh.from.sha, base: refresh.base } : null;
     if (!target) return;
     // A docs-sync head (GY-566) is the same head and tip's second outcome, reported under its own key.
-    // A restore's retry reads the same head and base tip as the attempt before it, so the attempt
-    // is part of the key: the escalated attempt is reported, not folded into the first (GY-854).
-    const attempt = !pending && refresh?.restore?.attempts && refresh.restore.attempts > 1 ? `:attempt-${refresh.restore.attempts}` : '';
-    const key = `refresh:${item.id}:${target.head}:${target.base}:${item.policyRevision}${!pending && refresh?.docsSync ? ':docs-sync' : ''}${attempt}`;
+    const key = `refresh:${item.id}:${target.head}:${target.base}:${item.policyRevision}${!pending && refresh?.docsSync ? ':docs-sync' : ''}`;
     if (pending) {
       if (state.actions[key]) return;
       performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: 'started',
@@ -365,19 +362,14 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     const kept = carry ? [...(carry.approval.carried ? ['the approval'] : []), ...carry.evidence.filter(entry => entry.carried).map(entry => entry.proof)] : [];
     const again = carry ? [...(carry.approval.carried ? [] : ['the approval']), ...carry.evidence.filter(entry => !entry.carried).map(entry => entry.proof)] : [];
     const trigger = refresh!.trigger ? ` [trigger: ${refresh!.trigger}]` : '';
-    const restore = refresh!.restore;
     const detail = refresh!.stale
       ? `${item.key}: ${refresh!.stale.reading}; it keeps its head, review and proofs (GY-375)`
       : refresh!.conflict
       ? `${item.key}${trigger}: ${refresh!.from.sha.slice(0, 12)} cannot be brought onto base branch tip ${refresh!.base.slice(0, 12)} by Graphyard; ${docsOnlyConflict(refresh!.conflictPaths) ? `both sides changed only docs pages (${refresh!.conflictPaths!.join(', ')}), so a docs-sync session resolves it unless the loop's own merge finds code conflicting, when it returns to the worker` : 'it returns to the worker'} with the conflict named: ${refresh!.conflict}`
       : refresh!.docsSync
       ? `${item.key}${trigger}: a docs-sync session brought ${refresh!.from.sha.slice(0, 12)} onto base branch tip ${refresh!.base.slice(0, 12)} as ${(refresh!.head ?? '').slice(0, 12)} with no rework round; kept ${kept.join(', ') || 'nothing'}${again.length ? `; required afresh: ${again.join(', ')}` : ''}${carry && !carry.approval.carried ? ` (${carry.approval.reason})` : ''}`
-      // A restore whose result GitHub does not show is a failure with its reason, never a success
-      // re-logged (GY-854): the escalation on the record names why it stops repeating.
-      : restore?.outcome === 'unpublished'
-      ? `${item.key}${trigger}: the branch restore is not on GitHub (attempt ${restore.attempts ?? 1} onto base branch tip ${refresh!.base.slice(0, 12)}): ${restore.failure}${restore.escalated ? ' — escalated, it stops repeating' : ' — one retry follows'}`
       : `${item.key}${trigger}: brought ${refresh!.from.sha.slice(0, 12)} onto base branch tip ${refresh!.base.slice(0, 12)} as ${(refresh!.head ?? '').slice(0, 12)} with no rework round; kept ${kept.join(', ') || 'nothing'}${again.length ? `; required afresh: ${again.join(', ')}` : ''}`;
-    performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: refresh!.conflict || restore?.outcome === 'unpublished' ? 'failed' : 'done', detail,
+    performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: refresh!.conflict ? 'failed' : 'done', detail,
       attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   });
   return { capacities, approversSpent };

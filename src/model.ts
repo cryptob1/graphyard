@@ -11,6 +11,6 @@ export * from './model/delegation.js';
 export * from './model/delivery.js';
 export * from './model/bootstrap.js';
 export * from './model/gates.js';
-export * from './model/queue.js';
 export * from './model/carry.js';
+export * from './model/carried-bindings.js';
 export * from './model/closure.js';

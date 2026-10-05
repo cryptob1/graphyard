@@ -3,7 +3,7 @@ import { type Work, type AgentReview, reviewProviderOf, standingEscalations, lea
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker } from '../model/scope.js';
 import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
-import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { extractProducerAccountsOrRuntimes, unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
@@ -244,13 +244,6 @@ export function routineDecision(work: Work, config: ReviewCapConfig, now: number
   return stopped.stopped ? { ...needed, input: situatedInput(needed), reason: `${needed.reason} The previous worker is stopped: ${stopped.grounds}.` } : null;
 }
 /**
- * GY-568. Whether the evaluated build gate holds the head for the control plane's restore after a
- * predecessor's ejection. Nothing read from such a head is the worker's: no rework is asked for it.
- */
-export function awaitingEjectionRestore(work: Pick<Work, 'gates'>): boolean {
-  return (work.gates ?? []).some(gate => gate.name === 'build' && gate.reasons.some(reason => reason.startsWith(restoringAfterEjectionPrefix)));
-}
-/**
  * What the item calls for, before asking whether the loop may attest that its worker is stopped.
  * `baseFailed` names required checks the base head fails too (GY-528); `exhausted`, spent producer requests (GY-496).
  */
@@ -264,10 +257,6 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   const closure = work.triage?.state === 'proposed' ? triageClosure(work.triage.judgement) : null;
   if (closure) return { action: 'close', reason: `${work.key} is a machine-filed backlog item the triage agent judged should be closed (${closure.kind}${closure.ref ? ` of ${closure.ref}` : ''}): ${closure.reason}`.slice(0, 2000),
     binding: `triage:${work.triage!.at}`, input: { ...closure, triageAt: work.triage!.at } };
-  // A stale speculative tip waits for the control plane's restore (GY-568): a conflict, a verdict,
-  // a failed check or proof, or a thread on it judged a tree that holds another item's unlanded
-  // work, so none of them is grounds to send it to a worker. Only a lease-loss is still settled.
-  if (awaitingEjectionRestore(work)) return leaseLossDecision(work);
   // Like a verdict, a conflict keeps matching the head it was found on until a new one is pushed,
   // and the engine's `rework` does not clear it: once the round is requested the item needs a
   // worker, not a second decision, even when that round's worker dies before pushing.
@@ -489,16 +478,10 @@ export function attestationDecision(work: Work): RoutineDecision | null {
 
 /**
  * The conflict with the base that only a sync round can resolve, for exactly the current head, or
- * null. Two observations say so. GitHub computed a merge conflict for the open pull request (its
- * `mergeable` is false, not merely uncomputed); and the merge queue ejected this head because its
- * speculative merge conflicts. An ejection whose base the control plane has not yet tried to
- * bring the head onto waits for that attempt first: a clean refresh republishes the head and it
- * re-enters the queue with no round at all, and a conflicting one is named by `baseRefreshConflict`.
- * The binding names the head and the base tip, so a base that moves on is a fresh ground; for a
- * queue ejection that tip is the base the conflicting merge was attempted onto, as recorded.
- * An ejection whose speculative base held predecessors is no conflict with the base (GY-321): merging
- * the base resolves nothing, so no round is asked; the entry waits for those predecessors
- * and re-enters with the same head (model/queue.ts, `predecessorWait`).
+ * null: GitHub computed a merge conflict for the open pull request (its `mergeable` is false, not
+ * merely uncomputed). While the control plane's own test merge of the head onto that tip is
+ * pending, it decides first. The binding names the head and the base tip, so a base that moves on
+ * is a fresh ground.
  */
 export function syncConflict(work: Work): { reason: string; binding: string } | null {
   const candidate = work.candidate, observation = work.observation;
@@ -508,16 +491,8 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
   // While the control plane's own test merge of the head onto that tip is pending, it decides: a
   // confirmed conflict is `baseRefreshConflict`'s, routed to a docs-sync session when it is confined
   // to docs pages (GY-566), and a clean one costs no round at all.
-  if (observation.conflicting && !work.queue && !pendingBaseRefresh(work))
+  if (observation.conflicting && !pendingBaseRefresh(work))
     return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
-  const ejection = work.queueEjection;
-  if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflict(ejection) && !ejection.predecessors?.length && !pendingBaseRefresh(work)) {
-    // The base the speculative merge was actually attempted onto, as the ejection recorded it
-    // (GY-252); the observed tip only for a record that named none (GY-583).
-    const base = ejection.conflict?.base ?? tip;
-    const moved = base === tip ? '' : `; the base branch tip is now ${tip.slice(0, 12)}`;
-    return { reason: `the merge queue ejected candidate ${candidate.sha.slice(0, 12)}: ${ejection.reason} (base branch tip ${base.slice(0, 12)}${moved})`, binding: `${candidate.sha}:queue-conflict:${ejection.sequence}:${base}` };
-  }
   return null;
 }
 /** The resolve decision a standing control-plane lease-loss calls for (see `supersededLeaseLoss`), or null. */

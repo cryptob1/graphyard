@@ -4,7 +4,7 @@ import { blockerView } from '../model/blocker-class.js';
 import { humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { automatableProof } from '../model/mechanical-proofs.js';
 import { type Work, standingEscalations } from '../model.js';
-import { currentRestore, refusedReconciliation } from '../merge-queue.js';
+import { refusedReconciliation } from '../merge-queue.js';
 import { missingBaseAncestry } from '../merge-base-ancestry.js';
 import { type ProductionReport, attentionLines } from '../production-watch.js';
 import type { FleetView } from '../model/registry.js';
@@ -55,7 +55,7 @@ export function installationOwner(source: typeof installationSources[number], te
 }
 /** Why a work item raises attention; each cause is also its fault kind. */
 export const workAttentionCauses = ['human-request', 'containment-settleable', 'containment-grace', 'containment', 'session', 'proof-gap', 'reviewer-exhausted', 'launch-review', 'launch-producer',
-  'base-conflict', 'merged-unauthorized', 'merged-reverted', 'hold-overdue', 'contaminated', 'merge-base-dismissed', 'merge-refused', 'gate'] as const satisfies readonly FaultKind[];
+  'base-conflict', 'merged-unauthorized', 'merged-reverted', 'hold-overdue', 'merge-base-dismissed', 'merge-refused', 'gate'] as const satisfies readonly FaultKind[];
 export type WorkAttentionCause = typeof workAttentionCauses[number];
 /**
  * The owner of a work item's attention, from the same facts that raised it. Everything an agent
@@ -66,20 +66,8 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause): Atten
   const key = work.key;
   if (cause === 'merge-refused') return agentOwner('master', `Nothing to run by hand: the integration job asks GitHub again on every observation of ${key}; fix what GitHub names (branch protection, the App's pull request permission, a moved head) and the next observation clears it`);
   if (cause === 'merge-base-dismissed') return agentOwner('master', missingBaseAncestry(work)
-    ? `Nothing to run: the merge queue republishes ${key}'s tip onto the base branch tip and the merge broker refuses it until then; graphyard master status shows the new head`
-    : `Nothing to run: the approval is restored on the unchanged head and re-posted before the merge`);
-  // A branch carrying another item's unlanded commits is the control plane's to restore (GY-127):
-  // an ejected tip is restored on its own, any other contaminated head on the coordinator's
-  // request, and a head nothing can move goes back to a worker as a fresh attempt.
-  if (cause === 'contaminated') {
-    const restore = currentRestore(work)?.restore ?? null;
-    if (restore?.outcome === 'unrepairable') return agentOwner('master', `graphyard master decide ${key} rework REASON, then graphyard master approver ${key} DECISION: the foreign commits sit under something the control plane cannot move, so a fresh attempt on a fresh branch is the way back`, 'approver');
-    if (restore?.outcome === 'unpublished' && restore.escalated) return agentOwner('master', `Fix what GitHub refuses for ${key} — the restore's own record names it (${restore.failure ?? restore.escalated}), usually branch protection or the App's contents permission — then graphyard master repair ${key} REASON requests the restore again; it stops repeating on its own`);
-    if (restore && !restore.performedAt) return agentOwner('master', `Nothing to run: the reconciliation job restores ${key} to its own reviewed head merged onto the base and reports the result here`);
-    return work.queueEjection?.sha === work.candidate?.sha
-      ? agentOwner('master', `Nothing to run: the control plane restores an ejected tip on its own, to ${key}'s own reviewed head merged onto the base; graphyard master repair ${key} REASON requests it again if the record shows no restore`)
-      : agentOwner('master', `graphyard master repair ${key} REASON: the control plane resets the branch to ${key}'s own reviewed head and merges the base onto it; no worker force-push and no shell`);
-  }
+    ? `Nothing to run: the loop requests a fresh review of ${key}'s head; graphyard master status shows the new verdict`
+    : `Nothing to run: the approval is restored on the unchanged head`);
   // The one attention item no agent may clear: the three human decisions, answered by the human.
   if (cause === 'human-request') {
     const request = work.humanRequest!;
@@ -99,7 +87,7 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause): Atten
   if (cause === 'merged-unauthorized') {
     const refused = refusedReconciliation(work);
     return refused ? agentOwner('master', `graphyard master decide ${key} merge REASON with a REASON that cites refused decision ${refused.decision}, then the operator approves it with their admin credential (GRAPHYARD_TOKEN_FILE=ADMIN_TOKEN_FILE graphyard master approve ${key} DECISION REASON); the next observation delivers it as operator-authorized, stating that no execution authorized the merge and what the record lacked`, 'approver')
-      : agentOwner('master', `graphyard master decide ${key} merge REASON, then graphyard master approver ${key} DECISION; the next observation re-checks the record at the merge cutoff and delivers on the approved decision, or records why it cannot${work.queue ? ` and removes the queue entry the merged pull request can never publish, without delivering` : ''}`, 'approver');
+      : agentOwner('master', `graphyard master decide ${key} merge REASON, then graphyard master approver ${key} DECISION; the next observation re-checks the record at the merge cutoff and delivers on the approved decision, or records why it cannot`, 'approver');
   }
   // Graphyard absorbs a moved base itself; a conflict is the one case it cannot, so the candidate
   // goes back to a worker for a fresh attempt rather than waiting for a refresh that cannot land.

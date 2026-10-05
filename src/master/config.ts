@@ -6,11 +6,11 @@ import { homedir, hostname } from 'node:os';
 import { defaultChildRun } from '../child-runner.js';
 import { sessionName } from '../session-name.js';
 import { discover, assertRepository, localDirectory, saveDiscovery } from '../onboarding.js';
-import { serverOrigin, loadConnection, managedInstructions, onboardingMergeQueue } from '../repository-setup.js';
+import { serverOrigin, loadConnection, managedInstructions } from '../repository-setup.js';
 import { launchPlan } from '../harness.js';
 import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSupervisor, loopUnitName, unsupervisedInstruction, loopSupervisionAttention } from '../supervisor.js';
 import { type FilesystemProbe, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes } from '../install/worktree-root.js';
-import { type AgentEnvironment, type MasterBrowser, type MasterConfig, masterConfigSchema, mergeParallelTips, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withReviewerDefaults, withRoleDefaults } from './profiles.js';
+import { type AgentEnvironment, type MasterBrowser, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withReviewerDefaults, withRoleDefaults } from './profiles.js';
 import { managedMasterInstructions } from './instructions.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
 import { controlPlaneAttention } from './attention.js';
@@ -183,7 +183,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   await assertOutsideWorktrees(root, credentialDirectory, 'Coordinator credential directory');
   const identity = createHash('sha256').update(`${url}\0${detected.repository}`).digest('hex').slice(0, 20);
   const credentialFile = resolve(credentialDirectory, `${identity}.token`);
-  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}), reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run }, ...(previous?.mergeQueue ? { mergeQueue: previous.mergeQueue } : { mergeQueue: onboardingMergeQueue() }), ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
+  const config = masterConfigSchema.parse({ version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], ...(previous?.reviewer ? { reviewer: previous.reviewer } : {}), reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run }, ...(previous?.mergeQueue ? { mergeQueue: previous.mergeQueue } : {}), ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
   const instructionsFile = resolve(root, 'AGENTS.md');
   let existing = ''; let mode = 0o644;
   try { const info = await lstat(instructionsFile); if (!info.isFile()) throw new Error('Refusing to replace a non-regular AGENTS.md'); mode = info.mode & 0o777; existing = await readFile(instructionsFile, 'utf8'); }
@@ -242,12 +242,6 @@ export async function setupMaster(root: string, input: { url: string; token: str
     return { environment: environment.name, kind: environment.kind, home: environment.home, loggedIn: health.loggedIn, login: health.login };
   }));
   return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: config.autoMerge, workers: config.workers.length, run: config.run, browser: config.browser ?? null, config: '.graphyard/master.json', reviewer: config.reviewer ? `${config.reviewer.slug}[bot]` : null, attention,
-    // What this setup left under `mergeQueue` (GY-501): onboarding wrote the recommended
-    // parallel-tip window on a first setup, and keeps the repository's own values afterwards;
-    // the report explains what parallelTips costs.
-    mergeQueue: { parallelTips: mergeParallelTips(config),
-      parallelTipsExplained: `The merge queue validates ${mergeParallelTips(config)} queue positions at once, each on its own speculative tip, so one CI duration can land that many entries; CI then needs parallelTips × jobs per pull-request run concurrent Actions jobs. Declare your limit as mergeQueue.ciConcurrency and graphyard master protection reports when it is too low; set mergeQueue.parallelTips to 1 to validate one tip at a time`,
-      source: previous?.mergeQueue ? 'kept from the existing master config' : 'onboarding wrote the product defaults; tune mergeQueue.parallelTips in .graphyard/master.json' },
     worktreeRoot: { path: verifiedRoot.path, freeBytes: verifiedRoot.freeBytes, minFreeBytes: verifiedRoot.minFreeBytes, configured: !!config.run.worktreeRoot },
     agentEnvironments: { directory: environmentDirectory, discovered: environments },
     // What setup installed for the loop, in the words of the commands it ran.

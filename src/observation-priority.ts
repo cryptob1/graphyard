@@ -1,6 +1,6 @@
 import type { Observation, Work } from './model.js';
 import { nextAction } from './model/next-action.js';
-import { mergeAuthorized, predictQueue } from './merge-queue.js';
+import { mergeAuthorized } from './merge-queue.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 
 /**
@@ -12,8 +12,8 @@ import { agentOwner, type AttentionItem } from './master/attention.js';
  * launch, which binds the head rather than the age (GY-710), but kept there by this scheduler. On 2026-10-02, with ~95 open items,
  * the fleet's steady-state interval had stretched to an hour, so 43 review-requested items aged
  * past thirty minutes behind the starved backlog while 19 reviewer slots idled and nothing merged
- * for 80 minutes. Here every open item is placed in a band — `merge` (the queue head band, merges
- * in flight, tips in validation), `review` (the next action is the review request) or `steady` —
+ * for 80 minutes. Here every open item is placed in a band — `merge` (every gate passes and GitHub
+ * may merge it), `review` (the next action is the review request) or `steady` —
  * and the bands with a bound are claimed ahead of the backlog before they reach it.
  */
 
@@ -36,19 +36,6 @@ export const reviewCadenceCapMs = reviewObservationFreshnessMs / 3;
 /** A review-requested item whose reading is this old is claimed with the merge path, ahead of starved jobs. */
 export const reviewPromotionAgeMs = reviewObservationFreshnessMs / 2;
 
-/**
- * How far the claim priority reaches into the merge queue (GY-492): the head and the next
- * `max(2, batch size) - 1` entries. The head needs a fresh observation to merge at all; the
- * entries its batch is validated with move only when it does.
- */
-export const headClaimBand = (batchSize: number) => Math.max(2, Math.max(1, Math.floor(batchSize)));
-/**
- * The batch size the observation workers claim the merge path with (GY-498): the parallel-tip window
- * when it is wider than the batch, since every entry validated at once is claimed first. `processJob`
- * claims with it and `observationBandLag` reports with it (GY-1178), so the merge band master status
- * reports is the band the workers protect.
- */
-export const observationClaimBatch = (mergeBatchSize = 1, parallelTips = 1) => Math.max(1, mergeBatchSize, parallelTips);
 /** A submitted item the control plane has never read: its first observation is what every later gate waits on. */
 export const firstObservationOwed = (work: Work) => !!work.submission && !work.observation && !work.candidate && work.stage !== 'done';
 /** Whether a session is running on the item now: a worker, reviewer or producer whose result an observation reads. */
@@ -66,23 +53,17 @@ export function waitsOnObservation(work: Work, all: Work[], now = new Date(), ki
 /** Whether the item's next action is the review request, whose reading the scheduler keeps under the review bound. */
 export const reviewRequested = (work: Work, all: Work[], now = new Date()) => work.stage !== 'done' && nextAction(work, all, now)?.kind === 'request-review';
 
-/** The merge path's ids (GY-567): the queue-head band in queue position, then any merge in flight. */
-function mergePath(all: Work[], batchSize: number, now: number): string[] {
-  const band = headClaimBand(batchSize);
-  const ranked = predictQueue(all, now).filter(placement => placement.position < band).map(placement => placement.id);
-  for (const work of all) if (mergeAuthorized(work) && !ranked.includes(work.id)) ranked.push(work.id);
-  return ranked;
+/** The merge path's ids (GY-567): every item GitHub may merge now, whose merge is recorded from its next reading. */
+function mergePath(all: Work[]): string[] {
+  return all.filter(mergeAuthorized).map(work => work.id);
 }
-/**
- * How many of the claim order's leading ids are the merge path — the queue-head band and any merge
- * in flight (GY-567) — which no starved job overtakes.
- */
-export const observationHeadCount = (all: Work[], batchSize: number, now = Date.now()) => mergePath(all, batchSize, now).length;
+/** How many of the claim order's leading ids are the merge path (GY-567), which no starved job overtakes. */
+export const observationHeadCount = (all: Work[]) => mergePath(all).length;
 
 /** Every open item's claim class, read once from the fleet: the expensive part of the claim order. */
 export interface ObservationClaimClasses { mergePath: string[]; firstReads: string[]; review: string[]; waiting: string[]; running: string[] }
-export function observationClaimClasses(all: Work[], batchSize: number, now = Date.now()): ObservationClaimClasses {
-  const ranked = mergePath(all, batchSize, now), date = new Date(now);
+export function observationClaimClasses(all: Work[], now = Date.now()): ObservationClaimClasses {
+  const ranked = mergePath(all), date = new Date(now);
   const open = all.filter(work => work.stage !== 'done' && !ranked.includes(work.id));
   // A submission never observed has no candidate, so no gate, review or proof can start until it
   // is read once. Behind the review-waiting items, which come due again every cycle, one worker
@@ -109,17 +90,17 @@ export function observationClaimPlan(classes: ObservationClaimClasses, observedA
   return { order, headCount: head.length };
 }
 /** The claim plan for this fleet, read from each item's own observation time. */
-export function observationClaim(all: Work[], batchSize: number, now = Date.now(), tight = false) {
+export function observationClaim(all: Work[], now = Date.now(), tight = false) {
   const at = new Map(all.map(work => [work.id, work.observation?.at ? Date.parse(work.observation.at) : null]));
-  return observationClaimPlan(observationClaimClasses(all, batchSize, now), id => at.get(id) ?? null, now, tight);
+  return observationClaimPlan(observationClaimClasses(all, now), id => at.get(id) ?? null, now, tight);
 }
 /** The claim order alone (GY-492): see `observationClaimPlan`. */
-export const observationClaimOrder = (all: Work[], batchSize: number, now = Date.now(), tight = false) => observationClaim(all, batchSize, now, tight).order;
+export const observationClaimOrder = (all: Work[], now = Date.now(), tight = false) => observationClaim(all, now, tight).order;
 
 /** The band an open submitted item's observation lag is reported in; null for one with nothing to observe. */
 export function freshnessBand(work: Work, all: Work[], merging: ReadonlySet<string>, now: Date): FreshnessBand | null {
   if (work.stage === 'done' || !work.submission) return null;
-  if (merging.has(work.id) || work.queue?.tips?.length) return 'merge';
+  if (merging.has(work.id)) return 'merge';
   return reviewRequested(work, all, now) ? 'review' : 'steady';
 }
 /** How long a lag is, in the unit a reader reads: a minute and change, or seconds. */
@@ -128,13 +109,11 @@ export const observationLag = (ms: number) => ms >= 60_000 ? `${Math.floor(ms / 
 /**
  * Observation lag per band (GY-1114), for `master status`: how many items each band holds, the
  * oldest reading in it, its bound, and how many items are past it. A bounded band with any item
- * past its bound raises one attention item naming the band, the oldest item and its lag. The
- * merge band's queue head is `observationThroughputStatus`'s own item, so `skipHead` leaves it out.
- * `batchSize` is `observationClaimBatch` of the published queue settings: the merge band holds the
- * same queue positions the workers claim with the merge path (GY-1178).
+ * past its bound raises one attention item naming the band, the oldest item and its lag. The merge
+ * band holds the items the workers claim with the merge path (GY-1178).
  */
-export function observationBandLag(all: Work[], now: number, skipHead: string | null = null, batchSize = 1) {
-  const merging = new Set(mergePath(all, batchSize, now)), date = new Date(now);
+export function observationBandLag(all: Work[], now: number) {
+  const merging = new Set(mergePath(all)), date = new Date(now);
   const bands = (['merge', 'review', 'steady'] as FreshnessBand[]).map(band => ({ band, boundMs: observationFreshnessBounds[band], items: 0, pastBound: 0, oldest: null as string | null, lagMs: null as number | null, stale: null as { key: string; lagMs: number } | null }));
   for (const work of all) {
     const band = freshnessBand(work, all, merging, date);
@@ -142,7 +121,7 @@ export function observationBandLag(all: Work[], now: number, skipHead: string | 
     const entry = bands.find(row => row.band === band)!;
     entry.items++;
     const lag = work.observation?.at ? Math.max(0, now - Date.parse(work.observation.at)) : Infinity;
-    if (entry.boundMs !== null && lag > entry.boundMs && work.key !== skipHead) { entry.pastBound++; if (!entry.stale || lag > entry.stale.lagMs) entry.stale = { key: work.key, lagMs: lag }; }
+    if (entry.boundMs !== null && lag > entry.boundMs) { entry.pastBound++; if (!entry.stale || lag > entry.stale.lagMs) entry.stale = { key: work.key, lagMs: lag }; }
     if (entry.lagMs === null || lag > entry.lagMs) { entry.lagMs = lag; entry.oldest = work.key; }
   }
   const report = bands.map(({ stale: _stale, ...entry }) => ({ ...entry, lagMs: entry.lagMs === Infinity ? null : entry.lagMs, unobserved: entry.lagMs === Infinity }));

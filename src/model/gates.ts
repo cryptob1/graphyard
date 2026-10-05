@@ -1,5 +1,4 @@
-import { ciPendingReason, conversationProtectionRefusal, failedCheckResults, requiredCheck, requiredCheckPassed, requiredCheckRun, requiredChecksOf, checkRerunStatus } from '../merge-queue.js';
-import type { QueueEjection, QueueEntry, QueueHistoryEntry } from '../merge-queue.js';
+import { conversationProtectionRefusal, failedCheckResults, requiredCheck, requiredCheckPassed, requiredCheckRun, requiredChecksOf, checkRerunStatus } from '../merge-queue.js';
 import type { Gate, Stage, Work } from './work.js';
 import { escalationRefusals } from './escalation.js';
 import { ciCheckRefusal } from './ci-refusal.js';
@@ -7,7 +6,6 @@ import { requiredCheckFailure } from './required-check-refusal.js';
 import { leadHoldRefusal } from './delegation.js';
 import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
 import { carriedApproval } from './carry.js';
-import type { MergeQueueSettings } from './queue.js';
 import { evaluateLandability, landabilityAudit, landabilityRefusals } from './landability.js';
 import { itemLane, laneRequirements, laneSpeedTargets, type Lane } from './policy.js';
 import { isDelivered } from './closure.js';
@@ -34,22 +32,10 @@ export const mergeabilityComputingRefusal = 'GitHub is computing mergeability ag
 export { laneRequirements };
 
 /**
- * The test-gate lift the merge queue's validation pays for (GY-332): a tip the queue accounts for
- * covers exactly the CI-pending refusals, so only those leave the test gate; any other refusal is
- * the candidate's own, stays, and keeps the gate failed. `null` lifts nothing: no validation
- * running, no refusals paid.
+ * The item's stage, gates and lane, judged from the record alone. GitHub merges each candidate
+ * whose gates pass (docs/delivery.md); nothing here places it in a queue of Graphyard's own.
  */
-export function settleTestGate(test: Gate, validating: string[] | null): void {
-  if (!validating) return;
-  test.reasons = test.reasons.filter(reason => !ciPendingReason(reason));
-  test.passed = !test.reasons.length;
-}
-
-/**
- * `mergeQueue` is accepted for the callers that still name queue settings; GitHub delivery places
- * nothing in a Graphyard queue, so the evaluation no longer reads it.
- */
-export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[], _mergeQueue?: number | MergeQueueSettings): { stage: Stage; gates: Gate[]; violations: string[]; lane: Lane; speedTarget: number; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
+export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[]): { stage: Stage; gates: Gate[]; violations: string[]; lane: Lane; speedTarget: number } {
   const gates: Gate[] = [];
   const add = (name: string, reasons: string[]) => gates.push({ name, passed: reasons.length === 0, reasons });
   // The lane rides the one landability verdict, not beside it (GY-883 AC-3): the verdict
@@ -66,10 +52,9 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   const obs = work.observation;
   const current = !!candidate && !!obs && obs.candidate.sha === candidate.sha && obs.candidate.baseSha === candidate.baseSha;
   // Whether the candidate can land is one verdict (GY-878): the build and acceptance gates are its
-  // two families, word for word, and the merge queue ejects only for a reason it gives. A candidate
-  // that reverts, deletes or rewrites shipped files outside its planned scope, sits on a base the
-  // control plane cannot merge in cleanly, waits for its branch restore after a predecessor's
-  // ejection (GY-568), or failed a mechanical proof (GY-115) is refused by the build family; an
+  // two families, word for word. A candidate that reverts, deletes or rewrites shipped files
+  // outside its planned scope, sits on a base the control plane cannot merge in cleanly, or
+  // failed a mechanical proof (GY-115) is refused by the build family; an
   // unproven proof, inherited obligation or dependent producer by the acceptance family.
   const verdict = evaluateLandability(work, all, now);
   const family = (name: 'build' | 'acceptance') => {
@@ -84,7 +69,7 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   const provider = reviewProviderOf(work.policy);
   const selectedProfile = reviewerProfileFor(work);
   // An approval binds the exact commit: the one the provider approved (see exactApproval), or the
-  // one Graphyard carried it to across its own authored tip (see carry.ts). Nothing else counts.
+  // one Graphyard carried it to across its own authored base refresh (see carry.ts). Nothing else counts.
   const reviewPassed = !!exactApproval(work) || !!carriedApproval(work);
   const reviewRefusal = provider === 'codex' ? agentReview?.reason ?? 'Verified clean Codex review of the current commit is required'
     : provider === 'agent' ? !selectedProfile
@@ -127,5 +112,5 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');
   // Delivery history stays complete; later observations cannot rewrite it.
   if (work.stage === 'done') stage = 'done';
-  return { stage, gates, violations, lane, speedTarget, queue: null, queueSequence: work.queueSequence ?? 0, queueEjection: null, queueHistory: work.queueHistory ?? [] };
+  return { stage, gates, violations, lane, speedTarget };
 }

@@ -108,7 +108,7 @@ export function reopenReverted(work: Work, revert: MainGuardRevert, now: Date): 
   delete work.delivery;
   work.submission = null; work.candidate = null; work.observation = null;
   work.mergeAuthorization = null; work.mergeExecution = null; work.reviewRequest = null;
-  work.queue = null; work.queueEjection = null; work.reworkRequested = false;
+  work.reworkRequested = false;
   return true;
 }
 

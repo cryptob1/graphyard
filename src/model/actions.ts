@@ -3,7 +3,7 @@ import { demand } from './refusal.js';
 import { claimOrder, yieldsTo } from './action-candidates.js';
 import { actionRecordLimit, actionRetryAt, actionStall, claimable, claimLive, settling, type ActionStall } from './action-progress.js';
 import { nextAction, sameAction, type NextAction, type NextActionInputs, type NextActionKind } from './next-action.js';
-import type { Work } from './work.js';
+import { dropRetiredQueueFields, retiredQueueFields, type Work } from './work.js';
 
 /**
  * The durable action queue.
@@ -205,7 +205,8 @@ export function settleDelivered(work: Work, all: Work[], now: Date): boolean {
   const rows = (work.actionQueue?.actions ?? []).map(row => row.id).join();
   let changed = reconcileActions(work, all, now, { next: computed }).length > 0 || actionQueue(work).actions.map(row => row.id).join() !== rows;
   if (work.nextAction === undefined || !sameAction(work.nextAction, computed)) { work.nextAction = computed; changed = true; }
-  if (work.queue) { work.queue = null; changed = true; }
+  // A delivery stored before GY-1236 can still carry merge-queue fields: dropping them is a change to save.
+  if (retiredQueueFields.some(field => field in work)) { dropRetiredQueueFields(work); changed = true; }
   return changed;
 }
 

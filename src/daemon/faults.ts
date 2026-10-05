@@ -20,7 +20,7 @@ import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { diagnosisStep, standingFaultClassItem } from './diagnosis.js';
 import { candidateKey } from './reconcile.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
-import { baseRefreshConflict, currentRestore } from '../merge-queue.js';
+import { baseRefreshConflict } from '../merge-queue.js';
 import { mergeBaseDismissal } from '../merge-base-ancestry.js';
 import { openAction } from '../model/next-action.js';
 
@@ -77,7 +77,6 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
     const byKey = new Map(work.map(item => [item.key, item]));
     for (const item of classifyAttention(sources.attribute ? sources.attribute(listed) : listed.attentionItems))
       if (item.kind !== 'gate' && item.kind !== 'containment-grace' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))
-        && !(item.kind === 'contaminated' && restoreInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'base-conflict' && baseConflictInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'owed-decision' && owedReworkLine(byKey.get(item.subject), item.text) && reworkDecisionInMotion(byKey.get(item.subject), now)))
@@ -100,24 +99,8 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
   const shown = new Set([...own.map(fault => `${fault.subject}|${fault.kind}`), ...[...settling].map(key => `${key}|scope-request`)]);
   return [...own, ...derived.filter(fault => ![fault.kind, ...(restatements[fault.kind] ?? [])].some(kind => shown.has(`${fault.subject}|${kind}`)))];
 }
-/** How long an ejected tip's restore may stay owed before its contaminated head counts as a merge fault (GY-1087). */
-export const restoreWaitBoundMs = 30 * 60_000;
-/**
- * GY-1087. Whether the branch restore an ejection owes is still in motion: the candidate is the
- * ejected tip, or a restore is requested for it, the restore has not run yet, and the ejection or
- * request is inside `restoreWaitBoundMs`. The reconciliation job runs it on its own (GY-127), so the
- * contaminated head it clears is a handoff the control plane already made, not a merge fault
- * (GY-417, GY-971 on 1 October 2026: each counted seconds after its ejection). A restore that ran
- * and failed, a head found contaminated with no ejection, and a restore owed past the bound count.
- */
-export function restoreInMotion(work: Work | undefined, now: number): boolean {
-  if (!work?.candidate) return false;
-  const restore = currentRestore(work)?.restore ?? null;
-  if (restore?.performedAt) return false;
-  const ejected = work.queueEjection?.sha === work.candidate.sha ? work.queueEjection : null;
-  const since = restore ? restore.requested?.at ?? ejected?.at : ejected?.at;
-  return !!since && now - Date.parse(since) <= restoreWaitBoundMs;
-}
+/** How long a confirmed base conflict may stand on a head before it counts as a merge fault (GY-1129). */
+export const baseConflictWaitBoundMs = 30 * 60_000;
 /**
  * GY-1269. Whether an owed line names the item's rework decision: its open action is `request-rework`
  * and the line carries that action's own owed decision (`needsHuman.decision`), the phrase
@@ -168,7 +151,7 @@ export function mergeBaseDismissalInMotion(work: Work | undefined, now: number):
 }
 /**
  * GY-1129. Whether a base refresh conflict is still in motion: the candidate has a confirmed conflict
- * with the base branch, first found on this head within `restoreWaitBoundMs` (the time the loop takes
+ * with the base branch, first found on this head within `baseConflictWaitBoundMs` (the time the loop takes
  * to return the item and decide its rework). The control plane requests and approves that rework on
  * its own, so a conflict that recent is a step it is already handling, not a merge fault (GY-501,
  * GY-1073, GY-417 on 3 October 2026: each counted within minutes of the conflict). `reworkRequested`
@@ -181,7 +164,7 @@ export function baseConflictInMotion(work: Work | undefined, now: number): boole
   if (!work?.candidate) return false;
   if (!baseRefreshConflict(work)) return false;
   const since = work.baseRefresh?.conflictSince ?? work.baseRefresh?.at;
-  return !!since && now - Date.parse(since) <= restoreWaitBoundMs;
+  return !!since && now - Date.parse(since) <= baseConflictWaitBoundMs;
 }
 /**
  * The timing-dependent check failures `master status` names (qualifyTimingFailures), for the loop to
