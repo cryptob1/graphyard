@@ -443,6 +443,7 @@
     "tests/master-supervision.test.ts": 11184,
     "tests/master-verification.test.ts": 31699,
     "tests/master.test.ts": 4419,
+    "tests/mechanical-findings.test.ts": 1000,
     "tests/merge-band-queue-depth.test.ts": 643,
     "tests/merge-base-ancestry.test.ts": 761,
     "tests/merge-delegation-clean.test.ts": 2085,

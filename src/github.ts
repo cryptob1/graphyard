@@ -30,6 +30,10 @@ export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
 import { describePushShortfall, grantedPushPermissions, pushShortfallMarker, type PushPermissionShortfall } from './worker-credential.js';
 import { firstObservationOwed, observationBandLag, observationClaim, observationClaimBatch, observationFreshnessMs, observationLag, reviewCadenceCapMs } from './observation-priority.js';
 import { observedReviewBody } from './review-cap.js';
+import { botCommitSubjectPattern, parseClassifiedFindings } from './mechanical-findings.js';
+
+/** How many of an approval's nits are classified mechanical (GY-971): the review gate holds such an approval for its bot round. */
+const mechanicalNitCount = (body: unknown) => parseClassifiedFindings(body).filter(finding => finding.classification === 'mechanical').length;
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
@@ -1545,6 +1549,12 @@ export class GitHub {
     // given on (GY-127): the review list alone cannot tell a reviewer withdrawing a verdict from
     // GitHub withdrawing an approval because the merge base moved under an unchanged head.
     const dismissals = [...latest.values()].some(r => r.state === 'DISMISSED') ? await this.reviewDismissals(pr.number) : { read: new Map<number, ReviewDismissal>(), unread: null as string | null, forcePushes: [] as HeadForcePush[] };
+    // An approval of the head naming mechanical nits holds the review gate for their bot round
+    // (GY-971), unless the head is that round's bot commit: one round per approved head, so the fresh
+    // read's own nits stay follow-ups. The head commit is read only when such an approval exists.
+    const nitted = [...latest.values()].some(r => r.state === 'APPROVED' && r.commit_id === pr.head.sha && mechanicalNitCount(r.body) > 0);
+    const botHead = nitted && await this.request(`/commits/${pr.head.sha}`).then(commit => botCommitSubjectPattern.test(String(commit?.commit?.message ?? '').split('\n')[0]!), () => false);
+    const mechanicalNits = (r: any) => { const count = r.state === 'APPROVED' && !botHead ? mechanicalNitCount(r.body) : 0; return count ? { mechanical: count } : {}; };
     const dismissalOf = (id: number): ReviewDismissal | undefined => dismissals.read.get(id) ?? (dismissals.unread ? { reason: null, mergeBase: false, verdict: null, commit: null, at: null, by: null, unread: dismissals.unread } : undefined);
     // A published speculative tip carries its own validated base. The candidate stays bound to
     // that exact commit while the managed branch advances underneath it through queue merges. A
@@ -1607,6 +1617,7 @@ export class GitHub {
       dismissedReviewIds: dismissedReviewIds(reviews),
       reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at,
         ...(r.state === 'CHANGES_REQUESTED' && typeof r.body === 'string' && r.body.trim() ? observedReviewBody(r.body) : {}),
+        ...mechanicalNits(r),
         ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open', conflicting: pr.mergeable === false && pr.state === 'open',
       ...(pr.mergeable === null && pr.state === 'open' && !pr.merged ? { mergeabilityUnknown: true } : {}),
