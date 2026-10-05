@@ -11,7 +11,8 @@ import { launchAppearanceMs } from '../src/daemon/effects.js';
 import type { Work } from '../src/model.js';
 import type { ReviewRecord } from '../src/reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from '../src/producer.js';
-import { describeReclaim, finishedSessionGraceMs, ledgerRetentionMs, loadedRevision, nameReclaimBoundMs, readReclaimReports, readResources, reclaimResources, resourceAttention, stuckSessionMs, unownedPaneConfirmMs, type ResourceInputs } from '../src/master-resources.js';
+import { baseReclaimGates, describeReclaim, finishedSessionGraceMs, ledgerRetentionMs, loadedRevision, nameReclaimBoundMs, readReclaimReports, readResources, reclaimResources, resourceAttention, selfUpgradeBoundMs, stuckSessionMs, unownedPaneConfirmMs, type ResourceInputs } from '../src/master-resources.js';
+import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { classifyAttention } from '../src/model/fault-classes.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -114,7 +115,8 @@ test('manual:fault-class-resources — a checkout move that touches no loaded co
   assert.deepEqual(faults(inputs({ revision: docsOnly })), []);
   const code = loadedRevision('/nonexistent', 1, git('docs/operations-reference.md\nsrc/master.ts\n'), now)!;
   assert.equal(code.behind, 4);
-  assert.deepEqual(faults(inputs({ revision: code })), ['resource:loaded-revision']);
+  // Past the self-upgrade's bound (GY-1196): before it, the move is the upgrade under way.
+  assert.deepEqual(faults(inputs({ now: code.movedAt! + selfUpgradeBoundMs, revision: code })), ['resource:loaded-revision']);
 });
 
 test('manual:fault-class-resources — GY-1130: recurring resources faults from finished sessions not reclaimed are reproduced against base and do not recur against candidate', async () => {
@@ -351,15 +353,17 @@ test('unit:agent-name-reclaim-closes-pane-after-record-reaped — a producer pan
   // BASE: step 2 closed a pane only from the name's settled record (`if (!settled || …) continue`), and none is left.
   assert.equal(producers.filter(record => record.agentName === 'produce-claude-2').length, 0, 'retention reaped the only evidence the base close read');
 
-  // CANDIDATE: first sighting, then a pass 60s on (still confirming the launch bound), then closed.
+  // CANDIDATE: first sighting, then closed by the pass a grace (60s) on; a pass just inside it closes nothing.
   const directory = await ledgerRoot('gy-1166-reaped', producers);
-  const run = await passes(directory, 3, finishedSessionGraceMs, agents, [], profiles);
-  assert.deepEqual(run.reports.map(report => report.closed.map(entry => entry.pane)), [[], [], ['w1V:pG8C']], 'closed only once two passes at least 60s apart saw it unowned past the launch bound');
-  assert.match(run.reports[2].closed[0].reason, /no producer record holds the name \(its record was reaped or never written\) and Herdr reports it idle/);
+  const inside = await passes(await ledgerRoot('gy-1166-reaped-inside', producers), 2, finishedSessionGraceMs - 1, agents, [], profiles);
+  assert.deepEqual(inside.closed, [], 'two passes less than 60s apart close nothing');
+  const run = await passes(directory, 2, finishedSessionGraceMs, agents, [], profiles);
+  assert.deepEqual(run.reports.map(report => report.closed.map(entry => entry.pane)), [[], ['w1V:pG8C']], 'closed once two passes at least 60s apart saw it unowned');
+  assert.match(run.reports[1].closed[0].reason, /its producer session left no record$/);
   assert.deepEqual(run.remaining.map(entry => entry.pane_id), ['w1V:pG8A'], 'the pending launch on produce-claude-1 is untouched');
   const recorded = await readReclaimReports(directory);
   assert.deepEqual(recorded.at(-1)!.closed.map(entry => entry.name), ['produce-claude-2'], 'the pass records the close');
-  assert.match(describeReclaim(run.reports[2])!, /closed 1 finished session\(s\) and released their names \(produce-claude-2\)/);
+  assert.match(describeReclaim(run.reports[1])!, /closed 1 finished session\(s\) and released their names \(produce-claude-2\)/);
 
   // NON-RECURRENCE: the namespace is free again.
   assert.deepEqual(faults(reading({ now: t1166 + 2 * finishedSessionGraceMs, agents: run.remaining })), []);
@@ -385,16 +389,17 @@ test('integration:resources-reclaimed-within-bound — GY-1166: retention keeps 
   const first = await pass(t1166 - 60_000, [held('produce-claude-2', 'w1V:pG8C', 'working'), recordless, unknown]);
   assert.deepEqual([first.closed, first.reaped.producer], [[], 0]);
   assert.deepEqual((await readProducerLedger(directory)).producers.map(entry => entry.id), [kept.id], 'the newest record on a held name is not reaped');
-  // 60s on: the panes with no record or no recognized status are still inside the launch bound, so nothing closes yet.
+  // 60s on: the idle pane whose record was reaped is given back at the grace (GY-1165); the unknown
+  // worker is still inside the launch bound, so it is never taken for a leak yet.
   const finishedAgents = [held('produce-claude-2', 'w1V:pG8C', 'idle'), recordless, unknown];
   const second = await pass(t1166, finishedAgents);
-  assert.deepEqual(second.closed, [], 'a pane unowned for less than unownedPaneConfirmMs is never taken for a leak');
-  // 120s after the first sighting: all three are given back, each close reported with its evidence, and the kept record reaped with its pane.
+  assert.deepEqual(second.closed.map(entry => entry.pane), ['w1V:pG8D'], 'a pane with an unrecognized status unowned for less than unownedPaneConfirmMs is never taken for a leak');
+  assert.match(second.closed[0].reason, /its producer session left no record$/);
+  // 120s after the first sighting: the other two are given back, each close reported with its evidence, and the kept record reaped with its pane.
   const third = await pass(t1166 + 60_000, finishedAgents);
   assert.deepEqual(closed.sort(), ['w1V:pG8C', 'w1V:pG8D', 'w1V:pG8F']);
   const reason = (name: string) => third.closed.find(entry => entry.name === name)!.reason;
   assert.match(reason('produce-claude-2'), /its producer session completed/, 'the close read the record retention would otherwise have reaped');
-  assert.match(reason('produce-claude-4'), /no producer record holds the name \(its record was reaped or never written\)/);
   assert.match(reason('graphyard-claude-1'), /Herdr reports it unknown/);
   assert.equal(third.reaped.producer, 1);
   assert.deepEqual((await readProducerLedger(directory)).producers, []);
@@ -508,10 +513,10 @@ test('unit:resource-fault-recurrence-reproduces-subjects — both new holder sha
   assert.ok(shapes.some(entry => entry.agent_status === 'idle' && entry.name === 'produce-claude-2'));
   assert.ok(shapes.some(entry => entry.agent_status === 'unknown' && entry.agent));
   assert.ok(shapes.some(entry => entry.agent_status === undefined));
-  // Neither shape is closed before two passes `unownedPaneConfirmMs` apart confirmed it unowned: a
-  // pass one grace on still only notes them, since a launch whose runtime has not appeared reads alike.
+  // The reaped-record shape closes two passes a grace apart; the unrecognized-status shape waits two
+  // passes `unownedPaneConfirmMs` apart, since a launch whose runtime has not appeared reads alike.
   const early = await passes(await ledgerRoot('gy-1166-subjects-early', observedProducers()), 2, finishedSessionGraceMs, gy1165Agents(), gy1165Work());
-  assert.deepEqual(early.closed, [], 'two passes one grace apart close none of the new shapes');
+  assert.deepEqual(early.closed, ['w1V:pG8C'], 'two passes one grace apart close none of the unrecognized-status workers');
   const directory = await ledgerRoot('gy-1166-subjects', observedProducers());
   // At the loop's observed cadence (7-11 minutes) the two passes still close everything, well inside retention of nothing.
   const run = await passes(directory, 2, 7 * 60_000, gy1165Agents(), gy1165Work());
@@ -589,24 +594,31 @@ test('manual:fault-class-resources — GY-1165: unknown-status worker panes and 
   // 1. REPRODUCE: the state raises all seven instances.
   assert.deepEqual(faults(state).sort(), instances);
 
-  // 2. BASE: the base pass closed a worker pane only when Herdr reported idle, done or blocked, and a
-  // reviewer or producer pane only when a ledger record settled on its name. Each holder fails one of
-  // those gates, so two passes the grace apart closed none of them and the faults re-raised every pass.
-  const baseFinished = ['idle', 'done', 'blocked'];
-  assert.ok(held.every(([, principal]) => !baseFinished.includes(agents.find(entry => entry.name === principal)!.agent_status!)), 'every worker pane is outside the base\'s finished statuses');
-  assert.equal((await readProducerLedger(directory)).producers.filter(record => record.agentName === 'produce-claude-2').length, 0, 'the producer pane has no record to settle on');
+  // 2. BASE: the base's own pass (its gates: a worker closed only when Herdr reported idle, done or
+  // blocked, a reviewer or producer pane only when a record settled on its name), run two passes the
+  // grace apart, closes none of the seven, so the faults re-raised every pass (GY-1192).
+  const baseDirectory = await temporaryDirectory('gy-1165-base');
+  await mkdir(join(baseDirectory, '.graphyard'), { recursive: true });
+  const baseClosed: string[] = [];
+  for (const at of [t0, t0 + finishedSessionGraceMs, t0 + 2 * finishedSessionGraceMs])
+    await reclaimResources(baseDirectory, config, { work, agents }, { tmpRoot: baseDirectory, now: at, gates: baseReclaimGates, closePane: pane => { baseClosed.push(pane); } });
+  assert.deepEqual(baseClosed, [], 'the base pass closes none of the seven holders');
+  assert.deepEqual(faults({ ...state, now: t0 + 2 * finishedSessionGraceMs }).sort(), instances, 'so every instance is still raised on base');
 
-  // 3. CANDIDATE: two passes the unowned-pane confirmation apart close all seven panes, and nothing
-  // earlier: none has a settled record Herdr reports finished, so each waits `unownedPaneConfirmMs` (GY-1166).
+  // 3. CANDIDATE: the idle recordless producer closes two passes the grace apart; the unknown workers,
+  // which a launch whose runtime has not appeared reads like, wait `unownedPaneConfirmMs` (GY-1166).
   const closed = new Set<string>();
   const closePane = (pane: string) => { closed.add(pane); };
-  const first = await reclaimResources(directory, config, { work, agents }, { tmpRoot: directory, now: t0, closePane });
+  const live = () => agents.filter(entry => !closed.has(entry.pane_id!));
+  const first = await reclaimResources(directory, config, { work, agents: live() }, { tmpRoot: directory, now: t0, closePane });
   assert.equal(first.closed.length, 0, 'the first sighting only starts the grace clock');
-  const early = await reclaimResources(directory, config, { work, agents }, { tmpRoot: directory, now: t0 + unownedPaneConfirmMs - 1, closePane });
-  assert.equal(early.closed.length, 0, 'a pass inside the grace closes nothing');
-  const second = await reclaimResources(directory, config, { work, agents }, { tmpRoot: directory, now: t0 + unownedPaneConfirmMs, closePane });
-  assert.deepEqual(second.closed.map(entry => entry.pane).sort(), [...held.map(([, , pane]) => pane), 'w1V:pG8C'].sort());
-  assert.match(second.closed.find(entry => entry.pane === 'w1V:pG8C')!.reason, /no producer record holds the name/);
+  const grace = await reclaimResources(directory, config, { work, agents: live() }, { tmpRoot: directory, now: t0 + finishedSessionGraceMs, closePane });
+  assert.deepEqual(grace.closed.map(entry => entry.pane), ['w1V:pG8C']);
+  assert.match(grace.closed[0].reason, /left no record/);
+  const early = await reclaimResources(directory, config, { work, agents: live() }, { tmpRoot: directory, now: t0 + unownedPaneConfirmMs - 1, closePane });
+  assert.equal(early.closed.length, 0, 'a pass inside the launch bound closes no unknown worker');
+  const second = await reclaimResources(directory, config, { work, agents: live() }, { tmpRoot: directory, now: t0 + unownedPaneConfirmMs, closePane });
+  assert.deepEqual(second.closed.map(entry => entry.pane).sort(), held.map(([, , pane]) => pane).sort());
 
   // 4. NON-RECURRENCE: with the closed panes gone, none of the seven instances is raised.
   assert.deepEqual(faults({ ...state, now: t0 + unownedPaneConfirmMs, agents: agents.filter(entry => !closed.has(entry.pane_id!)) }), []);
@@ -623,4 +635,132 @@ test('manual:fault-class-resources — GY-1165: the widened reclaim still spares
   for (const at of [now, now + finishedSessionGraceMs, now + 2 * finishedSessionGraceMs])
     await reclaimResources(directory, config, { work, agents }, { tmpRoot: directory, now: at, closePane: pane => { closed.push(pane); } });
   assert.deepEqual(closed, []);
+});
+
+/**
+ * GY-1196: three resources faults after GY-1130 and GY-1165 shipped, sharing one cause: the plane's
+ * declared reclaims for the two resources — the self-upgrade's restart for loaded-revision, the name
+ * reclaim for agent-names — ran on the master cycle's cadence, and a loaded cycle runs for ten to
+ * fifteen minutes, while the readings judged them on wall-clock bounds as if they ran at once.
+ *
+ * - resource:loaded-revision (11:07:12Z, 11:47:27Z): the self-upgrade between two cycles itself
+ *   moved the checkout (reflog 11:06:39Z, 11:46:54Z); the next cycle's reading, 33 seconds later,
+ *   faulted on the move the upgrade was still restarting onto.
+ * - resource:agent-names:claude-primary (12:41:53Z): graphyard-claude-1's finished pane w1V:pHAS
+ *   needed two reclaim passes 60s apart, one per cycle; cycles of 551s, 707s and 862s put the
+ *   second pass past the 10-minute bound.
+ */
+test('manual:fault-class-resources — GY-1196: the loaded-revision instances are the self-upgrade under way, not a fault, until its bound passes', () => {
+  const seconds = (at: string) => Math.floor(Date.parse(at) / 1000);
+  const sha = (label: string) => label.padEnd(40, '0');
+  /** A git and ps that answer for one loop process and the coordinator checkout's reflog, newest first. */
+  const host = (startedAt: string, readAt: number, reflog: [string, string][], codeMoves: string[], behind: number) => (command: string, args: string[]) => {
+    if (command === 'ps') return `${Math.floor(readAt / 1000) - seconds(startedAt)}\n`;
+    if (args.includes('rev-parse')) return `${reflog[0][0]}\n`;
+    if (args.includes('reflog')) return reflog.map(([commit, at]) => `${commit} HEAD@{${seconds(at)}}`).join('\n') + '\n';
+    if (args.includes('diff')) return codeMoves.includes(args.at(-1)!) ? 'src/master.ts\n' : 'docs/operations-reference.md\n';
+    return `${behind}\n`;
+  };
+  const instances = [
+    // Instance 1: the loop started 10:54:47Z on dd13101b84ed; the upgrade moved the checkout to b289b9137069 at 11:06:39Z.
+    { at: Date.parse('2026-10-04T11:07:12.746Z'), started: '2026-10-04T10:54:47Z', behind: 4, moved: '2026-10-04T11:06:39Z',
+      reflog: [[sha('b289b9137069'), '2026-10-04T11:06:39Z'], [sha('dd13101b84ed'), '2026-10-04T10:43:58Z']] as [string, string][], code: [sha('b289b9137069')] },
+    // Instance 2: the loop started 11:19:50Z on b289b9137069; a docs-only merge moved the checkout at
+    // 11:30Z, which the loop is never behind on, then the upgrade moved it onto code at 11:46:54Z.
+    { at: Date.parse('2026-10-04T11:47:27.419Z'), started: '2026-10-04T11:19:50Z', behind: 7, moved: '2026-10-04T11:46:54Z',
+      reflog: [[sha('6bfc6514ab1a'), '2026-10-04T11:46:54Z'], [sha('d0c5d0c5d0c5'), '2026-10-04T11:30:00Z'], [sha('b289b9137069'), '2026-10-04T11:06:39Z']] as [string, string][], code: [sha('6bfc6514ab1a')] },
+  ];
+  for (const instance of instances) {
+    const revision = loadedRevision('/nonexistent', 1, host(instance.started, instance.at, instance.reflog, instance.code, instance.behind), instance.at)!;
+    assert.equal(revision.behind, instance.behind);
+    assert.equal(revision.movedAt, Date.parse(instance.moved), 'the move onto unloaded code is timed from the reflog, not the first move since the start');
+    // REPRODUCE against base: base's reading had no move time and counted every commit behind at once.
+    const { movedAt: _, ...base } = revision;
+    assert.deepEqual(faults(inputs({ now: instance.at, revision: base })), ['resource:loaded-revision']);
+    // CANDIDATE: the same state 33 seconds after the upgrade's own move is the upgrade under way.
+    assert.deepEqual(faults(inputs({ now: instance.at, revision })), []);
+    const reading = readResources(inputs({ now: instance.at, revision })).find(entry => entry.id === 'loaded-revision')!;
+    assert.equal(reading.state, 'ok');
+    assert.match(reading.detail!, new RegExp(`${instance.behind} commits behind since ${instance.moved.replace('Z', '.000Z')}; the self-upgrade has until`));
+    // The bound still holds: an upgrade that never lands (the refusal GY-1145 removes) is a fault once it passes.
+    assert.deepEqual(faults(inputs({ now: Date.parse(instance.moved) + selfUpgradeBoundMs - 1, revision })), []);
+    assert.deepEqual(faults(inputs({ now: Date.parse(instance.moved) + selfUpgradeBoundMs, revision })), ['resource:loaded-revision']);
+  }
+});
+
+test('manual:fault-class-resources — GY-1196: the agent-names instance is reclaimed within its bound on the dispatcher tick, however long the cycle runs', async () => {
+  const settled = Date.parse('2026-10-04T12:30:00.000Z'), readAt = Date.parse('2026-10-04T12:41:53.835Z');
+  const config = { workers: [{ name: 'claude-primary', principal: 'graphyard-claude-1', agentName: 'graphyard-claude-1', mode: 'launch' as const }], reviewers: [], producers: [] };
+  const pane = agent('graphyard-claude-1', 'idle', 'w1V:pHAS');
+  const work = [workerItem('graphyard-claude-1', { startedAt: settled - 3_600_000, endedAt: settled, state: 'done' })];
+  const state = (now: number, agents: HerdrAgent[]): ResourceInputs => ({ now, reviews: [], producers: [], agents, work, plane: null, loop: null, revision: null, disk: null, profiles: config });
+
+  // REPRODUCE against base: the full pass ran once per cycle. The cycle that finished at 12:41:19Z
+  // ran its pass early, before the session settled; the next ran its first sighting after 12:41:53Z.
+  // At the reading the pane had been held, settled, for 11m53s: the instance.
+  const base = await temporaryDirectory('gy-1196-base');
+  await mkdir(join(base, '.graphyard'), { recursive: true });
+  const baseClosed: string[] = [];
+  for (const at of [settled - 5 * 60_000, readAt + 60_000]) await reclaimResources(base, config, { work, agents: [pane] }, { tmpRoot: base, now: at, closePane: closed => { baseClosed.push(closed); } });
+  assert.deepEqual(baseClosed, [], 'the cycle-paced pass had closed nothing by the reading');
+  assert.deepEqual(faults(state(readAt, [pane])), ['resource:agent-names:claude-primary']);
+
+  // CANDIDATE: the dispatcher's tick runs the name pass every few seconds. Driven through the tick,
+  // the pane closes at its second sighting a grace after the first, well inside the bound.
+  const directory = await temporaryDirectory('gy-1196-candidate');
+  await mkdir(join(directory, '.graphyard'), { recursive: true });
+  let agents: HerdrAgent[] = [pane], clock = settled;
+  const closedAt: Record<string, number> = {};
+  const effects: DispatchEffects = {
+    snapshot: async () => ({ work, now: new Date(clock).toISOString() }), agents: () => agents,
+    credentials: async () => ({}), reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: [] }),
+    launchReview: async () => {}, launchProducer: async () => {}, persist: async () => {},
+    reclaimNames: async (snapshotWork, observed) => (await reclaimResources(directory, config, { work: snapshotWork, agents: observed }, { namesOnly: true, tmpRoot: directory, now: clock,
+      closePane: closed => { closedAt[closed] = clock; agents = agents.filter(entry => entry.pane_id !== closed); } })).closed.map(entry => ({ pane: entry.pane, agentName: entry.name })),
+  };
+  const dispatchConfig = { url: 'https://graphyard.example', repository: 'owner/repo', hostId: 'vishrog', reviewers: [], producers: [], workers: [], run: {} } as unknown as MasterConfig;
+  const cursor = emptyDispatchCursor(dispatchConfig);
+  for (; clock <= settled + nameReclaimBoundMs && agents.length; clock += 10_000) await runDispatchTick(dispatchConfig, cursor, effects, () => clock);
+  assert.ok(closedAt['w1V:pHAS'] !== undefined, 'the tick closed the finished pane');
+  assert.ok(closedAt['w1V:pHAS'] - settled <= 3 * finishedSessionGraceMs, `closed ${(closedAt['w1V:pHAS'] - settled) / 1000}s after settling, inside the ${nameReclaimBoundMs / 60_000}-minute bound`);
+  assert.deepEqual(faults(state(readAt, agents)), [], 'with the pane closed, the instance does not recur');
+  // The name pass fails, reaps and sweeps nothing: no ledger written, no /tmp pass recorded.
+  assert.equal((await readReclaimReports(directory)).every(report => report.reaped.review === 0 && report.reaped.producer === 0 && report.tmp.removed === 0 && report.released.length === 0), true);
+});
+
+test('GY-1192: the base gates run by the GY-1165 reproduction close what the base closed — an idle worker and a producer with a settled record', async () => {
+  const directory = await temporaryDirectory('gy-1192-base-control');
+  await mkdir(join(directory, '.graphyard'), { recursive: true });
+  const config = { workers, producers, reviewers: [] };
+  // The positive control for the base half: the same holders, made finished in the base's own terms.
+  await saveProducerLedger(directory, { version: 1, producers: [{
+    id: randomUUID(), key: 'GY-PROD-1', pr: 1, sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 1, group: 'group-1', proofs: ['integration:proof'],
+    profile: 'claude-producer-2', principal: 'principal-claude-producer-2', agentName: 'produce-claude-2', pane: 'w1V:pB2', requestId: 'req-prod-1', attempt: 1,
+    state: 'completed' as const, outcome: {}, requestedAt: iso(now - 3_600_000), expiresAt: iso(now + 30 * 60_000), closedAt: iso(now - 15 * 60_000),
+  } as ProducerRecord] });
+  const agents = [agent('graphyard-opencode-1', 'idle', 'w1V:pB1'), agent('produce-claude-2', 'idle', 'w1V:pB2')];
+  const work = [workerItem('graphyard-opencode-1', { startedAt: now - 3_600_000, endedAt: now - 15 * 60_000, state: 'done' })];
+  const closed: string[] = [];
+  for (const at of [now, now + finishedSessionGraceMs])
+    await reclaimResources(directory, config, { work, agents }, { tmpRoot: directory, now: at, gates: baseReclaimGates, closePane: pane => { closed.push(pane); } });
+  assert.deepEqual(closed.sort(), ['w1V:pB1', 'w1V:pB2']);
+});
+
+test('GY-1192: a recordless producer pane blocked or unknown waits the stuck-session bound and closes as never started; an idle one keeps the grace', async () => {
+  const directory = await temporaryDirectory('gy-1192-recordless');
+  await mkdir(join(directory, '.graphyard'), { recursive: true });
+  const config = { workers: [], producers: [{ name: 'claude-producer-2', agentName: 'produce-claude-2', concurrency: 3 }], reviewers: [] };
+  // A launch stuck on a trust prompt before its pending record landed, one whose runtime never reports, and a finished one.
+  const agents = [agent('produce-claude-2-0000000a', 'blocked', 'w1V:pR1'), agent('produce-claude-2-0000000b', 'unknown', 'w1V:pR2'), agent('produce-claude-2-0000000c', 'idle', 'w1V:pR3')];
+  const closed: { pane: string; reason: string }[] = [];
+  const pass = (at: number) => reclaimResources(directory, config, { work: [], agents: agents.filter(entry => !closed.some(done => done.pane === entry.pane_id)) }, { tmpRoot: directory, now: at, closePane: () => {} }).then(report => { closed.push(...report.closed); });
+  await pass(now);
+  await pass(now + finishedSessionGraceMs);
+  assert.deepEqual(closed.map(entry => entry.pane), ['w1V:pR3'], 'only the idle recordless pane closes at the grace');
+  assert.match(closed[0].reason, /left no record$/);
+  await pass(now + stuckSessionMs - 1);
+  assert.equal(closed.length, 1, 'a blocked or unknown recordless pane survives inside the stuck-session bound');
+  await pass(now + stuckSessionMs);
+  assert.deepEqual(closed.map(entry => entry.pane).sort(), ['w1V:pR1', 'w1V:pR2', 'w1V:pR3']);
+  for (const entry of closed.filter(entry => entry.pane !== 'w1V:pR3')) assert.match(entry.reason, /left no record: never started: (blocked|unknown) in Herdr for over 10 minutes/);
 });
