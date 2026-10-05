@@ -7,7 +7,9 @@
 
 ## Reads that are not repeated
 
-Commits and exact-SHA compares are cached once (`github_cache`); the base ref is read once per 15 s, protection and rulesets every 5 min or on their events. `pull_request`, `pull_request_review`, `check_run`, `check_suite` and `push` webhooks claim items first; a poll they cover is skipped (`poll skipped: a webhook refreshed this item`).
+Commits and exact-SHA compares are cached once (`github_cache`); the base ref is read once per 15 s per replica, protection and rulesets every 5 min or on their events. `pull_request`, `pull_request_review`, `check_run`, `check_suite` and `push` webhooks claim items first; a poll they cover is skipped (`poll skipped: a webhook refreshed this item`).
+
+A base push wakes only open items whose files overlap it or whose last `mergeable_state` was not `CLEAN`/`UNSTABLE` (all items when the payload cannot name files), bounding merge bursts (`unit:merge-burst-request-budget`).
 
 ## Prioritized wakes
 

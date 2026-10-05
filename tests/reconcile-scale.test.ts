@@ -87,6 +87,9 @@ before(async () => {
   await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
   engine.principals = [operator];
+  // These cases exercise the batches of a pass that visits every open item (GY-727); which items a
+  // pass evaluates between full passes is tests/incremental-reconcile.test.ts's concern (GY-1124).
+  engine.reconcileFullEvaluationMs = 0;
   // 700 items, 150 of them open (the first created is the template for the rest), 547 settled
   // deliveries, and 3 done ones still holding a lease, a queue entry and a deployment row.
   const template = await createItem('Scale template');

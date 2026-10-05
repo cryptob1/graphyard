@@ -61,4 +61,6 @@ Observers `POST /api/delivery/observe`:
 
 Only complete listings verify; repeated `snapshotId`s return the original receipt; `POST /api/delivery/notify` only hints. A sweep (`graphyard delivery sweep` forces one) verifies generations once services share an interval within `freshnessSeconds`, adding `releaseDeliveries` to items. `graphyard delivery` shows state.
 
+`master status` `delivery`: `readyToMerged` and `mergedToProduction` p50/p90 over `24h`/`7d`; a 7-day p90 over master.json `deliverySpeed` targets (2 h, 8 h) raises attention.
+
 Validation binds manifest, signature, measurements (`POST /api/validation/result` refuses top-level SHAs). Mismatches record `attribution-undermined`, voiding passes. `GET /api/analytics/attribution` reports mismatches, cost.

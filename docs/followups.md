@@ -5,7 +5,7 @@ An approval's FOLLOW-UP findings (beyond criteria) are recorded on the item and 
 
 ## Recorded, then filed on ship
 
-The loop records them idempotently (`POST /api/work/GY-N/followups`; `followups.recorded`), resolving each thread. On delivery they are filed as `Follow-ups from the approved review of GY-N (PR #M)` (`{"ship":true}`), triaged in the [backlog](master-agent.md#machine-filed-backlog).
+The loop records them idempotently (`POST /api/work/GY-N/followups`; `followups.recorded`), resolving each thread. Once the item ships they are filed as `Follow-ups from the approved review of GY-N (PR #M)` (`{"ship":true}`), triaged in the [backlog](master-agent.md#machine-filed-backlog).
 
 ## Retrieving a batch
 

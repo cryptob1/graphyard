@@ -14,7 +14,7 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions.
 
 ## Shared project memory
 
-Sessions start with a role-scoped digest (≤500 words) of decisions, recurring faults and recent merges, built from applied records (`.graphyard/project-memory.json`; `projectMemory` in `master status`).
+Sessions start with a role-scoped digest (≤500 words; over-long entries skipped or cut with `…`) of decisions, recurring faults and recent merges, built from applied records (`.graphyard/project-memory.json`; `projectMemory` in `master status`).
 
 ## Risk lanes
 

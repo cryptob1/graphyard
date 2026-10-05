@@ -33,7 +33,7 @@ Worker tokens carry `contents`, `pull_requests` and `workflows` write ([push cre
 
 ## Require the check
 
-Require `Graphyard / merge` and `graphyard/landable` ([landability](coordination.md)) from the control-plane App on base: `strict` **off**, admin-enforced, no force push or deletion (`master protection --apply`, `master browser protection` reconcile). Needs: green `GITHUB_CI_APP_IDS` and protection-required checks, current-head approval, trusted passing evidence, mergeable non-draft PR, queue head or [optimistic lane](#optimistic-merges). GitHub merges only heads it passed; restrict other merge identities (lease-less workers still push).
+Require `Graphyard / merge` and `graphyard/landable` ([landability](coordination.md)) from the control-plane App on base: `strict` **off**, admin-enforced, no force push or deletion (`master protection --apply`, `master browser protection` reconcile). Needs: green `GITHUB_CI_APP_IDS` and protection-required checks, current-head approval, trusted passing evidence, mergeable non-draft PR at the queue head. GitHub merges only heads it passed; restrict other merge identities (lease-less workers still push).
 
 ## Merge queue
 
@@ -48,10 +48,6 @@ A carried review missing from the PR is re-posted before merging (`review.carry-
 ### Parallel tips
 
 `mergeQueue.parallelTips` (master config, default 4; `POST /api/merge-queue`): stacked per-entry tips test concurrently (`parallelTips: 1` batches). Entries merge in order; a failing tip ejects its entry once those ahead pass, and later tips rebuild. Failing only `unit:docs-word-budget` ejects the first entry whose running total exceeds the budget, naming words over and pages grown; otherwise the budget only warns ([development](development.md#documentation)).
-
-### Optimistic merges
-
-`mergeQueue.optimistic` (default on; `optimistic: false` disables): green entries disjoint from base changes land head-bound, unqueued, unless they or the base touched shared infrastructure (`mergeQueue.optimisticExclude` plus built-in globs). A main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`).
 
 ### Proofs in CI
 
