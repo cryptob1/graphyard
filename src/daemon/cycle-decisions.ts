@@ -293,9 +293,12 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const attempts = (state.actions[key]?.attempts ?? 0) + 1;
     await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'started', detail: `Requesting the ${decision.action} decision for ${item.key}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist);
     try {
-      // An unreadable history is unknown, not empty (GY-1241): read as empty, a standing request
-      // would look absent and be asked again, which the server refuses. The request waits for a read.
-      const history = effects.decisions ? (await effects.decisions(item)).decisions : [];
+      // An unreadable history is unknown, not empty (GY-1241): read as empty, an applied merge or a
+      // standing request would look absent and be asked again. The request waits for a read, and is
+      // recorded failed until one answers. A rework or recover request is made without it: the
+      // server names the refusal it stands on, and the loop answers that by citing it (GY-229).
+      const unread = decision.action === 'rework' || decision.action === 'recover';
+      const history = effects.decisions ? (await effects.decisions(item).catch(error => { if (unread) return { decisions: [] }; throw error; })).decisions : [];
       const applied = decision.action === 'merge' ? approvedMerge(item, history) : null;
       if (applied) {
         state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: applied.id, requestedAt: stamp, settledAt: stamp });
