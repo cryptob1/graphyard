@@ -1,3 +1,4 @@
+import { githubDelivery } from './delivery-mode.js';
 import { createHash } from 'node:crypto';
 import type { Work } from './work.js';
 import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
@@ -178,7 +179,8 @@ export function reconcileAutoDispatch(work: Work, all: Work[], now: Date): Dispa
     state.producers = kept;
     // Opened exactly for the groups the shared decision calls `request` — the same predicate the
     // planner reads before it names a proof dispatch (next-action.ts).
-    for (const decision of decisions) {
+    // Under GitHub delivery proofs gate nothing, so no producer is requested for them.
+    for (const decision of githubDelivery() ? [] : decisions) {
       if (decision.state !== 'request' || state.producers.some(request => request.group === decision.group)) continue;
       state.producers.push(open({ kind: 'producer', group: decision.group, proofs: decision.unproven, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: work.policyRevision, pr: candidate.pr, reason: decision.reason }));
     }

@@ -502,6 +502,7 @@
     "tests/secrets-scan-scope.test.ts": 298,
     "tests/server-heap-bounded.test.ts": 10420,
     "tests/server-scale.test.ts": 10872,
+    "tests/server-startup-readiness.test.ts": 1200,
     "tests/session-liveness-model.test.ts": 1990,
     "tests/session-liveness.test.ts": 3801,
     "tests/session-reconcile.test.ts": 1901,
@@ -554,6 +555,7 @@
     "tests/attestation-carry.test.ts": 612,
     "tests/automatic-review-concurrency.test.ts": 5000,
     "tests/coordinator-os-confinement.test.ts": 1100,
+    "tests/keyring-probe-backoff.test.ts": 300,
     "tests/delivery-causes.test.ts": 461,
     "tests/diagnostician.test.ts": 2769,
     "tests/dispatch-recovers-from-jam.test.ts": 1181,
@@ -580,6 +582,7 @@
     "tests/test-case-repository-ui.test.ts": 744,
     "tests/test-case-repository.test.ts": 4051,
     "tests/tmp-cleanup.test.ts": 13603,
-    "tests/unblock-stale-revision.test.ts": 4873
+    "tests/unblock-stale-revision.test.ts": 4873,
+    "tests/exhausted-proof-runtime.test.ts": 350
   }
 }

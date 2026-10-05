@@ -1,4 +1,5 @@
 // Concern: cycle steps 5–7 — shepherd reviews and proofs, the guarded merge, deployment verification.
+import { deliveredByGitHub } from '../model/delivery-mode.js';
 import { carriedApproval, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, deploySmokeRequired, deliveryState, rollbackGuidance } from '../model.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation, approvedMerge, transientMergeRace } from '../master.js';
 import { type Work } from '../model.js';
@@ -77,12 +78,14 @@ export const repeatedMergeRefusalMs = 10 * 60_000;
  * action instead of being deduplicated away by the first phase's marker (GY-831 review). A carry
  * re-bound to another review is a phase of its own. A refusal standing only on a stale GitHub
  * observation takes neither step: the candidate keeps its position and is observed (GY-1099).
+ * `staleOnly` is that judgement, made by the caller where the item as read cannot show it: the
+ * server's own freshness refusal of a candidate whose gates still passed when it was read (GY-1202).
  */
-export async function actOnRepeatedRefusal(cycle: Cycle, item: Work, mergeKey: string, reason: string, since: string) {
+export async function actOnRepeatedRefusal(cycle: Cycle, item: Work, mergeKey: string, reason: string, since: string, staleOnly = staleObservationOnly(item)) {
   const { state, effects, now, performed } = cycle;
   const minutes = Math.floor((now() - Date.parse(since)) / 60_000);
   if (now() - Date.parse(since) < repeatedMergeRefusalMs) return;
-  if (staleObservationOnly(item)) return requestCandidateObservation(cycle, item, mergeKey, reason, since, minutes);
+  if (staleOnly) return requestCandidateObservation(cycle, item, mergeKey, reason, since, minutes);
   const carry = carriedApproval(item), carried = !!carry;
   const key = `${mergeKey}:repeated:${carry ? `carry:${carry.reviewId ?? 'unnumbered'}:${carry.originalSha}` : 'rework'}`, previous = state.actions[key];
   if (previous?.state === 'done' && previous.since === since) return;
@@ -122,6 +125,31 @@ export function staleObservationOnly(work: Work) {
   const owed = (reason: string) => reason === staleObservationReason || (!work.observation && reason === unverifiedProtectionReason);
   return !work.violations.length && !!merge && !merge.passed && merge.reasons.includes(staleObservationReason) && merge.reasons.every(owed)
     && work.gates.every(gate => gate.name === 'merge' || gate.passed);
+}
+/**
+ * GY-1202. Whether the guarded merge's refusal of `work` stands only on observation freshness. The
+ * server refuses with "Merge authorization is no longer current" when the observation passed its
+ * two-minute bound after the loop read the item, so the item as read may still pass every gate: a
+ * freshness refusal of an item whose gates all passed, or failed on freshness alone, is stale-only.
+ */
+export function staleRefusalOnly(work: Work, refusal: string) {
+  return staleObservationOnly(work) || (staleMergeRefusal.test(refusal) && !work.violations.length && work.gates.every(gate => gate.passed));
+}
+/**
+ * GY-1202. The wait detail names the observation's time, which every landing observation changes, so
+ * the stale wait's `since` is carried while the same candidate waits uninterrupted: a previous wait
+ * of this candidate's head, with no guarded merge attempted since it began. Otherwise a candidate
+ * whose observations keep landing already stale would restart the ten-minute bound on each one and
+ * never be observed ahead of the backlog.
+ */
+export function staleWaitSince(waitPrevious: DaemonAction | undefined, mergePrevious: DaemonAction | undefined, item: Work, detail: string, at: number) {
+  if (!waitPrevious) return new Date(at).toISOString();
+  const began = waitPrevious.since ?? waitPrevious.at;
+  if (waitPrevious.detail === detail) return began;
+  const subject = (text: string) => text.replace(/ \(taken at [^ ]+ of head /, ' (of head ');
+  const sameHead = subject(waitPrevious.detail) === subject(detail) && !!item.observation && waitPrevious.detail.includes(`of head ${item.observation.candidate.sha.slice(0, 12)}`);
+  const attempted = !!mergePrevious && Date.parse(mergePrevious.at) > Date.parse(began);
+  return sameHead && !attempted ? began : new Date(at).toISOString();
 }
 /**
  * GY-1099. On 2026-10-02 seven candidates whose every other gate passed were ejected by GY-831's
@@ -243,7 +271,8 @@ export async function mergeStep(cycle: Cycle) {
   });
   //    A candidate waiting its turn in the merge queue is not attempted: the refusal would only
   //    restate its position, and each one would push its first real attempt further out (GY-192).
-  const mergeCandidates = open.filter(candidate => candidate.stage === 'merge' && !mergedWithoutAuthorization(candidate) && !waitingInMergeQueue(candidate));
+  //    Under GitHub delivery GitHub merges on its own branch protection; the loop never asks.
+  const mergeCandidates = open.filter(candidate => candidate.stage === 'merge' && !deliveredByGitHub(candidate) && !mergedWithoutAuthorization(candidate) && !waitingInMergeQueue(candidate));
   // The cycle snapshot is 30-45 s old by now, and observations and bookkeeping write to the item
   // throughout. The merge is invoked on the item as it stands immediately before the call, under
   // the same action key; one whose candidate or queue turn moved is left to the next cycle.
@@ -267,18 +296,24 @@ export async function mergeStep(cycle: Cycle) {
     // observation is not asked — the refusal would only restate it — but wakes the item's
     // observation job, and is asked on the first cycle after that observation lands.
     const stale = mergeObservationWait(item);
+    const waitKey = `wait:merge:${item.id}`;
+    const waitPrevious = state.actions[waitKey];
+    // A stale wait that ended without a merge attempt (the observation turned fresh) is cleared, so
+    // a later stale wait of the same head starts its own ten-minute bound (GY-1202).
+    if (!stale && waitPrevious) { delete state.actions[waitKey]; await effects.persist(state); }
     if (stale) {
-      const waitKey = `wait:merge:${item.id}`;
-      const waitPrevious = state.actions[waitKey];
       const reason = `Merge authorization is no longer current: ${staleObservationReason}`;
-      const since = waitPrevious && waitPrevious.detail === stale ? (waitPrevious.since ?? waitPrevious.at) : new Date(now()).toISOString();
-      if (detailChanged(waitPrevious, stale)) {
+      const since = staleWaitSince(waitPrevious, previous, item, stale, now());
+      // A wait record written before it carried `since` is re-recorded once with it, so the bound
+      // survives a restart (GY-1202).
+      if (detailChanged(waitPrevious, stale) || waitPrevious.since !== since) {
         performed.push(await record(state, waitKey, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: stale, attempts: (waitPrevious?.attempts ?? 0) + 1, cycle: state.cycle, since }, now(), effects.persist));
-      } else if (!waitPrevious.since) {
-        waitPrevious.since = since;
       }
       await wakeObservationJob(cycle, item, 'guarded merge');
-      await actOnRepeatedRefusal(cycle, item, key, reason, since);
+      // The guarded merge was never asked here, so only a wait standing on freshness alone is acted
+      // on — by observing the candidate. One whose merge gate or another gate also fails waits as
+      // it did before GY-1099, and is never reported as a refusal it was not given (GY-1202).
+      if (staleObservationOnly(item)) await actOnRepeatedRefusal(cycle, item, key, reason, since, true);
       return;
     }
     // A merge the server refused for a stale observation waits for the observation its refusal
@@ -339,7 +374,7 @@ export async function mergeStep(cycle: Cycle) {
         // bound since the snapshot — wakes the observation job at once, and the merge is asked
         // again as soon as that observation lands (GY-710).
         if (!race && staleMergeRefusal.test(message(error))) await wakeObservationJob(cycle, target, 'guarded merge');
-        if (!race) await actOnRepeatedRefusal(cycle, target, key, message(error), since);
+        if (!race) await actOnRepeatedRefusal(cycle, target, key, message(error), since, staleRefusalOnly(target, message(error)));
         return;
       }
     }

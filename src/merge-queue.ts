@@ -1,3 +1,4 @@
+import { deliveredByGitHub } from './model/delivery-mode.js';
 import type { Evidence, Observation, ScopeFile, Work } from './model.js';
 import { CHECK_NAME, LANDABLE_CHECK } from './model/work.js';
 import { carriedApproval, type ApprovalIdentity, type CarriedApproval, type CarriedProof, type QueueCarry, type RequiredApproval, type TipMerge } from './model/carry.js';
@@ -595,6 +596,22 @@ export interface BaseRefresh {
    * refresh. `head` is then the unchanged candidate, and whatever the record carried onto it stays.
    */
   stale?: StaleMergeability | null;
+  /**
+   * With a conflict (GY-1200): when a conflict was first recorded for this same head and policy
+   * revision. A refresh onto each new base tip rewrites `at`, so on a base that moves often `at`
+   * alone would keep restarting the bound an unhandled conflict is counted against (faults.ts
+   * baseConflictInMotion). Absent on records that predate the rule, which read as `at`.
+   */
+  conflictSince?: string | null;
+}
+/**
+ * GY-1200. When the conflict a refresh records was first found on this head: the earlier record's
+ * own first conflict when it conflicted on the same head and policy revision, else the refresh's own time.
+ */
+export function conflictSince(previous: Pick<BaseRefresh, 'from' | 'policyRevision' | 'at' | 'conflict' | 'conflictSince'> | null | undefined, refresh: Pick<BaseRefresh, 'from' | 'policyRevision' | 'at' | 'conflict'>): string | null {
+  if (!refresh.conflict) return null;
+  const same = !!previous?.conflict && previous.from.sha === refresh.from.sha && previous.policyRevision === refresh.policyRevision;
+  return same ? previous!.conflictSince ?? previous!.at : refresh.at;
 }
 /** Why a branch was written by the control plane rather than by its worker (GY-375). */
 export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair' | 'docs sync';
@@ -1653,9 +1670,11 @@ export interface MergeEnqueueRequest { sha: string; baseSha: string; policyRevis
  */
 export function mergeAuthorized(work: Work): boolean {
   const authorization = work.mergeAuthorization, candidate = work.candidate;
-  return work.stage === 'merge' && !!candidate && !!authorization && !work.observation?.merged
+  // Under GitHub delivery every passing gate is the authorization: GitHub's branch protection decides the merge.
+  const github = deliveredByGitHub(work);
+  return work.stage === 'merge' && !!candidate && (github || !!authorization) && !work.observation?.merged
     && work.gates.every(gate => gate.passed) && !work.violations.length && !work.leadHold
-    && authorization.sha === candidate.sha && authorization.baseSha === candidate.baseSha && authorization.policyRevision === work.policyRevision;
+    && (github || (authorization!.sha === candidate.sha && authorization!.baseSha === candidate.baseSha && authorization!.policyRevision === work.policyRevision));
 }
 /** Whether the coordinator's enqueue request binds the current candidate and policy. */
 export function enqueueRequestCurrent(work: Work, request: Pick<MergeEnqueueRequest, 'sha' | 'baseSha' | 'policyRevision'> | null | undefined): boolean {
@@ -1766,7 +1785,7 @@ export function mergeQueueAction(work: Work, state: GitHubMergeQueueState, reque
   const held = state.mode !== 'none';
   const sha = work.candidate?.sha;
   const withdrawn = !mergeAuthorized(work) ? `${work.key} is no longer authorized to merge: ${[...work.gates.flatMap(gate => gate.reasons), ...work.violations].join('; ') || 'no all-gates authorization binds the current candidate'}`
-    : !enqueueRequestCurrent(work, request) ? `${work.key}: no merge was requested for candidate ${sha?.slice(0, 12)} at policy revision ${work.policyRevision}`
+    : !deliveredByGitHub(work) && !enqueueRequestCurrent(work, request) ? `${work.key}: no merge was requested for candidate ${sha?.slice(0, 12)} at policy revision ${work.policyRevision}`
       : state.head !== sha ? `${work.key}: GitHub holds head ${state.head.slice(0, 12)}, not the authorized candidate ${sha?.slice(0, 12)}`
         : null;
   if (withdrawn) return held ? { kind: 'dequeue', reason: withdrawn } : { kind: 'hold', reason: withdrawn };
