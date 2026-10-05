@@ -3048,30 +3048,16 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
           // without spending the single re-request meant for vanished runs.
           const cancelledCount = Number(due.detail?.match(/cancelled:(\d+)/)?.[1] ?? 0);
           if (cancelledCount < cancelledRerunLimit) {
+            // Recorded through the engine under the item's lock and revision guard (GY-1124), so a
+            // heartbeat committing while GitHub is asked is kept, never written back over.
+            let outcome: Parameters<Engine['recordCheckRerunProbe']>[3];
             try {
               const again = await github.rerunFailedJobs(due.failedRunId);
-              const detail = `cancelled:${cancelledCount + 1}:${new Date().toISOString()}`;
-              const itemToUpdate: Work = work!;
-              work = await engine.store.transaction<Work>(async (db, now): Promise<Work> => {
-                const jobRow = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [itemToUpdate.id, job.token, now])).rows[0];
-                if (!jobRow) return itemToUpdate;
-                // Only this item is read under the coordination lock (GY-1027).
-                const cur: Work | undefined = (await db.query('SELECT document FROM work_items WHERE id=$1', [itemToUpdate.id])).rows[0]?.document;
-                if (!cur) return itemToUpdate;
-                const index = (cur.checkReruns ?? []).findIndex(entry => entry.sha === due.sha && entry.check === due.check && entry.failedRunId === due.failedRunId);
-                if (index < 0 || cur.checkReruns![index].state !== 'requested') return cur;
-                const current = cur.checkReruns![index];
-                const at = now.toISOString();
-                const next: CheckRerun = { ...current, runId: again.runId, ...(again.attempt !== undefined ? { attempt: again.attempt } : {}), detail, probedAt: at, waiting: undefined };
-                cur.checkReruns = cur.checkReruns!.map((entry, pos) => pos === index ? next : entry);
-                await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [cur.id, JSON.stringify(cur)]);
-                await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [cur.id, 'github', 'check.rerun.requested', JSON.stringify({ details: next, at })]);
-                return cur;
-              });
+              outcome = { kind: 'recancelled', runId: again.runId, ...(again.attempt !== undefined ? { attempt: again.attempt } : {}), detail: `cancelled:${cancelledCount + 1}:${new Date().toISOString()}` };
             } catch (error) {
-              const detail = `GitHub accepted the rerun but attempt was cancelled, and rerun was refused: ${error instanceof Error ? error.message.slice(0, 300) : 'no reason given'}`;
-              work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'refused', detail });
+              outcome = { kind: 'refused', detail: `GitHub accepted the rerun but attempt was cancelled, and rerun was refused: ${error instanceof Error ? error.message.slice(0, 300) : 'no reason given'}` };
             }
+            work = await engine.recordCheckRerunProbe(work.id, job.token, due, outcome);
           } else {
             work = await engine.recordCheckRerunProbe(work.id, job.token, due, { kind: 'waiting', status: 'cancelled' });
           }
