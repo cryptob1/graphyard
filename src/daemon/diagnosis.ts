@@ -122,6 +122,15 @@ export function diagnosticianGate(state: Pick<DaemonState, 'diagnoses'>, clock: 
   if (since.some(entry => entry.state !== 'running')) return 'open';
   return since.length ? 'held' : 'probe';
 }
+/**
+ * The one subject a probe runs: the waiting subject refused longest ago, so the retry order is
+ * fair and deterministic, else the first subject listed when none of them is waiting (GY-1245).
+ */
+export function probeSubject<T extends { id: string }>(state: Pick<DaemonState, 'diagnoses'>, subjects: readonly T[]): T[] {
+  const refusedAt = (subject: T) => { const entry = state.diagnoses[subject.id]; return entry?.state === 'waiting' ? Date.parse(entry.refusedAt ?? entry.updatedAt) : Infinity; };
+  const oldest = [...subjects].sort((a, b) => refusedAt(a) - refusedAt(b))[0];
+  return oldest ? [oldest] : [];
+}
 /** A waiting diagnosis whose retry time has come. */
 const retryDue = (entry: DiagnosisRecord | undefined, clock: number) => entry?.state === 'waiting' && (!entry.retryAt || Date.parse(entry.retryAt) <= clock);
 const live = new Map<string, Promise<void>>();
@@ -286,7 +295,7 @@ export async function diagnosisStep(cycle: Cycle) {
     if (outcome && !outcome.diagnosis && outcome.limit) await cycle.isolate('diagnosis', snapshot.work.find(candidate => candidate.key === entry.work) ?? null, `the diagnosis of ${entry.subject}`, () => advance(cycle, diagnostician, entry, note));
   }
   const gate = diagnosticianGate(state, clock);
-  for (const subject of gate === 'held' ? [] : gate === 'probe' ? subjects.slice(0, 1) : subjects) {
+  for (const subject of gate === 'held' ? [] : gate === 'probe' ? probeSubject(state, subjects) : subjects) {
     await cycle.isolate('diagnosis', subject.work, `the diagnosis of ${subject.id}`, () => launch(cycle, diagnostician, subject, note));
   }
   for (const entry of Object.values(state.diagnoses)) {
@@ -341,7 +350,14 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
   const subjectItem = entry.work ? snapshot.work.find(item => item.key === entry.work) ?? null : null;
   if (entry.state === 'diagnosed') {
     const diagnosis = entry.diagnosis!;
-    if (entry.kind === 'recurring' && (!subjectItem || subjectItem.stage === 'done')) { entry.state = 'failed'; await note(entry, 'failed', `${entry.work} is no longer open, so its diagnosis is not acted on`); return; }
+    // GY-1266: a recurring item closed while it was diagnosed — delivered, or closed by the master —
+    // needs nothing from its diagnosis. That is the subject moving on, not the loop failing: recorded
+    // as a failed action it opened a loop fault for every such closure.
+    if (entry.kind === 'recurring' && (!subjectItem || subjectItem.stage === 'done')) {
+      entry.state = 'answered'; entry.answeredBy = subjectItem ? answeringItem(subjectItem) : null;
+      await note(entry, 'done', `${entry.work} is no longer open, so its diagnosis is not acted on${entry.answeredBy ? `; it was closed as answered by ${entry.answeredBy}` : ''}`, null);
+      return;
+    }
     if (diagnosis.covering) {
       const covering = snapshot.work.find(item => item.key === diagnosis.covering);
       if (!covering || covering.stage === 'done' || covering.key === entry.work) { entry.state = 'failed'; await note(entry, 'failed', `The diagnosis names ${diagnosis.covering} as covering ${entry.subject}, but it is not another open item`); return; }
