@@ -94,6 +94,10 @@ The observer submits measurements through `POST /api/delivery/observe`:
 
 Only complete `provider` or `host-attestation` listings verify; a repeated `snapshotId` returns the first receipt; `POST /api/delivery/notify` only hints. A two-second sweep (`graphyard delivery sweep` drains sooner) verifies a generation once every service's common interval fits the freshness bound, adding `releaseDeliveries` to included items. Otherwise status reads `unobserved`, `mismatched`, `unknown`, `unhealthy`, `incomplete`, `no-common-interval`, `stale` or `degraded`; `graphyard delivery` shows it.
 
+## Delivery speed
+
+`master status` `delivery` measures items merged into main: `readyToMerged`, first `ready` event (or creation) to GitHub's merge, and `mergedToProduction`, merge to the first production promotion serving that commit. Each has `count`, `p50Ms` and `p90Ms` for `24h` and `7d`; unpromoted merges count as `pending`. Targets: p90 ≤ 2 hours and ≤ 8 hours, set by master.json `deliverySpeed` (`readyToMergedP90Ms`, `mergedToProductionP90Ms`). A 7-day p90 over target raises one attention line naming the slowest items.
+
 ## Attribution
 
 Each validation request binds the candidate's manifest, a compatibility signature (manifest, build inputs, test bundle, configuration, source, policy, artifacts) and the measurements; workers and client-supplied SHAs establish nothing; `POST /api/validation/result` refuses any top-level SHA. A mismatch inside an accepted pass's window records `attribution-undermined`; it stops counting. `GET /api/analytics/attribution` reports mismatches and paid-run cost.

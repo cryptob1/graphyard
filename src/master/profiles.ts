@@ -370,6 +370,12 @@ export const masterConfigSchema = z.object({
   // The system invariants' thresholds (GY-404, src/model/invariants.ts): every field optional,
   // each defaulting to the bound the loop checks every cycle.
   invariants: invariantThresholdsSchema.optional(),
+  // Delivery-speed targets master status judges p90 against (GY-1232); unset keeps the defaults,
+  // ready→merged 2 hours and merged→production 8 hours.
+  deliverySpeed: z.object({
+    readyToMergedP90Ms: z.number().int().positive().max(30 * 86_400_000).optional(),
+    mergedToProductionP90Ms: z.number().int().positive().max(30 * 86_400_000).optional(),
+  }).strict().optional(),
 }).strict();
 export type MasterConfig = z.infer<typeof masterConfigSchema>;
 /**
