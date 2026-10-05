@@ -177,8 +177,25 @@ export async function trustClaudeFolder(directory: string, environment: Record<s
  * of the home the session runs under, so Graphyard records it there before the session starts,
  * under the same lock, read-back and test-runner rules as trustClaudeFolder. Antigravity loads no
  * repository-controlled configuration on that record, so nothing is refused for carrying one.
+ *
+ * A registry account whose runtime names `AGY_CONFIG_DIR` as its home variable runs with that
+ * directory in place of `~/.gemini/antigravity-cli`, so its record goes to `$AGY_CONFIG_DIR/settings.json`,
+ * as claudeConfigFile honors `CLAUDE_CONFIG_DIR`, and never into the launcher's own home (GY-1183).
+ * Every call also drops the records of Graphyard checkouts that no longer exist — implementation
+ * worktrees (`.graphyard/worktrees/…`) and the managed review, proof and approval checkouts
+ * (`graphyard-<kind>-…/checkout`, wherever `run.worktreeRoot` puts them) — so the list does not
+ * grow by one per dispatch, and does so even when the folder is already trusted, so a stale record
+ * goes at the next launch rather than the next fresh worktree (GY-1194); any other entry, the
+ * operator's own, is kept as it is, existing or not.
  */
-export const agyConfigFile = (environment: Record<string, string> = {}) => resolve(environment.HOME ?? homedir(), '.gemini', 'antigravity-cli', 'settings.json');
+export const agyConfigFile = (environment: Record<string, string> = {}) => {
+  const home = environment.AGY_CONFIG_DIR ?? process.env.AGY_CONFIG_DIR;
+  return home ? resolve(home, 'settings.json') : resolve(environment.HOME ?? homedir(), '.gemini', 'antigravity-cli', 'settings.json');
+};
+/** A managed session checkout's leaf, by the name install/worktree-root.ts `sessionCheckoutName` gives its directory, under any root. */
+const managedCheckout = /[\\/]graphyard-(proof|review|approval)-[a-z0-9][a-z0-9-]{0,39}-[0-9a-f]{7}-[0-9a-f]{8}[\\/]checkout$/;
+const removedGraphyardWorktree = (entry: unknown) => typeof entry === 'string'
+  && (entry.includes(`${sep}.graphyard${sep}worktrees${sep}`) || managedCheckout.test(entry)) && !existsSync(entry);
 export async function trustAgyFolder(directory: string, environment: Record<string, string> = {}): Promise<FolderTrust> {
   const file = agyConfigFile(environment), folder = canonicalPath(directory);
   if (underTestRunner() && !temporaryDirectories().some(temporary => canonicalPath(file).startsWith(`${temporary}${sep}`))) return { file, directory: folder, written: false };
@@ -191,18 +208,20 @@ export async function trustAgyFolder(directory: string, environment: Record<stri
     }
     if (!document || typeof document !== 'object' || Array.isArray(document)) throw refuse(`its settings ${file} are not a JSON object; fix or remove them, then launch again`);
     const workspaces: unknown[] = Array.isArray(document.trustedWorkspaces) ? document.trustedWorkspaces : [];
-    return { document, workspaces, trusted: workspaces.includes(folder) };
+    const kept = workspaces.filter(entry => !removedGraphyardWorktree(entry));
+    return { document, kept, trusted: workspaces.includes(folder), stale: kept.length < workspaces.length };
   };
-  if ((await read()).trusted) return { file, directory: folder, written: false };
+  const current = await read();
+  if (current.trusted && !current.stale) return { file, directory: folder, written: false };
   for (let attempt = 1; ; attempt++) {
     try {
       const recorded = await withConfigLock(file, async () => {
-        const { document, workspaces, trusted } = await read();
-        if (trusted) return false;
+        const { document, kept, trusted, stale } = await read();
+        if (trusted && !stale) return false;
         const staged = `${file}.graphyard-${randomUUID()}`;
-        await writeFile(staged, `${JSON.stringify({ ...document, trustedWorkspaces: [...workspaces, folder] }, null, 2)}\n`, { mode: 0o600 });
+        await writeFile(staged, `${JSON.stringify({ ...document, trustedWorkspaces: trusted ? kept : [...kept, folder] }, null, 2)}\n`, { mode: 0o600 });
         await rename(staged, file);
-        return true;
+        return !trusted;
       });
       if ((await read()).trusted) return { file, directory: folder, written: recorded };
       if (attempt >= 3) throw refuse(`the folder's trust record in ${file} was overwritten ${attempt} times by another writer of those settings`);

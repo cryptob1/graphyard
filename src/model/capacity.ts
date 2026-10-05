@@ -35,8 +35,9 @@ export interface ExhaustionSignal {
 }
 
 // The notices the supported runtimes print when an account has nothing left. They are matched
-// against single short lines of a session that has stopped working: a worker that discusses a
-// usage limit in its own prose is working, and a long paragraph is never a provider banner.
+// against single short lines of a session that has stopped working, or of one still working whose
+// runtime prints its retry marker beside the notice: a worker that discusses a usage limit in its
+// own prose is working, and a long paragraph is never a provider banner.
 const exhaustionNotices: readonly RegExp[] = [
   /\b(?:you(?:'|’)?ve|you have) (?:hit|reached) your (?:\w+[- ]){0,3}limit\b/i,
   /\b(?:usage|weekly|daily|monthly|hourly|5[- ]hour|session|spend(?:ing)?|rate|token|request|plan) limit (?:has been |was |is )?(?:reached|exceeded|hit|exhausted)\b/i,
@@ -108,14 +109,16 @@ export function parseResetTime(text: string, now: number): string | null {
 }
 
 /**
- * Whether the tail of a stopped session's output is its provider saying the account is spent.
- * Only the last lines are read — a notice the session has long since worked past is history —
- * the notice must lead its line rather than sit inside a sentence the session wrote, and the
- * reset time is looked for on the notice and the two lines after it, where the runtimes that
- * split the sentence put it.
+ * A runtime's own retry marker beside a limit notice (GY-973): OpenCode 1.18 does not stop on a
+ * spent account, it prints `Weekly/Monthly Limit Exhausted. … [retrying in 4s attempt #5]` and
+ * retries forever, so its host keeps reporting the session as working. The marker is the runtime
+ * speaking, not the agent: an agent's prose never carries an attempt counter in brackets.
  */
-export function detectExhaustion(output: string, now: number): ExhaustionSignal | null {
-  const lines = output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n').map(line => line.replace(/[│┃|]\s*$/, '').trim()).filter(Boolean).slice(-exhaustionTailLines);
+const retryMarker = /\[\s*retrying\b[^\]]*\]|\bretrying in \d+(?:\.\d+)?\s*(?:ms|s|m|h)?\b[^\n]*?\battempt\s*#?\d+/i;
+
+function findExhaustion(output: string, now: number, retrying: boolean): ExhaustionSignal | null {
+  // Right-aligned status text is padded out to the terminal width: a run of spaces is one gap.
+  const lines = output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n').map(line => line.replace(/[│┃|]\s*$/, '').trim().replace(/\s{2,}/g, ' ')).filter(Boolean).slice(-exhaustionTailLines);
   for (let index = lines.length - 1; index >= 0; index--) {
     // The banner itself, with whatever the terminal drew in front of it removed.
     const line = lines[index].replace(/^[^A-Za-z0-9]+/, '');
@@ -123,9 +126,31 @@ export function detectExhaustion(output: string, now: number): ExhaustionSignal 
     const at = exhaustionNotices.map(notice => notice.exec(line)?.index ?? -1).filter(offset => offset >= 0);
     if (!at.length || (line.slice(0, Math.min(...at)).match(/\S+/g) ?? []).length > exhaustionNoticeLabelWords) continue;
     const context = [line, ...lines.slice(index + 1, index + 3)].join(' ');
-    return { reason: line.slice(0, 300), resetsAt: parseResetTime(context, now) };
+    if (retrying && !retryMarker.test(context)) continue;
+    // The retry's own wait ("retrying in 4s") is not the provider's reset.
+    return { reason: line.slice(0, 300), resetsAt: parseResetTime(context.replace(retryMarker, ' '), now) };
   }
   return null;
+}
+
+/**
+ * Whether the tail of a stopped session's output is its provider saying the account is spent.
+ * Only the last lines are read — a notice the session has long since worked past is history —
+ * the notice must lead its line rather than sit inside a sentence the session wrote, and the
+ * reset time is looked for on the notice and the two lines after it, where the runtimes that
+ * split the sentence put it.
+ */
+export function detectExhaustion(output: string, now: number): ExhaustionSignal | null {
+  return findExhaustion(output, now, false);
+}
+
+/**
+ * Whether a session its host still reports as working is in fact stuck on a spent account: its
+ * screen tail carries a limit notice together with its runtime's retry marker. A working
+ * session's notice without that marker is only text it printed, and is left alone.
+ */
+export function detectRetryingExhaustion(output: string, now: number): ExhaustionSignal | null {
+  return findExhaustion(output, now, true);
 }
 
 /**
