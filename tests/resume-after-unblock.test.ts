@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { idleLeaseMs } from '../src/daemon/cycle-sessions.js';
-import { idleRepromptGraceMs } from '../src/daemon/cycle-resume.js';
+import * as cycleResume from '../src/daemon/cycle-resume.js';
 import { launchAppearanceMs } from '../src/daemon/effects.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -202,8 +202,10 @@ test('unit:idle-lease-reclaim-inside-worker-bound — a session that answers its
     // GY-1321: a codex worker whose sandbox could not start answered its re-prompt in 18 s and went
     // quiet again; the old cadence (30 minutes, re-prompt, 30 more) held each attempt 65-73 minutes.
     assert.equal(idleLeaseMs, minutes(30));
+    // Read through the module namespace, so a base without the grace fails here as a test case.
+    const { idleRepromptGraceMs } = cycleResume as { idleRepromptGraceMs?: number };
     assert.equal(idleRepromptGraceMs, minutes(10));
-    assert.ok(idleLeaseMs + idleRepromptGraceMs < minutes(60) - minutes(10), 'quiet from its first minutes, the attempt ends with room inside the bound');
+    assert.ok(idleLeaseMs + idleRepromptGraceMs! < minutes(60) - minutes(10), 'quiet from its first minutes, the attempt ends with room inside the bound');
     const item = { current: [held({ id: 'work-260', key: 'GY-260', containmentQuarantine: null })] };
     const agent: HerdrAgent = { name: 'agent-alpha', pane_id: 'w1:p4J1', agent_status: 'idle', agent: 'claude' };
     const { log, effects } = harness(item, agent);
