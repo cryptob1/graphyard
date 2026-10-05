@@ -281,7 +281,7 @@ test('unit:reconcile-reads-open-items-once — sustained contention defers a bat
   try { await engine.reconcile(); }
   finally { onLocked = undefined; console.warn = warn; engine.reconcileBatchMs = 250; }
   assert.equal(attempts, engine.reconcileMaxAttempts, 'the contended batch has a finite attempt budget');
-  assert.ok(warnings.some(line => /deferred 1 item\(s\).*6 contended attempts/.test(line)), 'deferral is visible in the server log');
+  assert.ok(warnings.some(line => new RegExp(`deferred 1 item\\(s\\).*${engine.reconcileMaxAttempts} contended attempts`).test(line)), 'deferral is visible in the server log');
   const after = await store.list();
   assert.ok(after.find(item => item.id === written.id)!.lease, 'the deferred write was rolled back');
   assert.equal(after.find(item => item.id === later.id)!.lease, null, 'later candidates made progress in the same tick');
