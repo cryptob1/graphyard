@@ -29,6 +29,8 @@ const words = (text: string) => text.split(/\s+/).filter(Boolean).length;
 /** Headings that name a kind of section rather than a topic, so two pages may share them. */
 const GENERIC_HEADINGS = new Set(['overview', 'related', 'see also']);
 const DUPLICATE_PARAGRAPH_WORDS = 25;
+/** A sentence or clause this long, said on two pages, is a copy rather than a shared phrase (GY-1069). */
+const DUPLICATE_SENTENCE_WORDS = 10;
 
 const normalize = (text: string) => text.toLowerCase().replace(/<!--[\s\S]*?-->/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/[`*_>#|-]/g, ' ').replace(/\s+/g, ' ').trim();
 
@@ -39,9 +41,33 @@ function paragraphs(text: string) {
   return [...new Set([...blocks, ...blocks.flatMap(block => block.split('\n'))].map(normalize))].filter(block => words(block) >= DUPLICATE_PARAGRAPH_WORDS);
 }
 
+/** Sentences and clauses of prose outside code fences, split where a reader's quote would end. */
+function sentences(text: string) {
+  return [...new Set(text.replace(/```[\s\S]*?```/g, '\n\n').split(/(?<=[.!?:;])\s+|\n\s*\n/).map(normalize))].filter(sentence => words(sentence) >= DUPLICATE_SENTENCE_WORDS);
+}
+
 function headings(text: string) {
   return [...text.replace(/```[\s\S]*?```/g, '').matchAll(/^#{1,6}\s+(.+)$/gm)].map(match => normalize(match[1])).filter(heading => !GENERIC_HEADINGS.has(heading));
 }
+
+/**
+ * Headroom under the configured budget (GY-1069): every page stays at least 200 words under the
+ * per-page cap, so a merge-queue tip that adds a paragraph to one page does not fail the cap. A
+ * page past its headroom fails here by name; the total's headroom, like the total itself, is never
+ * a merge gate and only warns.
+ */
+const PAGE_HEADROOM = 200;
+const TOTAL_HEADROOM = 600;
+const headroomJudgement = (counts: { page: string; words: number }[]) => {
+  const pageTarget = PAGE_BUDGET - PAGE_HEADROOM;
+  const totalTarget = TOTAL_BUDGET - TOTAL_HEADROOM;
+  const over = counts.filter(entry => entry.words > pageTarget).map(entry => `${entry.page} (${entry.words} words)`);
+  const total = counts.reduce((sum, entry) => sum + entry.words, 0);
+  return {
+    failed: over.length ? `pages within ${PAGE_HEADROOM} words of the ${PAGE_BUDGET}-word page budget (over ${pageTarget}): ${over.join(', ')}` : null,
+    warning: total > totalTarget ? `README.md and docs/ total ${total} words, within ${TOTAL_HEADROOM} of the ${TOTAL_BUDGET}-word budget (over ${totalTarget})` : null,
+  };
+};
 
 /**
  * The budget's judgement (GY-574): a page over its per-page cap fails here by name; a total over
@@ -64,7 +90,7 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/master-agent-reference.md', /history whose ledger has not moved is kept, not read/],
 ];
 
-test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and every docs page) keep every page within its per-page budget, counted as wc -w counts them; a total over the budget warns and passes', () => {
+test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and every docs page) keep every page within its per-page budget and 200 words under it, counted as wc -w counts them; a total over the budget or its headroom warns and passes', () => {
   assert.ok(budget, 'graphyard.json configures documentation.wordBudget');
   assert.equal(words('one  two\tthree\n\nfour — `five six` [seven](eight.md)'), 8, 'words are whitespace-separated runs, as wc -w counts them');
   const wc = spawnSync('wc', ['-w', 'README.md'], { cwd: root, encoding: 'utf8' });
@@ -74,6 +100,11 @@ test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and 
   const judgement = budgetJudgement(counts);
   assert.equal(judgement.failed, null, `a page over its budget fails here: ${judgement.failed}`);
   if (judgement.warning) console.warn(`unit:docs-word-budget: ${judgement.warning}`);
+  const headroom = headroomJudgement(counts);
+  assert.equal(headroom.failed, null, `a page past its headroom fails here: ${headroom.failed}`);
+  if (headroom.warning) console.warn(`unit:docs-word-budget: ${headroom.warning}`);
+  const largest = counts.reduce((top, entry) => entry.words > top.words ? entry : top);
+  console.log(`unit:docs-word-budget: ${counts.length} pages, ${counts.reduce((sum, entry) => sum + entry.words, 0)} words in total; largest ${largest.page} (${largest.words})`);
   // Statements a criterion requires the budgeted pages to keep (GY-1142 AC-2): the budget holds
   // with them in, and a trim that drops one fails here instead of passing silently.
   for (const [page, statement] of REQUIRED_STATEMENTS) assert.match(read(page), statement, `${page} states ${statement}`);
@@ -84,12 +115,17 @@ test('unit:docs-budget-reports-not-blocks — an over-budget total passes with t
   const overTotal = budgetJudgement(Array.from({ length: 13 }, (_, index) => ({ page: `docs/page-${index}.md`, words: 1_000 })));
   assert.equal(overTotal.failed, null, 'a total over the budget is not a failure: the budget is never a merge gate');
   assert.match(overTotal.warning!, /^README\.md and docs\/ total 13000 words; the budget is 12000 \(largest: /, 'the warning records the total and is reported');
+  assert.match(headroomJudgement([{ page: 'docs/a.md', words: PAGE_BUDGET - PAGE_HEADROOM + 1 }]).failed!, /^pages within 200 words of the 1200-word page budget \(over 1000\): docs\/a\.md \(1001 words\)$/, 'a page past its headroom fails');
+  assert.equal(headroomJudgement([{ page: 'docs/a.md', words: PAGE_BUDGET - PAGE_HEADROOM }]).failed, null, 'a page at its headroom passes');
+  const nearTotal = headroomJudgement(Array.from({ length: 12 }, (_, index) => ({ page: `docs/page-${index}.md`, words: 951 })));
+  assert.equal(nearTotal.failed, null, 'a total past its headroom is not a failure');
+  assert.match(nearTotal.warning!, /^README\.md and docs\/ total 11412 words, within 600 of the 12000-word budget \(over 11400\)$/, 'the total headroom only warns');
   const breach = budgetJudgement([{ page: 'README.md', words: PAGE_BUDGET + 1 }, { page: 'docs/a.md', words: 10 }]);
   assert.equal(breach.warning, null, 'a set within its total raises no warning');
   assert.match(breach.failed!, /^pages over the 1200-word page budget: README\.md \(1201 words\)$/, 'a page over its per-page cap still fails');
 });
 
-test('unit:docs-no-duplication — no two pages share a heading or a paragraph of 25+ words, and every internal link and anchor resolves', () => {
+test('unit:docs-no-duplication — no two pages share a heading, a paragraph of 25+ words or a sentence of 10+ words, and every internal link and anchor resolves', () => {
   const owners = (extract: (text: string) => string[]) => {
     const seen = new Map<string, Set<string>>();
     for (const page of pages) for (const item of extract(read(page))) seen.set(item, (seen.get(item) ?? new Set()).add(page));
@@ -101,6 +137,9 @@ test('unit:docs-no-duplication — no two pages share a heading or a paragraph o
   assert.deepEqual(sharedHeadings, [], `headings on more than one page: ${sharedHeadings.join('; ')}`);
   const sharedParagraphs = owners(paragraphs);
   assert.deepEqual(sharedParagraphs, [], `paragraphs repeated on more than one page: ${sharedParagraphs.join('; ')}`);
+  assert.deepEqual(sentences('Low lands on its [required CI checks](x.md) and one approving review: then it merges.'), ['low lands on its required ci checks and one approving review:'], 'sentences split at a clause end and keep only 10+ words');
+  const sharedSentences = owners(sentences);
+  assert.deepEqual(sharedSentences, [], `sentences repeated on more than one page: ${sharedSentences.join('; ')}`);
   const check = spawnSync(process.execPath, ['scripts/check-docs.mjs'], { cwd: root, encoding: 'utf8' });
   assert.equal(check.status, 0, check.stderr || check.stdout);
   assert.match(check.stdout, /all relative links, anchors and generated indexes resolve/);

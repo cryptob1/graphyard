@@ -7,6 +7,7 @@ import { exactApproval, reviewProviderOf } from './model/review.js';
 import { pathScopesOverlap } from './model/scope.js';
 import { evaluateLandability, landabilityEjection, type LandabilityAudit, type LandabilityVerdict } from './model/landability.js';
 import { missingAncestryReason, missingBaseAncestry } from './merge-base-ancestry.js';
+import type { BaseBreak } from './master/base-break-refresh.js';
 import type { DocsSync } from './model/docs-sync.js';
 import { ciCheckName } from './model/ci-refusal.js';
 import { attributeDocsOverflow, docsBudgetProof, docsOverflowReason, ownDocsOverflow, type DocsWordBudget, type DocsWordCount } from './model/documentation.js';
@@ -593,6 +594,8 @@ export interface BaseRefresh {
    * refresh. `head` is then the unchanged candidate, and whatever the record carried onto it stays.
    */
   stale?: StaleMergeability | null;
+  /** The base-branch breakage a `base breakage` refresh answered (GY-793): the failing tests, the base that broke them and the tip that fixed them. */
+  baseBreak?: BaseBreak | null;
   /**
    * With a conflict (GY-1200): when a conflict was first recorded for this same head and policy
    * revision. A refresh onto each new base tip rewrites `at`, so on a base that moves often `at`
@@ -610,8 +613,12 @@ export function conflictSince(previous: Pick<BaseRefresh, 'from' | 'policyRevisi
   const same = !!previous?.conflict && previous.from.sha === refresh.from.sha && previous.policyRevision === refresh.policyRevision;
   return same ? previous!.conflictSince ?? previous!.at : refresh.at;
 }
-/** Why a branch was written by the control plane rather than by its worker (GY-375). */
-export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair' | 'docs sync';
+/**
+ * Why a branch was written by the control plane rather than by its worker (GY-375), or, for
+ * `base breakage` (GY-793), why a candidate whose required check failed only on tests the base
+ * branch broke and has since fixed was brought onto the fixed tip.
+ */
+export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair' | 'docs sync' | 'base breakage';
 /**
  * A GitHub `mergeable: false` the control plane's own test merge showed to be clean (GY-375).
  * GitHub recomputes mergeability lazily after the base moves and can report a clean head
