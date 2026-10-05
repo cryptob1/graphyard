@@ -10,7 +10,6 @@ import { landableCheckCurrent, landableCheckRun, type LandableCheckRun } from '.
 import { heldBase, mergeableNow, queueRef, type BaseRefresh, type GitHubMergeQueueState, type LandingCheck, type QueuePlacement, type QueueSpeculation } from '../../src/merge-queue.js';
 import type { Succession } from '../../src/model/successors.js';
 import { SpeculativeConflict } from '../../src/model/refusal.js';
-import { failedTestsAnnotation, readBaseBreak, type BaseBreak } from '../../src/master/base-break-refresh.js';
 
 // The outside world of the soak test (GY-404), simulated deterministically: one clock that both the
 // test process and the test Postgres read, a GitHub repository with pull requests, CI, a reviewer and
@@ -25,12 +24,6 @@ export const statusContext = 'ci/legacy';
 /** How long GitHub reports a `blockedMerge` item BLOCKED after its required check passed: past master status's ten-minute bound (GY-430). */
 export const blockedMergeMs = 14 * minute;
 export const sha = (...seed: (string | number)[]) => createHash('sha1').update(seed.join('\0')).digest('hex');
-/**
- * The test the briefly broken base branch fails (GY-793): CI names it in the failed-tests
- * annotation of the candidate pushed against the broken commit, of that commit's own run, and of
- * the candidate's rerun, and the tip that fixed the branch does not name it.
- */
-export const brokenBaseTest = 'tests/soak/base-branch.test.ts › the suite the base branch broke';
 const uuid = (hex: string) => `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 
 // ---------------------------------------------------------------------------
@@ -72,10 +65,9 @@ export const clockSql = [
 /**
  * A commit: on the base branch, a worker's head, or a queue tip Graphyard published; `files` is its
  * whole tree's file list, `contents` the content identity of every path it holds. A base-branch
- * commit also names the files it `changed` against its first parent, and whether the required suite
- * fails on it (`broken`, GY-793).
+ * commit also names the files it `changed` against its first parent.
  */
-export interface Commit { sha: string; tree: string; parents: string[]; files: string[]; contents: Map<string, string>; at: number; message: string; changed?: string[]; broken?: boolean }
+export interface Commit { sha: string; tree: string; parents: string[]; files: string[]; contents: Map<string, string>; at: number; message: string; changed?: string[] }
 export interface PullRequest {
   number: number; key: string; branch: string; author: string; head: string;
   /** The base-branch commit the head contains (its merge base with the base branch). */
@@ -137,15 +129,6 @@ export class SimulatedGitHub {
   blockedMerge = new Set<string>();
   /** Successions (renames and splits) recorded on the base branch. */
   successions: Succession[] = [];
-  /**
-   * GY-793: the base-branch commits that broke the required suite while they stood at the tip of a
-   * briefly broken main. CI reports the head pushed against one as failing `test` on the suite the
-   * commit broke, naming it in the failed-tests annotation the base-breakage judgement reads, and
-   * the run fails again on the rerun — the candidate is not the failure's author, its base was.
-   */
-  baseBreaks = new Set<string>();
-  /** The annotations CI published per check-run id: the failed-tests record GY-793's judgement parses. */
-  annotations = new Map<number, { message?: string | null }[]>();
   /**
    * Items whose first speculative tip hits an infrastructure flake (GY-516): its `test` run fails,
    * and the one rerun the control plane asks for passes (`rerun-passes`) or fails again (`rerun-fails`).
@@ -258,10 +241,10 @@ export class SimulatedGitHub {
    * split). It changed `changed` (default: the files added or removed). `contents` overrides the
    * merged content, as a hand edit's tree really holds it.
    */
-  commit(message: string, files: string[], at = clock.now(), parents = [this.tip], tree?: string, change: { changed?: string[]; broken?: boolean } = {}, contents?: Map<string, string>) {
+  commit(message: string, files: string[], at = clock.now(), parents = [this.tip], tree?: string, change: { changed?: string[] } = {}, contents?: Map<string, string>) {
     const parent = this.commits.get(parents[0]), before = new Set(parent?.files ?? []), after = new Set(files);
     const changed = change.changed ?? [...files.filter(path => !before.has(path)), ...[...before].filter(path => !after.has(path))];
-    const commit = this.record({ sha: sha('commit', ...parents, message), tree: tree ?? sha('tree', ...parents, message), parents, files, at, message, changed, broken: change.broken ?? !!parent?.broken }, contents);
+    const commit = this.record({ sha: sha('commit', ...parents, message), tree: tree ?? sha('tree', ...parents, message), parents, files, at, message, changed }, contents);
     this.tip = commit.sha;
     return commit;
   }
@@ -391,16 +374,9 @@ export class SimulatedGitHub {
     if (now - pr.pushed.get(head)! < this.options.ciMs) return [];
     if (!this.runs.has(head)) {
       const flake = this.flakeTips.get(pr.key) === head && this.flaky.has(pr.key);
-      // GY-793: CI tests the head merged with the base it was pushed against, so a head whose base
-      // commit broke the suite fails `test` on it and names it, whatever the head itself changed.
-      const brokenBase = this.baseBreaks.has(pr.base);
       // `secrets` is required by the base branch's protection alone (GY-1060), bound to no app, as
       // PR #221's scan was: every gate, verdict and window view of the day reads it beside the policy's.
-      const runs = ['test', 'typecheck', protectionOnlyCheck].map(name => {
-        const run = { name, result: name === 'test' && (flake || brokenBase) ? 'failure' : 'success', id: ++this.serial, attempt: 1, at: now };
-        if (name === 'test' && brokenBase) this.annotations.set(run.id, [{ message: failedTestsAnnotation([brokenBaseTest]) }]);
-        return run;
-      });
+      const runs = ['test', 'typecheck', protectionOnlyCheck].map(name => ({ name, result: flake && name === 'test' ? 'failure' : 'success', id: ++this.serial, attempt: 1, at: now }));
       // The project's own documentation budget check (GY-574): the budget is the project's own
       // rule, counted over the pages its configuration names (here docs/ and README.md, as the
       // committed graphyard.json does), and this project's CI fails the check when that total is
@@ -435,29 +411,12 @@ export class SimulatedGitHub {
     const pr = [...this.prs.values()].find(entry => entry.head === head)!;
     const now = clock.now();
     this.reruns.push({ key: pr.key, sha: head, checkRunId, at: now });
-    // The rerun runs on the same commit, so a base-branch breakage fails it again (GY-793): only
-    // the flake whose rerun passes, or a run whose cause the head itself holds, comes back green.
-    const brokenBase = this.baseBreaks.has(pr.base) && failed.name === 'test';
     const breached = failed.name === 'unit:docs-word-budget' && this.options.docs
       ? [...(this.commits.get(head)?.contents ?? [])].filter(([path]) => path === 'README.md' || /^docs\/.+\.md$/.test(path))
           .reduce((sum, [, text]) => sum + text.split(/\s+/).filter(Boolean).length, 0) > this.options.docs.budget.total
       : undefined;
-    const rerun = { name: failed.name, result: breached !== undefined ? (breached ? 'failure' : 'success') : this.flaky.get(pr.key) === 'rerun-fails' || brokenBase ? 'failure' : 'success', id: ++this.serial, attempt: failed.attempt + 1, at: now + this.options.ciMs };
-    if (brokenBase) this.annotations.set(rerun.id, [{ message: failedTestsAnnotation([brokenBaseTest]) }]);
-    runs.push(rerun);
+    runs.push({ name: failed.name, result: breached !== undefined ? (breached ? 'failure' : 'success') : this.flaky.get(pr.key) === 'rerun-fails' ? 'failure' : 'success', id: ++this.serial, attempt: failed.attempt + 1, at: now + this.options.ciMs });
     return { runId: 900_000 + checkRunId };
-  }
-  /** The latest completed run of one check on one commit, as the base-breakage judgement reads the base's and the tip's own runs (GY-793). */
-  checkRun(commit: string, name: string): { id: number; conclusion: string | null } | null {
-    const pr = [...this.prs.values()].find(entry => entry.head === commit);
-    if (pr) {
-      const latest = this.checks(pr, clock.now()).filter(run => run.name === name).at(-1);
-      return latest ? { id: latest.id, conclusion: latest.result } : null;
-    }
-    const latest = this.commitChecks(commit, clock.now()).filter(run => run.name === name).at(-1);
-    // A broken base commit's failed run names the test it broke, as CI publishes it on every run.
-    if (latest && latest.result === 'failure' && this.commits.get(commit)?.broken) this.annotations.set(latest.id, [{ message: failedTestsAnnotation([brokenBaseTest]) }]);
-    return latest ? { id: latest.id, conclusion: latest.result } : null;
   }
   /** One minute of GitHub: CI finishes, reviewers post verdicts, reviewer Apps answer, and auto-merge lands what it may. */
   tick(now: number) {
@@ -502,7 +461,7 @@ export class SimulatedGitHub {
     const firstParent = this.commits.get(this.tip)!.contents ?? new Map<string, string>();
     const contents = new Map(firstParent);
     for (const [path, blob] of head.contents) if (pr.files.includes(path) || !contents.has(path)) contents.set(path, blob);
-    const commit = this.record({ sha: sha('commit', ...[this.tip, pr.head], `Merge pull request #${pr.number} from ${pr.branch}`), tree: landsTree ? head.tree : sha('tree', this.tip, pr.head, `Merge pull request #${pr.number} from ${pr.branch}`), parents: [this.tip, pr.head], files: [...new Set([...this.files, ...head.files])], at: now, message: `Merge pull request #${pr.number} from ${pr.branch}`, changed: pr.files, broken: !!this.commits.get(this.tip)!.broken }, contents);
+    const commit = this.record({ sha: sha('commit', ...[this.tip, pr.head], `Merge pull request #${pr.number} from ${pr.branch}`), tree: landsTree ? head.tree : sha('tree', this.tip, pr.head, `Merge pull request #${pr.number} from ${pr.branch}`), parents: [this.tip, pr.head], files: [...new Set([...this.files, ...head.files])], at: now, message: `Merge pull request #${pr.number} from ${pr.branch}`, changed: pr.files }, contents);
     this.tip = commit.sha;
     pr.merged = { sha: commit.sha, at: now }; pr.open = false; pr.autoMerge = false;
     this.merges.push({ key: pr.key, pr: pr.number, sha: commit.sha, at: now, state, mode });
@@ -516,8 +475,7 @@ export class SimulatedGitHub {
     const at = this.commits.get(commit)?.at;
     if (at === undefined || now - at < this.options.ciMs) return [];
     if (!this.commitRuns.has(commit)) {
-      // GY-793: a base-branch commit that itself broke the suite (`broken`) fails `test` too.
-      const red = !!this.commits.get(commit)!.broken || this.broken.some(entry => this.contains(commit, entry.mergeSha) && ![...entry.clearedBy].some(clear => this.contains(commit, clear)));
+      const red = this.broken.some(entry => this.contains(commit, entry.mergeSha) && ![...entry.clearedBy].some(clear => this.contains(commit, clear)));
       this.commitRuns.set(commit, ['test', 'typecheck', protectionOnlyCheck].map(name => ({ name, result: name === 'test' && red ? 'failure' : 'success', id: ++this.serial })));
     }
     return this.commitRuns.get(commit)!;
@@ -622,13 +580,6 @@ export class SimulatedGitHub {
         const docsBudget = published && pr.open && !pr.merged
           ? await world.tipDocs(work, pr.head, speculation!.base, checks.filter(run => !run.source).map(run => ({ id: run.id, name: run.name, status: 'completed', conclusion: run.result })))
           : undefined;
-        // GY-793: the same base-breakage judgement the production observer runs, over this
-        // repository's own runs and annotations — read only for an open head the tip has moved
-        // past, so a candidate whose required check failed only on tests the base broke and the
-        // tip fixed is recorded for the refresh that answers it.
-        const baseBreak = pr.merged || !pr.open || world.contains(pr.head, world.tip) ? null : await readBaseBreak(
-          { required: work.policy.checks, checks, head: pr.head, built: pr.base, tip: world.tip, at: new Date(now).toISOString() },
-          { checkRun: (commit, name) => Promise.resolve(world.checkRun(commit, name)), annotations: runId => Promise.resolve(world.annotations.get(runId) ?? []) });
         return {
           clockOffset: { min: 0, max: 0 }, prState: pr.open ? 'open' : 'closed', draft: false, prCreatedAt: new Date(pr.createdAt).toISOString(),
           candidate: { sha: pr.head, baseSha: pr.base, pr: pr.number, branch: pr.branch, author: pr.author, createdAt: new Date(pr.createdAt).toISOString() },
@@ -640,7 +591,6 @@ export class SimulatedGitHub {
           merged: !!pr.merged, mergeSha: pr.merged?.sha ?? null, mergedAt: pr.merged ? new Date(pr.merged.at).toISOString() : null,
           mergeable: pr.open && !world.conflicting(pr), conflicting: world.conflicting(pr), baseTip: world.tip, baseTree: world.tree, baseTipContained: world.contains(pr.head, world.tip),
           protected: true, requiredChecks: [{ name: 'test', appId: options.ciAppId }, { name: 'typecheck', appId: options.ciAppId }, { name: protectionOnlyCheck, appId: null }, { name: statusContext, appId: null }], files: pr.files, scopeFiles: [], ...(landing ? { landing } : {}), at: new Date(now).toISOString(),
-          ...(baseBreak ? { baseBreak } : {}),
           // The failing published tip's docs counts (GY-574), from which its overflow is attributed.
           ...(docsBudget ? { docsBudget } : {}),
         };
@@ -673,27 +623,6 @@ export class SimulatedGitHub {
           conflict: `Candidate ${pr.head.slice(0, 12)} cannot be brought onto base branch tip ${world.tip.slice(0, 12)} without resolving a conflict in ${world.docsConflicts.get(pr.key)}`, conflictPaths: [world.docsConflicts.get(pr.key)!] };
         return { from: { sha: pr.head, baseSha: pr.base }, base: world.tip, baseTree: world.tree, policyRevision: work.policyRevision, at, head: pr.head, conflict: null, merge: null, carry: null,
           stale: { head: pr.head, base: world.tip, policyRevision: work.policyRevision, at, reading: `GitHub reported ${pr.head.slice(0, 12)} conflicting, but a test merge is clean` } } as BaseRefresh;
-      },
-      // GY-793: brings a candidate held only by a base-branch breakage onto the tip that fixed it —
-      // the same merge of the tip into the candidate's own branch GitHub's merge API makes for a
-      // queue refresh, recorded with trigger `base breakage` and the breakage it answered, so the
-      // engine decides the carry exactly as for any refresh. A moved tip or pull request refuses.
-      async refreshOntoFixedBase(work: Work, found: BaseBreak, beforeWrite: () => Promise<void> = async () => {}): Promise<BaseRefresh> {
-        const pr = world.pr(work), at = new Date(clock.now()).toISOString();
-        if (!work.candidate || work.queue || work.candidate.sha !== found.head) throw new Error('An unqueued candidate held by a base-branch breakage is required');
-        if (pr.head !== work.candidate.sha || pr.base !== work.candidate.baseSha || !pr.open || pr.merged) throw new Error('Pull request changed before the base refresh; retry');
-        if (world.tip !== found.fixedBy) throw new Error(`Base branch ${options.baseBranch} moved before the base refresh; retry`);
-        await beforeWrite();
-        const from = pr.head, onto = world.commits.get(world.tip)!, bound = work.candidate.baseSha;
-        const merged = world.record({ sha: sha('base-refresh', from, world.tip), tree: sha('tree', 'base-refresh', from, world.tip), parents: [from, world.tip],
-          files: [...new Set([...world.commits.get(from)!.files, ...onto.files])], at: clock.now(),
-          message: `Graphyard base refresh for ${work.key} onto ${options.baseBranch}: its failing tests were broken on ${found.builtOn.slice(0, 12)} and fixed by ${found.fixedBy.slice(0, 12)}` },
-          world.mergedContents(from, world.tip, work.plannedFiles ?? []));
-        pr.head = merged.sha; pr.base = world.tip; pr.pushed.set(merged.sha, clock.now());
-        return { from: { sha: found.head, baseSha: bound }, base: world.tip, baseTree: world.tree, policyRevision: work.policyRevision, at, head: merged.sha, conflict: null, carry: null,
-          trigger: 'base breakage', baseBreak: found,
-          merge: { from, parents: [from, world.tip], author: 'graphyard[bot]', authoredByApp: true, conflicts: false,
-            baseChanges: onto.files.filter(file => !world.commits.get(bound)!.files.includes(file)), diff: { reviewed: sha('patch', from), tip: sha('patch', from) } } } as BaseRefresh;
       },
       // A docs-sync head, as the real adapter describes it: a two-parent merge of the reviewed head and
       // the base tip, whose change outside docs/ keeps its patch-id (the session resolved prose only).

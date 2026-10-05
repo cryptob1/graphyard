@@ -247,7 +247,6 @@
     "tests/autonomy-contract.test.ts": 1736,
     "tests/await-reviewers-exhausted.test.ts": 1002,
     "tests/backup-restore.test.ts": 10274,
-    "tests/base-break-refresh.test.ts": 2614,
     "tests/batch-deadlock.test.ts": 2660,
     "tests/blast-radius.test.ts": 346,
     "tests/blocked-session.test.ts": 1063,

@@ -37,8 +37,6 @@ Require `Graphyard / merge` and `graphyard/landable` ([landability](coordination
 
 ## Merge queue
 
-A failed required check failing only tests (`graphyard-failed-tests:`) its old base broke and the tip fixed refreshes onto the tip (`baseBreak`), not rework; a rework awaiting fresh observation wakes it first.
-
 Once gated, a speculative tip pushed onto the candidate branch once and `refs/graphyard/queue/KEY` binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects it; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. Authorized heads pass the check and merge through GitHub; without a queue they merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled`.
 
 ### Bindings and carry

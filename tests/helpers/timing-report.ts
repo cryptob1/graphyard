@@ -2,15 +2,13 @@ import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describeTiming, failedTiming, parseTimingRecord, percentile, type TimingMeasurement } from './timing.js';
 import { timingAnnotationMarker, type TimingFailure } from '../../src/cli/timing-failures.js';
-import { failedTestsAnnotation, failedTestsFromLog } from '../../src/master/base-break-refresh.js';
 
 // The CI half of a distinguishable timing failure. The required `test` job runs this after the
 // suite, whatever the suite's outcome: it reads the run's timing record and publishes, on the
 // job's own check run, one annotation per timing-dependent assertion that went over its budget.
 // `master status` reads those annotations back, so a red `test` check that failed on the clock
 // is reported with the measured value against the budget rather than as an unqualified failure.
-// It changes no verdict: the check stays failed and the gate stays refused. The same step names
-// every failed test in one annotation, which the base-breakage judgement reads (GY-793).
+// It changes no verdict: the check stays failed and the gate stays refused.
 
 /** How many tests the run reported failed, from the spec or TAP summary; null when it has none. */
 export function failedTestCount(log: string): number | null {
@@ -79,16 +77,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const [recordFile, ...logFiles] = process.argv.slice(2);
   if (!recordFile) throw new Error('Usage: timing-report RECORD.jsonl [TEST.log...]');
   const record = existsSync(recordFile) ? parseTimingRecord(readFileSync(recordFile, 'utf8')) : [];
-  const logs = logFiles.map(file => existsSync(file) ? readFileSync(file, 'utf8') : null);
-  // Every failed test by name across every shard, first: the observation compares them with the
-  // base branch's own runs to tell a base-branch breakage from the candidate's own failure (GY-793).
-  // A missing shard log publishes no names and no count, like a run that failed before reporting.
-  if (logs.every(log => log !== null)) {
-    const failed = [...new Set(logs.flatMap(log => failedTestsFromLog(log!) ?? []))].sort();
-    const annotation = failedTestsAnnotation(failed);
-    if (annotation) console.log(annotation);
-  }
-  const counts = logs.map(log => log === null ? null : failedTestCount(log));
+  const counts = logFiles.map(file => existsSync(file) ? failedTestCount(readFileSync(file, 'utf8')) : null);
   const failures = timingFailures(record, counts.length && counts.every(count => count !== null) ? counts.reduce<number>((sum, count) => sum + count!, 0) : null);
   for (const failure of failures) console.log(annotationCommand(failure));
   const summary = timingSummary(record, failures, readBaseline());
