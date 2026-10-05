@@ -293,12 +293,6 @@ export function applyScopeDecision(work: Work, request: NonNullable<Work['scopeR
 /** The violation an observed merge records when no valid execution covered it. */
 export const unauthorizedMergeViolation = 'Merge observed without a prior authorization for this candidate';
 /**
- * Whether two readings of one item differ only in action-queue bookkeeping (GY-607). Claiming,
- * renewing, completing or failing a row moves the item's rows, its revision and its `updatedAt`,
- * and nothing a gate reads; everything else is compared by its stable JSON, so any other change
- * still counts.
- */
-/**
  * The refresh record a stale mergeability reading (GY-375) leaves for its head: the reading over
  * whatever the record for that same head carried onto it. `conflictSince` and `conflictPaths` are
  * kept only beside a conflict (GY-1230), so what an earlier conflict on the head recorded never
@@ -310,6 +304,12 @@ export function staleRefreshRecord(previous: BaseRefresh | null | undefined, ref
   if (!record.conflict) { delete record.conflictSince; delete record.conflictPaths; }
   return record;
 }
+/**
+ * Whether two readings of one item differ only in action-queue bookkeeping (GY-607). Claiming,
+ * renewing, completing or failing a row moves the item's rows, its revision and its `updatedAt`,
+ * and nothing a gate reads; everything else is compared by its stable JSON, so any other change
+ * still counts.
+ */
 export function sameBesideActions(read: Work, current: Work): boolean {
   const rest = ({ actionQueue: _queue, revision: _revision, updatedAt: _updated, ...others }: Work) => stableJson(others);
   return rest(read) === rest(current);

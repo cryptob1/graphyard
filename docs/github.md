@@ -37,7 +37,7 @@ Require `Graphyard / merge` and `graphyard/landable` ([landability](coordination
 
 ## Merge queue
 
-Once gated, a speculative tip pushed onto the candidate branch once and `refs/graphyard/queue/KEY` binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects it; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. Authorized heads and merge groups pass the check and merge through GitHub (protection decides). Queueless mergeable PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled`.
+Once gated, a speculative tip pushed onto the candidate branch once and `refs/graphyard/queue/KEY` binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects it; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. Authorized heads pass the check and merge through GitHub; without a queue they merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled`.
 
 ### Bindings and carry
 
@@ -51,7 +51,7 @@ A carried review missing from the PR is re-posted before merging (`review.carry-
 
 ### Optimistic merges
 
-`mergeQueue.optimistic` (default on; `optimistic: false` disables): green entries disjoint from base changes land head-bound, unqueued, unless they (or base since their run) touched shared infrastructure (`mergeQueue.optimisticExclude` globs plus manifests, lockfiles, CI config, test helpers, migrations). A main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`).
+`mergeQueue.optimistic` (default on; `optimistic: false` disables): green entries disjoint from base changes land head-bound, unqueued, unless they or the base touched shared infrastructure (`mergeQueue.optimisticExclude` plus built-in globs). A main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`).
 
 ### Proofs in CI
 

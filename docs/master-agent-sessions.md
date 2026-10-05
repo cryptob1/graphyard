@@ -51,7 +51,7 @@ On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-
 
 Reviewers and producers are `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once if quiet past `run.acknowledgementSeconds` (default 90); settling resultless is **`never started`**: relaunched free a minute later, three at most (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
 
-A resolved blocker or scope request re-prompts the inactive session once; re-blocking hands the item to a fresh session. **Idle-with-lease** (30 quiet minutes, nothing open): re-prompted once, after 30 more handed to a new attempt on its branch.
+**Idle-with-lease** (30 quiet minutes, nothing open): re-prompted once, after 30 more handed to a new attempt on its branch.
 
 Headless Pi runs (`.graphyard/runs/`) survive restarts.
 

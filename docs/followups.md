@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 4 | held until ship, promoted. -->
 # Review follow-ups
 
-An approval's FOLLOW-UP findings (beyond criteria) are recorded on the item and held until it ships (`pendingFollowUps`), then filed as its one follow-up item; an operator may promote sooner.
+An approval's FOLLOW-UP findings (beyond criteria) are recorded on the item and held until it ships (`pendingFollowUps`), then filed as its one follow-up item; an operator may promote sooner. With `GRAPHYARD_FOLLOW_UP_ITEMS=off` none is filed: the reviewer requests changes on the pull request instead.
 
 ## Recorded, then filed on ship
 
