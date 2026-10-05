@@ -509,16 +509,22 @@ export async function relaunchUnansweredApprovers(cycle: Cycle) {
   const { state, effects, now, snapshot, clock, performed, agents, isolate, launcher } = cycle;
   const { decisions, approver } = effects;
   if (!decisions || !approver) return;
-  const checked = state.doctor.decisionsCheckedAt;
+  const checked = state.doctor.decisionsCheckedAt, held = cycle.heldDecisions;
   for (const id of Object.keys(checked)) if (!snapshot.work.some(item => item.id === id && item.stage !== 'done')) delete checked[id];
   for (const item of snapshot.work.filter(item => item.stage !== 'done')) {
-    // One decision-history read per item per `decisionCheckMs`, not per cycle: a decision is only
-    // relaunched past ten minutes, so reading more often finds nothing new and loads the control plane.
-    const last = checked[item.id];
-    if (last && clock - Date.parse(last) < decisionCheckMs) continue;
-    checked[item.id] = new Date(clock).toISOString();
+    // A history the decisions step holds is current to this cycle's ledger read (GY-1142) and costs
+    // nothing. Any other is read at most once per item per `decisionCheckMs`, and first only
+    // `decisionCheckMs` after the remedy first sees the item: a decision is relaunched only past
+    // ten minutes, so an earlier read finds nothing new and loads the control plane. What the remedy
+    // reads joins the held histories, kept until the ledger shows the item's decisions moved.
+    const kept = held.histories.get(item.id), last = checked[item.id];
+    if (!kept && (!last || clock - Date.parse(last) < decisionCheckMs)) {
+      if (!last) checked[item.id] = new Date(clock).toISOString();
+      continue;
+    }
+    if (!kept) checked[item.id] = new Date(clock).toISOString();
     await isolate('decision', item, item.key, async () => {
-      const history = await decisions(item).then(result => result.decisions, () => []);
+      const history = kept ?? await decisions(item).then(result => { held.histories.set(item.id, result.decisions); return result.decisions; }, () => []);
       for (const decision of history.filter(entry => entry.state === 'requested')) {
         if (!decision.requestedAt || clock - Date.parse(decision.requestedAt) < unansweredDecisionMs) continue;
         const name = approverSessionName(item, decision.id);

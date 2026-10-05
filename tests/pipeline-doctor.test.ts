@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { emptyHeldDecisions } from '../src/daemon/decision-reads.js';
 import { Launcher, type Cycle } from '../src/daemon/cycle.js';
 import { Timings } from '../src/master/timings.js';
 import { approverSessionName } from '../src/master/autonomy.js';
@@ -54,7 +55,7 @@ function cycle(work: Work[], overrides: Partial<Omit<Cycle, 'effects'>> & { doct
     performed: [], agents: overrides.agents ?? [], credentials: {}, open: work.filter(entry => entry.stage !== 'done'),
     owns: () => false, heldBy: () => null, timings: new Timings(() => clock),
     launcher: new Launcher(Number.POSITIVE_INFINITY),
-    launch: () => false, detached: false,
+    launch: () => false, detached: false, heldDecisions: emptyHeldDecisions(),
     isolate: async (_kind, _item, _name, body) => await body(),
     ...cycleOverrides,
   } as Cycle;
@@ -535,7 +536,9 @@ test('unit:loop-applies-routine-remedies — the loop settles a lapsed containme
   const launched: string[] = [];
   const asked = at(-unansweredDecisionMs - 60_000), fresh = at(-60_000);
   const waiting = item({ id: 'id-GY-79', key: 'GY-79', stage: 'review', candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 9, branch: 'x', author: 'w' } });
-  const approverCycle = cycle([waiting], {
+  // The remedy first reads an item's history `decisionCheckMs` after it first sees the item.
+  const seen = (target: Cycle) => { target.state.doctor.decisionsCheckedAt[waiting.id] = new Date(target.clock - decisionCheckMs).toISOString(); return target; };
+  const approverCycle = seen(cycle([waiting], {
     agents: [],
     effects: {
       decisions: async () => ({ decisions: [
@@ -544,43 +547,43 @@ test('unit:loop-applies-routine-remedies — the loop settles a lapsed containme
       ] }),
       approver: async (_target, decision) => { launched.push(decision); return { agentName: 'approver-1', pane: null }; },
     },
-  });
+  }));
   await relaunchUnansweredApprovers(approverCycle);
   assert.deepEqual(launched, ['d-old'], 'the decision unanswered past ten minutes is relaunched; the fresh one is not');
 
   // A live approver session for the same decision is adopted, not doubled.
-  const adopted = cycle([waiting], {
+  const adopted = seen(cycle([waiting], {
     agents: [liveAgent(approverSessionName(waiting, 'd-old'))],
     effects: {
       decisions: async () => ({ decisions: [{ id: 'd-old', action: 'unblock', state: 'requested', input: null, approvedBy: null, requestedAt: asked }] }),
       approver: async (_target, decision) => { launched.push(`again-${decision}`); return { agentName: 'approver-2', pane: null }; },
     },
-  });
+  }));
   await relaunchUnansweredApprovers(adopted);
   assert.deepEqual(launched, ['d-old'], 'a decision whose approver session is still live is left alone');
 
   // In the loop's own cycles the launch goes to the launcher beside the cycle (GY-616), never awaited in it.
   const handed: string[] = [];
-  const detachedCycle = cycle([waiting], {
+  const detachedCycle = seen(cycle([waiting], {
     agents: [], detached: true,
     launch: (_kind, _item, key) => { handed.push(key); return true; },
     effects: {
       decisions: async () => ({ decisions: [{ id: 'd-slow', action: 'unblock', state: 'requested', input: null, approvedBy: null, requestedAt: asked }] }),
       approver: async (_target, decision) => { launched.push(decision); return { agentName: 'approver-s', pane: null }; },
     },
-  });
+  }));
   await relaunchUnansweredApprovers(detachedCycle);
   assert.deepEqual(handed, ['launch:approver:d-slow'], 'the relaunch is handed to the shared launcher');
   assert.deepEqual(launched, ['d-old'], 'and not run inside the cycle');
 
   // A decision the loop's approval supervision watches is relaunched there (GY-551), never here too.
-  const watchedCycle = cycle([waiting], {
+  const watchedCycle = seen(cycle([waiting], {
     agents: [],
     effects: {
       decisions: async () => ({ decisions: [{ id: 'd-watched', action: 'unblock', state: 'requested', input: null, approvedBy: null, requestedAt: asked }] }),
       approver: async (_target, decision) => { launched.push(decision); return { agentName: 'approver-w', pane: null }; },
     },
-  });
+  }));
   watchedCycle.state.approvals['hand:d-watched'] = { decision: 'd-watched' } as never;
   await relaunchUnansweredApprovers(watchedCycle);
   assert.deepEqual(launched, ['d-old'], 'a watched decision is left to its approval supervision');
@@ -602,4 +605,14 @@ test('unit:loop-applies-routine-remedies — the loop settles a lapsed containme
   await relaunchUnansweredApprovers(throttled);
   assert.equal(reads, 0, 'the item read 30 s ago is not read again');
   assert.ok(decisionCheckMs <= unansweredDecisionMs / 2, 'the throttle is well inside the ten-minute bound');
+  // An item seen for the first time is not read until `decisionCheckMs` later (GY-1142's bound on
+  // the cycle's history reads), and a history the decisions step already holds is used, not read.
+  let unseenReads = 0;
+  const unseen = cycle([waiting], { agents: [], effects: { decisions: async () => { unseenReads++; return { decisions: [] }; }, approver: async (_target, decision) => { launched.push(decision); return { agentName: 'approver-u', pane: null }; } } });
+  await relaunchUnansweredApprovers(unseen);
+  assert.equal(unseenReads, 0, 'the first sighting defers the read');
+  unseen.heldDecisions.histories.set(waiting.id, [{ id: 'd-held', action: 'unblock', state: 'requested', input: null, approvedBy: null, requestedAt: asked }] as never);
+  await relaunchUnansweredApprovers(unseen);
+  assert.equal(unseenReads, 0, 'a held history is not read again');
+  assert.deepEqual(launched.slice(-1), ['d-held'], 'and its unanswered decision is relaunched');
 });
