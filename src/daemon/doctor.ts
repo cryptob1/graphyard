@@ -269,8 +269,11 @@ export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: 
   // through — is raised as an escalation, which master status reports under the loop's escalations.
   for (const finding of payload.findings)
     await note(finding.subject, `${finding.check} bound passed${finding.unactionable ? ', and the doctor could not act on it' : ''}: ${finding.detail}`.slice(0, 2000), 'done', finding.unactionable ? 'escalation' : 'fault');
+  // A command the doctor's allowlist refused is the guard working: the doctor records it and adapts,
+  // and the run itself succeeded. Recorded as failed, each refusal was a loop fault, and a run that
+  // tried five read-only forms filed "Recurring loop faults" for a loop that never stopped (GY-1295).
   for (const action of payload.actions)
-    await note(action.subject, `${action.outcome === 'applied' ? 'Ran' : 'Was refused'} \`${action.command}\`: ${action.detail}`.slice(0, 2000), action.outcome === 'applied' ? 'done' : 'failed');
+    await note(action.subject, `${action.outcome === 'applied' ? 'Ran' : 'Was refused'} \`${action.command}\`: ${action.detail}`.slice(0, 2000));
   const deduped = dedupDoctorFiles(payload.filed, snapshot.work);
   for (const { file, covered } of deduped) {
     if (covered) { await note('installation', `Not filing "${file.title}": the ${file.faultClass} fault class is already covered by an open item`); continue; }
