@@ -12,12 +12,13 @@ import { runtimeEndedStates } from './harness.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { actionRenewIntervalMs, type ActionRow } from './model/actions.js';
 import { nextActionKinds, type NextActionKind } from './model/next-action.js';
-import { agentOwner, assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, neverStarted, neverStartedReason, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
+import { agentOwner, assertOutsideWorktrees, closeHerdrPane, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, neverStarted, neverStartedReason, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { capacityRefusal } from './fleet.js';
 import { answeredByPendingReview, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, type ReviewRecord } from './reviewer.js';
 import { answeredByPendingSession, independentProducerProfiles, launchProducer, reconcileProducers, requestAttemptLimit, sessionRetry, type ProducerRecord } from './producer.js';
 import { unexercisedFindings } from './model/mechanical-proofs.js';
+import { reclaimResources } from './master-resources.js';
 
 /**
  * The launch side of automatic dispatch at submit. The control plane records what each exact
@@ -376,6 +377,12 @@ export interface DispatchEffects {
   /** `released` names the panes, with their names, of settled sessions the pass closed (GY-1072): those names are free for this tick's launches. */
   reconcileReviews: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ reviews: ReviewRecord[]; threads?: string[]; released?: { pane: string; agentName: string }[] }>;
   reconcileProducers: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ producers: ProducerRecord[] }>;
+  /**
+   * The name half of the resource reclaim (GY-1196): closes finished panes on profile names on the
+   * tick's cadence rather than the cycle's, so a name is given back within `nameReclaimBoundMs`
+   * however long a cycle runs. Returns the panes it closed, whose names are free for this tick.
+   */
+  reclaimNames?: (work: Work[], agents: HerdrAgent[]) => Promise<{ pane: string; agentName: string }[]>;
   launchReview: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
   launchProducer: (work: Work, request: DispatchRequest, profile: ProducerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
   /**
@@ -739,7 +746,9 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   // inventory and in the recorded handles alike (GY-1075): `observeSessions` above read the
   // inventory before the close, so a running handle on that pane still says running until a later
   // tick's report closes it, and a profile of one session could not take the freed name this tick.
-  const releasedPanes = new Set((released ?? []).map(entry => `${entry.pane}\0${entry.agentName}`));
+  // A failed name reclaim never fails the tick: the cycle's own pass runs it again.
+  const reclaimed = herdr && effects.reclaimNames ? await timings.step('reclaim names', () => effects.reclaimNames!(snapshot.work, herdr).catch(() => [])) : [];
+  const releasedPanes = new Set([...(released ?? []), ...reclaimed].map(entry => `${entry.pane}\0${entry.agentName}`));
   const isReleased = (pane: string | null | undefined, name: string | null | undefined) => !!pane && !!name && releasedPanes.has(`${pane}\0${name}`);
   const agents = (herdr ?? []).filter(agent => !isReleased(agent.pane_id, agent.name));
   const credentials = await timings.step('credentials', () => effects.credentials(config.producers));
@@ -1231,6 +1240,8 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     credentials: profiles => inspectProducerCredentials(root, profiles),
     reconcileReviews: (work, agents) => reconcileReviews(root, current(), { run, work, agents }),
     reconcileProducers: (work, agents) => reconcileProducers(root, current(), work, agents, { run }),
+    reclaimNames: async (work, agents) => (await reclaimResources(root, withReviewerDefaults(current()), { work, agents }, { namesOnly: true, closePane: pane => closeHerdrPane(pane, run) }))
+      .closed.map(entry => ({ pane: entry.pane, agentName: entry.name })),
     // Each launch's reads of its own pane are watched: a runtime that exited on its provider's
     // limit notice is failed over below rather than counted as a refusal.
     launchReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, requestId: request.id, request: { sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } }).catch(error => { throw watch.classify(error); }); },
