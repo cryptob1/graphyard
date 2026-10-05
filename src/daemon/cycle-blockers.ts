@@ -4,7 +4,7 @@ import { blockerClassMeaning, environmentalBlockerClasses, itemBlockerClass, ite
 import { scopeRefusalBlocker } from '../model/scope.js';
 import { approvalWatchSchema, message, type DaemonAction } from './state.js';
 import { handWatchPrefix } from './cycle-decisions.js';
-import { readyToRetry } from './sessions.js';
+import { profileHealth, readyToRetry } from './sessions.js';
 import { boundDetail, detailChanged, namePaths } from './decisions.js';
 import { record } from './effects.js';
 import { workerHandle } from './cycle-resume.js';
@@ -83,7 +83,7 @@ export async function blockerStep(cycle: Cycle) {
   // independent probes in distinct worktrees run side by side rather than one after another.
   for (const item of open) {
     const classification = itemBlockerClass(item);
-    if (!classification || !item.blocker || !environmentalBlockerClasses.includes(classification.class)) continue;
+    if (!classification || !item.blocker || !environmentalBlockerClasses.includes(classification.class) || classification.class === 'dispatch-failure') continue;
     if ((item.blockerProbe?.clears ?? 0) >= maxAutomaticClears || item.blocker.startsWith(scopeRefusalBlocker)) continue;
     if (classification.class === 'control-plane-error' && itemSpecificPlaneError(item.blocker)) continue;
     void probe(item, classification);
@@ -122,7 +122,8 @@ export async function blockerStep(cycle: Cycle) {
     }
 
     let result: BlockerProbeResult | null = null;
-    if (environmentalBlockerClasses.includes(classification.class)) {
+    if (classification.class === 'dispatch-failure') result = launchableProbe(cycle);
+    else if (environmentalBlockerClasses.includes(classification.class)) {
       result = await probe(item, classification);
       if (!result) return;
       // A cause that keeps failing its probe is reported to the master once it has failed for
@@ -228,6 +229,20 @@ async function endCredentialBlockedSession(cycle: Cycle, item: Work) {
   await workerHandle(cycle, item, profile, epoch, pane ?? 'none', `closed as failed: credential-blocked attempt on epoch ${epoch}`, true);
   performed.push(await record(state, key, { kind: 'session', work: item.key, principal: owner, epoch, state: 'done', attempts: 1, cycle: state.cycle,
     detail: boundDetail(`${profile.agentName} on ${item.key} recorded a GitHub credential failure, which ended epoch ${epoch} with its work kept; ${closed}, and ${item.key} is launched again with a freshly minted push credential once its blocker clears`) }, now(), effects.persist));
+}
+
+/**
+ * GY-1322: a dispatch-failure blocker clears once a worker profile can take a launch again, read
+ * from this cycle's Herdr agents as the dispatch step reads them: a profile whose name a finished,
+ * unowned session holds is launchable, since the dispatch closes that session. While none is, the
+ * blocker stands and the probe names why each profile cannot launch.
+ */
+function launchableProbe(cycle: Cycle): BlockerProbeResult {
+  const { config, credentials, agents, state, clock, snapshot } = cycle;
+  const launch = profileHealth(config.workers, credentials, agents, state, clock, snapshot.work).filter(entry => entry.profile.mode === 'launch');
+  const ready = launch.find(entry => entry.healthy);
+  return { probe: 'a worker profile can take a launch', passed: !!ready,
+    detail: ready ? `profile ${ready.profile.name} is launchable` : launch.map(entry => `${entry.profile.name} (${entry.reason})`).join('; ') || 'no launch profile is configured' };
 }
 
 /** Runs at most `size` of the tasks handed to it at once, the rest as slots free, each answering its own task's promise. */

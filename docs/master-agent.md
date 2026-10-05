@@ -28,13 +28,13 @@ that host's loop. `dispatch.sessionReconcile` reports each closure:
   way as any other. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
-A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
+A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, never closed.
 
 **So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
 that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
 another session's handle finished to free a slot.
 
-`blocked` frees the slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) `github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch`, `outside-scope-test-failure`, `planned-file-scope`, `needs-decision` self-clear; `genuine`/`human-only` escalate.
+`blocked` frees the slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) `github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch`, `outside-scope-test-failure`, `dispatch-failure`, `planned-file-scope`, `needs-decision` self-clear; `genuine`/`human-only` escalate.
 
 ### System invariants
 

@@ -199,7 +199,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   await settleLaunches();
 
   // A pane this cycle just closed frees its profile, so health is read after the closures.
-  const health = profileHealth(config.workers, credentials, await timings.step('observe', () => effects.agents()), state, clock);
+  const health = profileHealth(config.workers, credentials, await timings.step('observe', () => effects.agents()), state, clock, snapshot.work);
 
   // 1m. The loop's own master session (GY-898): launch, adopt, supervise, rotate, wake. Isolated
   //     like every step: a failed launch or wake is its own action, and the cycle goes on.
