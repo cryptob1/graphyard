@@ -17,7 +17,7 @@ import { classifyGateRefusals } from '../model/retro-synthesis.js';
 export async function withRetroStanding(work: any, api: (path: string) => Promise<any>) {
   let standing: any[] = [];
   try { standing = (await api('retro/standing')).standing ?? []; } catch (error: any) {
-    if (error?.status === 404 || /\b404\b/.test(String(error?.message ?? error))) return work;
+    if (error?.status === 404) return work;
     throw error;
   }
   const inForce = standing.filter(registry => registry.entries?.length);
@@ -76,28 +76,6 @@ export const workCommands = defineCommands([
     name: 'create',
     help: ['  create path/to/work.json      Create work with acceptance criteria (operator)'],
     run: async ({ id, api, print }) => print(await api('work', JSON.parse(await readFile(id!, 'utf8')))),
-  },
-  {
-    name: 'followups',
-    help: ['  followups GY-N | --pr N      Read the review follow-up batch of an item, or every batch of a pull request'],
-    async run({ id, args, api, print }) {
-      if (id === '--pr') {
-        if (!/^\d+$/.test(args[0] ?? '')) throw new Error('Usage: graphyard followups --pr N');
-        return print(await api(`followups?pr=${args[0]}`));
-      }
-      if (!id) throw new Error('Usage: graphyard followups GY-N | --pr N');
-      return print(await api(`work/${encodeURIComponent(id)}/followups`));
-    },
-  },
-  {
-    name: 'promote-followup',
-    help: ['  promote-followup GY-N INDEX   Promote finding INDEX of GY-N\'s follow-up batch to its own work item (operator)'],
-    async run({ id, args, api, print }) {
-      const index = Number(args[0]);
-      if (!id || !args[0] || !Number.isInteger(index) || index < 1) throw new Error('Usage: graphyard promote-followup GY-N INDEX (INDEX is a positive integer)');
-      // The control plane files the promoted item once, however often the command is repeated.
-      return print(await api(`work/${encodeURIComponent(id)}/promote`, { index }, `promote-followup:${id}:${index}`));
-    },
   },
   {
     name: 'handoff',

@@ -1,21 +1,22 @@
-// Concern: workspace commands — sync with base branch tip and supervised watch under lease.
-import { spawnSync } from 'node:child_process';
+// Concern: workspace commands — sync with the base branch tip, and the supervised worker watch under lease.
 import { randomUUID } from 'node:crypto';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
-import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
 import { setupLine, supervise, systemdContainment } from '../supervisor.js';
 import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServerUrl, regenerateManagedBlocks } from '../sync.js';
-import { superviseSessionCredential, type MintedPushCredential } from '../worker-credential.js';
+import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
+import { superviseSessionCredential, type MintedPushCredential } from '../worker-credential.js';
 import type { CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
-import { defineCommands, workMutation } from './registry.js';
 import { restoreAndReport } from './sync-restore.js';
+import { pushViaControlPlane } from './sync-push.js';
+import { defineCommands, workMutation } from './registry.js';
+import { keepBlockedWork } from './lease.js';
 import { agentsRenderers, agentsTemplateSources, localGeneratedManifest, regenerateGenerated } from './workspace-generated.js';
 import { createWorktree, restoreBranchWork } from './workspace-worktree.js';
-import { keepBlockedWork } from './lease.js';
 
 export { installUnderLease };
 
@@ -120,14 +121,13 @@ export const workspaceCommands = defineCommands([
       '  sync GY-N --restore           The same, then restore every such file to the base in one new',
       '                                commit naming them; push it plainly. A force push is never',
       '                                needed or allowed',
+      '  sync GY-N --push-via-control-plane COMMIT  Control plane pushes a refused workflow base sync',
     ],
     async run(context, work) {
       // A write the worker's sandbox refused is recorded as that, naming the sandbox and the path,
       // so the item never presents as a ready-gate refusal or an unexplained lapse (GY-134).
-      try { await syncWork(context, work); }
-      catch (error) {
-        const failure = environmentFailure(error);
-        const epoch = work.workspaces.find((w: any) => w.branch === quietBranch())?.epoch ?? work.lease?.epoch;
+      try { await (context.args.includes('--push-via-control-plane') ? pushViaControlPlane : syncWork)(context, work); } catch (error) {
+        const failure = environmentFailure(error); const epoch = work.workspaces.find((w: any) => w.branch === quietBranch())?.epoch ?? work.lease?.epoch;
         if (!failure || epoch === undefined) throw error;
         const reason = environmentBlocker(`sync ${work.key}`, process.env.GRAPHYARD_HERDR_AGENT_KIND, failure);
         const partialWork = keepBlockedWork(work, epoch); await workMutation(context, work)('blocked', { epoch, reason, ...(partialWork ? { partialWork } : {}) });
@@ -148,16 +148,16 @@ export const workspaceCommands = defineCommands([
   {
     name: 'worktree',
     scope: 'work',
-    help: ['  worktree GY-N EPOCH [BASE]    Reserve and create a local isolated worktree'],
+    help: ['  worktree GY-N EPOCH [BASE]    Reserve and create a local isolated worktree; an earlier attempt\'s hold on the branch is preserved and released'],
     run: createWorktree,
   },
   {
     name: 'watch',
     help: ['  watch GY-N EPOCH -- COMMAND   Run a worker, heartbeat, stop on lease loss'],
-    // Not work-scoped (GY-1033): the setup line comes from argv before any control-plane call, even the item lookup.
+    // Not work-scoped (GY-1033): the setup line comes from argv before any control-plane call, even the item lookup, once the epoch is checked (GY-1184).
     async run(context) {
       const { id, args, api, base } = context; const epoch = Number(args[0]); const separator = args.indexOf('--');
-      if (!id || separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
+      if (!id || !Number.isSafeInteger(epoch) || epoch <= 0 || separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
       console.error(setupLine(id, epoch));
       const work = (await api('work')).find((w: any) => w.id === id || w.key === id); if (!work) throw new Error(`Unknown work item ${id}`);
       const workspace = work.workspaces.find((w: any) => w.epoch === epoch); const hostId = context.individualHostId();
@@ -220,5 +220,3 @@ export const workspaceCommands = defineCommands([
     },
   },
 ]);
-
-export default workspaceCommands;

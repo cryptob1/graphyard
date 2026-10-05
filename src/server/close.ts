@@ -2,12 +2,12 @@ import type pg from 'pg';
 import { demand, operatorCapability, type Principal, type Work } from '../model.js';
 import { closeRefusal, closeSchema, closureRefRefusal, commitRef, itemRef, type Closure } from '../model/closure.js';
 import { dispatchHistoryLimit, type DispatchRequest } from '../model/dispatch.js';
-import { dropHeldFollowUps } from '../model/followups-held.js';
 import { humanRequestBlocker, retainedHumanRequests, type HumanRequest } from '../model/human-request.js';
 import { endAttempt } from '../pipeline-speed.js';
 import { save, wakeJob } from '../store.js';
 import { authenticated, digest, receipt, record } from './decisions.js';
 import type { Services } from './routes.js';
+import { lockedWork } from '../store/locked-read.js';
 
 type Db = pg.PoolClient;
 
@@ -35,7 +35,7 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     const actor = await authenticated(services, db, now, caller);
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay as unknown as Work;
     demand(['admin', 'coordinator', 'operator-agent'].includes(actor.role), 'Only the master (coordinator or operator agent) or an admin may close work', 403);
-    const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(row => row.document);
+    const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     if (actor.role === 'operator-agent') operatorCapability(actor, 'intent:create', work!, services.repository);
     const refused = closeRefusal(work!, now.getTime()); demand(!refused, refused!, 409);
@@ -47,15 +47,13 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     if (work!.lease) { endAttempt(work!, work!.lease.epoch, 'released', now); work!.lease = null; }
     const queued = !!work!.queue;
     Object.assign(work!, { closure, stage: 'done', stageEnteredAt: now.toISOString(), reviewRequest: null, scopeRequest: null, blocker: null });
-    // Closed without shipping: the follow-ups held on it are dropped, saying why (GY-845).
-    const droppedFollowUps = dropHeldFollowUps(work!, now);
     services.engine.evaluate(work!, all, now);
     // Nothing closed may be queued or merged, whatever its last gates said.
     Object.assign(work!, { queue: null, mergeAuthorization: null });
     // The engine's own ledger entries for this evaluation (see waits.ts); internal to its transactions.
     await (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, work!, now);
     for (const request of settled.cancelled) await record(db, work!, 'graphyard', 'dispatch.cancelled', { details: { ...request, at: now.toISOString() } });
-    await save(db, work!, actor.id, 'work.closed', now, { closure, actor: actor.id, reason: data.reason, cancelled: settled.cancelled.map(request => request.id), withdrawn: settled.withdrawn?.id ?? null, agentRequests: settled.agentRequests, ...(droppedFollowUps ? { droppedFollowUps, droppedReason: work!.pendingFollowUps!.dropped!.reason } : {}) });
+    await save(db, work!, actor.id, 'work.closed', now, { closure, actor: actor.id, reason: data.reason, cancelled: settled.cancelled.map(request => request.id), withdrawn: settled.withdrawn?.id ?? null, agentRequests: settled.agentRequests });
     // Entries queued behind a closed one predict against the real base again.
     if (queued) for (const peer of all) if (peer.queue && peer.id !== work!.id) await wakeJob(db, peer.id);
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);

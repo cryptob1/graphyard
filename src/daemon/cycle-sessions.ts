@@ -1,6 +1,6 @@
 // Concern: cycle steps 1–1d and 1g — close finished sessions, fail over exhausted ones, answer blocked prompts, recover dead workers and exited sessions; the resume waits they hand to live in cycle-resume.ts.
 import type { Work } from '../model.js';
-import { type CapacityRole } from '../model/capacity.js';
+import { detectRetryingExhaustion, type CapacityRole, type ExhaustionSignal } from '../model/capacity.js';
 import { detectRuntimeExhaustion } from '../master/environments.js';
 import { classifyRuntimePrompt, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, isProfileSession, ownLoginAccounts, profileAccount, type RuntimePrompt } from '../master.js';
 import { standingEscalations } from '../model/escalation.js';
@@ -16,6 +16,13 @@ import type { Cycle } from './cycle.js';
 export { idleLeaseMs, resumeWaitKey, idleLeaseKey, resumePromptText, idlePromptText } from './cycle-resume.js';
 
 /** Steps 1–1d: close finished sessions, fail over exhausted ones, and settle what dead workers and orphaned supervisors left. */
+/**
+ * A listed session's limit notice: a stopped one by its runtime's own notices, one its host still
+ * reports working only when its runtime is retrying on the notice (GY-973).
+ */
+export const sessionExhaustion = (output: string, stopped: boolean, runtime: string | null | undefined, now: number): ExhaustionSignal | null =>
+  stopped ? detectRuntimeExhaustion(output, runtime, now) : detectRetryingExhaustion(output, now);
+
 export async function closeStep(cycle: Cycle) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, open, owns, heldBy } = cycle;
   // Whether a live lease of `principal` is worked in the worktree `cwd` names (…/worktrees/GY-N-EPOCH).
@@ -29,6 +36,8 @@ export async function closeStep(cycle: Cycle) {
   //    end that item's worker.
   const heldPanes = new Set(open.flatMap(item => !!item.lease && Date.parse(item.lease.expiresAt) > clock
     ? (item.sessions ?? []).filter(s => s.kind === 'implementation' && s.pane).map(s => s.pane!) : []));
+  // The sightings that still stand this cycle; any other on a launch profile's panes is dropped below.
+  const sighted = new Set<string>();
   for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('close', null, profile.name, async () => {
     const matchingAgents = agents.filter(candidate => candidate.name && isProfileSession(profile, candidate.name));
     for (const agent of matchingAgents) {
@@ -38,25 +47,43 @@ export async function closeStep(cycle: Cycle) {
       // profiles held for hours). Such a pane is closed unless a live lease of its principal is worked
       // in the worktree it stands in, and only once it has stood so for launchAppearanceMs, so a launch
       // whose runtime has not yet started is never taken for one that exited.
-      const exited = !agent.agent && agent.agent_status === 'unknown';
+      // A holder Herdr reports 'unknown' or with no status, runtime present or not, is not running
+      // either (GY-1166): it holds the name at its bound until closed, so it takes the same
+      // launchAppearanceMs confirmation. Only a status Herdr reports as working is never closed here.
+      const unrecognized = !['idle', 'done', 'blocked', 'working'].includes(agent.agent_status ?? '');
+      const seenKey = `exited:${profile.name}:${agent.pane_id}`;
+      // A sighting stands only while the pane keeps reading so: one that reports a status since starts the wait over.
+      if (!unrecognized) delete state.actions[seenKey];
+      if (agent.agent_status === 'working') continue;
+      const exited = !agent.agent && unrecognized;
       if (exited && agent.cwd ? workedHere(profile.principal, agent.cwd) : owns(profile.principal)) continue;
-      if (!exited && !['idle', 'done', 'blocked'].includes(agent.agent_status ?? '')) continue;
       const key = closeKey(profile, agent.pane_id);
       if (state.actions[key]?.state === 'done') continue;
-      if (exited) {
-        const seenKey = `exited:${profile.name}:${agent.pane_id}`, seen = state.actions[seenKey];
-        if (!seen) { await record(state, seenKey, { kind: 'close', work: null, principal: profile.principal, state: 'started', detail: `${agent.name}'s runtime has left pane ${agent.pane_id}, which holds no live assignment; it is closed if that still stands in ${launchAppearanceMs / 1000}s`, attempts: 1, cycle: state.cycle }, now(), effects.persist); continue; }
+      if (unrecognized) {
+        sighted.add(seenKey);
+        // The sighting is a wait, not an action in flight: a `started` row would be resumed as an
+        // interrupted close (indeterminate, a standing action:close fault, its clock reset each cycle).
+        const seen = state.actions[seenKey];
+        if (seen?.state !== 'waiting') { await record(state, seenKey, { kind: 'close', work: null, principal: profile.principal, state: 'waiting', detail: `${exited ? `${agent.name}'s runtime has left pane ${agent.pane_id}` : `${agent.name} in pane ${agent.pane_id} reports ${agent.agent_status ?? 'no status'}`}, which holds no live assignment; it is closed if that still stands in ${launchAppearanceMs / 1000}s`, attempts: 1, cycle: state.cycle }, now(), effects.persist); continue; }
         if (now() - Date.parse(seen.at) < launchAppearanceMs) continue;
       }
       await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'started', detail: `Closing ${agent.name}: no active Graphyard assignment`, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
       try {
         await effects.closeSession(agent.pane_id);
-        performed.push(await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'done', detail: `Closed finished session ${agent.name} (${exited ? 'its runtime exited' : agent.agent_status ?? 'unknown'}) with no active assignment`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        // Its sighting goes with the pane, in this step's sweep.
+        sighted.delete(seenKey);
+        performed.push(await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'done', detail: `Closed finished session ${agent.name} (${exited ? 'its runtime exited' : agent.agent_status ?? 'no status'}) with no active assignment`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
       } catch (error) {
         performed.push(await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'failed', detail: `Could not close ${agent.name}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
       }
     }
   });
+  // A sighting whose pane was closed, is no longer listed, or reads a recognised status is dropped,
+  // so no row outlives its pane.
+  const launchProfiles = config.workers.filter(worker => worker.mode === 'launch').map(profile => `exited:${profile.name}:`);
+  const stale = Object.keys(state.actions).filter(key => launchProfiles.some(prefix => key.startsWith(prefix)) && !key.startsWith('exited:implementation:') && !sighted.has(key));
+  for (const key of stale) delete state.actions[key];
+  if (stale.length) await effects.persist(state);
 
   // 1a. Mid-session exhaustion. A session that ran out of provider quota does not fail: it stops
   //     on its runtime's limit notice and waits for a person. The loop reads that notice from the
@@ -67,10 +94,14 @@ export async function closeStep(cycle: Cycle) {
   //     producer request is launched again at once. Nobody repoints a profile by hand.
   const failedOver = new Set<string>();
   if (effects.sessionOutput && effects.reportCapacity) {
-    const stopped = (name: string) => { const agent = agents.find(candidate => candidate.name === name); return agent && stoppedStates.includes(agent.agent_status ?? '') ? agent : null; };
+    const listed = (name: string) => agents.find(candidate => candidate.name === name) ?? null;
+    const stopped = (name: string) => { const agent = listed(name); return agent && stoppedStates.includes(agent.agent_status ?? '') ? agent : null; };
     // The notice is judged against the session's own runtime's provider messages, never generic
     // quota wording: a worker's prose about a quota (a disk's) is not its provider's notice (GY-421).
-    const notice = async (agent: HerdrAgent, runtime: string | null | undefined) => { try { const output = await effects.sessionOutput!(agent); return output ? detectRuntimeExhaustion(output, runtime, clock) : null; } catch { return null; } };
+    // A session Herdr still reports working counts only when its runtime prints its retry marker
+    // beside the notice (GY-973): OpenCode retries a spent account forever and never stops.
+    const notice = async (agent: HerdrAgent, runtime: string | null | undefined) => { try { const output = await effects.sessionOutput!(agent); return output ? sessionExhaustion(output, stoppedStates.includes(agent.agent_status ?? ''), runtime, clock) : null; } catch { return null; } };
+    const onNotice = (agent: HerdrAgent) => stoppedStates.includes(agent.agent_status ?? '') ? 'stopped on' : 'is retrying on';
     /** The runtime a launched role's profile names, for the notice the loop reads off its pane. */
     const profileRuntime = (role: string, profile: string) =>
       (role === 'reviewer' ? config.reviewers : role === 'producer' ? config.producers : []).find(entry => entry.name === profile)?.kind;
@@ -83,7 +114,7 @@ export async function closeStep(cycle: Cycle) {
       return { account, runtime: selected?.kind ?? null };
     };
     for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('failover', heldBy(profile), profile.name, async () => {
-      const agent = stopped(profile.agentName);
+      const agent = listed(profile.agentName);
       const item = open.find(candidate => !!candidate.lease && candidate.lease.owner === profile.principal && Date.parse(candidate.lease.expiresAt) > clock);
       if (!agent || !item || item.submission?.epoch === item.lease!.epoch) return;
       const key = failoverKey('worker', item, item.lease!.epoch), previous = state.actions[key];
@@ -93,7 +124,7 @@ export async function closeStep(cycle: Cycle) {
       failedOver.add(item.id);
       const epoch = item.lease!.epoch, attempts = (previous?.attempts ?? 0) + 1;
       const resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
-      await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'started', detail: `${profile.agentName} on ${item.key} (epoch ${epoch}) stopped on its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
+      await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'started', detail: `${profile.agentName} on ${item.key} (epoch ${epoch}) ${onNotice(agent)} its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
       try {
         const partialWork = await effects.preserveWork?.(item, epoch) ?? { state: 'not-applicable' as const, detail: 'this loop has no access to the attempt worktree' };
         const { account, runtime } = await held('worker', profile.name, item, signal);
@@ -114,7 +145,7 @@ export async function closeStep(cycle: Cycle) {
       }
     });
     for (const session of await effects.launchedSessions?.().catch(() => [] as LaunchedSession[]) ?? []) await isolate('failover', open.find(candidate => candidate.key === session.work) ?? null, session.agentName, async () => {
-      const agent = stopped(session.agentName), item = open.find(candidate => candidate.key === session.work);
+      const agent = listed(session.agentName), item = open.find(candidate => candidate.key === session.work);
       if (!agent || !item) return;
       const key = failoverKey(session.role, item, session.record), previous = state.actions[key];
       // Its relaunch is still on the launcher: the failover is in flight, not due again.
@@ -122,7 +153,7 @@ export async function closeStep(cycle: Cycle) {
       const signal = await notice(agent, profileRuntime(session.role, session.profile));
       if (!signal) return;
       const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
-      await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'started', detail: `${session.role} session ${session.agentName} for ${item.key} stopped on its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
+      await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'started', detail: `${session.role} session ${session.agentName} for ${item.key} ${onNotice(agent)} its provider's limit notice: ${signal.reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
       try {
         const { account, runtime } = await held(session.role, session.profile, item, signal);
         await effects.reportCapacity!(item, { event: 'exhausted', role: session.role, ...(session.requestId ? { requestId: session.requestId } : {}), profile: session.profile, account, runtime, reason: signal.reason, resetsAt: signal.resetsAt,
@@ -222,10 +253,10 @@ export async function closeStep(cycle: Cycle) {
         });
         return;
       }
-      const agent = stopped(session.agentName);
+      const agent = listed(session.agentName);
       if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) return;
       const signal = agent ? await notice(agent, session.runtime ?? session.kind) : null;
-      if (!signal) { await handlerFinished(session, !!agent); return; }
+      if (!signal) { await handlerFinished(session, !!agent && !!stopped(session.agentName)); return; }
       const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
       try {
         // A handler on no named account spent its runtime's own login, which an approver launches on too.

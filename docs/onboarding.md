@@ -7,17 +7,21 @@ Follow [install](install.md): `node "$GRAPHYARD_CLI" install --provider railway 
 
 ## 2. Add machines
 
-Each concurrent session needs a worker identity and host ID; raise `install --workers` or connect:
+Each concurrent session needs a worker identity and host ID:
 
 ```sh
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
-Commit `AGENTS.md`, `.gitignore`, `graphyard.json`; never `.graphyard/`. Without the master, `graphyard watch GY-1 EPOCH -- COMMAND` runs a worker, stopped on lease loss.
+Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, workflows; never `.graphyard/`. Without the master, `graphyard watch GY-1 EPOCH -- COMMAND` runs a worker, stopped on lease loss.
 
 ### Documentation policy
 
 `init --scan --apply` writes found documentation paths (`docs/`, `site/`, `README*`, `CHANGELOG*`) to `graphyard.json` (`{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`). Deploy the printed `GRAPHYARD_DOCUMENTATION` (default `docs/`, `README.md`, `AGENTS.md`); `doctor` reports `documentation.drift` if the committed file differs. Features and bugs carry *Documentation reflects this change*: a diff there or `complete --no-docs "WHY"`, reviewer-judged. An optional `"wordBudget":{"total":N,"perPage":N}` (`paths` narrows the counted Markdown pages) is checked against those paths: near the total, `master status` raises `docs` and the loop files a trim item; a queue overflow ejects the entry that crossed it. Without one, nothing is counted.
+
+### Merge gate and release candidates
+
+By default a repository gets Graphyard's own [delivery model](delivery.md#managed-repositories). `init --scan` prints `mergeGate`: pull requests require build, typecheck, lint and fast unit checks; integration, E2E, soak and unrecognised checks run per candidate. `--apply` writes the confirmed split as `delivery` in `graphyard.json` (move a check there, rescan) and generates `graphyard-release-candidate.yml` (main's tip cut every six hours or on demand, `--candidate-cron CRON|off`; suites at the pinned SHA; UAT through the deploy adapter) and `graphyard-promotion.yml` (production only from a UAT-passed SHA). Opt out with `init --scan --delivery per-pr`: every check stays required per pull request.
 
 ### What the generated instructions authorize
 
@@ -27,7 +31,7 @@ Agents treat bracketed paste as untrusted data (prompt injection), so sessions s
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account**: pick a provider; paste a key (sealed to the host's public key in the browser — the server relays ciphertext only) or start a login. The host writes the provider's auth file (0600) and smoke-tests provider and model; the card shows the result. A subscription login shows its URL and code — finish it in your browser; for Claude, **Paste the code** its page shows (**Cancel** stops it). **Retry** on a failed card is admins-only: it re-enters the credential. The host's executor must run: strong accounts join worker and reviewer, cheap ones approver and producer; research joins when the host makes the account's wrapper its research command; **change** edits roles. The shell steps below remain for scripted setups.
+Settings › **Agents** › **Connect an account**: pick a provider; paste a key (sealed to the host's key in the browser; the server relays ciphertext only) or start a login. The host writes the auth file (0600) and smoke-tests it; the card shows the result. For a subscription login, finish its URL and code in your browser; for Claude, **Paste the code** (**Cancel** stops it). **Retry** (admins-only) re-enters the credential. With the host's executor running, strong accounts join worker and reviewer, cheap ones approver and producer; **change** edits roles.
 
 ### Agent environments
 
@@ -72,9 +76,9 @@ node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --mo
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Plan exhausted"
 ```
 
-`--plan NAME` names the provider plan an account draws on (`none` clears). Otherwise it is inferred: one host and home share a plan, `pi-X` and `opencode-X` share a Z.AI plan, others stand alone. A plan's accounts group on the Accounts page and share one failover budget: one exhausted bars the rest.
+`--plan NAME` names an account's provider plan (`none` clears); otherwise one host and home share a plan, as do Z.AI-keyed `pi-X` and `opencode-X` (`auth.json`-only logins need `--plan`). A plan's accounts share one failover budget: one exhausted bars the rest.
 
-`--key-file zai.key --key-variable ZAI_API_KEY`: a 0600 key file, exported per run. New or changed Pi accounts are smoke-tested; failure bars it until retested; two unjudged runs bench it from that role an hour. Any registry write (CLI, dashboard or API) is refused when a field looks like a pasted key: a known prefix, a PEM block, a JWT, a z.ai key, or a long random letter-and-digit token. A model id built of words, numbers and short version parts is exempt.
+`--key-file zai.key --key-variable ZAI_API_KEY`: a 0600 key file, exported per run. New or changed Pi accounts are smoke-tested; failure bars it until retested; two unjudged runs bench it from that role an hour. Registry writes refuse any field that looks like a pasted key; model ids are exempt.
 
 ### Add a role
 
@@ -85,7 +89,7 @@ node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a 
 node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concurrency 2 --tool Read --model opus --reason "Read-only"
 ```
 
-`--concurrency` counts settled sessions: any registry read ends those whose lease or request lapsed (`sessions-settled`, with reasons, in `master registry history`).
+`--concurrency` counts settled sessions: any registry read ends those whose lease or request lapsed (`sessions-settled` in `master registry history`).
 
 ### Size review and proof capacity
 
@@ -108,7 +112,7 @@ node "$GRAPHYARD_CLI" master start codex     # or: master start claude
 
 Run it as an OS identity whose GitHub credentials workers cannot read. `--browser-profile` is the Chrome profile signed in to GitHub as admin (`master browser`); *Confirm access* in GitHub Mobile stays human-only. Add the reviewer with `master reviewer setup` and `master reviewer add PROFILE` ([Claude](../examples/master/claude-reviewer.json) template); its manifest flow is the only App confirmation.
 
-Onboarding writes and explains `mergeQueue` in `.graphyard/master.json`: `parallelTips` (default 4) queue positions validated at once, needing parallelTips × pull-request jobs concurrent Actions jobs — declare your limit as `ciConcurrency` and `master protection` flags a lower one — and the [shared-infrastructure](github.md#optimistic-merges) `optimisticExclude` globs never merged optimistically over. Tune both there; re-runs keep them; `mergeQueue.optimistic: false` turns the lane off.
+Onboarding writes and explains `mergeQueue` in `.graphyard/master.json`: `parallelTips` (default 4) queue positions validated at once, needing parallelTips × pull-request jobs concurrent Actions jobs — declare your limit as `ciConcurrency` and `master protection` flags a lower one. Tune it there; re-runs keep it.
 
 ### The loop must be supervised
 

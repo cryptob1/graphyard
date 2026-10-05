@@ -15,19 +15,19 @@ Add reviewers with `master reviewer setup` and `master reviewer add FILE` ([Clau
 
 ### Approval modes
 
-Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode bypassPermissions`, `.claude.json` trust (Claude Code); `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir` (Codex); `--force --trust` (Cursor, started and logged in as `agent`: `cursor` is the IDE launcher and `cursor-agent` refuses interactive runs); allow-all `OPENCODE_PERMISSION` (opencode); `--yolo` (Gemini, Qwen); `--allow-all-tools --allow-all-paths` (Copilot); `--approval-mode never --trust-workspace` (Muse); `--dangerously-skip-permissions`, request via `--prompt-interactive` (Antigravity `agy`); none (Pi). `"prompt"`, `refusedLaunchKinds` and runtimes lacking command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}` in their arguments.
+Sessions run in no-approval mode (`"approvals": "auto"`): `--permission-mode bypassPermissions`, `.claude.json` trust (Claude Code); `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir` (Codex); `--force --trust` (Cursor, started and logged in as `agent`: `cursor` is the IDE launcher and `cursor-agent` refuses interactive runs); allow-all `OPENCODE_PERMISSION` (opencode); `--yolo` (Gemini, Qwen); `--allow-all-tools --allow-all-paths` (Copilot); `--approval-mode never --trust-workspace` (Muse); `--dangerously-skip-permissions`, `trustedWorkspaces` trust, `--prompt-interactive` (Antigravity `agy`); none (Pi). `"prompt"`, `refusedLaunchKinds` and runtimes lacking command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}` in their arguments.
 
 ### The coordinator checkout is confined at the OS level
 
-Every launch runs with the checkout unwritable to shell commands (GY-888). A codex `--sandbox workspace-write` confines only while every grant touching the checkout or its `.git` stays in the session's worktree and admin directory; wider grants give up the claim. Every other launch runs under bubblewrap: the checkout mounted read-only, PIDs unshared, `/proc` fresh, channels hidden (systemd, `/run/dbus`; the session bus is a keyring-only proxy), only the session's worktree or checkout and worktree-admin directories re-exposed beside the shared Git areas (objects, `graphyard/` branches, remote refs, `FETCH_HEAD`), each masked at its canonical path. A launch unable to apply it (no bubblewrap, non-Linux, refused namespaces, confinement off, an underivable checkout) is refused with the reason. The master session is exempt. The loop and executors never start, self-upgrade or restart on a dirty checkout; escalation names the paths and their leases.
+Every launch runs with the checkout unwritable to shell commands (GY-888). A codex `--sandbox workspace-write` confines only while every grant touching the checkout or its `.git` stays in the session's worktree and admin directory; wider grants give up the claim. Every other launch runs under bubblewrap: the checkout mounted read-only, PIDs unshared, `/proc` fresh, channels hidden (systemd, `/run/dbus`; the session bus is a [keyring-only proxy](operations.md#worker-host-keyring-proxy)), only the session's worktree or checkout and worktree-admin directories re-exposed beside the shared Git areas (objects, `graphyard/` branches, remote refs, `FETCH_HEAD`), each masked at its canonical path. A launch unable to apply it (no bubblewrap, non-Linux, refused namespaces, confinement off, an underivable checkout) is refused with the reason. The master session is exempt. The loop and executors never start, self-upgrade or restart on a dirty checkout; escalation names the paths and their leases.
 
 ## Accounts and failover
 
 A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`).
 
-A runtime failing to start fails over too, named in `master status` (`opencode-a failed to start: …; launched on claude-b`); three in a row raise one attention item until a start.
+A runtime failing to start fails over too, named in `master status` (`opencode-a failed to start: …; launched on claude-b`); three in a row raise an attention item until a start.
 
-On a runtime's own limit notice (never agent text) the loop commits work as unpushed `WIP:`, records `capacity.exhausted`, relaunches on the next account or awaits reset.
+On a runtime's limit notice (never agent text), even mid-retry, the loop commits work as unpushed `WIP:`, records `capacity.exhausted`, relaunches on another account or awaits reset.
 
 ## The loop's own master session
 
@@ -57,15 +57,15 @@ OpenCode 1.18 is ready at `Ask anything…`/`tab agents` ([fixture](../tests/fix
 
 #### First-run consent prompts
 
-A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; everything else, above all a **credential** or **payment** prompt, is escalated. A worker is held in `.graphyard/launch/NAME.consent` (attach: `herdr pane attach`); after **15 minutes** its supervisor stops renewing and stops it; the item is dispatchable again.
+A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; everything else, above all a **credential** or **payment** prompt, is escalated. Workspace-trust prompts fail the launch, unheld. A worker is held in `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** its supervisor stops renewing and stops it; the item is dispatchable again.
 
 ### Acknowledgement, the one re-prompt, and never started
 
-A reviewer or producer is `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`); quiet past `run.acknowledgementSeconds` (default 90) it is re-prompted once; settling resultless makes it **`never started`**, relaunched free a minute later, three at most (`retry.neverStarted`).
+A reviewer or producer is `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`); quiet past `run.acknowledgementSeconds` (default 90) it is re-prompted once; settling resultless makes it **`never started`**, relaunched free a minute later, three at most (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
 
 ### Resume, idle-with-lease and exited sessions
 
-When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`); blocking again ends the attempt and a fresh session, preferably another runtime, takes over. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then after 30 more handed to a new attempt on its branch.
+When a live attempt's blocker or scope request resolves, its idle session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`); blocking again ends the attempt and a fresh session, preferably another runtime, takes over. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then after 30 more handed to a new attempt on its branch.
 
 Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts and are re-adopted; lost ones retry free (approvers thrice per decision). Only Pi is confined; triage and diagnosis runs end with the loop.
 

@@ -9,6 +9,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server/index.js';
 import { CHECK_NAME, GitHub, baseRefCycleMs, billableBudgetShare, observationThroughputStatus, processJob, protectionShareMs } from '../src/github.js';
 import type { Principal, Work } from '../src/model.js';
+import { queueOrder, queuePlacement } from '../src/merge-queue.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-806: GitHub API use fits the rate limit. Each test is named for the proof it produces:
@@ -58,6 +59,12 @@ class Api {
   }
   fetch = async (url: unknown, options: any = {}): Promise<Response> => {
     const method = options.method ?? 'GET'; const path = String(url).replace('https://api.github.com', '');
+    // A GraphQL mutation (GY-1052) spends GraphQL points, which GitHub reports as their own resource.
+    if (path === '/graphql') {
+      this.requests.push({ method, path });
+      if (/mergePullRequest/.test(String(options.body))) this.main = sha(`merged-${this.requests.length}`);
+      return new Response(JSON.stringify({ data: { mergePullRequest: { pullRequest: { id: 'PR_node' } } } }), { status: 200, headers: { 'content-type': 'application/json', 'x-ratelimit-limit': '5000', 'x-ratelimit-remaining': '4990', 'x-ratelimit-reset': String(this.resetAt), 'x-ratelimit-resource': 'graphql' } });
+    }
     if (!path.startsWith(`/repos/${REPOSITORY}`)) throw new Error(`Unexpected request ${method} ${path}`);
     this.requests.push({ method, path: path.replace(`/repos/${REPOSITORY}`, '') }); this.remaining--;
     return new Response(JSON.stringify(this.body(method, path)), { status: 200, headers: { 'content-type': 'application/json', 'x-ratelimit-limit': String(this.limit), 'x-ratelimit-remaining': String(Math.max(0, this.remaining)), 'x-ratelimit-used': String(this.limit - this.remaining), 'x-ratelimit-reset': String(this.resetAt), 'x-ratelimit-resource': 'core' } });
@@ -202,6 +209,11 @@ test('unit:github-shared-cycle-reads — twenty items observed in one cycle make
   github.noteWebhook('branch_protection_rule', { action: 'edited' });
   await github.observe(items[2], items);
   assert.equal(protections(), 2); assert.equal(rules(), 2);
+  // A head-bound GraphQL merge moves the base branch as a REST merge does, and ends the cycle too (GY-1052).
+  await github.observe(items[4], items);
+  await github.enqueuePullRequest({ pullRequestId: 'PR_node', head: items[4].candidate!.sha, queue: false } as Parameters<GitHub['enqueuePullRequest']>[0], items[4].candidate!.sha, true);
+  const merged = await github.observe(items[5], items);
+  assert.equal(refs(), 4); assert.equal(merged.baseTip, api.main);
   now += protectionShareMs;
   await github.observe(items[3], items);
   assert.equal(protections(), 3);
@@ -309,9 +321,80 @@ test('unit:webhook-driven-observation — a check_run delivery re-observes its i
   assert.match(skipped.deferred_reason ?? '', /poll skipped: a webhook refreshed this item/);
   assert.ok(skipped.available_at.getTime() - skipped.now.getTime() > 30_000, 'the job is due again when the interval ends');
 
+  // An item that entered the merge band since the refresh is not skipped (GY-1052): the band is read
+  // again at skip time, so it is observed at the merge cadence rather than at the end of the interval.
+  await store!.pool.query('UPDATE jobs SET available_at=now() WHERE work_id=$1', [woken.id]);
+  const asMerging = (await store!.list()).map(entry => entry.id !== woken.id ? entry : { ...entry, stage: 'merge' as const, violations: [], leadHold: undefined,
+    gates: entry.gates.map(gate => ({ ...gate, passed: true })), mergeAuthorization: { sha: entry.candidate!.sha, baseSha: entry.candidate!.baseSha, policyRevision: entry.policyRevision, at: new Date().toISOString() } } as Work);
+  t.mock.method(engine.store, 'list', async () => asMerging, { times: 1 });
+  const beforeMerge = api.requests.length;
+  assert.equal(await processJob(engine, github), true, 'the merge-band item was claimed');
+  assert.ok(api.requests.length > beforeMerge, 'and observed, not skipped');
+  assert.doesNotMatch((await jobRow(woken)).deferred_reason ?? '', /poll skipped/);
+
+  // The band is re-read after the claim (GY-1052): an item that entered it between the pre-claim
+  // snapshot and `takeJob` is observed too. The first read shows it outside the band, the second inside.
+  await store!.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour' WHERE work_id<>$1", [woken.id]);
+  await store!.pool.query("UPDATE jobs SET available_at=now(), refreshed_until=now()+interval '1 hour', claimed_generation=generation, webhook_at=NULL WHERE work_id=$1", [woken.id]);
+  const preClaim = await store!.list();
+  const merging = preClaim.map(entry => asMerging.find(other => other.id === entry.id && entry.id === woken.id) ?? entry);
+  let reads = 0, itemReads = 0, queueReads = 0;
+  t.mock.method(engine.store, 'list', async () => { reads++; return preClaim; }, { times: 1 });
+  t.mock.method(engine.store, 'workItem', async (id: string) => { itemReads++; return merging.find(entry => entry.id === id); }, { times: 1 });
+  const queued = t.mock.method(engine.store, 'queuedWork', async () => { queueReads++; return []; });
+  const beforeRace = api.requests.length;
+  assert.equal(await processJob(engine, github), true, 'the item was claimed');
+  assert.deepEqual({ reads, itemReads }, { reads: 1, itemReads: 1 }, 'the claimed item, not the fleet, was read again after the claim');
+  assert.equal(queueReads, 0, 'a merge-authorized item needs no queue read');
+  assert.ok(api.requests.length > beforeRace, 'and observed, not skipped');
+  assert.doesNotMatch((await jobRow(woken)).deferred_reason ?? '', /poll skipped/);
+  queued.mock.restore();
+
+  // A skip outside the merge band costs one read of the claimed item by its id (GY-1052): neither the
+  // fleet nor the queue is read again, so an early-due poll never pays a second full fleet read.
+  await store!.pool.query("UPDATE jobs SET available_at=now(), refreshed_until=now()+interval '1 hour', claimed_generation=generation, webhook_at=NULL WHERE work_id=$1", [woken.id]);
+  const fleetReads = t.mock.method(engine.store, 'list'), itemRead = t.mock.method(engine.store, 'workItem'), queueRead = t.mock.method(engine.store, 'queuedWork');
+  const beforeSkip = api.requests.length;
+  assert.equal(await processJob(engine, github), true, 'the poll was claimed');
+  assert.equal(api.requests.length, beforeSkip, 'and skipped');
+  assert.match((await jobRow(woken)).deferred_reason ?? '', /poll skipped/);
+  assert.deepEqual({ fleet: fleetReads.mock.callCount(), item: itemRead.mock.callCount(), queue: queueRead.mock.callCount() }, { fleet: 1, item: 1, queue: 0 }, 'one fleet read before the claim, one item read after it');
+  fleetReads.mock.restore(); itemRead.mock.restore(); queueRead.mock.restore();
+
+  // A queued, unauthorized merge-stage item is placed from the live queue alone: the queue head is in the band.
+  await store!.pool.query("UPDATE jobs SET available_at=now(), refreshed_until=now()+interval '1 hour', claimed_generation=generation, webhook_at=NULL WHERE work_id=$1", [woken.id]);
+  const plain = (await store!.list()).find(entry => entry.id === woken.id)!;
+  const queuedHead = { ...plain, stage: 'merge' as const, queue: { sequence: 1, enqueuedAt: new Date().toISOString() } } as Work;
+  t.mock.method(engine.store, 'workItem', async () => queuedHead, { times: 1 });
+  const headQueue = t.mock.method(engine.store, 'queuedWork', async () => [queuedHead]);
+  const beforeHead = api.requests.length;
+  assert.equal(await processJob(engine, github), true, 'the queue head was claimed');
+  assert.equal(headQueue.mock.callCount(), 1, 'its position was read from the live queue');
+  assert.ok(api.requests.length > beforeHead, 'and observed, not skipped');
+  headQueue.mock.restore();
+  // The targeted reads against the real store: the item by its id, and no live queue entries in this fleet.
+  assert.equal((await store!.workItem(woken.id))?.key, woken.key);
+  assert.deepEqual(await store!.queuedWork(), []);
+
   // A worker's push to the pull-request branch names the item by its branch before its candidate names the new head.
   await deliver('push', { ref: `refs/heads/${polled.candidate!.branch}`, after: sha('pushed-head'), repository: { full_name: REPOSITORY } });
   assert.deepEqual(await replica.store.webhookDue(), [polled.id]);
+
+  // The live queue places an entry exactly as the whole fleet does (GY-1052): `queuedWork` filters as
+  // `queueOrder` does, so a done item still holding a queue entry, and an unqueued item, change nothing.
+  const placed = async () => {
+    const fleet = await store!.list(), live = await store!.queuedWork();
+    const queued = new Set(queueOrder(fleet).map(entry => entry.id));
+    assert.deepEqual(live.map(entry => entry.id), fleet.filter(entry => queued.has(entry.id)).map(entry => entry.id), 'the live queue is exactly the fleet\'s queue entries');
+    for (const entry of queueOrder(fleet)) assert.deepEqual(queuePlacement(entry, live, 0), queuePlacement(entry, fleet, 0), `${entry.key} is placed alike`);
+    return queueOrder(live).map(entry => entry.key);
+  };
+  const enqueue = (id: string, sequence: number, stage?: string) => store!.pool.query(`UPDATE work_items SET document=jsonb_set(document, '{queue}', $2::jsonb)${stage ? " || jsonb_build_object('stage', $3::text)" : ''} WHERE id=$1`,
+    [id, JSON.stringify({ sequence, enqueuedAt: new Date().toISOString() }), ...(stage ? [stage] : [])]);
+  await enqueue(woken.id, 2); await enqueue(polled.id, 1);
+  assert.deepEqual(await placed(), [polled.key, woken.key]);
+  await enqueue(polled.id, 1, 'done');
+  assert.deepEqual(await placed(), [woken.key], 'a done item holding a queue entry is out of the queue either way');
 });
 
 /**
@@ -424,4 +507,107 @@ test('unit:github-budget-projection — a charge batch whose write fails is queu
   await writer.sync(); await reader.sync();
   assert.deepEqual(reader.fleet().rows.map(row => [row.endpoint, row.requests]), [['GET /pulls/:n', 5]], 'the failed batch was written with the next one');
   await writer.close(); await reader.close();
+});
+
+test('unit:github-budget-projection — GraphQL points and App-level calls are not billed against the REST core limit (GY-1052)', async t => {
+  const api = new Api();
+  t.mock.method(globalThis, 'fetch', api.fetch);
+  const github = api.client();
+  await github.request('/pulls/1');
+  await github.enqueuePullRequest({ pullRequestId: 'PR_node', head: sha('head'), queue: false } as Parameters<GitHub['enqueuePullRequest']>[0], sha('head'), true);
+  const budget = github.budget();
+  assert.equal(api.requests.length, 2, 'both requests were made');
+  assert.deepEqual([budget.billable.perHour, budget.lastHour.requests, budget.spentInWindow], [1, 1, 1], 'only the REST read is billed');
+  assert.deepEqual(budget.billable.byEndpoint.map(entry => entry.endpoint), ['GET /pulls/:n']);
+});
+
+test('unit:github-budget-projection — the charge ledger counts the minute its hour starts in, prunes every instance\'s rows past two hours, and close waits for a sync already writing (GY-1052)', async () => {
+  const db = await database();
+  const installation = `window-${randomUUID()}`;
+  const rows = async () => (await db.pool.query('SELECT instance, minute FROM github_charges WHERE installation=$1 ORDER BY minute', [installation])).rows as { instance: string; minute: Date }[];
+  const now = Date.parse('2026-09-26T10:30:30Z');
+  // A restarted replica's instance id never writes again; the survivor's prune still removes its rows.
+  const gone = new GitHubChargeLedger(db.pool, installation, { instance: 'restarted' });
+  gone.charge(now - 150 * 60_000, 'GET /pulls/:n', 'pulls'); await gone.sync(now - 150 * 60_000); await gone.close();
+  const writer = new GitHubChargeLedger(db.pool, installation, { instance: 'writer' });
+  const reader = new GitHubChargeLedger(db.pool, installation, { instance: 'reader' });
+  writer.charge(Date.parse('2026-09-26T09:29:50Z'), 'GET /pulls/:n', 'pulls');
+  writer.charge(Date.parse('2026-09-26T09:30:45Z'), 'GET /pulls/:n', 'pulls');
+  writer.charge(now, 'GET /pulls/:n', 'pulls');
+  await writer.sync(now); await reader.sync(now);
+  assert.deepEqual(reader.fleet(now).rows.map(row => row.requests), [2], 'the 09:30 minute is inside the hour at 10:30:30; 09:29 is not');
+  assert.ok((await rows()).every(row => now - row.minute.getTime() <= 2 * 60 * 60_000), 'no row older than two hours is left, the restarted instance\'s included');
+  assert.equal((await rows()).filter(row => row.instance === 'restarted').length, 0);
+
+  // close() while a timer-started sync is writing waits for that write.
+  let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
+  const slow = new GitHubChargeLedger({ query: async (text: string, values?: unknown[]) => { if (text.startsWith('INSERT')) await held; return db.pool.query(text, values); } } as any, installation, { instance: 'closing' });
+  slow.charge(now, 'GET /pulls/:n', 'pulls');
+  const syncing = slow.sync(now);
+  let closed = false; const closing = slow.close().then(() => { closed = true; });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(closed, false, 'close waits for the sync already writing');
+  release(); await closing; await syncing;
+  assert.ok((await rows()).some(row => row.instance === 'closing'), 'the in-flight batch was written before close returned');
+  await writer.close(); await reader.close();
+});
+
+test('unit:webhook-driven-observation — webhook wakes are claimed oldest delivery first, even ahead of a newer wake whose job is long overdue (GY-1052)', async () => {
+  const api = new Api();
+  const older = await submitted(api, 'Older webhook'), newer = await submitted(api, 'Newer webhook, long overdue');
+  await store!.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour', webhook_at=NULL");
+  await store!.pool.query("UPDATE jobs SET available_at=now(), webhook_at=now()-interval '10 seconds' WHERE work_id=$1", [older.id]);
+  await store!.pool.query("UPDATE jobs SET available_at=now()-interval '1 day', webhook_at=now()-interval '5 seconds' WHERE work_id=$1", [newer.id]);
+  const first = await store!.takeJob([], 0, 60_000);
+  assert.equal(first?.work_id, older.id, 'the older delivery is claimed first');
+  assert.equal(first?.webhook, true);
+  const second = await store!.takeJob([], 0, 60_000);
+  assert.equal(second?.work_id, newer.id);
+});
+
+test('unit:github-immutable-cache — an entry whose write-behind flush is still running answers a lookup from memory, so GitHub is not asked for it again (GY-1052)', async () => {
+  const db = await database();
+  let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
+  const cache = new GitHubCacheStore({ query: async (text: string, values?: unknown[]) => { if (text.startsWith('INSERT')) await held; return db.pool.query(text, values); } } as any, `inflight-${randomUUID()}`, { flushMs: 60_000 });
+  cache.put('immutable', '/commits/abc', { sha: 'abc' });
+  const flushing = cache.flush();
+  assert.deepEqual(await cache.lookup('immutable', '/commits/abc'), { sha: 'abc' }, 'the batch being written is visible to lookups');
+  release(); await flushing;
+  assert.deepEqual(await cache.lookup('immutable', '/commits/abc'), { sha: 'abc' }, 'and the table answers once it is written');
+  await cache.close();
+});
+
+test('unit:github-immutable-cache — a batch whose write fails is queued once more, then dropped if the retry fails too (GY-1052)', async () => {
+  const db = await database();
+  let failures = 1;
+  const cache = new GitHubCacheStore({ query: async (text: string, values?: unknown[]) => {
+    if (text.startsWith('INSERT') && failures-- > 0) throw new Error('connection reset');
+    return db.pool.query(text, values);
+  } } as any, `retry-${randomUUID()}`, { flushMs: 60_000 });
+  const error = console.error; console.error = () => {};
+  try {
+    cache.put('immutable', '/commits/abc', { sha: 'abc' });
+    await cache.flush();
+    assert.deepEqual(await cache.lookup('immutable', '/commits/abc'), { sha: 'abc' }, 'the failed entry is still queued, not lost');
+    await cache.flush();
+    assert.deepEqual(await cache.lookup('immutable', '/commits/abc'), { sha: 'abc' }, 'the retry wrote it');
+    failures = 2;
+    cache.put('immutable', '/commits/def', { sha: 'def' });
+    await cache.flush(); await cache.flush();
+    assert.equal(await cache.lookup('immutable', '/commits/def'), undefined, 'a second failure drops the entry');
+    await cache.flush();
+
+    // close() retries a batch that fails during shutdown flush rather than dropping it (GY-1052)
+    failures = 1;
+    const closeScope = `close-retry-${randomUUID()}`;
+    const closingCache = new GitHubCacheStore({ query: async (text: string, values?: unknown[]) => {
+      if (text.startsWith('INSERT') && failures-- > 0) throw new Error('connection reset');
+      return db.pool.query(text, values);
+    } } as any, closeScope, { flushMs: 60_000 });
+    closingCache.put('immutable', '/commits/close-retry', { sha: 'close-retry' });
+    await closingCache.close();
+    const reopened = new GitHubCacheStore(db.pool, closeScope);
+    assert.deepEqual(await reopened.lookup('immutable', '/commits/close-retry'), { sha: 'close-retry' }, 'a chunk failing during shutdown gets its single retry before close returns');
+    await reopened.close();
+  } finally { console.error = error; await cache.close(); }
 });
