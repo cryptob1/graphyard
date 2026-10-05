@@ -393,7 +393,8 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
         if (step.step === 'wait') continue;
         // GY-1300: an approved decision is judged. Its session is put down, never replaced, and the control plane is asked to apply
         // what was approved; the next cycle finds it settled and lets the watch go.
-        if (step.step === 'apply') { recordWatchEnded(watch, step.detail); await closeApprover(item, watch, 'its decision is approved'); await applyHandApproval(item, watch, step.detail); continue; }
+        // One still working past the grace is put down the same way: with the resume, the loop applies it rather than withdrawing it.
+        if (step.step === 'apply' || (step.step === 'rerequest' && judged?.state === 'approved' && effects.resume)) { recordWatchEnded(watch, step.detail); await closeApprover(item, watch, 'its decision is approved'); await applyHandApproval(item, watch, step.detail); continue; }
         if (step.step === 'relaunch' && !watch.agentName && approversSpent) continue;
         // The close, relaunch, record and escalation steps of the loop's own watches (GY-779). A
         // hand watch has no request of its own to repeat, so its one `rerequest` step is an approval

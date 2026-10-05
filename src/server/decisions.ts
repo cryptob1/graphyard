@@ -136,7 +136,7 @@ async function recordRequest(services: Services, caller: Principal, id: string, 
     }
     // An approved one here is still inside the grace its approval has to apply it, or the lane's whose resumption faulted (GY-1300).
     demand(!pending, pending?.state === 'approved'
-      ? `Decision ${pending.id} (${data.action}) on ${work!.key} was approved by ${pending.approvedBy} at ${pending.approvedAt} and its application has recorded no outcome yet; a request after ${Math.round(approvalApplyGraceMs / 1000)}s resumes it`
+      ? `Decision ${pending.id} (${data.action}) on ${work!.key} was approved by ${pending.approvedBy} at ${pending.approvedAt} and its application has recorded no outcome yet; a request after ${Math.round(approvalApplyGraceMs / 1000)}s resumes it, and { "action": "resume", "decision": "${pending.id}" } resumes it now`
       : `Decision ${pending?.id} (${data.action}) is already ${pending?.state} on ${work!.key}; wait for it before requesting another`, 409);
     const decisionId = randomUUID();
     await record(db, work!, actor.id, 'decision.requested', { id: decisionId, action: data.action, input, reason: data.reason, requester: { id: actor.id, role: actor.role }, capabilities: requiredDecisionCapabilities(data.action, input, work!),
