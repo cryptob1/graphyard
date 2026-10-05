@@ -550,6 +550,11 @@ export function repetitionReviewSection(files?: readonly string[] | null) {
  * so those commands reach the repository from there without the directory itself being a registered
  * linked worktree (which would cause confinement to bind only its own admin directory and leave
  * .git/worktrees read-only, breaking subsequent `git worktree add`).
+ * The anchor makes the directory a second work tree of the main repository: it shares the
+ * coordinator's HEAD and index, so `git status` there shows every tracked file deleted, and
+ * `git add`, `commit` or `checkout` there would write the coordinator's index and HEAD. Only the
+ * read-only confinement keeps those writes out; the session's own work belongs in the detached
+ * worktree its request adds under `checkout/`, never in the anchor directory itself.
  */
 export async function anchorSessionCheckout(root: string, directory: string, run: ChildRun = defaultChildRun): Promise<void> {
   try {

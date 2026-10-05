@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
@@ -21,7 +21,8 @@ import { bwrapOnPath, coordinatorCheckoutRefusal, readCoordinatorCheckout, readO
 import { readApproverLaunches } from '../src/master/autonomy.js';
 import { orphanGraceMs, worktreeRoot } from '../src/install/worktree-root.js';
 import { atomicPrivateWrite, dispatchWork, launchApprover, launchEscalationHandler, loadMasterConfig, readEscalationSessions, masterConfigSchema, saveProducerProfile, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { launchProducer, readProducerLedger, reclaimCheckouts } from '../src/producer.js';
+import { launchProducer, loopScratchCheckout, readProducerLedger, reclaimCheckouts } from '../src/producer.js';
+import { applyResearchEvent, clearResearchRuns, type ResearchEvent } from '../src/research.js';
 import { clearDiagnoses, diagnosesSettled, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
 import { faultClassItem, type FaultInstance } from '../src/model/fault-classes.js';
 import { diagnosticianSettings } from '../src/runner/payloads.js';
@@ -92,6 +93,8 @@ async function installed(options: { research?: boolean } = {}) {
   const head = execFileSync('git', ['-C', directory, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const fullConfig = await loadMasterConfig(directory);
   return { root: directory, head, token, config: fullConfig, cleanup: async () => {
+    // The loop's scratch checkout outlives the loop, so the fixture takes it back with the repository.
+    await rm(loopScratchCheckout(worktreeRoot(directory, fullConfig)).directory, { recursive: true, force: true });
     await rm(directory, { recursive: true, force: true });
     await rm(credentials, { recursive: true, force: true });
   } };
@@ -418,14 +421,14 @@ test('unit:session-cwd-own-checkout — the loop starts its research and triage 
       assert.ok(run.holdsRelease, 'the scratch checkout holds the release the loop runs, so the session reads real code');
     }
     assert.equal(started[0].cwd, started[1].cwd, 'research and triage share the one scratch checkout this loop allocated');
-    assert.equal(existsSync(started[0].cwd), false, 'the scratch checkout is settled when the loop that allocated it stops');
+    assert.equal(existsSync(started[0].cwd), true, 'the scratch checkout outlives the loop: research runs detached into it keep working there');
     assert.ok(researchEvents.length >= 1, 'the research run is recorded on the item');
     assert.ok(triageEvents.length === 0, 'a run that settles without a judgement records no triage judgement');
     await cleanup();
   } finally { await fixture.cleanup(); }
 });
 
-test('unit:session-cwd-own-checkout — the loop holds its scratch checkout for as long as it runs: a reclaim pass past the orphan grace leaves it, and the loop settles it when it stops', async () => {
+test('unit:session-cwd-own-checkout — the loop keeps its scratch checkout: a reclaim pass past the orphan grace leaves it while the loop runs and after it stops', async () => {
   const fixture = await installed({ research: true });
   try {
     const { root, head, config, cleanup } = fixture;
@@ -449,7 +452,44 @@ test('unit:session-cwd-own-checkout — the loop holds its scratch checkout for 
       assert.ok(cycle.scratch, 'the loop allocated its scratch checkout before its first cycle');
       assert.ok(cycle.survives, 'a reclaim pass past the orphan grace leaves the scratch checkout, with its release, while the loop runs');
     }
-    assert.equal(existsSync(seen[0].scratch!), false, 'the scratch checkout is settled when the loop that allocated it stops');
+    assert.ok(await survivesReclaim(root, config, seen[0].scratch!), 'a reclaim pass with no loop running leaves the scratch checkout too: a detached research run may still work in it');
+    await cleanup();
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:session-cwd-own-checkout — a restarted loop finds the research run the loop before it detached into the scratch checkout, and adopts it', async () => {
+  const fixture = await installed({ research: true });
+  try {
+    const { root, head, config, cleanup } = fixture;
+    const started: { cwd: string; directory: string }[] = [], adopted: string[] = [];
+    const pending = { id: 'run-1', events: [], onEvent: () => () => {}, cancel: () => {}, detach: () => {}, result: () => new Promise<never>(() => {}) };
+    // A research run that is still working when its loop stops: its directory is in the registry
+    // under the cwd it was started in, and it never settles while the test runs.
+    const runner: Runner = {
+      name: 'stub',
+      start: (_prompt, options) => {
+        const directory = join(options.runs!, 'research-run-1');
+        mkdirSync(directory, { recursive: true });
+        started.push({ cwd: options.cwd, directory });
+        return { ...pending, directory };
+      },
+      adopt: (directory: string) => { adopted.push(directory); return { ...pending, directory }; },
+    } as Runner;
+    const item = { ...ready(), type: 'feature' } as Work;
+    const events: ResearchEvent[] = [];
+    const record = async (_work: Work, event: ResearchEvent) => { events.push(event); };
+    try {
+      await runDaemon(config, emptyDaemonState(config), loopEffects([item], { loadedRelease: { commit: head, dirty: false }, recordResearch: record, research: { cwd: root, runner } }), loopOptions(fixture));
+      assert.equal(started.length, 1, 'the first loop starts one research run');
+      assert.equal(existsSync(started[0].directory), true, 'the run\'s registry entry survives the loop that started it');
+      // The restart: the process that started the run is gone, and the plane records it as running.
+      clearResearchRuns();
+      const running = { ...item, researchBrief: applyResearchEvent(item, events.find(event => event.event === 'started')!, 'graphyard-master', new Date()) } as Work;
+      await runDaemon(config, emptyDaemonState(config), loopEffects([running], { loadedRelease: { commit: head, dirty: false }, recordResearch: record, research: { cwd: root, runner } }), loopOptions(fixture));
+    } finally { clearResearchRuns(); }
+    assert.equal(started.length, 1, 'the restarted loop starts no second run');
+    assert.deepEqual(adopted, [started[0].directory], 'the restarted loop adopts the run from the registry in the same scratch checkout');
+    assert.ok(!events.some(event => event.event === 'failed'), 'the run is not written off as a timeout');
     await cleanup();
   } finally { await fixture.cleanup(); }
 });
