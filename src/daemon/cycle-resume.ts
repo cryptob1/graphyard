@@ -9,6 +9,7 @@ import { launchAppearanceMs, preserveInterruptedAttempt, record } from './effect
 import { roleSessionMaximumMs } from '../model/sessions.js';
 import { credentialBlockedKey, credentialBlockedReason, credentialFailure } from '../worker-credential.js';
 import type { Cycle } from './cycle.js';
+import { settleEndedAttemptFence } from './cycle-reclaim.js';
 
 /** A worker's implementation handle, written by the loop: the one record `master status` and the item's history show of it. */
 export function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, outcome: string, finished: boolean) {
@@ -37,7 +38,10 @@ export async function endWorkerAttempt(cycle: Cycle, item: Work, profile: Worker
   // A session already gone from Herdr has no pane left to close (GY-867 ends such attempts too).
   if (pane) await effects.closeSession(pane);
   await workerHandle(cycle, item, profile, epoch, pane ?? 'none', `closed as failed: ${reason}`, true);
-  return `the attempt ended on the record, ${stop}, ${pane ? `pane ${pane} was closed` : 'no pane was left to close'}, and ${item.key} is dispatched again`;
+  // GY-1155: the ending is on the record and the supervisor was stopped, so the fence is settled
+  // in this same action once the host verifies it gone, rather than waiting out the grace window.
+  const settled = scope && await settleEndedAttemptFence(cycle, item, { epoch, owner: profile.principal, ...(preserved ? { preserved: observed } : {}), closed: `closed as failed: ${reason}` });
+  return `the attempt ended on the record, ${stop}, ${pane ? `pane ${pane} was closed` : 'no pane was left to close'}, ${settled ? 'its containment fence was settled, ' : ''}and ${item.key} is dispatched again`;
 }
 
 /** How long a worker holding a live lease may show no activity before it is re-prompted, and again after that before its item goes to a new attempt (GY-524). */

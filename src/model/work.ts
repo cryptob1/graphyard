@@ -19,7 +19,7 @@ import type { Closure } from './closure.js';
 import type { PendingFollowUps, TriageRecord } from './machine-backlog.js';
 import { proofSchema } from './proof.js';
 import { closedQuestionsSchema } from './closed-question.js';
-import { workOriginSchema } from './interventions.js';
+import { workOriginSchema, type WorkOrigin } from './interventions.js';
 import { demand } from './refusal.js';
 
 export const CHECK_NAME = 'Graphyard / merge', LANDABLE_CHECK = 'graphyard/landable'; // GY-887: both are Graphyard's own, never CI inputs to the verdict
@@ -176,7 +176,7 @@ export interface Work extends Create {
   /** What the research step found before build, and the product questions it asked (src/research.ts). */
   researchBrief?: ResearchRecord | null;
   /** Set when the item was closed without delivery (model/closure.ts); a closed item is `done` but never delivered. */
-  closure?: Closure | null; triage?: TriageRecord | null; pendingFollowUps?: PendingFollowUps | null; // triage: a machine-filed item's judgement (GY-402); pendingFollowUps: follow-ups held until it ships (GY-845), model/machine-backlog.ts
+  closure?: Closure | null; triage?: TriageRecord | null; pendingFollowUps?: PendingFollowUps | null; // triage: a machine-filed item's judgement (GY-402); pendingFollowUps: follow-ups held until it shipped (GY-845), stored before GY-1249 and never written now, model/machine-backlog.ts
   /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */
   capacity?: CapacityState | null;
   queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];
@@ -247,9 +247,7 @@ export function activeLease(work: Work, actor: Principal, epoch: number, now: Da
 // ---- plannedFiles derived from the criteria (GY-140) ---------------------------------------------
 
 interface CriterionText { id: string; text: string; proofs?: readonly string[] }
-const creationWords = /\b(new|creat\w*|add(?:s|ed|ing)?|introduc\w*)\b/i;
-const testPath = /(^|\/)tests?\/|\.test\.[A-Za-z]+$/;
-const sentences = (text: string) => text.split(/(?<=[.!?;])\s+/);
+const creationWords = /\b(new|creat\w*|add(?:s|ed|ing)?|introduc\w*)\b/i, testPath = /(^|\/)tests?\/|\.test\.[A-Za-z]+$/, sentences = (text: string) => text.split(/(?<=[.!?;])\s+/);
 /** True when the tree holds the planned scope: the file itself, or any file under a directory scope. */
 export function scopeExists(path: string, tree: ReadonlySet<string>) {
   const scope = pathScope(path);
@@ -264,8 +262,7 @@ export function scopeExists(path: string, tree: ReadonlySet<string>) {
  * test, since "a test asserts …" is a criterion describing the test it will be written in.
  */
 export function describedAsNew(path: string, criteria: readonly CriterionText[]) {
-  return criteria.find(criterion => sentences(criterion.text).some(sentence => creationWords.test(sentence) && namedPaths(sentence).some(named => pathScopeContains(named, path)))
-    || testPath.test(path) && /\btests?\b/i.test(criterion.text))?.id ?? null;
+  return criteria.find(c => sentences(c.text).some(s => creationWords.test(s) && namedPaths(s).some(n => pathScopeContains(n, path))) || testPath.test(path) && /\btests?\b/i.test(c.text))?.id ?? null;
 }
 export interface PlannedFilesDerivation {
   plannedFiles: string[];
@@ -281,15 +278,18 @@ export interface PlannedFilesDerivation {
  * description mentions in prose is not a requirement and adds nothing — and only exact files
  * are carried: a criterion naming a directory widens nothing on its own. So are a change's inevitable companions (GY-955, model/scope-companions.ts).
  */
-export function derivePlannedFiles(item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[]; documentation?: ItemDocumentation | null }, tree: ReadonlySet<string>): PlannedFilesDerivation {
-  const planned = [...new Set(item.plannedFiles ?? [])];
+export function derivePlannedFiles(
+  item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[]; documentation?: ItemDocumentation | null; origin?: WorkOrigin | null; description?: string | null },
+  tree: ReadonlySet<string>,
+): PlannedFilesDerivation {
+  const planned = [...new Set(item.plannedFiles ?? [])], added: PlannedFilesDerivation['added'] = [];
   const missing = planned.filter(path => !scopeExists(path, tree) && !describedAsNew(path, item.criteria));
-  const added: PlannedFilesDerivation['added'] = [];
   for (const criterion of item.criteria) for (const path of namedPaths(criterion.text)) {
-    if (!tree.has(path) || planned.some(entry => pathScopeContains(entry, path)) || added.some(entry => entry.path === path)) continue;
-    added.push({ path, criterion: criterion.id });
+    if (tree.has(path) && !planned.some(entry => pathScopeContains(entry, path)) && !added.some(entry => entry.path === path)) added.push({ path, criterion: criterion.id });
   }
-  for (const entry of plannedCompanions({ plannedFiles: [...planned, ...added.map(entry => entry.path)], criteria: item.criteria }, tree, itemDocumentationPaths(item))) added.push({ path: entry.path, criterion: entry.criterion ?? 'DOCS' });
+  for (const entry of plannedCompanions({ plannedFiles: [...planned, ...added.map(entry => entry.path)], criteria: item.criteria, origin: item.origin, description: item.description }, tree, itemDocumentationPaths(item))) {
+    if (!added.some(entry2 => entry2.path === entry.path) && !planned.some(entry2 => pathScopeContains(entry2, entry.path))) added.push({ path: entry.path, criterion: entry.criterion ?? 'DOCS' });
+  }
   return { plannedFiles: [...planned, ...added.map(entry => entry.path)], added, missing };
 }
 export function plannedFilesRefusal(missing: readonly string[], base: string) {

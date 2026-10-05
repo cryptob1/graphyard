@@ -80,7 +80,7 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
    * without it never decides one, and every request waits for the operator as before.
    */
   decideScope?: (work: Work) => Promise<Work>;
-  wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: `resync` now, for a step refused on a stale observation
+  wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: a prioritized `resync` now (GY-1266), for a step refused on a stale observation
   /**
    * The review findings standing against the item's head — its unresolved threads and its
    * reviewer's latest change request (review-scope.ts) — read outside every transaction.
@@ -149,13 +149,7 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
    * escalates each and, a cycle later, requests the rework. Absent, nothing is escalated.
    */
   exhaustedProofs?: () => Promise<ExhaustedProof[]>;
-  /**
-   * GY-1118: records a capped change request's non-blocking findings as the item's follow-up batch
-   * (`POST /api/work/KEY/followups`), as the master's operator-agent identity, idempotent on `key`.
-   * With `withdrawReview` absent too, a capped change request is escalated instead.
-   */
-  fileReviewFollowUps?: (work: Work, findings: { path: string | null; text: string }[], reason: string, key: string) => Promise<unknown>;
-  /** GY-1118: withdraws a capped change request as the reviewer App that posted it (GitHub's review dismissal). */
+  /** GY-1118: withdraws a capped change request as the reviewer App that posted it (GitHub's review dismissal); absent, it is escalated instead. */
   withdrawReview?: (work: Work, reviewId: number, message: string) => Promise<void>;
   /**
    * GY-437: between cycles, aligns this checkout with the verified deployed release — fetches the
@@ -266,8 +260,6 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
   adoptRuns?: () => Promise<AdoptedRun[]>; // the headless runs a restart left running (GY-453, run-adoption.ts); unwired adopts nothing
   /** Records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage). */
   recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>;
-  /** Asks the control plane for the one-time follow-up migration (GY-402, POST followups/migrate) as the operator agent. */
-  migrateFollowUps?: () => Promise<{ merged: number; already?: boolean }>;
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
   /** The account the profile's current session was launched on, as its launcher recorded it. */
@@ -583,7 +575,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     research: { cwd: root },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
     recordTriage: (work, body) => mutate(`work/${work.id}/triage`, body),
-    migrateFollowUps: () => asOperatorAgent('POST', 'followups/migrate', {}, 'graphyard-followups-migration'),
     launchedSessions: async () => [
       ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending' && !entry.launching).map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
       ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId })),
@@ -653,7 +644,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     probeBlocker: (work, classification) => loopBlockerProbe(current(), root, run, () => dispatchRefusal(current().url, fetcher))(work, classification), recordBlockerProbe: (work, body) => mutate(`work/${work.id}/blocker-probe`, body) as Promise<Work>,
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
-    decideScope: work => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }), wakeObservation: work => mutate(`work/${work.id}/resync`, {}),
+    decideScope: work => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }), wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true }),
     // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.
     // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.
     reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null,
@@ -668,10 +659,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get replan() {
       return current().operatorAgent ? async (work: Work, paths: string[], reason: string) =>
         asOperatorAgent('POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)) : undefined;
-    },
-    get fileReviewFollowUps() {
-      return current().operatorAgent ? async (work: Work, findings: { path: string | null; text: string }[], reason: string, key: string) =>
-        asOperatorAgent('POST', `work/${encodeURIComponent(work.key)}/followups`, { findings, reason }, key) : undefined;
     },
     get withdrawReview() {
       const reviewer = current().reviewer;
