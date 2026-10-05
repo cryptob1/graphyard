@@ -1042,12 +1042,15 @@ export class Engine {
         // item back. Every other revision under a live lease or quarantine is refused exactly
         // as before.
         const leaseLive = !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
+        // A revision read before the item's last one is refused as exactly that, first: judged
+        // against requirements it never saw, an additive widening reads as a narrowing and would be
+        // refused as a quarantine or lease breach it is not (GY-1293).
+        demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
         widening = liveScopeWidening({ criteria: work.criteria, dependencies: work.dependencies, plannedFiles: work.plannedFiles ?? [], exclusiveResources: work.exclusiveResources, producerProofs: work.producerProofs }, data);
         if (!widening) {
           demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}; requirements remain immutable until settlement or stopped-worker recovery`);
           demand(!leaseLive, 'Stop and release the active worker before revising requirements');
         }
-        demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
         // A widening that answers one attempt's scope request (the loop's, on a review finding)
         // holds only while that request is open, its attempt holds a live lease and the head the
         // findings were read for is still the candidate: a claim, a lease end or a push changes

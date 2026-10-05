@@ -1,5 +1,6 @@
 // Concern: the decision histories the decisions step reads, kept across cycles (GY-1142).
 import type { Work } from '../model.js';
+import { routableScopeRequest } from '../model/scope.js';
 import type { ApprovalWatch } from './state.js';
 import type { DaemonEffects } from './effects.js';
 
@@ -13,6 +14,11 @@ export const emptyHeldDecisions = (): HeldDecisions => ({ seq: null, histories: 
 export const decisionReadConcurrency = 8;
 /** How long the decisions step's control-plane reads may take in all, from the step's start (GY-1241). */
 export const decisionReadDeadlineMs = 10_000;
+/**
+ * GY-1293. A request that failed only because its history read missed the step's deadline: its
+ * read was still started, so it is asked again on the next cycle, never on the widening backoff.
+ */
+export const lateDecisionRead = (detail: string) => / ms read deadline passed before .+ answered; it is read again next cycle/.test(detail);
 /** How long a kept history may go without being read afresh, whatever the ledger says (GY-1241). */
 export const decisionRefreshMs = 30 * 60_000;
 /**
@@ -39,6 +45,11 @@ export const decisionRefreshMs = 30 * 60_000;
  * named by `decisionChanges`, so every kept history is dropped and read afresh at least every
  * `decisionRefreshMs`. A kept history is handed out as a copy: no caller can change what later
  * cycles read.
+ *
+ * GY-1293. The read-ahead takes first the items whose refused scope request the step may put to
+ * an approver this cycle, then the open watches. A worker waits on that request, inside the scope
+ * budget: read only when the step reached it, its history missed the deadline behind every slower
+ * read ahead of it, cycle after cycle (GY-1287 on 5 October 2026, twice, until the budget passed).
  */
 export async function decisionReads(effects: DaemonEffects, held: HeldDecisions, open: readonly Work[], watched: readonly ApprovalWatch[], clock = Date.now(), deadlineMs = decisionReadDeadlineMs) {
   const until = performance.now() + deadlineMs;
@@ -80,9 +91,10 @@ export async function decisionReads(effects: DaemonEffects, held: HeldDecisions,
     if (property === 'decide' || property === 'withdraw') return writes(Reflect.get(target, property, receiver));
     return Reflect.get(target, property, receiver);
   } });
-  // The open watches' histories are read ahead, a bounded few at a time, while the step works.
+  // The waiting scope requests' and open watches' histories are read ahead, a bounded few at a time, while the step works.
   const keys = new Set(watched.filter(watch => !watch.settledAt).map(watch => watch.work));
-  const ahead = effects.decisions ? open.filter(item => keys.has(item.key) && !held.histories.has(item.id)) : [];
+  const scoped = open.filter(item => item.stage !== 'done' && !!routableScopeRequest(item, clock));
+  const ahead = effects.decisions ? [...scoped, ...open.filter(item => keys.has(item.key) && !scoped.includes(item))].filter(item => !held.histories.has(item.id)) : [];
   const next = async (): Promise<void> => { const item = ahead.shift(); if (item) { if (!held.histories.has(item.id)) await start(item).catch(() => undefined); return next(); } };
   void Promise.all(Array.from({ length: decisionReadConcurrency }, next));
   return reads;

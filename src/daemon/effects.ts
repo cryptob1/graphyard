@@ -205,6 +205,8 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * item this names unmoved; absent, every history is read again each cycle.
    */
   decisionChanges?: (after: string | null) => Promise<{ seq: string; work: string[]; complete: boolean }>;
+  /** The deadline the decisions step's control-plane reads share, in ms (GY-1241); `decisionReadDeadlineMs` when unset. */
+  decisionReadDeadlineMs?: number;
   /**
    * Takes back one of the loop's own requests, as its requester. Only for a request the item has
    * moved past — a merge decision bound to an earlier candidate, a round the item no longer needs —
