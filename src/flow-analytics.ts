@@ -5,7 +5,6 @@ import { stages, type Stage, type Work } from './model.js';
 import { queueSequencingReason } from './merge-queue.js';
 import { conflictHotspots, conflictHotspotWindowMs, ledgerConflicts, type ConflictOccurrence } from './model/conflict-hotspots.js';
 import { eventHistoryLimits } from './events-history.js';
-import { agentOwner } from './master/attention.js';
 
 // Delivery-flow analytics.
 //
@@ -2094,7 +2093,9 @@ export async function speedSections(speed: Record<string, any>, masterApi: (path
   try { productionEnvironment = productionEnvironmentFromEnv(); } catch { /* an invalid name falls back to the default */ }
   const report = { ...deliverySpeed(snapshot.work, { now, readyAt: read.readyAt, targets: options.targets, productionEnvironment }), readyEventsComplete: read.complete };
   const attention = deliverySpeedBreaches(report).map(breach => ({ subject: 'delivery speed', text: breach.text,
-    ...agentOwner('master', 'Find what held the slowest items (graphyard status GY-N) and file the fix that removes it; the targets are deliverySpeed in master.json') }));
+    // agentOwner('master', …)'s shape, built here: src/master/attention.ts imports Node-only modules this browser-bundled file must not.
+    role: 'master' as const, approvedBy: null, human: false, humanOnly: null,
+    next: 'Find what held the slowest items (graphyard status GY-N) and file the fix that removes it; the targets are deliverySpeed in master.json' }));
   return { report, attention };
 }
 const merged7d = (items: readonly Work[], now: number) => items.filter(work => {
