@@ -2394,7 +2394,7 @@ export class Engine {
             if (opening) {
               // Versions first: a row that moves after them reads as moved, so the first batch reads it again.
               const listed = (await db.query(reconcileRowsSql)).rows as { id: string; number: string; version: string; settled: boolean }[];
-              config = stableJson({ ciAppIds: this.ciAppIds, batch: this.mergeBatchSize, optimistic: this.optimisticMerge, exclude: this.optimisticExclude, tips: this.parallelTips });
+              config = stableJson({ ciAppIds: this.ciAppIds, batch: this.mergeBatchSize, tips: this.parallelTips });
               // Measured on the clock evaluation reads, so time the gates see pass is what brings the catch-up.
               full = !fleet.size || config !== this.reconcileConfig || !(now.getTime() - this.reconcileFullAt < this.reconcileFullEvaluationMs);
               if (full) this.reconcileFullAt = now.getTime();
