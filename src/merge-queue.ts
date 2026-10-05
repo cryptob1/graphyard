@@ -1451,6 +1451,23 @@ export function attributedFailureRework(work: Work): { reason: string; binding: 
   return { reason: `${work.key}: required CI check ${attribution.check} failed on speculative tip ${attribution.tip.slice(0, 12)} of ${attribution.entry}, built behind predecessors ${attribution.predecessors.join(', ')}, and is attributed to this item: ${culprit.evidence}. Attribution: ${attribution.evidence}. The item left the merge queue, ${attribution.entry} waits for it without a rework of its own, and it returns to a worker to fix what CI found.`,
     binding: `${candidate.sha}:ci-attributed:${attribution.entry}:${attribution.tip}` };
 }
+/**
+ * How a failed check on the current head reads when that head is a speculative queue tip holding
+ * unlanded predecessors (GY-471). `held`: the queue still decides (the head is the live tip), or the
+ * recorded attribution blames a predecessor, which `attributedFailureRework` asks instead. Otherwise
+ * `note` names the tip's predecessors and the attribution evidence for the approver ('' off a tip).
+ */
+export function tipFailureNote(work: Work): { held: boolean; note: string } {
+  const candidate = work.candidate;
+  if (!candidate) return { held: false, note: '' };
+  if (work.queue?.speculation?.tip === candidate.sha) return { held: true, note: '' };
+  const ejection = work.queueEjection?.sha === candidate.sha && work.queueEjection.policyRevision === work.policyRevision ? work.queueEjection : null;
+  const attribution = ejection?.attribution?.tip === candidate.sha ? ejection.attribution : null;
+  if (attribution?.verdict === 'predecessor') return { held: true, note: '' };
+  const predecessors = attribution?.predecessors ?? tipPredecessors(work);
+  if (predecessors === null) return { held: false, note: '' };
+  return { held: false, note: ` Candidate ${candidate.sha.slice(0, 12)} is a speculative merge-queue tip built ${predecessors.length ? `behind predecessors ${predecessors.join(', ')}` : 'on the base branch with no predecessor'}; attribution: ${attribution ? `${attribution.evidence}${attribution.named.length ? '' : ' (the check output named no file)'}` : 'none was recorded for this tip, so no predecessor was shown to explain the failure'}.` };
+}
 /** The entries the current head was published behind as a speculative tip, or null when it is not a tip the record knows. */
 export function tipPredecessors(work: Pick<Work, 'candidate' | 'queue' | 'queueHistory'>): string[] | null {
   const candidate = work.candidate, speculation = work.queue?.speculation;

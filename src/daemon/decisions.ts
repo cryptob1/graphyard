@@ -3,7 +3,7 @@ import { type Work, type AgentReview, reviewProviderOf, standingEscalations, lea
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker } from '../model/scope.js';
 import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
-import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, tipPredecessors, attributedFailureRework, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, tipFailureNote, attributedFailureRework, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { extractProducerAccountsOrRuntimes, isUnactedProducerAttempt, unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
@@ -399,22 +399,13 @@ export function overtakenDecision(work: Work, decision: RoutineDecision, standin
  * for the round: on 2026-09-25 GY-245's worker had completed, a base refresh produced
  * a3b75653db55, its `test` check failed, and the item sat in Test for over four hours with its
  * next step named for no one. The latest attempt of each check decides, so a rerun that is still
- * going or passed asks for nothing; the binding names the head and the failed checks.
- *
- * A head that is a speculative queue tip holds unlanded predecessors, so its failure is attributed
- * first (GY-471, merge-queue.ts `attributeTipFailure`): while queued, the queue decides; once
- * ejected, a failure attributed to a predecessor asks nothing of this item — the predecessor is
- * asked instead (merge-queue.ts `attributedFailureRework`). Any other failure on a tip is the
- * entry's, and the request names the tip's predecessors and the evidence for the approver.
- */
+ * going or passed asks for nothing; the binding names the head and the failed checks. A queue
+ * tip's failure is attributed first (GY-471, `tipFailureNote`). */
 export function failedCheckRework(work: Work): { reason: string; binding: string } | null {
   const candidate = work.candidate, observation = work.observation;
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
-  if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
-  if (work.queue?.speculation?.tip === candidate.sha) return null;
-  const ejection = work.queueEjection?.sha === candidate.sha && work.queueEjection.policyRevision === work.policyRevision ? work.queueEjection : null;
-  const attribution = ejection?.attribution?.tip === candidate.sha ? ejection.attribution : null;
-  if (attribution?.verdict === 'predecessor') return null;
+  const tip = tipFailureNote(work);
+  if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed' || tip.held) return null;
   // The policy's checks and the base branch's other required checks alike (GY-430): PR #221's
   // `secrets` scan failed, GitHub blocked the merge, and nothing asked for the round. A policy
   // check's run is read through the test gate's trust boundary (GY-731); a protection-only
@@ -427,10 +418,7 @@ export function failedCheckRework(work: Work): { reason: string; binding: string
     return !!latest && ['failure', 'timed_out', 'action_required', ...(required.policy ? [] : ['startup_failure'])].includes(latest.result) && !checkRerunHeld(work, required.name);
   }).map(required => required.name).sort();
   if (!failed.length) return null;
-  const predecessors = attribution?.predecessors ?? tipPredecessors(work);
-  const tip = predecessors === null ? ''
-    : ` Candidate ${candidate.sha.slice(0, 12)} is a speculative merge-queue tip built ${predecessors.length ? `behind predecessors ${predecessors.join(', ')}` : 'on the base branch with no predecessor'}; attribution: ${attribution ? `${attribution.evidence}${attribution.named.length ? '' : ' (the check output named no file)'}` : 'none was recorded for this tip, so no predecessor was shown to explain the failure'}.`;
-  return { reason: `${work.key}: required CI check${failed.length === 1 ? '' : 's'} ${failed.join(', ')} failed on candidate ${candidate.sha.slice(0, 12)}.${tip} No gate passes a head whose required checks failed, so the item returns to a worker to fix what CI found.`,
+  return { reason: `${work.key}: required CI check${failed.length === 1 ? '' : 's'} ${failed.join(', ')} failed on candidate ${candidate.sha.slice(0, 12)}.${tip.note} No gate passes a head whose required checks failed, so the item returns to a worker to fix what CI found.`,
     binding: `${candidate.sha}:ci:${failed.join(',')}` };
 }
 /**
