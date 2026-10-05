@@ -460,6 +460,8 @@ export interface ConnectProvider {
   authFile?: string;
   /** The provider's auth file content: what `key` becomes, laid over whatever the file already held. */
   authDocument?: (existing: Record<string, unknown>, key: string) => Record<string, unknown>;
+  /** A settings file the runtime needs beside the key, laid over whatever it held — no credential in it. */
+  settings?: { file: string; document: (existing: Record<string, unknown>) => Record<string, unknown> };
   /**
    * The provider's own login command for `subscription` providers, and the env variable that selects
    * the login home. `env` is laid over the host's environment (to keep a login from opening a
@@ -490,6 +492,16 @@ export const connectProviders: readonly ConnectProvider[] = [
     // The smoke pins the provider and model, so "healthy" means this key answered.
     smoke: { command: 'opencode', args: ['run', '--model', 'zai-coding-plan/glm-5.3-flash', smokePrompt], envVariable: 'XDG_DATA_HOME' },
     help: 'Your z.ai coding-plan key, wrapped by OpenCode. Cheap-model accounts join research, approval and proofs.',
+  },
+  {
+    id: 'pi-zai', label: 'Pi (z.ai key)', kind: 'api-key', runtime: 'pi', model: 'pi-default', tier: 'fast',
+    // Pi's own auth document under PI_CODING_AGENT_DIR: one entry per provider, a key as `api_key`.
+    authFile: 'auth.json',
+    authDocument: (existing, key) => ({ ...existing, zai: { type: 'api_key', key } }),
+    // A registry account launches `pi` with no provider flag, so the home names z.ai as its default.
+    settings: { file: 'settings.json', document: existing => ({ ...existing, defaultProvider: 'zai', defaultModel: 'glm-5.3' }) },
+    smoke: { command: 'pi', args: ['-p', '--no-session', '--provider', 'zai', '--model', 'glm-5.3', smokePrompt], envVariable: 'PI_CODING_AGENT_DIR' },
+    help: 'Your z.ai coding-plan key, run by the Pi coding agent. Pi accounts join approval and proofs.',
   },
   {
     id: 'anthropic-api', label: 'Anthropic API', kind: 'api-key', runtime: 'claude', model: 'claude-default', tier: 'strong',

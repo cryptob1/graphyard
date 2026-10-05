@@ -33,7 +33,7 @@ export interface CliContext {
   individualToken(): Promise<string | undefined>;
   individualHostId(): string;
   activeCliPath(): Promise<string>;
-  /** The Git toplevel of the current working directory. */
+  /** GRAPHYARD_REPOSITORY_ROOT when set, else the Git toplevel of the current working directory. */
   repositoryRoot(): string;
 }
 
@@ -81,7 +81,8 @@ export async function createContext(command: string, id: string | undefined, arg
         return path;
       } catch { throw new Error('The active Graphyard CLI launcher is unavailable; select an existing launcher'); }
     },
-    repositoryRoot: () => execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim(),
+    // GY-866: a session started in its own checkout is handed the coordinator's root by its launch.
+    repositoryRoot: () => process.env.GRAPHYARD_REPOSITORY_ROOT?.trim() ? resolve(process.env.GRAPHYARD_REPOSITORY_ROOT) : execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim(),
   };
 }
 

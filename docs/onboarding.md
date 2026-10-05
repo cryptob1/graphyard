@@ -37,7 +37,7 @@ Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-mo
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account** (key or login): the executor writes and smoke-tests a 0600 auth file.
+Settings › **Agents** › **Connect an account** (key or login): the executor writes and smoke-tests a 0600 auth file (**Pi (z.ai key)**: Pi's own `auth.json` in a `pi-<letter>` home).
 
 ### Configure the fleet
 
