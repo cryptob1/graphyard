@@ -47,7 +47,7 @@ function cycle(work: Work[], overrides: Partial<Omit<Cycle, 'effects'>> & { doct
     agents: () => overrides.agents ?? [],
     credentials: async () => ({}),
     snapshot: async () => ({ work, now: observedAt }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: observedAt, reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
   };

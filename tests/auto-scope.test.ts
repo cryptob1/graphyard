@@ -81,7 +81,6 @@ const loopEffects = (overrides: Partial<DaemonEffects> = {}, skewMs = 0): Daemon
   closeSession: () => {},
   dispatch: async () => {},
   requestProof: () => {},
-  merge: async () => ({}),
   observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
   recordDeployment: async () => {},
   requestSmoke: () => {},

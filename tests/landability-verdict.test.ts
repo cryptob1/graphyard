@@ -5,7 +5,7 @@ import { evaluate } from '../src/model/gates.js';
 import { placeInQueue } from '../src/model/queue.js';
 import { ejectionReason } from '../src/merge-queue.js';
 import {
-  LANDABILITY_VERSION, evaluateLandability, landabilityEjection, landabilityEjections, landabilityFamily, landabilityRefusals, type LandabilityVerdict,
+  LANDABILITY_VERSION, evaluateLandability, landabilityEjection, landabilityEjections, landabilityRefusals, type LandabilityVerdict,
 } from '../src/model/landability.js';
 import { stableJson } from '../src/model/stable-json.js';
 import type { Evidence, Observation, ScopeFile, Work } from '../src/model.js';
@@ -64,10 +64,13 @@ function item(shape: Shape, extra: Partial<Work> = {}): Work {
   } as unknown as Work;
 }
 
-/** The gates' own answer for the two landability families. */
+/**
+ * The gates' own answer for the landability families. Since GY-1235 the acceptance family is no
+ * gate (proofs gate nothing): only the build gate reads the verdict.
+ */
 const gatesOf = (work: Work, all: Work[]) => {
   const gates = evaluate(work, all, now, CI).gates;
-  return { build: gates.find(gate => gate.name === 'build')!, acceptance: gates.find(gate => gate.name === 'acceptance')! };
+  return { build: gates.find(gate => gate.name === 'build')!, acceptance: gates.find(gate => gate.name === 'acceptance') };
 };
 const refused = (verdict: LandabilityVerdict) => verdict.verdict === 'refused';
 
@@ -100,17 +103,12 @@ test('unit:landability-verdict-single-function — evaluateLandability returns l
       assert.equal(typeof entry.reason, 'string');
     }
     assert.ok(verdict.reasons.some(entry => entry.gate === gate && reason.test(entry.reason)), `${name}: ${JSON.stringify(verdict.reasons)}`);
-    // The gates are the verdict's families word for word, in order: nothing is computed twice.
+    // The build gate is the verdict's build family word for word, in order: nothing is computed
+    // twice; the acceptance family gates nothing since GY-1235.
     const gates = gatesOf(work, [work]);
     assert.deepEqual(gates.build.reasons, landabilityRefusals(verdict, 'build'), name);
-    assert.deepEqual(gates.acceptance.reasons, landabilityRefusals(verdict, 'acceptance'), name);
+    assert.equal(gates.acceptance, undefined, name);
   }
-  // An inherited bootstrap obligation is judged by the acceptance family too.
-  const bootstrap = { ...item({ key: 'GY-K', proofs: ['unit:contract'], queued: null }), stage: 'done', criteria: [{ id: 'AC-1', text: 'deferred', proofs: ['unit:contract'], bootstrap: true }] } as unknown as Work;
-  const inheritor = item({ key: 'GY-L', evidence: [evidence('unit:own-proof', sha('7'))] });
-  const all = [bootstrap, inheritor];
-  const gates = gatesOf(inheritor, all);
-  assert.deepEqual(gates.acceptance.reasons, landabilityRefusals(evaluateLandability(inheritor, all, now), 'acceptance'));
 });
 
 test('unit:queue-and-gates-share-verdict — ejectionReason and the landing guard eject only for a reason the verdict gives; GY-871, GY-875 and GY-863 agree', () => {
@@ -214,9 +212,11 @@ test('unit:landability-consumers-agree — over generated work items the gates, 
     const { work, all } = generated(round, random);
     const verdict = evaluateLandability(work, all, now);
     const label = `${round}: ${JSON.stringify(verdict)}`;
-    // The gates: build and acceptance both pass exactly when the verdict is landable.
+    // The gates: build passes exactly when the verdict refuses nothing on the build family.
     const gates = gatesOf(work, all);
-    assert.equal(gates.build.passed && gates.acceptance.passed, verdict.verdict === 'landable', label);
+    assert.equal(gates.build.passed, landabilityRefusals(verdict, 'build').length === 0, label);
+    const accepted = landabilityRefusals(verdict, 'acceptance').length === 0;
+    assert.equal(gates.build.passed && accepted, verdict.verdict === 'landable', label);
     // The queue: a queued entry is ejected on landability grounds only for a reason the verdict
     // gives, and a landable entry (clean CI, no review, no threads) is never ejected at all.
     if (work.queue) {
@@ -228,7 +228,7 @@ test('unit:landability-consumers-agree — over generated work items the gates, 
       } else if (refused(verdict)) seen.held++;
     } else {
       // An unqueued candidate the gates pass joins the queue; one the verdict refuses does not.
-      const placed = placeInQueue(work, all, now, CI, gates.build.passed && gates.acceptance.passed);
+      const placed = placeInQueue(work, all, now, CI, gates.build.passed && accepted);
       assert.equal(!!placed.queue, verdict.verdict === 'landable', label);
     }
     // The landing guard: its ejection is a build refusal of the same verdict, never a separate answer.
@@ -292,58 +292,5 @@ test('unit:landability-pure-on-demand — the verdict is deterministic, recomput
   const result = evaluate(stranger, [stranger], now, CI);
   const build = result.gates.find(gate => gate.name === 'build')!;
   assert.deepEqual(build.verdict, { version: verdict.version, inputs: verdict.inputs });
-  assert.equal(result.gates.find(gate => gate.name === 'acceptance')!.verdict, undefined, 'a passing gate records no refusal');
-  assert.equal(result.queueEjection?.family, 'landability');
-  assert.deepEqual(result.queueEjection?.verdict, { version: verdict.version, inputs: verdict.inputs });
-  assert.deepEqual(result.queueHistory.at(-1)?.verdict, { version: verdict.version, inputs: verdict.inputs });
-});
-
-test('unit:ejection-not-sticky — an entry ejected on landability grounds re-enters on the same head once the verdict is landable (GY-472)', () => {
-  // GY-472, 2026-09-27: ejected at f72abb4a2b48 over GY-509's files before GY-871 landed the carried
-  // excusal, and still held out by the stored ejection after production served the fix, because a
-  // stored ejection held the same head out forever. The record predates the typed family.
-  const tip = 'f72abb4a2b48';
-  const head = `${tip}${'0'.repeat(28)}`;
-  const gy509 = item({ key: 'GY-509', head: sha('4'), planned: ['src/state.ts'], files: ['src/state.ts'], queued: 1 });
-  const ejection = { at, sequence: 3, reason: `Landing speculative tip ${tip} on ${main.slice(0, 12)} would revert work outside its planned files: src/state.ts: differs from that commit (+3 −1) (owned by GY-509, ahead of it and not yet landed)`, sha: head, policyRevision: 1, conflict: null };
-  const gy472 = item({ key: 'GY-472', head, files: ['src/server/routes/own.ts', 'src/state.ts'], queued: null, evidence: [evidence('unit:own-proof', head)],
-    landing: { base: main, files: [changed('src/server/routes/own.ts'), changed('src/state.ts')], foreign: [{ key: 'GY-509', pr: gy509.candidate!.pr, head: sha('4') }] } },
-  { queueEjection: ejection, queueSequence: 3, queueHistory: [{ at, event: 'ejected', sequence: 3, reason: ejection.reason, tip: head }] });
-  const all = [gy509, gy472];
-  assert.equal(landabilityFamily(ejection), true, 'a legacy landing ejection reads as a landability one');
-  // Under the fix the verdict excuses the carried file: the build gate names GY-509 and sends no
-  // worker, so the item is not eligible yet — but nothing about the ejection itself holds it.
-  const carriedVerdict = evaluateLandability(gy472, all, now);
-  assert.match(landabilityRefusals(carriedVerdict, 'build')[0], /^Carried from another item's tip/);
-  assert.equal(landabilityEjection(carriedVerdict, 'landing'), null, 'the verdict no longer ejects over the carried file');
-  // GY-509 lands, the landing check no longer names it foreign: the same head is landable, and it
-  // re-enters the queue without a new head.
-  const landed = { ...gy509, stage: 'done', queue: null, observation: { ...gy509.observation!, merged: true } } as Work;
-  const cleared = { ...gy472, observation: { ...gy472.observation!, scopeFiles: [changed('src/server/routes/own.ts'), changed('src/state.ts', { sha: sha('e') })], landing: { base: main, files: [changed('src/server/routes/own.ts')] } } } as Work;
-  const after = [landed, cleared];
-  assert.equal(evaluateLandability(cleared, after, now).verdict, 'landable');
-  const result = evaluate(cleared, after, now, CI);
-  assert.ok(result.queue, `re-entered: ${JSON.stringify(result.gates.filter(gate => !gate.passed))}`);
-  assert.equal(result.queueEjection, null);
-  assert.equal(result.queueHistory.at(-1)?.event, 'enqueued');
-  assert.equal(cleared.candidate!.sha, head, 'the same head, not a new one');
-
-  // A typed landability ejection holds only while the verdict refuses. Eligibility alone does not
-  // decide: an ejection whose verdict still refuses stays out even if the caller says eligible.
-  const failing = item({ key: 'GY-F', queued: 1, evidence: [evidence('unit:own-proof', sha('7'), { result: 'fail' })] });
-  const out = evaluate(failing, [failing], now, CI);
-  assert.equal(out.queue, null);
-  assert.equal(out.queueEjection?.reason, 'Proof unit:own-proof failed on speculative tip 777777777777');
-  assert.equal(out.queueEjection?.family, 'landability');
-  const held = { ...failing, queue: null, queueEjection: out.queueEjection, queueHistory: out.queueHistory } as Work;
-  assert.equal(placeInQueue(held, [held], now, CI, true).queue, null, 'still refused: the ejection holds');
-  const proven = { ...held, evidence: [...held.evidence, evidence('unit:own-proof', sha('7'), { at: '2026-09-30T12:00:05.000Z' })] } as Work;
-  const back = evaluate(proven, [proven], now, CI);
-  assert.ok(back.queue, 'a new passing record on the same head re-enters it');
-  assert.equal(back.queueEjection, null);
-
-  // Any other ejection keeps the head's stickiness, so a CI or review ejection never churns in and out.
-  const ci = { ...proven, queueEjection: { at, sequence: 1, reason: 'Required CI check test did not pass on speculative tip 777777777777', sha: sha('7'), policyRevision: 1, conflict: null, family: null } } as Work;
-  assert.equal(landabilityFamily(ci.queueEjection!), false);
-  assert.equal(evaluate(ci, [ci], now, CI).queue, null);
+  assert.ok(result.gates.filter(gate => gate.passed).every(gate => gate.verdict === undefined), 'a passing gate records no refusal');
 });

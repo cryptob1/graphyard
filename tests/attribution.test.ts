@@ -11,7 +11,6 @@ import { Delivery, type Release } from '../src/delivery.js';
 import { defineScenario } from '../src/scenarios.js';
 import { currentEvidence, type Observation, type Principal, type Work } from '../src/model.js';
 import { server } from '../src/server.js';
-import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { attributionDrilldown, candidateManifest, compatibilitySignature, computeAttribution, digestHash, manifestHash, readAttribution, releaseManifest, signatureDifferences, targetIdentity, windowIdentity, type AttributionRecord } from '../src/attribution.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -124,21 +123,17 @@ async function cleanup(f: Fixture) {
     const a = (await request(r.id)).attempts.at(-1); if (a && !a.settled) await validation.operatorCommand(operator, 'settle', { requestId: r.id, epoch: a.epoch, reason: 'Fixture has no external process', settlementEvidence: 'https://tests.example.test/no-process' }, id());
   }
 }
-/** Delivered work the way production reaches it: an authorized, verified, independently observed merge — release membership is checked against this. */
+/** Delivered work the way production reaches it: a candidate passing every gate whose merge GitHub reports, independently observed — release membership is checked against this. */
 async function delivered(mergeSha: string) {
   let w = await engine.execute(operator, 'create', null, { title: `Delivered change ${++serial}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/attribution-delivered-${serial}`, branch: `graphyard/attribution-delivered-${serial}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: serial }, id());
-  await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [w.id]);
   const observation = (): Observation => ({ clockOffset: { min: 0, max: 0 }, candidate: { sha, baseSha: base, pr: serial, branch: `graphyard/attribution-delivered-${serial}`, author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }], reviews: [{ reviewer: 'reviewer', sha, state: 'APPROVED' }], protected: true, mergeable: true, merged: false, mergeSha: null, files: [], scopeFiles: [], at: new Date().toISOString() });
   w = await engine.observe(w.id, w.revision, observation());
   w = await engine.execute(collector, 'evidence', w.id, { proof: 'integration:claim-safety', sha, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
-  const speculation: QueueSpeculation = { ref: queueRef(w.key), tip: sha, base, baseTree: '7e'.repeat(20), predecessors: [], policyRevision: w.policyRevision, publishedAt: new Date().toISOString() };
-  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [w.id, JSON.stringify(speculation)]);
-  w = await engine.observe(w.id, (await current(w.id)).revision, observation());
-  const committed = await engine.requestEnqueue(coordinator, w.id, { enqueue: true, expectedRevision: w.revision, sha, baseSha: base, policyRevision: w.policyRevision }, id());
+  const committed = { revision: (await engine.store.workItem(w.id))!.revision };
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   w = await engine.observe(w.id, committed.revision, { ...observation(), merged: true, mergedAt, mergeSha });
   assert.equal(w.stage, 'done'); return w;
@@ -339,7 +334,7 @@ test('integration:safe-automatic-reanchor', async () => {
   // The fresh request executes and passes against the observed target.
   const command = await start(f, fresh);
   const passed: any = await validation.result(collector, report(f, command, B), id()); assert.equal(passed.passed, true, passed.reasons.join('; '));
-  w = await current(f.w.id); assert.ok(currentEvidence(w, f.proof), "currentEvidence(w, f.proof)"); assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, true);
+  w = await current(f.w.id); assert.ok(currentEvidence(w, f.proof), "currentEvidence(w, f.proof)");
   // A delayed observation of the execution window that measured manifest A undermines the pass; nothing is edited, the pass simply stops counting and the request is re-anchored.
   // The observer's newest sample still shows B, so the delayed one is history about the window, not the current identity.
   await observe(f, B);
@@ -348,7 +343,7 @@ test('integration:safe-automatic-reanchor', async () => {
   const delayed = await observe(f, A, { now: dispatchedAt, validFrom: 0, validTo: 0.001, observedAt: 0.001 });
   assert.equal(delayed.authoritative, true);
   w = await current(f.w.id);
-  assert.equal(currentEvidence(w, f.proof), undefined, 'the undermined pass is no longer current'); assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false);
+  assert.equal(currentEvidence(w, f.proof), undefined, 'the undermined pass is no longer current');
   assert.equal(w.evidence.length, 1, 'the evidence record is preserved, not edited or removed'); assert.equal(w.evidence[0].result, 'pass');
   const undermined = await records(f.w.id, 'attribution-undermined'); assert.equal(undermined.length, 1); assert.equal(undermined[0].attemptId, attempt.id); assert.equal(undermined[0].details.evidenceId, w.evidence[0].id);
   assert.equal((await request(fresh.id)).state, 'superseded');
@@ -584,7 +579,7 @@ test('integration:attribution-security-regressions', async () => {
   const passed: any = await validation.result(collector, report(f, command), id()); assert.equal(passed.passed, true, passed.reasons.join('; '));
   const attempt = (await request(live.id)).attempts.at(-1)!;
   await observe(f, B, { now: Date.parse(attempt.dispatchedAt), validFrom: 0, validTo: 0.001, observedAt: 0.001 });
-  w = await current(f.w.id); assert.equal(currentEvidence(w, f.proof), undefined); assert.equal(w.gates.find(g => g.name === 'acceptance')?.passed, false);
+  w = await current(f.w.id); assert.equal(currentEvidence(w, f.proof), undefined);
   const replacement = await request(w.validation![f.proof].requestId!); assert.equal(replacement.attempts.length, 0);
   const late: any = await validation.result(collector, report(f, command), id()); assert.equal(late.accepted, false, 'a late report on the superseded attempt is recorded, never accepted');
   const generic = await engine.execute({ ...collector, proofs: [f.proof] }, 'evidence', w.id, { proof: f.proof, sha, baseSha: base, policyRevision: 1, executed: 1, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, result: 'pass', scenarioRevision: 1, environment: f.environment.id }, id());

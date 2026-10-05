@@ -109,12 +109,12 @@ function adapter(observation: (work: Work) => Observation, refresh?: GitHub) {
   } as unknown as GitHub };
 }
 const snapshot = (work: Work) => ({ head: work.candidate!.sha, baseSha: work.candidate!.baseSha, review: gate(work, 'review').passed,
-  acceptance: gate(work, 'acceptance').passed, evidence: work.evidence.map(entry => entry.id).sort(), refreshed: work.baseRefresh?.head !== undefined && work.baseRefresh.head !== work.candidate!.sha, carry: work.baseRefresh?.carry ?? null });
+  evidence: work.evidence.map(entry => entry.id).sort(), refreshed: work.baseRefresh?.head !== undefined && work.baseRefresh.head !== work.candidate!.sha, carry: work.baseRefresh?.carry ?? null });
 
 test('unit:clean-candidate-not-refreshed — GitHub reporting a clean unqueued candidate conflicting is checked with a test merge: a clean one is recorded as a stale reading and keeps everything; a confirmed conflict is refreshed and reworked', async () => {
   const main = sha40('a1'), moved = sha40('a2'), head = sha40('a3');
   let work = await validated(await submitted('Stale mergeability'), { sha: head, baseSha: main });
-  assert.equal(gate(work, 'review').passed, true); assert.equal(gate(work, 'acceptance').passed, true);
+  assert.equal(gate(work, 'review').passed, true);
   const before = snapshot(work), stage = work.stage;
 
   // Main moves; GitHub's first reading after it says the head conflicts. It does not.

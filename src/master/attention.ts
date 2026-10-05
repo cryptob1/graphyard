@@ -33,8 +33,11 @@ export interface ControlPlaneStatus {
  * and `humanOnly` then names which of those decisions it is.
  */
 export interface AttentionOwner { role: 'master' | 'reviewer' | 'control plane' | 'human'; approvedBy: 'approver' | null; human: boolean; humanOnly: typeof humanOnlyDecisions[number] | null; next: string }
-/** An attention item carries its fault kind and class (GY-173); a builder that sets neither is classified by its wording. */
-export interface AttentionItem extends AttentionOwner { subject: string; text: string; kind?: FaultKind; faultClass?: FaultClass }
+/**
+ * An attention item carries its fault kind and class (GY-173); a builder that sets neither is classified by its wording.
+ * `resource` names the registered resource a symptom was attributed to (GY-1272), so the loop tracks it as that resource's fault.
+ */
+export interface AttentionItem extends AttentionOwner { subject: string; text: string; kind?: FaultKind; faultClass?: FaultClass; resource?: string }
 export const agentOwner = (role: 'master' | 'reviewer' | 'control plane', next: string, approvedBy: 'approver' | null = null): AttentionOwner => ({ role, approvedBy, human: false, humanOnly: null, next });
 export const humanOwner = (humanOnly: typeof humanOnlyDecisions[number], next: string): AttentionOwner => ({ role: 'human', approvedBy: null, human: true, humanOnly, next });
 /** The sources of installation attention; each is also its fault kind. */
@@ -130,7 +133,7 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause): Atten
   if (manual && driven && automatableProof(work, manual)) return agentOwner('control plane', `The loop's producer session produces ${manual} on the exact head; once the loop stops relaunching its request, graphyard master decide ${key} attest '{"proof":"${manual}"}' REASON, then graphyard master approver ${key} DECISION`);
   if (manual) return agentOwner('master', `graphyard master decide ${key} attest '{"proof":"${manual}"}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
   if (first?.name === 'review') return agentOwner('reviewer', driven ? `The reviewer session judges it; ${reviewNext}` : `The reviewer session judges it; graphyard master review ${key} relaunches a refused review`);
-  if (first?.name === 'merge' && work.stage === 'merge') return agentOwner('master', driven ? `Nothing to run by hand: the loop's merge step performs the guarded merge of ${key} once its authorization is current` : `graphyard master merge ${key}`);
+  if (first?.name === 'merge' && work.stage === 'merge') return agentOwner('master', `Nothing to run by hand: GitHub merges ${key} once its merge gate passes`);
   if (work.blocker) return agentOwner('master', `Clear the cause, then graphyard master unblock ${key} REASON; a cause that needs money, a third-party account or a person's credential goes to the human`);
   return agentOwner('master', `graphyard diagnose ${key}`);
 }

@@ -9,7 +9,7 @@ Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit
 
 ## Dispatch optimistically, smallest scope first
 
-`plannedFiles` (paths, `/`-ending prefixes) is the scope contract, not a lock: the [merge queue](github.md#merge-queue), `sync` integrate overlaps. `master status` shows `overlap.concurrent`, `git merge-tree` failures. Root-level directories are `highConflict`, refused without `--allow-broad-scope`; only `exclusiveResources` (reserved at claim) hold dispatch.
+`plannedFiles` (paths, `/`-ending prefixes) is the scope contract, not a lock: `sync` and GitHub's merges into main ([one delivery path](delivery.md#one-delivery-path)) integrate overlaps. `master status` shows `overlap.concurrent`, `git merge-tree` failures. Root-level directories are `highConflict`, refused without `--allow-broad-scope`; only `exclusiveResources` (reserved at claim) hold dispatch.
 
 `worktree GY-N EPOCH` frees the branch first: an earlier attempt's worktree is recorded (`workspace.preserved`) and detached, abandoned ones removed (`reclaimed`). A workspace failure releases the claim without spending the epoch. After **3** single-cause dispatch failures, the loop records a `dispatchblock` blocker until `graphyard unblock GY-N REASON`.
 
@@ -21,7 +21,7 @@ Reviewer approval of the exact head plus required CI gates landing; threads are 
 
 `plannedFiles` bounds changes at `complete`, new heads and landings: files in scope, new files and touched `tests/helpers/timing-baseline.json` lines pass; others must match base byte-for-byte. Scope requests or audited revisions widen it.
 
-`evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: gate failures and ejections are its non-sticky refusals, published as required check `graphyard/landable`, never a verdict input.
+`evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: gate failures are its non-sticky refusals, published as required check `graphyard/landable`, never a verdict input.
 
 Out-of-scope files three-way merge onto the landing commit: extended or base-only changes pass; reverts, deletions, rewrites refuse.
 
