@@ -1741,7 +1741,7 @@ export class Engine {
       const work = await this.actionOwner(db, id);
       demand(work, 'Action is not open on any work item', 404);
       const row = recordStallRemedy(work!, id, data, actor.id, now);
-      const all: Work[] = (await db.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document.id === work!.id ? work! : r.document);
+      const all = (await lockedWork(db, [work!.id])).map(item => item.id === work!.id ? work! : item);
       this.evaluate(work!, all, now);
       await this.recordDispatch(db, work!, now);
       await save(db, work!, actor.id, 'action.remedied', now, { id, kind: row.kind, remedy: data.remedy, outcome: data.outcome, flows: data.flows, detail: data.detail, reason: data.reason });
