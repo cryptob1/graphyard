@@ -1475,11 +1475,11 @@ export interface MergeEnqueueRequest { sha: string; baseSha: string; policyRevis
  */
 export function mergeAuthorized(work: Work): boolean {
   const authorization = work.mergeAuthorization, candidate = work.candidate;
-  const passing = work.stage === 'merge' && !!candidate && !work.observation?.merged && work.gates.every(gate => gate.passed) && !work.violations.length && !work.leadHold;
   // Under GitHub delivery every passing gate is the authorization: GitHub's branch protection decides the merge.
-  if (deliveredByGitHub(work)) return passing;
-  return passing && !!authorization
-    && authorization.sha === candidate!.sha && authorization.baseSha === candidate!.baseSha && authorization.policyRevision === work.policyRevision;
+  const github = deliveredByGitHub(work);
+  return work.stage === 'merge' && !!candidate && (github || !!authorization) && !work.observation?.merged
+    && work.gates.every(gate => gate.passed) && !work.violations.length && !work.leadHold
+    && (github || (authorization!.sha === candidate.sha && authorization!.baseSha === candidate.baseSha && authorization!.policyRevision === work.policyRevision));
 }
 /** Whether the coordinator's enqueue request binds the current candidate and policy. */
 export function enqueueRequestCurrent(work: Work, request: Pick<MergeEnqueueRequest, 'sha' | 'baseSha' | 'policyRevision'> | null | undefined): boolean {

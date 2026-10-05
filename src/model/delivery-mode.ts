@@ -11,4 +11,4 @@ import type { Work } from './work.js';
 export const githubDeliveryGate = 'github-delivery';
 export const githubDelivery = (env: NodeJS.ProcessEnv = process.env) => env.GRAPHYARD_DELIVERY?.trim() === 'github';
 /** Whether the server evaluated this item under GitHub delivery: it carries the marker gate. */
-export const deliveredByGitHub = (work: Pick<Work, 'gates'>) => work.gates.some(gate => gate.name === githubDeliveryGate);
+export const deliveredByGitHub = (work: Pick<Work, 'gates'>) => (work.gates ?? []).some(gate => gate.name === githubDeliveryGate);
