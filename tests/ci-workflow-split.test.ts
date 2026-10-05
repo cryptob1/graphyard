@@ -120,9 +120,12 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
     assert.ok(checkouts.length >= 1 && checkouts.every(match => match[1].includes("ref: '${{ env.CANDIDATE_SHA }}'")), `${id} checks out the candidate SHA`);
   }
   for (const id of longSuites) assert.deepEqual(jobs.get(id)!.needs, ['candidate'], `${id} waits only for the candidate to be pinned`);
-  // A cut candidate's UAT record carries every long suite's verdict, so a failure among them blocks promotion.
-  assert.deepEqual(jobs.get('uat')!.needs, ['candidate', 'long-suites', 'container-acceptance', 'container-recovery', 'chart']);
-  for (const id of longSuites) assert.match(jobs.get('uat')!.text, new RegExp(`--suite '${id}=test "\\$[A-Z_]+" = success'`), `the UAT record carries the ${id} verdict`);
+  // A cut candidate's UAT record carries the container and chart verdicts, so a failure among them blocks
+  // promotion; the soak and timing-budget suites are advisory and neither delay nor decide it.
+  const gating = longSuites.filter(id => id !== 'long-suites');
+  assert.deepEqual(jobs.get('uat')!.needs, ['candidate', 'container-acceptance', 'container-recovery', 'chart']);
+  for (const id of gating) assert.match(jobs.get('uat')!.text, new RegExp(`--suite '${id}=test "\\$[A-Z_]+" = success'`), `the UAT record carries the ${id} verdict`);
+  assert.doesNotMatch(jobs.get('uat')!.text, /--suite 'long-suites=/, 'the soak verdict is advisory');
 
   // Every suite the pre-merge gate excludes runs here.
   assert.deepEqual([...jobs.keys()].sort(), ['candidate', 'chart', 'container-acceptance', 'container-recovery', 'long-suites', 'promote', 'uat']);

@@ -74,7 +74,7 @@ A silent hour: `master status` points to `https://github.com/settings/apps/APP-S
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (system-wide; warns under 25%) and loop removals of 2h-idle `graphyard-*`, `gy-*`, `landing-merge-result*`, `native-*`, `pg-password*`, `playwright_chromiumdev_profile*`. Database bound: `GRAPHYARD_DATABASE_MAX_BYTES`, else same-host `data_directory` volume size, else an advisory 10 GiB. `agent-names` flags holders 10m past settling; `loaded-revision` counts code moves.
+Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (warns under 25%) and loop-removed 2h-idle temporary files. The database bound is `GRAPHYARD_DATABASE_MAX_BYTES` when set, else readable same-host `data_directory` volume, else an advisory, silent 10 GiB. `agent-names` flags holders 10m past settling; `loaded-revision` counts code moves.
 
 ## Storage retention
 
@@ -126,8 +126,10 @@ graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 
 `GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) share one pace per token. Claims: webhook-woken, head `max(2,batchSize,parallelTips)` band, in-flight merges, review requests 15+ min stale, never-observed, due, waits, sessions. `observationThroughput`: budget, pace, head lag, oldest unobserved, `bands` lag (`github` past merge 2, review 30 min). Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` reports heartbeat p50/p95 and failures (raised past 5 s).
 
-Reconcile opens on [cached stand-ins](operations.md#safety-facts-that-never-change), reads each live item whole once, unlocked, and row-locks only its batch, skipping writer-held rows. Renewals never contend; contended batches rerun twice, halved, then defer; deferrals and >5 s ticks warn. Resyncs share one tick per server, holding one pool connection.
+Reconcile opens on [cached stand-ins](operations.md#safety-facts-that-never-change), reads each live item whole once, unlocked, and row-locks only its batch, skipping writer-held rows. Renewals never contend; contended batches rerun twice, halved, then defer; deferrals and >5 s ticks warn. Resyncs share one tick and pool connection per server.
+
+Listening precedes startup validation; meanwhile `/healthz` reports `readiness: false`, `/healthz?ready` 503.
 
 ### Concurrent reconciliation
 
-A stale observation snapshot retries after 2 s.
+Stale observation snapshots retry after 2 s.

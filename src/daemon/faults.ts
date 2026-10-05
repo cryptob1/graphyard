@@ -133,17 +133,20 @@ export function mergeBaseDismissalInMotion(work: Work | undefined, now: number):
   return Number.isFinite(since) && now - since <= mergeBaseDismissalWaitBoundMs;
 }
 /**
- * GY-1129. Whether a base refresh conflict is still in motion or in rework: the candidate has a confirmed
- * conflict with the base branch, and the conflict was reported within `restoreWaitBoundMs` (the time the
- * loop takes to return the item and decide its rework). The control plane requests and approves rework on
- * its own, so a base conflict actively being handled is self-handled, not a merge fault
- * (GY-501, GY-1073, GY-417 on 3 October 2026: each counted while in rework or within minutes of the conflict).
- * A conflict left unhandled past the bound counts as a merge fault even if rework was requested.
+ * GY-1129. Whether a base refresh conflict is still in motion: the candidate has a confirmed conflict
+ * with the base branch, first found on this head within `restoreWaitBoundMs` (the time the loop takes
+ * to return the item and decide its rework). The control plane requests and approves that rework on
+ * its own, so a conflict that recent is a step it is already handling, not a merge fault (GY-501,
+ * GY-1073, GY-417 on 3 October 2026: each counted within minutes of the conflict). `reworkRequested`
+ * plays no part: a conflict still standing past the bound counts as a merge fault whether or not rework
+ * was requested. The bound runs from the first conflict on this head (`conflictSince`, GY-1200), not
+ * from the latest refresh: each refresh onto a new base tip re-records the conflict, and on a base that
+ * moves more often than the bound an unhandled conflict would otherwise never count.
  */
 export function baseConflictInMotion(work: Work | undefined, now: number): boolean {
   if (!work?.candidate) return false;
   if (!baseRefreshConflict(work)) return false;
-  const since = work.baseRefresh?.at;
+  const since = work.baseRefresh?.conflictSince ?? work.baseRefresh?.at;
   return !!since && now - Date.parse(since) <= restoreWaitBoundMs;
 }
 /**
