@@ -23,8 +23,8 @@ export const decisionRefreshMs = 30 * 60_000;
  *
  * The step now sees its effects through this. A history is read at most once per cycle, and one
  * read on an earlier cycle is kept while the ledger shows no decision of that item moved since:
- * a single `decisionChanges` read per cycle names the items that did. Its own `decide` and
- * `withdraw` calls drop the item's history, so whatever the step wrote it reads back. The
+ * a single `decisionChanges` read per cycle names the items that did. Its own `decide`,
+ * `withdraw` and `resume` calls drop the item's history, so whatever the step wrote it reads back. The
  * items with a watch still open are read before the step reaches them, `decisionReadConcurrency`
  * at a time. Without `decisionChanges`, or when it cannot be read, nothing is kept from one cycle
  * to the next.
@@ -78,6 +78,7 @@ export async function decisionReads(effects: DaemonEffects, held: HeldDecisions,
   const reads: DaemonEffects = new Proxy(effects, { get: (target, property, receiver) => {
     if (property === 'decisions') return target.decisions && read;
     if (property === 'decide' || property === 'withdraw') return writes(Reflect.get(target, property, receiver));
+    if (property === 'resume') return writes(target.resume);
     return Reflect.get(target, property, receiver);
   } });
   // The open watches' histories are read ahead, a bounded few at a time, while the step works.

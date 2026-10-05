@@ -11,14 +11,15 @@ import { refuseDecision, withdrawDecision } from './decision-refusal.js';
 import { precedentAvailability } from './escalation-context.js';
 import { applyTriageClosure } from './followups.js';
 import { closeWork } from './close.js';
-import { answerWith, applyLaneRework, laneApprover, resumeLaneReworks } from './lane-rework.js';
+import { answerWith, applyLaneRework, approvedUnapplied, resumeApprovedDecisions, resumeDecision } from './lane-rework.js';
 import { lockedWork, workIdByRef } from '../store/locked-read.js';
 
 type Db = pg.PoolClient;
 // The ledger's read half lives in decision-ledger.ts (GY-102); decision-refusal.ts reads it from here too.
 export { readDecisions, type DecisionRecord } from './decision-ledger.js';
-// The risk lane's own application of a rework lives in lane-rework.ts (GY-1110).
-export { laneApprover, resumeLaneReworks } from './lane-rework.js';
+// The risk lane's own application of a rework, and the resumption of any approved decision whose
+// application was interrupted, live in lane-rework.ts (GY-1110, GY-1300).
+export { approvedUnapplied, laneApprover, resumeApproved, resumeApprovedDecisions } from './lane-rework.js';
 export const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const findWork = async (db: Db, id: string): Promise<Work | undefined> =>
   (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')} FOR UPDATE`, [id])).rows[0]?.document;
@@ -40,7 +41,7 @@ export async function receipt(db: Db, actor: Principal, key: string, fingerprint
  * The requester's authority is re-read when the decision is applied: a revoked operator agent,
  * or one that lost the capability or the item's scope, no longer carries its request.
  */
-async function requesterAuthority(services: Services, db: Db, decision: Pick<Decision, 'requestedBy' | 'action' | 'input'>, work: Work) {
+export async function requesterAuthority(services: Services, db: Db, decision: Pick<Decision, 'requestedBy' | 'action' | 'input'>, work: Work) {
   let requester = services.principals.find(entry => entry.actor.id === decision.requestedBy)?.actor;
   if (!requester) {
     const agent = (await db.query('SELECT document FROM operator_agents WHERE id=$1', [decision.requestedBy])).rows[0]?.document;
@@ -57,22 +58,26 @@ async function requesterAuthority(services: Services, db: Db, decision: Pick<Dec
  */
 export async function requestDecision(services: Services, caller: Principal, id: string, body: unknown, key: string) {
   if ((body as any)?.action === 'withdraw') return withdrawDecision(services, caller, id, body, key);
+  if ((body as any)?.action === 'resume') return resumeDecision(services, caller, id, body, key);
   const data = decisionRequestSchema.parse(body);
   const input = decisionInputs[data.action].parse(data.input);
   const fingerprint = digest({ id, action: data.action, input, reason: data.reason, ...(data.precedent ? { precedent: data.precedent } : {}), ...(data.context ? { context: data.context } : {}) });
-  // A lane-approved rework whose application was interrupted is resumed by the next request for
-  // the item, whatever its key (GY-1110). One that applied answers a new rework request in its
-  // place; one that failed no longer stands, so the new request is recorded and supersedes it.
+  // An approved decision whose application was interrupted — the lane's (GY-1110) or any
+  // approver's (GY-1300) — is resumed by the next request for the item, whatever its key, before
+  // the pending guard judges the request. One that applied answers a new request of its action in
+  // its place (a rework whatever its input, any other action only for the same input); one that
+  // settled failed or stale no longer stands, so the new request is recorded and supersedes it.
   // Only a caller with authority for the request it makes triggers the resumption (GY-1244).
   await callerMayRequest(services, caller, id, data.action, input, key, fingerprint);
-  const resumed = await resumeLaneReworks(services, id);
-  const answered = data.action === 'rework' ? resumed.find(decision => decision.state === 'applied') : undefined;
+  const resumed = await resumeApprovedDecisions(services, id);
+  const answered = resumed.find(decision => decision.state === 'applied' && decision.action === data.action
+    && (data.action === 'rework' || JSON.stringify(canonical(decision.input)) === JSON.stringify(canonical(input))));
   if (answered) return answerWith(services, caller, key, fingerprint, answered);
   // A rework on a low- or medium-lane item needs no approver decision (GY-883 AC-2): once recorded,
   // it is applied at once with the lane as its ground. A replayed request whose application was
   // interrupted resumes it; a high-lane rework waits for its independent approver as ever.
   const requested = await recordRequest(services, caller, id, data, input, key, fingerprint);
-  return requested.action === 'rework' && (requested.state === 'requested' || (requested.state === 'approved' && requested.approvedBy === laneApprover))
+  return requested.action === 'rework' && (requested.state === 'requested' || approvedUnapplied(requested))
     ? applyLaneRework(services, requested) : requested;
 }
 
@@ -126,7 +131,10 @@ async function recordRequest(services: Services, caller: Principal, id: string, 
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       return result;
     }
-    demand(!pending, `Decision ${pending?.id} (${data.action}) is already ${pending?.state} on ${work!.key}; wait for it before requesting another`, 409);
+    // An approved one here is one whose resumption above just faulted (GY-1300): the next request retries it.
+    demand(!pending, pending?.state === 'approved'
+      ? `Decision ${pending.id} (${data.action}) on ${work!.key} was approved by ${pending.approvedBy} but its application could not be resumed; request again to retry it`
+      : `Decision ${pending?.id} (${data.action}) is already ${pending?.state} on ${work!.key}; wait for it before requesting another`, 409);
     const decisionId = randomUUID();
     await record(db, work!, actor.id, 'decision.requested', { id: decisionId, action: data.action, input, reason: data.reason, requester: { id: actor.id, role: actor.role }, capabilities: requiredDecisionCapabilities(data.action, input, work!),
       ...(cited ? { precedent: cited } : {}), ...(noPrecedent ? { noPrecedent } : {}), ...(data.context ? { context: data.context } : {}), ...(data.action === 'resolve' ? { pin: resolvePin(work!) } : {}), ...(situation ? { situation } : {}) });
@@ -142,10 +150,13 @@ async function recordRefusal(services: Services, actor: Principal, workId: strin
     [workId, actor.id, 'decision.refused', JSON.stringify({ id: decision, conflict, approver: { id: actor.id, role: actor.role } })]));
 }
 
+type Stale = { actor: Principal; workId: string; decision: Pick<Decision, 'id' | 'action'>; reason: string } & StaleRace;
+/** The 'stale' entry of a decision a race made permanently unappliable, inside the caller's transaction. */
+export const staleEvent = (db: Db, stale: Stale) => db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)',
+  [stale.workId, stale.actor.id, 'decision.stale', JSON.stringify({ id: stale.decision.id, action: stale.decision.action, reason: stale.reason, expected: stale.expected, current: stale.current, observedBy: { id: stale.actor.id, role: stale.actor.role } })]);
 /** A decision a race made permanently unappliable is settled as 'stale' in its own transaction. */
-async function recordStale(services: Services, stale: { actor: Principal; workId: string; decision: Pick<Decision, 'id' | 'action'>; reason: string } & StaleRace) {
-  await services.engine.store.transaction(db => db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)',
-    [stale.workId, stale.actor.id, 'decision.stale', JSON.stringify({ id: stale.decision.id, action: stale.decision.action, reason: stale.reason, expected: stale.expected, current: stale.current, observedBy: { id: stale.actor.id, role: stale.actor.role } })]));
+async function recordStale(services: Services, stale: Stale) {
+  await services.engine.store.transaction(db => staleEvent(db, stale));
 }
 
 /**
@@ -236,11 +247,14 @@ export async function approveDecision(services: Services, caller: Principal, id:
     if (!(error instanceof Refusal) && !(error instanceof z.ZodError)) throw error;
     outcome = { kind: 'decision.failed', details: { error: error.message } };
   }
-  return services.engine.store.transaction(async db => finish(db, work, approver, decision.id, outcome.kind, outcome.details, key, fingerprint));
+  // The item is locked first, so a resumption racing this approval serializes with it (GY-1300).
+  return services.engine.store.transaction(async db => { await findWork(db, work.id); return finish(db, work, approver, decision.id, outcome.kind, outcome.details, key, fingerprint); });
 }
 
 async function finish(db: Db, work: Work, approver: Principal, decisionId: string, kind: string, details: object, key: string, fingerprint: string) {
-  await record(db, work, approver.id, kind, { id: decisionId, ...details });
+  // Single outcome (GY-1300): a resumption that settled the decision first keeps its outcome.
+  const settled = (await readDecisions(db, work)).find(entry => entry.id === decisionId)?.state !== 'approved';
+  if (!settled) await record(db, work, approver.id, kind, { id: decisionId, ...details });
   const result = (await readDecisions(db, work)).find(entry => entry.id === decisionId)!;
   await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [approver.id, key, fingerprint, JSON.stringify(result)]);
   return result;

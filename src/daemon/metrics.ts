@@ -7,9 +7,9 @@ import { unexercisedFindings } from '../model/mechanical-proofs.js';
 import { standingCapacity } from '../model/capacity.js';
 import { stalledItems } from '../model/action-account.js';
 import { type MasterConfig, type ContainmentAssessment, assertDispatchable, containmentPhase } from '../master.js';
-import { type DaemonAction, type DaemonActionKind, type DaemonState, type CycleMetrics, type ItemClock, itemClockSchema, type LatencySample, latencySampleSchema, type ScopeMeasurement } from './state.js';
+import { type ApprovalWatch, type DaemonAction, type DaemonActionKind, type DaemonState, type CycleMetrics, type ItemClock, itemClockSchema, type LatencySample, latencySampleSchema, type ScopeMeasurement } from './state.js';
 import { decisionKey } from './reconcile.js';
-import { boundDetail, mergeableCandidate, namePaths, routineDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvedUnapplied, boundDetail, mergeableCandidate, namePaths, routineDecision, standingVerdict, withheldDecision } from './decisions.js';
 
 export function percentiles(values: number[]) {
   const sorted = [...values].sort((a, b) => a - b);
@@ -109,6 +109,14 @@ export const approverWaitWording = { waiting: 'is requested and waiting for appr
  */
 export const approverWait = (entry: Pick<SilenceEntry, 'kind' | 'detail'>) => entry.kind === 'decision'
   && (entry.detail.includes(approverWaitWording.waiting) || entry.detail.includes(approverWaitWording.unjudged));
+/**
+ * When the watch's decision was approved with no outcome recorded, as the loop last found it once the named session ended (GY-1300),
+ * or null. The apply step keeps that finding on the watch; a re-request's new decision carries the entry under the old id, never its own.
+ */
+export function approvedUnappliedSince(watch: Pick<ApprovalWatch, 'decision' | 'ended'>): string | null {
+  const entry = watch.ended.findLast(line => line.includes(`decision ${watch.decision} on `) && line.includes(approvedUnapplied));
+  return entry ? entry.slice(entry.indexOf(approvedUnapplied) + approvedUnapplied.length).trim().split(' ')[0] || null : null;
+}
 export interface ActionableSubject { key: string; kind: DaemonActionKind; work: string | null; detail: string }
 export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run'>, work: Work[], now: number,
   context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals']; baseFailed?: Map<string, Set<string>> } = {}): ActionableSubject[] {
@@ -128,7 +136,10 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     const decision = routineDecision(item, config, now, context.assessments?.[item.id], context.baseFailed?.get(item.id));
     const watch = decision ? context.approvals?.[decisionKey(item, decision)] : undefined;
     // A decision waiting for an approver account to reset is the one capacity line, not a stall per item (GY-182).
+    // An approved decision whose application was lost is named for what it is (GY-1300), never as waiting for its approver.
+    const unapplied = watch ? approvedUnappliedSince(watch) : null;
     if (decision && !watch?.settledAt && !(watch && standingCapacity(item, 'approver').length)) add('decision', item, !watch ? `${item.key} needs a ${decision.action} decision requested and approved`
+      : unapplied ? `${item.key}'s ${decision.action} decision ${watch.decision} is ${approvedUnapplied} ${unapplied}; the loop asks the control plane to apply it`
       : watch.exhaustedAt ? `${item.key}'s ${decision.action} decision ${watch.decision} ${approverWaitWording.unjudged} ${watch.launches} approver session(s)`
         : `${item.key}'s ${decision.action} decision ${watch.decision} ${approverWaitWording.waiting} ${watch.agentName ?? '(not launched)'} to judge it`);
     const withheld = decision ? null : withheldDecision(item, config, now, context.assessments?.[item.id]);

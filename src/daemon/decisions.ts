@@ -9,8 +9,7 @@ import { extractProducerAccountsOrRuntimes, unactedProducerAttempts, unexercised
 import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js'; import { baseBreakHold } from '../master/base-break-refresh.js';
-import { unproducedManualProofs } from '../model/unproduced-attestation.js';
-import { triageClosure } from '../model/machine-backlog.js';
+import { unproducedManualProofs } from '../model/unproduced-attestation.js'; import { triageClosure } from '../model/machine-backlog.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf } from '../review-cap.js';
 import { sessionName } from '../session-name.js';
@@ -20,12 +19,11 @@ export type ReviewCapConfig = Pick<MasterConfig, 'autoMerge'> & Partial<Pick<Mas
 
 // ---- Routine decisions ---------------------------------------------------------------------
 /*
- * The pipeline used to stop here. A verdict landed, a base conflicted, a supervisor died — and
- * nothing moved until a master session happened to look. Each of those is a routine decision with
- * one correct answer, so the loop makes it: it requests the decision with the master's own
- * operator-agent identity and launches the independent approver session for it. It never approves
- * its own request, never weakens a requirement, and never touches a worker or producer credential;
- * the separation the server enforces is unchanged, and only the waiting is gone.
+ * The pipeline used to stop here. A verdict landed, a base conflicted, a supervisor died — and nothing moved until a master
+ * session happened to look. Each of those is a routine decision with one correct answer, so the loop makes it: it requests the
+ * decision with the master's own operator-agent identity and launches the independent approver session for it. It never approves
+ * its own request, never weakens a requirement, and never touches a worker or producer credential; the separation the server
+ * enforces is unchanged, and only the waiting is gone.
  */
 
 export interface StandingVerdict { reviewer: string; at: string; reason: string }
@@ -501,9 +499,8 @@ export function proofRework(work: Work): { reason: string; binding: string } | n
  * remedy, which the GY-393 approver refused. The change was never at fault, only the record, so the
  * loop asks for the attestation again, carrying the exercise record (`attestationExercise`) its
  * approver confirms by running the proof against the candidate base.
- * GY-868: a trusted manual record with executed = 0 is an unexercised finding too — no case ran, so
- * the criterion was never judged — and is answered here as well, never through rework or an
- * operator escalation.
+ * GY-868: a trusted manual record with executed = 0 is an unexercised finding too — no case ran, so the criterion was never
+ * judged — and is answered here as well, never through rework or an operator escalation.
  */
 export function attestationDecision(work: Work): RoutineDecision | null {
   const candidate = work.candidate;
@@ -727,32 +724,28 @@ export function withheldDecision(work: Work, config: ReviewCapConfig, now: numbe
 
 // ---- The approver a decision is waiting on -------------------------------------------------
 /*
- * A requested decision changes nothing until an approver judges it, and the approver is a launched
- * session: it can die, drop its prompt, hit an account limit, decline, or hang. Each cycle therefore
- * reads the decision back from the control plane and the session back from Herdr, and takes the one
- * step that follows. Launches are bounded, so a decision no session will judge ends as an escalation
- * and an actionable silence rather than as a relaunch every few minutes forever.
+ * A requested decision changes nothing until an approver judges it, and the approver is a launched session: it can die, drop
+ * its prompt, hit an account limit, decline, or hang. Each cycle therefore reads the decision back from the control plane and
+ * the session back from Herdr, and takes the one step that follows. Launches are bounded, so a decision no session will judge
+ * ends as an escalation and an actionable silence rather than as a relaunch every few minutes forever.
  */
 export const approverJudgeBoundMs = 600_000, approverSettleMs = 60_000, maxApproverLaunches = 3, maxApproverCloses = 3, maxDecisionRequests = 3;
 /**
- * A headless approver run lost to something outside the loop (GY-453: killed, recording no exit)
- * judged nothing, so its launch is given back — but only this many times per decision. Past it, a
- * lost run spends its launch like any other ended session, so a decision whose approver keeps
- * being killed still reaches `maxApproverLaunches` and its escalation: at most
- * `maxApproverLaunches + maxLostApproverRuns` launches per decision.
+ * A headless approver run lost to something outside the loop (GY-453: killed, recording no exit) judged nothing, so its launch
+ * is given back — but only this many times per decision. Past it, a lost run spends its launch like any other ended session, so
+ * a decision whose approver keeps being killed still reaches `maxApproverLaunches` and its escalation: at most `maxApproverLaunches + maxLostApproverRuns`.
  */
 export const maxLostApproverRuns = 3;
 /** Whether the watch's last run was lost and its launch is still given back (see `maxLostApproverRuns`). */
-export const lostRunRefunded = (watch: Pick<ApprovalWatch, 'run' | 'lostRuns'>) =>
-  watch.run?.result?.ok === false && watch.run.result.reason === 'lost' && watch.lostRuns < maxLostApproverRuns;
+export const lostRunRefunded = (watch: Pick<ApprovalWatch, 'run' | 'lostRuns'>) => watch.run?.result?.ok === false && watch.run.result.reason === 'lost' && watch.lostRuns < maxLostApproverRuns;
 export type ApprovalStep =
   | { step: 'wait'; detail: string }
   | { step: 'settled'; detail: string }
   | { step: 'refused'; detail: string }
   | { step: 'rerequest'; detail: string }
   | { step: 'relaunch'; detail: string }
-  | { step: 'exhausted'; detail: string };
-export function approvalStep(watch: ApprovalWatch, decision: { state: string; outcome?: string | null; refusal?: { approver: string; reason: string } | null } | null | undefined,
+  | { step: 'exhausted'; detail: string } | { step: 'apply'; detail: string };
+export function approvalStep(watch: ApprovalWatch, decision: { state: string; outcome?: string | null; refusal?: { approver: string; reason: string } | null; approvedBy?: string | null; approvedAt?: string | null } | null | undefined,
   sessions: { agents: HerdrAgent[]; available: boolean }, now: number): ApprovalStep {
   const label = `${watch.action} decision ${watch.decision} on ${watch.work}`;
   // `undefined`: the history could not be read this cycle. Nothing is concluded from that.
@@ -762,8 +755,14 @@ export function approvalStep(watch: ApprovalWatch, decision: { state: string; ou
   // A refusal is the approver's considered judgement (GY-141), not a session to replace or a
   // request to repeat: the server refuses the same request unchanged, and answering it is the master's.
   if (decision.state === 'refused') return { step: 'refused', detail: `${label} was refused by ${decision.refusal?.approver ?? 'its approver'}: ${decision.refusal?.reason ?? decision.outcome ?? 'no reason recorded'}` };
-  if (decision.state !== 'requested' && decision.state !== 'approved')
-    return { step: 'rerequest', detail: `${label} ended ${decision.state}${decision.outcome ? ` (${decision.outcome})` : ''}` };
+  // An approved decision is already judged (GY-1300): no approver session is waited on, relaunched or spent for it. Only while its
+  // session still works, within a minute of the approval, is its own call left to apply it; otherwise the loop asks the server to.
+  if (decision.state === 'approved') {
+    const applying = sessions.available && !!decision.approvedAt && now - Date.parse(decision.approvedAt) < approverSettleMs && sessions.agents.some(agent => agent.name === watch.agentName && agent.agent_status === 'working');
+    return applying ? { step: 'wait', detail: `${label} is approved; approver session ${watch.agentName} is still applying it` }
+      : { step: 'apply', detail: `${label} is ${approvedUnapplied} ${decision.approvedAt ?? 'an unrecorded time'} (approved by ${decision.approvedBy ?? 'its approver'}); the loop asks the control plane to apply it` };
+  }
+  if (decision.state !== 'requested') return { step: 'rerequest', detail: `${label} ended ${decision.state}${decision.outcome ? ` (${decision.outcome})` : ''}` };
   if (!sessions.available) return { step: 'wait', detail: `Herdr could not be read, so the approver session of ${label} is unknown this cycle` };
   const session = watch.agentName ? sessions.agents.find(agent => agent.name === watch.agentName) : undefined;
   const launchedAt = watch.launchedAt ? Date.parse(watch.launchedAt) : Number.NaN, age = Number.isFinite(launchedAt) ? now - launchedAt : 0;
@@ -783,6 +782,7 @@ export function repeatedMergeRefusal(work: Pick<Work, 'mergeRefusal' | 'candidat
   return refusal && refusal.action === 'rework' && candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha && refusal.policyRevision === work.policyRevision ? refusal : null;
 }
 
+export const approvedUnapplied = 'approved but unapplied since'; // An approved decision with no outcome recorded (GY-1300); metrics reads it back from the watch.
 /** The launcher key of the approver launch for a decision (GY-616). */
 export const approverLaunchKey = (decision: string) => `launch:approver:${decision}`;
 /** The approval-watch key of an approver session no request of the loop's launched (GY-403). */

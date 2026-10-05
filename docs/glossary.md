@@ -65,6 +65,8 @@ Role | Held by | May | Never
 
 The master applies non-weakening intent directly. Two-party decisions (`graphyard master decide GY-N ACTION REASON`, applied by a separate approver's `graphyard master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, triage closures and merges with automatic merging off. Gates decide the rest; human-only decisions [park](master-agent-reference.md#items-scope-and-human-waits) items.
 
+An approval whose application was interrupted (state `approved`, no outcome) is resumed, never re-judged: the next `decide` for the item replays it under its recorded approval before judging the request, as does `POST /api/work/:id/decide` with `{ "action": "resume", "decision": ID }`, which the loop sends instead of relaunching an approver. It settles `applied`, `failed`, or `stale` if its pinned situation moved; `master status` names it `approved but unapplied since <approvedAt>`.
+
 ## Diagram legend
 
 Shape and colour | Term

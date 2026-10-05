@@ -354,6 +354,14 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
         if ((!judged || judged.state === 'requested') && await approverExhausted(item, watch)) continue;
         const step = approvalStep({ ...watch, launchedAt: watch.launchedAt ?? watch.requestedAt }, judged, seen, clock);
         if (step.step === 'wait') continue;
+        // GY-1300: an approved decision is judged. Its session is put down, never replaced, and the control plane is asked to apply
+        // what was approved; the next cycle finds it applied and lets the watch go, or asks again.
+        if (step.step === 'apply') {
+          recordWatchEnded(watch, step.detail);
+          if (effects.resume) await effects.resume(item, watch.decision).catch(error => note(`approver:${watch.decision}:apply`, item, 'decision', 'failed', `${step.detail}, and could not: ${message(error)}`));
+          await closeApprover(item, watch, 'its decision is approved');
+          continue;
+        }
         if (step.step === 'relaunch' && !watch.agentName && approversSpent) continue;
         // The close, relaunch, record and escalation steps of the loop's own watches (GY-779): a
         // `rerequest` step cannot arise here — a decision this watch holds that the control plane
