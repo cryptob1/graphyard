@@ -11,7 +11,7 @@ import { loopBlockerProbe, type BlockerClassification, type BlockerProbeRecord, 
 import { successorWidening } from '../model/successors.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
-import { type ResourceReclaimReport, reclaimResources, dispatchRefusal } from '../master-resources.js';
+import { type HostMemoryReading, type ResourceReclaimReport, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { mergeBatchSize, mergeParallelTips, rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
@@ -171,13 +171,12 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
    * no Graphyard record, so it needs no credential and is safe to run on every cycle.
    */
   reclaim?: (work: Work[]) => Promise<WorktreeReclaimReport>;
-  /**
-   * The resource reclaim pass (GY-132): reaps terminal ledger records, closes finished sessions
-   * holding profile names, and releases the slots of stuck sessions. Runs every cycle.
-   */
+  /** The resource reclaim pass (GY-132): reaps terminal records, closes finished sessions holding profile names, frees stuck sessions' slots; every cycle. */
   reclaimResources?: (work: Work[], agents: HerdrAgent[] | null) => Promise<ResourceReclaimReport>;
   /** Why the plane cannot record a dispatch's result (its /healthz verdict), or null when it can. */
   planeHealth?: () => Promise<string | null>;
+  /** This host's memory (GY-612): below its floor, new launches are deferred. A loop wired without it never defers. */
+  hostMemory?: () => Promise<HostMemoryReading | null>;
   /** GY-1008: probe a blocker's cause as the next attempt meets it (blocker-probes.ts), and record it as the coordinator; a pass clears it. */ probeBlocker?: (work: Work, classification: BlockerClassification) => Promise<BlockerProbeResult | null>; recordBlockerProbe?: (work: Work, body: BlockerProbeRecord) => Promise<Work>;
   /**
    * Requests one routine decision with the master's own operator-agent identity and returns it.
@@ -640,6 +639,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     closeSession: pane => closeHerdrPane(pane, run),
     reclaimResources: (work, agents) => reclaimResources(root, withReviewerDefaults(current()), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
     planeHealth: () => dispatchRefusal(current().url, fetcher),
+    hostMemory: readHostMemory,
     probeBlocker: (work, classification) => loopBlockerProbe(current(), root, run, () => dispatchRefusal(current().url, fetcher))(work, classification), recordBlockerProbe: (work, body) => mutate(`work/${work.id}/blocker-probe`, body) as Promise<Work>,
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),

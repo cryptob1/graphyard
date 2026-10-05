@@ -1,5 +1,6 @@
 // Concern: session and worker harness permissions, and starting the master session.
 import { lstat, mkdir } from 'node:fs/promises';
+import { mkdirSync } from 'node:fs';
 import { dirname, resolve, basename } from 'node:path';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { nameForLaunch } from '../session-name.js';
@@ -13,6 +14,8 @@ import { accountLaunch } from './environments.js';
 import { type RequestDelivery, startAgentSession } from './launch.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson, stopCreatedHerdrTab } from './herdr.js';
 import type { PreparedWorker } from './dispatch.js';
+import { worktreeRoot } from '../install/worktree-root.js';
+import { verificationEnvironment, verificationSlotsDirectory } from './verification-slots.js';
 
 /**
  * The master's harness rules cover everything the master owns, not only the coordination loop:
@@ -142,16 +145,36 @@ async function repositoryCarriesClaudeSettings(root: string) {
  * out the repository's AGENTS.md, so such a session carries the launch authorization written there
  * (repository-setup.ts launchAuthorization) as its role text, loaded from the session's role file.
  */
+/** A session's verification slot variables (GY-612), or none when the managed worktree root cannot be written: master status reports that root. */
+export function sessionVerificationEnvironment(root: string, config: Pick<MasterConfig, 'repository' | 'run'>): Record<string, string> {
+  try { return verificationEnvironment(worktreeRoot(root, config)); } catch { return {}; }
+}
+/**
+ * The lock directory every session must be able to write to take a slot, created now so a sandboxed
+ * runtime (Codex under workspace-write) can be granted it with `--add-dir`: without the grant its
+ * `mkdir slot-N` is refused and the run goes ahead unbounded. None when the root cannot be written.
+ */
+export function sessionSlotsGrant(root: string, config: Pick<MasterConfig, 'repository' | 'run'>): string[] {
+  // Only under a managed root that exists: setup creates and verifies it, and a launch never makes one.
+  let directory: string;
+  try { directory = verificationSlotsDirectory(worktreeRoot(root, config)); } catch { return []; }
+  try { mkdirSync(directory); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return []; }
+  return [directory];
+}
 export async function prepareSessionHarness(root: string, config: MasterConfig, input: Omit<SessionHarnessInput, 'cliPath' | 'repository' | 'baseBranch' | 'credentialHome' | 'credentialDirectories'> & { profile: string; credentialFiles?: string[] }) {
   const plan = sessionHarnessPlan({ ...input, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)),
     credentialDirectories: [dirname(config.credentialFile), ...(config.reviewer ? [dirname(config.reviewer.credentialFile)] : []), ...(input.credentialFiles ?? []).map(file => dirname(file))] });
-  if (input.kind !== 'claude' || !await repositoryCarriesClaudeSettings(root)) return { plan, file: null, args: [] as string[], role: null as string | null };
+  // Every session's heavy verification runs share the host's slots (GY-612): its tab carries the
+  // lock directory under the managed worktree root, the bound, and the wrappers first on its PATH.
+  // A root that cannot be written leaves the session unbounded rather than unlaunched.
+  const environment = sessionVerificationEnvironment(root, config);
+  if (input.kind !== 'claude' || !await repositoryCarriesClaudeSettings(root)) return { plan, file: null, args: [] as string[], role: null as string | null, environment };
   const file = sessionHarnessFile(root, input.role, input.profile);
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   await atomicPrivateText(file, `${JSON.stringify({ permissions: { allow: plan.allow.map(entry => entry.rule), deny: plan.deny.map(entry => entry.rule) } }, null, 2)}\n`);
   // The authorization is the session's role text: startAgentSession writes it to the session's
   // role file and the command line loads that file (GY-121), never the text itself.
-  return { plan, file, args: ['--setting-sources', 'user', '--settings', file], role: launchAuthorization.replace(/\s+/g, ' ') as string | null };
+  return { plan, file, args: ['--setting-sources', 'user', '--settings', file], role: launchAuthorization.replace(/\s+/g, ' ') as string | null, environment };
 }
 /**
  * The master session's own first request (GY-93): the role, its boundaries and its commands, shared
