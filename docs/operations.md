@@ -46,7 +46,7 @@ The filter admits only the Secret Service methods a credential read needs, but b
 - Workers never hold `admin`, `coordinator` or `producer` tokens. No AI principal can hold `admin`.
 - Proof authority is a live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs.
 - Operator agents add requirements, never remove.
-- Only guarded or audited [repair-lane](master-agent.md#repair-lane) merges: no bypass, no lifecycle-state endpoint.
+- Only guarded merges: no bypass, no lifecycle-state endpoint.
 - Non-master sessions start their pane and process in their own checkout, never the coordinator's (GY-866).
 - Under the coordination lock a write reads whole only its item, overlapping open items and dependencies; the rest are cached projections or `work_index` summaries, so at 1,000 items claims, heartbeats, submissions and registry selects hold it under 500 ms and a reconcile pass under 5 s.
 - History is append-only; only routine rows past their retention window are [compacted](operations-reference.md#storage-retention), each batch audited.

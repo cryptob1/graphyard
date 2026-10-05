@@ -42,7 +42,6 @@ import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordInt
 import { dispatchFailureBlockAfter } from './daemon/dispatch-failures.js';
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
-import { repairAuditEvent, repairScopeRefusal, type RepairAudit } from './master/repair-lane.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
 import { coordinationProjection, isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type SavedVersion } from './store/locked-read.js';
 
@@ -874,8 +873,6 @@ export class Engine {
         if (reviewProviderOf(data.policy) === 'agent') assertReviewerProfiles(data.policy.reviewerProfiles, this.reviewerApps, this.controlPlaneAppId);
         demand(data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown dependency');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
-        // A merge-path repair (GY-406) plans only files within the merge path.
-        const repairScope = repairScopeRefusal(data); demand(!repairScope, repairScope!, 422);
         const criteria = this.declareBootstrap(actor, data, [], 1, now);
         const scenarioRequirements: Work['scenarioRequirements'] = [];
         const proofNames: string[] = [...new Set<string>(data.criteria.flatMap((ac: { proofs: string[] }) => ac.proofs))];
@@ -1005,8 +1002,6 @@ export class Engine {
           demand(!leaseLive, 'Stop and release the active worker before revising requirements');
         }
         demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
-        // A merge-path repair (GY-406) keeps its plannedFiles within the merge path on every revision, not only at creation (GY-428).
-        const repairScope = repairScopeRefusal({ plannedFiles: data.plannedFiles, repair: work.repair, key: work.key }); demand(!repairScope, repairScope!, 422);
         // A widening that answers one attempt's scope request (the loop's, on a review finding)
         // holds only while that request is open, its attempt holds a live lease and the head the
         // findings were read for is still the candidate: a claim, a lease end or a push changes
@@ -2696,7 +2691,6 @@ export class Engine {
       let mergedAtRepository: string | null = null; let repositoryClockOffsetMs: number | null = null;
       let reconciliation: MergeReconciliation | null = null; let refusedReconciliation: { decision: string; reasons: string[] } | null = null;
       let operatorAuthorization: OperatorAuthorizedDelivery | null = null;
-      let repairLane: RepairAudit | null = null;
       if (observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))) {
         const providerMergedTime = Date.parse(observation.mergedAt);
         // Never allow evidence from after the earliest possible merge instant.
@@ -2771,14 +2765,6 @@ export class Engine {
           const snapshot = past ?? structuredClone(work);
           authorizedSnapshot = snapshot; authorizationRevision = snapshot.revision;
           operatorAuthorization = directMergeAuthorization(directMerge, { sha: observation.mergeSha!, at: observation.mergedAt }, snapshot.revision, new Date(cutoff).toISOString(), historical);
-        }
-        // A merge the repair lane made (GY-406) is delivered on its audit entry, which the lane
-        // appended for exactly this head before it asked GitHub to merge (github.ts repairLaneStep).
-        const repaired = !authorizedSnapshot && observation.mergeSha ? (await db.query(`SELECT payload->'details' AS audit FROM events WHERE work_id=$1 AND kind=$2 AND payload->'details'->>'head'=$3 AND created_at<$4 ORDER BY seq DESC LIMIT 1`,
-          [id, repairAuditEvent, observation.candidate.sha, new Date(cutoff)])).rows[0]?.audit as RepairAudit | undefined : undefined;
-        if (repaired) {
-          const snapshot = past ?? structuredClone(work);
-          authorizedSnapshot = snapshot; authorizationRevision = snapshot.revision; repairLane = repaired;
         }
         if (!authorizedSnapshot && past && observation.mergeSha) {
           const decisions = await postMergeDecisions(db, work, observation, past.policyRevision, cutoff);
@@ -2883,13 +2869,12 @@ export class Engine {
           // recorded as a second violation.
           // An operator-authorized delivery is judged by the operator, not the gates: what the
           // record lacked is on the delivery, and the violation it owns leaves the record the same way.
-          if (reconciliation || operatorAuthorization || repairLane) work.violations = work.violations.filter(entry => entry !== violation && !entry.startsWith(reconciliationRefusalPrefix));
+          if (reconciliation || operatorAuthorization) work.violations = work.violations.filter(entry => entry !== violation && !entry.startsWith(reconciliationRefusalPrefix));
           else if (work.gates.some(g => !g.passed)) work.violations.push('Post-merge checks differ from the recorded authorization; follow-up required');
           work.stage = 'done'; work.stageEnteredAt = now.toISOString();
           const delivery: Work['delivery'] = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision!, ...(evidenceAsOf ? { evidenceAsOf } : {}),
             ...(mergedAtRepository ? { mergedAtRepository, repositoryClockOffsetMs: repositoryClockOffsetMs! } : {}) };
           work.delivery = reconciliation ? Object.assign(delivery, { reconciliation }) : operatorAuthorization ? Object.assign(delivery, { operatorAuthorization }) : delivery;
-          if (repairLane) work.repairLane = repairLane;
           if (reconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, reconciliation.requestedBy, 'merge.reconciled',
             JSON.stringify({ details: { ...reconciliation, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision, evidenceAsOf, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
           if (operatorAuthorization) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, operatorAuthorization.operator, 'merge.operator-authorized',
