@@ -21,6 +21,8 @@ The required pre-merge set is `typecheck` and `test` (`.github/workflows/ci.yml`
 
 With `GRAPHYARD_DELIVERY=github` on the server, GitHub merges: once a candidate's build, review and required checks pass, the observation that saw it enables auto-merge on that head. No proof, queue or observation age gates the merge, the loop skips its guarded merge, and proofs are not requested; UAT validates before promotion.
 
+Branch protection does not require up-to-date branches, so two green pull requests can break main together. CI checks every push to main; every 30 s the main guard (`src/main-guard.ts`) finds a merge commit failing a required check its parent passed, opens a `graphyard-revert/` pull request of exactly that merge, merges it as the App once its own checks pass, and reopens the item naming the check and commit. A revert that conflicts, fails or stalls an hour is closed after one attempt and the loop raises one attention line naming the merge, failing check and revert PR; nothing waits on it, so fix main forward.
+
 ## Managed repositories
 
 Installing Graphyard gives a repository the same model. `init --scan` classifies its checks into `delivery.mergeGate` and shows the split; `init --scan --apply` writes it as `delivery` in `graphyard.json` and renders two workflows from it (re-rendered on every apply, so edit `graphyard.json`, not them):

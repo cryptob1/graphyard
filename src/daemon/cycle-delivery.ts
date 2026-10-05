@@ -15,6 +15,7 @@ import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { deploymentDetail } from './deployment.js';
 import { loopAttested } from '../model/unproduced-attestation.js';
+import { mainGuardAttention } from '../main-guard.js';
 
 /** How many times one cycle re-reads and retries a guarded merge that lost a race to a concurrent write. */
 export const mergeRaceRetries = 3;
@@ -269,6 +270,11 @@ export async function mergeStep(cycle: Cycle) {
     if (state.actions[key]?.state === 'done') return;
     performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: `${item.key} was merged on GitHub (${item.observation!.mergeSha?.slice(0, 12) ?? 'merge commit unknown'} at ${item.observation!.mergedAt ?? 'an unrecorded time'}) without a valid merge execution: ${unauthorizedMergeViolation}. It stays at the merge stage until a two-party decision reconciles it: graphyard master decide ${item.key} merge REASON, then graphyard master approver ${item.key} DECISION; Graphyard re-checks the record at the merge cutoff and delivers on the approved decision`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   });
+  //    A revert the main guard abandoned (GY-1250) is raised once, as one attention line naming the
+  //    merge, the failing check and the revert PR; nothing waits on it.
+  for (const line of mainGuardAttention(cycle.snapshot.work)) {
+    if (!state.actions[line.key]) performed.push(await record(state, line.key, { kind: 'escalation', work: line.work, principal: null, state: 'done', detail: line.text, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+  }
   //    A candidate waiting its turn in the merge queue is not attempted: the refusal would only
   //    restate its position, and each one would push its first real attempt further out (GY-192).
   //    Under GitHub delivery GitHub merges on its own branch protection; the loop never asks.
