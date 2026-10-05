@@ -307,8 +307,8 @@ export function outputAfterCommand(screen: string | null, command: string) {
 }
 /** Whether an argv word is the graphyard CLI: `graphyard`, or its `graphyard.mjs` script, by basename. */
 const graphyardCli = (word: string) => (word.split('/').at(-1) ?? '').replace(/\.[cm]?js$/, '') === 'graphyard';
-/** The words a shell wrapper's `-c` string (`-c`, `-lc`, …) runs, split on whitespace (GY-1225). */
-const wrappedWords = (argv: string[]) => argv.flatMap((word, index) => index > 0 && /^-[a-z]*c$/.test(argv[index - 1]) ? word.split(/\s+/).filter(Boolean) : []);
+/** The words a shell wrapper's `-c` string (`-c`, `-lc`, …) runs, split on whitespace (GY-1225); only a shell's: `grep -c` is not a wrapper. */
+const wrappedWords = (argv: string[]) => /^(sh|bash|zsh|dash)$/.test(argv[0]?.split('/').at(-1) ?? '') ? argv.flatMap((word, index) => index > 0 && /^-[a-z]*c$/.test(argv[index - 1]) ? word.split(/\s+/).filter(Boolean) : []) : [];
 /**
  * Whether a foreground process's argv is a `graphyard watch` supervisor (GY-1213): `watch`, right
  * after the graphyard CLI that runs it (GY-1225: not any bare `watch`, such as `sudo watch`), then

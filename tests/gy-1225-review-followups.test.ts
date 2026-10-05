@@ -6,6 +6,9 @@ test('manual:review-followups-triaged GY-1225.1: only the word a -c wrapper runs
   assert.equal(runsProgram(['vim', 'notes claude'], 'claude'), false);
   assert.equal(runsProgram(['grep', 'run claude'], 'claude'), false);
   assert.equal(runsProgram(['less', '/var/log/x claude'], 'claude'), false);
+  // A -c flag of a program that is not a shell is no wrapper: its argument is not split.
+  assert.equal(runsProgram(['grep', '-c', 'run claude', 'file'], 'claude'), false);
+  assert.equal(runsProgram(['wc', '-c', 'x claude'], 'claude'), false);
   // A wrapper's -c string (or -lc) is still split, and a bare word still counts.
   assert.ok(runsProgram(['/bin/sh', '-c', '/usr/lib/codex/bin/codex.mjs exec go'], 'codex'));
   assert.ok(runsProgram(['/bin/bash', '-lc', 'exec claude --print'], 'claude'));
