@@ -13,8 +13,8 @@ import { actionableSubjects, emptyDaemonState, loopAttention, loopLiveness, trac
 //   containment class carries it. There was no settle for the loop to perform.
 // - GY-402: proofs for a head the build gate refused (a conflict with the moved base). The
 //   control plane cancels producers for such a head; the wait was the build's.
-// - GY-404: proofs a producer request pending for the head answered for, within the producer
-//   timeout. The dispatcher owned that wait, bounded like every obligation the control plane holds.
+// - GY-404: proofs a producer request pending for the head answered for. Since GitHub delivery is
+//   the only delivery (GY-1235) no proof is anyone's to request, so neither instance is a subject.
 //
 // Each instance is replayed through the loop's own measure for longer than the bound and must not
 // breach it, while a subject the loop does own still breaches: the bound is not weakened.
@@ -45,13 +45,10 @@ function submitted(key: string, build: boolean, overrides: Partial<Work> = {}): 
     criteria: [{ id: 'AC-1', text: 'unit proof', proofs: ['unit:a', 'unit:b'] }] as Work['criteria'],
     submission: { epoch: 1, pr: 221, submittedAt: iso(clock - 2 * minute) } as unknown as Work['submission'],
     candidate: { sha: head, baseSha: base, pr: 221 } as unknown as Work['candidate'],
-    gates: [gate('ready', true), gate('build', build, ['Candidate cannot be brought onto base branch tip without resolving a conflict']), gate('review', false, ['Independent approval of the current commit is required']),
-      gate('acceptance', false, ['AC-1: unit:a needs trusted passing evidence'])] as Work['gates'],
+    gates: [gate('ready', true), gate('build', build, ['Candidate cannot be brought onto base branch tip without resolving a conflict']), gate('review', false, ['Independent approval of the current commit is required'])] as Work['gates'],
     ...overrides,
   });
 }
-const producerRequest = (requestedAt: number) => ({ id: 'request-1', pr: 221, sha: head, baseSha: base, kind: 'producer', group: 'unit', state: 'requested',
-  proofs: ['unit:a', 'unit:b'], reason: 'no trusted evidence binds the head', requestedAt: iso(requestedAt), policyRevision: 1 });
 function quarantined(key: string): Work {
   return item(key, {
     workspaces: [{ host: 'machine-a', path: `/repo/.graphyard/worktrees/${key}-1`, epoch: 1, owner: 'graphyard-codex-2', branch: `graphyard/${key.toLowerCase()}-1` }] as Work['workspaces'],
@@ -92,28 +89,10 @@ test('GY-426 GY-393: a lapsed quarantine this host cannot verify dead is the con
   assert.match(settleable.attention[0].text, /Nothing has acted on GY-393 holds a lapsed containment quarantine from epoch 1 for 60 minutes, past the 20-minute bound/);
 });
 
-test('GY-426 GY-402: a head the build gate refuses is owed no proof, so its missing evidence is not the loop\'s silence', () => {
-  const conflicting = replay([submitted('GY-402', false)], span);
-  assert.deepEqual(conflicting.silence.subjects.filter(subject => subject.kind === 'proof'), [], 'no proof is the loop\'s to request for a head the build refuses');
-  assert.deepEqual(conflicting.attention, []);
-  // The same head past its build gate, with nobody producing its proofs, is still the loop's and still breaches.
-  const unowned = replay([submitted('GY-402', true)], span);
-  assert.equal(unowned.attention.length, 1);
-  assert.match(unowned.attention[0].text, /Nothing has acted on GY-402 is missing trusted evidence for unit:a, unit:b for 60 minutes/);
-});
-
-test('GY-426 GY-404: proofs a pending producer request answers for are the dispatcher\'s wait, bounded by the producer timeout', () => {
-  const requested = clock - minute;
-  const pending = submitted('GY-404', true, { autoDispatch: { review: null, producers: [producerRequest(requested)], history: [] } as unknown as Work['autoDispatch'] });
-  const owned = replay([pending], span);
-  assert.deepEqual(owned.silence.subjects.filter(subject => subject.kind === 'proof'), [], 'the pending request owns the proofs it names');
-  assert.deepEqual(owned.attention, [], 'an hour waiting on a producer inside its timeout files no loop fault');
-  // Past the producer timeout (120 minutes by default) the request no longer answers for them: the
-  // proofs are the loop's again and their wait is measured from there.
-  const expired = replay([pending], 150 * minute);
-  assert.equal(expired.attention.length, 1);
-  assert.match(expired.attention[0].text, /Nothing has acted on GY-404 is missing trusted evidence for unit:a, unit:b/);
-  // A request for another head answers for nothing on this one.
-  const stale = submitted('GY-404', true, { autoDispatch: { review: null, producers: [{ ...producerRequest(requested), sha: 'd'.repeat(40) }], history: [] } as unknown as Work['autoDispatch'] });
-  assert.equal(replay([stale], span).attention.length, 1);
+test('GY-426 GY-402: a head\'s missing evidence is never the loop\'s silence: under GitHub delivery proofs gate nothing and no producer is requested, whether or not the build gate passes', () => {
+  for (const build of [false, true]) {
+    const replayed = replay([submitted('GY-402', build)], span);
+    assert.deepEqual(replayed.silence.subjects.filter(subject => subject.kind === 'proof'), [], `no proof is the loop's to request (build ${build ? 'passed' : 'refused'})`);
+    assert.deepEqual(replayed.attention, []);
+  }
 });

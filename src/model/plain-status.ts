@@ -53,7 +53,7 @@ export function plainReason(reason: string, gate: string): { text: string; stuck
     [/^(AC-\d+): (\S+) needs trusted passing evidence[^;]*(; previously accepted evidence was revoked)?/, m => `${m[1]} is not proven yet (${m[2]})${m[3] ? ' — an earlier proof was withdrawn' : ''}`],
     [/^Bootstrap obligation inherited from (\S+) (\S+): (\S+) needs/, m => `Owes the proof ${m[3]} that ${m[1]} put off`],
     [/^Trusted (\S+) evidence from (\S+) is no longer independent/, m => `The ${m[1]} proof no longer counts: ${m[2]} later worked on this item`, true],
-    [/^GitHub observation missing or older than two minutes$/, () => 'Graphyard is re-checking GitHub'],
+    [/^GitHub has not been observed at the current candidate$/, () => 'Graphyard is re-checking GitHub'],
     [/^Required Graphyard check and merge-queue branch protection/, () => 'GitHub merge protection is not confirmed yet', true],
     [/^Pull request is not mergeable against the current base$/, () => 'The pull request conflicts with the main branch', true],
     [/^Unresolved (\S+) escalation requires operator resolution: (.*)$/s, m => `Needs a decision about ${trigger[m[1]] ?? 'a problem'}: ${m[2]}`, true],

@@ -55,7 +55,6 @@ function harness(item: { current: Work[] }, agent: HerdrAgent, extra: Partial<Da
     closeSession: pane => { log.closed.push(pane); },
     dispatch: async () => {},
     requestProof: () => {},
-    merge: async () => ({ result: 'merge requested' }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},

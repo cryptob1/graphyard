@@ -212,7 +212,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
 
   const { settled, budget } = await timings.step('scope', () => scopeStep(cycle));
   // 2c. Open items planning a file the base split or renamed are re-planned onto its successors.
-  await timings.step('successors', () => successorStep(cycle));
+  await timings.step('successors', () => successorStep(cycle, settled));
   // 2d. Every standing blocker is re-checked: its cause probed, cleared once the probe passes (GY-1008).
   await timings.step('blockers', () => blockerStep(cycle));
   spent('decisions');

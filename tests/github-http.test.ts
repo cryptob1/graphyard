@@ -149,7 +149,7 @@ test('the permission preflight compares the installation with the declaration, h
   assert.equal(first.error, null); assert.equal(first.app, 'graphyard-fixture-repo'); assert.equal(first.account, 'fixture');
   assert.deepEqual(first.missing.map(shortfall => shortfall.permission), ['contents']);
   assert.deepEqual(first.blockedFeatures, ['merge-queue']);
-  assert.deepEqual(first.attention, ['App graphyard-fixture-repo lacks Contents: write (installed with read), which the merge queue needs to publish speculative merge-queue tips: the merge commit on the candidate branch and the `refs/graphyard/queue/*` ref that binds it; accept the pending permission request at https://github.com/settings/installations/4242']);
+  assert.deepEqual(first.attention, ['App graphyard-fixture-repo lacks Contents: write (installed with read), which branch refresh needs to push base refreshes, branch restores and main-guard revert branches onto the managed repository; accept the pending permission request at https://github.com/settings/installations/4242']);
   assert.equal(github.permissionShortfall('merge-queue'), first.attention[0]);
   assert.equal(github.permissionShortfall('observation'), null); assert.equal(github.permissionShortfall('check'), null); assert.equal(github.permissionShortfall('review-dispatch'), null);
   assert.equal(await github.preflightIfDue(1_000 + github.preflightIntervalMs - 1), null, 'the periodic preflight waits for its interval');

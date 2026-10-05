@@ -93,8 +93,6 @@ export interface InvariantInput {
   agents?: readonly { name?: string; pane_id?: string }[] | null;
   /** The build the control plane reports it runs; null when it could not be read. */
   build?: string | null;
-  /** Items whose current candidate's guarded merge was refused, with the refusal recorded (the loop's merge action failed). */
-  refusedMerges?: ReadonlySet<string>;
 }
 
 /** The one proof review follow-up items were filed with until GY-1249: what marks a machine-filed follow-up. */
@@ -203,8 +201,8 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
     const github = observation?.githubQueue && observation.githubQueue.head === candidate?.sha ? observation.githubQueue : null;
     const mergeable = item.stage === 'merge' && !!candidate && !!observation && observation.mergeable === true && !observation.merged && observation.candidate.sha === candidate.sha
       && (!github || !github.queue && mergeableNow(github));
-    // A gate still failing is a recorded refusal (its reasons are on the item), and so are a refused guarded merge and GitHub's refusal of the request.
-    const refused = !item.gates.every(gate => gate.passed) || item.violations.length > 0 || !!input.refusedMerges?.has(item.id) || !!github?.refused;
+    // A gate still failing is a recorded refusal (its reasons are on the item), and so is GitHub's refusal of the request.
+    const refused = !item.gates.every(gate => gate.passed) || item.violations.length > 0 || !!github?.refused;
     if (!mergeable || refused) continue;
     waiting.add(item.id);
     const entry = record.mergeable[item.id]?.sha === candidate!.sha ? record.mergeable[item.id] : { sha: candidate!.sha, since: at };

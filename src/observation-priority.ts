@@ -6,8 +6,9 @@ import { agentOwner, type AttentionItem } from './master/attention.js';
 /**
  * What the observation scheduler serves first, and how stale each band may grow (GY-492, GY-1114).
  *
- * Two steps read GitHub through an observation with a bound: the merge gate refuses one older than
- * two minutes, and a review request is held to readings under thirty — not refused by the reviewer
+ * Two steps read GitHub through an observation with a bound: merge candidates are read every two
+ * minutes so GitHub's merge is recorded promptly (no gate refuses an old one since GY-1235), and a
+ * review request is held to readings under thirty — not refused by the reviewer
  * launch, which binds the head rather than the age (GY-710), but kept there by this scheduler. On 2026-10-02, with ~95 open items,
  * the fleet's steady-state interval had stretched to an hour, so 43 review-requested items aged
  * past thirty minutes behind the starved backlog while 19 reviewer slots idled and nothing merged
@@ -16,7 +17,7 @@ import { agentOwner, type AttentionItem } from './master/attention.js';
  * and the bands with a bound are claimed ahead of the backlog before they reach it.
  */
 
-/** How old an observation may be and still serve the merge gate (the publication guard's bound too). */
+/** How stale a merge candidate's reading may grow before the scheduler serves it (the publication guard's bound too); no gate refuses on it (GY-1235). */
 export const observationFreshnessMs = 120_000;
 /**
  * How old the reading of a review-requested head may grow (GY-1114): the scheduler's own bound, which
@@ -146,7 +147,7 @@ export function observationBandLag(all: Work[], now: number, skipHead: string | 
   }
   const report = bands.map(({ stale: _stale, ...entry }) => ({ ...entry, lagMs: entry.lagMs === Infinity ? null : entry.lagMs, unobserved: entry.lagMs === Infinity }));
   const attention: AttentionItem[] = bands.filter(entry => entry.boundMs !== null && entry.stale).map(entry => ({ subject: 'github',
-    text: `The ${entry.band} band has ${entry.pastBound} of ${entry.items} item(s) observed longer ago than its ${observationLag(entry.boundMs!)} bound (oldest ${entry.stale!.key}, ${entry.stale!.lagMs === Infinity ? 'never observed' : observationLag(entry.stale!.lagMs)}): ${entry.band === 'merge' ? 'the merge gate refuses them' : 'their review requests may name heads that have since moved'} until the observation workers reach them`,
+    text: `The ${entry.band} band has ${entry.pastBound} of ${entry.items} item(s) observed longer ago than its ${observationLag(entry.boundMs!)} bound (oldest ${entry.stale!.key}, ${entry.stale!.lagMs === Infinity ? 'never observed' : observationLag(entry.stale!.lagMs)}): ${entry.band === 'merge' ? 'their merges and deliveries are recorded late' : 'their review requests may name heads that have since moved'} until the observation workers reach them`,
     ...agentOwner('control plane', 'Nothing to run: the workers claim these bands ahead of the backlog; if the lag persists, raise GRAPHYARD_OBSERVATION_CONCURRENCY with GRAPHYARD_DATABASE_POOL_SIZE (workers at most half the pool) and restart the server') }));
   return { bands: report, attention };
 }

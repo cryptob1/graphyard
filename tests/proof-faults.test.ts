@@ -42,24 +42,22 @@ const candidate = (n: number, extra: Partial<Work> = {}): Work => ({
 
 /**
  * One merge step over `count` candidates on a virtual clock. Every snapshot read advances the clock
- * by `readCostMs` and returns the ledger as it now stands (each item a revision on), which `merge`
- * receives; `merge` may throw to model a refusal or a race.
+ * by `readCostMs`. Since GY-1235 GitHub merges and the step only raises escalations for merges it
+ * observed without passing gates, so it has nothing to read the ledger afresh for.
  */
-async function mergeStepOver(count: number, options: { readCostMs?: number; merge?: (work: Work) => Promise<unknown>; ledger?: (open: Work[]) => Work[] } = {}) {
+async function mergeStepOver(count: number, options: { readCostMs?: number } = {}) {
   let clock = Date.parse('2026-10-01T22:00:00Z'), reads = 0;
   const open = Array.from({ length: count }, (_, index) => candidate(index + 1));
-  const merged: Work[] = [];
   const master = { url: 'https://graphyard.example', repository: 'owner/project', autoMerge: true } as MasterConfig;
   const state = emptyDaemonState(master);
   const effects = {
-    snapshot: async () => { reads++; clock += options.readCostMs ?? 0; return { work: (options.ledger ?? (items => items.map(item => ({ ...item, revision: item.revision + reads }))))(open), now: new Date(clock).toISOString() }; },
+    snapshot: async () => { reads++; clock += options.readCostMs ?? 0; return { work: open, now: new Date(clock).toISOString() }; },
     persist: async () => {},
-    merge: async (work: Work) => { merged.push(work); return options.merge ? options.merge(work) : { result: `merge requested for ${work.candidate!.sha.slice(0, 12)}`, pending: true }; },
   };
   const started = clock;
   const performed: Cycle['performed'] = [];
   await mergeStep({ config: master, state, effects, now: () => clock, performed, open, isolate: async (_kind: unknown, _item: unknown, _name: unknown, body: () => Promise<unknown>) => body() } as unknown as Cycle);
-  return { reads, merged, performed, state, elapsedMs: clock - started };
+  return { reads, performed, state, elapsedMs: clock - started };
 }
 
 test('manual:fault-class-proof — the item lists 4 instances, each the coordination cycle over its interval budget', () => {
@@ -76,58 +74,13 @@ for (const instance of instances) {
     // What one whole-ledger read cost on that runner, if the base's reads were the whole cycle.
     const readCostMs = instance.measuredMs / baseReads;
     const step = await mergeStepOver(mergeCandidates, { readCostMs });
-    assert.equal(step.merged.length, mergeCandidates, 'every candidate still reaches the guarded merge');
     const replayedMs = readCostMs + step.elapsedMs;
     assert.ok(replayedMs <= instance.budgetMs, `replayed cycle ${Math.round(replayedMs)}ms (${1 + step.reads} ledger reads at ${Math.round(readCostMs)}ms) is within ${instance.budgetMs}ms`);
   });
 }
 
-test('manual:fault-class-proof — the merge step reads the ledger once, however many candidates it holds', async () => {
-  for (const count of [1, mergeCandidates, 170]) {
-    const step = await mergeStepOver(count);
-    assert.equal(step.reads, 1, `${count} candidate(s): one read for the step`);
-    assert.equal(step.merged.length, count);
-  }
-  // A step with nothing to merge reads nothing.
-  assert.equal((await mergeStepOver(0)).reads, 0);
-});
-
-test('manual:fault-class-proof — not weakened: the merge still runs on a fresh read, not the cycle snapshot, and skips a candidate that moved', async () => {
-  const step = await mergeStepOver(3);
-  assert.ok(step.merged.every(work => work.revision > 1), 'each merge received the item as the step read it, a revision past the cycle snapshot');
-  // A candidate whose head moved since the cycle snapshot is left to the next cycle.
-  const moved = await mergeStepOver(3, { ledger: open => open.map(item => item.key === 'GY-2' ? { ...item, candidate: { ...item.candidate!, sha: sha(2, 2) } } : item) });
-  assert.deepEqual(moved.merged.map(work => work.key), ['GY-1', 'GY-3']);
-});
-
-test('manual:fault-class-proof — not weakened: a merge that lost a race is retried on a read taken afresh after it', async () => {
-  let raced = 0;
-  const step = await mergeStepOver(3, { merge: async work => {
-    if (work.key === 'GY-2' && raced++ === 0) throw new Error('GY-2 changed before GitHub verification; retry');
-    return { result: 'merge requested', pending: true };
-  } });
-  const attempts = step.merged.filter(work => work.key === 'GY-2').map(work => work.revision);
-  assert.equal(attempts.length, 2, 'the raced candidate is retried in the same step');
-  assert.ok(attempts[1] > attempts[0], 'on a read taken after the race');
-  assert.ok(step.merged.find(work => work.key === 'GY-3')!.revision >= attempts[1], 'and later candidates see that read or a newer one');
-  const key = candidateKey('merge', candidate(2));
-  assert.equal(step.state.actions[key].state, 'waiting');
-});
-
-test('manual:fault-class-proof — not weakened: a failed read is not reused; the next candidate reads again', async () => {
-  let reads = 0;
-  const open = [candidate(1), candidate(2)];
-  const master = { url: 'https://graphyard.example', repository: 'owner/project', autoMerge: true } as MasterConfig;
-  const state = emptyDaemonState(master);
-  const merged: string[] = [], failures: string[] = [];
-  const effects = {
-    snapshot: async () => { if (reads++ === 0) throw new Error('work snapshot read timed out'); return { work: open, now: new Date().toISOString() }; },
-    persist: async () => {},
-    merge: async (work: Work) => { merged.push(work.key); return { result: 'merge requested', pending: true }; },
-  };
-  const isolate = async (_kind: unknown, item: Work, _name: unknown, body: () => Promise<unknown>) => { try { return await body(); } catch (error) { failures.push(`${item.key}: ${(error as Error).message}`); } };
-  await mergeStep({ config: master, state, effects, now: Date.now, performed: [], open, isolate } as unknown as Cycle);
-  assert.deepEqual(failures, ['GY-1: work snapshot read timed out']);
-  assert.deepEqual(merged, ['GY-2']);
-  assert.equal(reads, 2);
+test('manual:fault-class-proof — the merge step reads no ledger of its own, however many candidates it holds', async () => {
+  // GitHub merges (GY-1235): the guarded merge and its per-candidate fresh read are gone, so the
+  // step costs the cycle nothing beyond the cycle's own snapshot.
+  for (const count of [0, 1, mergeCandidates, 170]) assert.equal((await mergeStepOver(count)).reads, 0, `${count} candidate(s): no read for the step`);
 });

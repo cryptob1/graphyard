@@ -21,7 +21,7 @@ import { classified } from '../model/fault-classes.js';
 import { mechanicalProof, unexercisedDetail, unexercisedFindings } from '../model/mechanical-proofs.js';
 import { requestRemedy } from '../model/dispatch.js';
 import { unrunnableRemedies } from './harness.js';
-import { mergedWithoutAuthorization, unauthorizedMergeViolation } from './merge.js';
+import { mergeAuthorized, mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
 import { splitRelation, splitReport } from '../decomposition.js';
 import type { ProjectMemory } from '../model/project-memory.js';
 
@@ -172,11 +172,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     // A launch still preparing its session is `launching`, not unseen (GY-1287).
     const sessionState = handle && recorded ? recorded.live ? recorded.observed! : handle.state === 'running' ? launchingSession(work, handle, now) ? 'launching' : `not seen since ${recorded.seenAt ?? handle.updatedAt}` : recorded.observed ?? 'finished' : session?.state ?? 'offline';
     const first = work.gates.find(gate => !gate.passed);
-    const freshObservation = !!work.observation && now - Date.parse(work.observation.at) >= 0 && now - Date.parse(work.observation.at) < 120_000;
-    const mergeable = freshObservation && work.stage === 'merge' && !!work.candidate && !!work.mergeAuthorization
-      && work.mergeAuthorization.sha === work.candidate.sha && work.mergeAuthorization.baseSha === work.candidate.baseSha
-      && work.mergeAuthorization.policyRevision === work.policyRevision
-      && work.gates.every(gate => gate.passed) && !work.violations.length;
+    // GitHub's to merge: every gate passes on the candidate (GY-1235); the observation's age is not read.
+    const mergeable = mergeAuthorized(work);
     const dwellMs = now - Date.parse(work.stageEnteredAt);
     const review = reviewState(work);
     const assessed = containment[work.id];
@@ -257,7 +254,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : merged?.reverted ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) and its content is not on the base branch: ${merged.reverted.files.length}${merged.reverted.partial ? ' or more' : ''} file${merged.reverted.files.length === 1 && !merged.reverted.partial ? '' : 's'} missing from base ${merged.reverted.base.slice(0, 12)} — ${merged.reverted.files.map(file => `${file.path} (${file.detail})`).join(', ')} — ${merged.reverted.removedBy
         ? `removed by merge ${merged.reverted.removedBy.mergeSha?.slice(0, 12) ?? 'commit unknown'} of ${merged.reverted.removedBy.key ? `${merged.reverted.removedBy.key}, ` : ''}pull request #${merged.reverted.removedBy.pr}${merged.reverted.removedBy.commit ? ` (commit ${merged.reverted.removedBy.commit.slice(0, 12)})` : ', whose head carried this item\'s commits without their content'}`
         : 'and the merge that removed them could not be identified from the branch history'}. This is a reverted delivery, not an unreconciled merge: nothing is delivered until the content is restored${merged.refusal ? `; the last reconciliation was refused — ${merged.refusal}` : ''}`, 'merged-reverted']
-      : merged ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) without a valid merge execution: ${merged.violation}. It is held at the merge stage, not waiting for its queue tip; ${merged.queue ? `its merge queue entry (sequence ${merged.queue.sequence}, position ${merged.queue.position} of ${merged.queue.size}) can never publish a speculative tip because the pull request is already merged${merged.queue.behind.length ? `, and ${merged.queue.behind.join(', ')} wait behind it` : ''}; ` : ''}${merged.refusal ? `the last reconciliation was refused — ${merged.refusal}; an operator may deliver it as operator-authorized by a decision citing that refusal` : `a two-party merge decision requested now reconciles it if every gate passed and every required proof was live at the merge cutoff${merged.queue ? ', and a refused one removes the entry without delivering' : ''}`}`, 'merged-unauthorized']
+      : merged ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) though its gates had not passed on that head: ${merged.violation}. It is held at the merge stage, not waiting for its queue tip; ${merged.queue ? `its merge queue entry (sequence ${merged.queue.sequence}, position ${merged.queue.position} of ${merged.queue.size}) can never publish a speculative tip because the pull request is already merged${merged.queue.behind.length ? `, and ${merged.queue.behind.join(', ')} wait behind it` : ''}; ` : ''}${merged.refusal ? `the last reconciliation was refused — ${merged.refusal}; an operator may deliver it as operator-authorized by a decision citing that refusal` : `a two-party merge decision requested now reconciles it if every gate passed for the merged head at the merge cutoff${merged.queue ? ', and a refused one removes the entry without delivering' : ''}`}`, 'merged-unauthorized']
       // A branch carrying another item's unlanded commits blocks the candidate whatever else stands
       // (GY-127): the restore is the control plane's, and the row says whether it is owed, requested,
       // ran and published, or failed and escalated (GY-854).
@@ -285,7 +282,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // The risk lane the item rides and its speed target (GY-883), stamped by the last evaluation
       // and shown per row: the lane names the ceremony the item's change is asked for.
       lane: work.lane ?? null, speedTarget: work.speedTarget ?? null,
-      // Set only for an item GitHub merged with no valid execution: the merge, the violation and
+      // Set only for an item GitHub merged though its gates had not passed: the merge, the violation and
       // the last refused reconciliation, so the row reads as stuck rather than as a candidate.
       merged,
       // The two waits that stall only this item (GY-89): the open human-only request, and the
@@ -317,7 +314,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       split: splitRelation(work) };
   });
   const delivered = snapshot.work.filter(work => work.stage === 'done' && work.delivery && deploySmokeRequired(work.policy)).map(work => deliveredRow(work, now, baseBranch));
-  // Every delivery no valid execution authorized, apart by how it was judged: reconciled — the
+  // Every delivery whose gates had not passed at the merge, apart by how it was judged: reconciled — the
   // record at the merge cutoff satisfied every gate — or operator-authorized, where it did not
   // and an operator took responsibility (GY-94). Neither is mistaken for the other or for a routine merge.
   const deliveries = recoveredDeliveries(snapshot.work);
@@ -353,7 +350,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   return { observedAt: snapshot.now,
     counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready').length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + remedyItems.length + capacityItems.length + concurrencyItems.length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
       // Candidates the guarded merge could take once their gates pass, and the items GitHub already
-      // merged without a valid execution, which are never candidates and wait on a reconciliation.
+      // merged though their gates had not passed, which are never candidates and wait on a reconciliation.
       mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged && !row.merged.reverted).length, revertedDeliveries: rows.filter(row => row.merged?.reverted).length,
       dispatchRequested: rows.reduce((total, row) => total + (row.dispatch ? (row.dispatch.review ? 1 : 0) + row.dispatch.producers.length : 0), 0), dispatchRunning: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending' && request.session.activity === 'running').length : 0), 0),
       dispatchAwaiting: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending' && request.session.activity === 'awaiting acknowledgement').length : 0), 0), reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,

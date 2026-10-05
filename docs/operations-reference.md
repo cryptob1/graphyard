@@ -27,11 +27,11 @@ Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next wo
 
 ## Flaky CI check
 
-A failing check is [rerun](github.md#merge-queue) once in place (`mergeQueue.rerunFailedChecks`, 0 disables); a second failure ejects, and a passing rerun on that tip lifts the ejection.
+A failing check is [rerun](github.md#failed-checks) once in place (`mergeQueue.rerunFailedChecks`, 0 disables); a second failure fails the test gate and returns the item for rework, and a passing rerun on that head clears it.
 
 ## Accepted evidence turns out to be wrong
 
-`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes the gate and ejects.
+`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes the gate, so GitHub's required checks no longer pass on that head.
 
 ## GitHub request budget
 
@@ -60,7 +60,7 @@ About ten requests uncached; unchanged, none.
 
 ### What a pause means for gates
 
-A rate-limit `403`/`429` pause stops requests; gates read stale until it lifts; nothing merges on an observation over two minutes old. A merge stalled only on freshness gets a [prioritized wake](protocol/github-webhook.md#prioritized-wakes), not rework.
+A rate-limit `403`/`429` pause stops requests; gates read the last observation until it lifts. GitHub keeps merging on its branch protection, and the merge is recorded once requests resume ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
 
 ### Reading the budget
 

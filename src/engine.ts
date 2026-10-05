@@ -10,11 +10,12 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
+import { unauthorizedMergeViolation } from './merge-queue.js';
 import { branchContamination, conflictSince, requestedBaseRefresh, nextQueueEntries, disprovedConflict, withDisprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, defaultParallelTips, mergeParallelTipsEvent, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, tipReplacesHead, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { docsSyncCarry } from './model/docs-sync.js';
 import { liftedEjection, queueEjectionRecord } from './model/queue.js';
@@ -188,13 +189,6 @@ const actionRenewSchema = z.object({ executor: executorName.optional(), leaseSec
 // since then satisfies it; `wake: false` only reads, for an executor waiting on the job it woke.
 const resyncSchema = z.object({ since: z.string().datetime({ offset: true }).optional(), wake: z.boolean().optional(), prioritized: z.boolean().optional(), wait: z.boolean().optional() }).strict();
 const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.string().min(1).max(200).optional() }).strict();
-// The merge request names the executor instance that recorded it — one daemon process or one
-// interactive `master merge` request — bound here to the principal that authenticates it (GY-92).
-const executorInstance = z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
-/** The coordinator's request that GitHub merge exactly this candidate (GY-258): the merge step's whole authority now. */
-const mergeEnqueueSchema = z.object({ enqueue: z.literal(true), expectedRevision: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().positive(), queueTip: sha.optional(), executor: executorInstance.optional() }).strict();
-/** Who recorded a merge request: `principal#instance` for an executor that names its instance, else the bare principal. */
-export const mergeExecutionOwner = (actor: Pick<Principal, 'id'>, executor?: string | null) => executor ? `${actor.id}#${executor}` : actor.id;
 /** The refusal a replay of one idempotency key with different input earns; read back by the pull. */
 export const idempotencyMismatch = 'Idempotency key reused with different input';
 export type Command = keyof typeof commands;
@@ -259,12 +253,14 @@ export function closeEndedScopeRequest(work: Work, now: Date, by: string) {
   const request = work.scopeRequest;
   if (!request || work.lease?.epoch === request.epoch) return null;
   work.scopeRequest = null;
-  if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
+  // A blocker the worker has just reported is its own, whatever its words: only a refusal left standing is cleared.
+  if (by !== 'blocked' && work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
   return { epoch: request.epoch, paths: request.paths, requestedBy: request.requestedBy, requestedAt: request.at, decision: request.decision?.state ?? null,
     refusal: request.decision?.state === 'refused' ? request.decision.reason : null, reason: scopeRequestEndedReason, by, at: now.toISOString() };
 }
 /** The commands that end an attempt, or clear what an ended one left behind, and so close its scope request. */
-const attemptEndingCommands = new Set<string>(['submit', 'release', 'rework', 'requirements', 'unblock']);
+// A blocker ends its attempt (GY-1008); a cleared one (`blocked GY-N EPOCH -`) keeps the lease, so its request stays open.
+const attemptEndingCommands = new Set<string>(['submit', 'release', 'rework', 'requirements', 'unblock', 'blocked']);
 export function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date): ScopeDecision {
   const verdict = decideScopeRequest(work, request);
   const decision: ScopeDecision = { state: verdict.state, reason: verdict.reason, at: now.toISOString(), decidedBy: 'graphyard',
@@ -305,8 +301,8 @@ function endedBySubmission(work: Work, epoch: number) {
     demand(false, `Implementation lease for epoch ${epoch} ended when ${work.key} was submitted; stop heartbeating after complete`);
 }
 
-/** The violation an observed merge records when no valid execution covered it. */
-export const unauthorizedMergeViolation = 'Merge observed without a prior authorization for this candidate';
+/** The violation an observed merge records when its gates had not passed on the merged head. */
+export { unauthorizedMergeViolation };
 /**
  * The refresh record a stale mergeability reading (GY-375) leaves for its head: the reading over
  * whatever the record for that same head carried onto it. `conflictSince` and `conflictPaths` are
@@ -365,29 +361,29 @@ export interface MergeReconciliation {
   cutoff: string; snapshotRevision: number; judgement: string; proofs: string[]; violation: string;
 }
 /**
- * Why the record as it stood before the merge cutoff does not authorize the observed merge, or
- * nothing when it does: exactly the acceptance gate's demand at the cutoff — a bootstrap
- * criterion's deferred proofs excluded, an inherited obligation re-checked — plus the
- * authorization itself, the submitted pull request, every gate, a fresh observation and an
- * authorization that predates the merge. Read for the authorized path and for a reconciliation.
+ * Why the record as it stood before the merge cutoff does not deliver the observed merge, or
+ * nothing when it does (GY-1235). GitHub merges; a merge is the delivery when the record showed the
+ * merged head as its candidate on the merged pull request with every gate passed — build, review,
+ * required checks — and no violation standing. GitHub's merge answers its own mergeability, so a
+ * merge gate held only on GitHub computing or refusing mergeability does not refuse it. No merge
+ * authorization, execution or observation age is read. Read for a delivery and for a reconciliation.
  */
-export function historicalAuthorizationRefusals(past: Work, all: Work[], observation: Observation, cutoff: number, mergedTime: number, options: { reconciling?: boolean } = {}): string[] {
-  const authorization = past.mergeAuthorization;
+export function historicalAuthorizationRefusals(past: Work, _all: Work[], observation: Observation, _cutoff: number, _mergedTime: number, options: { reconciling?: boolean } = {}): string[] {
   const refusals: string[] = [];
-  if (!authorization || authorization.sha !== observation.candidate.sha || authorization.baseSha !== observation.candidate.baseSha || authorization.policyRevision !== past.policyRevision)
-    refusals.push(`no merge authorization for ${observation.candidate.sha.slice(0, 12)} on ${observation.candidate.baseSha.slice(0, 12)} at policy revision ${past.policyRevision} stood at the merge cutoff`);
-  else if (!(Date.parse(authorization.at) < mergedTime)) refusals.push(`the merge authorization was recorded at ${authorization.at}, not before the merge`);
+  if (past.candidate?.sha !== observation.candidate.sha)
+    refusals.push(`the record named candidate ${past.candidate?.sha.slice(0, 12) ?? 'none'}, not the merged head ${observation.candidate.sha.slice(0, 12)}`);
   if (past.submission?.pr !== observation.candidate.pr) refusals.push(`the record named pull request #${past.submission?.pr ?? 'none'}, not #${observation.candidate.pr}`);
   // A reconciliation judges the merge that happened, so nothing that merge itself wrote can refuse
   // it (GY-94): the unauthorized-merge violation it exists to clear, a refusal of an earlier
   // decision, and a merge gate that only reports the queue position the merge left behind.
   const circular = (violation: string) => options.reconciling && (violation === unauthorizedMergeViolation || violation.startsWith(reconciliationRefusalPrefix));
-  const sequencingOnly = (gate: Work['gates'][number]) => options.reconciling && gate.name === 'merge' && gate.reasons.length > 0 && gate.reasons.every(queueSequencingReason);
-  for (const gate of past.gates.filter(gate => !gate.passed && !sequencingOnly(gate))) refusals.push(`gate ${gate.name} had not passed: ${gate.reasons.join('; ')}`);
+  const githubAnswers = (reason: string) => reason === mergeabilityComputingRefusal || reason === 'Pull request is not mergeable against the current base'
+    || (!!options.reconciling && queueSequencingReason(reason));
+  for (const gate of past.gates) {
+    const reasons = gate.name === 'merge' ? gate.reasons.filter(reason => !githubAnswers(reason)) : gate.reasons;
+    if (!gate.passed && reasons.length) refusals.push(`gate ${gate.name} had not passed: ${reasons.join('; ')}`);
+  }
   for (const violation of past.violations.filter(violation => !circular(violation))) refusals.push(`violation stood: ${violation}`);
-  const asOf = new Date(cutoff - 1);
-  for (const proof of requiredProofs(past, all)) if (!currentEvidence(past, proof, asOf)) refusals.push(`required proof ${proof} had no live trusted evidence at ${asOf.toISOString()}`);
-  if (!past.observation || !(cutoff - Date.parse(past.observation.at) < 120_000)) refusals.push('the last GitHub observation before the merge was older than two minutes');
   return refusals;
 }
 /**
@@ -1048,12 +1044,15 @@ export class Engine {
         // item back. Every other revision under a live lease or quarantine is refused exactly
         // as before.
         const leaseLive = !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
+        // A revision read before the item's last one is refused as exactly that, first: judged
+        // against requirements it never saw, an additive widening reads as a narrowing and would be
+        // refused as a quarantine or lease breach it is not (GY-1293).
+        demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
         widening = liveScopeWidening({ criteria: work.criteria, dependencies: work.dependencies, plannedFiles: work.plannedFiles ?? [], exclusiveResources: work.exclusiveResources, producerProofs: work.producerProofs }, data);
         if (!widening) {
           demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}; requirements remain immutable until settlement or stopped-worker recovery`);
           demand(!leaseLive, 'Stop and release the active worker before revising requirements');
         }
-        demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
         // A widening that answers one attempt's scope request (the loop's, on a review finding)
         // holds only while that request is open, its attempt holds a live lease and the head the
         // findings were read for is still the candidate: a claim, a lease end or a push changes
@@ -1317,7 +1316,6 @@ export class Engine {
           work.capacity = { ...capacity, exhaustions: [...capacity.exhaustions, record].slice(-retainedExhaustions) };
           endAttempt(work, data.epoch, 'released', now);
           work.lease = null;
-          work.scopeRequest = null;
         }
       }
       if (command === 'scope') {
@@ -1819,47 +1817,6 @@ export class Engine {
     const iso = (value: Date | null) => value ? new Date(value).toISOString() : null;
     return { availableAt: iso(row.available_at), lockedUntil: iso(row.locked_until), attempts: Number(row.attempts), error: row.error ?? null, heldUntil: iso(row.held_until), heldReason: row.held_reason ?? null };
   }
-  /**
-   * GitHub executes merges; Graphyard only gates them (GY-258). The coordinator's merge step records
-   * a request that GitHub merge exactly this candidate — refused unless every gate passes for it
-   * now — and wakes the item's observation job, whose control-plane App publishes the check and
-   * enqueues the pull request. No execution, window or clock wait is issued: GitHub merges only a
-   * head whose required check the control plane published as passed, and dequeues on withdrawal.
-   */
-  async requestEnqueue(actor: Principal, id: string, input: unknown, key: string) {
-    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-    demand((input as { enqueue?: unknown } | null)?.enqueue === true, 'Graphyard grants no merge executions: GitHub executes merges, and the merge step requests one with enqueue: true (merge protocol 3)', 400);
-    const data = mergeEnqueueSchema.parse(input);
-    const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'merge.enqueue', id, data })).digest('hex');
-    return this.store.transaction(async (db, now) => {
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) { demand(receipt.fingerprint === fingerprint, idempotencyMismatch); return receipt.result; }
-      const all = await lockedWork(db, [id]);
-      const work = all.find(item => item.id === id || item.key === id);
-      demand(work, 'Work item not found', 404);
-      demand(data.expectedRevision <= work.revision, 'Task changed before the merge was requested; retry');
-      demand(data.queueTip === undefined || work.queue?.speculation?.tip === data.queueTip && work.queue.speculation.base === data.baseSha, 'Task changed before the merge was requested; retry');
-      this.evaluate(work, all, now);
-      const authorization = work.mergeAuthorization;
-      const age = work.observation ? now.getTime() - Date.parse(work.observation.at) : NaN;
-      demand(work.stage === 'merge' && work.gates.every(gate => gate.passed) && !work.violations.length && authorization
-        && authorization.sha === data.sha && authorization.baseSha === data.baseSha && authorization.policyRevision === data.policyRevision
-        && work.candidate?.sha === data.sha && work.candidate.baseSha === data.baseSha && Number.isFinite(age) && age >= 0 && age < 120_000,
-      'Merge authorization is no longer current');
-      const request: MergeEnqueueRequest = { sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, requestedBy: mergeExecutionOwner(actor, data.executor), at: now.toISOString() };
-      const standing = await this.enqueueRequest(work.id, db);
-      if (!standing || standing.sha !== request.sha || standing.baseSha !== request.baseSha || standing.policyRevision !== request.policyRevision)
-        await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'merge.enqueue.requested', JSON.stringify({ details: request })]);
-      // The enqueue is the observation job's, and the authorization holds only while the
-      // observation is under two minutes old: the wake is claimed ahead of the polled backlog, so a
-      // candidate observed on request is not left to go stale again behind it (GY-1099).
-      await wakeJob(db, work.id, true);
-      const result = { key: work.key, revision: work.revision, enqueue: standing && standing.sha === request.sha && standing.baseSha === request.baseSha && standing.policyRevision === request.policyRevision ? standing : request };
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
-      return result;
-    });
-  }
   /** The latest merge request the coordinator recorded for the item, or null (GY-258). */
   async enqueueRequest(id: string, db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> } = this.store.pool): Promise<MergeEnqueueRequest | null> {
     return (await db.query("SELECT payload->'details' AS request FROM events WHERE work_id=$1 AND kind='merge.enqueue.requested' ORDER BY seq DESC LIMIT 1", [id])).rows[0]?.request ?? null;
@@ -2258,10 +2215,9 @@ export class Engine {
     const result = evaluate(work, all, now, this.ciAppIds, { batchSize: this.mergeBatchSize, parallelTips: this.parallelTips });
     if (work.stage !== result.stage) work.stageEnteredAt = now.toISOString();
     Object.assign(work, result);
-    if (work.gates.some(g => !g.passed) || work.violations.length) work.mergeAuthorization = null;
-    else if (work.candidate && !work.observation?.merged && (!work.mergeAuthorization || work.mergeAuthorization.sha !== work.candidate.sha || work.mergeAuthorization.baseSha !== work.candidate.baseSha)) {
-      work.mergeAuthorization = { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, at: now.toISOString() };
-    }
+    // GitHub merges on every passing gate (GY-1235): no merge authorization is recorded, and one a
+    // record carried from before is cleared.
+    if (work.mergeAuthorization) work.mergeAuthorization = null;
     // What the exact head still needs from a launched reviewer or producer, decided from the
     // gates just evaluated; the transitions reach the ledger with the document (recordDispatch).
     // A queued entry whose published tip is not this head is being replaced by it (GY-127): the
@@ -2748,83 +2704,33 @@ export class Engine {
       const queuedBefore = work.queue?.sequence ?? null;
       const dissolvedBefore = work.queue?.batchDissolved ?? null;
       let authorizedSnapshot: Work | null = null; let authorizationRevision: number | null = null;
-      // The repository-clock instant at which this authorization's evidence was judged
-      // applicable. The provider merge timestamp cannot stand in for it: the two clocks
-      // are only related through the recorded offset bound, so a reader that re-checks
-      // expiry at the raw provider instant can call evidence expired that was live when
-      // the merge was authorized. Recorded with the delivery so the judgement is exact.
+      // The instant the delivery was judged at: the last instant before the merge cutoff.
       let evidenceAsOf: string | null = null;
-      // The same two clocks make the raw provider merge timestamp unusable for any
-      // repository-clock comparison a reader makes later: window membership, weekly
-      // bucketing, and the interval from the append-only intent event are all measured on
-      // the database clock. Carry the merge onto that clock here, while the bounded offset
-      // is still in hand, and record the offset itself so other provider timestamps on the
-      // same observation (the pull request's creation time) can be carried with it.
-      let mergedAtRepository: string | null = null; let repositoryClockOffsetMs: number | null = null;
       let reconciliation: MergeReconciliation | null = null; let refusedReconciliation: { decision: string; reasons: string[] } | null = null;
       let operatorAuthorization: OperatorAuthorizedDelivery | null = null;
       if (observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))) {
         const providerMergedTime = Date.parse(observation.mergedAt);
-        // Never allow evidence from after the earliest possible merge instant.
-        // Whole-second timestamps can therefore conservatively refuse same-second authorization.
-        const acquired = (await db.query(`SELECT ${eventWorkSql()}->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind IN ('merge.execution.acquired','merge.execution.verified','merge.execution.committed') ORDER BY seq DESC LIMIT 1`, [id])).rows[0]?.execution as Work['mergeExecution'] | undefined;
-        // A merge execution recorded before GY-258, when Graphyard called the provider itself, still
-        // attributes the merge it committed; GitHub-executed merges stand on the enqueue request below.
-        // The execution that called the provider for this head is the one that bounds its merge: a
-        // later execution acquired on a lagging read that still showed the pull request open never
-        // committed, and binding the merge to it would record a merge its predecessor authorized as
-        // unauthorized (GY-202). So the latest committed execution for the observed head is preferred.
-        const commits = (candidate: Work['mergeExecution'] | undefined) => !!candidate?.committingAt && candidate.sha === observation.candidate.sha && candidate.baseSha === observation.candidate.baseSha;
-        const committed = (await db.query(`SELECT ${eventWorkSql()}->'mergeExecution' AS execution FROM events WHERE work_id=$1 AND kind='merge.execution.committed' AND ${eventWorkSql()}->'mergeExecution'->>'sha'=$2 AND ${eventWorkSql()}->'mergeExecution'->>'baseSha'=$3 ORDER BY seq DESC LIMIT 1`,
-          [id, observation.candidate.sha, observation.candidate.baseSha])).rows[0]?.execution as Work['mergeExecution'] | undefined;
-        const boundedExecution = (commits(committed) ? committed : null) ?? acquired ?? null;
-        const offset = boundedExecution?.clockOffset;
-        const mergedTime = providerMergedTime + (offset?.min ?? 0);
-        // The lower bound of the offset, so the recorded instant is the earliest the merge
-        // can have happened on the repository clock and a derived duration is never
-        // inflated by skew. The bound is narrow: the recorded verification refused an offset
-        // observation wider than 20 seconds, so the true instant is at most that far later.
-        if (offset) { repositoryClockOffsetMs = offset.min; mergedAtRepository = new Date(mergedTime).toISOString(); }
-        const cutoff = providerMergedTime + (/\.\d+Z$/.test(observation.mergedAt) ? 1 : 1000) + (offset?.max ?? 0);
-        // Evidence is judged live at `cutoff - 1`, the instant the historical check uses: a recorded
-        // execution's expiry was bounded by the earliest required-evidence expiry, and the enqueue
-        // path re-checks every required proof on the record before the cutoff.
+        // GitHub merges (GY-1235): no execution or clock offset is issued, so the merge instant is
+        // GitHub's own and the cutoff the first instant after it.
+        const mergedTime = providerMergedTime;
+        const cutoff = providerMergedTime + (/\.\d+Z$/.test(observation.mergedAt) ? 1 : 1000);
         evidenceAsOf = new Date(cutoff - 1).toISOString();
-        let cancelledExecution = false;
-        if (boundedExecution) {
-          const cancellation = (await db.query("SELECT created_at FROM events WHERE work_id=$1 AND kind='merge.execution.cancelled' AND payload->'details'->>'executionId'=$2 AND created_at<$3 ORDER BY seq DESC LIMIT 1", [id, boundedExecution.id, new Date(cutoff)])).rows[0]?.created_at as Date | undefined;
-          cancelledExecution = !!cancellation && cancellation.getTime() < cutoff;
-        }
-        const executionValid = !!boundedExecution && !!offset && !cancelledExecution && boundedExecution.sha === observation.candidate.sha && boundedExecution.baseSha === observation.candidate.baseSha
-          && !!boundedExecution.verifiedAt && !!boundedExecution.committingAt
-          && Date.parse(boundedExecution.issuedAt) <= Date.parse(boundedExecution.verifiedAt)
-          && Date.parse(boundedExecution.verifiedAt) <= Date.parse(boundedExecution.committingAt)
-          && Date.parse(boundedExecution.committingAt) < mergedTime && cutoff <= Date.parse(boundedExecution.expiresAt);
-        // The record as it stood immediately before the merge: what the historical authorization
-        // check reads, and what a two-party reconciliation re-checks (GY-92). The cutoff carries
-        // the clock-offset allowance so an authorization recorded up to the merge instant on the
-        // repository clock still counts, but that allowance admits no post-merge record (GY-94):
-        // a snapshot whose own observation already reports this pull request merged was written
-        // after the merge, whatever its timestamp, and carries the merge's consequences.
+        // The record as it stood immediately before the merge: what the delivery judgement reads,
+        // and what a two-party reconciliation re-checks (GY-92). A snapshot whose own observation
+        // already reports this pull request merged was written after the merge, whatever its
+        // timestamp, and carries the merge's consequences, so it is never read (GY-94).
         // A row stored as a delta (store/snapshot-delta.ts) is read as the document it stands for.
         const past = await documentBefore(db, id, new Date(cutoff),
           record => !(record.observation?.merged && record.observation.candidate?.pr === observation.candidate.pr));
         const historical = past ? historicalAuthorizationRefusals(past, all, observation, cutoff, mergedTime) : ['No record of the item precedes the merge cutoff'];
-        // GitHub executes the merge (GY-258): the coordinator's request that GitHub merge exactly
-        // this head, recorded before the merge, stands where an execution stood. The record before
-        // the cutoff must still show every gate passed and the authorization binding this head.
-        const requested = !executionValid && past ? (await db.query(`SELECT 1 FROM events WHERE work_id=$1 AND kind='merge.enqueue.requested' AND payload->'details'->>'sha'=$2 AND payload->'details'->>'baseSha'=$3
-          AND (payload->'details'->>'policyRevision')::int=$4 AND created_at<$5 LIMIT 1`, [id, observation.candidate.sha, observation.candidate.baseSha, past.policyRevision, new Date(cutoff)])).rowCount! > 0 : false;
-        if (!authorizedSnapshot && past && (executionValid || requested) && !historical.length) {
-          authorizedSnapshot = past; authorizationRevision = boundedExecution?.authorizationRevision ?? past.revision;
-        }
-        // An observed merge whose execution was cancelled or never valid is a recorded violation
-        // that every later observation re-derives from immutable history. It is recoverable by
-        // exactly one path: a two-party merge decision for this candidate, requested after the
-        // merge, applied by an independent approver. The decision does not decide delivery by
-        // itself — the record before the cutoff must still show every gate passed and every
-        // required proof live, the same judgement an authorized merge is held to — and the
-        // delivery then cites that snapshot and the decision. A decision the history refuses
+        // GitHub's merge of a head whose every gate passed on that head is the delivery.
+        if (past && !historical.length) { authorizedSnapshot = past; authorizationRevision = past.revision; }
+        // An observed merge of a head whose gates had not passed is a recorded violation that every
+        // later observation re-derives from immutable history. It is recoverable by a two-party
+        // merge decision for this candidate, requested after the merge, applied by an independent
+        // approver. The decision does not decide delivery by itself — the record before the cutoff
+        // must still show every gate passed for the merged head, apart from what the merge itself
+        // wrote — and the delivery then cites that snapshot and the decision. A decision the history refuses
         // is recorded on the item with the reasons, once, so the item says why it cannot be;
         // that refusal is also the exit of a queue entry that can never publish (merge-queue.ts).
         // What the history refuses, an operator may still own (GY-94): a later decision with an
@@ -2844,11 +2750,11 @@ export class Engine {
           const decision = decisions.filter(entry => !refused.has(entry.id)).at(-1) ?? null;
           const reconcilable = decision ? historicalAuthorizationRefusals(past, all, observation, cutoff, mergedTime, { reconciling: true }) : historical;
           if (decision && !reconcilable.length) {
-            authorizedSnapshot = past; authorizationRevision = boundedExecution?.sha === observation.candidate.sha && boundedExecution.baseSha === observation.candidate.baseSha ? boundedExecution.authorizationRevision : past.revision;
+            authorizedSnapshot = past; authorizationRevision = past.revision;
             reconciliation = { decision: decision.id, requestedBy: decision.requestedBy, requestedAt: decision.requestedAt, approvedBy: decision.approvedBy!, approvedAt: decision.approvedAt!,
               reason: decision.reason, approvalReason: decision.approvalReason ?? '', cutoff: new Date(cutoff).toISOString(), snapshotRevision: past.revision,
-              judgement: `Every gate passed and every required proof was live at ${new Date(cutoff - 1).toISOString()}, the recorded merge cutoff; the merge was observed without a valid execution and is delivered on the approved decision`,
-              proofs: requiredProofs(past, all), violation: unauthorizedMergeViolation };
+              judgement: `Every gate passed for the merged head at ${new Date(cutoff - 1).toISOString()}, the recorded merge cutoff; the merge was held as a violation and is delivered on the approved decision`,
+              proofs: [], violation: unauthorizedMergeViolation };
           } else if (decision) {
             const operator = operatorAuthorizing(decision, refused);
             if ('operator' in operator) {
@@ -2856,7 +2762,7 @@ export class Engine {
               operatorAuthorization = { decision: decision.id, requestedBy: decision.requestedBy, requestedAt: decision.requestedAt, approvedBy: decision.approvedBy!, approvedAt: decision.approvedAt!,
                 reason: decision.reason, approvalReason: decision.approvalReason ?? '', operator: operator.operator, refusedDecision: operator.refusedDecision, unmet: reconcilable,
                 cutoff: new Date(cutoff).toISOString(), snapshotRevision: past.revision, execution: null, violation: unauthorizedMergeViolation,
-                judgement: `No merge execution authorized merge ${observation.mergeSha.slice(0, 12)} and the record at ${new Date(cutoff - 1).toISOString()}, the recorded merge cutoff, did not either (${reconcilable.join('; ')}); operator ${operator.operator} authorized it outside the guarded path by decision ${decision.id}, citing refused reconciliation ${operator.refusedDecision}` };
+                judgement: `The gates did not pass for merge ${observation.mergeSha.slice(0, 12)}: the record at ${new Date(cutoff - 1).toISOString()}, the recorded merge cutoff, lacked ${reconcilable.join('; ')}; operator ${operator.operator} authorized it by decision ${decision.id}, citing refused reconciliation ${operator.refusedDecision}` };
             } else {
               const reasons = operator.refusal ? [...reconcilable, operator.refusal] : reconcilable;
               const refusal = `${reconciliationRefusalPrefix}${decision.id} refused: ${reasons.join('; ')}`;
@@ -2944,8 +2850,7 @@ export class Engine {
           if (reconciliation || operatorAuthorization) work.violations = work.violations.filter(entry => entry !== violation && !entry.startsWith(reconciliationRefusalPrefix));
           else if (work.gates.some(g => !g.passed)) work.violations.push('Post-merge checks differ from the recorded authorization; follow-up required');
           work.stage = 'done'; work.stageEnteredAt = now.toISOString();
-          const delivery: Work['delivery'] = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision!, ...(evidenceAsOf ? { evidenceAsOf } : {}),
-            ...(mergedAtRepository ? { mergedAtRepository, repositoryClockOffsetMs: repositoryClockOffsetMs! } : {}) };
+          const delivery: Work['delivery'] = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision!, ...(evidenceAsOf ? { evidenceAsOf } : {}) };
           work.delivery = reconciliation ? Object.assign(delivery, { reconciliation }) : operatorAuthorization ? Object.assign(delivery, { operatorAuthorization }) : delivery;
           if (reconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, reconciliation.requestedBy, 'merge.reconciled',
             JSON.stringify({ details: { ...reconciliation, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision, evidenceAsOf, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);

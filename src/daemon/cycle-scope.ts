@@ -7,6 +7,7 @@ import { barrelSuccessorGround, criterionSymbolGround, criterionSymbols, criteri
 import { type Successor, successorGround, successorsOf } from '../model/successors.js';
 import { findingScope, type ReviewFinding } from '../review-scope.js';
 import { guardBroadScope } from '../master.js';
+import { RefusedResponse } from '../model/refusal.js';
 import { message, scopeMeasurementSchema } from './state.js';
 import { scopeKey } from './reconcile.js';
 import { scopeBudget } from './metrics.js';
@@ -119,6 +120,10 @@ export async function scopeStep(cycle: Cycle) {
     const key = `${scopeKey(item, request)}:finding:${item.policyRevision}`;
     const previous = state.actions[key];
     if (previous?.state === 'done' && /^Widened /.test(previous.detail)) return previous.at;
+    // The rest of a partly widened request is the approver's once it is asked (GY-1293): reading the
+    // findings again meanwhile would widen by one more hop of companions, move the revision the
+    // approver's decision is bound to, and defer that decision another cycle.
+    if (approverDeciding(state.approvals, item.key, request)) return null;
     const judged = previous?.state === 'done';
     if (judged ? clock - Date.parse(previous.at) < findingRecheckMs : previous && (previous.state !== 'failed' || !readyToRetry(previous, state.cycle))) return null;
     const attempts = judged ? previous.attempts : (previous?.attempts ?? 0) + 1;
@@ -154,21 +159,28 @@ export async function scopeStep(cycle: Cycle) {
       const reason = guardBroadScope({ ...item, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...granted])] },
         `Additive scope ${item.key}'s own change calls for — a review finding names it, it succeeds a planned file the base branch split, renamed or re-exports, a test pins text a planned file holds or a criterion changes, it defines or calls a symbol a criterion names, or it is a companion the change inevitably carries: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
       const widened = await effects.widenScope(item, request, granted, reason) as Work | undefined;
+      // Every later step of this cycle reads the widened item, never the snapshot this widening
+      // outdated: a successor re-plan posted from that snapshot is refused (GY-1235, GY-1293).
+      if (widened?.id === item.id) settled.set(item.id, widened);
       // The time the control plane recorded the answer, never the cycle's: the worker reads it at once.
       const recorded = widened?.scopeDecision;
       const at = recorded?.epoch === request.epoch && recorded.requestedAt === request.at ? recorded.at : new Date(now()).toISOString();
       if (rest) {
         // Partly widened: the rest stays refused, for the approver, and is judged again like any
         // refusal. The approver is asked for it against the widened item, never this cycle's
-        // snapshot, whose plannedFiles would drop what was just granted.
-        if (widened?.id === item.id) settled.set(item.id, widened);
-        performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Partly widened ${item.key} with ${namePaths(granted)} on ${widenedOn(scoped.grounds!, granted.length)}: ${grounds}. The rest goes to the approver: ${rest}`), attempts, cycle: state.cycle }, now(), effects.persist));
+        // snapshot, whose plannedFiles would drop what was just granted. The judgement stands for the
+        // revision the widening made, so the decision step asks the approver this cycle (GY-1293).
+        const detail = boundDetail(`Partly widened ${item.key} with ${namePaths(granted)} on ${widenedOn(scoped.grounds!, granted.length)}: ${grounds}. The rest goes to the approver: ${rest}`);
+        performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail, attempts, cycle: state.cycle }, now(), effects.persist));
+        if (widened?.id === item.id && widened.policyRevision !== item.policyRevision)
+          await record(state, `${scopeKey(item, request)}:finding:${widened.policyRevision}`, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail, attempts: 1, cycle: state.cycle }, now(), effects.persist);
         return null;
       }
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Widened ${item.key} with ${namePaths(paths)} on ${widenedOn(scoped.grounds!, paths.length)}: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
       return at;
     } catch (error) {
-      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed', detail: boundDetail(`Could not widen ${item.key} on a review finding or a planned file's successor: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist));
+      const transient = transientScopeRefusal(error);
+      performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed', detail: boundDetail(`Could not widen ${item.key} on a review finding or a planned file's successor${transient ? ` (${transient}, ${transientScopeRetry})` : ''}: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist, scopeRefusalFault(transient, previous)));
       return null;
     }
   };
@@ -272,10 +284,13 @@ const baseSuccessors = (effects: Cycle['effects'], item: Work) => effects.baseSu
  * audited additive requirements revision naming each successor's ground. Nothing is removed, and an
  * item whose successors are all planned already is left alone, so a standing re-plan never churns.
  */
-export async function successorStep(cycle: Cycle) {
+export async function successorStep(cycle: Cycle, settled: ReadonlyMap<string, Work> = new Map()) {
   const { state, effects, now, performed, isolate, open } = cycle;
   if (!effects.baseSuccessions || !effects.replan) return;
-  for (const item of open) await isolate('scope', item, item.key, async () => {
+  // An item the scope step revised this cycle is re-planned from that revision, never from the
+  // snapshot it outdated: the stale revision would be refused, not applied (GY-1235, GY-1293).
+  for (const read of open) await isolate('scope', read, read.key, async () => {
+    const item = settled.get(read.id) ?? read;
     if (item.observation?.merged || !(item.plannedFiles ?? []).length) return;
     const key = `successors:${item.id}:${item.policyRevision}`;
     const previous = state.actions[key];
@@ -294,8 +309,39 @@ export async function successorStep(cycle: Cycle) {
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: null, epoch: item.epoch, state: 'done',
         detail: boundDetail(`Re-planned ${item.key} with ${namePaths([...missing])}, the successors of planned files the base branch split or renamed: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
+      const transient = transientScopeRefusal(error);
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: null, epoch: item.epoch, state: 'failed',
-        detail: boundDetail(`Could not re-plan ${item.key} onto the successors of its planned files: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist));
+        detail: boundDetail(`Could not re-plan ${item.key} onto the successors of its planned files${transient ? ` (${transient}, ${transientScopeRetry})` : ''}: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist, scopeRefusalFault(transient, previous)));
     }
   });
+}
+
+/** What a scope action refused only transiently says, so its next failure can tell a run of them from one (GY-1293). */
+const transientScopeRetry = 'so it is retried next cycle on a fresh read';
+/**
+ * GY-1293. Why the control plane refused one of the loop's own additive scope revisions without
+ * judging its scope, or null: the plane answered 5xx (GY-1290 on 5 October 2026: an internal error
+ * under reconciliation contention, widened on the next cycle), read from the response's own status,
+ * or the item moved past the policy revision the loop read (a concurrent revision; the next cycle
+ * reads the new one).
+ */
+export function transientScopeRefusal(error: unknown): string | null {
+  if (error instanceof RefusedResponse && error.status >= 500) return 'the control plane answered 5xx';
+  if (/Policy revision changed; reload before revising/.test(message(error))) return 'the item moved past the revision the loop read';
+  return null;
+}
+/**
+ * The fault kind a refused scope action is noted under: a transient refusal judged nothing about the
+ * item's scope, so one alone is no scope fault (null: stored for retry, never an instance); the
+ * second in a row is, and so is every other refusal (undefined: the action's own kind, action:scope).
+ * "In a row" is per action key, and the key names the policy revision: a stale-revision refusal's
+ * retry runs under the new revision's key, so it starts a run of its own. That is intended — the
+ * item moved on, and the retry is a new revision's first attempt, not the stale one again.
+ */
+export function scopeRefusalFault(transient: string | null, previous: { state: string; detail: string } | undefined): null | undefined {
+  return transient && !(previous?.state === 'failed' && previous.detail.includes(transientScopeRetry)) ? null : undefined;
+}
+/** True while an approver judges the requirements decision that answers this scope request (GY-176). */
+export function approverDeciding(approvals: Cycle['state']['approvals'], work: string, request: Pick<ScopeRequestState, 'epoch' | 'at'>) {
+  return Object.values(approvals).some(watch => watch.work === work && !watch.settledAt && watch.scope?.epoch === request.epoch && watch.scope?.at === request.at);
 }
