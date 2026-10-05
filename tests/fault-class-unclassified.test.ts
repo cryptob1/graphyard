@@ -18,6 +18,8 @@ import { classifyAttention, trackFaults, type FaultRecord } from '../src/model/f
 //   until the retry stopped. The create path already resolved such a refusal (GY-598); the append did
 //   not. The stop line itself also carried no kind. GY-1249 removed the follow-up filing, so the
 //   append no longer exists; the stop line's classification is still tested below.
+// GY-1085 landed first and already classifies the non-exercising-proof and stopped-retry lines, so
+// both tests below are regression guards on that base, not reproductions of a base failure (GY-1168).
 // The test is named for the proof it produces: manual:fault-class-unclassified.
 
 const nonExercising = [

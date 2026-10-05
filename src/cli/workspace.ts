@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
-import { setupLine, supervise, systemdContainment } from '../supervisor.js';
+import { containmentFailureNote, setupLine, supervise, systemdContainment } from '../supervisor.js';
 import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServerUrl, parseGeneratedManifest, regenerateManagedBlocks, type GeneratedManifest } from '../sync.js';
 import { managedInstructions } from '../repository-setup.js';
 import { managedMasterInstructions } from '../master.js';
@@ -311,7 +311,7 @@ export const workspaceCommands = defineCommands([
             settle: () => settleContainment(
               (requestId, body) => api(`work/${work.id}/settle`, body, requestId),
               { epoch, settlementToken: containment!.settlementToken, settlementHash: containment!.settlementHash, exclusiveResources, requestId: settlementRequestId },
-            ),
+            ), report: failure => api(`work/${work.id}/request`, containmentFailureNote(epoch, failure), randomUUID()), // a fence it cannot lower goes on the record
           } : undefined,
         }));
     },
