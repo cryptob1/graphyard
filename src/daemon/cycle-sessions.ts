@@ -36,6 +36,8 @@ export async function closeStep(cycle: Cycle) {
   //    end that item's worker.
   const heldPanes = new Set(open.flatMap(item => !!item.lease && Date.parse(item.lease.expiresAt) > clock
     ? (item.sessions ?? []).filter(s => s.kind === 'implementation' && s.pane).map(s => s.pane!) : []));
+  // The sightings that still stand this cycle; any other on a launch profile's panes is dropped below.
+  const sighted = new Set<string>();
   for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('close', null, profile.name, async () => {
     const matchingAgents = agents.filter(candidate => candidate.name && isProfileSession(profile, candidate.name));
     for (const agent of matchingAgents) {
@@ -58,19 +60,30 @@ export async function closeStep(cycle: Cycle) {
       const key = closeKey(profile, agent.pane_id);
       if (state.actions[key]?.state === 'done') continue;
       if (unrecognized) {
+        sighted.add(seenKey);
+        // The sighting is a wait, not an action in flight: a `started` row would be resumed as an
+        // interrupted close (indeterminate, a standing action:close fault, its clock reset each cycle).
         const seen = state.actions[seenKey];
-        if (!seen) { await record(state, seenKey, { kind: 'close', work: null, principal: profile.principal, state: 'started', detail: `${exited ? `${agent.name}'s runtime has left pane ${agent.pane_id}` : `${agent.name} in pane ${agent.pane_id} reports ${agent.agent_status ?? 'no status'}`}, which holds no live assignment; it is closed if that still stands in ${launchAppearanceMs / 1000}s`, attempts: 1, cycle: state.cycle }, now(), effects.persist); continue; }
+        if (seen?.state !== 'waiting') { await record(state, seenKey, { kind: 'close', work: null, principal: profile.principal, state: 'waiting', detail: `${exited ? `${agent.name}'s runtime has left pane ${agent.pane_id}` : `${agent.name} in pane ${agent.pane_id} reports ${agent.agent_status ?? 'no status'}`}, which holds no live assignment; it is closed if that still stands in ${launchAppearanceMs / 1000}s`, attempts: 1, cycle: state.cycle }, now(), effects.persist); continue; }
         if (now() - Date.parse(seen.at) < launchAppearanceMs) continue;
       }
       await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'started', detail: `Closing ${agent.name}: no active Graphyard assignment`, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
       try {
         await effects.closeSession(agent.pane_id);
+        // Its sighting goes with the pane, in this step's sweep.
+        sighted.delete(seenKey);
         performed.push(await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'done', detail: `Closed finished session ${agent.name} (${exited ? 'its runtime exited' : agent.agent_status ?? 'no status'}) with no active assignment`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
       } catch (error) {
         performed.push(await record(state, key, { kind: 'close', work: null, principal: profile.principal, state: 'failed', detail: `Could not close ${agent.name}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
       }
     }
   });
+  // A sighting whose pane was closed, is no longer listed, or reads a recognised status is dropped,
+  // so no row outlives its pane.
+  const launchProfiles = config.workers.filter(worker => worker.mode === 'launch').map(profile => `exited:${profile.name}:`);
+  const stale = Object.keys(state.actions).filter(key => launchProfiles.some(prefix => key.startsWith(prefix)) && !key.startsWith('exited:implementation:') && !sighted.has(key));
+  for (const key of stale) delete state.actions[key];
+  if (stale.length) await effects.persist(state);
 
   // 1a. Mid-session exhaustion. A session that ran out of provider quota does not fail: it stops
   //     on its runtime's limit notice and waits for a person. The loop reads that notice from the

@@ -431,6 +431,25 @@ test('unit:agent-name-reclaim-closes-unknown-status-holder — a worker pane Her
   assert.ok(result.actions.some(action => action.kind === 'close' && action.state === 'done' && /Closed finished session graphyard-claude-1 \(unknown\)/.test(action.detail)));
   assert.ok(result.actions.some(action => action.kind === 'close' && action.state === 'done' && /Closed finished session graphyard-cursor-1 \(no status\)/.test(action.detail)));
   assert.ok(130_000 < nameReclaimBoundMs);
+
+  // With the snapshot clock advancing as in production, the sighting is a wait rather than an
+  // interrupted close: reconcile leaves it alone, so it opens no action:close fault, its clock is not
+  // reset, the pane closes on the first cycle past launchAppearanceMs, and no sighting row outlives its pane.
+  const ticking = { now: t1166 };
+  const gone: HerdrAgent[] = [held('graphyard-claude-1', 'pane-1', 'unknown'), held('graphyard-cursor-1', 'pane-2', undefined)];
+  const shut: string[] = [], cursor = emptyDaemonState(config), live = loopEffects([], gone, shut, () => ticking.now);
+  const cycleAt = async (at: number) => { ticking.now = at; return runCycle(config, cursor, live, () => at); };
+  await cycleAt(t1166);
+  assert.deepEqual(Object.keys(cursor.actions).filter(key => key.startsWith('exited:')).map(key => cursor.actions[key].state), ['waiting', 'waiting']);
+  // pane-2 leaves Herdr on its own before its wait ends: its sighting goes with it.
+  gone.splice(1, 1);
+  await cycleAt(t1166 + launchAppearanceMs + 1_000);
+  assert.deepEqual(shut, ['pane-1'], 'closed on the first cycle past the launch bound, inside nameReclaimBoundMs');
+  assert.ok(launchAppearanceMs + 1_000 < nameReclaimBoundMs);
+  await cycleAt(t1166 + 2 * launchAppearanceMs);
+  assert.deepEqual(Object.keys(cursor.actions).filter(key => key.startsWith('exited:')), [], 'no sighting row is left once its pane is closed or gone');
+  assert.deepEqual(Object.keys(cursor.faults.failing).filter(key => key.startsWith('exited:') || key.startsWith('close:')), [], 'no action:close fault stands');
+  assert.ok(!cursor.faults.instances.some(instance => /exited:|close:/.test(JSON.stringify(instance))), 'no close fault instance was opened');
 });
 
 test('unit:ledger-retention-keeps-record-with-live-pane — a terminal record whose name a pane still holds is not reaped until the pass closes that pane', async () => {
@@ -562,9 +581,9 @@ async function loopCloses(agents: HerdrAgent[], at: number[], launch = gy1165Wor
   for (const clock of at) { await runCycle(config, state, loop, () => clock); after.push([...closed]); }
   return after;
 }
-function loopEffects(work: Work[], agents: HerdrAgent[], closed: string[]): DaemonEffects {
+function loopEffects(work: Work[], agents: HerdrAgent[], closed: string[], clock = () => t1166): DaemonEffects {
   return {
-    agents: () => agents.filter(entry => !closed.includes(entry.pane_id!)), credentials: async () => ({}), snapshot: async () => ({ work, now: new Date(t1166).toISOString() }),
+    agents: () => agents.filter(entry => !closed.includes(entry.pane_id!)), credentials: async () => ({}), snapshot: async () => ({ work, now: new Date(clock()).toISOString() }),
     closeSession: pane => { closed.push(pane); }, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({ result: 'merged', merged: true }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(t1166).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
