@@ -215,8 +215,7 @@ const refusalsOf = (work: Work, gate: string) => work.gates.find(entry => entry.
  * `master scope` — or `master requirements` where no fold represents the ask under the cap, which
  * the plain union `master scope` posts cannot carry (GY-936) — a recorded blocker `master unblock`,
  * an escalation `master decide … resolve`, a merged item production does not serve
- * `master verify-deployment`, a candidate every other gate passed (merging, or stranded there)
- * `master merge`, a review `master review`, backlog `master release`, and a human-only decision the
+ * `master verify-deployment`, a review `master review`, backlog `master release`, and a human-only decision the
  * answer its row names. Null where the next step is a session already running or a turn nobody can
  * take early.
  */
@@ -231,8 +230,6 @@ export function nextCommand(work: Work, group: Group | null, actor: ActorRole, h
   if (work.blocker) return blockerView(work)?.needsSomeone === false ? null : `graphyard master unblock ${key} REASON`;
   if (work.stage === 'done') return actor === 'master' ? `graphyard master verify-deployment ${key}` : null;
   if (refusalsOf(work, 'merge').some(reason => escalation.test(reason))) return `graphyard master decide ${key} resolve REASON`;
-  const mergeable = !!work.submission && work.gates.every(gate => gate.passed || gate.name === 'merge');
-  if (mergeable && (actor === 'master' || actor === 'executor') && (work.nextAction?.kind ?? 'merge') === 'merge') return `graphyard master merge ${key}`;
   return null;
 }
 

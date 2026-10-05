@@ -8,7 +8,6 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { wellFormedFlowReport } from '../web/flow-analytics.js';
 import type { Observation, Principal, Work } from '../src/model.js';
-import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { daemonEffects } from '../src/master-daemon.js';
 import {
   classifyWait, computeFlow, coveredWindow, dayBuckets, deriveFacts, distribution, flowDrilldown, flowExport, flowLimits, flowWindowLabel, flowWindowMessage, flowWindows, gateFactStep,
@@ -259,30 +258,22 @@ async function settle(instant: string) {
   const wait = Date.parse(instant) + 5 - Date.now();
   if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
 }
-// A merge authorization now requires the candidate to hold the head of the global merge queue
-// with Graphyard's speculative tip published for it. The queue is shared by every fixture in
-// this file, so the other entries step aside and this candidate's tip is published the way
-// tests/system.test.ts does; queue publication itself is proven by the merge-queue tests.
+// GitHub merges a candidate whose gates pass (GY-1235): observe the approved, green head, then
+// its merge. No queue entry or speculative tip is involved any more.
 async function deliver(work: Work, slice: string, mergeSha: string, overrides: Partial<Observation> = {}) {
   const current = () => (store.list()).then(items => items.find(item => item.id === work.id)!);
-  await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [work.id]);
   let latest = await current();
-  assert.ok(latest.queue, 'a proven candidate holds a merge-queue entry');
-  const speculation: QueueSpeculation = { ref: queueRef(latest.key), tip: head, base, baseTree: 'f'.repeat(40), predecessors: [], policyRevision: latest.policyRevision, publishedAt: new Date().toISOString() };
-  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [latest.id, JSON.stringify(speculation)]);
-  latest = await current();
   latest = await engine.observe(latest.id, latest.revision, { ...observation(latest, slice, overrides), prState: 'open', draft: false });
-  assert.ok(latest.gates.every(gate => gate.passed), `the published tip clears the merge gate: ${JSON.stringify(latest.gates.find(gate => !gate.passed)?.reasons)}`);
-  // GitHub executes the merge (GY-258): the coordinator's request binds this head, and the merged
-  // observation that follows completes the delivery.
-  const requested = await engine.requestEnqueue(coordinator, work.id, { enqueue: true, expectedRevision: latest.revision, sha: head, baseSha: base, policyRevision: latest.policyRevision }, randomUUID());
-  const mergedAt = new Date(Math.ceil((Date.parse(requested.enqueue.at) + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+  assert.ok(latest.gates.every(gate => gate.passed), `the candidate passes every gate: ${JSON.stringify(latest.gates.find(gate => !gate.passed)?.reasons)}`);
+  // GitHub merges (GY-1235): the merged observation of the head whose gates passed completes the delivery.
+  const now = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
+  const mergedAt = new Date(Math.ceil((now + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
   latest = await current();
   const delivered = await engine.observe(latest.id, latest.revision, { ...observation(latest, slice, overrides), merged: true, mergeSha, mergedAt });
   assert.equal(delivered.stage, 'done');
-  // GY-60: a merge observed without a prior request is recorded as a violation and never
-  // reaches `done`; pin the attribution so a dropped request fails here, not in the analytics.
-  assert.deepEqual(delivered.violations, [], 'the merged observation is attributed to the merge request');
+  // GY-60: a merge of a head whose gates had not passed is recorded as a violation and never
+  // reaches `done`; pin the attribution so a refused delivery fails here, not in the analytics.
+  assert.deepEqual(delivered.violations, [], 'the merged observation is attributed to the gates that passed');
   await settle(mergedAt);
   return { delivered, mergedAt, mergeSha };
 }
@@ -314,9 +305,8 @@ test('integration:flow-analytics-phase-durations', async () => {
   assert.equal(phase('review-start-to-review-complete').medianMs, 3600_000);
   assert.equal(phase('review-complete-to-evidence-complete').n, 1);
   assert.ok(phase('review-complete-to-evidence-complete').medianMs! >= 0);
-  assert.equal(phase('evidence-complete-to-merge-authorized').n, 1);
-  assert.equal(phase('merge-authorized-to-merged').n, 1);
-  assert.ok(phase('merge-authorized-to-merged').medianMs! > 0);
+  // No merge authorization is recorded since GY-1235 (GitHub merges), so the two authorization
+  // phases have nothing to measure here.
   assert.equal(phase('merged-to-production').n, 1);
   assert.equal(phase('merged-to-production').medianMs, 1000);
   assert.equal(report.ci.runs, 2, 'each observed check run is measured once per candidate');
@@ -591,9 +581,10 @@ test('integration:flow-analytics-bottleneck-summary', async () => {
   const snapshot = (await analyse({ slice })).report.bottleneck;
   const count = (id: string) => snapshot.categories.find(category => category.id === id)!.count;
   assert.equal(count('review'), 6, 'six items wait on review');
-  assert.equal(count('evidence'), 4, 'four items wait on acceptance evidence');
+  // Proofs gate nothing since GY-1235: the four approved, green but unproven items are merge ready too.
+  assert.equal(count('evidence'), 0, 'no item waits on acceptance evidence');
   assert.equal(count('dependency'), 5, 'five items are dependency blocked');
-  assert.equal(count('merge-ready'), 1, 'one item is merge ready');
+  assert.equal(count('merge-ready'), 5, 'five items are merge ready');
   assert.equal(count('backlog') + count('blocked') + count('implementation') + count('merge-blocked'), 0);
   assert.equal(snapshot.scope.undelivered, 16);
   assert.equal(snapshot.leading!.category, 'review');
@@ -604,22 +595,19 @@ test('integration:flow-analytics-bottleneck-summary', async () => {
   assert.ok(snapshot.categories.every(category => category.definition.length > 20));
   assert.ok(snapshot.categories.find(category => category.id === 'review')!.items.every(item => item.waitingMs !== null && item.key.startsWith('GY-')));
 
-  // Merge readiness is read from the durable gate fact: the proven candidate holds a merge-queue
-  // entry and the merge gate only sequences it, which is not a refusal. A queued candidate whose
-  // pull request stops being mergeable is merge blocked until a later observation clears it.
+  // Merge readiness is read from the durable gate fact: every gate of the ready candidate passes.
+  // A candidate whose pull request stops being mergeable is merge blocked until a later
+  // observation clears it.
   const readyGate = (await analyse({ slice })).dataset.latest.find(fact => fact.workId === observed.id && fact.kind === 'gates.changed')!.details;
-  assert.deepEqual(readyGate.unmet, ['merge']);
-  assert.equal(readyGate.queued, true);
-  assert.equal(readyGate.mergeBlockers, 0);
-  assert.ok(readyGate.reasons.every((reason: string) => /merge queue|speculative tip/i.test(reason)), `only queue sequencing remains: ${JSON.stringify(readyGate.reasons)}`);
+  assert.deepEqual(readyGate.unmet, []);
   let queued = (await store.list()).find(item => item.id === observed.id)!;
   await engine.observe(queued.id, queued.revision, observation(queued, slice, { reviews: approval(head, 9600), mergeable: false }));
   const conflicted = (await analyse({ slice })).report.bottleneck;
-  assert.equal(conflicted.categories.find(category => category.id === 'merge-blocked')!.count, 1, 'a queued but unmergeable candidate is blocked, not ready');
-  assert.equal(conflicted.categories.find(category => category.id === 'merge-ready')!.count, 0);
+  assert.equal(conflicted.categories.find(category => category.id === 'merge-blocked')!.count, 1, 'an unmergeable candidate is blocked, not ready');
+  assert.equal(conflicted.categories.find(category => category.id === 'merge-ready')!.count, 4);
   queued = (await store.list()).find(item => item.id === observed.id)!;
   await engine.observe(queued.id, queued.revision, observation(queued, slice, { reviews: approval(head, 9600) }));
-  assert.equal((await analyse({ slice })).report.bottleneck.categories.find(category => category.id === 'merge-ready')!.count, 1);
+  assert.equal((await analyse({ slice })).report.bottleneck.categories.find(category => category.id === 'merge-ready')!.count, 5);
   const gate = (overrides: Record<string, unknown>) => ({ released: true, hasCandidate: true, dependencyWaiting: [], blocker: null, unmet: ['merge'], ...overrides });
   assert.equal(classifyWait(gate({ queued: true, mergeBlockers: 0 }), false), 'merge-ready');
   assert.equal(classifyWait(gate({ queued: true, mergeBlockers: 1 }), false), 'merge-blocked');
@@ -635,9 +623,9 @@ test('integration:flow-analytics-bottleneck-summary', async () => {
   const updated = (await analyse({ slice })).report.bottleneck;
   const updatedCount = (id: string) => updated.categories.find(category => category.id === id)!.count;
   assert.equal(updatedCount('review'), 5, 'the value follows the new observation instead of a hard-coded number');
-  assert.equal(updatedCount('evidence'), 5);
+  assert.equal(updatedCount('evidence'), 0);
   assert.equal(updatedCount('dependency'), 5);
-  assert.equal(updatedCount('merge-ready'), 1);
+  assert.equal(updatedCount('merge-ready'), 6);
 
   // The drill-down population matches the summarised count exactly.
   const { dataset, report } = await analyse({ slice });
@@ -743,7 +731,7 @@ test('integration:flow-analytics-master-production-environment', async () => {
     return response.body;
   };
   let configured: string | undefined = 'graphyard / production';
-  const effects = daemonEffects(process.cwd(), () => ({ url, run: { productionEnvironment: configured } }) as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate, executor: {} as any });
+  const effects = daemonEffects(process.cwd(), () => ({ url, run: { productionEnvironment: configured } }) as any, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate });
   try {
     await effects.publishProductionEnvironment!();
     await effects.publishProductionEnvironment!();
@@ -1577,16 +1565,10 @@ test('manual:review-followups-triaged GY-1275.3 — a reverted delivery is named
   // Reverted work is never promoted, so it is not pending a promotion.
   assert.equal(speed.mergedToProduction['7d'].pending, 9);
   assert.match(deliverySpeedBreaches(speed)[0].text, /slowest: GY-V 26h \(reverted\)/);
-  // The live mode is read from the most recently evaluated item's github-delivery marker gate.
-  const github = { ...mergedItem('GY-G', hour, hour), updatedAt: at(0), gates: [{ name: 'github-delivery', passed: true, reasons: [] }] } as unknown as Work;
-  assert.equal(deliverySpeed([...readyItems(2), github], { now: deliveryNow }).deliveryMode, 'github');
-  assert.match(deliverySpeed([...readyItems(2), github], { now: deliveryNow }).statements[0], /^Delivery mode: GitHub merges each pull request into main/);
-  assert.equal(speed.deliveryMode, 'graphyard');
-  assert.match(speed.statements[0], /^Delivery mode: Graphyard's merge queue/);
-  // A newer closed item, or one not evaluated since, does not stand for the live mode.
-  const closedLater = { ...mergedItem('GY-X', hour, hour), updatedAt: at(-hour), closure: { reason: 'superseded' }, gates: [{ name: 'ready', passed: true, reasons: [] }] } as unknown as Work;
-  const unevaluatedLater = { ...mergedItem('GY-Y', hour, hour), updatedAt: at(-hour), gates: [] } as unknown as Work;
-  assert.equal(deliveryPathMode([github, closedLater, unevaluatedLater]), 'github');
+  // GitHub delivery is the only mode (GY-1235): the report always says so.
+  assert.equal(speed.deliveryMode, 'github');
+  assert.match(speed.statements[0], /^Delivery mode: GitHub merges each pull request into main/);
+  assert.equal(deliveryPathMode([]), 'github');
 });
 
 /**

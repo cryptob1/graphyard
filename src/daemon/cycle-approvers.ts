@@ -4,20 +4,12 @@ import { approverRuntime } from '../master/autonomy.js';
 import { type HerdrAgent, type RoleCapacity, approverProfile, ownLoginAccounts, approverSessionId, approverSessionName } from '../master.js';
 import { type ApprovalWatch, approvalWatchSchema, type DaemonActionKind, message } from './state.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, type ApprovalStep, approverLaunchKey, approverPrefixes, handWatchPrefix, maxApproverCloses, maxApproverLaunches, maxLostApproverRuns, lostRunRefunded, recordWatchEnded } from './decisions.js';
+import { approvalStep, type ApprovalStep, approverLaunchKey, approverPrefixes, boundDetail, handWatchPrefix, maxApproverCloses, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, recordWatchEnded } from './decisions.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { capacityRefusal } from '../fleet.js';
-import { recordSettledDecision } from '../model/project-memory.js';
 import type { Cycle } from './cycle.js';
 import { sessionExhaustion } from './cycle-sessions.js';
-
-/**
- * GY-1298. The loop's applications of one approved decision that may fail before it escalates. A
- * failing apply is retried on the widening `readyToRetry` interval, never every cycle, and keeps
- * being retried on that interval after the escalation: a control plane that recovers applies it.
- */
-export const maxApplyAttempts = 3;
-export const applyKey = (decision: string) => `approver:${decision}:apply`;
+import { resumedApplication } from './decision-reads.js';
 
 /**
  * The approver sessions step 4c puts its decisions to (GY-1147 moved them here from
@@ -277,55 +269,24 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     return 'done';
   };
   /**
-   * GY-1298. Ask the control plane to apply an approved decision, within a bound: an attempt that
-   * failed (the control plane answered it still approved, or the call threw) is made again only on
-   * the widening `readyToRetry` interval, and once `maxApplyAttempts` have failed the loop escalates
-   * it, once, like a decision no approver will judge, while it keeps retrying on that interval.
-   * Returns the decision as it then stands, or null when no attempt was made or it failed.
+   * GY-1297. Settle a hand-watched approval left without an outcome: the withdrawal the loop sends
+   * settles it on the server, which answers with the settled record, or refuses naming the
+   * resumed application. Nothing else would send it, so without it the approval would stand until
+   * an unrelated request for the item happened to arrive. A failed send is retried next cycle, up to
+   * `maxDecisionRequests` sends, and then escalated like a decision no session judges.
    */
-  const applyBounded = async (item: Work, decision: string, detail: string): Promise<{ id: string; state: string; outcome?: string | null } | null> => {
-    const key = applyKey(decision), previous = state.actions[key];
-    if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle)) return null;
-    let failure: string;
+  const settleHandApproval = async (item: Work, watch: ApprovalWatch, detail: string) => {
+    const key = `approver:${watch.decision}:settle:${watch.requests}`;
+    if (!effects.withdraw) return note(key, item, 'escalation', 'failed', `${detail}, and this loop has no way to settle it: graphyard master decisions ${item.key}`);
+    if (watch.requests > maxDecisionRequests) return escalateUnjudged(item, watch, `${detail}, and settling it failed ${watch.requests - 1} times`);
+    watch.requests += 1;
     try {
-      const applied = await effects.applyDecision!(item, decision, `${detail}; the loop applies the recorded approval (GY-1298)`);
-      if (applied.state !== 'approved') return applied;
-      failure = 'the control plane left it approved';
-    } catch (error) { failure = `the loop could not have it applied: ${message(error)}`; }
-    const attempts = (previous?.attempts ?? 0) + 1;
-    await note(key, item, 'decision', 'failed', `${detail}; ${failure}, so it is tried again on the widening retry interval (attempt ${attempts})`);
-    const escalation = `escalation:decision-unapplied:${decision}`;
-    if (attempts >= maxApplyAttempts && !state.actions[escalation])
-      await note(escalation, item, 'escalation', 'failed', `${detail}. ${attempts} applications by the loop have failed (${failure}); it keeps retrying on the widening interval, but the apply needs attention: read it with graphyard master decisions ${item.key}, have its approver resume it with graphyard master approve ${item.key} ${decision} REASON, or request the decision afresh, which reconciles the standing approval`);
-    return null;
-  };
-  /**
-   * GY-1298. A decision its approver approved but never applied — the session ended between the
-   * approval and its application — was put to another approver here, which could only judge it
-   * again, and it stood approved for days while every re-request was refused. The judgement is
-   * recorded, so the loop asks the control plane to apply it under that approver instead; the
-   * control plane supersedes it when the candidate it judged has moved. Returns `settled` once it is
-   * applied, `rerequest` when it settled otherwise (stale, failed) — only the loop's own request
-   * path can ask again — and `wait` when it still stands approved, so it is tried again later.
-   */
-  const applyApproved = async (item: Work, watch: ApprovalWatch, detail: string, judged?: Parameters<typeof recordSettledDecision>[2]): Promise<'settled' | 'rerequest' | 'wait'> => {
-    const key = applyKey(watch.decision);
-    if (!effects.applyDecision) {
-      if (!state.actions[key]) await note(key, item, 'escalation', 'done', `${detail}. This loop runs without the decision effects, so it cannot apply it; the approver resumes it with graphyard master approve ${item.key} ${watch.decision} REASON`);
-      return 'wait';
+      const settled = await effects.withdraw(item, watch.decision, detail) as { state?: string; outcome?: string | null } | undefined;
+      await note(key, item, 'decision', 'done', `${detail}; the control plane settled it ${settled?.state ?? 'as asked'}${settled?.outcome ? `: ${boundDetail(settled.outcome, 400)}` : ''}`);
+    } catch (error) {
+      const applied = resumedApplication.test(message(error));
+      await note(key, item, 'decision', applied ? 'done' : 'failed', applied ? `${detail}; the control plane applied it` : `${detail}; settling it failed and is tried again next cycle: ${message(error)}`);
     }
-    const applied = await applyBounded(item, watch.decision, detail);
-    if (!applied) return 'wait';
-    await closeApprover(item, watch, `its decision is ${applied.state}`);
-    if (applied.state === 'applied') {
-      watch.settledAt = stamp;
-      if (judged) recordSettledDecision(state.projectMemory, watch, { ...judged, state: 'applied' }, stamp);
-      await note(key, item, 'decision', 'done', `${detail}; the loop applied it: ${applied.outcome ?? 'applied'}`);
-      return 'settled';
-    }
-    recordWatchEnded(watch, `${detail}; the control plane settled it ${applied.state}`);
-    await note(key, item, 'decision', 'done', `${detail}; the control plane settled it ${applied.state} instead of applying it: ${applied.outcome ?? 'no reason recorded'}`);
-    return 'rerequest';
   };
   // 4c'. Approver sessions no request of the loop's launched (GY-403). `master approver` records the
   //      item and decision with its launch, and the loop registers such a session in its approval
@@ -369,7 +330,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       const item = snapshot.work.find(candidate => candidate.key === record.work);
       if (!item || item.stage === 'done' || !effects.decisions) continue;
       const judged = await effects.decisions(item).then(result => result.decisions.find(entry => entry.id === record.decision) ?? null, () => null);
-      if (judged?.state !== 'requested' && judged?.state !== 'approved') continue;
+      if (judged?.state !== 'requested') continue;
       const watch = state.approvals[`${handWatchPrefix}${record.decision}`] = approvalWatchSchema.parse({ work: item.key, action: judged.action, decision: record.decision, requestedAt: stamp, agentName: record.agentName,
         launchedAt: record.launchedAt, launches: 1, account: record.account, runtime: record.runtime, session: record.session });
       watched.push(watch);
@@ -380,7 +341,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       if (!key.startsWith(handWatchPrefix)) continue;
       const item = snapshot.work.find(candidate => candidate.key === watch.work);
       const listed = seen.agents.some(agent => agent.name === watch.agentName);
-      let why: string | null = null, judged: { state: string; action: string; approvedBy: string | null; approvedAt?: string | null; approvalReason?: string | null } | null | undefined;
+      let why: string | null = null, judged: { state: string; action: string } | null | undefined;
       if (!item) why = `${watch.work} is no longer open`;
       else if (item.stage === 'done') why = `${item.key} is delivered`;
       else if (effects.decisions) {
@@ -415,13 +376,12 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
         const step = approvalStep({ ...watch, launchedAt: watch.launchedAt ?? watch.requestedAt }, judged, seen, clock);
         if (step.step === 'wait') continue;
         if (step.step === 'relaunch' && !watch.agentName && approversSpent) continue;
-        // An approved decision is applied, never judged again (GY-1298); a hand watch has no request to repeat.
-        if (step.step === 'apply') { await applyApproved(item, watch, step.detail, judged ?? undefined); continue; }
-        // The close, relaunch, record and escalation steps of the loop's own watches (GY-779): a
-        // `rerequest` step cannot arise here — a decision this watch holds that the control plane
-        // settled otherwise already set `why` above — and a hand watch has no request of its own
-        // to repeat.
-        await actOnStep(item, watch, step);
+        // The close, relaunch, record and escalation steps of the loop's own watches (GY-779). A
+        // hand watch has no request of its own to repeat, so its one `rerequest` step is an approval
+        // left without an outcome (GY-1297): the approver's session is put down and the loop sends
+        // the withdrawal that settles it on the control plane this cycle — applied, failed or
+        // superseded — and the next cycle's read closes the watch on that outcome.
+        if (await actOnStep(item, watch, step) === 'rerequest') await settleHandApproval(item, watch, step.detail);
         continue;
       }
       if (listed && !why) continue;
@@ -452,5 +412,5 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     for (const entry of ended) performed.push(await record(state, `registry:end:${entry.session}`, { kind: 'close', work: entry.work, principal: null, state: 'done',
       detail: `Ended the ${entry.role} registry session ${entry.session} on ${entry.account}${entry.work ? ` for ${entry.work}` : ''}: ${entry.reason}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   }); };
-  return { sessions, invalidate, endApproverSession, closeApprover, capacityRelaunchWaits, launch, approverExhausted, escalateUnjudged, actOnStep, applyBounded, applyApproved, superviseHandApprovers, reconcileRegistrySessions };
+  return { sessions, invalidate, endApproverSession, closeApprover, capacityRelaunchWaits, launch, approverExhausted, escalateUnjudged, actOnStep, superviseHandApprovers, reconcileRegistrySessions };
 }

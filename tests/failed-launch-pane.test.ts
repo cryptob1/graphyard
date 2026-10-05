@@ -193,7 +193,7 @@ async function loop(item: Work, containment: DaemonEffects['containment']) {
   const effects: DaemonEffects = {
     agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(entry => [entry.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: [item], now: observedAt }),
-    closeSession: paneId => { closed.push(paneId); }, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    closeSession: paneId => { closed.push(paneId); }, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: observedAt, reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
     settleContainment: async (_item, assessment) => { settled.push(assessment); }, containment,

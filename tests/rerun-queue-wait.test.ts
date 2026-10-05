@@ -7,7 +7,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { processJob, type GitHub } from '../src/github.js';
 import { routineDecision } from '../src/master-daemon.js';
-import { checkRerunProbeMs, checkRerunVisibilityMs, classifyRerunRun, queueRef, type QueuePlacement, type QueueSpeculation, type RerunWorkflowRun } from '../src/merge-queue.js';
+import { checkRerunProbeMs, checkRerunVisibilityMs, classifyRerunRun, type RerunWorkflowRun } from '../src/merge-queue.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 
 // GY-1096: with 28 CI runs queued, reruns the control plane requested could not start within 15
@@ -18,7 +18,6 @@ const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f'
 const treeOf = (sha: string) => sha40(`7${sha.slice(0, 2)}`);
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'agent-a', role: 'worker' };
-const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['unit:wait'] };
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 let pr = 1096;
 before(async () => {
@@ -68,8 +67,6 @@ function adapter(candidate: { sha: string; baseSha: string }, checks: Check[], r
   const reruns: number[] = [], reads: number[] = [];
   return { reruns, reads, github: {
     observe: async (work: Work) => seen(work, candidate, checks),
-    publishSpeculativeTip: async (work: Work, placement: QueuePlacement): Promise<QueueSpeculation> =>
-      ({ ref: queueRef(work.key), tip: candidate.sha, base: placement.predictedBase!, baseTree: treeOf(placement.predictedBase!), predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge: null }),
     rerunFailedJobs: async (id: number) => { reruns.push(id); return rerun(id); },
     rerunWorkflowRun: async (id: number) => { reads.push(id); return workflow(id); },
     requestCodex: async () => { throw new Error('no review request expected'); },
@@ -84,7 +81,7 @@ async function reconcile(work: Work, checks: Check[], workflow: (runId: number) 
   await processJob(engine, github.github);
   return { work: await reload(work), reruns: github.reruns, reads: github.reads };
 }
-const bindings = (work: Work) => ({ sequence: work.queue?.sequence ?? null, tip: work.queue?.speculation?.tip ?? null, review: gate(work, 'review').passed, acceptance: gate(work, 'acceptance').passed, evidence: work.evidence.map(entry => entry.id) });
+const bindings = (work: Work) => ({ head: work.candidate!.sha, review: gate(work, 'review').passed });
 const workflowRun = (status: string, conclusion: string | null, attempt: number) => async (): Promise<RerunWorkflowRun> => ({ status, conclusion, attempt });
 
 test('unit:queued-rerun-is-a-wait — a requested rerun still queued or in progress after 15 minutes keeps the check pending, named as a runner-queue wait, and owes no new head; only a concluded failing rerun owes one', async () => {
@@ -92,15 +89,11 @@ test('unit:queued-rerun-is-a-wait — a requested rerun still queued or in progr
   const head = sha40('a1096'), base = sha40('b1096');
   const failing = [run('test', 11, 'failure'), run('typecheck', 12, 'success')];
   let work = await submitted('Rerun behind a runner queue');
-  work = await engine.observe(work.id, work.revision, seen(work, { sha: head, baseSha: base }, [run('test', 1, 'success'), run('typecheck', 2, 'success')]));
-  work = await engine.execute(producer, 'evidence', work.id, { proof: 'unit:wait', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['src/wait.ts'] }, randomUUID());
-  assert.ok(work.queue, `enqueued: ${work.gates.flatMap(entry => entry.reasons).join('; ')}`);
-  let step = await reconcile(work, [run('test', 1, 'success'), run('typecheck', 2, 'success')]);
-  assert.equal(step.work.queue?.speculation?.tip, head, 'the tip is published');
-  const held = bindings(step.work);
+  work = await engine.observe(work.id, work.revision, seen(work, { sha: head, baseSha: base }, failing));
+  const held = bindings(work);
 
-  // The tip's test job fails and its one rerun is accepted; within 15 minutes the workflow run is not read.
-  step = await reconcile(step.work, failing);
+  // The head's test job fails and its one rerun is accepted; within 15 minutes the workflow run is not read.
+  let step = await reconcile(work, failing);
   assert.deepEqual([step.reruns, step.reads], [[11], []]);
   assert.deepEqual(step.work.checkReruns!.map(entry => [entry.state, entry.runId, entry.attempt]), [['requested', 9001, 1]]);
 
@@ -110,10 +103,9 @@ test('unit:queued-rerun-is-a-wait — a requested rerun still queued or in progr
   work = step.work;
   assert.deepEqual([step.reruns, step.reads], [[], [9001]], 'the workflow run is read, and no second rerun is requested');
   assert.deepEqual(work.checkReruns!.map(entry => [entry.state, entry.waiting?.status]), [['requested', 'queued']]);
-  assert.deepEqual(bindings(work), held, 'the candidate keeps its position, approval and proofs');
-  assert.equal(work.queueEjection ?? null, null);
-  assert.equal(gate(work, 'merge').passed, false, 'the tip\'s check is still pending');
-  assert.ok(gate(work, 'merge').reasons.some(reason => /required CI check test failed and its failed jobs are rerunning \(workflow run 9001\), waiting for a runner \(its workflow run is queued in the runner queue\); the entry keeps its position/.test(reason)), 'master status names the runner-queue wait on the queue row');
+  assert.deepEqual(bindings(work), held, 'the candidate keeps its head and approval');
+  assert.equal(gate(work, 'test').passed, false, 'the check is still pending');
+  assert.match(gate(work, 'test').reasons[0], /rerun: its failed jobs are rerunning \(workflow run 9001\), waiting for a runner \(its workflow run is queued in the runner queue\)/, 'the test gate names the runner-queue wait');
   assert.equal(routineDecision(work, { autoMerge: true }, Date.now()), null, 'no new head is owed while the rerun waits for a runner');
   assert.deepEqual(await kinds(work), ['check.rerun.owed', 'check.rerun.requested', 'check.rerun.waiting']);
 
@@ -131,17 +123,16 @@ test('unit:queued-rerun-is-a-wait — a requested rerun still queued or in progr
   work = step.work;
   assert.deepEqual(work.checkReruns!.map(entry => [entry.state, entry.waiting?.status]), [['requested', 'in_progress']]);
   assert.deepEqual(bindings(work), held);
-  assert.ok(gate(work, 'merge').reasons.some(reason => /waiting for a runner \(its workflow run is in progress in the runner queue\)/.test(reason)));
+  assert.match(gate(work, 'test').reasons[0], /waiting for a runner \(its workflow run is in progress in the runner queue\)/);
   assert.equal(routineDecision(work, { autoMerge: true }, Date.now()), null);
 
-  // The rerun's new check run appears and passes: the entry proceeds on the same tip.
+  // The rerun's new check run appears and passes: the candidate proceeds on the same head.
   step = await reconcile(work, [...failing, run('test', 13, 'success')]);
   assert.deepEqual(bindings(step.work), held);
   assert.deepEqual(step.work.checkReruns!.map(entry => [entry.state, entry.rerunId]), [['passed', 13]]);
-  assert.ok(step.work.gates.every(entry => entry.passed), step.work.gates.flatMap(entry => entry.reasons).join('; '));
+  assert.ok(gate(step.work, 'test').passed, gate(step.work, 'test').reasons.join('; '));
 
-  // A head outside the queue: the rerun concludes failing without its check run yet observed, and only then is a new head owed.
-  await clearQueue();
+  // Another head: the rerun concludes failing without its check run yet observed, and only then is a new head owed.
   const other = sha40('a1097');
   work = await submitted('Rerun that fails after its wait');
   work = await engine.observe(work.id, work.revision, seen(work, { sha: other, baseSha: base }, [run('test', 21, 'failure'), run('typecheck', 22, 'success')]));

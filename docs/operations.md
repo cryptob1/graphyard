@@ -13,6 +13,7 @@
   - Escalation: declared human session runs `graphyard resolve GY-N TRIGGER "reason"`; explained `lease-loss` needs only `admin --attestation` ([who](delegation.md#who-may-settle-what)).
   - Expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission); another attempt: [rework](operations-reference.md#submitted-implementation-needs-rework); fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
   - An owed `request-rework` head counts as an `owed-decision` fault only after 30 minutes (`reworkDecisionWaitBoundMs`).
+  - A lapsed containment fence counts as a `containment` fault only 10 minutes past its grace window (`containmentSettleWaitBoundMs`), while the loop verifies and settles it; a fence the loop settled is no fault in that cycle.
   - A failed manual proof a producer may run returns to a worker, never to an operator escalation; one no producer may run needs an operator witness, an unexecuted one an attestation.
 - **Merge refused**: wait or repair; never bypass. Auto-merge `BLOCKED` 10m with every gate passing is retried as a head-bound merge; after 30m one `merge-blocked` attention item names GitHub's answer. **Merged outside Graphyard**: [bypass](operations-reference.md#merge-bypass). **Wrong accepted evidence**: [revoke](operations-reference.md#accepted-evidence-turns-out-to-be-wrong). **GitHub paused or webhook silent**: [budget](operations-reference.md#github-request-budget). **Smoke proof failed**: [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
 - **Main ahead of production**: a [deployment incident](operations-reference.md#merged-but-not-deployed). An up-to-date release starts without taking coordination locks; a migrating release fails fast within the health check: it touches only the tables whose DDL changed since it recorded a digest per table (unchanged tables are skipped without any lock), and retries a deadlock or expired lock wait with backoff inside one 30-second lock budget; each attempt waits at most 3 seconds for a lock, so live writes never queue behind it longer.
@@ -40,7 +41,7 @@ The filter cannot select keyring items: keep other secrets out of that keyring, 
 - Workers never hold `admin`/`coordinator`/`producer` tokens; No AI principal can hold `admin`.
 - Proof authority is a live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs.
 - Operator agents add requirements, never remove.
-- Only guarded merges: no bypass, no lifecycle-state endpoint.
+- GitHub merges on passing gates: no bypass, no lifecycle-state endpoint.
 - Non-master sessions run in their own checkout, never the coordinator's.
 - Coordination-lock writes read whole only their item, overlaps and dependencies: under 500 ms at 1,000 items; a worker's heartbeat takes only its item's lock.
 - History is append-only; only routine rows past retention are [compacted](operations-reference.md#storage-retention), each batch audited.

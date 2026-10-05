@@ -12,7 +12,7 @@ import { escalationTriggers, type Evidence, type Observation, type Work } from '
 import { nameUnobtainableReviews, requestAttemptLimit, settledAnswerGraceMs, unansweredRequest, type DispatchRequest, type RequestProgress } from '../src/model/dispatch.js';
 import { applyRegistryMutation, emptyRegistry, fleetRoles, fleetView, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { agentOwner, buildMasterStatus, controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type AttentionItem, type MasterConfig } from '../src/master.js';
-import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, faultObservationIntervalMs, deploymentObservationSchema, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { containmentSettleWaitBoundMs, cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, faultObservationIntervalMs, deploymentObservationSchema, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { attributeAttention, derivedAttention, faulted } from '../src/master-status.js';
 import { sessionRetries } from '../src/producer.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from '../src/cli/unanswered-requests.js';
@@ -456,7 +456,9 @@ test('unit:recurring-class-item — containment grace window is no fault; lapsed
   // After grace window has elapsed (120s past leaseExpiresAt)
   const lapsedClock = clock + 180_000;
   assert.deepEqual(workFaults(fenced, lapsedClock).map(fault => fault.kind), ['containment'], 'lapsed quarantine is a containment fault');
-  assert.equal(cycleFaults(emptyDaemonState(config()), [fenced], lapsedClock, { config: config() }).filter(fault => fault.faultClass === 'containment').length, 1);
+  // The loop is still settling a fence that recent (GY-1299), so it counts once it stands past the settle wait bound.
+  assert.equal(cycleFaults(emptyDaemonState(config()), [fenced], lapsedClock, { config: config() }).filter(fault => fault.faultClass === 'containment').length, 0, 'a fence the loop is still settling is no fault');
+  assert.equal(cycleFaults(emptyDaemonState(config()), [fenced], lapsedClock + containmentSettleWaitBoundMs, { config: config() }).filter(fault => fault.faultClass === 'containment').length, 1);
 });
 
 test('unit:recurring-class-item — a recurring human-decision class keeps the decision with the human', () => {
@@ -759,8 +761,8 @@ test('unit:recurring-class-item — the loop tracks the report\'s final attribut
   const state = emptyDaemonState(config());
   await runCycle(config(), state, effects, () => now);
   assert.equal(attributed.length, 1, 'the report\'s attribution runs over the cycle\'s list');
-  assert.deepEqual(state.faults.instances.filter(entry => entry.subject === 'GY-1').map(entry => [entry.kind, entry.faultClass]), [['resource-bound', 'resources']],
-    'the session symptom is tracked as the resource it names, not also as session liveness');
+  assert.deepEqual(state.faults.instances.filter(entry => entry.subject === 'GY-1' || entry.subject === 'resource:agent-names').map(entry => [entry.kind, entry.faultClass, entry.subject]), [['resource-bound', 'resources', 'resource:agent-names']],
+    'the session symptom is tracked as the resource it names, on the resource\'s own subject (GY-1272), not also as session liveness');
   // Without the report's attribution the raw symptom stands for itself.
   const raw = cycleFaults(emptyDaemonState(config()), [], clock, { config: config(), reported: [symptom('GY-2')] });
   assert.deepEqual(raw.filter(fault => fault.subject === 'GY-2').map(fault => fault.kind), ['launch-review']);
@@ -826,29 +828,6 @@ test('unit:recurring-class-item — a scope request from an attempt that no long
   const moot = ['GY-31', 'GY-32', 'GY-33'].map(key => item(key, { scopeRequest: request, lease: null } as Partial<Work>));
   trackFaults(record, cycleFaults(emptyDaemonState(config()), moot, clock), iso(0));
   assert.deepEqual(recurringClasses(record.instances, [], policy, clock).filter(entry => entry.file), []);
-});
-
-test('unit:recurring-class-item — a guarded merge the gate refused is no fault, so refusals file nothing', async () => {
-  const filed: unknown[] = [];
-  const candidates = ['GY-41', 'GY-42', 'GY-43'].map((key, index) => item(key, { stage: 'merge', epoch: 1, candidate: { sha: String(index + 1).repeat(40), branch: `graphyard/${key}`, pr: 40 + index } } as unknown as Partial<Work>));
-  let refusal = 'the review gate has not passed';
-  const effects = {
-    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: candidates.map(entry => ({ ...entry })), now: new Date(now).toISOString() }),
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    merge: async () => { throw new Error(refusal); },
-    faultClassPolicy: policy, persist: async () => {}, fileFaultClass: async (input: unknown) => { filed.push(input); return item('GY-199'); },
-  } as unknown as DaemonEffects;
-  let now = clock;
-  const state = emptyDaemonState(config());
-  for (let round = 0; round < 4; round++) { now = clock + round * 10 * 60_000; await runCycle(config(), state, effects, () => now); }
-  const merges = Object.values(state.actions).filter(action => action.kind === 'merge');
-  assert.equal(merges.length, 3, `each candidate's merge was tried: ${JSON.stringify(state.actions)}`);
-  assert.ok(merges.every(action => action.state === 'failed' && action.faultClass === undefined), 'a refusal stays retryable and carries no class');
-  assert.deepEqual(state.faults.instances.filter(entry => entry.faultClass === 'merge'), [], 'no refusal opens a merge instance');
-  assert.deepEqual(filed, [], 'three refusals file no structural item');
-  // A merge whose outcome is unknown is still the merge fault it was.
-  storeAction(state, 'merge:work-GY-44:1', { kind: 'merge', work: 'GY-44', principal: null, state: 'indeterminate', detail: 'Resumed: interrupted', attempts: 1, epoch: 1, cycle: 0, at: iso(0) });
-  assert.deepEqual(state.faults.instances.filter(entry => entry.faultClass === 'merge').map(entry => entry.subject), ['GY-44']);
 });
 
 test('unit:recurring-class-item — a starved reviewer or producer role reaches the loop, so its capacity item can be filed', async () => {

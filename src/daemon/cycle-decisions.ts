@@ -8,8 +8,8 @@ import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, approverLaunchKey, approverSettleMs, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
-import { decisionReads } from './decision-reads.js';
+import { approvalStep, approverLaunchKey, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { decisionReads, lateDecisionRead, resumedApplication } from './decision-reads.js';
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { baseRefreshConflict } from '../merge-queue.js';
@@ -23,7 +23,7 @@ export { handWatchPrefix };
 /** Step 4c: request and supervise the routine decisions. */
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
   const { config, state, now, snapshot, clock, performed, isolate, agents, open } = cycle;
-  const effects = await decisionReads(cycle.effects, cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock);
+  const effects = await decisionReads(cycle.effects, cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock, cycle.effects.decisionReadDeadlineMs);
   // 4c. The routine decisions. A standing verdict, a base the control plane could not merge in, and
   //     a delivered item still fenced by a dead supervisor each have one correct answer, and each
   //     used to wait for a master session to notice. The loop requests the decision with the
@@ -40,11 +40,11 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now()) =>
     performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist));
   const approvers = createApproverSupervisor(cycle, effects, stamp, note, capacities, approversSpent);
-  const { sessions, invalidate, closeApprover, endApproverSession, launch, capacityRelaunchWaits, approverExhausted, escalateUnjudged, actOnStep, applyBounded, applyApproved } = approvers;
+  const { sessions, invalidate, closeApprover, endApproverSession, launch, capacityRelaunchWaits, approverExhausted, escalateUnjudged, actOnStep } = approvers;
   /** Request the decision (or adopt the one already standing) and put it to an approver. */
   const request = async (item: Work, decision: RoutineDecision, key: string, carried: ApprovalWatch | null) => {
     const verdict = decision.action === 'rework' && !carried ? standingVerdict(item) : null;
-    const attempts = (state.actions[key]?.attempts ?? 0) + 1;
+    const previous = state.actions[key], attempts = (previous?.attempts ?? 0) + 1;
     await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'started', detail: `Requesting the ${decision.action} decision for ${item.key}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist);
     try {
       // An unreadable history is unknown, not empty (GY-1241): the request fails until a read answers,
@@ -62,21 +62,18 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved'));
       // A merge or attest decision names what it binds. One standing for an earlier head can never
       // apply to this one, and it refuses the request that could: the requester takes it back.
-      const overtaken = standing ? overtakenDecision(item, decision, standing, !!effects.withdraw) : null;
-      if (overtaken) { await effects.withdraw!(item, standing!.id, overtaken); standing = undefined; }
-      // An approval already judged is applied, never put to another approver (GY-1298). Applied, it
-      // settles this binding; superseded or failed, the decision is requested afresh below. A failing
-      // application is retried on the widening interval and escalated, never every cycle.
-      const settling = standing?.state === 'approved' && !(clock - Date.parse(standing.approvedAt ?? '') < approverSettleMs);
-      if (settling && effects.applyDecision) {
-        const applied = await applyBounded(item, standing!.id, `${item.key}'s ${decision.action} decision ${standing!.id} was approved by ${standing!.approvedBy ?? 'its approver'} at ${standing!.approvedAt ?? 'an unrecorded time'} and never applied`);
-        if (applied?.state === 'applied') {
+      const overtaken = standing ? overtakenDecision(item, decision, standing, !!effects.withdraw, clock) : null;
+      if (overtaken) {
+        // An approval the withdrawal settled by applying it is this decision, applied (GY-1298): the
+        // binding is settled, not a failed request repeated on the widening interval.
+        const applied = await effects.withdraw!(item, standing!.id, overtaken).then(() => null, (error: unknown) => { if (resumedApplication.test(message(error))) return message(error); throw error; });
+        if (applied) {
           const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing!.id, requestedAt: stamp, settledAt: stamp });
           recordSettledDecision(state.projectMemory, watch, { ...standing!, state: 'applied' }, stamp);
-          performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Applied decision ${standing!.id} (${decision.action}), approved by ${standing!.approvedBy ?? 'its approver'} at ${standing!.approvedAt ?? 'an unrecorded time'} and never applied: ${applied.outcome ?? 'applied'}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+          performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${overtaken}; the control plane applied it: ${boundDetail(applied, 400)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
           return;
         }
-        if (applied) standing = undefined;
+        standing = undefined;
       }
       // Nor does the server keep more than one resolve standing, whatever its trigger. One for
       // another escalation (a security-concern a master asked about) is not this decision: adopting
@@ -218,12 +215,15 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // queue (GY-849): while another waiter's relaunch is queued or running on the launcher, this
       // one hands off nothing and is made again on a later cycle, through the guarded relaunch path.
       const how = prior?.agentName ? `kept approver session ${prior.agentName}, already judging it under the earlier binding`
-        : (requested as { state?: string }).state === 'approved' ? (settling ? 'left it unapplied this cycle; the loop retries its application on the widening interval (GY-1298)' : 'left it to the approver applying it; the loop applies it once the settle window passes (GY-1298)')
         : watch.capacity && capacityRelaunchWaits(watch) ? 'held its capacity wait behind the relaunch already in flight'
         : await launch(item, watch, true);
       performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${standing ? `Adopted decision ${requested.id} (${decision.action}), already standing on ${item.key},` : `Requested decision ${requested.id} (${decision.action}) for ${item.key}`} and ${how}: ${reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
-      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+      // A history read that only missed the step's deadline judged nothing (GY-1293): one alone is
+      // no decision fault, and its request is asked again next cycle; the second in a row counts.
+      const detail = `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`;
+      const late = lateDecisionRead(detail) && !(previous?.state === 'failed' && lateDecisionRead(previous.detail));
+      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, late ? null : undefined));
     }
   };
   /**
@@ -258,7 +258,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, () => undefined) : undefined;
     const judged = history === undefined ? undefined : history.find(entry => entry.id === watch.decision) ?? null;
     if ((!judged || judged.state === 'requested') && await approverExhausted(item, watch)) return;
-    // What the silence measure names this wait (GY-1298): an approval owed its application is not an approver judging it.
+    // What the silence measure names this wait (GY-1298): an approval owed its settlement is not an approver judging it.
     if (judged?.state === 'approved') Object.assign(watch, { approvedAt: judged.approvedAt ?? null, approvedBy: judged.approvedBy });
     const step = approvalStep(watch, judged, await sessions(), clock);
     if (step.step === 'wait' || (watch.exhaustedAt && step.step === 'exhausted')) return;
@@ -268,13 +268,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // A routed request judged after this observation is settled from one that shows the outcome.
     if ((step.step === 'settled' || step.step === 'refused') && watch.scope && judged && scopeOutcomeAnswered(item, watch.scope, judged, clock) === 'pending') return;
     const base = `approver:${watch.decision}`;
-    // A judged decision its approver never applied is applied by the loop (GY-1298); one the
-    // control plane superseded or failed instead is requested again below, like any other.
-    if (step.step === 'apply') {
-      const applied = await applyApproved(item, watch, step.detail, judged ?? undefined);
-      if (applied === 'settled' && judged) await noteScopeOutcome(item, watch, { ...judged, state: 'applied' });
-      if (applied !== 'rerequest') return;
-    } else if (step.step === 'settled') {
+    if (step.step === 'settled') {
       await closeApprover(item, watch, 'its decision is applied');
       watch.settledAt = stamp;
       // The shared memory takes the approver's judgement as it settled, never a refusal (GY-1125).
@@ -298,7 +292,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // relaunch — one at a time for a capacity wait, GY-849 — the record and the escalation shared
     // with the hand watches, GY-779). Only the re-request returns here: it is bound to this
     // request, so it is taken below.
-    if (step.step !== 'apply' && await actOnStep(item, watch, step) !== 'rerequest') return;
+    if (await actOnStep(item, watch, step) !== 'rerequest') return;
     // The server settled it some other way — failed on a precondition, stale, withdrawn — and
     // the item still needs the decision, so it is asked again: a bounded number of times, and on
     // the same widening interval as any refused action. The watch stays until a new request
@@ -345,7 +339,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   // A needed decision with no watch is requested once ready to retry, or escalated.
   const requestNeeded = async (item: Work, decision: RoutineDecision, key: string) => {
     const previous = state.actions[key];
-    if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle)) return;
+    if (previous?.state === 'failed' && !readyToRetry(previous, state.cycle) && !lateDecisionRead(previous.detail)) return;
     if (effects.decide && effects.approver) return request(item, decision, key, null);
     const escalationKey = `escalation:decision:${item.id}:${decision.binding}`, input = decision.action === 'attest' ? ` '${JSON.stringify(decision.input)}'` : '';
     const detail = `${item.key} needs a${decision.action === 'attest' ? 'n' : ''} ${decision.action} decision: ${decision.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} ${decision.action}${input} REASON, then graphyard master approver ${item.key} DECISION`;
@@ -357,9 +351,13 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   for (const read of workToProcess) await isolate('decision', read, read.key, async () => {
     let item = read;
     const assessment = assessments[item.id];
-    // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it.
+    // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it, and
+    // its decision is requested against that revision: one a partial widening moved past the
+    // snapshot's would carry a policy revision its approval could never apply to (GY-1293).
     const scoped = settled.get(item.id) ?? item;
-    let decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? blockerScopeDecision(scoped) ?? routineDecision(item, config, clock, assessment, cycle.baseFailed.get(item.id), exhausted);
+    const scope = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? blockerScopeDecision(scoped);
+    if (scope) item = scoped;
+    let decision = scope ?? routineDecision(item, config, clock, assessment, cycle.baseFailed.get(item.id), exhausted);
     if (!decision) {
       // Still called for, only not attestable this cycle: its request is not one the item moved past.
       const called = neededDecision(item, config, cycle.baseFailed.get(item.id), exhausted);

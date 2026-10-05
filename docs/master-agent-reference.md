@@ -3,19 +3,19 @@
 
 ## Items, scope and human waits
 
-Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (flags before `--` refused). Auto-granted if grounded: docs; files criteria or follow-ups name; `web/`/`browser-tests/` for `docs/`-planning items; files review findings name; tests pinning planned text; symbol definitions; successors; companions (docs-budget gate, timing baseline, importing tests, planned modules' imports and importers). An `approve-scope` executor or the loop decides; standing decisions replay. Otherwise an approver judges; `master scope GY-N [--allow-broad-scope] REASON` applies refused requests (needs reason); leases stay (`--wait` reads outcome). Ending attempts (submit, release, lapse, rework, requirements) close open/refused requests as `attempt ended`; `master unblock GY-N` closes stale ones. Human decisions: `park GY-N EPOCH KIND NEEDED [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you), answered via `graphyard answer GY-N …`).
+Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (flags before `--` refused). Auto-granted if grounded: docs; files criteria or follow-ups name; `web/`/`browser-tests/` for `docs/`-planning items; files review findings name; tests pinning planned text; symbol definitions; successors; companions (docs-budget gate, timing baseline, importing tests, planned modules' imports and importers). An `approve-scope` executor or the loop decides; standing decisions replay. Otherwise an approver judges (a partial grant's rest: same cycle); `master scope GY-N [--allow-broad-scope] REASON` applies refused requests (needs reason); leases stay (`--wait` reads outcome). Ending attempts (submit, release, lapse, rework, requirements) close open/refused requests as `attempt ended`; `master unblock GY-N` closes stale ones. Human decisions: `park GY-N EPOCH KIND NEEDED [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you), answered via `graphyard answer GY-N …`).
 
 ## Conflict avoidance
 
 Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)); `git merge-tree` reports `conflicts`.
 
-### Speculative tips and branch protection
+### Base refreshes and branch protection
 
-**An approval must survive a tip publication.** [Carry rules](github.md#bindings-and-carry) apply.
+**An approval must survive a base refresh.** [Carry rules](github.md#bindings-and-carry) apply.
 
 **A merge-base dismissal is not a reviewer withdrawing a verdict.** Only a current-head approval dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); its re-post is no new verdict (`observation.dismissedReviewIds`).
 
-**A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejected branches restore onto the base tip in one push (`baseRefresh.restore`; a second failure → `escalated` in `master status`). Another item's carried files (`Carried from another item's tip`) are neither rework nor ejection.
+**A branch must never keep another item's unlanded commits.** A contaminated branch restores onto the base tip in one push (`baseRefresh.restore`; a second failure → `escalated` in `master status`).
 
 #### A contaminated branch
 
@@ -45,7 +45,7 @@ Missing or retired rules (`gh api *merge*`, `gh api graphql*`) are `harness` dri
 
 ## Typed actions and executors
 
-One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units, claiming rows under their own credential; `master executors restart` moves them to the current release. Verified deployments move clean checkouts to the base tip and restart executors, then the loop (`upgrade` attention if dirty). A fenced executor (`POST /api/actions/presence`) or one renewing a claim still counts as alive, so it never reads as `Nothing can run KIND`.
+One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units, claiming rows under their own credential; `master executors restart` moves them to the current release. Verified deployments move clean checkouts to the base tip and restart executors, then the loop (`upgrade` attention if dirty). A fenced executor (`POST /api/actions/presence`) or one renewing a claim still counts as alive, so it never reads as `Nothing can run KIND`. Every poll and renewal also upserts the executor's row in `executor_presence` (never an event), so a restarted or redeployed control plane reads the fleet live at once; an empty fleet is judged only on evidence — a poll heard, or rows in that table older than the 120s window (an empty table counts once it has been recording that long, from a marker its first read writes) — never by process age.
 
 A `resync` (`POST /api/work/:id/resync` `{ since }`) completes only on an observation newer than its claim.
 
@@ -57,18 +57,16 @@ A dead supervisor fences its item; `containment` lists survivors' pid, cmdline a
 
 An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator`, `stopped-by-attestation` lapses are history); any admin settles an explained one: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns a handler answering `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
-An approved decision its approver never applied is applied by the loop a minute after approval (`approverSettleMs`), under that approver, not put to another; a failing apply is retried on the widening retry interval and escalated once after three failures. A re-request of its action applies it too. A `rework`/`recover` approval whose candidate has moved is superseded (`stale`), and the re-request is recorded for the current one.
-
 ### Producer-runtime faults
 
 A producer request spent with no attempt acting (never started, launch refused, exited at launch) requests no rework; it relaunches on an independent profile none of them ran on.
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`). Workless sessions raise `fleet-capacity`; settled requests unanswered past `settledAnswerGraceMs` (5 minutes) are `unanswered-request`; sandbox or `workflows`-permission refusals are `configuration`. A silent decision waiting on its approver session is `decision-unanswered` (`decision`), not `loop-silence`; one `approved but unapplied` (with its `approvedAt`) awaits the loop's apply, so it is `loop-silence`; a doctor command its allowlist refused is recorded done, not a failed `loop` action. A review waiting over 15 minutes without a launch is `concurrency-starved` (capacity) when every reviewer profile is busy, `review-settlement` (review-convergence) when a reviewer already answered, else `launch-review`.
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); a resource at its bound is one fault on `resource:ID`, however many subjects it holds. Workless sessions raise `fleet-capacity`; settled requests unanswered past `settledAnswerGraceMs` (5 minutes) are `unanswered-request`; sandbox or `workflows`-permission refusals are `configuration`. A silent decision waiting on its approver session is `decision-unanswered` (`decision`), not `loop-silence`; a doctor command its allowlist refused is recorded done, not a failed `loop` action. A review waiting over 15 minutes without a launch is `concurrency-starved` (capacity) when every reviewer profile is busy, `review-settlement` (review-convergence) when a reviewer already answered, else `launch-review`.
 
 ## Pipeline speed
 
 Target (ten-plus deliveries): submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; `speed.submitToMerge` is the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
 
-The loop's decisions step stays within 10 s a cycle at about 90 open items: one `decision.*` ledger read names moved items, rereading only those. A history whose ledger has not moved is kept, not read.
+The loop's decisions step stays within 10 s a cycle at about 90 open items: one `decision.*` ledger read names moved items, rereading only those. A history whose ledger has not moved is kept, not read. Loop widenings refused by 5xx or stale revision, and scope decisions whose history (read first) misses the deadline, retry next cycle; two misses running is a fault.
