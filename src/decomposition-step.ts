@@ -30,7 +30,7 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 /** The decomposition session's request: the item, why it is too broad, and the rules its split must keep. */
 export function decompositionPrompt(config: { repository: string }, work: Pick<Work, 'key' | 'title' | 'type' | 'description' | 'criteria' | 'plannedFiles' | 'dependencies'>, bounds: string[], settings: Pick<DecompositionSettings, 'timeoutMinutes'>) {
   return `You are the Graphyard decomposition agent for ${config.repository}. ${work.key} (${work.type}): ${work.title} is about to be dispatched to an implementation worker, but it is too broad for one small pull request: ${bounds.join('; ')}. `
-    + 'Large pull requests collide in the merge queue and are ejected, so split it into 2 to 10 small child items that can each be built, reviewed and merged on their own. '
+    + 'Large pull requests conflict with the changes merging beside them and return for rework, so split it into 2 to 10 small child items that can each be built, reviewed and merged on their own. '
     + (work.description ? `Its description: ${clip(work.description, 6000)} ` : '')
     + `Its acceptance criteria: ${work.criteria.map(criterion => `${criterion.id}: ${clip(criterion.text, 1500)}`).join(' ')} `
     + (work.plannedFiles?.length ? `Its planned files: ${work.plannedFiles.join(', ')}. ` : '')

@@ -393,7 +393,7 @@ function assertSettled(item: Work, path: string) {
   assert.ok(item.nextAction === null || item.nextAction?.kind === 'verify-deployment', `${path}: the next action is the deployment it owes or nothing, not ${item.nextAction?.kind}`);
   assert.deepEqual(pendingRows(item).map(row => row.kind), [], `${path}: no pending row is left to retry`);
   assert.ok(item.actionQueue!.history.some(row => row.kind === 'dispatch' && /no longer needs this action|now needs/.test(row.resolution ?? '')), `${path}: the leftover row was retired with a reason`);
-  assert.equal(item.queue ?? null, null, `${path}: the merge-queue entry is cleared`);
+  assert.equal((item as { queue?: unknown }).queue ?? null, null, `${path}: the legacy merge-queue entry is cleared`);
 }
 
 test('integration:done-retires-actions — an item delivered by the gated merge observation or by the direct-merge sweep has its next action recomputed, its pending rows retired and its queue entry cleared in the same transaction', async () => {
@@ -451,7 +451,7 @@ test('integration:done-rows-never-claimed — a done item\'s pending dispatch an
     assert.ok(retired, `the ${row.kind} row is retired to history`);
     assert.equal(retired!.history.at(-1)!.event, 'cancelled');
   }
-  assert.equal(settled.queue, null, 'the queue entry is cleared');
+  assert.equal((settled as { queue?: unknown }).queue ?? null, null, 'the legacy queue entry is cleared');
   assert.equal(settled.nextAction, null, 'the next action is recomputed');
   const revision = settled.revision;
   await engine.reconcile();

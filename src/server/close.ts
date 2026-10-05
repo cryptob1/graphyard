@@ -4,7 +4,7 @@ import { closeRefusal, closeSchema, closureRefRefusal, commitRef, itemRef, type 
 import { dispatchHistoryLimit, type DispatchRequest } from '../model/dispatch.js';
 import { humanRequestBlocker, retainedHumanRequests, type HumanRequest } from '../model/human-request.js';
 import { endAttempt } from '../pipeline-speed.js';
-import { save, wakeJob } from '../store.js';
+import { save } from '../store.js';
 import { authenticated, digest, receipt, record } from './decisions.js';
 import type { Services } from './routes.js';
 import { lockedWork } from '../store/locked-read.js';
@@ -45,17 +45,14 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     const settled = settleOpenRequests(work!, closure, now);
     // A lapsed lease reconciliation never reached ends here, as released.
     if (work!.lease) { endAttempt(work!, work!.lease.epoch, 'released', now); work!.lease = null; }
-    const queued = !!work!.queue;
     Object.assign(work!, { closure, stage: 'done', stageEnteredAt: now.toISOString(), reviewRequest: null, scopeRequest: null, blocker: null });
     services.engine.evaluate(work!, all, now);
-    // Nothing closed may be queued or merged, whatever its last gates said.
-    Object.assign(work!, { queue: null, mergeAuthorization: null });
+    // Nothing closed may be merged, whatever its last gates said.
+    Object.assign(work!, { mergeAuthorization: null });
     // The engine's own ledger entries for this evaluation (see waits.ts); internal to its transactions.
     await (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, work!, now);
     for (const request of settled.cancelled) await record(db, work!, 'graphyard', 'dispatch.cancelled', { details: { ...request, at: now.toISOString() } });
     await save(db, work!, actor.id, 'work.closed', now, { closure, actor: actor.id, reason: data.reason, cancelled: settled.cancelled.map(request => request.id), withdrawn: settled.withdrawn?.id ?? null, agentRequests: settled.agentRequests });
-    // Entries queued behind a closed one predict against the real base again.
-    if (queued) for (const peer of all) if (peer.queue && peer.id !== work!.id) await wakeJob(db, peer.id);
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
     return work!;
   });

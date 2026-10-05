@@ -500,8 +500,8 @@ export function assertReviewCandidate(work: Work, observedAt: string, request?: 
   if (request && (request.sha !== candidate.sha || request.baseSha !== candidate.baseSha || request.policyRevision !== work.policyRevision)) throw new Error(`${work.key} review request for ${request.sha.slice(0, 12)} on base ${request.baseSha.slice(0, 12)} is superseded: the latest observation is of head ${candidate.sha.slice(0, 12)} on base ${candidate.baseSha.slice(0, 12)}`);
   if (observation.prState === 'closed') throw new Error(`${work.key} pull request is closed`);
   if (observation.draft) throw new Error(`${work.key} pull request is still a draft`);
-  // A head behind the base branch is reviewed as it stands when it merges cleanly: the merge queue
-  // integrates it with the current base and re-tests the combined tip before merging (GY-191).
+  // A head behind the base branch is reviewed as it stands when it merges cleanly: GitHub
+  // integrates it with the current base when it merges (GY-191).
   // Only a head that conflicts with the base, or whose mergeability GitHub has not computed, waits
   // for a sync.
   if (behindBaseHold(work)) throw new Error(`${work.key} candidate ${candidate.sha.slice(0, 12)} does not contain the base branch tip ${observation.baseTip?.slice(0, 12) ?? ''}; ${observation.conflicting ? 'GitHub reports a merge conflict with it' : 'GitHub does not report it mergeable'}, so a review would judge a diff the sync will change. Run graphyard sync ${work.key} and push`);

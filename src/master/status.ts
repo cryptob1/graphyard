@@ -5,9 +5,9 @@ import { hotFileSet } from '../daemon/hotspots.js';
 import type { ConflictReport } from '../conflicts.js';
 import { standingCapacity, describeCapacity, quotaRoles } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
-import { type Work, carriedBindings, describeGround, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, describeQueueBinding, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance, type QueueBindingReport } from '../model.js';
+import { type Work, carriedBindings, describeGround, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance } from '../model.js';
 import { containmentAttestation, containmentGraceMs } from '../quarantine.js';
-import { defaultMergeBatchSize, describeMergeBatches, describeTipWindow, windowBatchView, type MergeBatchView, type TipView, predictQueue, describeGitHubQueue, pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, branchContamination, currentRestore, ejectedTipRestore, restoredApproval, unpublishableEntry, refusedReconciliation, blockedPastProbe, type QueuePlacement } from '../merge-queue.js';
+import { pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, restoredApproval, refusedReconciliation, blockedPastProbe } from '../merge-queue.js';
 import { MERGE_PROTOCOL } from '../protocol-version.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention } from '../merge-base-ancestry.js';
 import { pipelineSpeed, pipelineSpeedSummary } from '../pipeline-speed.js';
@@ -131,7 +131,7 @@ export function concurrencyAttention(reports: RoleConcurrencyReport[]): Attentio
     text: `${report.role} capacity is saturated: ${report.running} session${report.running === 1 ? '' : 's'} running against a limit of ${report.limit} (${report.profiles.map(entry => `${entry.profile} ${entry.running}/${entry.limit}`).join(', ')}), ${report.waiting} request${report.waiting === 1 ? '' : 's'} waiting for a slot, the longest (${report.longest!.work}${report.longest!.group ? ` ${report.longest!.group} proofs` : ''}) for ${Math.round(report.longestWaitMs! / 60_000)} minutes`,
     ...agentOwner('master', `Raise concurrency on a ${report.role} profile in .graphyard/master.json, or add a ${report.role} profile on another account (master ${report.role} add); master run adopts the change on its next tick and starts more sessions without a restart. See docs/onboarding.md#size-review-and-proof-capacity`) }));
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles, cliPath = 'graphyard', mergeQueue: { batchSize: number; parallelTips?: number } = { batchSize: defaultMergeBatchSize }, loop?: { projectMemory?: ProjectMemory | null } | { error: string } | null) {
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles, cliPath = 'graphyard', loop?: { projectMemory?: ProjectMemory | null } | { error: string } | null) {
   const now = Date.parse(snapshot.now);
   const scheduling = dispatchSchedule(snapshot.work, now);
   const installation = controlPlaneAttention(controlPlane), registry = fleetStatus(controlPlane?.fleet);
@@ -143,25 +143,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const credential = credentialHealth[profile.name] ?? { available: true, reason: null };
     return { profile: profile.name, principal: profile.principal, agentName: profile.agentName, mode: profile.mode, state: agent?.agent_status ?? 'offline', pane: agent?.pane_id ?? null, cwd: agent?.foreground_cwd ?? agent?.cwd ?? null, contextPercent: agent?.tokens?.agent_watcher_context_pct ? Number(agent.tokens.agent_watcher_context_pct) : null, credential };
   });
-  const placements = predictQueue(snapshot.work, now);
-  // The queue in batches (GY-330): each entry's batch, its members, and the combined tip under test.
-  const reportedCiApps = (controlPlane as { ciAppIds?: unknown } | undefined)?.ciAppIds;
-  const ciApps = Array.isArray(reportedCiApps) ? reportedCiApps.filter((id): id is number => typeof id === 'number') : null;
-  // Under a parallel-tip window (GY-498) each entry's merge step reads the window — the tips it
-  // merges behind, their entries and CI state — exactly as the control plane validates it.
-  const windows = mergeQueue.parallelTips ? describeTipWindow(snapshot.work, placements, mergeQueue.parallelTips, ciApps) : null;
-  const batches: Map<string, MergeBatchView> = windows
-    ? new Map([...windows].map(([key, view]) => [key, windowBatchView(key, view, mergeQueue.parallelTips!)]))
-    : describeMergeBatches(snapshot.work, placements, mergeQueue.batchSize, ciApps);
-  const tipsOf = (key: string): { tips: TipView[] } | Record<string, never> => windows?.get(key)?.tips.length ? { tips: windows.get(key)!.tips } : {};
-  // Each queued item's batch (GY-330) and its place in GitHub's own merge queue, as the control plane
-  // last read it (GY-258): GitHub performs the merge, so this is where a queued item waits once every gate passes.
-  const githubQueueRow = (work: Work) => ({ batch: batches.get(work.key) ?? null, ...tipsOf(work.key), ...(work.observation?.githubQueue ? { github: { ...work.observation.githubQueue, summary: describeGitHubQueue(work) } } : {}) });
-  const queueRows = placements.map(placement => { const work = snapshot.work.find(item => item.id === placement.id)!; return { ...queueRow(placement, describeQueueBinding(work, snapshot.work, new Date(now), placement)), ...githubQueueRow(work) }; });
   // The cause each row's attention was raised for, which is the fault kind its attention item carries.
   const causes = new Map<string, WorkAttentionCause>();
   const rows = snapshot.work.filter(work => work.stage !== 'done').map(work => {
-    const placement = placements.find(entry => entry.id === work.id) ?? null;
     const active = !!work.lease && Date.parse(work.lease.expiresAt) > now;
     const profile = active ? profiles.find(item => item.principal === work.lease!.owner) : undefined;
     const session = profile ? workerSessions.find(item => item.profile === profile.name) : undefined;
@@ -208,21 +192,11 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const dispatch = describeDispatch(work, reviews, sessions, now);
     const baseRefresh = pendingBaseRefresh(work), baseConflict = baseRefreshConflict(work);
     const refreshCarry = currentBaseRefreshCarry(work);
-    // A branch found carrying another item's unlanded commits, with the restore the control plane
-    // owes, requested or ran for it (GY-127); and an approval GitHub dismissed for a merge-base
-    // change on an unchanged head that the control plane restored rather than re-requesting.
-    const contaminated = branchContamination(work, snapshot.work);
-    const restore = currentRestore(work);
-    const contamination = contaminated || restore?.restore ? { head: contaminated?.head ?? restore!.restore!.contaminated, foreign: contaminated?.foreign ?? restore!.restore!.foreign, source: contaminated?.source ?? [],
-      restore: restore?.restore ? { cause: restore.restore.cause, requested: restore.restore.requested, performedAt: restore.restore.performedAt, outcome: restore.restore.outcome, own: restore.restore.own, head: restore.head, conflict: restore.conflict,
-        failure: restore.restore.failure ?? null, escalated: restore.restore.escalated ?? null, attempts: restore.restore.attempts ?? null,
-        // Whether the loop retries an unpublished restore on its own (GY-1056): only an ejected tip's
-        // restore is retried (ejectedTipRestore); a coordinator repair that failed to publish waits
-        // for graphyard master repair, so no row promises a retry that never runs.
-        retried: restore.restore.outcome === 'unpublished' && !restore.restore.escalated && !!ejectedTipRestore(work, snapshot.work) } : null } : null;
+    // An approval GitHub dismissed for a merge-base change on an unchanged head that the control
+    // plane restored rather than re-requesting.
     const restored = restoredApproval(work), baseDismissal = mergeBaseDismissal(work);
     const approvalRestored = restored ? { reviewer: restored.reviewer, reviewId: restored.reviewId ?? null, sha: restored.sha, dismissal: restored.dismissal, at: restored.at,
-      line: `${restored.reviewer}'s approval of ${restored.sha.slice(0, 12)} was dismissed by GitHub for a merge-base change while the head was unchanged (${restored.dismissal.reason ?? 'reason unread'}${restored.dismissal.at ? ` at ${restored.dismissal.at}` : ''}); the control plane restored it as the binding approval, requested no review, spent no attempt, and re-posts it through the reviewer App before the merge` } : null;
+      line: `${restored.reviewer}'s approval of ${restored.sha.slice(0, 12)} was dismissed by GitHub for a merge-base change while the head was unchanged (${restored.dismissal.reason ?? 'reason unread'}${restored.dismissal.at ? ` at ${restored.dismissal.at}` : ''}); the control plane restored it as the binding approval, requested no review and spent no attempt` } : null;
     // A role with no account left is one line for the whole repository (`capacity` below), never a
     // launch refusal or a session retry repeated on every item that waits for it.
     const paused = new Set(standingCapacity(work).map(entry => entry.role));
@@ -230,19 +204,15 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const retrying = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.retry && request.session && ['failed', 'expired'].includes(request.session.state) && !paused.has(request.group ? 'producer' : 'reviewer'));
     // A session re-prompted once and still not acknowledged is awaiting acknowledgement, not running.
     const unacknowledged = [dispatch?.review, ...(dispatch?.producers ?? [])].find(request => request?.session?.state === 'pending' && request.session.activity === 'awaiting acknowledgement' && request.session.repromptedAt);
-    // An observed merge no execution authorized is not a candidate waiting for its queue tip: it
-    // is named as the violation it is, with the recovery, and never as a gate refusal.
-    // Its queue entry, when it still holds one, can never publish a speculative tip: the entry and
-    // everything waiting behind it are named, with the exit (see merge-queue.ts unpublishableEntry).
-    const dead = unpublishableEntry(work);
+    // An observed merge its gates did not pass is not a candidate: it is named as the violation it
+    // is, with the recovery, and never as a gate refusal.
     // A merged item whose content the base branch does not hold is a reverted delivery, not an
     // ordinary unreconciled merge (GY-97): the row names the files missing from the base and the
     // merge that removed them, so nobody has to read a diff to learn the work is gone.
     const reverted = work.stage !== 'done' && work.observation?.merged ? work.observation.revertedDelivery ?? null : null;
     const merged = mergedWithoutAuthorization(work) || reverted ? { at: work.observation!.mergedAt ?? null, sha: work.observation!.mergeSha ?? null, violation: unauthorizedMergeViolation,
       refusal: refusedReconciliation(work)?.violation ?? null,
-      ...(reverted ? { reverted: { base: reverted.base, files: reverted.files, removedBy: reverted.removedBy, partial: !!reverted.partial } } : {}),
-      ...(dead && placement ? { queue: { sequence: dead.sequence, position: placement.position + 1, size: placement.size, unpublishable: true as const, behind: placements.filter(entry => entry.sequence > placement.sequence).map(entry => entry.key) } } : {}) } : null;
+      ...(reverted ? { reverted: { base: reverted.base, files: reverted.files, removedBy: reverted.removedBy, partial: !!reverted.partial } } : {}) } : null;
     const parked = parkedOnHuman(work) ? work.humanRequest! : null;
     const queueRefusal = work.observation?.merged ? null : work.observation?.githubQueue?.refused ?? null;
     // A refusal on a head BLOCKED with every gate passing past its bound is named once, by master
@@ -254,11 +224,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : merged?.reverted ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) and its content is not on the base branch: ${merged.reverted.files.length}${merged.reverted.partial ? ' or more' : ''} file${merged.reverted.files.length === 1 && !merged.reverted.partial ? '' : 's'} missing from base ${merged.reverted.base.slice(0, 12)} — ${merged.reverted.files.map(file => `${file.path} (${file.detail})`).join(', ')} — ${merged.reverted.removedBy
         ? `removed by merge ${merged.reverted.removedBy.mergeSha?.slice(0, 12) ?? 'commit unknown'} of ${merged.reverted.removedBy.key ? `${merged.reverted.removedBy.key}, ` : ''}pull request #${merged.reverted.removedBy.pr}${merged.reverted.removedBy.commit ? ` (commit ${merged.reverted.removedBy.commit.slice(0, 12)})` : ', whose head carried this item\'s commits without their content'}`
         : 'and the merge that removed them could not be identified from the branch history'}. This is a reverted delivery, not an unreconciled merge: nothing is delivered until the content is restored${merged.refusal ? `; the last reconciliation was refused — ${merged.refusal}` : ''}`, 'merged-reverted']
-      : merged ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) though its gates had not passed on that head: ${merged.violation}. It is held at the merge stage, not waiting for its queue tip; ${merged.queue ? `its merge queue entry (sequence ${merged.queue.sequence}, position ${merged.queue.position} of ${merged.queue.size}) can never publish a speculative tip because the pull request is already merged${merged.queue.behind.length ? `, and ${merged.queue.behind.join(', ')} wait behind it` : ''}; ` : ''}${merged.refusal ? `the last reconciliation was refused — ${merged.refusal}; an operator may deliver it as operator-authorized by a decision citing that refusal` : `a two-party merge decision requested now reconciles it if every gate passed for the merged head at the merge cutoff${merged.queue ? ', and a refused one removes the entry without delivering' : ''}`}`, 'merged-unauthorized']
-      // A branch carrying another item's unlanded commits blocks the candidate whatever else stands
-      // (GY-127): the restore is the control plane's, and the row says whether it is owed, requested,
-      // ran and published, or failed and escalated (GY-854).
-      : contaminated && !(contamination?.restore && contamination.restore.performedAt && contamination.restore.outcome === 'restored' && contamination.restore.head !== contaminated.head) ? [`${work.key} branch head ${contaminated.head.slice(0, 12)} carries the unlanded commits of ${contaminated.foreign.join(', ')} (${contaminated.source.includes('ejection') ? `a speculative tip published behind ${contaminated.foreign.join(', ')} and ejected from the merge queue` : 'found in its history by GitHub'}): kept, it is refused as an out-of-scope regression; landed, it would record ${contaminated.foreign.join(', ')} merged without ${contaminated.foreign.length === 1 ? 'its' : 'their'} content. ${contamination?.restore?.outcome === 'unrepairable' ? 'A restore found no own reviewed head under it: the foreign commits sit under something the control plane cannot move' : contamination?.restore?.outcome === 'unpublished' ? contamination.restore.escalated ? `The restore failed twice without the candidate changing and stopped repeating, escalated: ${contamination.restore.failure}` : contamination.restore.retried ? `The restore could not publish its result and is retried once: ${contamination.restore.failure}` : `The restore could not publish its result and nothing retries it on its own: ${contamination.restore.failure}; graphyard master repair ${work.key} REASON requests it again` : contamination?.restore && !contamination.restore.performedAt ? `A restore is requested (${contamination.restore.cause}) and runs on the next reconciliation` : work.queueEjection?.sha === contaminated.head ? 'The control plane restores it to its own reviewed head merged onto the base on the next reconciliation' : `graphyard master repair ${work.key} REASON restores it to its own reviewed head merged onto the base`}`, 'contaminated']
+      : merged ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) though its gates had not passed on that head: ${merged.violation}. It is held at the merge stage; ${merged.refusal ? `the last reconciliation was refused — ${merged.refusal}; an operator may deliver it as operator-authorized by a decision citing that refusal` : 'a two-party merge decision requested now reconciles it if every gate passed for the merged head at the merge cutoff'}`, 'merged-unauthorized']
       : active && !['working', 'idle', 'launching'].includes(sessionState) ? [`Assigned worker session is ${sessionState}`, 'session']
       : gaps.length ? [`No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`, 'proof-gap']
       : review?.exhausted ? [`Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`, 'reviewer-exhausted']
@@ -278,7 +244,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
     const attentionOwner = cause ? workAttentionOwner(work, cause) : null;
     if (cause) causes.set(work.key, cause);
-    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, dispatch, proofGaps: gaps, containment: quarantine, attention, attentionOwner, queue: placement ? queueRows.find(row => row.key === work.key) ?? null : null,
+    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, dispatch, proofGaps: gaps, containment: quarantine, attention, attentionOwner,
       // The risk lane the item rides and its speed target (GY-883), stamped by the last evaluation
       // and shown per row: the lane names the ceremony the item's change is asked for.
       lane: work.lane ?? null, speedTarget: work.speedTarget ?? null,
@@ -295,18 +261,13 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
         refreshed: refreshCarry ? { from: refreshCarry.from.sha, head: refreshCarry.to.sha, base: refreshCarry.to.baseSha, ground: describeGround(refreshCarry.ground),
           approval: { carried: refreshCarry.approval.carried, reason: refreshCarry.approval.reason },
           evidence: refreshCarry.evidence.map(entry => ({ proof: entry.proof, carried: entry.carried, reason: entry.reason })) } : null } : null,
-      // A branch carrying another item's unlanded commits and the restore for it (GY-127), and
-      // an approval GitHub dismissed for a merge-base change that the control plane restored.
-      contamination, restoredApproval: approvalRestored,
+      // An approval GitHub dismissed for a merge-base change that the control plane restored.
+      restoredApproval: approvalRestored,
       // The standing blocker's class, the loop's last probe of it and when it runs next (GY-1008).
       blocker: blockerView(work),
       scope: scopeBreadth(work.plannedFiles), overlap: { concurrent }, conflicts,
       // Execution versus wait so far, rework rounds and hand-offs, from the item's own timeline.
       speed: pipelineSpeed(work, now),
-      // Where the item is inside the Merge step (GY-330): its batch and the combined tip under test,
-      // a substate of Merge — CI on that tip is the merge validating the combination, not a return
-      // to Test. Null for an item outside the queue.
-      mergeStep: mergeStep(work, batches.get(work.key) ?? null),
       // The review and proofs held by carry across a Graphyard-authored merge, each with its ground:
       // the verdict given before that merge, shown as carried rather than as freshly passed.
       carried: carriedBindings(work, snapshot.work, new Date(now)),
@@ -353,12 +314,12 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // merged though their gates had not passed, which are never candidates and wait on a reconciliation.
       mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged && !row.merged.reverted).length, revertedDeliveries: rows.filter(row => row.merged?.reverted).length,
       dispatchRequested: rows.reduce((total, row) => total + (row.dispatch ? (row.dispatch.review ? 1 : 0) + row.dispatch.producers.length : 0), 0), dispatchRunning: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending' && request.session.activity === 'running').length : 0), 0),
-      dispatchAwaiting: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending' && request.session.activity === 'awaiting acknowledgement').length : 0), 0), reviewFailover: rows.filter(row => row.review?.failedOver.length).length, queued: placements.length,
+      dispatchAwaiting: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending' && request.session.activity === 'awaiting acknowledgement').length : 0), 0), reviewFailover: rows.filter(row => row.review?.failedOver.length).length,
       quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length,
       reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length,
       humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length, unrunnableRemedies: remedies.length, effectiveConcurrency: fleet.effective, idleWorkers: idle.length,
-      contaminatedBranches: rows.filter(row => row.contamination && row.contamination.source.length).length, restoredApprovals: rows.filter(row => row.restoredApproval).length,
+      restoredApprovals: rows.filter(row => row.restoredApproval).length,
       // Closed without delivery (model/closure.ts): never open, never delivered, counted only here.
       closed: snapshot.work.filter(isClosed).length },
     // Every attention item with the role that resolves it and the next command, work items first.
@@ -369,7 +330,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     // and the blockers whose remedy no launched session may run.
     humanRequests, capacity, concurrency, effectiveConcurrency: fleet, unrunnableRemedies: remedies,
     closed: closedHistory(snapshot.work),
-    workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation, fleet: registry.fleet,
+    workers: workerSessions, reviews, producers: sessions.producers, work: rows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation, fleet: registry.fleet,
     // Every split parent and its children's progress (GY-1126): the parent is delivered when they all are.
     splits: splitReport(snapshot.work),
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) },
@@ -378,32 +339,21 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
 }
 
 /**
- * What the merge queue's own pushes did to pull-request branches and their approvals (GY-127),
- * in one place: every branch found carrying another item's unlanded commits, with the restore
- * the control plane owes, requested or ran for it, and every approval GitHub dismissed for a
- * merge-base change on an unchanged head that the control plane restored instead of asking the
- * reviewer again. The rows carry the same facts under `contamination` and `restoredApproval`;
- * this is the list a master reads before it wonders why a reviewer approved the same commit twice.
+ * Every approval GitHub dismissed for a merge-base change on an unchanged head that the control
+ * plane restored instead of asking the reviewer again (GY-127): the list a master reads before it
+ * wonders why a reviewer approved the same commit twice. The rows carry the same facts under
+ * `restoredApproval`.
  */
 export function branchReport(rows: ReturnType<typeof buildMasterStatus>['work']) {
-  const contaminated = rows.flatMap(row => row.contamination ? [{ key: row.key, head: row.contamination.head, foreign: row.contamination.foreign, source: row.contamination.source,
-    restore: row.contamination.restore ? { cause: row.contamination.restore.cause, requestedBy: row.contamination.restore.requested?.by ?? null, performedAt: row.contamination.restore.performedAt, outcome: row.contamination.restore.outcome, own: row.contamination.restore.own, head: row.contamination.restore.head, retried: row.contamination.restore.retried } : null,
-    line: row.contamination.restore?.outcome === 'restored' && row.contamination.restore.head !== row.contamination.head
-      ? `${row.key}: head ${row.contamination.head.slice(0, 12)} carried ${row.contamination.foreign.join(', ')}; restored to own reviewed head ${row.contamination.restore.own?.slice(0, 12) ?? '(unknown)'} merged onto the base as ${row.contamination.restore.head!.slice(0, 12)}`
-      : row.contamination.restore?.outcome === 'conflict' ? `${row.key}: head ${row.contamination.head.slice(0, 12)} carried ${row.contamination.foreign.join(', ')}; reset to own reviewed head ${row.contamination.restore.own?.slice(0, 12) ?? '(unknown)'}, whose merge onto the base conflicts and is the worker's`
-      : row.contamination.restore?.outcome === 'unrepairable' ? `${row.key}: head ${row.contamination.head.slice(0, 12)} carries ${row.contamination.foreign.join(', ')} under something the control plane cannot move; request rework`
-      : row.contamination.restore?.outcome === 'unpublished' ? `${row.key}: head ${row.contamination.head.slice(0, 12)} carries ${row.contamination.foreign.join(', ')}; the restore is not on the branch — ${row.contamination.restore.failure}${row.contamination.restore.escalated ? ' — escalated: it stops repeating' : row.contamination.restore.retried ? ' — one retry follows' : ` — nothing retries it on its own; graphyard master repair ${row.key} REASON requests it again`}`
-      : row.contamination.restore ? `${row.key}: head ${row.contamination.head.slice(0, 12)} carries ${row.contamination.foreign.join(', ')}; a ${row.contamination.restore.cause} restore is requested and runs on the next reconciliation`
-      : `${row.key}: head ${row.contamination.head.slice(0, 12)} carries ${row.contamination.foreign.join(', ')}; ${row.attention ?? 'a restore is owed'}` }] : []);
   const restoredApprovals = rows.flatMap(row => row.restoredApproval ? [{ key: row.key, reviewer: row.restoredApproval.reviewer, sha: row.restoredApproval.sha, reason: row.restoredApproval.dismissal.reason, at: row.restoredApproval.at, line: `${row.key}: ${row.restoredApproval.line}` }] : []);
-  return { contaminated, restoredApprovals };
+  return { restoredApprovals };
 }
 /**
  * The dispatch plan the durable loop and `master dispatch` follow: ready items in the order they
  * would be offered (within a priority: starving first, then cold before hot, then smallest planned
  * scope, by the loop's own comparator over the same hot set and clock), and the broad scopes that
  * make a weak change-scope contract. Nothing is held for planned-file overlap: dispatch is
- * optimistic, and the merge queue and a sync round integrate whichever overlapping item lands second.
+ * optimistic, and a base refresh or a sync round integrates whichever overlapping item lands second.
  */
 export function dispatchSchedule(work: Work[], now: number) {
   const ready = dispatchSort(work.filter(item => dispatchable(item, now)), hotFileSet(work, now), now);
@@ -459,26 +409,4 @@ export function latencyPercentiles(values: number[]) {
   const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
   const at = (percentile: number) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * percentile / 100) - 1))] : 0;
   return { count: sorted.length, p50Ms: at(50), p90Ms: at(90) };
-}
-
-/**
- * One queue entry as the master reads it. `binding` says, per entry, whether its review and each
- * required proof bind the published tip exactly, were carried across a Graphyard-authored tip or a
- * tree-identical base advance, or must be produced afresh — and the recorded reason for each.
- */
-function queueRow(placement: QueuePlacement, binding: QueueBindingReport | null) {
-  return { key: placement.key, position: placement.position + 1, size: placement.size, predictedBase: placement.predictedBase,
-    predictedTip: placement.tip, validated: placement.current, waitMs: placement.waitMs, waitMinutes: Math.floor(placement.waitMs / 60_000),
-    enqueuedAt: placement.enqueuedAt, ahead: placement.predecessors, skipped: placement.skipped ?? [], passedOver: placement.passedOver ?? null, reasons: placement.reasons, binding };
-}
-/**
- * A queued item's place inside the Merge step (GY-330): `batch` while it is validated in a batch
- * (its members, the combined tip and what is under test), `queued` while it is in the queue but
- * outside the validated chain. The step stays Merge either way: the combined tip's CI is the merge
- * validating the combination, never the item going back to Test.
- */
-export function mergeStep(work: Work, batch: MergeBatchView | null) {
-  if (!work.queue || work.stage === 'done') return null;
-  if (!batch) return { step: 'merge' as const, substate: 'queued' as const, batch: null, summary: 'in the merge queue, outside the validated chain until revalidated' };
-  return { step: 'merge' as const, substate: 'batch' as const, batch: { number: batch.batch, members: batch.members, tip: batch.tip, underTest: batch.underTest, state: batch.state }, summary: batch.summary };
 }

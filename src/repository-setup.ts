@@ -5,7 +5,6 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
-import { onboardingParallelTips } from './master/profiles.js';
 import { generatedFilesAssignment } from './install/generated-files.js';
 import { ensureMergeMode, type ProtectionRun } from './protection.js';
 import { autonomyContract } from './autonomy.js';
@@ -526,17 +525,6 @@ export async function readDocumentationConfig(root: string): Promise<Documentati
   try { const { wordBudget: _budget, ...policy } = parseRepositoryConfig(await readFile(resolve(root, repositoryConfigFile), 'utf8')).documentation; return policy; }
   catch (error: any) { if (error.code === 'ENOENT') return null; throw error; }
 }
-
-// --- Merge-queue exclusions: the shared infrastructure onboarding names per repository (GY-503) ---
-
-/**
- * The `mergeQueue` configuration onboarding writes when a repository's master config names none:
- * the product's recommended parallel-tips value (`onboardingParallelTips`, master/profiles.ts) under
- * `mergeQueue.parallelTips`, where the operator tunes it for this repository. A later `master init`
- * keeps what is written, exactly as it keeps an operator-tuned profile, so the default is named once
- * per repository and the product hardcodes nobody's concurrency settings.
- */
-export const onboardingMergeQueue = (): { parallelTips: number } => ({ parallelTips: onboardingParallelTips });
 
 // --- Executor supervision: what a host runs, and the unit that keeps it running (GY-105) -----------
 

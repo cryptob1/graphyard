@@ -192,7 +192,7 @@ test('integration:operator-authorized-delivery — a merge whose gates had not p
   const merged = { ...await mergedAt(work, mergeSha), ...unreviewed };
   const cutoff = Date.parse(merged.mergedAt!) + 1000;
   let current = await engine.observe(work.id, (await reload(work.id)).revision, merged);
-  assert.ok(current.violations.includes(unauthorizedMergeViolation)); assert.equal(current.queue, null);
+  assert.ok(current.violations.includes(unauthorizedMergeViolation));
   await waitUntil(cutoff);
   // The master's agent pair asks for a reconciliation: the record refuses it, with what it lacked.
   const first = await mergeDecision(current, `Reconcile ${work.key} after the administrative merge`, masterAgent.token, approverAgent.token);

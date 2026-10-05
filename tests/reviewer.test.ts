@@ -418,7 +418,7 @@ test('branch protection reconciles to the review policy of every open item and r
   assert.equal(protectionPlan(current({ required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true }), config, [native]).consistent, true);
   assert.throws(() => protectionPlan(current({ required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true }), config, [native, agent]), /one review provider/);
   const unprotected = protectionPlan({ required_status_checks: { strict: true, checks: [] }, enforce_admins: { enabled: false } }, config, [native]);
-  assert.equal(unprotected.blockers.length, 3); assert.match(unprotected.refusal!, /merge queue requires it off/); assert.match(unprotected.refusal!, /Graphyard \/ merge/);
+  assert.equal(unprotected.blockers.length, 3); assert.match(unprotected.refusal!, /Graphyard requires it off/); assert.match(unprotected.refusal!, /Graphyard \/ merge/);
   assert.match(protectionPlan(current({ required_approving_review_count: 1, require_code_owner_reviews: true, require_last_push_approval: true, dismiss_stale_reviews: true }), config, [native]).refusal!, /CODEOWNERS/);
   assert.equal(protectionPlan(current({ required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true }), { ...config, githubAppId: 4321 }, [native]).blockers.length, 1);
 });

@@ -1,6 +1,6 @@
 // Concern: base-branch breakage — telling a failure the base caused from the candidate's own, and the refresh and waking that answer it.
 import type { Observation, Work } from '../model.js';
-import { currentRestore, latestCheck } from '../merge-queue.js';
+import { latestCheck } from '../merge-queue.js';
 
 // GY-793. A candidate whose required check failed only because the base branch was broken when it
 // ran is not the worker's to fix, and not the approver's to send back: it is the control plane's
@@ -167,18 +167,15 @@ export function currentBaseBreak(work: Pick<Work, 'candidate' | 'observation'>):
  * The refresh a base breakage calls for, or null (GY-793). Once per head, base tip and policy
  * revision, like every base refresh: a refresh already recorded for the three — published,
  * conflicted, or found stale — is never repeated, so a conflict goes back to the worker as any
- * base conflict does. Never for a queued entry (the queue builds its own tip), a head being
- * reworked, a closed, draft or merged pull request, or a branch found carrying foreign commits.
+ * base conflict does. Never for a head being reworked, or a closed, draft or merged pull request.
  */
 export function baseBreakRefreshNeeded(work: Work): BaseBreak | null {
   const found = currentBaseBreak(work), observation = work.observation, candidate = work.candidate;
   if (!found || !observation || !candidate) return null;
-  if (!work.submission || work.reworkRequested || work.stage === 'done' || work.queue || work.blocker) return null;
+  if (!work.submission || work.reworkRequested || work.stage === 'done' || work.blocker) return null;
   if (observation.merged || observation.prState === 'closed' || observation.draft || observation.baseTipContained !== false) return null;
   const refresh = work.baseRefresh;
   if (refresh && refresh.from.sha === candidate.sha && refresh.base === found.fixedBy && refresh.policyRevision === work.policyRevision) return null;
-  const restore = currentRestore(work)?.restore;
-  if (restore && restore.contaminated === candidate.sha) return null;
   return found;
 }
 

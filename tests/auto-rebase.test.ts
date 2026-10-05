@@ -7,7 +7,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { CHECK_NAME, GitHub, processJob } from '../src/github.js';
-import { baseRefreshConflict, baseRefreshNeeded, heldBase, pendingBaseRefresh, type BaseRefresh, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
+import { baseRefreshConflict, baseRefreshNeeded, heldBase, pendingBaseRefresh, type BaseRefresh } from '../src/merge-queue.js';
 import { Refusal, type Observation, type Principal, type Work } from '../src/model.js';
 import { diagnose } from '../src/coordination.js';
 import { evaluateLandability, landabilityRefusals } from '../src/model/landability.js';
@@ -203,18 +203,13 @@ async function onlyJob(work: Work) {
   await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [work.id]);
 }
 /** The control-plane adapter the reconciliation job drives: an observation and a base refresh. */
-function adapter(observation: (work: Work) => Observation, refresh: ((work: Work) => BaseRefresh) | null,
-  speculation: ((work: Work, placement: QueuePlacement) => QueueSpeculation) | null = null) {
-  const refreshed: string[] = [], requested: string[] = [], published: string[] = [];
-  return { refreshed, requested, published, github: {
+function adapter(observation: (work: Work) => Observation, refresh: ((work: Work) => BaseRefresh) | null) {
+  const refreshed: string[] = [], requested: string[] = [];
+  return { refreshed, requested, github: {
     observe: async (work: Work) => observation(work),
     refreshCandidateBase: async (work: Work) => {
       if (!refresh) throw new Error(`${work.key} must not be refreshed`);
       refreshed.push(work.key); return refresh(work);
-    },
-    publishSpeculativeTip: async (work: Work, placement: QueuePlacement) => {
-      if (!speculation) throw new Error(`${work.key} must not publish a speculative tip`);
-      published.push(work.key); return speculation(work, placement);
     },
     requestCodex: async (work: Work) => { requested.push(work.candidate!.sha); throw new Error('no review request expected'); },
     publish: async () => {},
@@ -232,7 +227,7 @@ async function mergeHead(work: Work, candidate: { sha: string; baseSha: string }
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   return engine.observe(current.id, committed.revision, seen(current, candidate, { merged: true, mergeSha, mergedAt }));
 }
-/** A candidate whose required checks have not all landed: in flight, never queue-eligible. */
+/** A candidate whose required checks have not all landed: in flight, never merge-eligible. */
 const inFlight = (extra: Partial<Observation> = {}): Partial<Observation> => ({ checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'in_progress', appId: 15368 }], ...extra });
 
 /** What GitHub reports for a head that does not merge cleanly with the moved base: the one kind of in-flight candidate a base refresh is for (GY-292). */
@@ -254,7 +249,7 @@ test('integration:auto-rebase-clean-candidate — the reconciliation job leaves 
   await onlyJob(work);
   const untouched = adapter(clean, null);
   await processJob(engine, untouched.github);
-  assert.deepEqual([untouched.refreshed, untouched.published], [[], []], 'a clean candidate is not refreshed');
+  assert.deepEqual(untouched.refreshed, [], 'a clean candidate is not refreshed');
   work = await reload(work);
   assert.deepEqual([work.candidate!.sha, work.candidate!.baseSha, work.stage, work.baseRefresh ?? null], [head, main, before.stage, null]);
 
@@ -269,7 +264,7 @@ test('integration:auto-rebase-clean-candidate — the reconciliation job leaves 
   await onlyJob(work);
   const run = adapter(stale, item => refreshRecord(item, { head: refreshedHead, base: moved }));
   await processJob(engine, run.github);
-  assert.deepEqual([run.refreshed, run.requested, run.published], [[work.key], [], []], 'the base was refreshed, and no review or tip was asked for');
+  assert.deepEqual([run.refreshed, run.requested], [[work.key], []], 'the base was refreshed, and no review was asked for');
 
   work = await reload(work);
   const carry = work.baseRefresh!.carry!;
@@ -299,7 +294,7 @@ test('integration:auto-rebase-conflict-guard — a conflicting base returns the 
   const stale = (item: Work) => seen(item, { sha: head, baseSha: main }, inFlight({ baseTip: moved, baseTree: treeOf(moved), baseTipContained: false, ...conflicts }));
   conflicting = await engine.observe(conflicting.id, conflicting.revision, stale(conflicting));
   await onlyJob(conflicting);
-  const conflict = `Candidate ${head.slice(0, 12)} cannot be brought onto base branch tip ${moved.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: Speculative merge of ${moved.slice(0, 12)} into graphyard/gy-1 conflicts and cannot be resolved by Graphyard. Run graphyard sync ${conflicting.key}, resolve it and push; the approval and proofs bound to ${head.slice(0, 12)} do not survive the resolution.`;
+  const conflict = `Candidate ${head.slice(0, 12)} cannot be brought onto base branch tip ${moved.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: Merge of ${moved.slice(0, 12)} into graphyard/gy-1 conflicts and cannot be resolved by Graphyard. Run graphyard sync ${conflicting.key}, resolve it and push; the approval and proofs bound to ${head.slice(0, 12)} do not survive the resolution.`;
   await processJob(engine, adapter(stale, item => refreshRecord(item, { head: null, base: moved }, { conflict })).github);
   conflicting = await reload(conflicting);
   assert.equal(conflicting.baseRefresh!.carry, null, 'a refusal decides no carry at all');
@@ -314,7 +309,7 @@ test('integration:auto-rebase-conflict-guard — a conflicting base returns the 
   assert.match(row.attentionOwner!.next, new RegExp(`graphyard master decide ${conflicting.key} rework`));
 
   // A clean merge whose base touched a reviewed file or a declared proof scope carries only what
-  // it may: the rest is required afresh with the reason, exactly as the merge queue decides it.
+  // it may: the rest is required afresh with the reason, exactly as a carry across a base refresh decides it.
   const main2 = sha40('25'), moved2 = sha40('26'), head2 = sha40('27');
   let partial = await submitted('Partial carry');
   partial = await validated(partial, { sha: head2, baseSha: main2 }, inFlight());
@@ -417,7 +412,7 @@ test('integration:parallel-candidates-survive-merge — merging one of five in-f
     await onlyJob(current);
     const run = adapter(stale, null);
     await processJob(engine, run.github);
-    assert.deepEqual([run.refreshed, run.requested, run.published], [[], [], []], `${item.key} was neither rebuilt nor re-reviewed`);
+    assert.deepEqual([run.refreshed, run.requested], [[], []], `${item.key} was neither rebuilt nor re-reviewed`);
     current = await reload(current);
     assert.deepEqual([current.candidate!.sha, current.candidate!.baseSha, current.baseRefresh ?? null], [heads[index], main, null], `${item.key} kept its head`);
     assert.deepEqual([current.stage, gate(current, 'review').passed, (await proofs(current)).passed], [before[index].stage, true, true], `${item.key} is still in its stage`);

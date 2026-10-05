@@ -140,7 +140,7 @@ export const workspaceCommands = defineCommands([
     scope: 'work',
     help: [
       '  restore-branch GY-N EPOCH     Replace the leased attempt\'s own branch with HEAD after an',
-      '                                ejected or contaminated tip: a lease push to that one branch,',
+      '                                contaminated branch: a lease push to that one branch,',
       '                                conditional on the tip just fetched; run after reset and sync',
     ],
     run: restoreBranchWork,

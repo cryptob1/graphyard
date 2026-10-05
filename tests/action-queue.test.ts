@@ -286,7 +286,6 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.equal(refusalAction(all[0], 'build', 'Worker has not submitted implementation for this attempt'), 'dispatch');
   assert.equal(refusalAction(all[0], 'build', 'Pull request has not been independently observed'), 'resync');
   assert.equal(refusalAction(all[0], 'review', 'Independent approval of the current commit is required'), 'request-review');
-  assert.equal(refusalAction(all[0], 'merge', 'Merge queue position 2 of 3: GY-1 is ahead'), 'merge');
   assert.equal(refusalAction(all[0], 'nowhere', 'A refusal nobody has written a rule for yet'), 'escalate', 'an unmapped refusal escalates rather than vanishing');
   // A required check that reported a failure needs a new head; one still to answer needs a re-read.
   const failing = { ...all[0], observation: { ...observation(item), checks: [{ name: 'test', result: 'failure', appId: 15368 }] } } as Work;

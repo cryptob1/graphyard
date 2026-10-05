@@ -35,6 +35,7 @@ export const masterCommands = defineCommands([
       '                                open request\'s next attempt; master run does this on its own,',
       '                                so it is the recovery path for a request nothing else answers',
       '  master protection [--apply]   Reconcile branch protection with every open review policy',
+      '  master tip-cleanup [--apply]  Delete the speculative-tip refs the removed merge queue left',
       '  master browser FLOW [--dry-run]',
       "                                Perform GitHub administration through the operator's browser",
       '                                profile: app-permissions, installation-accept, or protection;',

@@ -9,8 +9,8 @@
 //
 // The classification reads recorded text alone (GY-643's discipline): the rework reason is the only
 // AC-1 input, and AC-2 reads only facts the ledger recorded. The GY-643 taxonomy, the fact
-// projection (deriveFacts), the dashboard's step rule (gateFactStep), the merge-ready rule, the
-// queue-sequencing test and the nearest-rank percentiles are imported from src/ through tsx so this
+// projection (deriveFacts), the dashboard's step rule (gateFactStep), the merge-ready rule and the
+// nearest-rank percentiles are imported from src/ through tsx so this
 // script and `master status` can never disagree about a number; only the two new GY-879 causes and
 // the review/CI split live here, layered in front of the shared classifier.
 //
@@ -184,8 +184,7 @@ const observationWaitMarkers = [/\bobservation\b[^.\n]{0,40}\b(missing|older tha
 
 /**
  * One delivery's waiting time by cause (AC-2). `events` are the item's full-payload ledger rows in
- * any order; `helpers` carries the imported analytics ({ deriveFacts, gateFactStep, mergeReadyGate,
- * queueSequencingReason }). The rows are folded through `deriveFacts` with a state reset per item —
+ * any order; `helpers` carries the imported analytics ({ deriveFacts, gateFactStep, mergeReadyGate }). The rows are folded through `deriveFacts` with a state reset per item —
  * `gates.changed` is a projected fact the raw ledger never stores — and the window (first
  * submission → accepted merge) is swept as ordered slices bounded by gate-fact instants, attempt
  * endpoints and decision endpoints. Each slice is classified into exactly one bucket: execution
@@ -255,7 +254,6 @@ export function deliveryWaitingTimeByCase(item, events, helpers) {
       if (helpers.mergeReadyGate(gate.details)) return 'merge-queue';
       const reasons = (gate.details.reasons ?? []).map(String);
       const text = reasons.join('\n');
-      if (reasons.length && reasons.every(reason => helpers.queueSequencingReason(reason))) return 'merge-queue';
       if (gateDisagreementRules.some(rule => rule.pattern.test(text))) return 'gate-disagreement';
       if (approverDecisionMarkers.some(pattern => pattern.test(text))) return 'approver-decision';
       if (observationWaitMarkers.some(pattern => pattern.test(text))) return 'observation';
@@ -351,20 +349,17 @@ async function readToken(env) {
  * The analytics pieces are TypeScript; tsx is a runtime dependency of the CLI already. They are
  * imported — never copied — so this script and `master status`/dashboard can never disagree:
  * recentDelivered and classifyReworkReason (GY-643), deriveFacts/gateFactStep/mergeReadyGate
- * (the dashboard's own step and merge-ready rules), queueSequencingReason (the merge queue's
- * sequencing test), pipelineSpeedSummary and nearestRankPercentiles (GY-54), and the page bounds
+ * (the dashboard's own step and merge-ready rules), pipelineSpeedSummary and nearestRankPercentiles (GY-54), and the page bounds
  * the /api/events contract documents.
  */
 export async function analytics() {
   const { tsImport } = await import('tsx/esm/api');
   const flow = await tsImport('../src/flow-analytics.ts', import.meta.url);
-  const queue = await tsImport('../src/merge-queue.ts', import.meta.url);
   const history = await tsImport('../src/events-history.ts', import.meta.url);
   const speed = await tsImport('../src/pipeline-speed.ts', import.meta.url);
   return {
     recentDelivered: flow.recentDelivered, classifyReworkReason: flow.classifyReworkReason,
     deriveFacts: flow.deriveFacts, gateFactStep: flow.gateFactStep, mergeReadyGate: flow.mergeReadyGate,
-    queueSequencingReason: queue.queueSequencingReason,
     pipelineSpeedSummary: speed.pipelineSpeedSummary, nearestRankPercentiles: speed.nearestRankPercentiles,
     pageLimit: history.eventHistoryLimits.page, reworkPages: flow.reworkEventPages, pageWalkBound: 24,
   };
@@ -390,7 +385,7 @@ async function mapPool(items, limit, worker) {
  * rethink's baselines. `analytics` is the object `analytics()` loads (injected by tests).
  */
 export async function collect(api, options, analytics) {
-  const { recentDelivered, classifyReworkReason, deriveFacts, gateFactStep, mergeReadyGate, queueSequencingReason, pipelineSpeedSummary, nearestRankPercentiles, pageLimit, reworkPages, pageWalkBound } = analytics;
+  const { recentDelivered, classifyReworkReason, deriveFacts, gateFactStep, mergeReadyGate, pipelineSpeedSummary, nearestRankPercentiles, pageLimit, reworkPages, pageWalkBound } = analytics;
   const classify = reason => classifyDeliveryReworkReason(reason, classifyReworkReason);
   const snapshot = await api('work-snapshot');
   const population = recentDelivered(snapshot.work, options.items);
@@ -413,7 +408,7 @@ export async function collect(api, options, analytics) {
   const rawCounts = measuredEntries.map(entry => entry.rounds.length);
   const ownCounts = measuredEntries.map(entry => entry.rounds.filter(round => round.cause === 'own-change-review' || round.cause === 'own-change-ci').length);
 
-  const helpers = { deriveFacts, gateFactStep, mergeReadyGate, queueSequencingReason };
+  const helpers = { deriveFacts, gateFactStep, mergeReadyGate };
   const skipResult = (item, coverage) => ({ measured: false, coverage, key: item.key, complete: true, windowMs: 0, executionMs: 0, totalWaitMs: 0, byCause: Object.fromEntries(waitCauses.map(cause => [cause, 0])), slices: [] });
   // Six bounded per-item walks in flight, each starting at the item's first submission — the
   // window the split measures — each capped at a deterministic row budget whose exhaustion turns

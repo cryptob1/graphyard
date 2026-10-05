@@ -80,7 +80,7 @@ const dashboard = (work: Work[]): Dashboard => ({
   token: 'fixture', work, status: { actor: { id: 'operator', role: 'admin', sessionKind: 'human' }, repository: 'owner/project' }, error: '', connected: true, lastUpdated: '12:00:00', view: 'workers', setView: noop,
   filter: null, setFilter: noop, selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
   operatorAgents: [], operatorAgentsError: null, features: { releases: null, validation: null, automation: null }, events: [], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false,
-  queue: { order: [], predictions: {} } as any, sessionEpoch: { current: 0 }, api: async () => ({}), refresh: async () => {}, action: async () => {}, setError: noop, signOut: noop,
+  sessionEpoch: { current: 0 }, api: async () => ({}), refresh: async () => {}, action: async () => {}, setError: noop, signOut: noop,
 });
 const render = (work: Work[]) => renderToStaticMarkup(createElement(WorkersPage, dashboard(work)));
 const unescape = (value: string) => value.replace(/&quot;/g, '"').replace(/&#x27;/g, '\'').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');

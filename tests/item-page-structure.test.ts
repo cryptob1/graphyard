@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Work } from '../src/model.js';
-import { predictQueue } from '../src/merge-queue.js';
 // @ts-expect-error the checked-in dashboard fixture is plain JavaScript
 import { fixtureApi, fixtureStatus, fixtureWork, NOW, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { live } from '../browser-tests/ui-board.js';
@@ -30,7 +29,7 @@ function dashboard(work: Work[], overrides: Partial<Dashboard> = {}): Dashboard 
     token: 'fixture', work, status: fixtureStatus('admin'), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
     operatorAgents: [], operatorAgentsError: null, features: {} as any, events: fixtureApi('events') as any[], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false,
-    queue: predictQueue(work, NOW), sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, 'admin'), refresh: async () => {}, action: async () => {},
+    sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, 'admin'), refresh: async () => {}, action: async () => {},
     setError: noop, signOut: noop, ...overrides,
   } as Dashboard;
 }
@@ -181,7 +180,7 @@ test('the Activity section reads the kinds the ledger records — command names 
   // Typed over every command: a command added to the engine without a plain label fails typecheck here.
   const commands: Record<Command, true> = { create: true, ready: true, requirements: true, reviewpolicy: true, unblock: true, rework: true, resolve: true, recover: true, claim: true, rereview: true,
     heartbeat: true, quarantine: true, launch: true, settle: true, autosettle: true, release: true, workspace: true, submit: true, blocked: true, dispatchblock: true, scope: true, autoscope: true, evidence: true,
-    deployment: true, revoke: true, session: true, request: true, repair: true, refresh: true, mergerefused: true };
+    deployment: true, revoke: true, session: true, request: true, refresh: true, mergerefused: true };
   for (const command of Object.keys(commands)) assert.notEqual(activityLabel(command), 'Updated', `command ${command} has a plain label`);
   assert.deepEqual(['create', 'ready', 'claim', 'submit', 'rework', 'review.requested', 'merge.execution.committed', 'delivery.verified', 'human.requested', 'github.observed'].map(activityLabel),
     ['Created', 'Released for work', 'Picked up by a builder', 'Handed in', 'Sent back for changes', 'Review requested', 'Merged', 'Live in production', 'Asked you for a decision', 'Graphyard checked GitHub']);
@@ -221,14 +220,6 @@ test('What is left names who clears each step from the refusal itself: exhausted
   // A conflict with the base and unresolved review threads are the builder's to clear on a new head.
   const threads = { ...protection, gates: [...protection.gates.filter(entry => entry.name !== 'merge'), gate('merge', ['Branch protection requires conversation resolution and 2 review threads are unresolved on 594f711015d0: a on b:1; c on d:2. GitHub blocks the merge until each is resolved'])] } as unknown as Work;
   assert.deepEqual(whatIsLeft(threads, NOW).map(group => [group.label, group.who]), [['Review', 'Reviewer agent'], ['Merge', 'Builder agent']]);
-  // Queued behind another item with branch protection unverified: the queue position is reported beside the protection
-  // refusal, and the master agent's refusal wins over the automatic wait, in the panel and in Who acts next.
-  const queuedProtection = { ...protection, gates: [...protection.gates.filter(entry => entry.name !== 'merge' && entry.name !== 'review'), gate('review', []),
-    gate('merge', ['Required Graphyard check and merge-queue branch protection have not been verified', 'Merge queue position 2 of 2: GY-9 is ahead'])] } as unknown as Work;
-  assert.deepEqual(whatIsLeft(queuedProtection, NOW).map(group => [group.label, group.who]), [['Merge', 'Master agent']]);
-  assert.equal(prSteps(queuedProtection, NOW).who, 'Master agent');
-  const queuedOnly = { ...queuedProtection, gates: [...queuedProtection.gates.filter(entry => entry.name !== 'merge'), gate('merge', ['Merge queue position 2 of 2: GY-9 is ahead'])] } as unknown as Work;
-  assert.deepEqual([prSteps(queuedOnly, NOW).who, prSteps(queuedOnly, NOW).detail], ['Graphyard (automatic)', '2nd in line, after GY-9']);
   // A review refusal no launched reviewer can answer (src/model/refusal-mapping.ts reviewStandstill): the action the control
   // plane computed from it names who moves the item — proofs first, a fresh reading, or an escalation — never the reviewer.
   const standstill = (kind: string) => ({ ...protection, gates: [...protection.gates.filter(entry => entry.name !== 'merge'), gate('merge', [])],

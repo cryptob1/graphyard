@@ -2,7 +2,6 @@ import type { RefObject } from 'react';
 import type { Work } from '../../src/model';
 import type { Board, OpenGroup } from '../groups';
 import type { IntegrationJob } from '../../src/coordination';
-import type { predictQueue } from '../../src/merge-queue';
 import type { Features } from '../features';
 import type { StepTransition } from '../flow-replay';
 
@@ -37,7 +36,6 @@ export interface Dashboard {
    * minute), which start the "In step" clock; null or absent until they are read.
    */
   stepMoves?: StepTransition[] | null;
-  queue: ReturnType<typeof predictQueue>;
   /** Bumped on sign-out so a stale response never lands in a newer session. */
   sessionEpoch: RefObject<number>;
   api(path: string, data?: unknown): Promise<any>;

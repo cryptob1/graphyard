@@ -191,14 +191,13 @@ export function documentationReviewSection(obligation: Pick<DocumentationObligat
 // ---------------------------------------------------------------------------
 // The documentation word budget (GY-574). A project that configures `documentation.wordBudget` in
 // its graphyard.json keeps its documentation within a total and a per-page budget (Graphyard's own
-// is enforced by tests/docs-budget.test.ts); one that configures none is never counted. Every item documents its change and each passes the budget
-// against its own base, so a set left at its cap overflows on the first merge-queue tip that
-// combines two of them. Two rules keep that from ejecting queue heads: headroom is kept (master
-// status names a set within 3% of the budget and the loop files one trim item), and an overflow
-// on a tip is attributed to the entry whose docs change crossed the budget, never to the head.
+// is enforced by tests/docs-budget.test.ts); one that configures none is never counted. Every item
+// documents its change and each passes the budget against its own base, so a set left at its cap
+// overflows as soon as two of them land. So headroom is kept: master status names a set within 3%
+// of the budget and the loop files one trim item.
 // ---------------------------------------------------------------------------
 
-/** The proof a tip's docs-budget overflow is judged as, and the trim item's criterion names. */
+/** The proof the docs word budget is judged as, which the trim item's criterion names. */
 export const docsBudgetProof = 'unit:docs-word-budget';
 /** A project's configured budget, resolved: the pages it counts are Markdown pages inside both `documentation` and `paths`. */
 export interface DocsWordBudget { total: number; perPage: number; paths: string[]; documentation: string[] }
@@ -267,53 +266,3 @@ export function docsTrimItem(headroom: DocsHeadroom, base: string) {
   };
 }
 
-/** The entry an over-budget tip is attributed to: the words over, and the pages its change grew. */
-export interface DocsOverflow { member: string; total: number; budget: number; paths: string[]; over: number; grew: { page: string; from: number; to: number }[] }
-/**
- * Attribute an overflow on a chain of tips: `base` is the count the first entry sits on, and each
- * entry's count is its own tip's, which holds every entry ahead of it. The overflow belongs to the
- * first entry at which the running total exceeds the budget; null when none does, or when a count up
- * to it (or the count just before it, which names the pages it grew) is missing. The entries ahead of
- * it fit, so ejecting it alone leaves them to merge.
- */
-export function attributeDocsOverflow(base: DocsWordCount | undefined, entries: { key: string; count: DocsWordCount | undefined }[], configured: Pick<DocsWordBudget, 'total' | 'paths'>): DocsOverflow | null {
-  const budget = configured.total;
-  let before = base;
-  for (const entry of entries) {
-    if (!entry.count) return null;
-    const total = docsTotal(entry.count);
-    if (total > budget) {
-      if (!before) return null;
-      const prior = before;
-      const grew = Object.entries(entry.count).filter(([page, words]) => words > (prior[page] ?? 0)).map(([page, to]) => ({ page, from: prior[page] ?? 0, to }));
-      // A total the commit before it already carried, with no page grown, is inherited (GY-1109):
-      // GY-967 was ejected naming 15643 words its base 7ef4cb702d65 carried, "pages that grew: none".
-      if (!(docsTotal(prior) > budget && !grew.length)) return { member: entry.key, total, budget, paths: [...configured.paths], over: total - budget, grew };
-    }
-    before = entry.count;
-  }
-  return null;
-}
-/**
- * GY-1109: whether a tip's docs total over the budget is its own — the commit it was built on was
- * within the budget, or the tip grew a page. A total the base already carries with no page grown is
- * inherited: it is never judged the tip's failure nor named in an ejection or rework reason.
- */
-export function ownDocsOverflow(docs: Pick<TipDocs, 'base' | 'pages'> & { budget: Pick<DocsWordBudget, 'total'> }): boolean {
-  if (docsTotal(docs.pages) <= docs.budget.total) return false;
-  return docsTotal(docs.base) <= docs.budget.total || Object.entries(docs.pages).some(([page, words]) => words > (docs.base[page] ?? 0));
-}
-/** The refusal an attributed overflow ejects its entry with. */
-export const docsOverflowReason = (overflow: DocsOverflow) =>
-  `${docsBudgetProof} failed: its docs change takes the budgeted documentation (${listed(overflow.paths)}) to ${overflow.total} words, ${overflow.over} over the ${overflow.budget}-word budget; pages that grew: ${overflow.grew.map(entry => `${entry.page} (${entry.from} → ${entry.to})`).join(', ') || 'none'}`;
-
-/**
- * The docs word counts the GitHub observer records for a queued entry's published tip whose required
- * checks failed (src/github.ts tipDocs): the tip's own pages, the pages of the commit it was built on
- * (the tip of the entry ahead, or the base branch), and whether no other required check failed. The
- * planner attributes an overflow only from these records; a tip without one is bisected as before.
- */
-export interface TipDocs { sha: string; base: DocsWordCount; pages: DocsWordCount; onlyFailure: boolean;
-  /** The budget the tip's own committed graphyard.json configures; a tip whose project keeps none carries no record. */
-  budget: DocsWordBudget }
-declare module './work.js' { interface Observation { docsBudget?: TipDocs } }

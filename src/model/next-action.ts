@@ -1,4 +1,3 @@
-import { predecessorWaitReason, queueSequencingReason } from '../merge-queue.js';
 import { dispatchIneligibility, reviewNeed } from './dispatch.js';
 import { attestationWait } from './unproduced-attestation.js';
 import { standingEscalations } from './escalation.js';
@@ -186,12 +185,12 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
   const failing = work.gates.find(gate => !gate.passed);
   if (failing) {
     // Which of the gate's refusals this item acts on. A refusal that belongs to another item — an
-    // unfinished dependency, a turn behind somebody else in the merge queue — answers this item
+    // unfinished dependency — answers this item
     // only while it is the *only* thing the gate says: a blocker recorded beside a dependency used
     // to disappear behind it until the dependency landed, which is this same silence in a smaller
     // room. So the first refusal that is this item's own is the one acted on, and a gate that says
     // nothing but deferred refusals is the wait it looks like.
-    const deferred = (entry: string) => /^Dependency .+ is unfinished$/.test(entry) || !!queueSequencingReason(entry);
+    const deferred = (entry: string) => /^Dependency .+ is unfinished$/.test(entry);
     const refusal = failing.reasons.find(entry => !deferred(entry)) ?? failing.reasons[0];
     // A gate that refuses without saying why is the defect in its purest form: nothing can be
     // computed from it, and before this it produced exactly no action and no word to anybody.
@@ -255,14 +254,8 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
     if (kind === 'request-rework') return make('request-rework', `${key} needs a new head: ${detail}`,
       { kind: 'request-rework', pr: work.candidate?.pr ?? null, sha: work.candidate?.sha ?? null, detail }, binding, failing.name, refusal);
     if (kind === 'resync') return make('resync', `${key} is waiting on a fresh reading of its pull request: ${detail}`, resyncInputs(work), binding, failing.name, refusal);
-    // Waiting a turn in the merge queue is nobody's action: the predecessor's merge is the one
-    // that moves this item, or re-queues one it was ejected behind (GY-321), as a dependency's dispatch does.
-    if (kind === 'merge' && failing.reasons.every(entry => queueSequencingReason(entry))) {
-      const ahead = refusal.match(/^Merge queue position \d+ of \d+: (\S+) is ahead$/), predecessors = predecessorWaitReason(refusal)?.join(', '), on = ahead?.[1] ?? predecessors, detail = ahead ? `${key} waits behind ${on} in the merge queue: ${refusal}` : `${key} waits for ${on} to land or leave the merge queue: ${refusal}`;
-      if (on) return waits({ kind: 'queue', on, detail }, failing.name, refusal);
-    }
     if (kind === 'merge') return make('merge', `${key} is queued to merge: ${refusal}`,
-      { kind: 'merge', pr: work.candidate!.pr, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, queuePosition: work.queue?.sequence ?? null }, binding, failing.name, refusal);
+      { kind: 'merge', pr: work.candidate!.pr, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision }, binding, failing.name, refusal);
     // `detail` again rather than the refusal: a review refusal standing over a spent reviewer
     // roster says "a review is required", and what the operator has to decide is the roster.
     return make('escalate', `${key} is refused at the ${failing.name} gate and no executor step answers it: ${detail}`,

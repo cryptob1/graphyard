@@ -121,7 +121,7 @@ test('unit:stuck-merge-attention — master status names an item held at the mer
   const status = buildMasterStatus({ work: [stuck, waiting], now: at }, [], []);
   const row = status.work.find(entry => entry.key === 'GY-81')!;
   assert.match(row.attention!, /GY-81 was merged on GitHub \(cccccccccccc at 2026-09-20T19:50:22Z\) though its gates had not passed on that head: Merge observed without a prior authorization/);
-  assert.match(row.attention!, /held at the merge stage, not waiting for its queue tip/);
+  assert.match(row.attention!, /held at the merge stage; /);
   assert.equal(row.attentionOwner?.role, 'master'); assert.equal(row.attentionOwner?.approvedBy, 'approver');
   assert.match(row.attentionOwner!.next, /^graphyard master decide GY-81 merge REASON, then graphyard master approver GY-81 DECISION/);
   assert.deepEqual(row.merged, { at: '2026-09-20T19:50:22Z', sha: mergeSha, violation: unauthorizedMergeViolation, refusal: null });

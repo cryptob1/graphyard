@@ -122,7 +122,7 @@ const item = (key: string, pr: number, head: string, baseSha: string, overrides:
   policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/'], stage: 'build', revision: 3, policyRevision: 1, createdAt: '2026-09-21T09:00:00Z', updatedAt: '2026-09-21T09:00:00Z',
   stageEnteredAt: '2026-09-21T09:00:00Z', ready: true, epoch: 1, lease: null, workspaces: [{ host: 'machine', path: `/w/${key}`, branch: `graphyard/${key.toLowerCase()}-1`, epoch: 1, owner: 'implementer' }],
   candidate: { sha: head, baseSha, pr, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' }, submission: { epoch: 1, pr }, reworkRequested: false, scenarioRequirements: [],
-  evidence: [], observation: null, blocker: null, gates: [], violations: [], escalations: [], implementers: [], queueHistory: [], ...overrides } as unknown as Work);
+  evidence: [], observation: null, blocker: null, gates: [], violations: [], escalations: [], implementers: [], ...overrides } as unknown as Work);
 /** The item as the control plane would hold it after this observation: gates and stage re-evaluated. */
 const evaluated = (work: Work, all: Work[], observation: Work['observation']) => {
   const next = { ...work, observation };

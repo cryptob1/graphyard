@@ -19,7 +19,6 @@ import { unansweredRequestAttention, unobtainableReviewAttention } from '../src/
 import { retryStopAttention } from '../src/retry-stop.js';
 import { stoppedFollowUpAttention, type ReviewRecord } from '../src/reviewer.js';
 import type { ResourceReading } from '../src/master-resources.js';
-import { predictQueue } from '../src/merge-queue.js';
 import { describeHumanRequest } from '../src/model/human-request.js';
 import { ExecutorRegistry, describeUnserved, executorLiveMs, executorReport } from '../src/model/executor-presence.js';
 import type { ActionRow } from '../src/model/actions.js';
@@ -206,7 +205,7 @@ test('unit:fault-classes — master status and the dashboard group open problems
     token: 'fixture', work, status, error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
     operatorAgents: [], operatorAgentsError: null, features: { validation: null, releases: null, automation: null }, events: [], editingRequirements: false, setEditingRequirements: noop,
-    codexAvailable: false, queue: predictQueue(work, NOW), sessionEpoch: { current: 0 }, api: async (path: string) => boardApi(path, 'admin'), refresh: async () => {},
+    codexAvailable: false, sessionEpoch: { current: 0 }, api: async (path: string) => boardApi(path, 'admin'), refresh: async () => {},
     action: async () => {}, setError: noop, signOut: noop,
   } as unknown as Dashboard));
   const page = render(work);

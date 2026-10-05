@@ -9,7 +9,6 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server/index.js';
 import { CHECK_NAME, GitHub, baseRefCycleMs, billableBudgetShare, observationThroughputStatus, processJob, protectionShareMs } from '../src/github.js';
 import type { Principal, Work } from '../src/model.js';
-import { queueOrder, queuePlacement } from '../src/merge-queue.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-806: GitHub API use fits the rate limit. Each test is named for the proof it produces:
@@ -85,7 +84,7 @@ const item = (index: number, api: Api): Work => {
     policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], stage: 'build', revision: 3, policyRevision: 1, createdAt: '2026-09-26T09:00:00Z', updatedAt: '2026-09-26T09:00:00Z',
     stageEnteredAt: '2026-09-26T09:00:00Z', ready: true, epoch: 1, lease: null, workspaces: [{ host: 'machine', path: `/w/${key}`, branch: `graphyard/gy-${900 + index}-1`, epoch: 1, owner: 'implementer' }],
     candidate: { sha: head, baseSha: api.main, pr, branch: `graphyard/gy-${900 + index}-1`, author: 'implementer' }, submission: { epoch: 1, pr }, reworkRequested: false, scenarioRequirements: [],
-    evidence: [], observation: null, blocker: null, gates: [], violations: [], escalations: [], implementers: [], queueHistory: [] } as unknown as Work;
+    evidence: [], observation: null, blocker: null, gates: [], violations: [], escalations: [], implementers: [] } as unknown as Work;
 };
 const immutable = /^\/(commits\/[a-f0-9]{40}|compare\/[a-f0-9]{40}\.\.\.[a-f0-9]{40})(\?(?!per_page=1$).*)?$/;
 
@@ -94,7 +93,7 @@ test('unit:github-immutable-cache — a commit by SHA and a compare of two exact
   t.mock.method(globalThis, 'fetch', api.fetch);
   const github = api.client();
   const items = Array.from({ length: 3 }, (_, index) => item(index, api));
-  /** One observation cycle: every item observed, and the reads a queue step makes of the same SHAs. */
+  /** One observation cycle: every item observed, and the reads a base refresh makes of the same SHAs. */
   const cycle = async () => {
     for (const work of items) {
       await github.observe(work, items);
@@ -338,63 +337,29 @@ test('unit:webhook-driven-observation — a check_run delivery re-observes its i
   await store!.pool.query("UPDATE jobs SET available_at=now(), refreshed_until=now()+interval '1 hour', claimed_generation=generation, webhook_at=NULL WHERE work_id=$1", [woken.id]);
   const preClaim = await store!.list();
   const merging = preClaim.map(entry => asMerging.find(other => other.id === entry.id && entry.id === woken.id) ?? entry);
-  let reads = 0, itemReads = 0, queueReads = 0;
+  let reads = 0, itemReads = 0;
   t.mock.method(engine.store, 'list', async () => { reads++; return preClaim; }, { times: 1 });
   t.mock.method(engine.store, 'workItem', async (id: string) => { itemReads++; return merging.find(entry => entry.id === id); }, { times: 1 });
-  const queued = t.mock.method(engine.store, 'queuedWork', async () => { queueReads++; return []; });
   const beforeRace = api.requests.length;
   assert.equal(await processJob(engine, github), true, 'the item was claimed');
   assert.deepEqual({ reads, itemReads }, { reads: 1, itemReads: 1 }, 'the claimed item, not the fleet, was read again after the claim');
-  assert.equal(queueReads, 0, 'a merge-authorized item needs no queue read');
   assert.ok(api.requests.length > beforeRace, 'and observed, not skipped');
   assert.doesNotMatch((await jobRow(woken)).deferred_reason ?? '', /poll skipped/);
-  queued.mock.restore();
 
   // A skip outside the merge band costs one read of the claimed item by its id (GY-1052): neither the
-  // fleet nor the queue is read again, so an early-due poll never pays a second full fleet read.
+  // fleet nor anything else is read again, so an early-due poll never pays a second full fleet read.
   await store!.pool.query("UPDATE jobs SET available_at=now(), refreshed_until=now()+interval '1 hour', claimed_generation=generation, webhook_at=NULL WHERE work_id=$1", [woken.id]);
-  const fleetReads = t.mock.method(engine.store, 'list'), itemRead = t.mock.method(engine.store, 'workItem'), queueRead = t.mock.method(engine.store, 'queuedWork');
+  const fleetReads = t.mock.method(engine.store, 'list'), itemRead = t.mock.method(engine.store, 'workItem');
   const beforeSkip = api.requests.length;
   assert.equal(await processJob(engine, github), true, 'the poll was claimed');
   assert.equal(api.requests.length, beforeSkip, 'and skipped');
   assert.match((await jobRow(woken)).deferred_reason ?? '', /poll skipped/);
-  assert.deepEqual({ fleet: fleetReads.mock.callCount(), item: itemRead.mock.callCount(), queue: queueRead.mock.callCount() }, { fleet: 1, item: 1, queue: 0 }, 'one fleet read before the claim, one item read after it');
-  fleetReads.mock.restore(); itemRead.mock.restore(); queueRead.mock.restore();
-
-  // A queued, unauthorized merge-stage item is placed from the live queue alone: the queue head is in the band.
-  await store!.pool.query("UPDATE jobs SET available_at=now(), refreshed_until=now()+interval '1 hour', claimed_generation=generation, webhook_at=NULL WHERE work_id=$1", [woken.id]);
-  const plain = (await store!.list()).find(entry => entry.id === woken.id)!;
-  const queuedHead = { ...plain, stage: 'merge' as const, queue: { sequence: 1, enqueuedAt: new Date().toISOString() } } as Work;
-  t.mock.method(engine.store, 'workItem', async () => queuedHead, { times: 1 });
-  const headQueue = t.mock.method(engine.store, 'queuedWork', async () => [queuedHead]);
-  const beforeHead = api.requests.length;
-  assert.equal(await processJob(engine, github), true, 'the queue head was claimed');
-  assert.equal(headQueue.mock.callCount(), 1, 'its position was read from the live queue');
-  assert.ok(api.requests.length > beforeHead, 'and observed, not skipped');
-  headQueue.mock.restore();
-  // The targeted reads against the real store: the item by its id, and no live queue entries in this fleet.
-  assert.equal((await store!.workItem(woken.id))?.key, woken.key);
-  assert.deepEqual(await store!.queuedWork(), []);
+  assert.deepEqual({ fleet: fleetReads.mock.callCount(), item: itemRead.mock.callCount() }, { fleet: 1, item: 1 }, 'one fleet read before the claim, one item read after it');
+  fleetReads.mock.restore(); itemRead.mock.restore();
 
   // A worker's push to the pull-request branch names the item by its branch before its candidate names the new head.
   await deliver('push', { ref: `refs/heads/${polled.candidate!.branch}`, after: sha('pushed-head'), repository: { full_name: REPOSITORY } });
   assert.deepEqual(await replica.store.webhookDue(), [polled.id]);
-
-  // The live queue places an entry exactly as the whole fleet does (GY-1052): `queuedWork` filters as
-  // `queueOrder` does, so a done item still holding a queue entry, and an unqueued item, change nothing.
-  const placed = async () => {
-    const fleet = await store!.list(), live = await store!.queuedWork();
-    const queued = new Set(queueOrder(fleet).map(entry => entry.id));
-    assert.deepEqual(live.map(entry => entry.id), fleet.filter(entry => queued.has(entry.id)).map(entry => entry.id), 'the live queue is exactly the fleet\'s queue entries');
-    for (const entry of queueOrder(fleet)) assert.deepEqual(queuePlacement(entry, live, 0), queuePlacement(entry, fleet, 0), `${entry.key} is placed alike`);
-    return queueOrder(live).map(entry => entry.key);
-  };
-  const enqueue = (id: string, sequence: number, stage?: string) => store!.pool.query(`UPDATE work_items SET document=jsonb_set(document, '{queue}', $2::jsonb)${stage ? " || jsonb_build_object('stage', $3::text)" : ''} WHERE id=$1`,
-    [id, JSON.stringify({ sequence, enqueuedAt: new Date().toISOString() }), ...(stage ? [stage] : [])]);
-  await enqueue(woken.id, 2); await enqueue(polled.id, 1);
-  assert.deepEqual(await placed(), [polled.key, woken.key]);
-  await enqueue(polled.id, 1, 'done');
-  assert.deepEqual(await placed(), [woken.key], 'a done item holding a queue entry is out of the queue either way');
 });
 
 /**

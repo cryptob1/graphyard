@@ -31,7 +31,6 @@ export async function assembleStatusSections<
   snapshot: any;
   coordinator: any;
   cli: { commit: string | null };
-  mergeQueue: any;
   probe: any;
   observation: any;
   health: any;
@@ -60,7 +59,7 @@ export async function assembleStatusSections<
   approvals: Parameters<typeof loopAttestations>[1];
 }) {
   const {
-    master, snapshot, coordinator, cli, mergeQueue, probe, observation, health, hs,
+    master, snapshot, coordinator, cli, probe, observation, health, hs,
     merger, setup, administration, daemon, dispatch, reviewRecords, producerRecords,
     owed, executors, releases, lag, status, disk, managedRoot, inventory, reclaimPlan,
     runtime, reviewRuntime, humanOnly, masterApi, decisions, approvals,
@@ -73,7 +72,6 @@ export async function assembleStatusSections<
     conflictHotspots: hs.report,
     merger: { merger: merger.merger, detail: merger.detail },
     autoMerge: master.autoMerge,
-    mergeQueue,
     mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     conflictProbe: probe,
     observationThroughput: observation,

@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store, wakeJob } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { GitHub, firstObservationOwed, headClaimBand, observationClaimOrder, observationHeadCount, observationFreshnessMs, observationThroughput, processJob, waitsOnObservation } from '../src/github.js';
+import { GitHub, firstObservationOwed, observationClaimOrder, observationHeadCount, observationFreshnessMs, observationThroughput, processJob, waitsOnObservation } from '../src/github.js';
 import { evaluate, type Principal, type Work } from '../src/model.js';
 import { nextAction } from '../src/model/next-action.js';
 import { observationConcurrency, observationWorkers } from '../src/server/main.js';
@@ -82,7 +82,7 @@ const item = (key: string, pr: number, head: string, baseSha: string, overrides:
   policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/'], stage: 'merge', revision: 3, policyRevision: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
   stageEnteredAt: new Date().toISOString(), ready: true, epoch: 1, lease: null, workspaces: [{ host: 'machine', path: `/w/${key}`, branch: `graphyard/${key.toLowerCase()}-1`, epoch: 1, owner: 'implementer' }],
   candidate: { sha: head, baseSha, pr, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' }, submission: { epoch: 1, pr }, reworkRequested: false, scenarioRequirements: [],
-  evidence: [], observation: null, blocker: null, gates: [], violations: [], escalations: [], implementers: [], queueHistory: [], ...overrides } as unknown as Work);
+  evidence: [], observation: null, blocker: null, gates: [], violations: [], escalations: [], implementers: [], ...overrides } as unknown as Work);
 
 /** A current observation: in scope, checked, approved, so only the queue itself refuses the merge. */
 const observed = (work: Work, at = new Date(Date.now() - 30_000).toISOString(), approved = true) => ({
@@ -113,7 +113,7 @@ async function freshStore() {
 const insert = async (works: Work[]) => {
   for (const work of works) await store.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [work.id, work]);
 };
-/** When each job became due: the head last, its queue behind it, the waiting item and the backlog before it. */
+/** When each job became due: the first merge candidate last, the others behind it, the waiting item and the backlog before it. */
 const dueAt = (position: number) => new Date(Date.now() - (position === 0 ? 1_000 : (15 - position / 3) * 60_000));
 
 test('unit:job-claim-priority — thirty due jobs with the merge-ready candidates due last are claimed merge path first: every candidate GitHub may merge, then a submission never observed, then the item a review waits on, then the backlog by availability, which is what availability alone still claims', async () => {
@@ -150,10 +150,8 @@ test('unit:job-claim-priority — thirty due jobs with the merge-ready candidate
     const availableAt = position === 30 ? new Date(Date.now() - 90 * 60_000) : position === 31 ? new Date(Date.now() - 180 * 60_000) : dueAt(position);
     await store.pool.query('INSERT INTO jobs(work_id,available_at) VALUES($1,$2)', [work.id, availableAt]);
   }
-  // The band the claim order reaches: two entries at least, the batch size when it is larger.
-  assert.equal(headClaimBand(0), 2); assert.equal(headClaimBand(1), 2); assert.equal(headClaimBand(5), 5);
-  const order = observationClaimOrder(all, 5);
-  assert.equal(observationHeadCount(all, 5), 5, 'the merge path is the five candidates GitHub may merge');
+  const order = observationClaimOrder(all);
+  assert.equal(observationHeadCount(all), 5, 'the merge path is the five candidates GitHub may merge');
   assert.deepEqual(order.slice(0, 7), [queue[0].id, queue[1].id, queue[2].id, queue[3].id, queue[4].id, ordinary.id, waiting.id], 'merge path first, then the unread submission, then the item a review waits on');
   assert.ok(!order.includes(queue[10].id), 'a backlog candidate is not named; it falls back to availability');
   // Availability alone claims the oldest job: the merge path is due last, so the backlog wins.
@@ -163,14 +161,14 @@ test('unit:job-claim-priority — thirty due jobs with the merge-ready candidate
   // With the claim order the merge path wins although it became due last, then the unread
   // submission, then the review-waiting item, then the backlog by availability.
   const claims: string[] = [];
-  for (let index = 0; index < 8; index++) claims.push((await store.takeJob(observationClaimOrder(all, 5), observationHeadCount(all, 5)))!.work_id);
+  for (let index = 0; index < 8; index++) claims.push((await store.takeJob(observationClaimOrder(all), observationHeadCount(all)))!.work_id);
   const byId = new Map(all.map(work => [work.id, work.key]));
   assert.deepEqual(claims.map(id => byId.get(id)),
     ['GY-Q00', 'GY-Q01', 'GY-Q02', 'GY-Q03', 'GY-Q04', 'GY-BACK', 'GY-WAIT', 'GY-Q05'],
     'priority reorders the due jobs; availability orders what the priority does not name');
 });
 
-test('unit:starved-job-claimed — a job due longer than the starvation bound is claimed right after the queue-head band, ahead of named jobs that just came due', async () => {
+test('unit:starved-job-claimed — a job due longer than the starvation bound is claimed right after the merge path, ahead of named jobs that just came due', async () => {
   await freshStore();
   const base = sha('main-starved');
   // The claim query itself: a head the order names first, a named job that just came due (a review
@@ -185,7 +183,7 @@ test('unit:starved-job-claimed — a job due longer than the starvation bound is
   const byId = new Map([head, named, starved].map(work => [work.id, work.key]));
   const claims: string[] = [];
   for (let index = 0; index < 3; index++) claims.push(byId.get((await store.takeJob([head.id, named.id], 1))!.work_id)!);
-  assert.deepEqual(claims, ['GY-HEAD', 'GY-STARVED', 'GY-NAMED'], 'the head band first, then the job due ten minutes, then the named job that just came due');
+  assert.deepEqual(claims, ['GY-HEAD', 'GY-STARVED', 'GY-NAMED'], 'the merge path first, then the job due ten minutes, then the named job that just came due');
   // Inside the bound the named list still wins: a job due one minute waits behind it.
   await freshStore();
   await insert([head, named, starved]);
@@ -293,13 +291,12 @@ test('unit:parallel-observation-jobs — twenty due jobs whose observations each
   assert.ok(throughput.jobsPerMinute > 0); assert.ok(throughput.medianDurationMs! >= 1000); assert.ok(throughput.p90DurationMs! >= throughput.medianDurationMs!);
 });
 
-test('unit:observation-lag-visible — master status reports what the workers achieve and how old the oldest due job and the queue head\'s observation are, and raises one attention item once the head passes two minutes', () => {
+test('unit:observation-lag-visible — master status reports what the workers achieve and how old the oldest due job is, and raises one attention item for the merge band once its readings pass two minutes', () => {
   const now = Date.now();
   const base = sha('main-lag');
-  const docs = ([
-    { ...item('GY-HEAD', 700, sha(`head-h-${base}`), base), queue: { sequence: 1, enqueuedAt: new Date(now - 3_600_000).toISOString(), policyRevision: 1, speculation: null } },
-    { ...item('GY-MID', 701, sha(`head-m-${base}`), base), queue: { sequence: 2, enqueuedAt: new Date(now - 3_600_000).toISOString(), policyRevision: 1, speculation: null } },
-  ] as Work[]).map((work, index) => ({ ...work, observation: observed(work, new Date(now - 181_000).toISOString()) as Work['observation'] }));
+  // Every gate passes on both: GitHub may merge them, so both are in the merge band (GY-1235).
+  const docs = [item('GY-HEAD', 700, sha(`head-h-${base}`), base), item('GY-MID', 701, sha(`head-m-${base}`), base)]
+    .map(work => ({ ...work, observation: observed(work, new Date(now - 181_000).toISOString()) as Work['observation'] }));
   const snapshot = { work: docs, now: new Date(now).toISOString(), jobs: [
     { work_id: docs[0].id, available_at: new Date(now - 3_600_000).toISOString(), locked_until: null, error: null },
     { work_id: docs[1].id, available_at: new Date(now - 7_200_000).toISOString(), locked_until: new Date(now + 60_000).toISOString(), error: null },
@@ -308,24 +305,22 @@ test('unit:observation-lag-visible — master status reports what the workers ac
   const coordinator = { githubBudget: { throughput: { jobsPerMinute: 6.1, medianDurationMs: 9000, p90DurationMs: 13000 } } };
   const report = observationThroughputStatus(coordinator, snapshot as { work: Work[]; now: string; jobs: { work_id: string; available_at: string; locked_until: string | null; error: string | null; held_until?: string | null }[] }, now);
   assert.deepEqual([report.jobsPerMinute, report.medianDurationMs, report.p90DurationMs], [6.1, 9000, 13000], 'the throughput the server reported is carried');
-  assert.equal(report.head, 'GY-HEAD', 'the queue head is named');
-  assert.equal(report.oldestDueJobMs, 3_600_000, 'the locked and the held job are not backlog; the head\'s own job is the oldest due one');
-  assert.ok(report.headObservationAgeMs! > observationFreshnessMs, 'the head has passed the freshness the merge gate demands');
-  // The head is its own item; the entry behind it, as stale and in the merge band, is the band's (GY-1114).
-  assert.equal(report.attention.length, 2);
-  const [lagItem, bandItem] = report.attention;
-  assert.match(bandItem.text, /^The merge band has 1 of 2 item\(s\) observed longer ago than its 2m0s bound \(oldest GY-MID, 3m1s\)/);
-  assert.equal(lagItem.subject, 'github');
-  assert.match(lagItem.text, /The merge-queue head GY-HEAD has gone 3m\d?s without an observation/);
-  assert.match(lagItem.text, /the oldest due job has waited 60m0s/);
-  assert.match(lagItem.text, /observing 6\.1 job\(s\)\/min \(median 9000 ms, p90 13000 ms\)/);
-  assert.match(lagItem.text, /the queue stalls until its head is observed/);
-  assert.equal(lagItem.role, 'control plane');
-  // A fresh head, a missing budget reading and no queue at all raise nothing.
-  const freshDocs = docs.map((work, index) => ({ ...work, observation: observed(work, new Date(now - 20_000).toISOString()) as Work['observation'] }));
-  assert.deepEqual(observationThroughputStatus(coordinator, { ...snapshot, work: freshDocs }, now).attention, [], 'a head observed within two minutes is not lag');
-  assert.deepEqual(observationThroughputStatus(coordinator, { ...snapshot, work: [], jobs: [] }, now).attention, [], 'no queue head, nothing to raise');
-  assert.deepEqual(observationThroughputStatus(null, snapshot, now).attention.length, 2, 'the items are raised without a budget reading too');
+  assert.equal(report.oldestDueJobMs, 3_600_000, 'the locked and the held job are not backlog; GY-HEAD\'s own job is the oldest due one');
+  const merge = report.bands.find(band => band.band === 'merge')!;
+  assert.deepEqual([merge.items, merge.pastBound, merge.oldest], [2, 2, 'GY-HEAD']);
+  assert.ok(merge.lagMs! > observationFreshnessMs, 'the merge band has passed its freshness bound');
+  // One item for the band, naming its oldest reading (GY-1114); no merge-queue head of its own.
+  assert.equal(report.attention.length, 1);
+  const [bandItem] = report.attention;
+  assert.equal(bandItem.subject, 'github');
+  assert.match(bandItem.text, /^The merge band has 2 of 2 item\(s\) observed longer ago than its 2m0s bound \(oldest GY-HEAD, 3m1s\)/);
+  assert.equal(bandItem.role, 'control plane');
+  assert.ok(!report.attention.some(entry => /merge-queue head/.test(entry.text)));
+  // Fresh readings and no work at all raise nothing; a missing budget reading raises the same item.
+  const freshDocs = docs.map(work => ({ ...work, observation: observed(work, new Date(now - 20_000).toISOString()) as Work['observation'] }));
+  assert.deepEqual(observationThroughputStatus(coordinator, { ...snapshot, work: freshDocs }, now).attention, [], 'readings within two minutes are not lag');
+  assert.deepEqual(observationThroughputStatus(coordinator, { ...snapshot, work: [], jobs: [] }, now).attention, [], 'no work, nothing to raise');
+  assert.deepEqual(observationThroughputStatus(null, snapshot, now).attention.length, 1, 'the item is raised without a budget reading too');
   // The throughput arithmetic itself: windowed, ordered, and empty when nothing ran.
   const durations = [12_000, 4_000, 8_000, 16_000].map((ms, index) => ({ at: now - index * 60_000, ms }));
   assert.deepEqual(observationThroughput(durations, now), { windowMs: 600_000, count: 4, jobsPerMinute: 0.4, medianDurationMs: 12_000, p90DurationMs: 16_000 });
