@@ -14,7 +14,6 @@ import { accountKeySchema, notSecret, secretPaths, smokeObservationSchema, type 
  * particular runtime or account: the built-in contracts below are what setup *proposes*, and only
  * what the registry stores is ever launched.
  */
-
 const entryName = z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/, 'Use letters, digits, dot, underscore or dash (at most 80 characters)');
 const hostName = z.string().trim().min(1).max(200).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'A host id cannot contain control characters');
 const text = (max: number) => z.string().trim().min(1).max(max).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'Control characters are not allowed');
@@ -108,12 +107,13 @@ export interface FleetAccount extends FleetAccountInput { quota: ObservedQuota; 
 /** The roles a configured registry is expected to name. The master role (GY-898) is never proposed by setup: the operator names its accounts. */
 export const fleetRoles = ['worker', 'reviewer', 'producer', 'approver', 'escalation-handler', 'master'] as const;
 /**
- * Every role the registry may define: the proposed ones, and the diagnostician (GY-439), which turns
- * a recurring-fault item into its root cause and a fix item. The diagnostician runs headless on Pi
- * from `run.diagnostician` until an operator names accounts for it here, so it is never proposed
- * and never reported missing.
+ * Every role the registry may define: the proposed ones, the diagnostician (GY-439), which turns a
+ * recurring-fault item into its root cause and a fix item, and the doctor (GY-711), which finds
+ * stuck and overdue work and fixes it through its sanctioned commands. Each runs headless on Pi
+ * from `run.diagnostician`/`run.doctor` until an operator names accounts for it here, so neither
+ * is proposed nor reported missing.
  */
-export const registryRoles = [...fleetRoles, 'diagnostician'] as const;
+export const registryRoles = [...fleetRoles, 'diagnostician', 'doctor'] as const;
 export type FleetRoleName = typeof registryRoles[number];
 /**
  * How every session of a role is launched, whichever account serves it (GY-170): the runtime

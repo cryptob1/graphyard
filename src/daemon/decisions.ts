@@ -280,9 +280,7 @@ export function awaitingEjectionRestore(work: Pick<Work, 'gates'>): boolean {
 }
 /**
  * What the item calls for, before asking whether the loop may attest that its worker is stopped.
- * `baseFailed` names the required checks the base-failure step set aside for this item (GY-528):
- * they fail on the base head too, so no rework is requested for them. `exhausted` is the producer
- * requests the loop escalated as spent on an earlier cycle (GY-496).
+ * `baseFailed` names required checks the base head fails too (GY-528); `exhausted`, spent producer requests (GY-496).
  */
 export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
   if (work.stage === 'done') {
@@ -407,8 +405,7 @@ export function failedCheckRework(work: Work, baseFailed?: ReadonlySet<string>):
   const candidate = work.candidate, observation = work.observation;
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
   if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
-  // A check that fails on the base head too is no worker's to fix (GY-528): the loop raises it against
-  // the base once, and the approvers are not asked, one blocked item at a time, to refuse the round.
+  // A check the base head fails too is no worker's to fix (GY-528): the loop raises it against the base once.
   // The policy's checks and the base branch's other required checks alike (GY-430): PR #221's
   // `secrets` scan failed, GitHub blocked the merge, and nothing asked for the round. A policy
   // check's run is read through the test gate's trust boundary (GY-731); a protection-only

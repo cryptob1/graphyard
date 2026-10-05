@@ -13,6 +13,7 @@ import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { detailChanged } from './decisions.js';
 import { describeSelfUpgrade } from './upgrade.js';
 import { describeTimings } from '../master/timings.js';
+import { stopDoctorRuns, doctorReport } from './doctor.js';
 import { detachRuns } from '../runner/registry.js';
 
 /**
@@ -68,6 +69,10 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     diagnoses: diagnosisReport(state),
     // The system invariants as the last observation judged them (GY-404): one line per invariant, with its threshold and reading.
     invariants: { at: state.invariants.at, violated: state.invariants.report.filter(check => !check.holds).length, lines: state.invariants.report.map(check => check.line), checks: state.invariants.report },
+    // The pipeline doctor as this cursor holds it (GY-711): whether a run is in flight right now —
+    // which the control plane's posted runs cannot show, they settle only afterwards — and its
+    // recent runs, newest first.
+    doctor: doctorReport(state),
   };
 }
 
@@ -284,6 +289,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // they did is logged here since no next cycle will report it.
     if (launcher.pending) log(`[graphyard-master] waiting for ${launcher.pending} launch(es) in flight before stopping`);
     await launcher.idle();
+    // A pipeline-doctor run in flight is cancelled and its outcome recorded before the lock is released (GY-711).
+    await stopDoctorRuns();
     for (const action of launcher.drain()) log(`[graphyard-master] launch ${action.kind} ${action.state}: ${action.detail}`);
     for (const signal of signals) host.off(signal, stop);
     host.off('unhandledRejection', onRejection); host.off('uncaughtException', onException);
