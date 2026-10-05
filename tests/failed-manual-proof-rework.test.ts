@@ -69,7 +69,7 @@ test('unit:zero-executed-manual-proof-attested — a manual fail with executed 0
   assert.equal(neededDecision(item([{ trusted: false }]), { autoMerge: true }), null);
 });
 
-test('unit:producer-manual-proof-never-escalated — a judged manual failure reworks; an unrunnable one escalates, never reworks', async () => {
+test('unit:producer-manual-proof-never-escalated — a judged manual failure reworks; an unrunnable one never reworks, and neither is parked for an operator', async () => {
   // A producer-runnable manual proof the producer judged and failed with cases executed:
   // the item returns to a worker through proofRework.
   const judged = item([{ executed: 3 }]);
@@ -83,15 +83,16 @@ test('unit:producer-manual-proof-never-escalated — a judged manual failure rew
   const unrunnable = item([{ executed: 3 }], { producerProofs: [] });
   assert.equal(proofRework(unrunnable), null);
 
-  // The shepherd escalates only the proof no producer may run, never the producer-runnable one.
+  // The shepherd never parks the producer-runnable proof as operator-witnessed. Since GY-1235 proofs
+  // gate nothing and the shepherd raises no proof escalation at all (only exhausted producers), so
+  // the proof no producer may run is no longer escalated either.
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/tmp/coordinator.token', cliPath: '/bin/graphyard.mjs',
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true,
     mergeMethod: 'merge', workers: [], run: { intervalSeconds: 20, proofWorkflow: 'acceptance.yml', deploymentShaField: 'commit' } }) as MasterConfig;
   const candidate = { sha: head, baseSha: base, pr: 901, branch: 'graphyard/gy-901-1', author: 'worker' };
   const outstanding = item([{ trusted: false }], {
-    id: 'acc-1', stage: 'acceptance', submission: { epoch: 1, pr: 901 }, candidate,
+    id: 'acc-1', stage: 'merge', submission: { epoch: 1, pr: 901 }, candidate,
     criteria: [{ id: 'AC-1', text: 'Triaged', proofs: [PROOF] }, { id: 'AC-2', text: 'Witnessed', proofs: [WITNESS] }],
-    gates: [{ name: 'acceptance', passed: false, reasons: ['needs evidence'] }],
   });
   const log: string[] = [];
   const deps = {
@@ -101,15 +102,13 @@ test('unit:producer-manual-proof-never-escalated — a judged manual failure rew
     closeSession: (pane: string) => { log.push(`close:${pane}`); },
     dispatch: async (work: Work) => { log.push(`dispatch:${work.key}`); },
     requestProof: async (work: Work) => { log.push(`proof:${work.key}`); },
-    merge: async () => ({ result: 'merged', merged: true }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at, reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: async () => {},
     persist: async () => {},
   } as unknown as DaemonEffects;
   const result = await runCycle(config, emptyDaemonState(config), deps, () => Date.parse(at));
-  assert.ok(result.actions.some(action => action.kind === 'escalation' && /operator-witnessed proof for manual:witness-only/.test(action.detail)),
-    'a manual proof no producer may run still escalates for an operator witness');
+  assert.ok(!result.actions.some(action => action.kind === 'escalation' && /operator-witnessed/.test(action.detail ?? '')), 'no proof is parked for an operator witness');
   for (const action of result.actions)
     assert.doesNotMatch(action.detail ?? '', new RegExp(PROOF), 'a producer-runnable manual proof is never parked as operator-witnessed');
 });

@@ -166,29 +166,29 @@ function unexercisedItem(options: { finding?: boolean } = {}): Work {
     gates: [], violations: [], blocker: null, queue: null, queueSequence: 0, queueHistory: [] } as unknown as Work;
   const graded = evaluate(work, [work], clock, [CI_APP]);
   const copy = structuredClone({ ...work, stage: graded.stage, gates: graded.gates, violations: graded.violations });
+  // The unit request GY-421 held. Since GY-1235 the reconciler opens none (proofs gate nothing), so
+  // it is the one a record raised before then still holds, and the reconciler keeps it.
+  copy.autoDispatch = { review: null, history: [], producers: [{ id: 'producer-unit-gy-421', kind: 'producer', group: 'unit', proofs: [UNIT], sha: head, baseSha: base, policyRevision: 1, pr: 421,
+    requestedAt: ago(52), reason: `${UNIT} has no trusted evidence on ${head.slice(0, 12)}`, state: 'requested' }] };
   reconcileAutoDispatch(copy, [copy], clock);
   return copy;
 }
 
-test('unit:nonexercising-proof-reworks a unit proof recorded as not exercising its criterion names request-rework and the loop requests that rework', () => {
+test('unit:nonexercising-proof-reworks a unit proof recorded as not exercising its criterion is never left on a producer dispatch, and the loop requests its rework', () => {
   const work = unexercisedItem();
   assert.ok(openProducerRequest(work, 'unit'), 'the unit request stands, as it did on GY-421');
+  // Since GY-1235 review is never held for proofs, so the planner asks for the review (never a
+  // producer dispatch no executor launches) and the rework is the loop's decision below.
   const action = nextAction(work, [work], clock)!;
-  assert.equal(action.kind, 'request-rework', `a rework, not a producer dispatch no executor launches: ${action.reason}`);
-  assert.equal(action.inputs.kind, 'request-rework');
-  const detail = action.inputs.kind === 'request-rework' ? action.inputs.detail : '';
-  for (const named of [UNIT, 'AC-3', MUTATION]) assert.ok(detail.includes(named), `the detail names ${named}: ${detail}`);
-  assert.match(detail, /survived/);
-  assert.deepEqual(action.inputs.kind === 'request-rework' ? [action.inputs.pr, action.inputs.sha] : [], [421, head]);
+  assert.equal(action.kind, 'request-review', `the head is reviewed, never left on a producer dispatch: ${action.reason}`);
   // The loop's decision input is the rework a failing proof gets, carrying the producer's finding.
   const decision = neededDecision(work, { autoMerge: true })!;
   assert.equal(decision.action, 'rework');
   assert.equal(decision.binding, `${head}:proof:unexercised:${UNIT}`);
   for (const named of [UNIT, 'AC-3', MUTATION]) assert.ok(decision.reason.includes(named), `the decision names ${named}: ${decision.reason}`);
-  // Without the finding the same head is a proof dispatch: only the recorded finding reroutes it.
+  // Without the finding nothing reworks the head: only the recorded finding asks for it.
   const plain = unexercisedItem({ finding: false });
-  const dispatch = nextAction(plain, [plain], clock)!;
-  assert.equal(dispatch.kind, 'dispatch');
+  assert.equal(nextAction(plain, [plain], clock)!.kind, 'request-review');
   assert.equal(neededDecision(plain, { autoMerge: true }), null);
 });
 

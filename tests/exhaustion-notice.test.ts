@@ -66,7 +66,6 @@ function loop(config: MasterConfig, herdr: Herdr, clock: { skewMs: number }) {
       calls.dispatch.push({ work: work.key, profile: profile.name, account: selected.account?.name ?? null });
     },
     requestProof: () => {},
-    merge: async () => { throw new Error('no candidate reaches the merge step here'); },
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},

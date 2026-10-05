@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import type { Work } from '../src/model.js';
+import { evaluate, type Work } from '../src/model.js';
 import { actionAccount, humanNeededActions } from '../src/model/next-action.js';
-import { attestationOwner, unproducedManualProofs } from '../src/model/unproduced-attestation.js';
-import { accountOutcome, stalledItems } from '../src/model/action-account.js';
+import { unproducedManualProofs } from '../src/model/unproduced-attestation.js';
+import { stalledItems } from '../src/model/action-account.js';
 import { loopAttestations } from '../src/cli/hand-actions.js';
 
 // GY-521, 2026-09-26: GY-374 (manual:fault-class-configuration) and GY-393 sat in acceptance for over
@@ -42,17 +42,18 @@ function item(head = sha, overrides: Partial<Work> = {}): Work {
   } as unknown as Work;
 }
 
-test('unit:unproduced-manual-proof-owned-by-loop — the wait is the loop\'s attestation request, never a human step', () => {
+test('unit:unproduced-manual-proof-owned-by-loop — an unproduced manual proof is never a human step: re-evaluated it gates nothing, and a stored request is still the loop\'s', () => {
   const work = item(), now = new Date(clock);
   assert.deepEqual(unproducedManualProofs(work, [work], now), [proof]);
-  const account = actionAccount(work, [work], now);
-  assert.equal(account.action, null, 'no escalation to a person');
-  assert.equal(account.wait?.kind, 'session');
-  assert.equal(account.wait?.on, attestationOwner);
-  assert.match(account.wait!.detail, /loop's two-party attestation request for manual:fault-class-configuration/);
-  assert.equal(accountOutcome(account), 'waiting-on');
-  // Not needs-human, and not a stall however long it holds the gate.
-  const stored = { ...work, nextAction: account.action } as Work;
+  // GitHub delivery is the only mode (GY-1235): re-evaluated, the record carries no acceptance gate,
+  // so the unproduced proof holds nothing and nobody — person or loop — is owed a step for it.
+  const result = evaluate(work, [work], now, [15368]);
+  assert.equal(result.gates.some(gate => gate.name === 'acceptance'), false, 'no acceptance gate');
+  const current = { ...work, stage: result.stage, gates: result.gates } as Work;
+  assert.deepEqual(unproducedManualProofs(current, [current], now), [], 'nothing waits on the proof');
+  const account = actionAccount(current, [current], now);
+  assert.notEqual(account.action?.kind, 'escalate', 'no escalation to a person');
+  const stored = { ...current, nextAction: account.action } as Work;
   assert.deepEqual(humanNeededActions([stored], now), []);
   assert.deepEqual(stalledItems([stored], now, 0), []);
   // master status lists it under the loop's pending decisions, with what the loop does next.

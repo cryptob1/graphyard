@@ -11,7 +11,6 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
-import { mechanicalHold, reviewNeed } from '../src/model/dispatch.js';
 import { nextAction } from '../src/model/next-action.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -54,46 +53,36 @@ const prove = (item: Work, proof: string, sha: string, result: 'pass' | 'fail') 
   engine.execute(producer, 'evidence', item.id, { proof, sha, baseSha: B, policyRevision: item.policyRevision, result, executed: 3, skipped: 0, ...(result === 'pass' ? { exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } } : {}) }, randomUUID());
 const gate = (item: Work, name: string) => item.gates.find(entry => entry.name === name)!;
 
-test('integration:proofs-precede-review — no review request is raised before the head\'s mechanical proofs have run, and a head that fails one returns to its worker naming the criterion without a reviewer session', async () => {
+// Since GY-1235 review is no longer held for proofs (CI runs the unit tests on the head and no
+// producer is requested), so what remains of integration:proofs-precede-review is its second half:
+// a head that fails a trusted proof returns to its worker naming the criterion.
+test('integration:proofs-precede-review — a head is reviewed without waiting on producers, and a head that fails a trusted proof returns to its worker naming the criterion', async () => {
   let item = await submitted('Proofs precede review', [
     { id: 'AC-1', text: 'Parses', proofs: ['unit:vbr-parse', 'integration:vbr-flow'] },
     { id: 'AC-2', text: 'Documented', proofs: ['manual:vbr-docs'] },
   ]);
   item = await engine.observe(item.id, item.revision, observed(item, H));
-  // The head builds and its producers are asked for; the reviewer is not.
+  // The head builds and its reviewer is asked for; no producer is.
   assert.ok(gate(item, 'build').passed);
-  assert.deepEqual(item.autoDispatch!.producers.map(request => request.group), ['unit', 'integration']);
-  assert.equal(item.autoDispatch!.review, null, 'no review request stands for an unverified head');
-  assert.deepEqual(await reviewRequests(item), []);
-  const pending = reviewNeed(item, [item]);
-  assert.equal(pending.state, 'proofs-pending'); assert.match(pending.reason, /AC-1 unit:vbr-parse, AC-1 integration:vbr-flow have not passed on/);
-  const waiting = nextAction(item, [item], new Date())!;
-  assert.equal(waiting.kind, 'dispatch'); assert.equal(waiting.inputs.kind === 'dispatch' && waiting.inputs.target, 'proof', 'what the head waits on is its producers, not a reviewer');
+  assert.deepEqual(item.autoDispatch!.producers, [], 'no producer request is opened');
+  assert.deepEqual([item.autoDispatch!.review?.state, item.autoDispatch!.review?.sha], ['requested', H], 'the reviewer is not held for proofs');
+  assert.equal((await reviewRequests(item)).length, 1);
+  assert.equal(nextAction(item, [item], new Date())!.kind, 'request-review');
 
   // One proof passes and the other fails: the head goes back to its worker with the criterion named.
   item = await prove(item, 'unit:vbr-parse', H, 'pass');
-  assert.equal(item.autoDispatch!.review, null, 'a partly verified head is still not reviewed');
   item = await prove(item, 'integration:vbr-flow', H, 'fail');
   assert.equal(item.stage, 'build');
   assert.deepEqual(gate(item, 'build').reasons, [`AC-1: integration:vbr-flow failed on ${H.slice(0, 12)} (trusted evidence from proof-runner); the head returns to its worker before review`]);
-  assert.equal(item.autoDispatch!.review, null);
-  assert.deepEqual(await reviewRequests(item), [], 'the failing head never consumed a reviewer session');
   const returned = nextAction(item, [item], new Date())!;
   assert.equal(returned.kind, 'request-rework'); assert.match(returned.reason, /AC-1: integration:vbr-flow failed/);
-  // Every review provider holds the same way: the control plane's own codex/agent dispatch reads mechanicalHold.
-  for (const reviewProvider of ['codex', 'agent'] as const) assert.equal(mechanicalHold({ ...item, policy: { ...item.policy, reviewProvider } }, [item], new Date())?.state, 'proof-failed');
 
-  // The worker pushes a fix: the new head is proven first, and only then is a reviewer asked for it.
+  // The worker pushes a fix: the new head builds and a reviewer is asked for it at once.
   item = await engine.observe(item.id, item.revision, observed(item, H2));
-  assert.ok(gate(item, 'build').passed); assert.equal(item.autoDispatch!.review, null);
-  item = await prove(item, 'unit:vbr-parse', H2, 'pass');
-  item = await prove(item, 'integration:vbr-flow', H2, 'pass');
+  assert.ok(gate(item, 'build').passed);
   const review = item.autoDispatch!.review!;
   assert.deepEqual([review.state, review.sha], ['requested', H2]);
-  const requested = await reviewRequests(item);
-  assert.equal(requested.length, 1); assert.equal(requested[0].payload.details.sha, H2);
-  // The manual proof waits beside the review, not ahead of it.
-  assert.match(gate(item, 'acceptance').reasons.join('\n'), /AC-2: manual:vbr-docs needs trusted passing evidence/);
+  assert.deepEqual((await reviewRequests(item)).map(event => event.payload.details.sha).sort(), [H, H2].sort());
 });
 
 // ---- The worker's own check: the real launcher against a stub control plane ----------------------

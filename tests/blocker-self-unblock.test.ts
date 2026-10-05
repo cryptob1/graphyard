@@ -86,7 +86,6 @@ function harness(probeRun: (command: string, args: string[]) => string = () => '
     closeSession: () => {},
     dispatch: async work => { dispatched.push(work.key); },
     requestProof: () => {},
-    merge: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},

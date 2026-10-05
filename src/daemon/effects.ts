@@ -22,7 +22,7 @@ import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, type MergeExecutor, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, mergeExecutor, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson, readCredentialFile, type ControlPlaneStatus } from '../master.js';
+import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson, readCredentialFile, type ControlPlaneStatus } from '../master.js';
 import { readControlPlaneClock, type ContainmentObservation, type ControlPlaneClock } from '../master/containment.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { listHerdrPanes } from '../master/herdr.js';
@@ -109,19 +109,6 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * additive requirements revision (`successorWidening`), which removes nothing.
    */
   replan?: (work: Work, paths: string[], reason: string) => Promise<unknown>;
-  merge: (work: Work) => Promise<unknown>;
-  /**
-   * GY-831. Report a guarded merge refused for one reason since `since` to the control plane,
-   * which clears a carried approval (a fresh review is requested) or marks the candidate for a
-   * rework decision.
-   */
-  refuseMerge?: (work: Work, reason: string, since: string) => Promise<Work>;
-  /**
-   * GY-1099. Asks the control plane for an observation of this candidate claimed ahead of the
-   * polled backlog: what a merge refused only for a stale GitHub observation is owed instead of a
-   * rework or an ejection.
-   */
-  observeCandidate?: (work: Work) => Promise<unknown>;
   /**
    * The deployed release and which deliveries it serves. The containment the previous observation
    * retained is handed back so the cycle re-derives only what the release has not already been
@@ -218,6 +205,8 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * item this names unmoved; absent, every history is read again each cycle.
    */
   decisionChanges?: (after: string | null) => Promise<{ seq: string; work: string[]; complete: boolean }>;
+  /** The deadline the decisions step's control-plane reads share, in ms (GY-1241); `decisionReadDeadlineMs` when unset. */
+  decisionReadDeadlineMs?: number;
   /**
    * Takes back one of the loop's own requests, as its requester. Only for a request the item has
    * moved past — a merge decision bound to an earlier candidate, a round the item no longer needs —
@@ -425,12 +414,6 @@ export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
 export function daemonEffects(root: string, source: MasterConfig | (() => MasterConfig), deps: {
   snapshot: () => Promise<{ work: Work[]; now: string }>;
   mutate: (path: string, data: unknown, requestId?: string) => Promise<any>;
-  /**
-   * The merge executor this daemon process is: its coordinator principal and an instance minted
-   * once per process. Every guarded merge the loop runs presents it, so an execution this process
-   * acquired is resumed by this process alone and never by an interactive merge or a second loop.
-   */
-  executor: MergeExecutor;
   /** The child runner; a test's stub, or the process's own bounded asynchronous runner. */
   run?: ChildRun;
   fetcher?: typeof fetch;
@@ -679,9 +662,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await run('gh', ['workflow', 'run', config.run.proofWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
         '-f', `pr=${work.submission!.pr}`, '-f', `work_id=${work.id}`, '-f', `policy_revision=${work.policyRevision}`]);
     },
-    merge: work => mergeExecutor(current(), snapshot, mutate, deps.executor, randomUUID(), run)(work),
-    refuseMerge: (work, reason, since) => mutate(`work/${work.id}/mergerefused`, { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, reason: reason.slice(0, 2000), since }),
-    observeCandidate: work => mutate(`work/${work.id}/resync`, { prioritized: true }),
     // `root` is this checkout: containment is derived from its object store, never from the forge.
     observeDeployment: (delivered, retained) => observeDeployment(current(), delivered, run, fetcher, () => Date.now(), { root, retained }),
     publishProductionEnvironment: async () => {

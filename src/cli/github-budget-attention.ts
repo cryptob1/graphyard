@@ -47,7 +47,7 @@ export function pauseAttention(status: BudgetStatus): AttentionItem[] {
   if (!budget?.paused) return [];
   const pausedJobs = (status.jobs ?? []).filter(job => /rate limited|requests paused/.test(job.error ?? '')).length;
   return [{ subject: 'github',
-    text: `GitHub requests are paused until ${budget.paused.until} (since ${budget.paused.since}): ${budget.paused.reason}. What exhausted the budget: ${spend(budget.lastHour)}${budget.limit !== null ? ` of an hourly limit of ${budget.limit}` : ''}. Every gate reads stale until the pause lifts; the merge gate refuses observations older than two minutes${pausedJobs ? `; ${pausedJobs} integration job${pausedJobs === 1 ? ' recorded' : 's recorded'} the refusal in the ledger` : ''}`,
+    text: `GitHub requests are paused until ${budget.paused.until} (since ${budget.paused.since}): ${budget.paused.reason}. What exhausted the budget: ${spend(budget.lastHour)}${budget.limit !== null ? ` of an hourly limit of ${budget.limit}` : ''}. Every gate reads stale until the pause lifts${pausedJobs ? `; ${pausedJobs} integration job${pausedJobs === 1 ? ' recorded' : 's recorded'} the refusal in the ledger` : ''}`,
     ...agentOwner('control plane', `Nothing to run: observation resumes at ${budget.paused.until}; graphyard status (githubBudget.lastHour) shows what spent it, and the merge-path reserve (${budget.reserve} requests) keeps merge-gate candidates observed before the next pause`) }];
 }
 

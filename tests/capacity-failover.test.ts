@@ -106,10 +106,10 @@ async function submittedAndProven(work: Work, worker: Principal, extra: Partial<
       predecessors: placement.predecessors, policyRevision: item.policyRevision, publishedAt: new Date().toISOString(), merge: null }) } as unknown as GitHub);
   return { work: await reload(work.id), candidate };
 }
-/** The loop's guarded merge, as the broker performs it with the coordinator credential alone. */
-async function guardedMerge(work: Work) {
+/** GitHub merging a head whose gates passed, as the next observation reports it: the merge is GitHub's, never the loop's. */
+async function githubMerges(work: Work) {
   const current = await reload(work.id), candidate = { sha: current.candidate!.sha, baseSha: current.candidate!.baseSha };
-  const committed = await engine.requestEnqueue(coordinator, current.id, { enqueue: true, expectedRevision: current.revision, ...candidate, policyRevision: current.policyRevision }, randomUUID());
+  const committed = { revision: (await engine.store.workItem(current.id))!.revision };
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   await engine.observe(current.id, committed.revision, seen(current, candidate, { merged: true, mergeSha: sha40(`merge:${work.id}`), mergedAt }));
   return { result: 'merged', merged: true };
@@ -132,7 +132,7 @@ interface Herdr { agents: { name: string; pane_id: string; agent_status: string 
  */
 function loop(config: MasterConfig, herdr: Herdr, clock: { skewMs: number }, overrides: Partial<DaemonEffects> = {}) {
   const now = () => Date.now() + clock.skewMs;
-  const calls = { dispatch: [] as { work: string; profile: string; account: string | null }[], merge: [] as string[], stopped: [] as string[], closed: [] as string[] };
+  const calls = { dispatch: [] as { work: string; profile: string; account: string | null }[], stopped: [] as string[], closed: [] as string[] };
   const effects: DaemonEffects = {
     agents: () => herdr.agents,
     herdr: () => ({ agents: herdr.agents, available: true }),
@@ -148,7 +148,6 @@ function loop(config: MasterConfig, herdr: Herdr, clock: { skewMs: number }, ove
       calls.dispatch.push({ work: work.key, profile: profile.name, account: selected.account?.name ?? null });
     },
     requestProof: () => {},
-    merge: async work => { calls.merge.push(work.key); return guardedMerge(work); },
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},
@@ -331,7 +330,7 @@ test('integration:capacity-exhausted-escalation — with every account of a role
   await recordObservedExhaustion(config, 'env-a', { at: new Date().toISOString(), resetsAt: resetA, reason: "You've hit your 5-hour limit", role: 'worker', profile: 'builder', work: null });
   await recordObservedExhaustion(config, 'env-b', { at: new Date().toISOString(), resetsAt: resetB, reason: 'Weekly usage limit reached', role: 'worker', profile: 'second', work: null });
 
-  // One item needs a worker; another is one guarded merge away from delivery and needs none.
+  // One item needs a worker; another is one GitHub merge away from delivery and needs none.
   let waiting = await released('capacity waits');
   const other = await released('capacity does not delay');
   const otherClaim = await launcherClaims(other, workerB);
@@ -341,9 +340,12 @@ test('integration:capacity-exhausted-escalation — with every account of a role
   const state = emptyDaemonState(config);
   const first = await cycle(state);
   assert.deepEqual(calls.dispatch, [], 'no worker is launched while the role has no account left');
-  assert.deepEqual(calls.merge, [other.key], 'an item that needs a different role moves in the same cycle');
-  assert.equal(kinds(state, 'merge')[0].state, 'done', kinds(state, 'merge')[0].detail);
-  assert.equal((await reload(other.id)).stage, 'done', 'and is delivered');
+  const merging = await reload(other.id);
+  assert.equal(merging.stage, 'merge', 'an item that needs a different role is not held');
+  assert.ok(merging.gates.every(gate => gate.passed), merging.gates.flatMap(gate => gate.reasons).join('; '));
+  assert.deepEqual(merging.capacity?.escalations ?? [], [], 'the worker capacity escalation is not its wait');
+  await githubMerges(other);
+  assert.equal((await reload(other.id)).stage, 'done', 'and GitHub\'s merge delivers it');
 
   waiting = await reload(waiting.id);
   const escalation = waiting.capacity!.escalations[0];
@@ -559,11 +561,11 @@ test('integration:human-answer-resumes-item — answering from the CLI or the da
   assert.equal(work.epoch, 2); assert.equal(work.lease?.owner, workerA.id);
   assert.match(workerPrompt(config, work, config.workers[0], 2), /the human answered: The key is issued; its fingerprint is in the staging runbook\. Continue from that answer\./);
 
-  // The new attempt delivers: the worker submits, the provider and the trusted producer do their parts, the loop merges.
+  // The new attempt delivers: the worker submits, the provider and the trusted producer do their parts, and GitHub merges.
   await submittedAndProven(work, workerA);
   herdr.agents = [];
   clock.skewMs += 20_000; await cycle(state);
-  assert.deepEqual(calls.merge, [work.key]);
+  await githubMerges(work);
   work = await reload(work.id);
   assert.equal(work.stage, 'done'); assert.ok(work.delivery, 'delivered');
   // No coordinator session took part: every actor after the answer is the worker, the producer, the loop's token, or the control plane and its provider observation.
@@ -589,7 +591,7 @@ const reviewerOn = (accounts: string[]) => ({ name: 'reviewer-a', agentName: 'ag
 async function approverLoop(label: string, accounts = ['env-a', 'env-b'], extra: (now: () => number) => Partial<DaemonEffects> = () => ({})) {
   await fresh();
   const approverHome = await temporaryDirectory(`capacity-${label}`);
-  const config = { ...loopConfig([profileOf('builder', workerA)], { credentialFile: join(approverHome, 'coordinator.token'), autoMerge: false }), reviewers: [reviewerOn(accounts)] } as MasterConfig;
+  const config = { ...loopConfig([profileOf('builder', workerA)], { credentialFile: join(approverHome, 'coordinator.token') }), reviewers: [reviewerOn(accounts)] } as MasterConfig;
   const herdr: Herdr = { agents: [], output: {} }, clock = { skewMs: 0 };
   const decisions: { id: string; action: string; state: string; input: any; approvedBy: string | null }[] = [];
   const launches: (string | null)[] = [], attempts: string[] = [];
@@ -611,9 +613,10 @@ async function approverLoop(label: string, accounts = ['env-a', 'env-b'], extra:
     roleHealth: async () => ({ approver: await approverRoleHealth(config, loginsOnly(now)) }),
     ...extra(now),
   });
-  // One item whose every gate passes; automatic merging is off, so it needs an approved merge decision.
-  const work = (await submittedAndProven(await launcherClaims(await released(`approver ${label}`), workerB), workerB)).work;
-  assert.equal(work.stage, 'merge');
+  // One machine-filed item the triage agent proposed closing: the close decision is the independent approver's to judge.
+  const filed = await ok(operator, 'POST', 'work', definition(`approver ${label}`, { origin: { reviewFollowUps: { parent: 'GY-1', findings: [{ path: 'src/a.ts', text: 'src/a.ts — a finding' }] } } })) as Work;
+  const work = await ok(coordinator, 'POST', `work/${filed.id}/triage`, { judgement: { outcome: 'close', reason: 'Not worth doing once the parent shipped' } }) as Work;
+  assert.equal(work.triage?.state, 'proposed');
   return { config, herdr, clock, decisions, launches, attempts, work, ...harness };
 }
 
@@ -621,7 +624,7 @@ test('unit:approver-exhaustion-fails-over — an approver session stopped on its
   const { config, herdr, decisions, launches, work, cycle, calls } = await approverLoop('failover');
   const state = emptyDaemonState(config);
   await cycle(state);
-  assert.equal(decisions.length, 1, 'the loop requests the merge decision');
+  assert.equal(decisions.length, 1, 'the loop requests the close decision');
   assert.deepEqual(launches, ['env-a'], 'and puts it to an approver on the first account');
   const watch = Object.values(state.approvals)[0], launchedAt = watch.launchedAt;
   assert.equal(watch.account, 'env-a');
@@ -641,7 +644,7 @@ test('unit:approver-exhaustion-fails-over — an approver session stopped on its
   const failover = detection.actions.find(action => action.kind === 'failover');
   assert.ok(failover, `the cycle that saw the notice failed it over: ${JSON.stringify(detection.actions)}`);
   assert.equal(failover.state, 'done', failover.detail);
-  assert.match(failover.detail, new RegExp(`exhausted env-a mid-session \\(${notice}; resets ${resetsAt.replace(/\./g, '\\.')}\\) judging merge decision ${decisions[0].id}; launched independent approver session ${name} on env-b`));
+  assert.match(failover.detail, new RegExp(`exhausted env-a mid-session \\(${notice}; resets ${resetsAt.replace(/\./g, '\\.')}\\) judging close decision ${decisions[0].id}; launched independent approver session ${name} on env-b`));
   assert.equal(state.actions[failoverKey('approver', work, `${decisions[0].id}:${launchedAt}`)].state, 'done', 'one failover per exhausted session');
 
   // The account is recorded exhausted until the time the notice names, for every launcher.

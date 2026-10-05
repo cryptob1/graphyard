@@ -256,10 +256,12 @@ function firstReadWaits(all: Work[], submissions: Work[], arrivals: number[], op
   return submissions.map(work => waits.get(work.id) ?? Infinity);
 }
 
-test('unit:first-observation-not-starved — with 13 queued entries and review-waiting items due every cycle, 3 new submissions each get their first observation within 5 minutes, ranked behind only the queue head band and in-flight merges; master status reports the oldest unobserved submission', () => {
+test('unit:first-observation-not-starved — with 13 open candidates and review-waiting items due every cycle, 3 new submissions each get their first observation within 5 minutes, ranked behind only the merges in flight; master status reports the oldest unobserved submission', () => {
   const base = sha('main-first-read');
+  // GitHub delivery is the only delivery (GY-1235): no Graphyard merge queue, so the merge path is
+  // the candidates GitHub may merge (here two); the other eleven await their rework.
   const raw = Array.from({ length: 13 }, (_, index) => item(`GY-Q${String(index).padStart(2, '0')}`, 600 + index, sha(`fq${index}`), base,
-    { queue: { sequence: index + 1, enqueuedAt: new Date(Date.now() - 3_600_000).toISOString(), policyRevision: 1, speculation: null } } as Partial<Work>));
+    { reworkRequested: index >= 2 } as Partial<Work>));
   const queue = raw.map(work => settle(work, raw));
   const waiting = Array.from({ length: 6 }, (_, index) => settle(item(`GY-W${index}`, 700 + index, sha(`fw${index}`), base, { criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['manual:budget'] }] }), queue, false));
   const submissions = [0, 1, 2].map(index => item(`GY-NEW${index}`, 800 + index, sha(`fn${index}`), base, { stage: 'build', candidate: null, observation: null,
@@ -267,7 +269,7 @@ test('unit:first-observation-not-starved — with 13 queued entries and review-w
   const fleet = [...queue, ...waiting];
   assert.ok(submissions.every(firstObservationOwed) && !fleet.some(firstObservationOwed), 'only the new submissions owe a first reading');
 
-  // The claim order: the head band first, then every never-observed submission, then the
+  // The claim order: the merges in flight first, then every never-observed submission, then the
   // review-waiting items — whether or not the budget is tight.
   for (const tight of [false, true]) {
     const all = [...fleet, ...submissions];

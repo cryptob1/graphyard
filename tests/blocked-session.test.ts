@@ -80,7 +80,6 @@ function harness(screen: string, item: { current: Work }) {
     closeSession: pane => { log.closed.push(pane); },
     dispatch: async work => { log.dispatched.push(work.key); },
     requestProof: () => {},
-    merge: async () => ({ result: 'merge requested' }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},
