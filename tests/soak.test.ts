@@ -13,6 +13,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { GitHub, processJob } from '../src/github.js';
 import { GitHubCacheStore } from '../src/github-cache.js';
+import { GitHubChargeLedger } from '../src/github-charges.js';
 import { createHash } from 'node:crypto';
 import { Refusal, isClosed, type Principal, type Work } from '../src/model.js';
 import { approverSessionName, assessContainment, atomicPrivateWrite, automaticReviewerConcurrency, containmentPhase, containmentQuarantines, decisionInput, dispatchWork, loadMasterConfig, masterConfigSchema, mergeExecutor, profileConcurrency, setupMaster, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
@@ -25,7 +26,7 @@ import { coordinatorConfinementRefusal, mergeBatchSize, mergeParallelTips, rerun
 import { headlessConfinementWrapper, sessionConfinement } from '../src/master/launch.js';
 import { answeringWidening, daemonEffects, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { staleObservationReason } from '../src/daemon/cycle-delivery.js';
-import { adoptHeadlessRuns } from '../src/daemon/run.js';
+import { adoptHeadlessRuns, noteWatchdog } from '../src/daemon/run.js';
 import { maxApproverLaunches, maxLostApproverRuns } from '../src/daemon/decisions.js';
 import { adoptRuns, detachRuns, liveRuns, pruneRunDirectories, runDirectoryRetentionMs, runsDirectory, watchedRuns, withRunnerAgents, type Applied } from '../src/runner/registry.js';
 import { applyDecision, approverRunOptions, startNarrowRun } from '../src/runner/roles.js';
@@ -51,6 +52,8 @@ import { expandTypedCommand } from './helpers/launch-shell.js';
 import { lostRunReason, requestAttemptLimit, sessionRetry, sessionRetryLimit } from '../src/producer.js';
 import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
+import { watchdogPlan } from '../src/daemon/liveness.js';
+import { loopWatchdogSeconds } from '../src/supervisor.js';
 import { queuePlacement } from '../src/merge-queue.js';
 import { ChildProcessError } from '../src/child-runner.js';
 import { probeBlocker } from '../src/daemon/blocker-probes.js';
@@ -137,7 +140,12 @@ const basePlan = {
   rework: new Set([3, 7, 11]), deaths: new Set([5, 9]), deathAfterMs: 8 * minute,
   // GY-521: the attested item is one whose first head is review-reworked, so its unproducible
   // manual proof is the only thing standing on the fresh head.
-  deploys: [2 * hour + 30 * minute, 5 * hour], dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6, slowObservationMs: 10 * minute, attested: 3,
+  deploys: [2 * hour + 30 * minute, 5 * hour],
+  // GY-916: the first deploy's executor restart meets a claim still held for this many passes, and
+  // the loop's installed unit carries a hand-copied watchdog window too short for its interval
+  // (the supervisor also restarts the loop at these offsets, before any alignment rewrites it).
+  heldClaimRestarts: 3, driftedWatchdogSec: 120, loopRestarts: [1 * hour, 2 * hour],
+  dirtyCheckout: { from: 4 * hour + 50 * minute, to: 6 * hour }, split: { at: 45 * minute, item: 12 }, clean: 2, unstable: 4, slowRecompute: 8, exhaustedReviewer: 6, slowObservationMs: 10 * minute, attested: 3,
   // GY-566: main rewrites the docs page item six documented itself in just as its reviewer approves
   // it; the loop routes the docs-only conflict to a docs-sync session, which resolves it in four
   // minutes. Item six hosts it because its approval lands past the day's first merges, so the base
@@ -1391,7 +1399,10 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // A detached checkout of the base branch, at the tip the day starts on; git answers from the
   // simulated GitHub, and a restart of the fleet or of the loop itself is recorded, not performed.
   const checkout = { head: github.tip, origin: github.tip, dirty: false };
-  const upgrades = { fetches: 0, checkouts: [] as { at: number; from: string; to: string }[], executors: [] as string[], self: 0, outcomes: [] as SelfUpgradeOutcome['outcome'][] };
+  const upgrades = { fetches: 0, checkouts: [] as { at: number; from: string; to: string }[], executors: [] as string[], self: 0, outcomes: [] as SelfUpgradeOutcome['outcome'][],
+    /** GY-916: the restarts refused on a held claim, the owed restart sampled each cycle it stood, and the unit the supervisor runs. */
+    held: [] as string[], owed: [] as { to: string; state: string; attempts: number }[], unit: { watchdogSec: plan.driftedWatchdogSec, rewrites: 0 },
+    starts: 0, watchdog: [] as { failed: number; attempts: number; windowSec: number }[] };
   /** The paths the base branch changed between two commits: every merged pull request's files, and what any other commit added or removed. */
   const changedPaths = (from: string, to: string) => {
     const paths = new Set<string>(), seen = new Set<string>(), queue = [to];
@@ -1423,13 +1434,31 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   };
   const selfUpgrade = (state: DaemonState) => performSelfUpgrade(config, state, {
     root: '/soak/coordinator', run: coordinatorGit, now: clock.now, persist: async () => {},
-    restartExecutors: async to => { upgrades.executors.push(to); return { result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; },
-    // The supervisor re-executes the loop: the next process loads the release the checkout holds, as runDaemon records it.
-    restartSelf: async () => { upgrades.self++; state.release = { commit: checkout.head, dirty: checkout.dirty }; },
+    restartExecutors: async to => {
+      // A busy fleet: a claim outlives restartExecutors' bounded wait for the first passes, and the restart is refused.
+      if (upgrades.held.length < plan.heldClaimRestarts) { upgrades.held.push(to); return { result: 'refused', reason: `Restart refused while an executor on ${config.hostId} holds a claimed action`, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; }
+      upgrades.executors.push(to); return { result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] };
+    },
+    // The alignment re-applies the unit the loop runs under: a drifted watchdog window is rewritten to the configuration's.
+    alignUnit: async () => {
+      if (upgrades.unit.watchdogSec === loopWatchdogSeconds(config.run.intervalSeconds)) return { wrote: 'unchanged', reason: null };
+      upgrades.unit.watchdogSec = loopWatchdogSeconds(config.run.intervalSeconds); upgrades.unit.rewrites++;
+      return { wrote: 'updated', reason: null };
+    },
+    // The supervisor re-executes the loop: the next process loads the release the checkout holds, as runDaemon records it,
+    // and starts under the unit as it now stands.
+    restartSelf: async () => { upgrades.self++; state.release = { commit: checkout.head, dirty: checkout.dirty }; await processStart(state); },
   });
+  /** What runDaemon does once per process start: the supervisor's watchdog window judged against the interval (GY-916). */
+  const processStart = async (state: DaemonState) => {
+    upgrades.starts++;
+    await noteWatchdog(state, watchdogPlan({ NOTIFY_SOCKET: '/run/user/1000/systemd/notify', WATCHDOG_USEC: String(upgrades.unit.watchdogSec * 1_000_000) }, config.run.intervalSeconds * 1000), new Date(clock.now()).toISOString(), async () => {});
+  };
 
   // ---- The day. ----
   let state = emptyDaemonState(config);
+  await processStart(state);
+  const loopRestarts = [...plan.loopRestarts];
   /** The cursor's upgrade actions and the refusal's attempts, sampled every cycle the checkout stood refused. */
   const refusalSamples: { keys: number; attempts: number }[] = [];
   // Session launches run beside the cycle (GY-616): the loop carries one launcher across its
@@ -1575,6 +1604,38 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   } });
   await immutableClient.attachCache(immutableCache);
   const immutable = { cycles: 0, peakLive: 0, peakRows: 0, peakBytes: 0, overBound: [] as string[], refetched: [] as string[], reads: 0 };
+  // GY-1052: the shared per-cycle reads on the real adapter, taken through `observe()` by every open item
+  // each cycle: one base-ref read per cycle, protection every five minutes, each observation binding the
+  // current tip. `send` answers from the simulated GitHub, so an `observe()` that stopped sharing its reads
+  // fails the per-cycle counts. And the cross-replica charge ledger over the day: two replicas charge what
+  // they ask of GitHub, the second restarting every three hours under a new instance id; the table must stay
+  // within two hours of rows, the restarted ids' included, and the fleet count must be the other replica's hour.
+  const cycleClient = new GitHub({ repository, base: 'main', appId: 1234, installationId: 2, privateKey: 'not-used' });
+  cycleClient.clock = () => clock.now();
+  const cycleSends = { ref: 0, protection: 0, other: 0 };
+  Object.assign(cycleClient, { token: 'fixture-token', expires: Number.MAX_SAFE_INTEGER, send: async (path: string) => {
+    const [route, query = ''] = path.replace(`/repos/${repository}`, '').split('?'), page = new URLSearchParams(query).get('page');
+    if (route === '/git/ref/heads/main') { cycleSends.ref++; return { ref: 'refs/heads/main', object: { type: 'commit', sha: github.tip } }; }
+    if (route === '/branches/main/protection' || route === '/rules/branches/main') { cycleSends.protection++; return route.endsWith('/protection') ? { required_status_checks: { strict: false, checks: [] } } : []; }
+    cycleSends.other++;
+    let match = /^\/pulls\/(\d+)(\/reviews|\/files)?$/.exec(route);
+    if (match) {
+      const pr = github.prs.get(Number(match[1]))!;
+      if (match[2] === '/reviews') return [];
+      if (match[2] === '/files') return page !== '1' ? [] : pr.files.map(filename => ({ filename, status: 'modified', sha: sha(`blob-${pr.head}-${filename}`), additions: 1, deletions: 1, patch: '@@' }));
+      return { number: pr.number, state: 'open', draft: false, merged: false, mergeable: true, merge_commit_sha: null, merged_at: null, created_at: new Date(pr.createdAt).toISOString(), user: { login: pr.author, id: 7 },
+        head: { sha: pr.head, ref: pr.branch, repo: { full_name: repository } }, base: { sha: github.tip, ref: 'main', repo: { full_name: repository } } };
+    }
+    if (/^\/commits\/[a-f0-9]{40}\/check-runs$/.test(route)) return { check_runs: [] };
+    match = /^\/compare\/([a-f0-9]{40})\.\.\.([a-f0-9]{40})$/.exec(route);
+    if (match) return { status: match[1] === match[2] ? 'identical' : 'ahead', ahead_by: 1, total_commits: 1, commits: [{ sha: match[2] }], files: [] };
+    return { sha: route.slice(-40), parents: [], commit: { tree: { sha: sha(`tree-${route.slice(-40)}`) }, message: 'change' } };
+  } });
+  const shared = { cycles: 0, observations: 0, refReads: 0, protectionReads: 0, overRead: [] as string[], stale: [] as string[], failed: [] as string[] };
+  const chargeInstallation = `soak-charges-${days}`, chargeOptions = { syncMs: 2 ** 31 - 1 };
+  const replicaA = new GitHubChargeLedger(store.pool, chargeInstallation, { ...chargeOptions, instance: 'replica-a' });
+  let replicaB = new GitHubChargeLedger(store.pool, chargeInstallation, { ...chargeOptions, instance: 'replica-b-0' }), chargeRestarts = 0;
+  const charged = { b: [] as number[], cycles: 0, peakRows: 0, instancesSeen: new Set<string>(), overBound: [] as string[], miscounted: [] as string[], boundaryCycles: 0 };
   const jobsDue = async () => Number((await store.pool.query('SELECT count(*) AS due FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now())')).rows[0].due);
   // The day's schedule position, hoisted so the launch effects record against it: one cycle is one
   // simulated minute, and a launch the cycle handed over settles before the position advances.
@@ -1759,6 +1820,33 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
             if ((immutableSends.get(`/repos/${repository}${path}`) ?? 0) > 1) immutable.refetched.push(`+${Math.round(elapsed / minute)} min ${pr.key} ${path.split('/').slice(-2).join('/')}`);
           }
         }
+        const openPrs = [...github.prs.values()].filter(pr => pr.open && !pr.merged), sent = { ...cycleSends }, fleet = await store.list();
+        for (const pr of openPrs) {
+          const work = fleet.find(entry => entry.submission?.pr === pr.number);
+          if (!work) continue;
+          const observed = await cycleClient.observe(work, fleet).catch(error => { shared.failed.push(`+${Math.round(elapsed / minute)} min ${pr.key}: ${error instanceof Error ? error.message : error}`); return null; });
+          if (observed && observed.baseTip !== github.tip) shared.stale.push(`+${Math.round(elapsed / minute)} min ${observed.baseTip?.slice(0, 8)} for ${github.tip.slice(0, 8)}`);
+        }
+        if (openPrs.length) { shared.cycles++; shared.observations += openPrs.length; }
+        if (cycleSends.ref - sent.ref > 1) shared.overRead.push(`+${Math.round(elapsed / minute)} min ${cycleSends.ref - sent.ref} ref reads`);
+        shared.refReads = cycleSends.ref; shared.protectionReads = cycleSends.protection;
+        if (elapsed > 0 && elapsed % (3 * hour) < minute) { await replicaB.close(); replicaB = new GitHubChargeLedger(store.pool, chargeInstallation, { ...chargeOptions, instance: `replica-b-${++chargeRestarts}` }); }
+        for (let index = 0; index < cycleSends.ref - sent.ref; index++) replicaA.charge(now, 'GET /git/ref/heads/:branch', 'git');
+        for (let index = 0; index < cycleSends.protection - sent.protection; index++) replicaA.charge(now, 'GET /branches/:branch/protection', 'branches');
+        for (const _pr of openPrs) { replicaB.charge(now, 'GET /pulls/:n', 'pulls'); charged.b.push(now); }
+        await replicaB.sync(now); await replicaA.sync(now); charged.cycles++;
+        // The window is computed here from the calendar, not with the ledger's minute floor (GY-1052): the
+        // hour back from now, truncated to the start of its UTC minute, that boundary minute's charges included.
+        const windowStart = new Date(now - hour); windowStart.setUTCSeconds(0, 0);
+        const expected = charged.b.filter(at => at >= windowStart.getTime()).length;
+        if (charged.b.some(at => at >= windowStart.getTime() && at < now - hour)) charged.boundaryCycles++;
+        const counted = replicaA.fleet(now).rows.reduce((total, row) => total + row.requests, 0);
+        if (counted !== expected) charged.miscounted.push(`+${Math.round(elapsed / minute)} min counted ${counted} of ${expected}`);
+        const ledger = (await store.pool.query('SELECT count(*)::int AS n, min(minute) AS oldest, array_agg(DISTINCT instance) AS instances FROM github_charges WHERE installation=$1', [chargeInstallation])).rows[0];
+        charged.peakRows = Math.max(charged.peakRows, ledger.n);
+        for (const instance of ledger.instances ?? []) charged.instancesSeen.add(instance);
+        // Three endpoints, at most one row per endpoint, instance and minute, and every row within two hours.
+        if (ledger.n > 3 * (2 * 60 + 2) || ledger.oldest && now - ledger.oldest.getTime() > 2 * hour) charged.overBound.push(`+${Math.round(elapsed / minute)} min ${ledger.n} rows from ${ledger.oldest?.toISOString()}`);
         await immutableCache.flush(); await immutableCache.prune(); immutable.cycles++;
         const held = (await store.pool.query(`SELECT count(*)::int AS n, coalesce(sum(pg_column_size(value)), 0)::int AS bytes FROM github_cache WHERE kind = 'immutable' AND key LIKE $1`, [`${immutableScope}:%`])).rows[0];
         immutable.peakRows = Math.max(immutable.peakRows, held.n); immutable.peakBytes = Math.max(immutable.peakBytes, held.bytes);
@@ -1861,6 +1949,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       if (options.staleRework && await restartOnVerdict(now)) { elapsed += minute; await moveClock(minute); continue; }
       if (options.staleMerge && await restartOnMerge(now)) { elapsed += minute; await moveClock(minute); continue; }
       master.cycleOf = cycles;
+      // GY-916: the supervisor restarts the loop for its own reasons: a new process, the same unit.
+      if (loopRestarts.length && elapsed >= loopRestarts[0]) { loopRestarts.shift(); await processStart(state); }
       try {
         if (headless) for (const run of await adoptHeadlessRuns(state, effects, () => {}, 'cycle')) {
           headless.settling.set(run.directory, run.settled);
@@ -1910,6 +2000,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       const upgraded = await selfUpgrade(state);
       upgrades.outcomes.push(upgraded.outcome);
       if (upgraded.outcome === 'failed') failures.push(`${new Date(now).toISOString()}: self-upgrade failed: ${upgraded.reason}`);
+      if (upgraded.outcome === 'pending') upgrades.owed.push({ to: state.upgrade.pending?.to ?? 'none', state: state.actions[`upgrade:${state.deployment?.sha}`]?.state ?? 'none', attempts: state.actions[`upgrade:${state.deployment?.sha}`]?.attempts ?? 0 });
+      const watchdogActions = Object.entries(state.actions).filter(([key]) => key.startsWith('escalation:watchdog:'));
+      upgrades.watchdog.push({ failed: watchdogActions.filter(([, action]) => action.state === 'failed').length, attempts: watchdogActions.reduce((total, [, action]) => total + action.attempts, 0), windowSec: upgrades.unit.watchdogSec });
       if (upgraded.outcome === 'refused') refusalSamples.push({ keys: Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length, attempts: state.actions['upgrade:refused']?.attempts ?? 0 });
       // The loop restarts after every other cycle a run is live, once its launches have settled as
       // `runDaemon` lets them: it signals none, and the next cycle adopts them.
@@ -1972,7 +2065,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   return { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master,
-    followUpDay, blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size },
+    followUpDay, blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
     wakes, staleMerges, restartLog };
 }
 
@@ -2040,6 +2133,20 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.deepEqual(immutable.overBound, [], 'immutable rows and bytes stayed within their bound every cycle');
   assert.deepEqual(immutable.refetched, [], 'no path still read was asked of GitHub twice');
   if (process.env.SOAK_TRACE) console.error(`immutable: ${JSON.stringify(immutable)}`);
+  // GY-1052: the shared per-cycle reads ran on the real adapter every cycle: one base-ref read per cycle
+  // however many items observed it, protection at most every five minutes, and every read bound the current tip.
+  const { shared, charges } = day;
+  assert.ok(shared.cycles > 0 && shared.observations > shared.cycles, `the shared reads ran every cycle: ${JSON.stringify(shared)}`);
+  assert.deepEqual(shared.overRead, [], 'no cycle read the base ref more than once');
+  assert.ok(shared.refReads <= shared.cycles, `one ref read per cycle at most (${shared.refReads} over ${shared.cycles})`);
+  assert.ok(shared.protectionReads <= 2 * (Math.ceil(hours * hour / (5 * minute)) + 1), `protection and branch rules every five minutes at most (${shared.protectionReads})`);
+  assert.deepEqual(shared.failed, [], 'every observation through the real adapter completed');
+  assert.deepEqual(shared.stale, [], 'every observation bound the base branch as it was');
+  // GY-1052: the charge ledger stayed within two hours of rows across restarts, and the fleet count was the other replica's hour.
+  assert.ok(charges.cycles > 0 && charges.b > 0 && charges.restarts > 0, `the charge ledger ran all day across restarts: ${JSON.stringify({ ...charges, instancesSeen: charges.instancesSeen.length })}`);
+  assert.deepEqual(charges.overBound, [], 'github_charges stayed within its two-hour bound every cycle');
+  assert.deepEqual(charges.miscounted, [], 'every sync counted the other replica\'s last hour exactly');
+  assert.ok(charges.boundaryCycles > 0, `the boundary minute held charges older than an hour that the count included (${charges.boundaryCycles} cycles)`);
   assert.ok(lanesSeen.size > 0, 'the day\'s items were evaluated into risk lanes, each checked against its change and its status row every cycle');
   // GY-883: the low-lane item's rework round ran with no approver session. Its first application
   // was refused, recorded failed and requested again on the retry interval; the second applied it,
@@ -2284,7 +2391,30 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal(state.upgrade.refused, null, 'the refusal cleared with the alignment');
   assert.equal(state.upgrade.alignedRelease, production.deploys[1].sha, 'the loop stands aligned with the last deployed release');
   assert.equal(state.release?.commit, checkout.head, 'the re-executed loop reports the release the checkout holds');
-  assert.ok(Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).length <= production.deploys.length + 1, `the cursor holds one upgrade action per deploy and one refusal: ${Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).join(', ')}`);
+  assert.ok(Object.keys(state.actions).filter(key => key.startsWith('upgrade:') && key !== 'upgrade:unit').length <= production.deploys.length + 1, `the cursor holds one upgrade action per deploy and one refusal: ${Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).join(', ')}`);
+  // GY-916: the first deploy's executor restart met a held claim. Each refused pass left the owed
+  // restart pending on the cursor and its action waiting — never a failed action:config, so no
+  // cycle failed — one attempt per pass, and the next pass after the claim settled completed it.
+  assert.deepEqual(upgrades.held, Array(basePlan.heldClaimRestarts).fill(upgrades.checkouts[0].to), 'the restart was refused only on the first deploy, against its tip');
+  assert.equal(upgrades.outcomes.filter(outcome => outcome === 'pending').length, basePlan.heldClaimRestarts, 'one pending pass per refusal');
+  assert.deepEqual(upgrades.owed.map(sample => sample.to), upgrades.held, 'the owed restart stood on the cursor against the moved tip');
+  assert.ok(upgrades.owed.every(sample => sample.state === 'waiting'), `the owed restart is waiting, not failed: ${JSON.stringify(upgrades.owed)}`);
+  assert.deepEqual(upgrades.owed.map((sample, index) => sample.attempts - upgrades.owed[0].attempts), upgrades.owed.map((_, index) => index), 'one attempt per refused pass, never more');
+  const firstRelease = production.deploys[0].sha;
+  assert.equal(state.actions[`upgrade:${firstRelease}`]?.state, 'done', 'the owed restart converged: the first deploy\'s action ends done');
+  assert.equal(state.actions[`upgrade:${firstRelease}`]?.attempts, upgrades.owed.at(-1)!.attempts + 1, 'and the pass that completed it is its last attempt');
+  // (The dirty checkout's standing refusal, `upgrade:refused`, is its own record and is not one of these.)
+  const restartFaults = Object.entries(state.actions).filter(([key, action]) => (/^upgrade:[0-9a-f]{40}$/.test(key) || key === 'upgrade:unit' || key.startsWith('escalation:watchdog:')) && action.state === 'failed');
+  assert.deepEqual(restartFaults.map(([key]) => key), [], 'no restart, unit or watchdog fault stands at the end of the day');
+  // GY-916: the drifted watchdog window was refused once at the first process start, not again at
+  // the supervisor's own restarts or on any cycle, and cleared by the first alignment's re-applied unit.
+  assert.equal(upgrades.unit.rewrites, 1, 'the unit was rewritten once, at the first alignment');
+  assert.equal(state.actions['upgrade:unit']?.state, 'done');
+  assert.equal(upgrades.starts, 1 + basePlan.loopRestarts.length + production.deploys.length, 'every process start judged the window');
+  const drifted = upgrades.watchdog.filter(sample => sample.windowSec === basePlan.driftedWatchdogSec), aligned = upgrades.watchdog.filter(sample => sample.windowSec !== basePlan.driftedWatchdogSec);
+  assert.ok(drifted.length > basePlan.loopRestarts.length && aligned.length > 0, 'the day ran under both units');
+  assert.ok(drifted.every(sample => sample.failed === 1 && sample.attempts === 1), `under the drifted unit the refusal stood once, across restarts and cycles: ${JSON.stringify(drifted.slice(0, 3))}`);
+  assert.ok(aligned.every(sample => sample.failed === 0 && sample.windowSec === loopWatchdogSeconds(soakConfig.run.intervalSeconds)), 'under the re-applied unit the refusal is cleared, every cycle after');
   // GY-842 across the day: every pane the day's launches opened went somewhere — closed once, by
   // the step that ended its session or by the bounded sweep — the operator's own pane was never
   // touched, the previous day's backlog drained over successive bounded passes, and the drain
