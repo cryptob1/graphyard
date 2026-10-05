@@ -10,7 +10,7 @@ name: Release candidate
 # it is not a recorded candidate, so it is never deployed or promoted.
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 */2 * * *'
   workflow_dispatch:
     inputs:
       sha:
