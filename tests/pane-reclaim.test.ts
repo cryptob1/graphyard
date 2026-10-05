@@ -488,6 +488,23 @@ test('unit:sweep-closes-unrecorded-worktree-shells — agentless shells in Graph
     assert.match(state.actions['sweep:pane:pane-unrecorded'].detail, /GY-20 epoch 3, which holds no live lease and no Graphyard session recorded it/);
     assert.match(state.actions['sweep:pane:pane-stuck'].detail, /implementation session worker-a:2 is still recorded running/);
 
+    // A sighting whose pane stops being a candidate — closed by another step or by hand — leaves no
+    // waiting row behind, and a later pane at that coordinate waits out its own bound.
+    const transient: HerdrAgent[] = [{ pane_id: 'pane-transient', agent_status: 'unknown', cwd: `${worktrees}/GY-20-3` }];
+    let standing = transient;
+    const sighted = emptyDaemonState(config), transientClosed: string[] = [];
+    const sweep = (at: number) => runCycle(config, sighted, sweepEffects(() => [], () => standing, transientClosed, at), () => at);
+    await sweep(clockStart);
+    assert.equal(sighted.actions['sweep:pane:pane-transient']?.state, 'waiting', 'the first sighting waits');
+    standing = [];
+    await sweep(clockStart + 60_000);
+    assert.ok(!Object.keys(sighted.actions).some(key => key.startsWith('sweep:pane:')), 'a pane gone from the candidates leaves no waiting row');
+    standing = transient;
+    await sweep(clockStart + 200_000);
+    assert.deepEqual(transientClosed, [], 'a pane sighted again starts its bound over');
+    await sweep(clockStart + 330_000);
+    assert.deepEqual(transientClosed, ['pane-transient'], 'and closes once that bound passes');
+
     // AC-3: a backlog of 300 agentless worktree shells drains within an hour at the default interval,
     // and at two-minute cycles too: the cycle's reconciliation of pending actions must not restart
     // the bound the first sighting started, which would cost the drain a cycle.

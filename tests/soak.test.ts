@@ -163,7 +163,7 @@ const sideDayLeftovers = 8;
 const basePlan = {
   items: 15, releaseEveryMs: 15 * minute, workMs: 20 * minute,
   // GY-842: review panes of a previous day, standing agentless with their worktrees deleted —
-  // more than one pass's bound (GY-980 raised it to ten), so the drain takes several passes.
+  // more than one pass's bound (GY-980 raised it to twelve), so the drain takes several passes.
   leftovers: 12,
   // GY-980: of each class a previous day left in Graphyard worktrees — an unrecorded shell, a shell
   // whose handle stayed 'running', an ended session's idle agent — this many.
@@ -3157,6 +3157,11 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.deepEqual(sweptAs(/still recorded running/), previousWorktrees.filter(pane => /:stuck\d+$/.test(pane)), 'the sweep closed every shell whose handle stayed running');
   assert.ok(sweptAs(/still holds its claude agent/).length > 0, 'the sweep closed the ended sessions\' idle agents');
   assert.deepEqual(closedLeased, [], 'no pane was closed while its worker\'s attempt held a live lease');
+  // The sweep's sightings are reaped with their panes: no `sweep:pane:*` row stays waiting for a
+  // pane that no longer stands, so the cursor does not grow by one row per ended session.
+  const standingPanes = new Set(herdr.paneList().map(pane => pane.pane_id));
+  assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('sweep:pane:') && state.actions[key].state === 'waiting' && !standingPanes.has(key.slice('sweep:pane:'.length))), [],
+    'no sweep sighting stays waiting for a pane that is gone');
   // GY-544: every scope decision made between two cycles earned exactly one re-prompt for its attempt, and nothing else re-prompted it.
   assert.equal(decided.length, basePlan.scoped.size, 'scope requests were asked and decided between cycles');
   for (const attempt of decided) {

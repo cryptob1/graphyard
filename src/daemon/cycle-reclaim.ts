@@ -281,6 +281,13 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
         why: `holds no agent in the worktree of ${tree.key} epoch ${tree.epoch}, which holds no live lease${hit ? `, though its ${hit.handle.kind} session ${hit.handle.id} is still recorded running` : ' and no Graphyard session recorded it'}` });
     }
   }
+  // A sighting whose pane is no longer a candidate — another step or the operator closed it, it
+  // gained a live lease or an agent, or it left the inventory — starts over: its row would otherwise
+  // stand in the cursor forever, and a later pane at that coordinate would close without its bound.
+  const candidates = new Set(agentless.map(entry => `sweep:pane:${entry.pane}`));
+  const lapsed = Object.keys(state.actions).filter(key => key.startsWith('sweep:pane:') && state.actions[key].state === 'waiting' && !candidates.has(key));
+  for (const key of lapsed) delete state.actions[key];
+  if (lapsed.length) await effects.persist(state);
   let closed = 0;
   for (const { pane, name, key: work, item, why, boundMs } of agentless) {
     if (closed >= paneSweepLimit) break;
