@@ -3335,6 +3335,12 @@ test('unit:soak-invariants-hold — under GitHub delivery the main guard across 
   assert.equal(github.merges.filter(merge => merge.key === reverted).length, 2, 'the reopened item merged again on a fresh pull request');
   assert.notEqual(reopened.delivery?.mergeSha, brokenBy(reverted).mergeSha, 'its delivery is the new merge');
   assert.ok(reverts.find(revert => revert.key === reverted)!.merged, 'the App merged its revert');
+  // GY-1291: branch protection refuses the App's merge of its own push without another's approval,
+  // so the revert approver approved exactly the revert's head, once, after its diff was read once.
+  const mergedRevert = [...github.reverts].find(([, revert]) => revert.key === reverted)!;
+  assert.deepEqual(mergedRevert[1].approvals, [mergedRevert[1].head], 'the merged revert was approved at its head, once');
+  assert.deepEqual(github.guardRequests.filter(request => request.kind === 'approve').map(request => `${request.pr}@${request.sha}`), [`${mergedRevert[0]}@${mergedRevert[1].head}`], 'only the verified revert is approved, once');
+  assert.deepEqual(github.guardRequests.filter(request => request.kind === 'merge-diff' || request.kind === 'revert-diff').map(request => request.kind), ['merge-diff', 'revert-diff'], 'the diffs are read once, for the revert whose checks passed');
 
   // The given-up revert: closed after one attempt, its item left delivered, and one attention line.
   const kept = final.find(item => item.key === givenUp)!;
@@ -3342,6 +3348,7 @@ test('unit:soak-invariants-hold — under GitHub delivery the main guard across 
   assert.match(kept.mainGuardReverts![0].reason!, /own required checks failed: test/);
   assert.equal(kept.delivery?.mergeSha, brokenBy(givenUp).mergeSha, 'nothing withdrew the delivery whose revert was given up');
   assert.ok(reverts.find(revert => revert.key === givenUp)!.closed, 'its revert pull request was closed');
+  assert.deepEqual(reverts.find(revert => revert.key === givenUp)!.approvals, [], 'the revert whose checks failed was never approved');
   const lines = escalations.filter(detail => detail.startsWith('Main guard:'));
   assert.equal(lines.length, 1, `exactly one attention line across the day: ${lines.join(' | ')}`);
   assert.match(lines[0], new RegExp(`${givenUp}'s merge ${brokenBy(givenUp).mergeSha.slice(0, 12)}.*\\(test\\).*revert PR #\\d+`));
