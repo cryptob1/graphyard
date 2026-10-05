@@ -275,6 +275,15 @@ test('unit:broad-items-split-before-dispatch — the control plane makes the spl
   assert.equal((await request(worker, `work/${parent.key}/claim`, {})).status, 409, 'a split parent cannot be claimed directly');
   assert.equal((await request(operator, `work/${parent.key}/requirements`, { expectedPolicyRevision: 1, reason: 'r', criteria: parent.criteria, dependencies: [], plannedFiles: ['src/'], exclusiveResources: [] })).status, 409, 'requirements revision on a split parent is refused');
 
+  // A child keeps the criteria it inherited unchanged, or the parent would never be delivered; it may add its own.
+  const childRevision = (childCriteria: typeof criteria) => request(operator, `work/${first.key}/requirements`, { expectedPolicyRevision: first.policyRevision, reason: 'r', criteria: childCriteria, dependencies: first.dependencies, plannedFiles: first.plannedFiles, exclusiveResources: [] });
+  const reworded = await childRevision([{ ...first.criteria[0], text: 'Reworded.' }, first.criteria[1]]);
+  assert.equal(reworded.status, 409, 'rewriting an inherited criterion on a child is refused');
+  assert.match(JSON.stringify(reworded.body), /AC-1 of its split parent/);
+  assert.equal((await childRevision([first.criteria[0]])).status, 409, 'retiring an inherited criterion on a child is refused');
+  const added = await childRevision([...first.criteria, { id: 'AC-9', text: 'An added behaviour holds.', proofs: ['unit:behaviour-9'] }]);
+  assert.equal(added.status, 200, JSON.stringify(added.body));
+
   // The operator's opt-out is a requirements field on an existing item.
   const other = await engine.execute(operator, 'create', null, { title: 'Opt out later', criteria: criteria.slice(0, 2), plannedFiles: ['src/'] }, randomUUID());
   const revised = await request(operator, `work/${other.key}/requirements`, { expectedPolicyRevision: 1, reason: 'Keep it whole', criteria: other.criteria, dependencies: [], plannedFiles: ['src/'], exclusiveResources: [], split: false });

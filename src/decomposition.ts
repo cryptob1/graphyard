@@ -250,6 +250,21 @@ export function splitParentDelivery(child: Work, all: readonly Work[], now: Date
 }
 
 /**
+ * Why a requirements revision of a split child is refused, or null: the parent is delivered only
+ * when its children carry each of its criteria unchanged, so a child may add criteria but may not
+ * rewrite or retire one it inherited from the parent; that would leave the parent undelivered.
+ */
+export function splitChildRevisionRefusal(child: Work, parent: Work, revised: readonly { id: string; text: string; proofs: readonly string[] }[]): string | null {
+  const same = (left: { text: string; proofs: readonly string[] }, right: { text: string; proofs: readonly string[] }) =>
+    left.text === right.text && JSON.stringify(left.proofs) === JSON.stringify(right.proofs);
+  const inherited = child.criteria.filter(cr => parent.criteria.some(pc => pc.id === cr.id && same(pc, cr)));
+  const changed = inherited.filter(cr => !revised.some(next => next.id === cr.id && same(next, cr)));
+  return changed.length
+    ? `${child.key} carries ${changed.map(cr => cr.id).join(', ')} of its split parent ${parent.key}, which is delivered only when its children keep them unchanged; add criteria instead of rewriting or retiring inherited ones`
+    : null;
+}
+
+/**
  * Deliver the split parent of a child delivered in this transaction, with its own ledger event
  * (`decomposition.parent-delivered`). The delivery paths call it beside the child's own save.
  */

@@ -42,7 +42,7 @@ import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordInt
 import { dispatchFailureBlockAfter } from './daemon/dispatch-failures.js';
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
-import { deliverSplitParent } from './decomposition.js';
+import { deliverSplitParent, splitChildRevisionRefusal } from './decomposition.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
 import { coordinationProjection, isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type SavedVersion } from './store/locked-read.js';
 
@@ -1034,6 +1034,11 @@ export class Engine {
           if (data.answers.sha !== undefined) demand((work.candidate?.sha ?? null) === data.answers.sha, `The findings this widening rests on were read for ${data.answers.sha?.slice(0, 12) ?? 'no head'}, which is no longer the item's head`);
         }
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
+        if (work.parent) {
+          const parent: Work | undefined = (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [work.parent])).rows[0]?.document;
+          const refusal = parent ? splitChildRevisionRefusal(work, parent, data.criteria) : null;
+          demand(!refusal, refusal!);
+        }
         if (actor.role === 'operator-agent') {
           demand(work.criteria.every(previous => data.criteria.some((next: typeof previous) => next.id === previous.id && next.text === previous.text && JSON.stringify(next.proofs) === JSON.stringify(previous.proofs))), 'Operator agents may add requirements but cannot weaken or rewrite existing criteria');
           demand(work.dependencies.every(dependency => data.dependencies.includes(dependency)), 'Operator agents cannot remove dependencies');
