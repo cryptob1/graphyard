@@ -5,6 +5,7 @@ import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cycleCost, daemonSummary, deploymentListingPages, deploymentPageSize, emptyDaemonState, loopAttention, loopLiveness, maxDeploymentRequests, observeDeployment, runCycle, type ContainmentRetention, type CycleSteps, type DaemonEffects } from '../src/master-daemon.js';
+import { inFlightShadowBound } from '../src/daemon/deployment.js';
 import { masterConfigSchema, masterSettingsFromArgs, type MasterConfig, type MasterRun } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -523,7 +524,7 @@ test('unit:deployment-observation-inactive-release — the newest production dep
     const [old, mid, release] = fixture.shas;
     // `recent` is the history's other end, when it is longer than the read's first window.
     type Status = { latest: string; history: string[]; recent?: string[] } | null;
-    let records: { id: number; sha: string; ref: string; environment: string }[] = [];
+    let records: { id: number; sha: string; ref: string; environment: string; created_at?: string }[] = [];
     let status: Record<number, Status> = {};
     const run = (command: string, args: string[]) => {
       if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -540,7 +541,7 @@ test('unit:deployment-observation-inactive-release — the newest production dep
     };
     const configured = config(fixture.token, { run: { productionEnvironment: 'graphyard / production' } });
     const observe = () => observeDeployment(configured, fixture.delivered, run, fetch, () => clock, { root: fixture.checkout });
-    const production = (id: number, sha: string, ref = sha) => ({ id, sha, ref, environment: 'graphyard / production' });
+    const production = (id: number, sha: string, ref = sha, created_at = iso(-5 * 60_000)) => ({ id, sha, ref, environment: 'graphyard / production', created_at });
     // Railway's sequence on 2026-10-02: 14ebe09097 success at 08:07, inactive at 08:10, nothing newer.
     const deactivated = { latest: 'inactive', history: ['inactive', 'success', 'in_progress', 'queued'] };
 
@@ -599,6 +600,20 @@ test('unit:deployment-observation-inactive-release — the newest production dep
     // Once it concludes, it does: a success is the release, a failure leaves the older one unasserted.
     status[4] = { latest: 'failure', history: ['failure', 'in_progress'] };
     assert.equal((await observe()).source, 'unavailable');
+    // One that never concludes — abandoned, held by a protection rule, or with no status at all —
+    // stops shadowing the supersession once it is older than the bound, or when its age is unread.
+    for (const flight of ['pending', 'queued', 'in_progress', 'waiting']) {
+      status = { 4: { latest: flight, history: [flight] }, 3: deactivated };
+      records = [production(4, mid, mid, iso(-inFlightShadowBound)), production(3, release)];
+      assert.equal((await observe()).sha, release, `a ${flight} deployment exactly at the bound still does not supersede`);
+      records = [production(4, mid, mid, iso(-inFlightShadowBound - 1)), production(3, release)];
+      assert.equal((await observe()).source, 'unavailable', `a ${flight} deployment past the bound supersedes the inactive release`);
+      records = [{ id: 4, sha: mid, ref: mid, environment: 'graphyard / production' }, production(3, release)];
+      assert.equal((await observe()).source, 'unavailable', `a ${flight} deployment with no creation time never shadows`);
+    }
+    records = [production(4, mid, mid, iso(-2 * inFlightShadowBound)), production(3, release)];
+    status = { 4: { latest: 'pending', history: [] }, 3: deactivated };
+    assert.equal((await observe()).source, 'unavailable', 'a deployment that never received a status stops shadowing past the bound');
 
     // A success outside the first window of a long history is still seen at the history's other end.
     records = [production(3, release)];
