@@ -59,14 +59,14 @@ test('unit:review-criteria-only-prompt — the reviewer launch prompt states the
     // Each criterion, by id and text, judged met or unmet.
     '[AC-1] The widget counts every frob.', '[AC-2] The count is shown on the dashboard.', 'Judge each acceptance criterion met or unmet',
     // Each finding and thread classified by the definitions.
-    'as BLOCKING or FOLLOW-UP', 'BLOCKING: the head fails a stated acceptance criterion, or a correctness or security defect in the changed code breaks one of the item\'s own criteria',
-    'FOLLOW-UP: everything else — edge cases beyond the criteria, style, naming, hypotheticals, further hardening, and bot suggestions',
+    'as BLOCKING or FOLLOW-UP', 'BLOCKING: anything worth fixing before this merges', 'The same worker fixes BLOCKING findings on this pull request',
+    'FOLLOW-UP: nits only',
     // When to approve, and what a change request may cite.
     'APPROVE when every criterion is met and no finding or thread is BLOCKING',
-    'REQUEST_CHANGES cites only BLOCKING findings, and names for each the acceptance criterion it blocks', 'never request changes for a FOLLOW-UP',
+    'REQUEST_CHANGES cites only BLOCKING findings, and names for each the acceptance criterion or defect it concerns', 'never request changes for a FOLLOW-UP',
     // The closing lines.
     '"Resolved threads: ID1 ID2"', '"Follow-up threads: ID3 ID4"', '"Overridden threads: ID5 ID6"', 'End the review body with three lines',
-    'files the Follow-up threads and findings as one backlog item',
+    'nits are not filed as backlog items',
     // A finding with no thread has its own line, which the loop files in the same item.
     'Write each FOLLOW-UP finding of your own that has no review thread on a line of its own', '"Follow-up finding: PATH:LINE — what is wrong and why"',
   ]) assert.ok(prompt.includes(fragment), `the prompt must state: ${fragment}`);
@@ -867,4 +867,16 @@ test('unit:review-followups-filed — the dispatcher and master status reconcili
     assert.equal(after.reviews[0].followUps?.failure, undefined);
     assert.equal((await readReviewLedger(root)).reviews[0].followUps?.item, 'GY-201', 'the filing is on the saved ledger');
   } finally { await cleanup(); }
+});
+
+test('unit:follow-up-items-off — with GRAPHYARD_FOLLOW_UP_ITEMS=off a shipped parent owes no follow-up item; unset, it still does', async () => {
+  const { followUpItemsFiled, shippedFollowUpsOwed } = await import('../src/model/followups-held.js');
+  assert.equal(followUpItemsFiled({}), true);
+  assert.equal(followUpItemsFiled({ GRAPHYARD_FOLLOW_UP_ITEMS: 'off' }), false);
+  const parent = { key: 'GY-1', stage: 'done', delivery: { mergeSha: 'a'.repeat(40) }, pendingFollowUps: { at: '2026-10-05T00:00:00.000Z', findings: [{ path: 'src/a.ts', text: 'a nit' }] } } as any;
+  const before = process.env.GRAPHYARD_FOLLOW_UP_ITEMS;
+  try {
+    process.env.GRAPHYARD_FOLLOW_UP_ITEMS = 'off';
+    assert.equal(shippedFollowUpsOwed(parent), false);
+  } finally { if (before === undefined) delete process.env.GRAPHYARD_FOLLOW_UP_ITEMS; else process.env.GRAPHYARD_FOLLOW_UP_ITEMS = before; }
 });

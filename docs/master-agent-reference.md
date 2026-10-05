@@ -11,7 +11,7 @@
 
 ## Items, scope and human waits
 
-An unplanned file needs `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (other flags before `--` refused). Automatic, grounded: documentation; files criteria name; for `docs/` items, single `web/` and `browser-tests/` files; base files named literally in an unresolved thread or `CHANGES_REQUESTED` review (rechecked every 2 min); tests pinning planned quotes or criterion labels; files defining or calling rare criterion symbols; successors (renames, copies, `Graphyard-Successor` trailers, barrels); companions: docs-budget gate, timing baseline (beside top-level `tests/*.test.ts`), proofs' test file, test imports, web-UI files. Approver judges the rest (`--allow-broad-scope` needs reason); workers keep leases (`--wait` reads outcome). `master create`/`requirements` plan proofs' test file, baseline and docs-budget gate up front. One decider per request (`approve-scope` executor, else loop); repeats get standing decisions. Attempt-bound: ending (submit, release, lapse, rework, revision) closes requests as `attempt ended`; next attempt asks afresh; `master unblock GY-N` closes ended requests. Human decisions need `park GY-N EPOCH KIND NEEDED [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you)).
+An unplanned file needs `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (other flags before `--` refused). Granted automatically when grounded: documentation; files criteria name; single `web/` and `browser-tests/` files for `docs/` items; base files named literally in an unresolved thread or `CHANGES_REQUESTED` review (rechecked every 2 min); tests pinning planned quotes or criterion labels; files defining or calling rare criterion symbols; successors (renames, copies, `Graphyard-Successor` trailers, barrels); and companions (docs-budget gate, timing baseline beside top-level `tests/*.test.ts`, proofs' test file, test imports, web-UI files), which `master create`/`requirements` also plan up front. The approver judges the rest (`--allow-broad-scope` needs a reason); workers keep leases (`--wait` reads the outcome). One decider per request (`approve-scope` executor, else loop); repeats get standing decisions. Ending an attempt (submit, release, lapse, rework, revision) closes its requests as `attempt ended`; `master unblock GY-N` closes ended requests. Human decisions need `park GY-N EPOCH KIND NEEDED [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you)).
 
 ## Conflict avoidance
 
@@ -61,10 +61,6 @@ A `dispatch` or `request-review` finding a session already answering the request
 
 A failed snapshot read retries once (0.5–1.5 s); a failed cycle waits min(interval, 30 s), doubling. One item's throw fails only its `isolated:KIND:ITEM-ID` action.
 
-## Resources and disk
-
-`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees (`run.reclaimIdleHours`; never dirty/unpushed), `run.worktreeRemovalLimit`/cycle, logging `.graphyard/worktree-reclaim.jsonl`, stale [test temp entries](operations-reference.md#control-plane-resources) and `tsx-<uid>` in `/tmp` (dead owner or 2h/6h idle; unheld; ≤100/cycle, one pass in flight); `disk` attention below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`). Agentless panes Graphyard launched are swept each cycle ([panes](master-agent-sessions.md#panes-are-closed-and-reclaimed)). The resource reclaim closes any unowned, non-`working` pane on a profile's name — `unknown` status or a recordless reviewer/producer included — once two passes 60 s apart saw it.
-
 ## Recovery
 
 A dead supervisor fences its item; `containment` lists each surviving process's pid, cmdline and cwd. With `settleable: true` run `master settle-containment`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
@@ -84,3 +80,5 @@ Faults carry `faultClass` (`master status` `faults`); recurring classes file one
 ## Pipeline speed
 
 Target: submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over ten-plus deliveries. Rows' `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
+
+The loop's decisions step stays within 10 s a cycle at about 90 open items: one read of the `decision.*` ledger names the items whose decisions moved, and only those histories are reread, eight at a time. A history whose ledger has not moved is kept, not read.
