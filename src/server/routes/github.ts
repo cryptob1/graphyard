@@ -3,12 +3,15 @@ import { demand } from '../../model.js';
 import { defineRoutes } from '../routes.js';
 import { observationEvents } from '../../github.js';
 import { wakeFromWebhook } from '../../store/store.js';
+import { baseChangeFiles, baseMoveWakes } from '../../observation-priority.js';
+import type { Work } from '../../model.js';
 
 /**
  * GitHub webhook: HMAC-verified, deduplicated in Postgres, wakes the durable jobs. Observation
  * events (pull_request, pull_request_review, check_run, check_suite, push) also stamp the woken
  * jobs' webhook wake, so any replica claims them ahead of polled jobs, and base-branch pushes and
- * protection events end the receiving adapter's shared reads (GY-806).
+ * protection events end the receiving adapter's shared reads (GY-806). A base-branch push wakes only
+ * the open items it can affect (GY-1231, `baseMoveWakes`); the rest keep their cadence.
  */
 export const githubRoutes = defineRoutes('github', [
   {
@@ -30,7 +33,11 @@ export const githubRoutes = defineRoutes('github', [
         const result = await db.query('INSERT INTO webhook_receipts(id) VALUES($1) ON CONFLICT DO NOTHING RETURNING id', [delivery]);
         if (!result.rowCount) return null;
         // Wake only the items the event is about; a move of the base branch or a queue ref touches them all.
-        const subjects = webhookSubjects(payload, github?.config.base ?? 'main');
+        let subjects = webhookSubjects(payload, github?.config.base ?? 'main');
+        if (subjects.all && payload?.ref === `refs/heads/${github?.config.base ?? 'main'}`) {
+          const open = (await db.query("SELECT document FROM work_items WHERE document->>'stage' <> 'done'")).rows.map(row => row.document as Work);
+          subjects = baseMoveSubjects(subjects, open, baseChangeFiles(payload));
+        }
         if (!subjects.all && !subjects.prs.length && !subjects.shas.length && !subjects.branches.length) return [];
         // An observation event also stamps the job's webhook wake (GY-806), which every replica's claim puts first.
         return wakeFromWebhook(db, subjects, (observationEvents as readonly string[]).includes(event));
@@ -41,6 +48,18 @@ export const githubRoutes = defineRoutes('github', [
     },
   },
 ]);
+
+/**
+ * What a push to the base branch wakes (GY-1231): with the pushed files known, not every job but the
+ * pull requests of the open items `baseMoveWakes` selects, alongside whatever else the push named;
+ * with them unknown, every job as before.
+ */
+export function baseMoveSubjects(subjects: ReturnType<typeof webhookSubjects>, open: Work[], baseFiles: string[] | null): ReturnType<typeof webhookSubjects> {
+  if (!baseFiles) return subjects;
+  const woken = new Set(baseMoveWakes(open, baseFiles));
+  const prs = open.filter(work => woken.has(work.id)).map(work => work.submission!.pr);
+  return { ...subjects, all: false, prs: [...new Set([...subjects.prs, ...prs])] };
+}
 
 /**
  * The pull requests, commits and branches a webhook names, or `all` when it moved the base branch

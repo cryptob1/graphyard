@@ -11,12 +11,16 @@ import { CHECK_NAME, GitHub, mergePathReserve, observationBand, observationCaden
 import { evaluate, type Principal, type Work } from '../src/model.js';
 import { exhaustionAttention, githubBudgetAttention, pauseAttention, webhookAttention } from '../src/cli/github-budget-attention.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { baseChangeFiles, baseMoveWakes } from '../src/observation-priority.js';
+import { simulateObservationScheduler } from '../src/observation-simulation.js';
+import { baseMoveSubjects, webhookSubjects } from '../src/server/routes/github.js';
 
 // GY-117. Each test is named for the proof it produces: unit:github-budget-tracked,
 // integration:observation-cadence-by-state, integration:merge-path-reserve-held,
 // unit:unchanged-candidate-observation-cost, integration:rate-limit-pause-single-incident,
 // manual:github-budget-docs-review, unit:steady-state-spend-bounded,
 // integration:webhook-liveness-visible.
+// GY-1231: unit:base-move-wakes-only-affected-items, unit:merge-burst-request-budget.
 
 // ---- GitHub's REST surface at the fetch level: ETags, rate-limit headers, and a refusal mode ----
 
@@ -35,6 +39,8 @@ const etagOf = (body: string) => `"${createHash('sha1').update(body).digest('hex
 class Api {
   main = sha('main-1');
   pulls = new Map<number, { head: string; branch: string; approved: boolean; checks: 'success' | 'in_progress' }>();
+  /** The files a pull request changes, where a scenario names them (GY-1231); every other one changes one route file. */
+  files = new Map<number, string[]>();
   limit = 5000; remaining = 5000; resetAt = Math.ceil(Date.now() / 1000) + 3000;
   refuse = false;
   requests: { method: string; path: string; status: number }[] = [];
@@ -58,7 +64,7 @@ class Api {
     if (match) return params.get('page') !== '1' ? [] : this.pulls.get(Number(match[1]))!.approved ? [{ id: 40 + Number(match[1]), user: { login: 'independent-reviewer' }, commit_id: this.pulls.get(Number(match[1]))!.head, state: 'APPROVED', submitted_at: '2026-09-21T10:05:00Z' }] : [];
     match = /^\/pulls\/(\d+)\/files$/.exec(route);
     // GY-883: a public API path keeps the item in the high lane, whose full path still demands the proof the cadence bands presuppose.
-    if (match) return params.get('page') !== '1' ? [] : [{ filename: 'src/server/routes/feature.ts', status: 'modified', sha: sha(`blob-${match[1]}`), additions: 3, deletions: 1, patch: '@@' }];
+    if (match) return params.get('page') !== '1' ? [] : (this.files.get(Number(match[1])) ?? ['src/server/routes/feature.ts']).map(filename => ({ filename, status: 'modified', sha: sha(`blob-${match![1]}-${filename}`), additions: 3, deletions: 1, patch: '@@' }));
     match = /^\/commits\/([a-f0-9]{40})\/check-runs$/.exec(route);
     if (match) {
       if (params.get('check_name')) return { check_runs: [] };
@@ -270,10 +276,10 @@ const status = async () => (await realFetch(`${origin}/api/status`, { headers: {
  * One signed webhook delivery, as GitHub sends it. A delivery wakes only the pull request it
  * names; one naming none is a push to the base branch, which wakes every job.
  */
-async function webhook(work?: Work) {
+async function webhook(work?: Work, commits?: { added: string[]; removed: string[]; modified: string[] }[]) {
   process.env.GITHUB_WEBHOOK_SECRET ??= 'webhook-secret-for-the-test';
   const raw = JSON.stringify(work ? { action: 'synchronize', repository: { full_name: REPOSITORY }, pull_request: { number: work.submission!.pr } }
-    : { repository: { full_name: REPOSITORY }, ref: 'refs/heads/main', after: sha(`push-${randomUUID()}`) });
+    : { repository: { full_name: REPOSITORY }, ref: 'refs/heads/main', after: sha(`push-${randomUUID()}`), ...(commits ? { commits } : {}) });
   const response = await realFetch(`${origin}/api/github/webhook`, { method: 'POST', body: raw, headers: { 'content-type': 'application/json', 'x-github-delivery': randomUUID(), 'x-hub-signature-256': `sha256=${createHmac('sha256', process.env.GITHUB_WEBHOOK_SECRET).update(raw).digest('hex')}` } });
   assert.equal(response.status, 202, 'the delivery is accepted');
 }
@@ -503,4 +509,84 @@ test('integration:webhook-liveness-visible — status reports the last delivery 
   // With nothing open there is nothing to wake, so silence is not a fault.
   assert.deepEqual(webhookAttention({ ...after, webhooks: { ...after.webhooks, openPullRequests: 0 } }, Date.now() + 7_200_000), []);
   assert.equal(githubBudgetAttention(after, Date.now()).length, 0, 'nothing else is raised on a healthy budget');
+});
+
+test('unit:base-move-wakes-only-affected-items — a merge touching one file wakes exactly the open items whose pull requests touch it, or whose mergeability GitHub has not settled; every other job keeps its schedule', async t => {
+  const api = new Api();
+  t.mock.method(globalThis, 'fetch', api.fetch);
+  const github = api.client(); await serve(github);
+  // Ten open items, each observed once: two change src/a.ts, eight change files of their own.
+  const items: Work[] = [];
+  for (let index = 0; index < 10; index++) {
+    api.files.set(prNumber + 1, index < 2 ? ['src/a.ts', `src/own-${index}.ts`] : [`src/own-${index}.ts`]);
+    items.push(await job(await submitted(api, `Open ${index}`), github));
+  }
+  assert.ok(items.every(work => work.observation?.mergeable && !work.observation.conflicting && !work.observation.mergeabilityUnknown), 'every reading is one GitHub computed mergeable (no conflict with the base)');
+  // Every job is scheduled an hour out, then main moves by one change to src/a.ts.
+  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour',webhook_at=NULL");
+  await webhook(undefined, [{ added: [], removed: [], modified: ['src/a.ts'] }]);
+  const woken = async () => (await store.pool.query('SELECT work_id FROM jobs WHERE available_at <= now()')).rows.map(row => String(row.work_id)).sort();
+  assert.deepEqual(await woken(), items.slice(0, 2).map(work => work.id).sort(), 'exactly the two items touching src/a.ts are woken');
+  // A push whose files the payload cannot name (none listed, forced, or truncated at 20 commits) wakes every job, as before.
+  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour',webhook_at=NULL");
+  await webhook();
+  assert.equal((await woken()).length, 10, 'a base push with unknown files wakes every item');
+  assert.equal(baseChangeFiles({ forced: true, commits: [{ added: [], removed: [], modified: ['x'] }] }), null);
+  assert.equal(baseChangeFiles({ commits: Array.from({ length: 20 }, () => ({ added: [], removed: [], modified: ['x'] })) }), null);
+  assert.deepEqual(baseChangeFiles({ commits: [{ added: ['n.ts'], removed: ['o.ts'], modified: ['m.ts'] }, { added: [], removed: [], modified: ['m.ts'] }] }), ['n.ts', 'o.ts', 'm.ts']);
+
+  // The selection itself: an item whose last reading is conflicting (DIRTY), still computing
+  // (UNKNOWN) or missing is woken whatever its files; a settled one only when its files overlap.
+  const fleet = await store.list();
+  const [dirty, unknown, unread] = [fleet[4], fleet[5], fleet[6]];
+  const states = fleet.map(work => work.id === dirty.id ? { ...work, observation: { ...work.observation!, mergeable: false, conflicting: true } }
+    : work.id === unknown.id ? { ...work, observation: { ...work.observation!, mergeable: false, mergeabilityUnknown: true } }
+      : work.id === unread.id ? { ...work, observation: null } : work) as Work[];
+  assert.deepEqual(baseMoveWakes(states, ['src/a.ts']).sort(), [items[0].id, items[1].id, dirty.id, unknown.id, unread.id].sort());
+  assert.deepEqual(baseMoveWakes(states, []).sort(), [dirty.id, unknown.id, unread.id].sort());
+  assert.equal(baseMoveWakes(states, null).length, 10);
+  // The route's subjects: the woken items' pull requests, never `all`; a queue ref still wakes every job.
+  const push = { ref: 'refs/heads/main', after: sha('m'), commits: [{ added: [], removed: [], modified: ['src/a.ts'] }] };
+  const subjects = baseMoveSubjects(webhookSubjects(push, 'main'), fleet, baseChangeFiles(push));
+  assert.deepEqual([subjects.all, subjects.prs.sort()], [false, items.slice(0, 2).map(work => work.submission!.pr).sort()]);
+  assert.equal(webhookSubjects({ ref: 'refs/graphyard/queue/GY-1', after: sha('q') }, 'main').all, true);
+});
+
+test('unit:merge-burst-request-budget — ten merges in ten minutes over 80 open items spend at most 1500 charged GitHub requests, with each reading costed by the real client against a provider that answers conditional reads with free 304s', async t => {
+  const api = new Api();
+  t.mock.method(globalThis, 'fetch', api.fetch);
+  const github = api.client();
+  // 80 open candidates: candidate i changes one of twenty areas, so each area is shared by four.
+  const candidates = Array.from({ length: 80 }, (_, index) => {
+    const pr = api.open(400 + index, `graphyard/gy-m${index}-1`); api.files.set(400 + index, [`src/area-${index % 20}.ts`, `src/own-${index}.ts`]);
+    return item(`GY-M${index}`, 400 + index, pr.head, api.main);
+  });
+  // What one reading costs, measured with the real client over the whole fleet: the first, an unchanged one, and the first after main moved.
+  let all: Work[] = [];
+  const first: number[] = [];
+  for (const candidate of candidates) { const measured = await github.measured(() => github.observe(candidate, candidates)); first.push(measured.uncached); all.push(evaluated(candidate, candidates, measured.value)); }
+  const read = async () => { const costs: number[] = []; for (const candidate of [...all]) { const measured = await github.measured(() => github.observe(candidate, all)); costs.push(measured.uncached); all = all.map(entry => entry.id === candidate.id ? evaluated(candidate, all, measured.value) : entry); } return costs; };
+  await read();
+  const unchanged = await read();
+  // Main moves, and its push webhook ends the client's shared read of the base ref, as in production.
+  api.main = sha('main-2'); github.noteWebhook('push', { ref: 'refs/heads/main' });
+  const moved = await read();
+  if (process.env.GRAPHYARD_BUDGET_DEBUG) console.log({ first, unchanged, moved });
+  // Each reading is charged the worst any candidate paid for it: the bound holds for the costliest readings.
+  const max = (costs: number[]) => Math.max(...costs), mean = (costs: number[]) => costs.reduce((sum, cost) => sum + cost, 0) / costs.length;
+  const requestCost = { unchanged: max(unchanged), changed: max(first), baseMoved: max(moved) };
+  assert.ok(mean(unchanged) <= 2 && mean(moved) > mean(unchanged), `a base move is paid for, and an unchanged reading mostly is not (${mean(unchanged)}, ${mean(moved)})`);
+  // Four candidates GitHub last read as conflicting: a base move may settle them, so every merge wakes them.
+  all = all.map((work, index) => index % 20 === 7 ? { ...work, observation: { ...work.observation!, mergeable: false, conflicting: true } } : work) as Work[];
+  // Ten merges a minute apart, each changing one area; ten minutes of the default workers.
+  const options = { all, workers: 8, steadyMs: steadyStateInterval(80, null, 5000), jobMs: 13_000, durationMs: 10 * 60_000, changedShare: 0.1, requestCost,
+    baseMoves: Array.from({ length: 10 }, (_, index) => ({ atMs: 30_000 + index * 60_000, files: [`src/area-${index * 2}.ts`] })) };
+  const run = simulateObservationScheduler(options);
+  if (process.env.GRAPHYARD_BUDGET_DEBUG) console.log('merge burst', { requestCost, requests: run.requests, claims: run.claims, woken: run.woken.map(keys => keys.length) });
+  assert.ok(run.woken.every(keys => keys.length === 8), `each merge wakes its area's four candidates and the four conflicting ones (${run.woken.map(keys => keys.length)})`);
+  assert.ok(run.requests <= 1500, `ten merges over 80 open items spent ${run.requests} charged requests, over 1500`);
+  // The simulation discriminates: waking every open item on each merge, as before GY-1231, spends past the bound.
+  const before = simulateObservationScheduler({ ...options, baseMoves: options.baseMoves.map(move => ({ ...move, files: null })) });
+  if (process.env.GRAPHYARD_BUDGET_DEBUG) console.log('before', before.requests, before.claims);
+  assert.ok(before.woken.every(keys => keys.length === 80) && before.requests > 1500, `waking every item on each merge spends ${before.requests}`);
 });

@@ -11,6 +11,12 @@
 - **Per cycle:** base ref once per 15 s (restarted by a base push or own ref write); protection and branch rules (required checks) every 5 min or on a protection, ruleset or `repository` event.
 - **Webhooks:** `pull_request`, `pull_request_review`, `check_run`, `check_suite` and `push` (branch pushes too) claim items first on any replica; a poll within a webhook-driven observation's interval is skipped (`poll skipped: a webhook refreshed this item`).
 
+## Base moves
+
+A push to the base branch (each merge into main) wakes at once only the open items it can affect: those whose pull-request files overlap the files the push changed, and those whose last reading GitHub had not computed mergeable — conflicting (`DIRTY`), still computing (`UNKNOWN`) or never read. An item read mergeable (`CLEAN`, `UNSTABLE`: no conflict with the base) keeps its cadence; the queue's head band is observed every 20 s anyway. A push whose files the payload cannot name (forced, no commits listed, or 20 commits, GitHub's truncation) wakes every item; so does a `refs/graphyard/*` move.
+
+The request budget per merge is those wakes: a woken item's next reading pays for the new base (its pull request and compare, about 5 requests), while unchanged reads are free 304s. Ten merges in ten minutes over 80 open items stay under 1500 requests (`unit:merge-burst-request-budget`); waking every item on each merge spent past that and, on 2026-10-05, paused GitHub requests for 34 minutes.
+
 ## Prioritized wakes
 
 A guarded merge refused for ten minutes is reworked or re-reviewed (GY-831), except a refusal standing only on a missing or stale observation, every other gate passing. That candidate keeps its queue position: the loop sends `POST /api/work/:id/resync` with `prioritized: true`, recorded as a `refresh` action and repeated at most once per two-minute window while the refusal stands. A prioritized wake, and the wake of a merge request's enqueue, is claimed like a webhook's, oldest first.
