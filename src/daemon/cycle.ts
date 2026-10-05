@@ -100,7 +100,10 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
 }
 
 async function cycle(config: MasterConfig, state: DaemonState, unbounded: DaemonEffects, now: () => number, timings: Timings, launcher: Launcher, settle: boolean) {
-  const effects = serialPersist(boundedPersist(unbounded), unbounded);
+  // Every pane a step of this cycle closes, so a later step reading the same cycle-start inventory
+  // never closes it again (GY-980).
+  const closedPanes = new Set<string>();
+  const effects = trackClosedPanes(serialPersist(boundedPersist(unbounded), unbounded), closedPanes);
   if (!settle) launcher.concurrency = config.run.launchConcurrency ?? defaultLaunchConcurrency;
   const startedAt = now();
   const read = await timings.step('snapshot', () => effects.snapshot());
@@ -192,14 +195,14 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // The decision histories a loop keeps between its cycles (GY-1142) are its own, like its write chain.
   let heldDecisions = heldHistories.get(unbounded);
   if (!heldDecisions) heldHistories.set(unbounded, heldDecisions = emptyHeldDecisions());
-  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, launcher, launch, detached: !settle, baseFailed: new Map(), exhaustedProofs, heldDecisions };
+  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, launcher, launch, detached: !settle, baseFailed: new Map(), exhaustedProofs, heldDecisions, closedPanes };
   /** A cycle that owns its launcher waits for what a step handed it; the loop's cycles never do. */
   const settleLaunches = async () => { if (settle && launcher.pending) { await timings.step('launches', () => launcher.idle()); performed.push(...launcher.drain()); } };
   await timings.step('close', () => closeStep(cycle));
   await settleLaunches();
 
   // A pane this cycle just closed frees its profile, so health is read after the closures.
-  const health = profileHealth(config.workers, credentials, await timings.step('observe', () => effects.agents()), state, clock);
+  const health = profileHealth(config.workers, credentials, await timings.step('observe', () => effects.agents()), state, clock, snapshot.work);
 
   // 1m. The loop's own master session (GY-898): launch, adopt, supervise, rotate, wake. Isolated
   //     like every step: a failed launch or wake is its own action, and the cycle goes on.
@@ -314,6 +317,12 @@ function serialPersist(effects: DaemonEffects, owner: object): DaemonEffects {
   return new Proxy(effects, { get: (target, property, receiver) => property === 'persist' ? persist : Reflect.get(target, property, receiver) });
 }
 
+/** Records every pane closed through `closeSession` into `closed`, once the close returns. */
+function trackClosedPanes(effects: DaemonEffects, closed: Set<string>): DaemonEffects {
+  const closeSession = async (pane: string) => { await effects.closeSession(pane); closed.add(pane); };
+  return new Proxy(effects, { get: (target, property, receiver) => property === 'closeSession' ? closeSession : Reflect.get(target, property, receiver) });
+}
+
 /** What every step of one cycle reads: the snapshot it acts on, the cursor, and the cycle's own bookkeeping. */
 export interface Cycle {
   config: MasterConfig; state: DaemonState; effects: DaemonEffects; now: () => number;
@@ -336,4 +345,6 @@ export interface Cycle {
   detached: boolean;
   /** The decision histories read on earlier cycles of this loop (GY-1142), which the decisions step keeps while their ledger has not moved. */
   heldDecisions: HeldDecisions;
+  /** The panes this cycle's steps have closed so far: the cycle-start inventory still lists them. */
+  closedPanes: Set<string>;
 }

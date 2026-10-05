@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import type { ChildRun } from '../child-runner.js';
 import type { ContainmentScope, Work } from '../model.js';
 import { scopePattern, watchAssignment } from '../supervisor.js';
-import type { WorkerProfile, HerdrAgent } from '../master.js';
+import { agentAssignment, finishedAgentStates, reclaimableAgent, type WorkerProfile, type HerdrAgent } from '../master.js';
 import { type DaemonAction, type DaemonState, message, profileCooldownMs } from './state.js';
 
 /** An assignment whose watch supervisor has outlived the session it was launched to run. */
@@ -67,20 +67,34 @@ export interface ProfileHealth { profile: WorkerProfile; healthy: boolean; busy:
  * A profile is dispatchable only when its credential still authenticates its principal, its agent
  * name is free in Herdr, and it is not inside a failure cool-off. Everything else routes around it.
  * A profile that is merely working is `busy`: that is capacity, not something to escalate.
+ *
+ * GY-1322: a name held by a finished session (idle or done) that no live assignment in `work` owns
+ * is free — the dispatch bounded-closes that session and launches as on a profile with no agent —
+ * so a fleet that just drained dispatches. A finished session a live lease still owns is `busy`,
+ * and its reason names the agent's state, the lease and the remedy.
  */
-export function profileHealth(profiles: WorkerProfile[], credentials: Record<string, { available: boolean; reason: string | null }>, agents: HerdrAgent[], state: DaemonState, now: number): ProfileHealth[] {
+export function profileHealth(profiles: WorkerProfile[], credentials: Record<string, { available: boolean; reason: string | null }>, agents: HerdrAgent[], state: DaemonState, now: number, work: readonly Work[] = []): ProfileHealth[] {
   return profiles.map(profile => {
     const credential = credentials[profile.name] ?? { available: true, reason: null };
-    const agent = agents.find(candidate => candidate.name === profile.agentName);
+    const found = agents.find(candidate => candidate.name === profile.agentName);
+    const agent = reclaimableAgent(profile, found, work, now) ? undefined : found;
     const cooldown = state.profiles[profile.name]?.cooldownUntil;
     const busy = profile.mode === 'launch' && credential.available && !!agent;
     const reason = profile.mode !== 'launch' ? 'Existing sessions are observed only; Graphyard will not inject new work into an unsupervised process'
       : !credential.available ? credential.reason ?? 'Worker credential is unavailable'
-        : agent ? `Herdr agent ${profile.agentName} is ${agent.agent_status ?? 'present'}`
+        : agent ? agentReason(profile, agent, work, now)
           : cooldown && Date.parse(cooldown) > now ? `Cooling off after a failed launch until ${cooldown}: ${state.profiles[profile.name]?.reason ?? 'launch failed'}`
             : null;
     return { profile, healthy: !reason, busy, reason };
   });
+}
+/** Why an agent holding a launch profile's name keeps it from dispatch, with the remedy when the agent is finished. No parentheses: refusals list each reason inside them. */
+function agentReason(profile: WorkerProfile, agent: HerdrAgent, work: readonly Work[], now: number) {
+  const status = agent.agent_status ?? 'present';
+  if (!finishedAgentStates.includes(status)) return `Herdr agent ${profile.agentName} is ${status}`;
+  const owner = agentAssignment(profile, agent, work, now);
+  if (owner) return `Herdr agent ${profile.agentName} is ${status} under ${owner.key}'s live lease; remedy: bounded close or relaunch once that lease ends${agent.pane_id ? `, or herdr pane close ${agent.pane_id} on the host` : ''}`;
+  return `Herdr agent ${profile.agentName} is ${status} with no pane to close; remedy: relaunch the session or restart Herdr on the host`;
 }
 
 /** Retry a refused action on a widening cycle interval rather than on every pass. */

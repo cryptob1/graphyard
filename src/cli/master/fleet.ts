@@ -19,11 +19,27 @@ import type { AttentionItem, MasterConfig } from '../../master.js';
  * The master's installed Claude harness judged against the current `masterHarness` plan (GY-1217):
  * an attention item naming the stale and missing rules, repaired by `master harness claude --apply`,
  * or null when it matches or nothing is installed. A settings file it cannot read is reported too.
+ *
+ * The recorded remedy is applied, not only printed (GY-1308): drift was printed at every master
+ * status pass for hours while the merge and push denies stayed missing from the settings every
+ * session in the checkout loads. With `repair` (the default, as `master status` reads it) the same
+ * idempotent write `master harness claude --apply` makes runs first — operator-added entries are
+ * kept — and the item is returned only when drift survives it; the repair itself is logged to stderr.
  */
-export async function masterHarnessDrift(root: string, master: MasterConfig): Promise<(AttentionItem & { drift: Awaited<ReturnType<typeof harnessDrift>> }) | null> {
+export async function masterHarnessDrift(root: string, master: MasterConfig, options: { repair?: boolean; log?: (line: string) => void } = {}): Promise<(AttentionItem & { drift: Awaited<ReturnType<typeof harnessDrift>> }) | null> {
   const repair = 'graphyard master harness claude --apply';
+  const plan = masterHarness(root, master, 'claude');
   try {
-    const drift = await harnessDrift(root, masterHarness(root, master, 'claude'));
+    let drift = await harnessDrift(root, plan);
+    if (drift && (options.repair ?? true)) {
+      try {
+        await writeHarnessPermissions(root, plan, true);
+        (options.log ?? (line => console.error(line)))(`Repaired harness drift in ${drift.file} with ${repair}: ${drift.text.replace(/^Harness drift in \S+: /, '').replace(/ Run graphyard .*$/, '')}`);
+      } catch (error) {
+        return { subject: 'harness', text: `${drift.text} Applying it automatically failed: ${error instanceof Error ? error.message : 'unknown reason'}`, drift, ...agentOwner('master', repair) };
+      }
+      drift = await harnessDrift(root, plan);
+    }
     return drift ? { subject: 'harness', text: drift.text, drift, ...agentOwner('master', repair) } : null;
   } catch (error) {
     return { subject: 'harness', text: `The master's harness settings cannot be compared with the current plan: ${error instanceof Error ? error.message : 'unknown reason'}`, drift: null, ...agentOwner('master', repair) };

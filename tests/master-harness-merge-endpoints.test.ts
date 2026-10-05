@@ -79,7 +79,7 @@ test('unit:master-harness-drift-reported — an installed older rule set is repo
     await writeFile(join(root, '.claude/settings.local.json'), JSON.stringify(older));
     await writeFile(join(root, '.gitignore'), '.claude/settings.local.json\n');
 
-    const item = await masterHarnessDrift(root, master);
+    const item = await masterHarnessDrift(root, master, { repair: false });
     assert.ok(item, 'the older rule set is drift');
     assert.equal(item.subject, 'harness');
     assert.equal(item.next, 'graphyard master harness claude --apply');
@@ -102,5 +102,67 @@ test('unit:master-harness-drift-reported — an installed older rule set is repo
     assert.ok(settings.permissions.allow.includes('Bash(npm test)') && settings.permissions.deny.includes('Bash(rm -rf /)'), 'operator-added rules are kept');
     assert.equal(settings.model, 'opus', 'other settings are kept');
     assert.equal(await masterHarnessDrift(root, master), null, 'the rewritten harness matches the plan');
+  } finally { await cleanup(); }
+});
+
+// GY-1308: the coordinator checkout's settings lost the merge and push denies and kept the retired
+// word-wide GraphQL deny; master status printed the remedy for hours and nothing applied it.
+const driftRules = ['Bash(gh pr merge:*)', 'Bash(gh api *pulls/*/merge*)', 'Bash(gh api *repos/*/merges*)', 'Bash(gh api *merge-upstream*)',
+  'Bash(gh api graphql*mutation*)', 'Bash(gh api graphql*=@*)', 'Bash(gh api graphql*--input*)', 'Bash(git push:*)'];
+async function drifted(root: string, master: MasterConfig) {
+  const plan = masterHarness(root, master, 'claude');
+  const installed = { permissions: { allow: [...plan.allow.map(entry => entry.rule), 'Bash(npm test)'], deny: [...plan.deny.map(entry => entry.rule).filter(rule => !driftRules.includes(rule)), 'Bash(gh api graphql*)', 'Bash(rm -rf /)'] }, model: 'opus' };
+  await mkdir(join(root, '.claude'), { recursive: true });
+  await writeFile(join(root, '.claude/settings.local.json'), JSON.stringify(installed));
+  await writeFile(join(root, '.gitignore'), '.claude/settings.local.json\n');
+  return { plan, installed };
+}
+
+test('unit:harness-drift-clears-after-apply — applying the claude harness plan rewrites the drifted settings so the next master status pass reports no stale and no missing deny rules, and master status applies it itself', async () => {
+  const { root, master, cleanup } = await repository();
+  try {
+    const { plan } = await drifted(root, master);
+    const before = await masterHarnessDrift(root, master, { repair: false });
+    assert.deepEqual(before!.drift!.stale, [{ list: 'deny', rule: 'Bash(gh api graphql*)' }]);
+    assert.deepEqual(before!.drift!.missing.map(entry => entry.rule).sort(), [...driftRules].sort());
+    // `graphyard master harness claude --apply` is this write.
+    assert.equal((await writeHarnessPermissions(root, plan, true)).applied, true);
+    assert.equal(await masterHarnessDrift(root, master, { repair: false }), null, 'no stale and no missing rules after apply');
+
+    // Drift again: the master status pass applies the recorded remedy instead of only printing it.
+    await drifted(root, master);
+    const logged: string[] = [];
+    assert.equal(await masterHarnessDrift(root, master, { log: line => logged.push(line) }), null, 'master status repairs drift and reports none');
+    assert.equal(logged.length, 1);
+    assert.match(logged[0]!, /^Repaired harness drift in \.claude\/settings\.local\.json with graphyard master harness claude --apply: stale deny Bash\(gh api graphql\*\); missing deny Bash\(gh pr merge:\*\)/);
+    assert.equal(await masterHarnessDrift(root, master, { repair: false }), null, 'the repair persisted');
+
+    // A settings file that is not a JSON object is never overwritten; the drift stays reported.
+    await writeFile(join(root, '.claude/settings.local.json'), '[]');
+    const unreadable = await masterHarnessDrift(root, master, { log: () => assert.fail('nothing was repaired') });
+    assert.ok(unreadable, 'drift that cannot be repaired stays an attention item');
+    assert.match(unreadable.text, /Applying it automatically failed: Existing harness settings are not a JSON object/);
+    assert.equal(await readFile(join(root, '.claude/settings.local.json'), 'utf8'), '[]');
+  } finally { await cleanup(); }
+});
+
+test('unit:harness-deny-plan-names-every-drift-rule — the rewritten deny list holds every rule the drift check named and drops only the stale graphql deny, keeping allow rules and read-only gh usage', async () => {
+  const { root, master, cleanup } = await repository();
+  try {
+    const { plan, installed } = await drifted(root, master);
+    for (const rule of driftRules) assert.ok(plan.deny.some(entry => entry.rule === rule), `${rule} is in the master deny plan`);
+    const written = await writeHarnessPermissions(root, plan, true);
+    assert.deepEqual(written.removed, [{ list: 'deny', rule: 'Bash(gh api graphql*)' }], 'only the stale graphql deny is removed');
+    const settings = JSON.parse(await readFile(join(root, '.claude/settings.local.json'), 'utf8'));
+    for (const rule of driftRules) assert.ok(settings.permissions.deny.includes(rule), `${rule} is installed`);
+    assert.ok(!settings.permissions.deny.includes('Bash(gh api graphql*)'));
+    assert.deepEqual(settings.permissions.deny.filter((rule: string) => !driftRules.includes(rule)), installed.permissions.deny.filter(rule => rule !== 'Bash(gh api graphql*)'), 'every other deny is kept');
+    assert.deepEqual(settings.permissions.allow, installed.permissions.allow, 'allow rules are intact');
+    assert.equal(settings.model, 'opus');
+    // Read-only gh usage the harness needs still runs.
+    for (const command of allowed) assert.notEqual(harnessDecision(plan, command).decision, 'deny', `${command} stays open`);
+    for (const command of ['gh pr view 606 --json state', 'gh pr checks 606', 'gh pr diff 606', 'gh pr list --head graphyard/gy-1'])
+      assert.equal(harnessDecision(plan, command).decision, 'allow', `${command} is allowed`);
+    for (const command of ['gh pr merge 606 --squash', 'git push origin main', 'gh api graphql --input body.json']) assert.equal(harnessDecision(plan, command).decision, 'deny', `${command} is denied`);
   } finally { await cleanup(); }
 });

@@ -198,7 +198,7 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
   const launchWorker = async (action: ActionRow, work: Work, all: Work[], observedAt: string) => {
     const agents = await herdr();
     const workers = config().workers;
-    const health = profileHealth(workers, await effects.workerCredentials(workers), agents, statelessProfiles, Date.parse(observedAt) || Date.now());
+    const health = profileHealth(workers, await effects.workerCredentials(workers), agents, statelessProfiles, Date.parse(observedAt) || Date.now(), all);
     const choices = health.filter(entry => entry.healthy);
     if (!choices.length) throw new Error(`no worker profile can take ${work.key}: ${health.map(entry => `${entry.profile.name} (${entry.reason})`).join('; ') || 'no launch profile is configured'}`);
     const workspace = config().herdrWorkspace;

@@ -6,7 +6,7 @@ import { dispatchSort } from '../coordination.js';
 import { type CapacityRole, capacitySignature, standingCapacity, describeCapacity } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { humanNeededActions } from '../model/next-action.js';
-import { assertDispatchable, dispatchReserved, type ContainmentAssessment, type EscalationSession, type RoleCapacity, roleCapacity } from '../master.js';
+import { assertDispatchable, dispatchReserved, reclaimableAgent, type ContainmentAssessment, type EscalationSession, type RoleCapacity, roleCapacity } from '../master.js';
 import { workspaceDispatchFailure } from '../master/dispatch.js';
 import { standingEscalations } from '../model/escalation.js';
 import { registeredLaunch } from '../model/session-state.js';
@@ -230,7 +230,8 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     const free = await effects.agents();
     // After an attempt ended as reblocked (GY-867), a profile on another runtime is tried first.
     const order = preferOtherRuntime(health, runtimeToAvoid(item));
-    const pick = () => order.find(entry => entry.healthy && !taken.has(entry.profile.name) && !free.some(agent => agent.name === entry.profile.agentName));
+    // A finished session no live assignment owns does not hold its profile (GY-1322): the launch closes it.
+    const pick = () => order.find(entry => entry.healthy && !taken.has(entry.profile.name) && !free.some(agent => agent.name === entry.profile.agentName && !reclaimableAgent(entry.profile, agent, snapshot.work, clock)));
     let choice = pick();
     if (!choice) {
       // Every launch profile working is capacity, not a decision for anyone. Escalate only when no
@@ -300,13 +301,13 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
           id: `${current.profile.principal}:${item.epoch + 1}`, kind: 'implementation', principal: current.profile.principal, runtime: current.profile.kind ?? current.profile.mode, host: config.hostId,
           ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
           subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
-        }, async () => await effects.dispatch(item, current.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string; reclaimed?: string[] } | undefined,
+        }, async () => await effects.dispatch(item, current.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string; reclaimed?: string[]; closedAgent?: string } | undefined,
         launched => launched, pane => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`);
         clearProfileFailure(state, current.profile);
         delete state.dispatchFailures[item.id];
         // The file comes before the claimant keys, so the 2000-character detail bound trims a long
         // key list and never the file it contends on; a cold dispatch records nothing new here.
-        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${current.profile.name}; the worker launcher claimed under ${current.profile.principal}${hotspotNote(beside)}${launched?.reclaimed?.length ? `; freed its branch by reclaiming ${launched.reclaimed.join('; ')}` : ''}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${current.profile.name}; the worker launcher claimed under ${current.profile.principal}${hotspotNote(beside)}${launched?.reclaimed?.length ? `; freed its branch by reclaiming ${launched.reclaimed.join('; ')}` : ''}${launched?.closedAgent ? `; closed finished session ${launched.closedAgent} that held the profile's name` : ''}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
         return;
       } catch (error) {
         // Another dispatcher — an executor, or a hand dispatch — holds the profile or the item
@@ -328,8 +329,8 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
         const workspace = workspaceDispatchFailure(message(error));
         if (!workspace) recordProfileFailure(state, current.profile, message(error), now());
         const run = noteDispatchFailure(state, item, message(error), new Date(now()).toISOString());
-        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}${workspace ? " (the item's workspace could not be prepared on this host; the profile is not cooled off and the item's next dispatch waits out a doubling backoff)" : ''} (failure ${run.count} of ${dispatchFailureBlockAfter} with this cause)`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
-        if (run.count >= dispatchFailureBlockAfter) performed.push(...await blockRepeatedFailure(item));
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}${workspace ? " (the item's workspace could not be prepared on this host; the profile is not cooled off and the item's next dispatch waits out a doubling backoff)" : ''}${run.count ? ` (failure ${run.count} of ${dispatchFailureBlockAfter} with this cause)` : ' (a fleet-idle cause, which never counts toward a dispatch-failure blocker)'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        if (run.count && run.count >= dispatchFailureBlockAfter) performed.push(...await blockRepeatedFailure(item));
         return;
       }
     }
