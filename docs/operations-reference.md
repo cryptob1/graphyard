@@ -7,7 +7,7 @@ Restarting `graphyard master run` never double-dispatches. `master status` → `
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge, or *already recording deployment* (follow-up). Without `--deployment-url` it reads `productionEnvironment` deployments only; the newest, if successful, counts even when inactive.
+`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge, or *already recording deployment*. Without `--deployment-url` it reads `productionEnvironment` deployments: newest success counts even inactive or behind sub-hour pending/queued/in_progress/waiting ones.
 
 ## Lost worker before submission
 
@@ -66,7 +66,7 @@ A `403`/`429` pauses requests; gates read stale until it lifts: nothing merges o
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also in `master status`): `perHour` across replicas (`instances`), `limit`, `share`, `target` 0.6, `byEndpoint`; the 2026-09-26 mix replays at 54%.
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also in `master status`): REST-only `perHour` across replicas (`instances`), `limit`, `share`, `target` 0.6, `byEndpoint`; 2026-09-26's mix replays at 54%.
 
 ### Webhook liveness
 
