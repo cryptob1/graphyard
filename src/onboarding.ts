@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import { sessionNameField, suffixedSessionName } from './session-name.js';
+import { defaultCandidateSchedule, deliveryPolicySchema, generatedWorkflowFiles, type DeliveryMode, type DeliveryPolicy, type GateCheck } from './model/delivery-policy.js';
 
 export function repositoryFromRemote(remote: string) {
   const value = remote.trim();
@@ -72,7 +73,7 @@ const scanInteresting: RegExp[] = [
   /^package\.json$/, /^pyproject\.toml$/, /^requirements(?:-dev)?\.txt$/, /^setup\.(?:py|cfg)$/, /^Pipfile$/, /^tox\.ini$/,
   /^Dockerfile(?:\.[^/]*)?$/, /^(?:docker-)?compose\.ya?ml$/, /^railway\.(?:json|toml)$/, /^vercel\.json$/, /^fly\.toml$/, /^netlify\.toml$/,
   /^\.nojekyll$/, /^CNAME$/, /^index\.html$/, /^\.env\.example$/, /^pytest\.ini$/, /^conftest\.py$/,
-  /^\.github\/workflows\/[^/]+\.ya?ml$/,
+  /^\.github\/workflows\/[^/]+\.ya?ml$/, /^graphyard\.json$/,
 ];
 const scanLimits = { files: 5000, depth: 6, bytes: 262_144 };
 
@@ -90,6 +91,9 @@ export async function collectScanInput(root: string): Promise<ScanInput> {
       if (entry.isDirectory()) { await walk(path, depth + 1); continue; }
       if (!entry.isFile()) continue;
       files.push(path);
+      // The workflows `init --apply` generates are Graphyard's output, never an input to the next
+      // scan: reading them back would make every apply change the scan it was applied from.
+      if ((generatedWorkflowFiles as readonly string[]).includes(path)) continue;
       if (scanInteresting.some(pattern => pattern.test(path))) {
         const bytes = await readFile(resolve(root, path)).catch((error: any) => { if (error.code === 'ENOENT') return null; throw error; });
         if (bytes && bytes.length <= scanLimits.bytes) contents[path] = bytes.toString('utf8');
@@ -237,6 +241,83 @@ export function environmentTopology(deploy: DeployDetection, database: { detecte
     : `Each candidate deploys to its own ${deploy.target} environment built from its commit and destroyed after review. Any backing datastore must be a per-candidate copy seeded from structure${database.detected ? ` (a shared ${database.evidence.join(', ')} was detected and must not be reused across candidates)` : ''}, never shared live state.` };
 }
 
+// --- The merge gate: which checks block a pull request, and which run per candidate (GY-1102) ---
+
+/** Names of checks that are fast by construction: compiling, typing, linting, and the plain unit run. */
+const fastCheck = /^(?:build|compile|typecheck|type-check|types|tsc|lint|eslint|format(?::check)?|check|test|tests|unit|test:unit|unit-tests?|pytest)$/i;
+/** Names or commands that mark a long suite: integration, end-to-end, soak and their kin. */
+const longSuite = /e2e|end-to-end|integration|soak|load|stress|perf|benchmark|acceptance|recover|chart|smoke|browser|playwright|cypress|selenium|visual/i;
+/** Scripts that are tooling, not checks: servers, watchers, lifecycle hooks. */
+const notACheck = /watch|^(?:dev|start|serve|preview|prepare|deploy|release|format|clean)(?::|$)|^(?:pre|post)[a-z]/i;
+const checkLike = /^(?:build|typecheck|type-check|lint|test|check|e2e|integration|soak)(?::|$)/i;
+
+/**
+ * Splits a repository's checks into the pre-merge gate (build, typecheck, lint and fast unit
+ * checks) and the per-candidate set (integration, E2E, soak). A check that is not recognisably
+ * fast goes to the per-candidate set: the gate holds only what is demonstrably quick, and the
+ * split is shown for confirmation before it is applied, so the operator moves a check in one
+ * edit of graphyard.json rather than discovering a slow gate later.
+ */
+export function classifyChecks(input: ScanInput, stack: StackDetection = detectStack(input)): { preMerge: GateCheck[]; perCandidate: GateCheck[] } {
+  const preMerge: GateCheck[] = [], perCandidate: GateCheck[] = [];
+  const known = (check: string) => [...preMerge, ...perCandidate].some(entry => entry.check === check);
+  const place = (check: string, command: string | null, source: GateCheck['source']) => {
+    if (known(check)) return;
+    const text = `${check} ${command ?? ''}`;
+    if (longSuite.test(text)) perCandidate.push({ check, command, source, reason: 'an integration, end-to-end or soak suite: it runs against the pinned candidate SHA' });
+    else if (fastCheck.test(check)) preMerge.push({ check, command, source, reason: 'build, typecheck, lint or fast unit check: required on every pull request' });
+    else perCandidate.push({ check, command, source, reason: 'not recognisably fast, so it runs per candidate; move it to preMerge in graphyard.json to require it on pull requests' });
+  };
+  const pkg = parseJson(input, 'package.json');
+  if (stack.name === 'node' && pkg && typeof pkg === 'object') {
+    const scripts: Record<string, unknown> = pkg.scripts ?? {};
+    for (const [name, body] of Object.entries(scripts)) {
+      if (typeof body !== 'string' || !body || notACheck.test(name)) continue;
+      if (checkLike.test(name) || longSuite.test(name)) place(name, `npm run ${name}`, 'script');
+    }
+  } else for (const command of stack.commands) place(command.check, command.command, 'script');
+  // A browser framework the scripts never run is still the repository's E2E suite.
+  const runs = (pattern: RegExp) => perCandidate.some(entry => pattern.test(`${entry.check} ${entry.command ?? ''}`)) || Object.values(pkg?.scripts ?? {}).some(body => typeof body === 'string' && pattern.test(body));
+  if (stack.frameworks.includes('@playwright/test') && !runs(/playwright/)) place('playwright', 'npx playwright test', 'framework');
+  if (stack.frameworks.includes('cypress') && !runs(/cypress/)) place('cypress', 'npx cypress run', 'framework');
+  // Pull-request jobs the repository's CI already runs keep their names; their own workflow runs them.
+  for (const job of workflowCheckNames(input, { onlyPullRequest: true })) place(job, null, 'workflow');
+  return { preMerge: preMerge.slice(0, 20), perCandidate: perCandidate.slice(0, 20) };
+}
+
+/**
+ * The repository's delivery policy as a scan proposes it: the committed graphyard.json `delivery`
+ * when the repository has one (its own reviewed choice, which a rescan must not undo), otherwise
+ * the classified split, the adapter the deploy target implies, and the default cadence. Explicit
+ * choices passed to `init --scan` win over both.
+ */
+export function proposeDelivery(input: ScanInput, deploy: DeployDetection, stack: StackDetection, overrides: { mode?: DeliveryMode; candidateSchedule?: string | null } = {}): DeliveryPolicy {
+  let committed: DeliveryPolicy | null = null;
+  const parsed = deliveryPolicySchema.safeParse(parseJson(input, 'graphyard.json')?.delivery);
+  if (parsed.success) committed = parsed.data;
+  const mergeGate = committed?.mergeGate ?? classifyChecks(input, stack);
+  return deliveryPolicySchema.parse({
+    mode: overrides.mode ?? committed?.mode ?? 'release-candidate',
+    mergeGate,
+    candidateSchedule: overrides.candidateSchedule !== undefined ? overrides.candidateSchedule : committed ? committed.candidateSchedule : defaultCandidateSchedule,
+    deploy: committed?.deploy ?? { adapter: deploy.target === 'railway' ? 'railway' : 'command', project: null, uat: null, production: null },
+  });
+}
+
+/** The split as the operator reads it before applying: one line per check, in the set it lands in. */
+export function describeMergeGate(policy: DeliveryPolicy): string[] {
+  const line = (entry: GateCheck) => `${entry.check}${entry.command ? ` (${entry.command})` : ''}: ${entry.reason}`;
+  if (policy.mode === 'per-pr') return [
+    'per-pr: every check below is required on each pull request; no release candidate is cut',
+    ...[...policy.mergeGate.preMerge, ...policy.mergeGate.perCandidate].map(entry => `required on pull requests — ${line(entry)}`),
+  ];
+  return [
+    ...policy.mergeGate.preMerge.map(entry => `pre-merge — ${line(entry)}`),
+    ...policy.mergeGate.perCandidate.map(entry => `per-candidate — ${line(entry)}`),
+    `candidates: ${policy.candidateSchedule ? `cut on schedule ${policy.candidateSchedule} and on demand` : 'cut on demand only'}; deployed to UAT then production through the ${policy.deploy.adapter} adapter`,
+  ];
+}
+
 export const agentRuntimes = ['claude', 'codex', 'gemini', 'opencode', 'copilot', 'cursor', 'qwen', 'amp', 'grok', 'kimi', 'kiro', 'droid', 'cline', 'devin', 'hermes', 'kilo', 'qodercli', 'maki', 'agy', 'omp', 'mastracode', 'pi'] as const;
 export type AgentRuntime = (typeof agentRuntimes)[number];
 
@@ -284,10 +365,12 @@ export const setupProposalSchema = z.object({
     reviewer: z.object({ provider: z.string(), note: z.string() }).strict(),
   }).strict(),
   githubApp: z.object({ name: z.string(), repository: z.string(), flow: z.string() }).strict().nullable(),
+  /** The merge gate and release-candidate policy (GY-1102); optional so proposals stored before it still load. */
+  delivery: deliveryPolicySchema.optional(),
 }).strict();
 export type SetupProposal = z.infer<typeof setupProposalSchema>;
 
-export function buildProposal(input: ScanInput, options: { repository?: string | null; server?: string | null; runtimes?: string[]; credentialDirectory?: string } = {}): SetupProposal {
+export function buildProposal(input: ScanInput, options: { repository?: string | null; server?: string | null; runtimes?: string[]; credentialDirectory?: string; delivery?: { mode?: DeliveryMode; candidateSchedule?: string | null } } = {}): SetupProposal {
   const stack = detectStack(input);
   const deploy = detectDeploy(input, stack);
   const database = hasSharedDatabase(input);
@@ -296,6 +379,9 @@ export function buildProposal(input: ScanInput, options: { repository?: string |
   const ci = { system: Object.keys(input.contents).some(path => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(path)) ? 'github-actions' : 'none', jobs };
   const fallbackJobs = prJobs.length ? prJobs : jobs;
   const checks = [...new Set([...stack.commands.map(command => command.check), ...(stack.commands.length ? [] : fallbackJobs)])].slice(0, 12);
+  const delivery = proposeDelivery(input, deploy, stack, options.delivery);
+  // Under the candidate model a pull request waits only for the pre-merge set.
+  const policyChecks = delivery.mode === 'per-pr' ? checks : checks.filter(check => delivery.mergeGate.preMerge.some(entry => entry.check === check));
   const proofs = [
     ...stack.commands.filter(command => command.purpose !== 'build').map(command => ({ name: proofName(command.purpose, command.check), command: command.command, check: command.check })),
     { name: deploy.proofName, command: null, check: null },
@@ -315,10 +401,11 @@ export function buildProposal(input: ScanInput, options: { repository?: string |
     proofs,
     deploy,
     environment: topology,
-    policy: { checks, review: true, reviewProvider: 'github',
+    policy: { checks: policyChecks, review: true, reviewProvider: 'github',
       evidenceExpectations: 'Automated proofs are submitted only by a trusted producer credential in protected CI, for the exact candidate SHA with executed > 0 and skipped = 0. Manual proofs are inspected and submitted by a separate operator session. Implementation workers never hold producer or admin credentials.' },
     profiles: { workers, reviewer: { provider: 'github', note: 'Reviews are GitHub approvals on the pull request from a reviewer independent of the author; a hosted Codex reviewer can be selected later with reviewpolicy.' } },
     githubApp: options.repository && /^[\w.-]+\/[\w.-]+$/.test(options.repository) ? { name: `Graphyard ${repository.replace('/', '-')}`, repository, flow: 'github-setup' } : null,
+    delivery,
   });
 }
 

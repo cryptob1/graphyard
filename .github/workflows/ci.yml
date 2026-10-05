@@ -69,7 +69,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v4
         # Two commits: a pull request's checkout is its merge onto the base, whose first parent is
@@ -141,18 +141,25 @@ jobs:
           records=("$RUNNER_TEMP"/timing/shard-*.jsonl)
           if (( ${#records[@]} )); then cat "${records[@]}" > "$RUNNER_TEMP/graphyard-timing.jsonl"; fi
           if grep -qs '"passed":false' "$RUNNER_TEMP/graphyard-timing.jsonl"; then echo "over=true" >> "$GITHUB_OUTPUT"; fi
-      # Only when an assertion went over its budget, so a passing run pays for no install here.
+      # Report when an assertion went over its budget or a shard failed: the failed-tests annotation
+      # is what the base-breakage judgement reads (GY-793), on pull requests and on pushes to main
+      # alike. A passing run within budget pays for no install here.
+      - name: Decide whether to report on this check run
+        id: report
+        if: steps.timing.outputs.over == 'true' || needs.test-shard.result == 'failure'
+        run: echo "run=true" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
-        if: steps.timing.outputs.over == 'true'
+        if: steps.report.outputs.run == 'true'
         with: { persist-credentials: false }
       - uses: actions/setup-node@v4
-        if: steps.timing.outputs.over == 'true'
+        if: steps.report.outputs.run == 'true'
         with: { node-version: '24', cache: npm }
       - name: Report timing-dependent assertions on this check run
         # Whatever the suite's verdict, and never changing it: an assertion that went over its
         # budget is annotated on the required check with what it measured, which
-        # `graphyard master status` reads back, beside how many tests failed across every shard.
-        if: steps.timing.outputs.over == 'true'
+        # `graphyard master status` reads back, beside how many tests failed across every shard;
+        # every failed test is named in one `graphyard-failed-tests:` annotation.
+        if: steps.report.outputs.run == 'true'
         shell: bash
         run: |
           npm ci --ignore-scripts

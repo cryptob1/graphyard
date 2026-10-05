@@ -15,7 +15,7 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import type { Principal, Work } from '../src/model.js';
 import { actionIdleMs, claimAction, renewClaim, settleAction, type ActionRow } from '../src/model/actions.js';
-import { describeUnserved, executorLiveMs, executorRegistry, executorReport } from '../src/model/executor-presence.js';
+import { describeUnserved, executorLiveMs, executorRegistry, executorReport, loopPresenceHeader, loopRegistry } from '../src/model/executor-presence.js';
 import { executorRunnableKinds } from '../src/model/action-kinds.js';
 import { executorEffects, runExecutor } from '../src/auto-dispatch.js';
 import { emptyDaemonState, preserveKey, launchAppearanceMs, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
@@ -365,8 +365,12 @@ test('integration:unserved-queue-visible: a pending action whose kind no live ex
 
   // Nobody polls. The queue alone cannot tell this from every executor being busy; presence can,
   // once the control plane has listened for a whole liveness window (GY-1086) — before that an
-  // empty registry is a fleet not yet heard from. This one has been listening that long.
+  // empty registry is a fleet not yet heard from. This one has been listening that long, and so
+  // has its durable presence table (GY-1289): an empty table proves silence only a window after it
+  // began recording.
   Object.assign(executorRegistry(engine), { since: new Date(Date.now() - executorLiveMs - 1) });
+  await ok(coordinator, 'GET', 'actions');
+  await store.pool.query(`UPDATE executor_presence SET seen_at = $1 WHERE principal = '' AND executor = ''`, [new Date(Date.now() - executorLiveMs - 1)]);
   const before = await ok(coordinator, 'GET', 'actions');
   assert.deepEqual(before.executors.live, []);
   assert.deepEqual(before.executors.unserved.map((entry: any) => [entry.key, entry.kind]), [[item.key, 'dispatch']]);
@@ -608,4 +612,21 @@ test('integration:killed-worker-work-preserved: a worker killed outright keeps i
     for (const agent of agents) { try { process.kill(agent.pid, 'SIGKILL'); } catch { /* already gone */ } }
     for (const worktree of worktrees) await rm(worktree, { recursive: true, force: true });
   }
+});
+
+test('integration:loop-read-names-merger: the master loop\'s coordination read names it to the control plane, which then reports the live loop as the merger whatever its last merge request; no other principal\'s read does (GY-916)', async () => {
+  await fresh();
+  const read = (principal: Principal, interval: string) => fetch(`${url}/api/work-snapshot`, { headers: { Authorization: `Bearer ${token(principal)}`, 'X-Graphyard-View': 'coordination', [loopPresenceHeader]: interval } });
+  assert.equal((await read(workerA, '20')).status, 200);
+  assert.equal((await ok(coordinator, 'GET', 'actions')).executors.loop, undefined, 'a worker\'s read is not the loop');
+  assert.equal((await read(coordinator, 'not-an-interval')).status, 200);
+  assert.equal((await ok(coordinator, 'GET', 'actions')).executors.loop, undefined, 'a read naming no supported interval is not the loop');
+  assert.equal((await read(coordinator, '20')).status, 200);
+  const seen = (await ok(coordinator, 'GET', 'actions')).executors.loop;
+  assert.equal(seen.live, true);
+  assert.match(seen.name, /^the master loop \(master-loop, cycling every 20s, last read /);
+  assert.equal((await ok(coordinator, 'GET', 'status')).executors.unserved.some((entry: any) => entry.kind === 'merge'), false);
+  // Three of its cycles without a read and it is no longer assumed live.
+  assert.ok(loopRegistry(engine).live(new Date(Date.now() + 60_000)));
+  assert.equal(loopRegistry(engine).live(new Date(Date.now() + 121_000)), null);
 });

@@ -3,6 +3,7 @@ import { readdirSync, readFileSync, readlinkSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import type { ContainmentScope, Work, Workspace } from './model.js';
+import { containmentGraceMs } from './model/containment.js';
 
 export class PrelaunchContainmentError extends Error {
   constructor(message: string, public readonly settleAllowed: boolean) { super(message); }
@@ -145,8 +146,8 @@ export async function settleContainment(
  * on every unverifiable signal instead of assuming death. What cannot be proven still
  * requires the operator attestation path.
  */
-/** Both the worker lease and the launch authority must have been expired this long. */
-export const containmentGraceMs = 120_000;
+/** Both the worker lease and the launch authority must have been expired this long; the model layer owns the window. */
+export { containmentGraceMs };
 /** A host verification older than this is no longer evidence about the present. */
 export const containmentProbeFreshnessMs = 120_000;
 /** Automatic settlement joins two clocks; they must demonstrably agree within this bound. */
@@ -447,12 +448,47 @@ export function closablePane(work: Pick<Work, 'containmentQuarantine' | 'session
   const process = shell ? verification.processes.find(entry => entry.pid === shell.pid) : undefined;
   return shell && process && idlePaneShell(work, verification, process) ? shell.pane : null;
 }
+/** How the loop's preserve of an attempt whose lease lapsed reads on the record (cycle-reclaim): an ending by expiry, not by the loop. */
+export const leaseLapsedEnding = 'ended without submitting: its lease lapsed';
+/** How the loop's own close of an implementation session reads on its handle (cycle-resume, cycle-sessions). */
+const loopClosedSession = /^closed (?:by the loop|as failed): /;
+/**
+ * Whether the item's record shows the loop itself ended the quarantined attempt (GY-1155), not
+ * its lease running out: a worker exhaustion for that epoch — the loop's preserve, or the worker's
+ * own `blocked` report, either of which ends the lease — other than the reclaim of a lapsed lease, or a submission of
+ * that epoch whose session handle the loop closed. Either way the attempt's authority ended on the
+ * record, so the grace window, which waits out a lease nobody ended, has nothing left to wait for.
+ */
+export function loopEndedAttempt(work: Pick<Work, 'containmentQuarantine'> & Partial<Pick<Work, 'capacity' | 'sessions' | 'submission'>>) {
+  const quarantine = work.containmentQuarantine;
+  if (!quarantine) return false;
+  const preserved = (work.capacity?.exhaustions ?? []).some(entry => entry.role === 'worker' && entry.epoch === quarantine.epoch && !entry.reason.startsWith(leaseLapsedEnding));
+  const closed = work.submission?.epoch === quarantine.epoch && (work.sessions ?? []).some(handle => handle.id === `${quarantine.owner}:${quarantine.epoch}`
+    && handle.kind === 'implementation' && handle.state === 'finished' && loopClosedSession.test(handle.outcome ?? ''));
+  return preserved || closed;
+}
+/**
+ * Whether the host verification proves the quarantined supervisor gone: inspected on Linux, on the
+ * registered host and workspace, completely, with the recorded scope ended and nothing of the
+ * worker or of a live scope left but the idle pane shell settlement already excuses.
+ */
+function supervisorVerifiedGone(work: Pick<Work, 'containmentQuarantine' | 'workspaces' | 'sessions'>, verification: ContainmentVerification) {
+  const quarantine = work.containmentQuarantine!;
+  const workspace = work.workspaces.find(item => item.epoch === quarantine.epoch);
+  if (!workspace || workspace.host !== verification.host || workspace.path !== verification.workspacePath) return false;
+  if (verification.platform !== 'linux' || verification.unverifiable.length || verification.truncated?.scopes !== undefined) return false;
+  const recorded = verification.recordedScope;
+  if (quarantine.scope && !(recorded?.unit === quarantine.scope.unit && recorded.pid === quarantine.scope.pid && endedScopeStates.includes(recorded.activeState))) return false;
+  return verification.processes.every(process => idlePaneShell(work, verification, process))
+    && verification.scopes.every(scope => !scope.processes.length && !(scope.truncated && scope.unit === quarantine.scope?.unit));
+}
+
 /**
  * Pure refusal evaluation, shared by the verifying coordinator and the control plane.
  * Every check states what it could not prove; an empty result is the only authorization.
  */
 export function containmentSettlementRefusals(
-  work: Pick<Work, 'containmentQuarantine' | 'lease' | 'workspaces' | 'sessions'>,
+  work: Pick<Work, 'containmentQuarantine' | 'lease' | 'workspaces' | 'sessions'> & Partial<Pick<Work, 'capacity' | 'submission'>>,
   verification: ContainmentVerification,
   options: { now: number; graceMs?: number; freshnessMs?: number; clockToleranceMs?: number },
 ): string[] {
@@ -476,12 +512,20 @@ export function containmentSettlementRefusals(
   // The quarantine retains its own deadline; the later of the two is the fence, and a
   // quarantine that records neither cannot prove its grace window has passed at all.
   if (work.lease && !Number.isFinite(Date.parse(work.lease.expiresAt))) refusals.push(`Worker lease for epoch ${work.lease.epoch} carries no readable expiry`);
-  const deadlines = [work.lease?.expiresAt, quarantine.leaseExpiresAt].map(value => value ? Date.parse(value) : NaN).filter(Number.isFinite);
-  const leaseExpiry = deadlines.length ? Math.max(...deadlines) : null;
-  if (leaseExpiry === null) refusals.push(`Quarantined epoch ${quarantine.epoch} records no worker-lease deadline, so its ${seconds(grace)}s grace window cannot be established`);
-  else if (!(leaseExpiry + grace <= now)) refusals.push(`Worker lease for epoch ${quarantine.epoch} has not been expired for the required ${seconds(grace)}s grace window`);
-  const launchExpiry = quarantine.launchExpiresAt ? Date.parse(quarantine.launchExpiresAt) : null;
-  if (launchExpiry !== null && !(launchExpiry + grace <= now)) refusals.push(`Launch authority for epoch ${quarantine.epoch} has not been expired for the required ${seconds(grace)}s grace window`);
+  // GY-1155: an attempt the loop ended on its own record, with its supervisor verified gone, has
+  // no authority left to wait out. Only that pair waives the grace windows; the lease the record
+  // ended must be gone from it too, and every refusal below still stands.
+  if (loopEndedAttempt(work) && supervisorVerifiedGone(work, verification)) {
+    if (work.lease?.epoch === quarantine.epoch && Date.parse(work.lease.expiresAt) > now)
+      refusals.push(`Worker lease for epoch ${quarantine.epoch} is still live, though the record shows the loop ended that attempt`);
+  } else {
+    const deadlines = [work.lease?.expiresAt, quarantine.leaseExpiresAt].map(value => value ? Date.parse(value) : NaN).filter(Number.isFinite);
+    const leaseExpiry = deadlines.length ? Math.max(...deadlines) : null;
+    if (leaseExpiry === null) refusals.push(`Quarantined epoch ${quarantine.epoch} records no worker-lease deadline, so its ${seconds(grace)}s grace window cannot be established`);
+    else if (!(leaseExpiry + grace <= now)) refusals.push(`Worker lease for epoch ${quarantine.epoch} has not been expired for the required ${seconds(grace)}s grace window`);
+    const launchExpiry = quarantine.launchExpiresAt ? Date.parse(quarantine.launchExpiresAt) : null;
+    if (launchExpiry !== null && !(launchExpiry + grace <= now)) refusals.push(`Launch authority for epoch ${quarantine.epoch} has not been expired for the required ${seconds(grace)}s grace window`);
+  }
   const observed = Date.parse(verification.observedAt);
   if (!Number.isFinite(observed)) refusals.push('Host verification carries no readable observation time');
   else if (observed > now + tolerance) refusals.push('Host verification is dated after the control-plane clock; clocks disagree');

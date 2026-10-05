@@ -1,10 +1,10 @@
 import { predecessorWaitReason, queueSequencingReason } from '../merge-queue.js';
-import { dispatchIneligibility, openProducerRequest, producerGroupDecisions, reviewNeed } from './dispatch.js';
-import { mechanicalProof, unexercisedRework } from './mechanical-proofs.js';
+import { dispatchIneligibility, reviewNeed } from './dispatch.js';
 import { attestationWait } from './unproduced-attestation.js';
-import { producerLaunchStop } from './action-progress.js';
 import { standingEscalations } from './escalation.js';
+import { proofStep } from './action-proof-step.js';
 import { deliveryState } from './delivery.js';
+import { isDelivered } from './closure.js';
 import { openAgentRequests } from './agent-requests.js';
 import { refusalAction, reviewStandstill } from './refusal-mapping.js';
 import type { Work } from './work.js';
@@ -12,6 +12,8 @@ import { nextActionLlmRoles, type NextAction, type NextActionInputs, type NextAc
 import type { ActionAccount, ActionWait } from './action-account.js';
 import { carriedAction, type OpenAction } from './concerns.js';
 import { livenessCarry } from './liveness.js';
+import { decompositionHold } from '../decomposition.js';
+import { baseBreakWait } from '../master/base-break-refresh.js';
 
 // The vocabulary lives in `action-kinds.ts`, the classification in `refusal-mapping.ts`, the
 // declared refusals in `refusal-catalogue.ts` and the accounting vocabulary in
@@ -57,7 +59,6 @@ export type { CarriedConcern, HumanNeeded, HumanNeededRow, OpenAction } from './
  */
 
 const short = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : 'none';
-
 const canonical = (value: unknown) => JSON.stringify(value, (_key, entry) =>
   entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.keys(entry).sort().map(key => [key, entry[key]])) : entry);
 /**
@@ -73,52 +74,7 @@ export const sameAction = (left: NextAction | null | undefined, right: NextActio
 
 const dispatchInputs = (work: Work): NextActionInputs => ({ kind: 'dispatch', target: 'implementation', epoch: work.epoch, priority: work.priority, plannedFiles: [...(work.plannedFiles ?? [])] });
 
-/**
- * What the proof groups of the head call for, read from the decision `reconcileAutoDispatch`
- * makes (`producerGroupDecisions`), so the planner never names a producer the reconciler will not
- * request (GY-188):
- *
- * - `dispatch` — a group the reconciler requests, holding its open request. Nothing else is a
- *   proof dispatch, so every one an executor claims has a request to launch against.
- * - `failed` — trusted evidence failed for a group, or all a mechanical group has left is proofs recorded as not exercising
- *   their criterion (GY-817): this head can never pass, so the step is a new head (or the operator, for a manual proof).
- * - `wait` — a group is left to prove but no request is open for it: the reconciler opens one on
- *   the next reading, or no request may stand for the head yet. Nobody's action, never a dispatch.
- * - `stopped` — every group left to prove holds a request whose launch an executor was refused for
- *   good (`producerLaunchStop`): no executor launches it again, so the step is the attestation.
- * - null — every proof left is one no producer session may run.
- */
-type ProofStep = { step: 'dispatch'; inputs: NextActionInputs } | { step: 'failed'; detail: string; mechanical: boolean } | { step: 'wait'; detail: string } | { step: 'stopped'; detail: string };
-function proofStep(work: Work, all: Work[], now: Date): ProofStep | null {
-  if (!work.candidate) return null;
-  const candidate = work.candidate;
-  const decisions = producerGroupDecisions(work, all, now);
-  const failed = decisions.find(decision => decision.state === 'failed');
-  const detail = failed?.reason ?? unexercisedRework(work, decisions);
-  if (detail) return { step: 'failed', detail, mechanical: !failed || failed.failed.every(entry => mechanicalProof(entry.proof)) };
-  let stopped: string | null = null;
-  for (const decision of decisions.filter(entry => entry.state === 'request')) {
-    const request = openProducerRequest(work, decision.group);
-    if (!request) continue;
-    // A request an executor's launcher has refused for good is never offered again, to any
-    // executor on any host (`producerLaunchStop`); its proofs are left to the attestation.
-    const stop = producerLaunchStop(work, request.id);
-    if (stop) {
-      const remedy = decision.unproven.every(proof => proof.startsWith('manual:')) ? `only a two-party attestation (master decide ${work.key} attest) satisfies them now` : 'a new head or the operator answers them now';
-      stopped ??= `${decision.group} proofs ${decision.unproven.join(', ')} on ${short(candidate.sha)} get no further producer launch from any executor — ${stop.reason}; ${remedy}`;
-      continue;
-    }
-    return { step: 'dispatch', inputs: { kind: 'dispatch', target: 'proof', group: decision.group, proofs: decision.unproven, requestId: request.id, pr: candidate.pr, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: work.policyRevision } };
-  }
-  if (stopped) return { step: 'stopped', detail: stopped };
-  const pending = decisions.find(decision => decision.state === 'request' || decision.state === 'ineligible');
-  if (!pending) return null;
-  return { step: 'wait', detail: pending.state === 'ineligible' ? `${pending.group} proofs ${pending.unproven.join(', ')} wait: ${pending.reason}`
-    : `no ${pending.group} producer request is open yet for ${short(candidate.sha)} (${pending.unproven.join(', ')}); the control plane's reconciliation opens it` };
-}
-
 const resyncInputs = (work: Work): NextActionInputs => ({ kind: 'resync', pr: work.candidate?.pr ?? work.submission?.pr ?? null, sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, baseTip: work.observation?.baseTip ?? null, observedAt: work.observation?.at ?? null });
-
 type Computed = Pick<ActionAccount, 'gate' | 'refusal' | 'action' | 'wait' | 'defect'>;
 
 /**
@@ -187,6 +143,13 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
       { kind: 'verify-deployment', mergeSha: work.delivery.mergeSha, mergedAt: work.delivery.mergedAt, state }, `delivery:${work.delivery.mergeSha}`);
     return waits({ kind: 'settled', on: null, detail: `${key} is delivered (${state}); its gates are history and no gate refuses it` });
   }
+
+  // A running decomposition holds dispatch: an item mid-split is not offered to workers.
+  if (decompositionHold(work, now.getTime())) return waits({ kind: 'session', on: 'decomposition', detail: `${key} is being split into child items before dispatch` }, 'ready', 'Splitting into child items before dispatch');
+
+  // A split parent (GY-1126) waits on its children: it is delivered when the last of them is.
+  const children = (work.children ?? []).filter(child => !all.some(entry => entry.key === child && isDelivered(entry)));
+  if (children.length) return waits({ kind: 'dependency', on: children[0], detail: `${key} was split into ${work.children!.join(', ')} and is delivered when they are; ${children.join(', ')} not yet` }, 'ready', `Split into child items: ${children[0]} is not delivered`);
 
   const liveLease = !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
   // A containment quarantine outlives the attempt that raised it, and no executor step lowers one:
@@ -288,6 +251,7 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
         { kind: 'request-review', provider: work.policy.reviewProvider ?? 'github', requestId: request?.id ?? null, pr: work.candidate!.pr, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision },
         binding, failing.name, refusal);
     }
+    if (kind === 'request-rework') { const broken = baseBreakWait(work, failing.name); if (broken) return waits(broken, failing.name, refusal); } // GY-793: refreshed onto the tip that fixed it, never reworked
     if (kind === 'request-rework') return make('request-rework', `${key} needs a new head: ${detail}`,
       { kind: 'request-rework', pr: work.candidate?.pr ?? null, sha: work.candidate?.sha ?? null, detail }, binding, failing.name, refusal);
     if (kind === 'resync') return make('resync', `${key} is waiting on a fresh reading of its pull request: ${detail}`, resyncInputs(work), binding, failing.name, refusal);

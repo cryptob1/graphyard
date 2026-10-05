@@ -29,11 +29,29 @@ export function withReviewRounds<R extends { key: string }>(rows: R[], work: rea
 
 /** How much of a change request's body an observation keeps: enough to file its findings, bounded like a decision reason. */
 export const reviewBodyMax = 2000;
-/** The line that names one blocking finding in a change request: `BLOCKING: <finding>`, optionally as a list item. */
-const blockingLine = /^\s*(?:[-*]\s*)?\**BLOCKING\**\s*(?:finding)?\s*[:\-–—]\**\s*(.+?)\**\s*$/i;
+/**
+ * The line that names one blocking finding in a change request: `BLOCKING: <finding>`, optionally as a list item.
+ * It captures the bold markers before the label, after it (after `BLOCKING` or after `finding`) and after its
+ * colon, so the finding loses only the Markdown wrapper the line actually opened (GY-1169: a finding ending
+ * `foo_` or `.` keeps it; GY-1220: `**BLOCKING finding**: x` is a finding too).
+ */
+const blockingLine = /^\s*(?:-\s*|\*\s+)?(\**)BLOCKING(\**)(?:\s*finding(\**))?\s*[:\-–—](\**)\s*(.+?)\s*$/i;
 /** The line that names one non-blocking finding: `Follow-up finding: <finding>`, as the reviewer prompt asks for it. */
 const followUpLine = /^\s*(?:[-*]\s*)?\**FOLLOW-?UP\**\s*(?:finding)?\**\s*[:\-–—]\**\s*(.+)$/i;
 const noneNamed = /^(none|n\/a|no blocking findings?)\.?$/i;
+/**
+ * A blocking finding without its Markdown wrapper: the bold the label left open, then a `**…**` or `_…_` pair
+ * around the whole text. A pair is a wrapper only when its inside holds no further marker of it, so
+ * `**a** and **b**` keeps both pairs, and an `_` pair only around words, so an identifier like `__init__` is kept (GY-1220).
+ */
+function unwrapFinding([, opened = '', closedLabel = '', closedFinding = '', afterColon = '', text = '']: RegExpExecArray): string {
+  const open = Math.abs(opened.length - closedLabel.length - closedFinding.length - afterColon.length);
+  let finding = open && text.endsWith('*'.repeat(open)) ? text.slice(0, -open).trimEnd() : text;
+  const wrapper = /^[*_]+/.exec(finding)?.[0];
+  const inner = wrapper && finding.length > 2 * wrapper.length && finding.endsWith([...wrapper].reverse().join('')) ? finding.slice(wrapper.length, -wrapper.length) : null;
+  if (inner !== null && !inner.includes(wrapper!) && (!wrapper!.includes('_') || /\s/.test(inner.trim()))) finding = inner;
+  return finding.trim();
+}
 /**
  * The verdict's own scaffolding, which is no finding: headings, the per-criterion judgements, the
  * "Review of #N" preamble, the findings-classification lines and the closing thread summary.
@@ -46,10 +64,7 @@ const scaffold = /^(?:#{1,6}\s|(?:[-*]\s*)?\**\[(?:AC-\d+|DOCS)\]|(?:[-*]\s*)?\*
 export function blockingFindings(body: unknown): string[] {
   if (typeof body !== 'string') return [];
   return body.split('\n')
-    .map(line => {
-      const captured = blockingLine.exec(line)?.[1];
-      return captured ? captured.trim().replace(/^[*_]+/, '').replace(/[\s*_.:;]+$/, '').trim() : '';
-    })
+    .map(line => { const match = blockingLine.exec(line); return match ? unwrapFinding(match) : ''; })
     .filter(text => text && !noneNamed.test(text))
     .map(text => text.slice(0, 300))
     .slice(0, 10);

@@ -19,7 +19,8 @@ import { runExecutorTick } from '../src/auto-dispatch.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { stalledActionAttention } from '../src/cli/master-status.js';
 import { attributeAttention, resourceStatus } from '../src/master-status.js';
-import { dispatchRefusal, loadedRevision, planeVerdict, finishedSessionGraceMs, nameReclaimBoundMs, stuckSessionMs, ledgerRetentionMs, readReclaimReports, readResources, reclaimResources, registryGaps, resourceIds, resourceRegistry, reviewLedgerBound, type ResourceInputs } from '../src/master-resources.js';
+import { dispatchRefusal, loadedRevision, planeVerdict, readGitHubBudget, resourceAttention, finishedSessionGraceMs, nameReclaimBoundMs, stuckSessionMs, ledgerRetentionMs, readReclaimReports, readResources, reclaimResources, registryGaps, resourceIds, resourceRegistry, reviewLedgerBound, type ResourceInputs } from '../src/master-resources.js';
+import { classifyAttention } from '../src/model/fault-classes.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -173,7 +174,8 @@ test('integration:headroom-warned-before-exhaustion — status reports each reso
       : args.includes('reflog') ? `${'c'.repeat(40)} HEAD@{${started + 60}}\n${'l'.repeat(40)} HEAD@{${started - 60}}\n`
       : args.includes('diff') ? 'src/master.ts\n'
       : '3\n';
-    assert.deepEqual(loadedRevision('/nonexistent', 1, git), { loaded: 'l'.repeat(40), checkout: 'c'.repeat(40), behind: 3 });
+    // The move is timed too (GY-1196): the self-upgrade has its bound from it.
+    assert.deepEqual(loadedRevision('/nonexistent', 1, git), { loaded: 'l'.repeat(40), checkout: 'c'.repeat(40), behind: 3, movedAt: (started + 60) * 1000 });
   });
 });
 
@@ -353,26 +355,6 @@ test('integration:health-reflects-write-capability — /healthz is unhealthy nam
     assert.equal(planeVerdict(null, { database: { used: 20 * 1024 ** 3, bound: 10 * 1024 ** 3, advisory: true }, github: null }).healthy, true);
   });
 
-  // The GitHub budget: the client pauses every request once a rate limit refuses one, which is the
-  // budget spent. Health names it, and `master status` reports it exhausted, not unread.
-  const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used-while-paused' });
-  const until = Date.now() + 30 * 60_000;
-  (github as unknown as { blockedUntil: number }).blockedUntil = until;
-  await plane(store, async url => {
-    const response = await fetch(`${url}/healthz?strict`);
-    const health = await response.json() as any;
-    assert.equal(response.status, 503);
-    assert.equal(health.healthy, false); assert.equal(health.writable, true);
-    assert.match(health.causes[0], new RegExp(`^GitHub App request budget is at its bound: 5000 of 5000 requests \\(the GitHub client paused every request until ${new Date(until).toISOString().replace(/\./g, '\\.')}`));
-    assert.match((await dispatchRefusal(url))!, /control plane reports itself unhealthy \(GitHub App request budget is at its bound/);
-    const directory = await scratchRoot();
-    const status = await resourceStatus(directory, master(url), { reviews: [], producers: [], agents: [], work: [], loop: null });
-    const budget = status.readings.find(reading => reading.id === 'github-budget')!;
-    assert.equal(budget.state, 'exhausted', 'a paused client reads as a spent budget, not an unread one');
-    assert.ok(status.attention.some(item => item.subject === 'resource:github-budget' && /GitHub App request budget is at its bound: 5000 requests used of 5000 requests/.test(item.text)));
-    const symptom = { subject: 'GY-9', text: `GY-9's observe action is stalled — GitHub requests paused until ${new Date(until).toISOString()} after a rate/access refusal`, role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: 'Clear what that reason names' };
-    assert.match(attributeAttention([symptom], status.readings)[0].text, /^GY-9 is held by a registered resource at its bound: GitHub App request budget is at its bound/, 'the pause is attributed to the budget');
-  }, github);
 
   // Refuse writes: every new session of the plane's database is read-only.
   await store.pool.query('ALTER DATABASE resources_test SET default_transaction_read_only = on');
@@ -412,4 +394,86 @@ test('integration:health-reflects-write-capability — /healthz is unhealthy nam
     await readOnly.close();
     await store.pool.query('ALTER DATABASE resources_test RESET default_transaction_read_only');
   }
+});
+
+/**
+ * GY-1278: the GitHub client's own rate-limit pause is the remediation under way, healing at the
+ * reset GitHub reported, and the observation class counts it once. It is not the budget measured at
+ * its bound: while it lasts the reading names the pause and its reset with its usage unread, the
+ * plane serves, and a held subject's pause symptom keeps its own subject. A budget still spent once
+ * the pause has ended is read from GET /rate_limit and faults as before.
+ */
+const pausedClient = (until: number) => {
+  const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used-while-paused' });
+  (github as unknown as { blockedUntil: number }).blockedUntil = until;
+  return github;
+};
+/** A client whose GET /rate_limit answers a spent core budget, with any pause already over. */
+const spentClient = (pausedUntil: number | null) => {
+  const github = pausedClient(pausedUntil ?? 0);
+  const reset = Math.floor(Date.now() / 1000) + 600;
+  (github as unknown as { apiRequest(path: string): Promise<unknown> }).apiRequest = async path => {
+    assert.equal(path, '/rate_limit');
+    return { resources: { core: { limit: 5000, remaining: 0, reset } } };
+  };
+  return github;
+};
+const pauseSymptom = (subject: string, until: number) => ({ subject, text: `${subject}'s observe action is stalled — GitHub requests paused until ${new Date(until).toISOString()} after a rate/access refusal`,
+  role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: 'Clear what that reason names' });
+
+test('integration:github-budget-pause-is-remediation-under-way — a live pause reads its usage unread, naming the pause and its reset, and raises no resource:github-budget line', async () => {
+  const until = Date.now() + 30 * 60_000;
+  const github = pausedClient(until);
+  const reading = (await readGitHubBudget(github))!;
+  assert.equal(reading.used, null, 'the pause is not fabricated as the budget used to its bound');
+  assert.notEqual(reading.used, reading.bound);
+  assert.match(reading.detail!, new RegExp(`paused every request until ${new Date(until).toISOString().replace(/\./g, '\\.')}`), 'the detail names the pause and its reset');
+  await plane(store, async url => {
+    const status = await resourceStatus(await scratchRoot(), master(url), { reviews: [], producers: [], agents: [], work: [], loop: null });
+    const budget = status.readings.find(entry => entry.id === 'github-budget')!;
+    assert.notEqual(budget.state, 'exhausted', 'a paused client is remediation under way, not a spent budget');
+    assert.match(budget.detail!, /the GitHub client paused every request until/);
+    assert.equal(status.attention.filter(item => item.subject === 'resource:github-budget').length, 0);
+  }, github);
+});
+
+test('integration:health-serves-through-a-rate-limit-pause — /healthz names no budget cause and dispatch is not refused during a pause; a spent reading with no pause still names it', async () => {
+  await plane(store, async url => {
+    const response = await fetch(`${url}/healthz?strict`);
+    const health = await response.json() as any;
+    assert.equal(response.status, 200);
+    assert.equal(health.healthy, true); assert.equal(health.writable, true);
+    assert.equal(health.causes.some((cause: string) => /GitHub App request budget/.test(cause)), false);
+    assert.equal(await dispatchRefusal(url), null, 'the loop dispatches through the pause while writes are healthy');
+  }, pausedClient(Date.now() + 30 * 60_000));
+  await plane(store, async url => {
+    const response = await fetch(`${url}/healthz?strict`);
+    const health = await response.json() as any;
+    assert.equal(response.status, 503);
+    assert.match(health.causes[0], /^GitHub App request budget is at its bound: 5000 of 5000 requests \(0 of 5000 left; resets /);
+    assert.match((await dispatchRefusal(url))!, /control plane reports itself unhealthy \(GitHub App request budget is at its bound/);
+  }, spentClient(null));
+});
+
+test('integration:pause-symptom-keeps-its-subject — a held subject\'s pause line is not rewritten as held by a resource at its bound while the pause is in force', async () => {
+  const until = Date.now() + 30 * 60_000;
+  const plane = { writable: true, writeError: null, database: null, github: await readGitHubBudget(pausedClient(until)) };
+  const readings = readResources(blank({ plane }));
+  const symptoms = ['GY-9', 'installation'].map(subject => pauseSymptom(subject, until));
+  const attributed = attributeAttention(symptoms, readings);
+  assert.deepEqual(attributed, symptoms, 'each line keeps its own subject and text');
+  assert.deepEqual(classifyAttention(attributed).map(item => item.kind), classifyAttention(symptoms).map(item => item.kind), 'and the kind its own text gives it');
+  assert.equal(classifyAttention(attributed).some(item => item.kind === 'resource-bound'), false);
+});
+
+test('integration:spent-past-the-pause-still-faults — with the pause over and GET /rate_limit spent, the reading is exhausted, raises its line and fails the plane verdict', async () => {
+  const github = spentClient(Date.now() - 60_000);
+  const reading = (await readGitHubBudget(github))!;
+  assert.deepEqual([reading.used, reading.bound], [5000, 5000]);
+  const readings = readResources(blank({ plane: { writable: true, writeError: null, database: null, github: reading } }));
+  assert.equal(readings.find(entry => entry.id === 'github-budget')!.state, 'exhausted');
+  assert.ok(resourceAttention(readings).some(item => item.subject === 'resource:github-budget' && /GitHub App request budget is at its bound: 5000 requests used of 5000 requests/.test(item.text)));
+  const verdict = planeVerdict(null, { database: null, github: reading });
+  assert.equal(verdict.healthy, false);
+  assert.match(verdict.causes[0], /^GitHub App request budget is at its bound: 5000 of 5000 requests/);
 });

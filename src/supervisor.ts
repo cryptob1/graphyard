@@ -13,6 +13,8 @@ interface Renewal { lease: { epoch: number; expiresAt: string } | null; updatedA
 export interface Containment {
   command: string;
   args: string[];
+  /** The systemd scope unit the session runs in, named in a failure to verify it empty. */
+  unit?: string;
   signal: (signal: NodeJS.Signals) => void;
   empty: () => boolean;
 }
@@ -21,7 +23,7 @@ export function systemdContainment(command: string, args: string[], run: typeof 
   run('systemctl', ['--user', 'show-environment'], { stdio: 'ignore' });
   const unit = `graphyard-watch-${process.pid}-${randomUUID()}.scope`;
   return {
-    command: 'systemd-run',
+    command: 'systemd-run', unit,
     args: ['--user', '--scope', '--quiet', `--unit=${unit}`, '--', command, ...args],
     signal: signal => { run('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${signal}`, unit], { stdio: 'ignore' }); },
     empty: () => {
@@ -274,12 +276,32 @@ export function renewalGraceMs(error: unknown): number | null {
 }
 
 /**
- * The one line the watch supervisor prints before its first control-plane call, naming the item and
- * epoch from its argv; the launcher quotes it as the starting detail of a supervisor still setting up (GY-1033).
+ * The one line `watch` (src/cli/workspace.ts) prints before its first control-plane call, naming the
+ * item and epoch from its argv; the launcher quotes it as the starting detail of a supervisor still
+ * setting up (GY-1033). \`supervise\` itself never prints it: it lives here, beside the supervisor the
+ * line announces, only so tests can import it without loading the CLI command table.
  */
 export const setupLine = (subject: string, epoch: number) => `graphyard: establishing containment for ${subject} epoch ${epoch}`;
+/**
+ * Why a supervisor could not lower its own containment fence (GY-1155): its shutdown did not
+ * verify the scope empty within its bound — the bound and what held it are named — or the settle
+ * it posted was refused. It is put on the item's record before the supervisor exits, so the fence
+ * it leaves standing is never silent, and the loop that observes the ended attempt settles it.
+ */
+export interface ContainmentShutdownFailure { reason: string; boundMs?: number; held?: string; refusal?: string }
+/**
+ * The record a supervisor's failure to lower its fence is put on the item as: a note, which needs
+ * no lease — the one this attempt held may already have ended — and names the quarantined epoch.
+ */
+export const containmentFailureNote = (epoch: number, failure: ContainmentShutdownFailure) =>
+  ({ type: 'note' as const, reason: `Containment fence of epoch ${epoch} was left standing by its supervisor: ${failure.reason}`.slice(0, 2000) });
+/** The durable containment fence a foreground supervisor raises, acknowledges, lowers, and reports a failure to lower. */
+export interface SupervisedQuarantine {
+  establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; acknowledge?: () => Promise<unknown>; settle: () => Promise<unknown>;
+  report?: (failure: ContainmentShutdownFailure) => Promise<unknown>;
+}
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
-export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; quarantine?: { establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; acknowledge?: () => Promise<unknown>; settle: () => Promise<unknown> } } = {}) {
+export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; quarantine?: SupervisedQuarantine } = {}) {
   let deadline = 0, granted = 0;
   async function heartbeat() {
     const started = performance.now();
@@ -391,9 +413,23 @@ export async function supervise(command: string, args: string[], epoch: number, 
             await delay(Math.min(options.shutdownPollMs ?? 50, remaining));
           } while (performance.now() < shutdownDeadline);
           containmentFailure ??= lastVerificationFailure;
-          if (!empty) { finish(new Error(`Worker containment shutdown could not be verified${containmentFailure instanceof Error ? `: ${containmentFailure.message}` : ''}`)); return; }
+          // A fence this supervisor cannot lower is reported on the item's record before it exits.
+          const unsettled = async (failure: ContainmentShutdownFailure) => {
+            try { await options.quarantine?.report?.(failure); } catch { /* the loop still observes the ended attempt and settles it */ }
+            finish(new Error(failure.reason));
+          };
+          if (!empty) {
+            const boundMs = Math.round(options.shutdownTimeoutMs ?? 2000);
+            const held = containmentFailure !== undefined ? (containmentFailure instanceof Error ? containmentFailure.message : String(containmentFailure)) : `${containment.unit ? `containment scope ${containment.unit}` : 'the containment scope'} still held processes`;
+            await unsettled({ reason: `Worker containment shutdown could not be verified: ${held} (its scope was not verified empty within ${boundMs}ms)`, boundMs, held });
+            return;
+          }
           try { await options.quarantine!.settle(); }
-          catch (error) { finish(new Error(`Worker containment shutdown was verified but its Graphyard quarantine could not be settled: ${error instanceof Error ? error.message : String(error)}`)); return; }
+          catch (error) {
+            const refusal = error instanceof Error ? error.message : String(error);
+            await unsettled({ reason: `Worker containment shutdown was verified but its Graphyard quarantine could not be settled: ${refusal}`, refusal });
+            return;
+          }
         }
         finish(null, code);
       }, options.graceMs ?? 5000);
@@ -713,6 +749,12 @@ export interface LoopSupervisorInstallOptions {
    * Never implied: without it such a unit is left as it is and the install is refused by name.
    */
   replace?: boolean;
+  /**
+   * Restart a running loop whose unit was rewritten (the default). The loop's own alignment
+   * passes false: it re-executes itself through `systemctl --no-block restart` right after, and a
+   * blocking restart issued from inside the unit would be ended by the very stop it requests.
+   */
+  restart?: boolean;
 }
 export interface LoopSupervision {
   supported: boolean;
@@ -980,7 +1022,7 @@ export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupe
   // A rewritten unit takes effect only when the service starts from it: `enable --now` leaves a
   // running loop on the old ExecStart and watchdog window, so it is restarted, and resumes from
   // the cursors it persists before and after every action.
-  if (wrote === 'updated') { run('systemctl', ['--user', 'restart', loopUnitName]); performed.push(`systemctl --user restart ${loopUnitName}`); }
+  if (wrote === 'updated' && options.restart !== false) { run('systemctl', ['--user', 'restart', loopUnitName]); performed.push(`systemctl --user restart ${loopUnitName}`); }
   // An enabled unit still never runs if this user's manager stops at logout and does not start at
   // boot, so lingering is part of "comes back after a reboot". A host that refuses it is reported
   // rather than left looking supervised.
@@ -992,6 +1034,26 @@ export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupe
   return { supported: true, unit: loopUnitName, unitPath, installed: true, enabled: observed.enabled, active: observed.active, linger,
     wrote, refused: null, performed, instruction: null,
     reason: [unreadable ? `systemd did not report whether the unit is ${unreadable}` : null, lingerReason].filter(Boolean).join('; ') || null };
+}
+
+/**
+ * The loop's own re-application of its unit (GY-916). Only `master init` used to write the unit,
+ * so a hand-copied packaged example (WatchdogSec written for the 20s default) stayed installed
+ * under a 300s interval and its window was refused as a configuration fault at every process
+ * start, forever. The alignment step calls this before it re-executes the loop: an installed unit
+ * whose text no longer matches `loopUnitText` for the running configuration is rewritten through
+ * `installLoopSupervisor`'s idempotent path — with all of its refusals, and without its blocking
+ * restart — so the next process starts under the window `loopWatchdogSeconds` computes. A unit
+ * that is not installed is left to `master init`; one that already matches is not touched.
+ */
+export async function alignLoopUnit(input: LoopUnitInput, host: LoopSupervisorHost = {}): Promise<{ wrote: LoopSupervisorInstallation['wrote']; reason: string | null; unitPath: string }> {
+  const unitPath = join(loopUnitDirectory(host), loopUnitName);
+  let existing: string | null = null;
+  try { existing = await readFile(unitPath, 'utf8'); } catch { existing = null; }
+  if (existing === null) return { wrote: 'none', reason: `${unitPath} is not installed; graphyard master init installs it`, unitPath };
+  if (existing === loopUnitText(input)) return { wrote: 'unchanged', reason: null, unitPath };
+  const installed = await installLoopSupervisor(input, host, { restart: false });
+  return { wrote: installed.wrote, reason: installed.refused ?? installed.reason, unitPath };
 }
 
 /** The same facts, observed rather than installed: what `master status` reports about supervision. */

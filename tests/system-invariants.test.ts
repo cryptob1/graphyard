@@ -6,7 +6,6 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { candidateKey } from '../src/daemon/reconcile.js';
 import { checkInvariants, emptyInvariantRecord, followUpProof, invariantDefaults, invariantFaultClass, invariantFaultKind, invariantFaults, systemInvariants, type InvariantInput, type SystemInvariant } from '../src/model/invariants.js';
-import { followUpTriageProof } from '../src/review-threads.js';
 import { repeatingPaths, repetitionReviewSection, reviewPrompt } from '../src/reviewer.js';
 import { readFile } from 'node:fs/promises';
 
@@ -62,7 +61,7 @@ const verdict = (checks: ReturnType<typeof judge>, invariant: SystemInvariant) =
 
 test('unit:system-invariants-checked — each invariant driven over its threshold reports exactly one fault of its class; at its threshold it holds', () => {
   assert.deepEqual([...systemInvariants], ['follow-ups-per-parent', 'lingering-sessions', 'refresh-churn', 'merge-stall', 'cycle-p90', 'untriaged-backlog', 'deploy-lease-loss']);
-  assert.equal(followUpProof, followUpTriageProof, 'a follow-up item is recognised by the proof the loop files it with');
+  assert.equal(followUpProof, 'manual:review-followups-triaged', 'a follow-up item filed before GY-1249 is recognised by the proof it was filed with');
   const parent = item('GY-1', { stage: 'done' });
   // Each fixture drives one invariant over its threshold (`over`) and holds it at the threshold (`at`).
   const fixtures: Record<SystemInvariant, { over: InvariantInput[]; at: InvariantInput[] }> = {
@@ -71,9 +70,13 @@ test('unit:system-invariants-checked — each invariant driven over its threshol
       at: [{ work: [parent, followUp('GY-2', parent), followUp('GY-3', { ...parent, id: 'work-GY-9', key: 'GY-9' } as Work)], now: clock }] },
     'lingering-sessions': {
       over: [{ work: [delivered('GY-5', 31 * minute, [session('reviewer-5')]), delivered('GY-6', 45 * minute, [session('reviewer-6')])], now: clock,
-        approvals: { 'decision:GY-7': { work: 'GY-7', agentName: 'approver-7', pane: null, settledAt: iso(-40 * minute) } }, agents: [{ name: 'reviewer-5' }, { name: 'reviewer-6' }, { name: 'approver-7' }] }],
+        approvals: { 'decision:GY-7': { work: 'GY-7', agentName: 'approver-7', pane: null, settledAt: iso(-40 * minute) } },
+        docsSyncs: { 'work-GY-14:head:base': { work: 'GY-14', agentName: 'gy-docs-sync-gy-14-1a2b3c4', pane: null, settledAt: iso(-40 * minute) } },
+        agents: [{ name: 'reviewer-5' }, { name: 'reviewer-6' }, { name: 'approver-7' }, { name: 'gy-docs-sync-gy-14-1a2b3c4' }] }],
       at: [{ work: [delivered('GY-5', 29 * minute, [session('reviewer-5')]), delivered('GY-6', 45 * minute, [session('reviewer-6')])], now: clock,
-        approvals: { 'decision:GY-7': { work: 'GY-7', agentName: 'approver-7', pane: null, settledAt: iso(-40 * minute) } }, agents: [{ name: 'reviewer-5' }] }] },
+        approvals: { 'decision:GY-7': { work: 'GY-7', agentName: 'approver-7', pane: null, settledAt: iso(-40 * minute) } },
+        docsSyncs: { 'work-GY-14:head:base': { work: 'GY-14', agentName: 'gy-docs-sync-gy-14-1a2b3c4', pane: null, settledAt: iso(-20 * minute) } },
+        agents: [{ name: 'reviewer-5' }, { name: 'gy-docs-sync-gy-14-1a2b3c4' }] }] },
     'refresh-churn': {
       over: [0, 1, 2, 3, 4].map(n => ({ work: [refreshed('GY-8', n)], now: clock + n * minute })),
       at: [0, 1, 2, 3].map(n => ({ work: [refreshed('GY-8', n)], now: clock + n * minute })) },

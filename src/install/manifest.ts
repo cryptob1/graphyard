@@ -32,3 +32,18 @@ export async function readAppFile(file: string): Promise<(AppFacts & { slug: str
   if (!Number.isSafeInteger(saved?.appId) || !Number.isSafeInteger(saved?.installationId)) return null;
   return { appId: saved.appId, slug: String(saved.slug), installationId: saved.installationId, privateKey: String(saved.privateKey), webhookSecret: String(saved.webhookSecret ?? ''), ...(saved.botUserId ? { botUserId: saved.botUserId } : {}) };
 }
+
+/** A saved control-plane App registration and the repository it was registered for. */
+export interface SavedApp { file: string; repository: string | null; facts: AppFacts & { slug: string; botUserId?: number } }
+
+/**
+ * Reads an App registration saved by the manifest flow (`graphyard github-setup`, `init`, or an
+ * earlier install), refusing a reviewer App: only the control-plane App can be reused as Graphyard's.
+ */
+export async function readSavedApp(file: string): Promise<SavedApp | null> {
+  const facts = await readAppFile(file);
+  if (!facts || !facts.privateKey || facts.privateKey === 'undefined') return null;
+  const saved = JSON.parse(await readFile(file, 'utf8'));
+  if (saved.reviewer) return null;
+  return { file, repository: typeof saved.repository === 'string' ? saved.repository : null, facts };
+}

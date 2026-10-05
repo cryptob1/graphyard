@@ -475,7 +475,7 @@ test('integration:auto-dispatch-producers — a producer session is launched on 
     const verify = async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] } });
     await assert.rejects(saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential }, async () => ({ actor: { id: 'proof-runner', role: 'worker' } })), /producer role/);
     await assert.rejects(saveProducerProfile(root, { name: 'producer-a', principal: 'someone-else', agentName: 'produce-a', kind: 'claude', credentialFile: credential }, verify), /does not match the profile principal/);
-    const added = await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential }, verify);
+    const added = await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, concurrency: 1 }, verify);
     assert.deepEqual([added.added, added.principal, added.proofs, added.launch.args], ['producer-a', 'proof-runner', ['unit:*', 'integration:*'], ['--permission-mode', 'bypassPermissions']]);
     await assert.rejects(saveProducerProfile(root, { name: 'producer-b', principal: 'proof-runner', agentName: 'produce-b', kind: 'claude', credentialFile: credential }, verify), /must be unique/);
     const config = await loadMasterConfig(root);
@@ -739,7 +739,7 @@ test('integration:instant-exit-classified — a session Herdr cannot find second
     written.environments = ['env-a', 'env-b'].map(name => ({ name, kind: 'claude', home: join(homes, name) }));
     await writeFile(file, JSON.stringify(written), { mode: 0o600 });
     const credential = join(credentialDirectory, 'producer.token'); await writeFile(credential, 'producer-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, accounts: ['env-a', 'env-b'] }, async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] } }));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, accounts: ['env-a', 'env-b'], concurrency: 1 }, async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] } }));
     const config = await loadMasterConfig(root);
     const item = requestedWork();
     // A reset in the future, on the hour, whenever the suite runs: a fixed date here held the account

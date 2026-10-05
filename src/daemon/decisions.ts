@@ -5,14 +5,15 @@ import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
 import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
-import { unexercisedFindings } from '../auto-dispatch.js';
+import { extractProducerAccountsOrRuntimes, unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
-import { researchRework } from '../research.js';
+import { researchRework } from '../research.js'; import { baseBreakHold } from '../master/base-break-refresh.js';
 import { unproducedManualProofs } from '../model/unproduced-attestation.js';
 import { triageClosure } from '../model/machine-backlog.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf } from '../review-cap.js';
+import { sessionName } from '../session-name.js';
 
 /** What the routine decisions read of the master configuration: automatic merging, and the review-round cap (GY-1118). */
 export type ReviewCapConfig = Pick<MasterConfig, 'autoMerge'> & Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>;
@@ -99,6 +100,8 @@ export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'rev
  * moved past. The loop waits for a fresh observation and decides from that.
  */
 export const reworkObservationMaxAgeMs = 120_000;
+/** GY-1266's former age bound on the woken observation, lifted by GY-1257 (a cycle may outlast it); the span a burst replay covers. */
+export const reworkWokenObservationMaxAgeMs = 15 * 60_000;
 export interface GitHubPause { until: string }
 /**
  * Whether the control plane's GitHub client is paused, read from the observation jobs it refused:
@@ -118,26 +121,27 @@ export const observedFrom = (work: Work) => work.observation
   ? `[Decided from the GitHub observation taken at ${work.observation.at} of candidate ${work.observation.candidate.sha}; if the item has moved since, this request no longer describes it.]`
   : '[Decided with no GitHub observation of the item.]';
 /**
- * Why a rework request must wait for a fresh observation, or null when the one on the item may be
- * decided from. The reason names the stale observation — its time and head — and never its age,
- * so it reads the same on every cycle it stands.
+ * Why a rework request must wait for a fresh observation, or null when the one on the item may be decided
+ * from. The reason names the stale observation — its time and head — never its age, so it reads the same each cycle.
  */
-export function reworkObservationWait(work: Work, now: number, pause: GitHubPause | null): string | null {
+export function reworkObservationWait(work: Work, now: number, pause: GitHubPause | null, wokenAt?: string | null): string | null {
   const observation = work.observation;
   if (!observation) return `${work.key}: rework waits for a GitHub observation of the item; there is none to decide from`;
   const seen = `the last GitHub observation (taken at ${observation.at} of head ${observation.candidate.sha.slice(0, 12)})`;
   if (pause) return `${work.key}: rework waits for a fresh GitHub observation — GitHub requests are paused until ${pause.until}, so ${seen} is a stale observation that may describe a head the branch has moved past`;
   const age = now - Date.parse(observation.at);
+  // GY-1266/GY-1257. The loop's own woken observation of the submitted head is the reading it waited for: the next cycle reads it
+  // an interval or a slow cycle later, past any age bound on the cycle clock, so on such a bound every landed wake was stale again,
+  // re-sent, and no rework was ever requested. Its head must still be the candidate's; apply time withdraws one the item moved past.
+  if (wokenAt && Date.parse(observation.at) > Date.parse(wokenAt) && observation.candidate.sha === work.candidate?.sha) return null;
   if (!(Number.isFinite(age) && age < reworkObservationMaxAgeMs)) return `${work.key}: rework waits for a fresh GitHub observation — ${seen} is a stale observation, older than two minutes, and the branch may have moved past that head`;
   return null;
 }
 
 /**
- * GY-710. A step refused for want of a fresh observation wakes the item's observation job at once
- * and waits for that observation to land, rather than for whatever the job's cadence brings round.
- * One wake stands until an observation newer than it lands; a wake that brought none within this
- * bound (the job failed, or the server lost it) is sent again. During a GitHub pause the job can
- * observe nothing, so no wake is sent.
+ * GY-710. A step refused for want of a fresh observation wakes the item's observation job at once and waits for that
+ * observation to land, not the job's cadence. One wake stands until a newer observation lands; a wake that brought none
+ * within this bound (the job failed, or the server lost it) is sent again. During a GitHub pause no wake is sent.
  */
 export const observationWakeRetryMs = 5 * 60_000;
 export function observationWakeDue(work: Work, wokenAt: string | null | undefined, now: number, pause: GitHubPause | null): boolean {
@@ -170,9 +174,8 @@ export function awaitingObservation(previous: { state: string; detail: string } 
   return previous?.state === 'failed' && staleMergeRefusal.test(previous.detail) && wake?.state === 'done';
 }
 /**
- * GY-710. Whether the observation a stale merge refusal woke has landed — an observation newer than
- * the wake — with every gate passing: the merge is asked again at once, the attempt following the
- * observation rather than the retry backoff (`mergeRetryDue`).
+ * GY-710. Whether the observation a stale merge refusal woke has landed (newer than the wake) with every
+ * gate passing: the merge is asked again at once, following the observation, not the backoff (`mergeRetryDue`).
  */
 export function mergeObservationLanded(wake: { state: string; at: string } | undefined, work: Work): boolean {
   if (wake?.state !== 'done' || work.violations.length || !work.gates.every(gate => gate.passed)) return false;
@@ -183,8 +186,7 @@ export function mergeObservationLanded(wake: { state: string; at: string } | und
 export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements', 'close', 'attest'] as const;
 export type RoutineDecisionAction = typeof routineDecisionActions[number];
 /** `input` is what the decision names beyond what `decisionInput` derives from the item: a resolve's trigger, and the grounds binding a situated request judges (GY-407). */
-/** `escalation` is the one standing escalation a resolve settles: a standing request for any other is not this decision. */
-/** `scope` is the worker request a `requirements` decision answers; `input.answers` binds the decision to it. */
+/** `escalation` is the one standing escalation a resolve settles: a standing request for any other is not this decision. `scope` is the worker request a `requirements` decision answers; `input.answers` binds the decision to it. */
 export interface RoutineDecision { action: RoutineDecisionAction; reason: string; binding: string; input?: Record<string, unknown>; escalation?: { trigger: string; at: string }; scope?: NonNullable<ApprovalWatch['scope']> }
 /**
  * Whether two decisions answer the same scope request. Compared field by field: the ledger keeps
@@ -255,8 +257,8 @@ export function blockerScopeDecision(work: Work): RoutineDecision | null {
  * Recovery releases a delivered item whose supervisor is still quarantined. A merge decision is
  * needed only where automatic merging is off, and then for the exact candidate that is mergeable.
  */
-export function routineDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
-  const needed = neededDecision(work, config, exhausted);
+export function routineDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
+  const needed = neededDecision(work, config, baseFailed, exhausted);
   if (!needed) return null;
   // None attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item,
   // and an attestation's approver judges the proof.
@@ -279,9 +281,9 @@ export function awaitingEjectionRestore(work: Pick<Work, 'gates'>): boolean {
 }
 /**
  * What the item calls for, before asking whether the loop may attest that its worker is stopped.
- * `exhausted` is the producer requests the loop escalated as spent on an earlier cycle (GY-496).
+ * `baseFailed` names required checks the base head fails too (GY-528); `exhausted`, spent producer requests (GY-496).
  */
-export function neededDecision(work: Work, config: ReviewCapConfig, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
+export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
   if (work.stage === 'done') {
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
@@ -321,7 +323,7 @@ export function neededDecision(work: Work, config: ReviewCapConfig, exhausted: r
   // which waits for one — must not hold this rework.
   const proofs = proofRework(work);
   if (proofs) return { action: 'rework', ...proofs };
-  const ci = failedCheckRework(work);
+  const ci = failedCheckRework(work, baseFailed);
   if (ci) return { action: 'rework', ...ci };
   const spent = exhaustedProofRework(work, exhausted);
   if (spent) return { action: 'rework', ...spent };
@@ -395,20 +397,21 @@ export function overtakenDecision(work: Work, decision: RoutineDecision, standin
 /**
  * The rework a required CI check that failed on exactly the current head calls for, or null. The
  * next action for such a head is already `request-rework` (refusal-mapping.ts), but nothing asked
- * for the round: on 2026-09-25 GY-245's worker had completed, a base refresh produced
- * a3b75653db55, its `test` check failed, and the item sat in Test for over four hours with its
- * next step named for no one. The latest attempt of each check decides, so a rerun that is still
- * going or passed asks for nothing; the binding names the head and the failed checks.
+ * for the round: GY-245 sat in Test for four hours after its refreshed head's `test` failed. The latest attempt of each check decides, so a rerun that is still
+ * going or passed asks for nothing; the binding names the head and the failed checks. A candidate
+ * failed only on what the base broke and its tip fixed is refreshed onto that tip instead (GY-793).
  */
-export function failedCheckRework(work: Work): { reason: string; binding: string } | null {
+export function failedCheckRework(work: Work, baseFailed?: ReadonlySet<string>): { reason: string; binding: string } | null {
   const candidate = work.candidate, observation = work.observation;
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
-  if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
+  if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed' || baseBreakHold(work)) return null;
+  // A check the base head fails too is no worker's to fix (GY-528): the loop raises it against the base once.
   // The policy's checks and the base branch's other required checks alike (GY-430): PR #221's
   // `secrets` scan failed, GitHub blocked the merge, and nothing asked for the round. A policy
   // check's run is read through the test gate's trust boundary (GY-731); a protection-only
   // check's through the app protection binds it to, or any app with the CI apps preferred (GY-1060).
   const failed = requiredChecksOf(work).filter(required => {
+    if (baseFailed?.has(required.name)) return false;
     const latest = required.policy ? requiredCheck(work, required.name) : requiredCheckRun(required, observation.checks, ciAppIdsOf(work));
     // A failure awaiting its one rerun (GY-516) is not yet the worker's: a rework round would push a
     // new head and lose the queue position, approval and proofs the rerun keeps.
@@ -432,6 +435,12 @@ const groupName = (entry: ExhaustedProof) => `the ${entry.group ?? 'producer'} p
 const quoteAttempts = (entry: ExhaustedProof, limit = 1600) => { const text = entry.attempts.map(attempt => `"${attempt}"`).join('; '); return text.length > limit ? `${text.slice(0, limit - 1)}…` : text || 'no attempt recorded'; };
 /** The attention the loop raises the cycle it first sees the request spent: group, every attempt's outcome, and the next step's owner. */
 export function exhaustedProofEscalation(entry: ExhaustedProof) {
+  const unacted = unactedProducerAttempts(entry.attempts);
+  if (unacted) {
+    const runtimesOrAccounts = extractProducerAccountsOrRuntimes(entry.attempts);
+    const target = runtimesOrAccounts.length ? runtimesOrAccounts.join(', ') : 'producer runtime or account';
+    return boundDetail(`${entry.work}: producer attempts for ${groupName(entry)} on ${entry.sha.slice(0, 12)} are used up (${entry.reason}); no producer is launched for this head until an eligible account exists. Attempts: ${quoteAttempts(entry)}. Next step, owned by the master loop: no rework is requested for ${entry.work}; the attempts name a producer-runtime fault on ${target}; the loop relaunches the request once an eligible producer account exists`);
+  }
   return boundDetail(`${entry.work}: producer attempts for ${groupName(entry)} on ${entry.sha.slice(0, 12)} are used up (${entry.reason}); no producer is launched for this head again. Attempts: ${quoteAttempts(entry)}. Next step, owned by the master loop: on its next cycle it requests a rework decision for ${entry.work} quoting these attempts, and the independent approver judges it; the master fixes a launcher fault (a producer profile or its credential) if the attempts name one`);
 }
 /** The rework an item whose proof requests are spent calls for, once the escalation has stood a cycle, or null. */
@@ -440,8 +449,15 @@ export function exhaustedProofRework(work: Work, exhausted: readonly ExhaustedPr
   if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
   const spent = exhausted.filter(entry => entry.work === work.key && entry.sha === candidate.sha);
   if (!spent.length) return null;
-  const each = Math.max(200, Math.floor(1600 / spent.length));
-  return { reason: `${work.key}: the producer attempts for ${spent.map(entry => `${groupName(entry)} on ${candidate.sha.slice(0, 12)} ended without trusted evidence — ${quoteAttempts(entry, each)}`).join('. And ')}. No producer is launched for this head again, so it cannot pass its proofs; the item returns to a worker to fix what the attempts name and push a fresh head the producers are requested for.`,
+  // GY-1153: When every spent producer attempt on a head ended without the session acting (never
+  // started, profile busy, account exhausted or launch refused), the loop requests no rework for the head.
+  // A head whose producer attempts include at least one session that acted and failed to produce
+  // evidence still gets the GY-496 rework, and so does a spent entry with no recorded attempt
+  // (GY-1227), exactly as `exhaustedProofEscalation` announced it.
+  const acted = spent.filter(entry => !unactedProducerAttempts(entry.attempts));
+  if (!acted.length) return null;
+  const each = Math.max(200, Math.floor(1600 / acted.length));
+  return { reason: `${work.key}: the producer attempts for ${acted.map(entry => `${groupName(entry)} on ${candidate.sha.slice(0, 12)} ended without trusted evidence — ${quoteAttempts(entry, each)}`).join('. And ')}. No producer is launched for this head again, so it cannot pass its proofs; the item returns to a worker to fix what the attempts name and push a fresh head the producers are requested for.`,
     // Keyed on the head alone: a second group spent on the same head asks for no second rework.
     binding: `${candidate.sha}:proof-exhausted` };
 }
@@ -519,7 +535,10 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
   if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
   const tip = observation.baseTip ?? candidate.baseSha;
-  if (observation.conflicting && !work.queue)
+  // While the control plane's own test merge of the head onto that tip is pending, it decides: a
+  // confirmed conflict is `baseRefreshConflict`'s, routed to a docs-sync session when it is confined
+  // to docs pages (GY-566), and a clean one costs no round at all.
+  if (observation.conflicting && !work.queue && !pendingBaseRefresh(work))
     return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
   const ejection = work.queueEjection;
   if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflict(ejection) && !ejection.predecessors?.length && !pendingBaseRefresh(work)) {
@@ -763,4 +782,18 @@ export function repeatedMergeRefusal(work: Pick<Work, 'mergeRefusal' | 'candidat
   const refusal = work.mergeRefusal, candidate = work.candidate;
   return refusal && refusal.action === 'rework' && candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha && refusal.policyRevision === work.policyRevision ? refusal : null;
 }
+
+/** The launcher key of the approver launch for a decision (GY-616). */
+export const approverLaunchKey = (decision: string) => `launch:approver:${decision}`;
+/** The approval-watch key of an approver session no request of the loop's launched (GY-403). */
+export const handWatchPrefix = 'hand:';
+/** The name prefixes every approver session for `key` starts with (see `approverSessionName`). */
+export const approverPrefixes = (key: string) => ['graphyard-approver', 'gy-approver'].map(prefix => `${sessionName(prefix, key)}-`);
+
+/** Record how a watch's session ended (GY-551). */
+export function recordWatchEnded(watch: ApprovalWatch, detail: string) {
+  const entry = `${watch.agentName ? `session ${watch.launches}: ` : ''}${detail}`.slice(0, 300);
+  if (watch.ended.at(-1) !== entry) watch.ended = [...watch.ended, entry].slice(-10);
+}
+
 
