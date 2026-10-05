@@ -9,7 +9,7 @@ The master acts without asking. Three decisions are human-only: goals and priori
 
 ## Operate
 
-Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has an external blocker recorded in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked.
+Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has an external blocker in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked.
 
 1. `master status` on startup and events.
 2. `master run` dispatches ready work in `schedule.order`.
@@ -31,20 +31,19 @@ Unproduced `manual:` proofs are the loop's: one `attest` decision per proof, hea
 
 ### Session liveness is reconciled, not trusted
 
-**The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
-that misses it; an unobserved one is spared its first 3 minutes. A handle another host launched is left to
-that host's loop. `dispatch.sessionReconcile` reports each closure:
+**The control plane, not the master, reconciles session liveness.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
+that misses it; an unobserved one is spared its first 3 minutes. Another host's handles are
+its loop's. `dispatch.sessionReconcile` reports each closure:
 
 - **Vanished**: missing from two consecutive listings.
 - **Ended**: agentless pane or terminal state. `idle`, `done` and
   `blocked` are deliberately not terminal.
-- **Superseded**: a review or proof session for a head the item moved past; a delivered item is closed the same
-  way as any other. Implementation sessions are left to the lease.
-- **Duplicate**: the older of two sessions for one role and head.
+- **Superseded**: a review or proof session for a head the item moved past, delivered or not. Implementation sessions are left to the lease.
+- **Duplicate**: the older of two same-role, same-head sessions.
 
 A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
 
-**Instead of closing sessions by hand:** nothing for a finished or dead one (`graphyard master run --once` sweeps); attach to an overlong one with the command on its handle. Never mark
+**Instead of closing sessions by hand:** nothing for a finished or dead one (`graphyard master run --once` sweeps); attach to an overlong one via its handle's command. Never mark
 another session's handle finished to free a slot.
 
 `blocked` frees the slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) `github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch`, `outside-scope-test-failure`, `planned-file-scope`, `needs-decision` self-clear; `genuine`/`human-only` escalate.
@@ -85,7 +84,7 @@ A passing producer records `"exercise"`: the proof rerun with the criterion's be
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
 ```
 
-A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it, for automated proofs. When all remaining unit or integration proofs are such findings, the next action is `request-rework`, naming proof, criterion and surviving mutation; status shows it awaiting rework. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
+A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion (`unexercised`, `evidence.exercise.refused`); the loop requests rework quoting it, for automated proofs. When all remaining unit or integration proofs are such findings, the next action is `request-rework`, naming proof, criterion and surviving mutation; status shows it awaiting rework. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
 
 ## Guarded merges
 
@@ -93,7 +92,7 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ### Repair lane
 
-First exception: a `"repair": "merge-path"` item within `mergePath` (`src/github.ts`, `src/merge-queue.ts`, `src/model/queue.ts`, `src/daemon/`, `.github/workflows/`, coordination store `src/engine.ts`, `src/store/`), stalled 15m, checks passed, an approved `repair-merge` naming the fault, merges via the App's bypass, audited (`repair.merged`), flagged until a normal merge. The loop [requests it](master-agent-reference.md#recovery); masters never hand operators bypass commands.
+First exception: a `"repair": "merge-path"` item within `mergePath` (`src/github.ts`, `src/merge-queue.ts`, `src/model/queue.ts`, `src/daemon/`, `.github/workflows/`, coordination store `src/engine.ts`, `src/store/`), stalled 15m, checks passed, an approved `repair-merge` naming the fault, merges via the App's bypass, audited (`repair.merged`), flagged until a normal merge. Once per stall the loop requests it and launches the approver: every merge-stage candidate refused 15m on one shared reason, and an approved, checks-passing candidate marked so or whose criteria name the fault. Masters never hand operators bypass commands.
 
 The main guard's revert ([optimistic merges](github.md#optimistic-merges)) is the second: a confirmed required-suite failure on main traced to the culprit lands a revert on the base tip — refused if later merges touched the files — head-bound through the bypass, recorded `optimistic.revert.*`, the item reopened as rework.
 

@@ -69,8 +69,6 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and
 
 `master escalation GY-N` spawns a handler answering with `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
-A merge band refused 15m on one shared reason calls the [repair lane](master-agent.md#repair-lane): the loop requests `repair-merge` naming the fault for the top-priority approved, checks-passing in-scope candidate marked `"repair": "merge-path"` (or whose criteria name the fault), and launches its approver — once per stall (`src/daemon/repair-trigger.ts`).
-
 ## Fault classes
 
 Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen, nor pruning retire, a standing fault. Full roles are slot waits; workless sessions raise `fleet-capacity` (capacity); unnamed master roles are no `configuration` fault. Scope requests count past 15 minutes open, or refused with no approver left. A failed section is listed only in `unavailable`. Sandbox or `workflows`-permission refusal blockers are `configuration`.
