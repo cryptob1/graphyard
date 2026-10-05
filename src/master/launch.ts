@@ -305,25 +305,28 @@ export function outputAfterCommand(screen: string | null, command: string) {
   if (prompted && echoed > 0 && lines[echoed - 1] && after.at(-1) === lines[echoed - 1]) after.pop();
   return after.length ? after.slice(-exitedLineLimit).map(line => line.length > paneLineLimit ? `${line.slice(0, paneLineLimit)}…` : line) : null;
 }
+/** Whether an argv word is the graphyard CLI: `graphyard`, or its `graphyard.mjs` script, by basename. */
+const graphyardCli = (word: string) => (word.split('/').at(-1) ?? '').replace(/\.[cm]?js$/, '') === 'graphyard';
+/** The words a shell wrapper's `-c` string (`-c`, `-lc`, …) runs, split on whitespace (GY-1225); only a shell's: `grep -c` is not a wrapper. */
+const wrappedWords = (argv: string[]) => /^(sh|bash|zsh|dash)$/.test(argv[0]?.split('/').at(-1) ?? '') ? argv.flatMap((word, index) => index > 0 && /^-[a-z]*c$/.test(argv[index - 1]) ? word.split(/\s+/).filter(Boolean) : []) : [];
 /**
- * Whether a foreground process's argv is a `graphyard watch` supervisor (GY-1213): `watch`, after
- * the CLI that runs it, then its operands and any flags, then the `--` that opens the runtime's
- * command — however many words lie between — or a shell wrapper's single `-c` string spelling the
- * same. Pinned against `launchCommand` with the supervisor prefix dispatch builds.
+ * Whether a foreground process's argv is a `graphyard watch` supervisor (GY-1213): `watch`, right
+ * after the graphyard CLI that runs it (GY-1225: not any bare `watch`, such as `sudo watch`), then
+ * its operands and any flags, then the `--` that opens the runtime's command — however many words
+ * lie between — or a shell wrapper's single `-c` string spelling the same. Pinned against
+ * `launchCommand` with the supervisor prefix dispatch builds.
  */
 export function supervisorArgv(argv: string[]) {
-  const at = argv.indexOf('watch');
-  if (at > 0 && argv.indexOf('--', at + 2) > 0) return true;
-  return argv.some(word => /\S\s+watch\s+\S.*\s--(\s|$)/.test(word));
+  return [argv, wrappedWords(argv)].some(words => words.some((word, at) => word === 'watch' && at > 0 && graphyardCli(words[at - 1]) && words.indexOf('--', at + 2) > 0));
 }
 /**
  * Whether a foreground process's argv runs `program` (GY-1213): a word, or a word of a wrapper's
- * `-c` string, whose basename is the program or an interpreter script named for it (`codex.js`).
+ * `-c` string (only that string is split, GY-1225: `grep "run claude"` is not the runtime), whose basename is the program or an interpreter script named for it (`codex.js`).
  * A runtime started as a script of another name (`node …/cli.js`) is not recognised; that is
  * harmless while its supervisor stays in the launch's foreground group, which is classed first.
  */
 export function runsProgram(argv: string[], program: string) {
-  return argv.flatMap(word => word.split(/\s+/)).some(word => { const base = word.split('/').at(-1) ?? ''; return base === program || base.replace(/\.[cm]?js$/, '') === program; });
+  return [...argv, ...wrappedWords(argv)].some(word => { const base = word.split('/').at(-1) ?? ''; return base === program || base.replace(/\.[cm]?js$/, '') === program; });
 }
 /**
  * Who holds the pane's terminal foreground, as `herdr pane process-info` reports it: `shell` when
@@ -505,7 +508,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
   // verdict is not kept, so the next launch on that endpoint reports it instead.
   let launched = false, settle!: (ok: boolean) => void;
   const outcome = new Promise<boolean>(done => { settle = done; });
-  void (options.keyringWarning ?? ((session, bound, ok) => keyringEndpointWarning(session, bound, undefined, undefined, undefined, ok, keyringProbeBackoff)))(name, confinement, outcome).then(line => { if (line) log(line); }, () => undefined);
+  void (options.keyringWarning ?? ((session, bound, ok) => keyringEndpointWarning(session, bound, undefined, undefined, undefined, ok, keyringProbeBackoff, log)))(name, confinement, outcome).then(line => { if (line) log(line); }, () => undefined);
   try {
     let started: Awaited<ReturnType<typeof awaitRuntimeStart>>;
     try { started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: startedStates }); }

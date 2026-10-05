@@ -15,6 +15,7 @@ export { migrationAttemptLockTimeoutMs, migrationLockTimeoutMs } from './migrati
 import { coordinationDocumentSql, coordinationRelevance, coordinationTail, coordinationTrimSql, detoasted, type CoordinationTrim } from './coordination-sql.js';
 import { namedPool, reportPool, type ReportPoolOptions } from './report-pool.js';
 import { closePool, leasePoolConnections, trackedPool } from './pools.js';
+import { pendingWakes, wakeJobs, webhookWakeTtlMs, observationStarvedAfterMs } from './wake.js';
 
 export * from './snapshot-delta.js';
 export * from './item-lock.js';
@@ -117,7 +118,9 @@ export class Store {
       const { rows } = await db.query('SELECT clock_timestamp() AS now');
       // Job wakes are taken last, in work-id order (GY-1115): see `wakeJob`.
       pendingWakes.set(db, new Map());
-      const result = await fn(db, rows[0].now);
+      const query = db.query; db.query = guardDeferredWakes(db, query);
+      let result: T;
+      try { result = await fn(db, rows[0].now); } finally { db.query = query; }
       const wakes = pendingWakes.get(db)!; pendingWakes.delete(db);
       await wakeJobs(db, [...wakes.keys()], [...wakes].filter(([, prioritized]) => prioritized).map(([id]) => id));
       await db.query('COMMIT');
@@ -127,6 +130,20 @@ export class Store {
   }
   async list(): Promise<Work[]> {
     return (await this.pool.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+  }
+  /** One item's document by its id, without reading the fleet (GY-1052). */
+  async workItem(id: string): Promise<Work | undefined> {
+    return (await this.pool.query('SELECT document FROM work_items WHERE id=$1', [id])).rows[0]?.document;
+  }
+  /**
+   * The live merge-queue entries, which is all a queue position is computed from (GY-1052): the
+   * filter is `queueOrder`'s own, a queue entry on an item not done, so `queuePlacement` over this
+   * equals it over the whole fleet. Selected through the work index, so no unqueued item's
+   * document is read; a settled item has no queue (`settledSql`), so none is read either.
+   */
+  async queuedWork(): Promise<Work[]> {
+    return (await this.pool.query(`SELECT w.document FROM work_index i JOIN work_items w ON w.id=i.id
+      WHERE i.stage IS DISTINCT FROM 'done' AND jsonb_typeof(w.document->'queue')='object' ORDER BY i.number`)).rows.map(row => row.document);
   }
   async workSnapshot(): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[] }> {
     const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs FROM work_items")).rows[0];
@@ -177,7 +194,7 @@ export class Store {
    */
   async takeJob(order: string[] = [], headCount = 0, starvedAfterMs = observationStarvedAfterMs) {
     const token = randomUUID();
-    const result = await this.pool.query(`WITH picked AS (SELECT work_id, generation<>claimed_generation AS woken, webhook_at > now() - ($5::text||' milliseconds')::interval AS webhook, refreshed_until > now() AS refreshed FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY CASE WHEN webhook_at > now() - ($5::text||' milliseconds')::interval THEN -1 WHEN array_position($1::uuid[], work_id) <= $3::int THEN 0 WHEN available_at < now() - ($4::text||' milliseconds')::interval * 3 THEN 1 WHEN available_at < now() - ($4::text||' milliseconds')::interval THEN 2 WHEN array_position($1::uuid[], work_id) IS NOT NULL THEN 3 ELSE 4 END, CASE WHEN available_at < now() - ($4::text||' milliseconds')::interval * 3 THEN available_at END, CASE WHEN webhook_at > now() - ($5::text||' milliseconds')::interval THEN webhook_at END, array_position($1::uuid[], work_id), available_at FOR UPDATE SKIP LOCKED LIMIT 1)
+    const result = await this.pool.query(`WITH picked AS (SELECT work_id, generation<>claimed_generation AS woken, webhook_at > now() - ($5::text||' milliseconds')::interval AS webhook, refreshed_until > now() AS refreshed FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY CASE WHEN webhook_at > now() - ($5::text||' milliseconds')::interval THEN -1 WHEN array_position($1::uuid[], work_id) <= $3::int THEN 0 WHEN available_at < now() - ($4::text||' milliseconds')::interval * 3 THEN 1 WHEN available_at < now() - ($4::text||' milliseconds')::interval THEN 2 WHEN array_position($1::uuid[], work_id) IS NOT NULL THEN 3 ELSE 4 END, CASE WHEN webhook_at > now() - ($5::text||' milliseconds')::interval THEN webhook_at END, CASE WHEN available_at < now() - ($4::text||' milliseconds')::interval * 3 THEN available_at END, array_position($1::uuid[], work_id), available_at FOR UPDATE SKIP LOCKED LIMIT 1)
       UPDATE jobs SET token=$2, locked_until=now()+interval '90 seconds', attempts=attempts+1,claimed_generation=generation,webhook_at=NULL
       FROM picked WHERE jobs.work_id=picked.work_id RETURNING jobs.*, picked.woken, picked.webhook IS TRUE AS webhook, picked.refreshed IS TRUE AS refreshed`, [order.length ? order : null, token, Math.max(0, Math.floor(headCount)), String(Math.max(0, Math.floor(starvedAfterMs))), String(webhookWakeTtlMs)]);
     return result.rows[0] as { work_id: string; token: string; attempts: number; woken: boolean; webhook: boolean; refreshed: boolean; refreshed_until: Date | null } | undefined;
@@ -258,56 +275,21 @@ export class Store {
   }
 }
 
-/** How long a webhook wake keeps its job ahead of polled jobs before it is dropped from the front (the job stays due). */
-export const webhookWakeTtlMs = 10 * 60_000;
-/** How long a due observation job may wait behind the claim-priority list before it is claimed first. */
-export const observationStarvedAfterMs = 5 * 60_000;
-
+const jobsStatement = /\b(?:from|into|update|join)\s+jobs\b/i;
 /**
- * Wake the jobs a verified GitHub webhook delivery names (GY-806): every job when it moved the base
- * branch or a merge-queue ref (`all`), else the items whose pull request, candidate or speculative
- * tip SHA, or candidate branch it names. An observation event also stamps their webhook wake, which
- * `takeJob` on any replica claims ahead of polled jobs. Returns the woken work ids.
+ * A transaction's `query`, refusing any statement on `jobs` once a wake is deferred (GY-1212). A
+ * `Store.transaction` takes its wakes just before COMMIT (see `wakeJob`), so its own statements on
+ * `jobs` (an observation's own job, a delivered item's) must come before its first wake: a later
+ * read would miss the wake and a later delete would see its row put back.
  */
-export async function wakeFromWebhook(db: Pick<pg.PoolClient, 'query'>, subjects: { all: boolean; prs: number[]; shas: string[]; branches: string[] }, observation: boolean): Promise<string[]> {
-  // The job rows are locked in work-id order first (GY-1115), the order every other job wake takes them in.
-  const woken = await db.query(`WITH target AS (SELECT work_id FROM jobs WHERE $1::boolean OR work_id IN (SELECT id FROM work_items
-    WHERE document->'submission'->>'pr' = ANY($2::text[]) OR document->'candidate'->>'sha' = ANY($3::text[]) OR document->'queue'->'speculation'->>'tip' = ANY($3::text[]) OR document->'candidate'->>'branch' = ANY($6::text[]))
-    ORDER BY work_id FOR UPDATE)
-    UPDATE jobs SET available_at=LEAST(available_at, now()),generation=generation+1,
-    webhook_at=CASE WHEN $4::boolean AND (webhook_at IS NULL OR webhook_at <= now() - ($5::text||' milliseconds')::interval) THEN now() ELSE webhook_at END
-    FROM target WHERE jobs.work_id = target.work_id RETURNING jobs.work_id`,
-    [subjects.all, subjects.prs.map(String), subjects.shas, observation, String(webhookWakeTtlMs), subjects.branches]);
-  return woken.rows.map(row => String(row.work_id));
+function guardDeferredWakes(db: pg.PoolClient, query: pg.PoolClient['query']): pg.PoolClient['query'] {
+  return ((text: unknown, ...rest: unknown[]) => {
+    const sql = typeof text === 'string' ? text : (text as { text?: unknown } | null)?.text, wakes = pendingWakes.get(db);
+    if (wakes?.size && typeof sql === 'string' && jobsStatement.test(sql)) return Promise.reject(new Error(`A jobs statement ran after this transaction deferred a job wake (${[...wakes.keys()].join(', ')}) (GY-1212)`));
+    return (query as (...args: unknown[]) => unknown).call(db, text, ...rest);
+  }) as pg.PoolClient['query'];
 }
-
-/** The job wakes a `Store.transaction` has asked for and not yet taken, per connection, each with whether it is prioritized (GY-1115). */
-const pendingWakes = new WeakMap<object, Map<string, boolean>>();
-/**
- * Make an item's observation job due now. A wake never moves a job that is already due later: an
- * item saved every minute would otherwise look freshly due forever and never reach the starvation
- * bound `takeJob` claims ahead of the priority list (2026-09-26: items stuck for an hour on stale reads).
- * `prioritized` also stamps the job's webhook wake, so `takeJob` claims it ahead of the polled
- * backlog as it would a webhook's (GY-1099: a merge refused only for a stale observation). Like a
- * webhook's, a wake still standing keeps its stamp, so prioritized wakes are claimed oldest first.
- * Inside a `Store.transaction` the wake is taken just before
- * COMMIT, with the transaction's other wakes, in work-id order (GY-1115): every transaction then
- * locks its item rows before any job row, and job rows in one stable order, so a reconciliation
- * batch, a resync and an observation can no longer deadlock on a job row one of them took mid-way.
- */
-export async function wakeJob(db: Pick<pg.PoolClient, 'query'>, id: string, prioritized = false) {
-  const pending = pendingWakes.get(db);
-  if (pending) pending.set(id, prioritized || pending.get(id) === true);
-  else await wakeJobs(db, [id], prioritized ? [id] : []);
-}
-/** Make several items' observation jobs due in one statement, their rows locked in work-id order; those in `prioritized` are stamped as `wakeJob` stamps one. */
-export async function wakeJobs(db: Pick<pg.PoolClient, 'query'>, ids: string[], prioritized: string[] = []) {
-  if (!ids.length) return;
-  await db.query(`INSERT INTO jobs(work_id,webhook_at) SELECT id, CASE WHEN id = ANY($2::uuid[]) THEN now() END FROM unnest($1::uuid[]) AS id ORDER BY id
-    ON CONFLICT(work_id) DO UPDATE SET available_at=LEAST(jobs.available_at, now()),generation=jobs.generation+1,
-    webhook_at=CASE WHEN EXCLUDED.webhook_at IS NOT NULL AND (jobs.webhook_at IS NULL OR jobs.webhook_at <= now() - ($3::text||' milliseconds')::interval) THEN now() ELSE jobs.webhook_at END`,
-    [[...new Set(ids)].sort(), [...new Set(prioritized)], String(webhookWakeTtlMs)]);
-}
+export { webhookWakeTtlMs, observationStarvedAfterMs, wakeFromWebhook, wakeJob, wakeJobs } from './wake.js';
 
 export async function save(db: pg.PoolClient, work: Work, actor: string, kind: string, now: Date, details?: unknown) {
   const text = await saveDocument(db, work, now);
