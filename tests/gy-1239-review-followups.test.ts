@@ -16,18 +16,18 @@ async function anthropicOpencodeHome(label: string) {
 
 test('unit:gy-1239-finding-1 — declaredPlan: undefined on an OpenCode account with derived plan zai is not Z.AI-specific', async () => {
   const home = await anthropicOpencodeHome('gy-1239-declared-undefined');
-  const health = await checkAgentEnvironment({ name: 'opencode-a', kind: 'opencode' as any, home, plan: 'zai-a', declaredPlan: undefined }, { quota: false });
+  const health = await checkAgentEnvironment({ name: 'opencode-a', kind: 'opencode', home, plan: 'zai-a', declaredPlan: undefined }, { quota: false });
   assert.equal(health.loggedIn, true, 'an explicitly undeclared plan must not fall back to the derived zai plan and probe the account as Z.AI');
 });
 
 test('unit:gy-1239-finding-1 — an absent declaredPlan falls back to the derived plan', async () => {
   const home = await anthropicOpencodeHome('gy-1239-declared-absent');
-  const health = await checkAgentEnvironment({ name: 'opencode-a', kind: 'opencode' as any, home, plan: 'zai-a' }, { quota: false });
+  const health = await checkAgentEnvironment({ name: 'opencode-a', kind: 'opencode', home, plan: 'zai-a' }, { quota: false });
   assert.equal(health.loggedIn, false, 'without a declaredPlan key the derived zai plan makes the account Z.AI-specific, and it holds no Z.AI key');
 });
 
 test('unit:gy-1239-finding-1 — declaredPlan: null on an OpenCode account with derived plan zai is not Z.AI-specific', async () => {
   const home = await anthropicOpencodeHome('gy-1239-declared-null');
-  const health = await checkAgentEnvironment({ name: 'opencode-a', kind: 'opencode' as any, home, plan: 'zai-a', declaredPlan: null }, { quota: false });
+  const health = await checkAgentEnvironment({ name: 'opencode-a', kind: 'opencode', home, plan: 'zai-a', declaredPlan: null }, { quota: false });
   assert.equal(health.loggedIn, true);
 });
