@@ -62,6 +62,8 @@ export async function requestDecision(services: Services, caller: Principal, id:
   // A lane-approved rework whose application was interrupted is resumed by the next request for
   // the item, whatever its key (GY-1110). One that applied answers a new rework request in its
   // place; one that failed no longer stands, so the new request is recorded and supersedes it.
+  // Only a caller with authority for the request it makes triggers the resumption (GY-1244).
+  await callerMayRequest(services, caller, id, data.action, input, key, fingerprint);
   const resumed = await resumeLaneReworks(services, id);
   const answered = data.action === 'rework' ? resumed.find(decision => decision.state === 'applied') : undefined;
   if (answered) return answerWith(services, caller, key, fingerprint, answered);
@@ -71,6 +73,20 @@ export async function requestDecision(services: Services, caller: Principal, id:
   const requested = await recordRequest(services, caller, id, data, input, key, fingerprint);
   return requested.action === 'rework' && (requested.state === 'requested' || (requested.state === 'approved' && requested.approvedBy === laneApprover))
     ? applyLaneRework(services, requested) : requested;
+}
+
+/**
+ * Authenticate the caller and check its authority for the action before the request resumes any
+ * stranded rework (GY-1244). A replay of a recorded request is judged by its receipt, as ever.
+ * recordRequest repeats both checks in its own transaction, which is the one that decides.
+ */
+async function callerMayRequest(services: Services, caller: Principal, id: string, action: Decision['action'], input: any, key: string, fingerprint: string) {
+  await services.engine.store.transaction(async (db, now) => {
+    const actor = await authenticated(services, db, now, caller);
+    if (await receipt(db, actor, key, fingerprint)) return;
+    const work = await findWork(db, id); demand(work, 'Work item not found', 404);
+    for (const capability of requiredDecisionCapabilities(action, input, work!)) assertDecisionAuthority(actor, capability, work!, services.repository);
+  });
 }
 
 async function recordRequest(services: Services, caller: Principal, id: string, data: z.infer<typeof decisionRequestSchema>, input: any, key: string, fingerprint: string): Promise<DecisionRecord> {

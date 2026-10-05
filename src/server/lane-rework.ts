@@ -17,6 +17,10 @@ export const laneApprover = 'graphyard-risk-lane';
  * decision.applied nor decision.failed (GY-1110): its approval and its application are separate
  * steps, and an interruption between them left it approved forever, refusing every later rework.
  * The engine call is keyed by the decision, so a resumption never applies a rework twice.
+ *
+ * Resumption is best-effort (GY-1244): an unexpected fault while applying one stranded rework is
+ * logged and leaves it approved for the next request to resume, rather than failing the request
+ * that triggered the resumption — an unrelated unblock or close is never held hostage by it.
  */
 export async function resumeLaneReworks(services: Services, id: string): Promise<DecisionRecord[]> {
   const stranded = await services.engine.store.transaction(async db => {
@@ -24,7 +28,10 @@ export async function resumeLaneReworks(services: Services, id: string): Promise
     return work ? (await readDecisions(db, work)).filter(decision => decision.action === 'rework' && decision.state === 'approved' && decision.approvedBy === laneApprover) : [];
   });
   const settled: DecisionRecord[] = [];
-  for (const decision of stranded) settled.push(await applyLaneRework(services, decision));
+  for (const decision of stranded) {
+    try { settled.push(await applyLaneRework(services, decision)); }
+    catch (error) { console.error(`lane rework ${decision.id} on ${id} could not be resumed; the next request retries it:`, error instanceof Error ? error.message : 'unknown'); }
+  }
   return settled;
 }
 

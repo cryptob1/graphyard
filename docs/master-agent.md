@@ -92,8 +92,4 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 `master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only under a current authorization for the exact head, base and policy. Protocol skew refuses (`… deploy main first`).
 
-### Main-guard revert
-
-The one exception: the main guard's revert ([optimistic merges](github.md#optimistic-merges)). A confirmed required-suite failure on main traced to the culprit lands a revert on the base tip — refused if later merges touched the files — head-bound through the bypass, recorded `optimistic.revert.*`, the item reopened as rework.
-
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
