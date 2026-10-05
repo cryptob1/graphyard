@@ -143,6 +143,31 @@ export const deploymentObservationSchema = z.object({
 }).strict();
 export type DeploymentObservation = z.infer<typeof deploymentObservationSchema>;
 
+/**
+ * GY-1302: the loop's promotion drive. GitHub's scheduled release-candidate runs are best-effort and
+ * on 2026-10-05 four in a row never fired, so the loop dispatches the release-candidate workflow
+ * itself (`promotionCycle`). `dispatchedAt` is the loop's own last dispatch, kept so a run GitHub
+ * has not listed yet is never dispatched twice; `lastDispatchAt` is the later of it and the newest
+ * cut run GitHub lists, from which `run.promoteEveryMinutes` is counted.
+ */
+export const promotionStateSchema = z.object({
+  checkedAt: z.string(),
+  mainSha: z.string().nullable(),
+  promotedSha: z.string().nullable(),
+  promotedAt: z.string().nullable(),
+  /** First-parent merges on the base branch production does not run yet; null when unknown. */
+  behind: z.number().int().min(0).nullable(),
+  /** When the base branch tip and the promotion record were last fetched; reused for `promotionLedgerReadMs`. */
+  ledgerReadAt: z.string().nullable().default(null),
+  inFlight: z.boolean(),
+  runsReadAt: z.string().nullable(),
+  dispatchedAt: z.string().nullable(),
+  lastDispatchAt: z.string().nullable(),
+  nextDueAt: z.string().nullable(),
+  reason: z.string().max(500).nullable(),
+}).strict();
+export type PromotionState = z.infer<typeof promotionStateSchema>;
+
 /** What one reclamation did, kept on the cursor so `master status` reports it without rescanning. */
 export const reclaimSummarySchema = z.object({
   at: z.string(), scanned: z.number().int().min(0), removed: z.number().int().min(0), kept: z.number().int().min(0),
@@ -440,6 +465,8 @@ export const daemonStateSchema = z.object({
   profiles: z.record(z.string(), z.object({ failures: z.number().int().min(0), reason: z.string().max(500).nullable(), cooldownUntil: z.string().nullable() }).strict()).default({}),
   metrics: z.array(cycleMetricsSchema).default([]),
   deployment: deploymentObservationSchema.nullable().default(null),
+  /** The loop's promotion drive (GY-1302). */
+  promotion: promotionStateSchema.nullable().default(null),
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
   /** The between-cycles self-upgrade's progress (GY-437). */
