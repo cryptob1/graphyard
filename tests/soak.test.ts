@@ -603,7 +603,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       plannedFiles: [...files(n), docs.page(n)],
       policy: { checks: ['test', 'typecheck', 'unit:docs-word-budget'], review: true },
     } : {};
-    const criteria = [{ id: 'AC-1', text: plan.scoped.has(n) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: [PROOF] },
+    const criteria = [{ id: 'AC-1', text: plan.scoped.has(n) || (options.remedies && n === remedyItem) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: [PROOF] },
       ...(n === plan.attested ? [{ id: 'AC-2', text: `Item ${n} is attested`, proofs: [MANUAL] }] : [])];
     let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria, ...scopeIntake, ...docsIntake }, id());
     if (n === plan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
@@ -784,14 +784,18 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     }
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
     // GY-711: the routine-remedy item exercises both per-item remedies from the real cycle. Its
-    // first attempt reports, a minute in, a scope refusal naming only its own planned file — the
-    // blocker a widening already covers — and stops on it, as the blocked day's sessions do. Its
+    // first attempt asks, a minute in, for the fixture its criterion names, which the control plane
+    // widens, and then reports a stale scope refusal naming that fixture — the blocker a widening
+    // already covers, on the item's structured scope record — and stops on it, as the blocked day's
+    // sessions do. Its
     // second attempt is launched under a containment fence, as a supervised launch is, and submits
     // without its supervisor lowering it: the lapsed fence of a submitted attempt. Only the day that
     // asserts them (`remedies`) scripts them, so every other day keeps its own item plan.
     if (options.remedies && n === remedyItem && attempt === 1)
       pending.push(async () => {
-        await engine.execute(principal, 'blocked', work.id, { epoch, reason: `${scopeRefusalBlocker}: ${file(n)} is outside the attempt's plannedFiles` }, id());
+        await engine.execute(principal, 'scope', work.id, { epoch, paths: [fixture(n)], reason: 'The fixture my criterion names' }, id());
+        await engine.execute(principals.coordinator, 'autoscope', work.id, { epoch }, id());
+        await engine.execute(principal, 'blocked', work.id, { epoch, reason: `${scopeRefusalBlocker}: ${fixture(n)} is outside the attempt's plannedFiles` }, id());
         const session = sessions.find(entry => entry.work === work.id && entry.epoch === epoch);
         if (session) { herdr.kill(session.pane); session.state = 'blocked'; }
       });

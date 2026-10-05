@@ -355,13 +355,14 @@ const doctorRecursiveReads = new Map<string, RegExp>([
 ]);
 /**
  * Whether a word names a local secret file, wherever it sits: an environment file, Graphyard's
- * installation credentials, App keys, tokens, or the classic credential files a clone can carry.
+ * installation credentials, App keys, tokens, package-registry auth files, a git directory (its
+ * config can hold a credential), or the classic credential files a clone can carry.
  * These resolve inside the checkout, so the checkout boundary is not a read boundary for them;
  * naming one is refused whether or not the file exists, because probing a secret path is itself
  * information. A git revision path (`HEAD:.env`) and an option's path (`--ignore-file=.env`) are
  * judged by their path.
  */
-const doctorSecretBasenames = new Set(['.git-credentials', '.netrc', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519']);
+const doctorSecretBasenames = new Set(['.git-credentials', '.netrc', '.npmrc', '.pypirc', '.yarnrc.yml', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519']);
 function doctorSecretFile(value: string, context?: DoctorGuardContext) {
   const cwd = context?.cwd ?? process.cwd();
   for (const part of value.split(':')) {
@@ -373,6 +374,8 @@ function doctorSecretFile(value: string, context?: DoctorGuardContext) {
     if (base.endsWith('.pem') || base.endsWith('.token')) return true;
     if (doctorSecretBasenames.has(base)) return true;
     if (path === '.graphyard' || path.startsWith('.graphyard/') || /(?:^|\/)\.(?:graphyard|config\/graphyard)(?:\/|$)/.test(path)) return true;
+    // A git directory's config can carry a credential (an extraheader, a tokenised remote URL).
+    if (path === '.git' || path.startsWith('.git/') || /(?:^|\/)\.git(?:\/|$)/.test(path)) return true;
     if (path !== '.' && path !== './' && !path.startsWith('..')) {
       try {
         const full = resolve(cwd, path);

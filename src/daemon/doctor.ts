@@ -468,6 +468,24 @@ export async function settleSubmittedContainment(cycle: Cycle) {
   }
 }
 
+/** A word of free text that names a file: it has a directory part, or a file extension (`README.md`). */
+const pathWord = /^(?:[\w.@-]+\/)+[\w.@-]*$|^[\w@-][\w.@-]*\.[A-Za-z][\w]*$/;
+
+/**
+ * The paths a scope-refusal blocker is about, when plannedFiles already covers every one of them,
+ * else null. Coverage is judged from the item's structured scope record — the open request's paths,
+ * or the paths its last scope decision named — never from the blocker's prose alone, so an item with
+ * no such record keeps its blocker. Any file the prose names besides must be planned as well: a
+ * refusal that cites a root-level file the record does not carry is not covered.
+ */
+export function coveredScopePaths(item: Pick<Work, 'blocker' | 'plannedFiles' | 'scopeRequest' | 'scopeDecision'>) {
+  const recorded = item.scopeRequest?.paths ?? item.scopeDecision?.paths ?? [];
+  if (!recorded.length) return null;
+  const words = (item.blocker ?? '').split(/[\s,;()'"`]+/).map(word => word.replace(/[.:,;!?]+$/, '')).filter(word => pathWord.test(word) && !/^https?:/.test(word));
+  const named = [...new Set([...recorded, ...words])];
+  return unplannedPaths(item.plannedFiles, named).length ? null : named;
+}
+
 /**
  * Remedy 2: clear a blocker whose named scope is already in plannedFiles. A scope refusal left the
  * item's blocker standing, and a widening since applied covers every path it names. Clearing it
@@ -481,8 +499,8 @@ export async function clearCoveredBlockers(cycle: Cycle) {
   for (const item of snapshot.work.filter(item => item.stage !== 'done' && item.blocker?.startsWith(scopeRefusalBlocker))) {
     await isolate('decision', item, item.key, async () => {
       // The remedy is only for a scope refusal whose every named path a later widening covered.
-      const named = item.blocker!.match(/[\w.@-]+(?:\/[\w.@-]+)+/g) ?? [];
-      if (!named.length || unplannedPaths(item.plannedFiles, named).length) return;
+      const named = coveredScopePaths(item);
+      if (!named) return;
       // Keyed by the revision it read: a blocker set again later is a new situation.
       const key = remedyKey('unblock', `${item.id}:${item.revision}`);
       const previous = state.actions[key];

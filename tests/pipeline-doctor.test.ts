@@ -6,7 +6,7 @@ import { decisionReadConcurrency, emptyHeldDecisions } from '../src/daemon/decis
 import { Launcher, type Cycle } from '../src/daemon/cycle.js';
 import { Timings } from '../src/master/timings.js';
 import { approverSessionName } from '../src/master/autonomy.js';
-import { clearDoctorRuns, clearCoveredBlockers, decisionCheckMs, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorReportPayloadSchema, doctorRunsSettled, doctorSanctionedCommands, doctorSessionArgs, doctorSessionTools, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, stopDoctorRuns, unansweredDecisionMs, type DoctorEffects } from '../src/daemon/doctor.js';
+import { clearDoctorRuns, clearCoveredBlockers, coveredScopePaths, decisionCheckMs, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorReportPayloadSchema, doctorRunsSettled, doctorSanctionedCommands, doctorSessionArgs, doctorSessionTools, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, stopDoctorRuns, unansweredDecisionMs, type DoctorEffects } from '../src/daemon/doctor.js';
 import { doctorTool } from '../src/daemon/doctor.js';
 import { doctorRunRecordSchema, type DoctorRunRecord } from '../src/daemon/state.js';
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
@@ -141,6 +141,12 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
     ['an option naming an environment file', words('rg', '--ignore-file=.env', 'x')],
     ['an ssh key inside the checkout', words('cat', 'fixtures/id_rsa')],
     ['a netrc inside the checkout', words('head', '.netrc')],
+    ['an npm registry auth file', words('cat', '.npmrc')],
+    ['a pypi auth file', words('cat', 'pkg/.pypirc')],
+    ['a yarn registry auth file', words('cat', '.yarnrc.yml')],
+    ['the git config', words('cat', '.git/config')],
+    ['the git directory', words('ls', '.git')],
+    ['a nested git config', words('grep', 'extraheader', 'vendor/lib/.git/config')],
     ['a home path', words('grep', '-r', 'token', '~')],
     ['a parent path', words('cat', '../../secrets.token')],
     ['an option naming an outside path', words('rg', '--ignore-file=/etc/passwd', 'x')],
@@ -520,9 +526,19 @@ test('unit:loop-applies-routine-remedies — the loop settles a lapsed containme
   // Remedy 2: a scope-refusal blocker whose paths a widening already planned is cleared by the loop
   // itself as the operator-agent identity, bound to the revision it read — no decision, no approver.
   const unblockedKeys: { key: string; revision: number }[] = [];
-  const covered = item({ id: 'id-GY-77', key: 'GY-77', blocker: 'Scope request refused: GY-77 needs src/item.ts/extra and tests/extra outside plannedFiles', plannedFiles: ['src/item.ts', 'src/item.ts/extra', 'tests/extra'] });
-  const stillUnplanned = item({ id: 'id-GY-78', key: 'GY-78', blocker: 'Scope request refused: GY-78 needs src/other.ts outside plannedFiles', plannedFiles: [] });
-  const unblocked = cycle([covered, stillUnplanned], { effects: {
+  // Coverage is judged from the structured scope record, and any file the prose names besides —
+  // a root-level one included — must be planned too; an item with no record keeps its blocker.
+  const refusal = (paths: string[]) => ({ state: 'refused' as const, reason: 'outside', at: at(-60_000), decidedBy: 'graphyard', waitedMs: 0, paths, requestedBy: 'worker-a', requestedAt: at(-120_000), epoch: 1 });
+  const covered = item({ id: 'id-GY-77', key: 'GY-77', blocker: 'Scope request refused: GY-77 needs src/item.ts/extra and tests/extra outside plannedFiles', plannedFiles: ['src/item.ts', 'src/item.ts/extra', 'tests/extra'], scopeDecision: refusal(['src/item.ts/extra', 'tests/extra']) });
+  const stillUnplanned = item({ id: 'id-GY-78', key: 'GY-78', blocker: 'Scope request refused: GY-78 needs src/other.ts outside plannedFiles', plannedFiles: [], scopeDecision: refusal(['src/other.ts']) });
+  const rootUnplanned = item({ id: 'id-GY-81', key: 'GY-81', blocker: 'Scope request refused: GY-81 needs src/a.ts and package.json outside plannedFiles', plannedFiles: ['src/a.ts'], scopeDecision: refusal(['src/a.ts', 'package.json']) });
+  const proseRootUnplanned = item({ id: 'id-GY-82', key: 'GY-82', blocker: 'Scope request refused: GY-82 needs src/a.ts and AGENTS.md outside plannedFiles', plannedFiles: ['src/a.ts'], scopeDecision: refusal(['src/a.ts']) });
+  const unrecorded = item({ id: 'id-GY-83', key: 'GY-83', blocker: 'Scope request refused: GY-83 needs src/a.ts outside plannedFiles', plannedFiles: ['src/a.ts'] });
+  assert.deepEqual(coveredScopePaths(covered), ['src/item.ts/extra', 'tests/extra']);
+  assert.equal(coveredScopePaths(rootUnplanned), null, 'a root-level path the record names and plannedFiles lacks is not covered');
+  assert.equal(coveredScopePaths(proseRootUnplanned), null, 'a root-level file the refusal names besides the record is not covered');
+  assert.equal(coveredScopePaths(unrecorded), null, 'with no structured scope record the blocker is left alone');
+  const unblocked = cycle([covered, stillUnplanned, rootUnplanned, proseRootUnplanned, unrecorded], { effects: {
     unblock: async target => { unblockedKeys.push({ key: target.key, revision: target.revision }); return { ...target, blocker: null }; },
     decide: async () => { throw new Error('the remedy applies the unblock itself; it never requests a decision'); },
   } });
