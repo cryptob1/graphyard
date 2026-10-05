@@ -211,6 +211,8 @@ export async function shepherdStep(cycle: Cycle) {
       const key = exhaustedProofKey(entry);
       if (!state.actions[key]) performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: exhaustedProofEscalation(entry), attempts: 1, cycle: state.cycle }, now(), effects.persist));
     }
+    // Under GitHub delivery proofs gate nothing and no producer is requested (GY-1266): nothing to ask for.
+    if (deliveredByGitHub(item)) return;
     const outstanding = missingProofs(item, new Date(clock));
     if (!outstanding.length) return;
     // GY-868: only a manual proof no producer session may run waits for an operator witness. One a

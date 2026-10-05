@@ -58,11 +58,11 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 With `run.research` set, a feature (or `"research": true`) gets one read-only Pi briefing a revision. Build follows it, a differing answer reworks, failure never blocks; product questions need a human.
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approvals release its fix or close-as-duplicate; recurrences re-file; its 429 waits, one probe. Sub-30m branch restores, base conflicts and restart-resumed merges are self-handled, not `merge` faults.
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approvals release its fix or close-as-duplicate; recurrences re-file; its 429 waits, one probe; a recurring item closed mid-diagnosis answers it, no fault. Sub-30m branch restores, base conflicts and restart-resumed merges are self-handled, not `merge` faults.
 
 ## Machine-filed backlog
 
-Follow-up findings wait on their item (`pendingFollowUps`) until it ships, then form or join its follow-up item; closing it unshipped drops them ([follow-ups](followups.md)). Triage skips unshipped parents. With `run.research`, Pi triages follow-up and fault items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; status counts `machineUntriaged`/`operatorBacklog`.
+Review follow-ups are never filed: worth-fixing findings are fixed on the same pull request; nit threads are replied to and resolved. Older follow-up items wait for their parent. With `run.research`, Pi triages follow-up and fault items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; status counts `machineUntriaged`/`operatorBacklog`.
 
 ## Automatic dispatch at submit
 
