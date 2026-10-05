@@ -51,7 +51,7 @@ On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-
 
 Reviewers and producers are `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once if quiet past `run.acknowledgementSeconds` (default 90); settling resultless is **`never started`**: relaunched free a minute later, three at most (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
 
-**Idle-with-lease** (30 quiet minutes, nothing open): re-prompted once, after 30 more handed to a new attempt on its branch.
+**Idle-with-lease** (25 quiet minutes, nothing open): re-prompted once; still quiet 45 minutes after first seen idle (10 after the re-prompt), handed to a new attempt on its branch, under 60 minutes from its last activity.
 
 **Blocked mid-session** (Herdr reports `blocked`): the loop reads the pane (by agent name, then pane id). A destructive-command prompt is declined; a folder-trust dialog is never answered: the session is closed and launched again at once, and the launch records the trust (a second dialog for the same request waits as unknown); any other prompt fails the session after **5 minutes**. A screen that cannot be read is no prompt: nothing is recorded or timed until a read shows one.
 

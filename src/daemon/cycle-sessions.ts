@@ -14,7 +14,7 @@ import { checkPaneStillBelongs, endWorkerAttempt, resumeStep, workerHandle } fro
 import type { Cycle } from './cycle.js';
 import { settleEndedAttemptFence } from './cycle-reclaim.js';
 
-export { idleLeaseMs, resumeWaitKey, idleLeaseKey, resumePromptText, idlePromptText } from './cycle-resume.js';
+export { idleLeaseMs, idleReclaimMs, idleRepromptGraceMs, resumeWaitKey, idleLeaseKey, resumePromptText, idlePromptText } from './cycle-resume.js';
 
 /** Steps 1–1d: close finished sessions, fail over exhausted ones, and settle what dead workers and orphaned supervisors left. */
 /**

@@ -4,7 +4,7 @@ import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { idleLeaseMs } from '../src/daemon/cycle-sessions.js';
+import { idleLeaseMs, idleReclaimMs, idleRepromptGraceMs } from '../src/daemon/cycle-sessions.js';
 import { launchAppearanceMs } from '../src/daemon/effects.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -147,20 +147,21 @@ test('unit:idle-lease-reclaimed — a worker idle with a live lease is re-prompt
     const { log, effects } = harness(item, agent);
     const state = emptyDaemonState(master);
     await runCycle(master, state, effects, () => clock);
-    await runCycle(master, state, effects, () => clock + minutes(29));
-    assert.equal(log.prompts.length, 0, 'thirty minutes of quiet have not passed');
+    await runCycle(master, state, effects, () => clock + minutes(24));
+    assert.equal(log.prompts.length, 0, 'twenty-five minutes of quiet have not passed');
 
     await runCycle(master, state, effects, () => clock + minutes(31));
-    assert.equal(log.prompts.length, 1, 'past thirty minutes it is re-prompted once');
+    assert.equal(log.prompts.length, 1, 'past twenty-five minutes it is re-prompted once');
+    assert.match(log.prompts[0], /shows no activity for another 14 minutes, the attempt ends/, 'it names the time left on the bound that runs from the idle mark');
     assert.match(log.prompts[0], /no activity from it since .* while it holds GY-252 \(epoch 1\) with no open blocker or scope request/);
     assert.ok(log.prompts[0].includes(`node ${launcher} complete GY-252 1 PR_NUMBER`));
     const idle = log.sessions.find(handle => /^idle-with-lease: agent-alpha in pane w1:p4J1/.test(handle.outcome ?? ''));
     assert.ok(idle, 'master status reads the handle as idle-with-lease, naming the pane');
     assert.equal(idle.state, 'running');
 
-    await runCycle(master, state, effects, () => clock + minutes(50));
+    await runCycle(master, state, effects, () => clock + minutes(44));
     assert.equal(log.prompts.length, 1, 'one re-prompt only');
-    assert.equal(log.capacity.length, 0, 'nothing is handed on before a further thirty minutes');
+    assert.equal(log.capacity.length, 0, 'nothing is handed on before forty-five minutes from the idle mark');
 
     await runCycle(master, state, effects, () => clock + minutes(62));
     assert.equal(log.prompts.length, 1);
@@ -189,9 +190,42 @@ test('unit:idle-lease-reclaimed — a worker idle with a live lease is re-prompt
     await runCycle(master, fresh, run.effects, () => clock + minutes(65));
     assert.equal(run.log.prompts.length, 1);
     assert.equal(run.log.capacity.length, 0, 'activity after the re-prompt means it is not handed on');
-    assert.ok(idleLeaseMs === minutes(30));
+    assert.ok(idleLeaseMs === minutes(25) && idleReclaimMs === minutes(45) && idleRepromptGraceMs === minutes(10));
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('unit:idle-session-closed-under-60m — an idle worker observed on the loop\'s five-minute cadence is closed and its item re-dispatched under 60 minutes after its last activity (GY-1319)', async () => {
+  // The GY-1312/1313/1315 shape: the session was last active at 16:25:53, the loop first marked it
+  // idle one observation later (16:31:29), re-prompted it at 33 quiet minutes and, paying the
+  // cadence again on a 30-minute grace that ran from the re-prompt, closed it 70 minutes after its
+  // last activity. Each cycle here lands just after a bound passes, the worst a 5-minute cadence does.
+  for (const offset of [0, 1, 2, 3, 4]) {
+    const { directory, master } = await setup();
+    try {
+      const item = { current: [held({ containmentQuarantine: null })] };
+      const agent: HerdrAgent = { name: 'agent-alpha', pane_id: 'w1:p4J1', agent_status: 'working', agent: 'claude' };
+      const { log, effects } = harness(item, agent);
+      const state = emptyDaemonState(master);
+      const lastActive = clock;
+      await runCycle(master, state, effects, () => lastActive);
+      agent.agent_status = 'idle';
+      let at = lastActive + minutes(offset + 1), dispatchedAt: number | null = null;
+      for (; at <= lastActive + minutes(120) && dispatchedAt === null; at += minutes(5)) {
+        await runCycle(master, state, effects, () => at);
+        if (log.capacity.length) dispatchedAt = at;
+      }
+      assert.equal(log.prompts.length, 1, 'it was re-prompted once before it was handed on');
+      assert.ok(dispatchedAt !== null, 'the attempt was ended');
+      assert.ok(dispatchedAt - lastActive < minutes(60), `closed ${(dispatchedAt - lastActive) / 60_000} minutes after its last activity`);
+      assert.equal(log.capacity[0].cause, 'interrupted', 'the attempt ends on the record, which frees the item for the next dispatch');
+      assert.equal(item.current[0].lease, null, 'the item holds no lease, so the dispatcher re-dispatches it');
+      assert.deepEqual(log.closed, ['w1:p4J1'], 'its pane is closed');
+      assert.match(log.sessions.at(-1)?.outcome ?? '', /closed as failed: idle with a live lease/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
 });
 
