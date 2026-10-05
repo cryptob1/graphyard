@@ -97,7 +97,7 @@ export interface InvariantInput {
   refusedMerges?: ReadonlySet<string>;
 }
 
-/** The follow-up item's one proof (review-threads.ts `followUpTriageProof`): what marks a machine-filed follow-up. */
+/** The one proof review follow-up items were filed with until GY-1249: what marks a machine-filed follow-up. */
 export const followUpProof = 'manual:review-followups-triaged';
 /** The parent a follow-up item was filed for: the approved item it depends on, or null for any other item. */
 export function followUpParent(work: Pick<Work, 'criteria' | 'dependencies' | 'title'>): string | null {
