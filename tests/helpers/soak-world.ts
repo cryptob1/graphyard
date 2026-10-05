@@ -197,9 +197,9 @@ export class SimulatedGitHub {
   /** Each merge that broke main, and the commits that clear it: its revert's inverse commit, or a fix made on main by hand. */
   broken: { key: string; mergeSha: string; clearedBy: Set<string> }[] = [];
   /** The revert pull requests the main guard opened, numbered apart from the items' own. */
-  reverts = new Map<number, { key: string; mergeSha: string; head: string; inverse: string; open: boolean; merged: { sha: string; at: number } | null; closed: string | null; closedAt: number | null; at: number }>();
+  reverts = new Map<number, { key: string; mergeSha: string; head: string; inverse: string; open: boolean; merged: { sha: string; at: number } | null; closed: string | null; closedAt: number | null; at: number; approvals: string[] }>();
   /** Every GitHub request the main guard made, with the simulated minute it made it in. */
-  guardRequests: { kind: 'history' | 'checks' | 'open' | 'pull' | 'merge' | 'close'; at: number; sha?: string }[] = [];
+  guardRequests: { kind: 'history' | 'checks' | 'open' | 'pull' | 'merge-diff' | 'revert-diff' | 'approve' | 'merge' | 'close'; at: number; sha?: string; pr?: number }[] = [];
   /** CI's runs on base-branch and revert commits, reported `ciMs` after the commit. */
   private commitRuns = new Map<string, { name: string; result: string; id: number }[]>();
   private serial = 0;
@@ -282,6 +282,9 @@ export class SimulatedGitHub {
       contents.set(grow.page, text === undefined ? prose(grow.words) : `${text} ${prose(grow.words)}`);
     }
     for (const path of [...new Set([...this.files, ...files])]) if (!contents.has(path)) contents.set(path, sha('content', path, head));
+    // GY-1291: the main guard compares a revert's diff with its merge's, so in its world a pull
+    // request changes the content of each file it plans (prose pages keep their real text).
+    if (this.options.mainGuard) for (const path of files) if (path !== grow?.page && !(this.options.docs && path in this.options.docs.pages)) contents.set(path, sha('content', path, head));
     this.record({ sha: head, tree: sha('tree', head), parents: [this.tip], files: [...new Set([...this.files, ...files])], at: clock.now(), message: `${key} head` }, contents);
     Object.assign(pr, { head, base: this.tip, files, autoMerge: false, mergeRequestedAt: null });
     pr.pushed.set(head, clock.now());
@@ -528,6 +531,26 @@ export class SimulatedGitHub {
     for (let at: string | undefined = this.tip; at && history.length < limit; at = this.commits.get(at)!.parents[0]) history.push({ sha: at, parent: this.commits.get(at)!.parents[0] ?? null });
     return history;
   }
+  /** The contents of `onto` with exactly `mergeSha`'s change undone: each path it changed back to its first parent's blob, or gone if it added it. */
+  private inverseOnto(mergeSha: string, onto: string) {
+    const merge = this.commits.get(mergeSha)!, parent = this.commits.get(merge.parents[0])!, contents = new Map(this.commits.get(onto)!.contents);
+    for (const path of merge.changed ?? []) {
+      const blob = parent.contents.get(path);
+      if (blob === undefined) contents.delete(path); else contents.set(path, blob);
+    }
+    return contents;
+  }
+  /** The files `to` changes against `from`, as GitHub's compare and pull request files list them: one line per blob. */
+  fileChanges(from: string, to: string) {
+    const before = this.commits.get(from)!.contents, after = this.commits.get(to)!.contents;
+    return [...new Set([...before.keys(), ...after.keys()])].sort().flatMap(filename => {
+      const old = before.get(filename), now = after.get(filename);
+      if (old === now) return [];
+      const status = old === undefined ? 'added' : now === undefined ? 'removed' : 'modified';
+      const patch = old === undefined ? `@@ -0,0 +1 @@\n+${now}` : now === undefined ? `@@ -1 +0,0 @@\n-${old}` : `@@ -1 +1 @@\n-${old}\n+${now}`;
+      return [{ filename, status, previousFilename: null, patch }];
+    });
+  }
   /** The revert of exactly `mergeSha` opened as a pull request onto main's tip: the merge's inverse, merged with the tip. */
   openRevert(key: string, mergeSha: string) {
     const merge = this.commits.get(mergeSha)!, parent = this.commits.get(merge.parents[0])!, now = clock.now();
@@ -535,18 +558,30 @@ export class SimulatedGitHub {
     // A revert whose own checks fail does not clear the merge: its head stays red.
     const entry = this.broken.find(item => item.mergeSha === mergeSha);
     if (entry && !this.revertFails.has(key)) entry.clearedBy.add(inverse.sha);
-    const head = this.record({ sha: sha('revert-head', this.tip, inverse.sha), tree: sha('tree', 'revert', this.tip, inverse.sha), parents: [this.tip, inverse.sha], files: this.files, at: now, message: `Revert ${key}'s merge` }, this.mergedContents(inverse.sha, this.tip, merge.changed ?? []));
+    const contents = this.inverseOnto(mergeSha, this.tip);
+    const head = this.record({ sha: sha('revert-head', this.tip, inverse.sha), tree: sha('tree', 'revert', this.tip, inverse.sha), parents: [this.tip, inverse.sha], files: [...contents.keys()], at: now, message: `Revert ${key}'s merge` }, contents);
     const number = 90_000 + this.reverts.size;
-    this.reverts.set(number, { key, mergeSha, head: head.sha, inverse: inverse.sha, open: true, merged: null, closed: null, closedAt: null, at: now });
+    this.reverts.set(number, { key, mergeSha, head: head.sha, inverse: inverse.sha, open: true, merged: null, closed: null, closedAt: null, at: now, approvals: [] });
     return { pr: number, head: head.sha };
   }
-  /** The App merges the revert at `head`: its change lands on main's tip. */
+  /** The revert approver App approves the revert at `head` (GY-1291): someone other than the App that pushed it. */
+  approveRevertPull(number: number, head: string) {
+    const revert = this.reverts.get(number)!;
+    if (!revert.open || revert.head !== head) throw new Error(`Revert pull request #${number} is not open at ${head.slice(0, 12)}`);
+    revert.approvals.push(head);
+  }
+  /**
+   * The App merges the revert at `head`: its change lands on main's tip. Branch protection requires
+   * an approval of that head from someone other than its last pusher, the App (GY-1291).
+   */
   mergeRevertPull(number: number, head: string) {
     const revert = this.reverts.get(number)!;
     if (!revert.open || revert.head !== head) throw new Error(`Revert pull request #${number} is not open at ${head.slice(0, 12)}`);
+    if (!revert.approvals.includes(head)) throw new Error('New changes require approval from someone other than the last pusher.');
     const now = clock.now(), message = `Merge pull request #${number} from graphyard-revert/main-${revert.mergeSha.slice(0, 12)}`;
     const changed = this.commits.get(revert.mergeSha)!.changed ?? [];
-    const commit = this.record({ sha: sha('commit', this.tip, head, message), tree: sha('tree', this.tip, head, message), parents: [this.tip, head], files: this.files, at: now, message, changed }, this.mergedContents(head, this.tip, changed));
+    const contents = this.inverseOnto(revert.mergeSha, this.tip);
+    const commit = this.record({ sha: sha('commit', this.tip, head, message), tree: sha('tree', this.tip, head, message), parents: [this.tip, head], files: [...contents.keys()], at: now, message, changed }, contents);
     this.tip = commit.sha;
     revert.merged = { sha: commit.sha, at: now }; revert.open = false;
     return commit.sha;
@@ -802,6 +837,13 @@ export class SimulatedGitHub {
           const revert = world.reverts.get(number)!;
           return { merged: !!revert.merged, mergeSha: revert.merged?.sha ?? null, open: revert.open, mergeable: true, head: revert.head };
         },
+        async mergeChanges(mergeSha: string) { world.guardRequests.push({ kind: 'merge-diff', at: clock.now(), sha: mergeSha }); return world.fileChanges(world.commits.get(mergeSha)!.parents[0], mergeSha); },
+        async revertChanges(number: number) {
+          world.guardRequests.push({ kind: 'revert-diff', at: clock.now(), pr: number });
+          const head = world.commits.get(world.reverts.get(number)!.head)!;
+          return world.fileChanges(head.parents[0], head.sha);
+        },
+        async approveRevert(number: number, head: string) { world.guardRequests.push({ kind: 'approve', at: clock.now(), pr: number, sha: head }); world.approveRevertPull(number, head); return 'approved' as const; },
         async mergeRevert(_work: Work, revert: { pr: number; head: string }) { world.guardRequests.push({ kind: 'merge', at: clock.now() }); return world.mergeRevertPull(revert.pr, revert.head); },
         async closeRevert(number: number, reason: string) {
           world.guardRequests.push({ kind: 'close', at: clock.now() });

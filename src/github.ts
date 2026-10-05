@@ -2896,7 +2896,7 @@ export const mainGuardIntervalMs = 30_000;
  * one whose delivery is the merge that broke main — and records each revert step on that item under
  * `main-guard.revert.<state>`, reopening it for rework when its revert merged.
  */
-export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'evaluate'>, github: Pick<GitHub, 'mainHistory' | 'commitChecks' | 'openMainRevert' | 'revertPull' | 'mergeChanges' | 'revertChanges' | 'approveRevert' | 'mergeRevert' | 'closeRevert'>, now = new Date(), verdicts = new Map<string, CommitVerdict>()): Promise<MainGuardTick> {
+export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'evaluate'>, github: Pick<GitHub, 'mainHistory' | 'commitChecks' | 'openMainRevert' | 'revertPull' | 'mergeChanges' | 'revertChanges' | 'approveRevert' | 'mergeRevert' | 'closeRevert'>, now = new Date(), verdicts = new Map<string, CommitVerdict>(), approved = new Set<string>()): Promise<MainGuardTick> {
   const pool = engine.store.pool;
   const required: string[] = (await pool.query("SELECT document->'policy'->'checks' AS checks FROM work_items WHERE document->>'stage'='done' AND document ? 'delivery' ORDER BY number DESC LIMIT 1")).rows[0]?.checks ?? [];
   return runMainGuard({
@@ -2918,9 +2918,9 @@ export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' 
       if (reopened) engine.evaluate(work, (await lockedWork(db, [work.id])).map(item => item.id === work.id ? work : item), at);
       await save(db, work, 'graphyard', `main-guard.revert.${revert.state}`, at, { revert, reopened });
     }),
-  }, { required, ciAppIds: engine.ciAppIds, now, verdicts });
+  }, { required, ciAppIds: engine.ciAppIds, now, verdicts, approved });
 }
-const mainGuardRead = new WeakMap<Engine, number>(), mainGuardVerdicts = new WeakMap<Engine, Map<string, CommitVerdict>>(), mainGuardFailure = new WeakMap<Engine, string>();
+const mainGuardRead = new WeakMap<Engine, number>(), mainGuardVerdicts = new WeakMap<Engine, Map<string, CommitVerdict>>(), mainGuardApproved = new WeakMap<Engine, Set<string>>(), mainGuardFailure = new WeakMap<Engine, string>();
 /** The revert approver App from `GRAPHYARD_REVERT_APPROVER_APP_ID`/`_INSTALLATION_ID`/`_PRIVATE_KEY` (or `_FILE`); undefined when unset. */
 export async function revertApproverFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<RevertApprover | undefined> {
   if (!env.GRAPHYARD_REVERT_APPROVER_APP_ID) return undefined;
@@ -3119,7 +3119,10 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     if (!mainGuardVerdicts.has(engine)) mainGuardVerdicts.set(engine, new Map());
     const verdicts = mainGuardVerdicts.get(engine)!;
     if (verdicts.size > historyEntries) verdicts.clear();
-    const failed = await guardGitHubMain(engine, github, new Date(), verdicts).then(tick => tick.errors.join('; '), error => error instanceof Error ? error.message : String(error));
+    if (!mainGuardApproved.has(engine)) mainGuardApproved.set(engine, new Set());
+    const approved = mainGuardApproved.get(engine)!;
+    if (approved.size > historyEntries) approved.clear();
+    const failed = await guardGitHubMain(engine, github, new Date(), verdicts, approved).then(tick => tick.errors.join('; '), error => error instanceof Error ? error.message : String(error));
     if (failed && mainGuardFailure.get(engine) !== failed) await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', 'main-guard.failed', JSON.stringify({ details: { error: failed, at: new Date().toISOString() } })]).catch(() => {});
     mainGuardFailure.set(engine, failed);
   }

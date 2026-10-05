@@ -272,6 +272,29 @@ test('unit:guard-revert-lands-under-protection a revert the App pushed is approv
   assert.equal(itemB.stage, 'ready', 'main is restored and the item reopened, with no reviewer round');
 });
 
+test('unit:guard-revert-lands-under-protection while GitHub has not merged an approved revert yet, later ticks neither re-read its diffs nor approve it again', async () => {
+  const [base, A, B] = ['b0', 'a1', 'b2'].map(sha);
+  const itemB = delivered('GY-2', B, 702);
+  const fake = world([{ sha: B, parent: A }, { sha: A, parent: base }], [itemB]);
+  fake.checks.set(A, green); fake.checks.set(B, runs({ test: 'failure', typecheck: 'success' }));
+  const options = { required, ciAppIds: [ci], now: new Date(at), approved: new Set<string>() };
+  await runMainGuard(fake.ports, options);
+  const revert = itemB.mainGuardReverts![0].revert!;
+  fake.checks.set(revert.head, green);
+  // GitHub's auto-merge has not landed it yet: the merge call returns null for two ticks.
+  const merge = fake.ports.mergeRevert, diffs = { merge: 0, revert: 0 };
+  let pending = 2;
+  fake.ports.mergeRevert = async (work, entry) => pending-- > 0 ? null : merge(work, entry);
+  const [mergeChanges, revertChanges] = [fake.ports.mergeChanges, fake.ports.revertChanges];
+  fake.ports.mergeChanges = async mergeSha => { diffs.merge++; return mergeChanges(mergeSha); };
+  fake.ports.revertChanges = async pr => { diffs.revert++; return revertChanges(pr); };
+  for (let tick = 0; tick < 3; tick++) assert.deepEqual((await runMainGuard(fake.ports, options)).errors, []);
+  assert.deepEqual(diffs, { merge: 1, revert: 1 }, 'the diffs are compared once per head');
+  assert.deepEqual(fake.calls.approved, [revert.pr], 'the head is approved once');
+  assert.deepEqual(fake.calls.merged, [revert.pr]);
+  assert.equal(itemB.mainGuardReverts![0].state, 'merged');
+});
+
 test('unit:guard-revert-lands-under-protection the GitHub client approves as the revert approver App, bound to the head, and never as the control-plane App', async () => {
   const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
   const head = sha('e900'), requests: { method: string; url: string; body: any; auth: string }[] = [];

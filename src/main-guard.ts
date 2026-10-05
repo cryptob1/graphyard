@@ -198,6 +198,12 @@ export interface MainGuardOptions {
   verdicts?: Map<string, CommitVerdict>;
   /** How long a revert's own checks may run before it is abandoned. */
   checksTimeoutMs?: number;
+  /**
+   * The revert heads (`pr@head`) already verified as the exact inverse and approved, kept across
+   * ticks: while GitHub's auto-merge has not landed one, the next tick neither re-reads its diffs
+   * nor approves it again; a moved head is abandoned before this is consulted.
+   */
+  approved?: Set<string>;
 }
 /** A revert whose own checks have not concluded in this long is closed: the guard never waits on one indefinitely. */
 export const revertChecksTimeoutMs = 60 * 60_000;
@@ -210,6 +216,7 @@ export interface MainGuardTick { main: MainState; steps: { key: string; mergeSha
  */
 export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOptions): Promise<MainGuardTick> {
   const now = options.now ?? new Date(), at = now.toISOString(), verdicts = options.verdicts ?? new Map<string, CommitVerdict>();
+  const approved = options.approved ?? new Set<string>();
   const tick: MainGuardTick = { main: { state: 'unknown' }, steps: [], errors: [] };
   // A concluded verdict is kept across ticks; a pending one only for this tick, so a commit whose CI
   // is still running is read once per tick, not once per look at it.
@@ -248,13 +255,17 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
         if (now.getTime() - Date.parse(revert.at) > (options.checksTimeoutMs ?? revertChecksTimeoutMs)) await abandon(work, revert, `revert PR #${pr}'s required checks did not conclude within ${Math.round((options.checksTimeoutMs ?? revertChecksTimeoutMs) / 60_000)} minutes`);
         continue;
       }
-      // Only a revert that is exactly the inverse of the merge it names is approved or merged.
-      let refused: string | null;
-      try { refused = revertInverseRefusal(await ports.mergeChanges(revert.mergeSha), await ports.revertChanges(pr)); }
-      catch (error) { refused = `its diff could not be compared with the merge's: ${message(error)}`; }
-      if (refused) { await abandon(work, revert, `revert PR #${pr} is not exactly the inverse of merge ${revert.mergeSha.slice(0, 12)}, so it is neither approved nor merged: ${refused}`); continue; }
-      try { await ports.approveRevert(pr, head, `Graphyard's main guard: this revert is exactly the inverse of ${work.key}'s merge ${revert.mergeSha} and its required checks passed at ${head}.`); }
-      catch (error) { await abandon(work, revert, `the revert approver could not approve revert PR #${pr}: ${message(error)}`); continue; }
+      // Only a revert that is exactly the inverse of the merge it names is approved or merged, and
+      // a head is verified and approved once: later ticks only ask GitHub to merge it.
+      if (!approved.has(`${pr}@${head}`)) {
+        let refused: string | null;
+        try { refused = revertInverseRefusal(await ports.mergeChanges(revert.mergeSha), await ports.revertChanges(pr)); }
+        catch (error) { refused = `its diff could not be compared with the merge's: ${message(error)}`; }
+        if (refused) { await abandon(work, revert, `revert PR #${pr} is not exactly the inverse of merge ${revert.mergeSha.slice(0, 12)}, so it is neither approved nor merged: ${refused}`); continue; }
+        try { await ports.approveRevert(pr, head, `Graphyard's main guard: this revert is exactly the inverse of ${work.key}'s merge ${revert.mergeSha} and its required checks passed at ${head}.`); }
+        catch (error) { await abandon(work, revert, `the revert approver could not approve revert PR #${pr}: ${message(error)}`); continue; }
+        approved.add(`${pr}@${head}`);
+      }
       let sha: string | null;
       try { sha = await ports.mergeRevert(work, { pr, head, failing: revert.failing }); }
       catch (error) { await abandon(work, revert, `GitHub refused to merge revert PR #${pr}: ${message(error)}`); continue; }
