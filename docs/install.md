@@ -20,7 +20,7 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 ### Providers
 
 - `railway`: `npm i -g @railway/cli`, `railway login`.
-- `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--domain`, `--ssh-key NAME`. A coordinator producing `manual:install-hetzner-live` needs `HCLOUD_TOKEN` and `HETZNER_SPEND_CAP_USD_MONTHLY` in repo-root `.env` (`0600`, uncommitted); without them launch is refused.
+- `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--domain`, `--ssh-key NAME`. A coordinator producing `manual:install-hetzner-live` or `manual:host-install-live` needs `HCLOUD_TOKEN` and `HETZNER_SPEND_CAP_USD_MONTHLY` in repo-root `.env` (`0600`, uncommitted), else launch is refused; optional `HETZNER_SSH_KEY` names a registered key (else a throwaway one).
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; `--ssh-host`, `--domain`.
 - `compose`: `curl -fsSL https://get.docker.com | sh`; local evaluation only.
 
@@ -50,7 +50,7 @@ Human installs the App at the printed `http://127.0.0.1:4311`; **Verify** *App r
 
 ## Step 5: first pull request
 
-Dispatch a [small item](onboarding.md#4-prove-the-first-pr); once `Graphyard / merge` appears, rerun `--apply`, requiring it and `graphyard/landable` (bound to the App). **Verify** both checks required on the base branch. `--plan`/`--apply` are idempotent; tokens never rotate.
+Dispatch a [small item](onboarding.md#4-prove-the-first-pr); once `Graphyard / merge` appears, rerun `--apply`, requiring it and `graphyard/landable` (bound to the App). **Verify** both checks required on the base branch. `--plan`/`--apply` are idempotent.
 
 ## Upgrading an existing installation
 

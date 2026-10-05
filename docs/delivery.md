@@ -7,7 +7,7 @@ Records which release each environment should run, verified only by service-scop
 
 Graphyard's own deployment: main → candidate → uat → production. `.railway/railway.ts` deploys `release/uat` and `release/production`, which only `graphyard release` moves, always to a candidate's exact SHA.
 
-- `release cut [--trigger schedule|manual]` tags main's tip `rc/ID` with the items it carries; merges never pause. `.github/workflows/release-candidate.yml` cuts every six hours or on demand and runs the [long suites](github.md#pre-merge-gate-and-release-candidate-validation).
+- `release cut [--trigger schedule|manual]` tags main's tip `rc/ID` with the items it carries; merges never pause. `.github/workflows/release-candidate.yml` cuts every six hours or on demand and runs the [long suites](#pre-merge-gate-and-release-candidate-validation).
 - `release uat ID` deploys to `uat` (own Postgres, no `GITHUB_*` credentials), refused while UAT serves an unjudged candidate cut within four hours; its push is leased on the observed tip.
 - `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` waits for UAT's `/healthz` `commit` to match, runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser` (dashboard sign-in, Work view) and suite checks, and records `rc-uat/ID`. Suites get `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`.
 - `release promote ID` requires that passing record, deploys the SHA to production (leased on the last promoted SHA) and records `rc-production/ID`; `release verify --url URL` confirms production serves it.
@@ -15,9 +15,13 @@ Graphyard's own deployment: main → candidate → uat → production. `.railway
 
 `release status` lists candidates; `release GY-N EPOCH` still gives up an item's lease. The workflow needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, `GRAPHYARD_UAT_TOKEN` and `GRAPHYARD_RELEASE_TOKEN`.
 
+### Pre-merge gate and release-candidate validation
+
+Required: `typecheck`, `test` (`.github/workflows/ci.yml`), under ten minutes. Soak/timing files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container and Helm checks run in `.github/workflows/release-candidate.yml` on each [release candidate](#release-candidates).
+
 ## Managed repositories
 
-Installed repositories get the same model. `init --scan` splits checks into `delivery.mergeGate` (pull requests: build, typecheck, lint, fast unit; the rest per candidate); `--apply` writes `delivery` and renders `graphyard-release-candidate.yml` (`release cut` on `candidateSchedule`, `--candidate-cron CRON|off`, default six hours; per-candidate checks at the exact SHA; `release uat`; `release validate`) and `graphyard-promotion.yml` (`release promote` only from a UAT-passed SHA, then `release verify`). Both pin the installing CLI. `deploy.adapter`: `railway` (`deploy.project`) or `command` (`deploy.uat`/`deploy.production` with `GRAPHYARD_CANDIDATE_SHA`; unset leaves workflows ungenerated). UAT reports the SHA at `/healthz` as `commit` or `revision`. `--delivery per-pr` (or `"mode": "per-pr"`) keeps every check required per pull request. `install --plan` lists the resources; `human` ones need `--apply --create-environments`.
+`init --scan` splits checks into `delivery.mergeGate` (pull requests) and per-candidate; `--apply` writes `delivery` and renders `graphyard-release-candidate.yml` (cut on `candidateSchedule`, `--candidate-cron CRON|off`; checks at the exact SHA; UAT; validation) and `graphyard-promotion.yml` (promote a UAT-passed SHA, then verify), pinning the installing CLI. `deploy.adapter`: `railway` (`deploy.project`) or `command` (`deploy.uat`/`deploy.production` with `GRAPHYARD_CANDIDATE_SHA`; unset leaves workflows ungenerated). UAT reports the SHA at `/healthz` as `commit` or `revision`. `--delivery per-pr` (or `"mode": "per-pr"`) keeps every check required per pull request. `install --plan` lists the resources; `human` ones need `--apply --create-environments`.
 
 ```json
 {"kind":"environment","id":"production","expectedRevision":0,"repository":"owner/repository","url":"https://app.example.test","instance":"production-cluster","immutable":true,"services":["api","web"],"resources":["production-smoke-account"],"delivery":{"freshnessSeconds":300,"approvalRequired":true}}
@@ -53,6 +57,6 @@ Observers `POST /api/delivery/observe`:
 {"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},"expectedGeneration":4,"snapshotId":"railway:snapshot:01J8Q4Z0Y3","observedAt":"2026-09-18T20:15:07Z","validFrom":"2026-09-18T20:12:31Z","validTo":"2026-09-18T20:15:07Z","services":[{"service":"api","complete":true,"deployment":{"id":"dep-a1","status":"success","deployedAt":"2026-09-18T20:12:31Z"},"instances":[{"instance":"api-1","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","measurement":"host-attestation","healthy":true}]},{"service":"web","complete":true,"deployment":{"id":"dep-w7","status":"success","deployedAt":"2026-09-18T20:12:40Z"},"instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
-Only complete listings verify; repeated `snapshotId`s return the original receipt; `POST /api/delivery/notify` only hints. A 2 s sweep (`graphyard delivery sweep` forces one) verifies generations once services share an interval within `freshnessSeconds`, adding `releaseDeliveries` to items. `graphyard delivery` shows state.
+Only complete listings verify; repeated `snapshotId`s return the original receipt; `POST /api/delivery/notify` only hints. A sweep (`graphyard delivery sweep` forces one) verifies generations once services share an interval within `freshnessSeconds`, adding `releaseDeliveries` to items. `graphyard delivery` shows state.
 
 Validation binds manifest, signature, measurements (`POST /api/validation/result` refuses top-level SHAs). Mismatches record `attribution-undermined`, voiding passes. `GET /api/analytics/attribution` reports mismatches, cost.

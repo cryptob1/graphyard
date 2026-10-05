@@ -15,11 +15,11 @@
 
 ### The coordinator checkout is confined at the OS level
 
-Every launch but the master session's gets the checkout unwritable to shell commands: Codex by `--sandbox workspace-write` while every grant on the checkout or `.git` stays in its worktree and admin directory; others by bubblewrap (checkout read-only, PIDs unshared, fresh `/proc`, session bus a keyring-only proxy), re-exposing only the session worktree or checkout, worktree-admin directories and shared Git areas (objects, remote refs, `FETCH_HEAD`). Refused with reason: missing bubblewrap, non-Linux, refused namespaces, confinement off, underivable checkout. Loop and executors never start, self-upgrade or restart on dirty checkouts.
+Every launch but the master session's gets the checkout unwritable to shell commands: Codex by `--sandbox workspace-write` with grants confined to its worktree and admin directory; others by bubblewrap (checkout read-only, PIDs unshared, session bus a keyring-only proxy), re-exposing only the session worktree, worktree-admin directories and shared Git areas. Refused with reason: missing bubblewrap, non-Linux, refused namespaces, confinement off, underivable checkout. Loop and executors never start, self-upgrade or restart on dirty checkouts.
 
 ## Accounts and failover
 
-A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first logged-in account under `run.quotaCeilingPercent`, else **fail over** (`dispatch.accounts`); so does a runtime failing to start (three in a row → one attention item). A runtime limit notice commits work as unpushed `WIP:`, sets `capacity.exhausted`, and relaunches on next account or after reset.
+A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first logged-in account under `run.quotaCeilingPercent`, else **fail over** (`dispatch.accounts`); so does a runtime failing to start (three in a row raise attention). A limit notice commits work as unpushed `WIP:`, sets `capacity.exhausted`, and relaunches on the next account or after reset.
 
 ## The loop's own master session
 

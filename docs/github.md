@@ -14,6 +14,7 @@ Control-plane App (`src/github-permissions.ts`):
 | Issues | Read | receive `issue_comment` webhooks carrying review results (comment webhooks) |
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | read pull requests and reviews (pull request observation); post review request comments (review dispatch) |
+| Workflows | Read and write | push base syncs carrying the base's workflow changes (workflow sync) |
 
 A reviewer App is never granted Contents: write, Checks, or Administration; worker identities are not Apps at all. It holds:
 
@@ -25,6 +26,10 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
 `graphyard master reviewer setup` creates it (Pull requests write, reads otherwise); review tokens last one hour; `SLUG[bot]` approving the head satisfies both. Shortfalls (`appPermissions`) hold jobs, **not retried** (`integration-held`), until `master browser app-permissions` or `master browser installation-accept`.
+
+## Workflow base syncs
+
+Worker tokens carry `contents`, `pull_requests` and `workflows` write ([push credential](protocol/leases.md#push-credential)). If GitHub still refuses a base sync, `sync GY-N --push-via-control-plane COMMIT` has the control plane push COMMIT when it fast-forwards the branch, merges `origin/BASE` and keeps its workflow files (`sync.workflow-push`).
 
 ## Require the check
 
@@ -47,10 +52,6 @@ A carried review missing from the PR is re-posted before merging (`review.carry-
 ### Optimistic merges
 
 `mergeQueue.optimistic` (default on; `optimistic: false` disables): green entries disjoint from base changes land head-bound, unqueued, unless they (or base since their run) touched shared infrastructure (`mergeQueue.optimisticExclude` globs plus manifests, lockfiles, CI config, test helpers, migrations). A main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`).
-
-### Pre-merge gate and release-candidate validation
-
-Required: `typecheck`, `test` (`.github/workflows/ci.yml`), under ten minutes. Soak/timing files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container and Helm checks run in `.github/workflows/release-candidate.yml` on each [release candidate](delivery.md#release-candidates).
 
 ### Proofs in CI
 

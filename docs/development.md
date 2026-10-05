@@ -17,7 +17,7 @@ npm ci && npm run build && npm test
 
 ## CI
 
-`test` aggregates shards balanced by `tests/helpers/timing-baseline.json` (top-level `tests/*.test.ts`); pull requests run affected tests (`scripts/ci-tests.mjs`). Long suites run on [release candidates](github.md#pre-merge-gate-and-release-candidate-validation).
+`test` aggregates shards balanced by `tests/helpers/timing-baseline.json` (top-level `tests/*.test.ts`); pull requests run affected tests (`scripts/ci-tests.mjs`). Long suites run on [release candidates](delivery.md#pre-merge-gate-and-release-candidate-validation).
 
 ## Documentation
 
@@ -25,7 +25,7 @@ npm ci && npm run build && npm test
 
 ### Documentation that rarely conflicts
 
-Add self-contained paragraphs; don't reword shared sentences. Candidates conflicting only in `docs/**/*.md` get docs-sync, not rework: base merges in, both sides kept in budget, approval kept if the non-docs diff is unchanged; five conflicts per path in 24 hours raise attention.
+Add self-contained paragraphs. Candidates conflicting only in `docs/**/*.md` get docs-sync, not rework: base merges in, both sides kept, approval kept if the non-docs diff is unchanged.
 
 ## Trusted contracts
 

@@ -15,7 +15,7 @@ Leases expire 120 s after last heartbeat (one further lease period after a recor
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker, `graphyard master settle-containment GY-N "reason"` verifies nothing survives (the loop alone excuses a childless `herdr server` pane shell). If refused, confirm the stop, then [`rework`, or `recover-containment` once delivered](operations.md#recovery-recipes). Autosettle's [clock bound](protocol/leases.md#watch).
+On the worker, `graphyard master settle-containment GY-N "reason"` verifies nothing survives. If refused, confirm the stop, then [`rework`, or `recover-containment` once delivered](operations.md#recovery-recipes). Autosettle's [clock bound](protocol/leases.md#watch).
 
 ## Submitted implementation needs rework
 
@@ -60,7 +60,7 @@ About ten requests uncached; unchanged, none.
 
 ### What a pause means for gates
 
-A rate-limit `403`/`429` pause stops requests; gates read stale until it lifts; nothing merges on an observation over two minutes old.
+A rate-limit `403`/`429` pause stops requests; gates read stale until it lifts; nothing merges on an observation over two minutes old. A merge stalled only on freshness gets a [prioritized wake](protocol/github-webhook.md#prioritized-wakes), not rework.
 
 ### Reading the budget
 
@@ -72,7 +72,7 @@ Hour without deliveries: `master status` points to `https://github.com/settings/
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default 10 GiB); `tmp-inodes`: free `/tmp` inodes (warns <25%) and 2h-idle temp cleanup; `loaded-revision` counts code moves.
+Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default 10 GiB); `tmp-inodes`: free `/tmp` inodes; `loaded-revision` counts code moves.
 
 ## Storage retention
 
@@ -113,7 +113,7 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (default 250): batch size. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace per token, merge path first. `observationThroughput`: budget, pace, head lag, oldest unobserved, `bands` lag (`github` past merge 2, review 30 min). Heartbeat, claim, `complete`, `blocked` own the lease pool; `leaseHealth` (`GET /api/status`): heartbeat p50/p95, failures past 5 s. Reconcile opens on cached stand-ins, reads items whole unlocked, row-locks only its batch; contended batches back off, then defer.
+`GRAPHYARD_RECONCILE_BATCH_MS` (default 250): batch size. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace per token, merge path first. `observationThroughput` reports budget, pace and lag; heartbeat, claim, `complete`, `blocked` own the lease pool (`leaseHealth` in `GET /api/status`: heartbeat p50/p95). Reconcile row-locks only its batch, skipping writer-held rows; contended batches rerun, then defer.
 
 ### Concurrent reconciliation
 

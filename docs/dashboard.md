@@ -5,11 +5,13 @@ Sidebar: **Work**, **Workers**, **Shipped**, **Tests**, **Insights**, **Settings
 
 ## Work
 
-One group per open item (a tile counts and filters it): **Needs you** (yours alone), **Blocked**, **Moving**, **Up next**, **Backlog**. `GET /api/board` serves groups, not the page; items carry `group`, `stage`, `owner`, `actor`, `command`, `since`, `overdue` (Moving/Blocked past `overdueAfterMs`, default 30 minutes). `master status` lists the master's as `board.owed`.
+One group per open item (a tile counts and filters it): **Needs you** (yours alone), **Blocked**, **Moving**, **Up next**, **Backlog**. `GET /api/board` items carry `group`, `stage`, `owner`, `actor`, `command`, `since`, `overdue` (Moving/Blocked past `overdueAfterMs`, default 30 minutes). `master status` lists the master's as `board.owed`.
 
 ## Needs you
 
 `graphyard login` prints the operator's single-use sign-in link. Requests offer choices; **Provide now** seals credentials for `unseal GY-N`.
+
+An operator approval offers **Approve** or **Decline**. **Decline** is terminal, refusing with your reason (`master refuse GY-N DECISION REASON`). Only a sign-in session of an admin declared `"sessionKind": "human"` answers.
 
 ## Workers
 

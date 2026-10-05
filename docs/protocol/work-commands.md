@@ -1,7 +1,7 @@
 <!-- page: Agent protocol | 1 | every work mutation. -->
 # Work commands
 
-All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)); mutations an `Idempotency-Key`, reused only for identical retries. Errors: `{ "error": "reason" }`; a `409` coordination refusal is read, not blindly retried.
+All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)); mutations an `Idempotency-Key`, reused only for identical retries. Errors: `{ "error": "reason" }`; a `409` refusal is read, not retried.
 
 `POST /api/work` ([example](../../examples/work.json)): `title`, `criteria`; optionally `dependencies`, `exclusiveResources`, `plannedFiles`, `producerProofs` (producer-runnable `manual:` proofs). Others: `POST /api/work/KEY/COMMAND`:
 
@@ -9,7 +9,7 @@ All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#th
 - `ready`, `unblock`: `{"reason":…}` (operator agents add `expectedRevision`); `master unblock` retries a stale-revision refusal (≤3 writes) while the same blocker stands.
 - `resolve`: `{"trigger":…, "expectedRevision":…, "reason":…}`; human `admin`, or any `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` explaining a `lease-loss`.
 - `rework`, `recover` (delivered quarantine): `admin`, `{"reason":…, "previousWorkerStopped":true}`.
-- `claim` `{}`; `heartbeat`, `release` `{"epoch":1}`; `release` may carry `"cause"`; `blocked` `{"epoch":1,"reason":…,"partialWork":…}` (a reason releases; null clears); `blocker-probe` (coordinator; a `pass` clears a routine [blocker](leases.md#blocked-work-unblocks-itself)); `workspace` `{"epoch":1,"host":…,"path":…,"branch":"graphyard/gy-1-1"}`.
+- `claim` `{}`; `heartbeat`, `release` `{"epoch":1}`; `release` may carry `"cause"` or `"failure":{"message":…}` (`workspace.failed`; an untouched claim keeps its epoch); `blocked` `{"epoch":1,"reason":…,"partialWork":…}` (a reason releases; null clears); `blocker-probe` (coordinator; a `pass` clears a routine [blocker](leases.md#blocked-work-unblocks-itself)); `workspace` `{"epoch":1,"host":…,"path":…,"branch":"graphyard/gy-1-1"}`, optional `preserved` (`workspace.preserved`).
 - `submit`: `{"epoch":1,"pr":123}`; `409` if a non-`plannedFiles` file [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope) or an applied retro check fails.
 - `deployment`: `{"sha":…, "mergeSha":…, "source":"endpoint", "observedAt":…}`; coordinator/admin, delivered work, once.
 - `followups` `{findings,reason}` (master): findings onto item (or open follow-up), held until ship ({ship:true}); read `GET /api/work/KEY/followups`, `GET /api/followups?pr=N`. `promote` `{index}` (operator): finding → item, once ([follow-ups](../followups.md)); `triage` `{judgement}` (coordinator), `POST /api/followups/migrate` (once): [backlog](../master-agent.md#machine-filed-backlog).

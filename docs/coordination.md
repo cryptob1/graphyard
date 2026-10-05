@@ -11,7 +11,7 @@ Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit
 
 `plannedFiles` (paths, `/`-ending prefixes) is the scope contract, not a lock: the [merge queue](github.md#merge-queue), `sync` integrate overlaps. `master status` shows `overlap.concurrent`, `git merge-tree` failures. Root-level directories are `highConflict`, refused without `--allow-broad-scope`; only `exclusiveResources` (reserved at claim) hold dispatch.
 
-`worktree GY-N EPOCH` frees the branch first, removing abandoned session checkouts (`reclaimed`); leased, dirty or external ones are kept. After **3** single-cause dispatch failures, the loop records a `dispatchblock` blocker until `graphyard unblock GY-N REASON`.
+`worktree GY-N EPOCH` frees the branch first: an earlier attempt's worktree is recorded (`workspace.preserved`) and detached, abandoned checkouts removed (`reclaimed`), leased, dirty or external ones kept. A workspace failure releases the claim, sparing epoch and profile. After **3** single-cause dispatch failures, the loop records a `dispatchblock` blocker until `graphyard unblock GY-N REASON`.
 
 ## Review gate: verdicts, not threads
 
@@ -19,9 +19,9 @@ Reviewer approval of the exact head plus required CI gates landing; threads are 
 
 ## Refuse candidates that revert shipped code outside their scope
 
-`plannedFiles` bounds changes: at `complete`, new heads and landings, files inside scope, new files, touched `tests/helpers/timing-baseline.json` lines of top-level tests pass; other files must match base byte-for-byte. Carried files (unlanded commits) never eject; scope requests or audited revisions widen it.
+`plannedFiles` bounds changes: at `complete`, new heads and landings, files inside scope, new files, touched `tests/helpers/timing-baseline.json` lines of top-level tests pass; other files must match base byte-for-byte. Carried files never eject; scope requests or audited revisions widen it.
 
-`evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: build/acceptance gates and queue ejections are its refusals, published as required check `graphyard/landable` (`success` or `failure`), never a verdict input.
+`evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: build/acceptance gates and queue ejections are its refusals, published as required check `graphyard/landable`, never a verdict input.
 
 Out-of-scope files three-way merge onto the landing commit: extended or base-only changes pass; reverts, deletions, rewrites refuse.
 

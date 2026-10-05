@@ -3,7 +3,7 @@
 
 ## Items, scope and human waits
 
-Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (flags before `--` refused). Auto-granted if grounded: docs; files criteria name; `web/`/`browser-tests/` for `docs/`-planning items; files named by unresolved review threads or `CHANGES_REQUESTED`; tests pinning planned quotes/labels; symbol definitions; successors (renames, copies); companions (docs-budget gate, timing baseline, importing tests). `master create`/`requirements` plan proof files, baselines, gates up front. Decided by an executor with `approve-scope` or the loop; standing decisions replay. Otherwise an approver judges; `master scope GY-N [--allow-broad-scope] REASON` applies refused requests (needs reason); leases stay (`--wait` reads outcome). Ending attempts (submit, release, lapse, rework, requirements) close open/refused requests as `attempt ended`; `master unblock GY-N` closes stale ones. Human decisions: `park GY-N EPOCH KIND NEEDED [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you), answered via `graphyard answer GY-N …`).
+Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (flags before `--` refused). Auto-granted if grounded: docs; files criteria name; `web/`/`browser-tests/` for `docs/`-planning items; files review findings name; tests pinning planned text; symbol definitions; successors; companions (docs-budget gate, timing baseline, importing tests). Decided by an executor with `approve-scope` or the loop; standing decisions replay. Otherwise an approver judges; `master scope GY-N [--allow-broad-scope] REASON` applies refused requests (needs reason); leases stay (`--wait` reads outcome). Ending attempts (submit, release, lapse, rework, requirements) close open/refused requests as `attempt ended`; `master unblock GY-N` closes stale ones. Human decisions: `park GY-N EPOCH KIND NEEDED [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you), answered via `graphyard answer GY-N …`).
 
 ## Conflict avoidance
 
@@ -35,7 +35,7 @@ A worker restores its own: `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-
 | `installation-accept` | Accept pending requests
 | `protection` | Reconcile branch protection
 
-Flows read `GET /api/github/installation` (App credential, not gh), record `record.json` under `.graphyard/master-actions/` and append `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, uses a merge bypass, pushes code or reads a worker credential.
+Flows read `GET /api/github/installation` (App credential, not gh), record `record.json` under `.graphyard/master-actions/` and append `ledger.json`. The master never stores the profile's cookies, uses a merge bypass, pushes code or reads a worker credential.
 
 If a harness classifier refuses routine administration, `master harness claude --apply` (Codex: `master harness codex`) writes rules to `.claude/settings.local.json`.
 
@@ -49,7 +49,7 @@ A `dispatch` or `request-review` finding a session already answering the head co
 
 ## Resources and disk
 
-`resourceRegistry` declares bounded resources, reported in `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed; `run.worktreeRemovalLimit` per cycle) and stale, unheld [test temp entries](operations-reference.md#control-plane-resources) in `/tmp`; unowned non-`working` profile panes, seen twice 60 s apart, close; `disk` attention below `run.diskThresholdGb`. Checkouts: `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`).
+`resourceRegistry` declares bounded resources, reported in `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop removes finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed) and stale test temp entries; unowned idle profile panes close; `disk` attention below `run.diskThresholdGb`. Checkouts: `run.worktreeRoot`.
 
 ## Recovery
 
