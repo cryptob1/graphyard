@@ -613,9 +613,23 @@ export function storeAction(state: DaemonState, key: string, action: Omit<Daemon
   const failed = faultKind !== null && (rest.state === 'failed' || rest.state === 'indeterminate');
   const fault = faultKind === null ? null : classified(faultKind);
   const entry = daemonActionSchema.parse({ ...rest, detail: boundDetail(rest.detail), attempts: clampCount(rest.attempts, 1000), ...(failed && fault ? { faultClass: fault.faultClass } : {}) });
-  if (fault) noteActionOutcome(state.faults, key, entry.state, { ...fault, subject: entry.work ?? key, text: entry.detail }, entry.at);
+  if (fault) { dispatchRun(state.faults.failing, key, entry.state); noteActionOutcome(state.faults, key, entry.state, { ...fault, subject: entry.work ?? key, text: entry.detail }, entry.at); }
   state.actions[key] = entry;
   return entry;
+}
+/**
+ * GY-1287: an item's dispatch row is keyed by the epoch it was offered at (`dispatch:ID:EPOCH`), and
+ * a launch that fails after its claim advances that epoch, so the item's next dispatch writes a new
+ * row. Its failures are still one run of one fault: a failure carries the item's failing run from
+ * the earlier row onto this one, and a success ends the run whichever row opened it. On 5 October
+ * 2026 GY-717's lapsed launch and the retry that met the control plane restarting counted as two.
+ */
+function dispatchRun(failing: Record<string, string>, key: string, outcome: DaemonAction['state']) {
+  const item = /^dispatch:([^:]+):\d+$/.exec(key)?.[1];
+  if (!item) return;
+  const earlier = Object.keys(failing).filter(other => other !== key && other.startsWith(`dispatch:${item}:`));
+  if (outcome === 'done') for (const other of earlier) delete failing[other];
+  else if ((outcome === 'failed' || outcome === 'indeterminate') && !failing[key] && earlier.length) { failing[key] = failing[earlier.at(-1)!]; for (const other of earlier) delete failing[other]; }
 }
 /**
  * A refusal that still stands, observed again with the same detail (GY-1086): its row is not
