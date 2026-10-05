@@ -121,10 +121,10 @@ Only `admin` grants or revokes, to `producer` principals: exact name, `kind:*` o
 
 ### Concurrent reconciliation
 
-A tick runs every 2 s and should finish within 5 s (slower logs `reconciliation tick took N ms`, with writes and longest lock wait). Locks, in order:
+A tick runs every 2 s and should finish within 5 s; slower ticks log `reconciliation tick took N ms` with writes and longest lock wait. Locks, in order:
 
-1. Opening: the coordination lock, briefly, to read row versions and sweep direct merges.
-2. Each batch evaluates up to 250 ms holding no lock, planning at most 8 writes; renewals, observations and requests proceed.
-3. Each write is its own transaction: the coordination lock (waiting at most 500 ms, holding no row), then the item's row (`FOR NO KEY UPDATE`), then commit. If the item or another item's face moved since evaluation, the item is re-evaluated first. Job wakes follow at commit, in work-id order.
+1. Opening: the coordination lock, briefly, reading row versions and sweeping direct merges.
+2. Each batch evaluates up to 250 ms lock-free, planning at most 8 writes.
+3. Each write is its own transaction: the coordination lock (waiting at most 500 ms, holding no row), then the item's row (`FOR NO KEY UPDATE`), then commit. If anything it read moved since evaluation, the item is re-evaluated first. Job wakes follow at commit, in work-id order.
 
-Three expired lock waits defer the batch's unwritten items to the next tick. A renewal takes only its item's lock. Before each evaluation and write, reconciliation lets pending requests run and waits up to 1 s for renewals in flight, so a renewal waits on at most one evaluation. Stale observation snapshots retry after 2 s.
+Three expired lock waits defer unwritten items a tick. A renewal takes only its item's lock. Before each evaluation and write, reconciliation yields to pending requests and waits up to 1 s for renewals in flight, so a renewal waits on at most one evaluation. Stale observation snapshots retry after 2 s.
