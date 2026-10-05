@@ -78,7 +78,7 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
         && !(item.kind === 'contaminated' && restoreInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'base-conflict' && baseConflictInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now))
-        && !(item.kind === 'owed-decision' && item.text.includes(`; a new head for ${item.subject} has been owed for`) && reworkDecisionInMotion(byKey.get(item.subject), now)))
+        && !(item.kind === 'owed-decision' && owedReworkLine(byKey.get(item.subject), item.text) && reworkDecisionInMotion(byKey.get(item.subject), now)))
         derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
     if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
@@ -111,6 +111,19 @@ export function restoreInMotion(work: Work | undefined, now: number): boolean {
   const ejected = work.queueEjection?.sha === work.candidate.sha ? work.queueEjection : null;
   const since = restore ? restore.requested?.at ?? ejected?.at : ejected?.at;
   return !!since && now - Date.parse(since) <= restoreWaitBoundMs;
+}
+/**
+ * GY-1269. Whether an owed line names the item's rework decision: its open action is `request-rework`
+ * and the line carries that action's own owed decision (`needsHuman.decision`), the phrase
+ * `humanNeededActions` puts in the action's row and `humanNeededAttention` reports. The phrase is
+ * read from the item, not restated here, so rewording it in concerns.ts or the line around it in
+ * owed-report.ts cannot silently disarm the rework guard. A concern carried beside the action
+ * (a standing escalation) is owed under its own decision, so its line is not this one and counts at once.
+ */
+export function owedReworkLine(work: Work | undefined, text: string): boolean {
+  const action = work && openAction(work);
+  const decision = action?.kind === 'request-rework' ? action.needsHuman?.decision : undefined;
+  return !!decision && text.includes(decision);
 }
 /** How long a rework decision (a new head owed by `request-rework`) may stay owed before it counts as a decision fault (GY-1251). */
 export const reworkDecisionWaitBoundMs = 30 * 60_000;
