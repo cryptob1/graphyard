@@ -25,9 +25,9 @@ Every launch runs with the checkout unwritable to shell commands (GY-888). A cod
 
 A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [agent registry](onboarding.md#configure-the-fleet) defines the role. A launch takes the first logged-in account under `run.quotaCeilingPercent`, else **fails over** (`dispatch.accounts`).
 
-A runtime failing to start fails over too, named in `master status` (`opencode-a failed to start: …; launched on claude-b`); three in a row raise an attention item until a start.
+A runtime failing to start fails over too, named in `master status` (`opencode-a failed to start: …; launched on claude-b`); three in a row raise attention until a start.
 
-On a runtime's limit notice (never agent text), even mid-retry, the loop commits work as unpushed `WIP:`, records `capacity.exhausted`, relaunches on another account or awaits reset.
+On a runtime's limit notice (never agent text), even mid-retry, the loop commits work as unpushed `WIP:`, records `capacity.exhausted`, relaunches elsewhere or awaits reset (agy's `Individual quota reached`).
 
 ## The loop's own master session
 
@@ -73,7 +73,7 @@ Every paste goes to the **pane on the attempt's own session handle**, never the 
 
 ### Panes are closed and reclaimed
 
-Every launch records its pane on the item's session handle; ending that session closes the pane in the same step. Research and triage run headless. A per-cycle sweep closes panes Graphyard launched **on this host** whose session has ended or worktree is gone, once agentless past **120 s**, at most **6** a pass — never a pane Graphyard did not launch, with an agent, or whose worktree holds a live lease. Each pass records the pane count (`daemon.actions`), raising attention past **20** agentless panes (`daemon.escalations`).
+Every launch records its pane on the item's session handle; ending that session closes the pane in the same step. Research and triage run headless. A per-cycle sweep closes panes Graphyard launched **on this host** whose session ended or worktree is gone, once agentless past **120 s**, at most **6** a pass — never a pane Graphyard did not launch, with an agent, or whose worktree holds a live lease. Each pass records the pane count (`daemon.actions`), raising attention past **20** agentless panes (`daemon.escalations`).
 
 ### The dispatcher's own state
 

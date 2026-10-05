@@ -12,7 +12,7 @@ import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { daemonEffects } from '../src/master-daemon.js';
 import {
   classifyWait, computeFlow, coveredWindow, dayBuckets, deriveFacts, distribution, flowDrilldown, flowExport, flowLimits, flowWindowLabel, flowWindowMessage, flowWindows, gateFactStep,
-  coveredUntil, defaultDeliverySpeedTargets, deliverySpeed, deliverySpeedBreaches, mergeReadyGate, pooledFlowDrilldown, pooledFlowReport, projectFlow, readFlow, separateKinds, stepEntries, stepMoves, workSlices, type FlowDataset, type FlowFact, type FlowQuery, type FlowWindow, type ProjectionState,
+  coveredUntil, defaultDeliverySpeedTargets, deliveryPathMode, deliverySpeed, deliverySpeedBreaches, deliverySpeedMinimumSample, mergeReadyGate, pooledFlowDrilldown, pooledFlowReport, projectFlow, readFlow, separateKinds, stepEntries, stepMoves, workSlices, type FlowDataset, type FlowFact, type FlowQuery, type FlowWindow, type ProjectionState,
 } from '../src/flow-analytics.js';
 import { attributionWindows } from '../src/attribution.js';
 import { act, createElement } from 'react';
@@ -1525,14 +1525,68 @@ test('unit:delivery-speed-attention — targets default to 2h and 8h, are config
   assert.deepEqual(defaultDeliverySpeedTargets, { readyToMergedP90Ms: 2 * hour, mergedToProductionP90Ms: 8 * hour });
   const readyAt = new Map([['id-GY-B', at(2 * hour)]]);
   // Defaults: ready→merged p90 8.4h breaches 2h; merged→production p90 1.9h is within 8h.
-  assert.deepEqual(deliverySpeedBreaches(deliverySpeed(deliveryItems(), { now: deliveryNow, readyAt })).map(breach => breach.text),
+  // The three-item fixture is judged with a minimum sample of one; the default minimum is GY-1275's.
+  assert.deepEqual(deliverySpeedBreaches(deliverySpeed(deliveryItems(), { now: deliveryNow, readyAt }), 1).map(breach => breach.text),
     ['Ready→merged into main p90 is 8.4h over 7 days (3 items), above the 2h target; slowest: GY-C 10h, GY-A 2h, GY-B 0.5h']);
   // master.json's deliverySpeed overrides a target; the pending item counts among the slowest.
   const configured = masterConfigSchema.shape.deliverySpeed.parse({ readyToMergedP90Ms: 10 * hour, mergedToProductionP90Ms: hour });
-  assert.deepEqual(deliverySpeedBreaches(deliverySpeed(deliveryItems(), { now: deliveryNow, readyAt, targets: configured })).map(breach => breach.text),
+  assert.deepEqual(deliverySpeedBreaches(deliverySpeed(deliveryItems(), { now: deliveryNow, readyAt, targets: configured }), 1).map(breach => breach.text),
     ['Merged→promoted to production p90 is 1.9h over 7 days (2 items), above the 1h target; slowest: GY-C 10h (pending), GY-A 2h, GY-B 1h']);
   assert.throws(() => masterConfigSchema.shape.deliverySpeed.parse({ readyToMergedP90Ms: 0 }));
   assert.throws(() => masterConfigSchema.shape.deliverySpeed.parse({ unknown: 1 }));
+});
+
+// GY-1275: follow-ups from the approved review of GY-1232 (PR #728), proof manual:review-followups-triaged.
+const readyItems = (count: number) => Array.from({ length: count }, (_, index) => mergedItem(`GY-R${index}`, 5 * hour, 2 * hour));
+test('manual:review-followups-triaged GY-1275.1 — an incomplete ready-event read leaves items with no ready event unmeasured, states the gap, and raises no ready→merged breach', () => {
+  // Ten backlog items created ten days ago, merged an hour ago; only one ready event was read.
+  const items = Array.from({ length: 10 }, (_, index) => mergedItem(`GY-K${index}`, 10 * day, hour));
+  const readyAt = new Map([['id-GY-K0', at(2 * hour)]]);
+  const partial = deliverySpeed(items, { now: deliveryNow, readyAt, readyComplete: false });
+  assert.equal(partial.readyEventsComplete, false);
+  assert.deepEqual({ count: partial.readyToMerged['7d'].count, unmeasured: partial.readyToMerged['7d'].unmeasured, p90Ms: partial.readyToMerged['7d'].p90Ms }, { count: 1, unmeasured: 9, p90Ms: hour });
+  assert.ok(partial.statements.some(line => /ready-event read was incomplete: 9 items .* unmeasured/.test(line)));
+  // Even a measured p90 over target is not judged on a partial read.
+  const slow = deliverySpeed(items, { now: deliveryNow, readyAt: new Map(items.map(work => [work.id, at(9 * day)])), readyComplete: false });
+  assert.ok(slow.readyToMerged['7d'].p90Ms! > slow.targets.readyToMergedP90Ms);
+  assert.deepEqual(deliverySpeedBreaches(slow), []);
+  // A complete read measures the same items from creation (created ready) and judges them.
+  const complete = deliverySpeed(items, { now: deliveryNow, readyAt, readyComplete: true });
+  assert.equal(complete.readyToMerged['7d'].count, 10);
+  assert.equal(complete.readyToMerged['7d'].unmeasured, undefined);
+  assert.equal(deliverySpeedBreaches(complete).length, 1);
+});
+
+test('manual:review-followups-triaged GY-1275.2 — a breach needs at least ten measured items, and a small sample carries the sparse marker', () => {
+  assert.equal(deliverySpeedMinimumSample, 10);
+  const one = deliverySpeed(readyItems(1), { now: deliveryNow });
+  assert.equal(one.readyToMerged['7d'].p90Ms, 3 * hour);
+  assert.equal(one.readyToMerged['7d'].sparse, true);
+  assert.deepEqual(deliverySpeedBreaches(one), [], 'one slow item in a quiet week does not alarm');
+  assert.deepEqual(deliverySpeedBreaches(deliverySpeed(readyItems(9), { now: deliveryNow })), []);
+  const ten = deliverySpeed(readyItems(10), { now: deliveryNow });
+  assert.equal(ten.readyToMerged['7d'].sparse, false);
+  assert.deepEqual(deliverySpeedBreaches(ten).map(breach => breach.measure), ['readyToMerged']);
+});
+
+test('manual:review-followups-triaged GY-1275.3 — a reverted delivery is named as reverted among the slowest, and the report names the live delivery mode', () => {
+  const reverted = { ...mergedItem('GY-V', 30 * hour, 4 * hour), stage: 'build', delivery: undefined,
+    observation: { merged: true, mergedAt: at(4 * hour), mergeSha: 'v'.repeat(40), revertedDelivery: { base: 'main', files: [], removedBy: null } } } as unknown as Work;
+  const speed = deliverySpeed([...readyItems(9), reverted], { now: deliveryNow });
+  assert.deepEqual(speed.readyToMerged['7d'].slowest[0], { key: 'GY-V', ms: 26 * hour, reverted: true });
+  // Reverted work is never promoted, so it is not pending a promotion.
+  assert.equal(speed.mergedToProduction['7d'].pending, 9);
+  assert.match(deliverySpeedBreaches(speed)[0].text, /slowest: GY-V 26h \(reverted\)/);
+  // The live mode is read from the most recently evaluated item's github-delivery marker gate.
+  const github = { ...mergedItem('GY-G', hour, hour), updatedAt: at(0), gates: [{ name: 'github-delivery', passed: true, reasons: [] }] } as unknown as Work;
+  assert.equal(deliverySpeed([...readyItems(2), github], { now: deliveryNow }).deliveryMode, 'github');
+  assert.match(deliverySpeed([...readyItems(2), github], { now: deliveryNow }).statements[0], /^Delivery mode: GitHub merges each pull request into main/);
+  assert.equal(speed.deliveryMode, 'graphyard');
+  assert.match(speed.statements[0], /^Delivery mode: Graphyard's merge queue/);
+  // A newer closed item, or one not evaluated since, does not stand for the live mode.
+  const closedLater = { ...mergedItem('GY-X', hour, hour), updatedAt: at(-hour), closure: { reason: 'superseded' }, gates: [{ name: 'ready', passed: true, reasons: [] }] } as unknown as Work;
+  const unevaluatedLater = { ...mergedItem('GY-Y', hour, hour), updatedAt: at(-hour), gates: [] } as unknown as Work;
+  assert.equal(deliveryPathMode([github, closedLater, unevaluatedLater]), 'github');
 });
 
 /**

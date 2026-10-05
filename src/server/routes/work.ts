@@ -11,7 +11,7 @@ import { readEscalationContext } from '../escalation-context.js';
 import { judgeClosedQuestion } from '../closed-question.js';
 import { recordBlockerProbe } from '../blocker-probe.js';
 import { closeWork } from '../close.js';
-import { appendFollowUps, followUpsByPr, migrateFollowUps, promoteFollowUp, readFollowUps, recordTriage } from '../followups.js';
+import { recordTriage } from '../followups.js';
 import { answerResearch, recordResearch } from '../../research.js';
 import { recordDecomposition } from '../../decomposition.js';
 import { issuePushCredential } from '../push-credential.js';
@@ -94,32 +94,13 @@ export const workRoutes = defineRoutes('work', [
       return closeWork(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
     },
   },
-  // Review follow-ups (GY-402, GY-896): an approval's findings recorded on the approved item's own
-  // record (or appended to a legacy follow-up item), read back by item or by pull request, one
-  // finding promoted to a work item on an operator's demand, the one-time migration of the
-  // duplicate follow-up items, and the triage agent's judgement.
-  { method: 'GET', path: /^\/api\/work\/([^/]+)\/followups$/, handle: ({ services, operatorVisible }, [id]) => readFollowUps(services, operatorVisible, decodeURIComponent(id)) },
-  { method: 'GET', path: '/api/followups', handle: ({ services, operatorVisible, url }) => followUpsByPr(services, operatorVisible, url.searchParams) },
+  // The triage agent's judgement of a machine-filed item (GY-402). Review follow-ups are no longer
+  // recorded, filed or promoted (GY-1249): findings worth fixing are fixed on the same pull request.
   {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/promote$/,
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/triage$/,
     async handle(context, [id]) {
-      await refuseLead(context, id, 'promote');
-      return promoteFollowUp(context.services, context.actor, decodeURIComponent(id), await parseJson(context));
-    },
-  },
-  {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/(followups|triage)$/,
-    async handle(context, [id, action]) {
-      await refuseLead(context, id, action);
-      const target = decodeURIComponent(id), data = await parseJson(context), key = context.idempotencyKey();
-      return action === 'followups' ? appendFollowUps(context.services, context.actor, target, data, key) : recordTriage(context.services, context.actor, target, data, key);
-    },
-  },
-  {
-    method: 'POST', path: '/api/followups/migrate',
-    async handle(context) {
-      await refuseLead(context, null, 'followups-migrate');
-      return migrateFollowUps(context.services, context.actor, context.idempotencyKey());
+      await refuseLead(context, id, 'triage');
+      return recordTriage(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
     },
   },
   // A closed-question proof (GY-109): the control plane asks the configured responder against the
