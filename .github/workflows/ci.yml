@@ -141,18 +141,21 @@ jobs:
           records=("$RUNNER_TEMP"/timing/shard-*.jsonl)
           if (( ${#records[@]} )); then cat "${records[@]}" > "$RUNNER_TEMP/graphyard-timing.jsonl"; fi
           if grep -qs '"passed":false' "$RUNNER_TEMP/graphyard-timing.jsonl"; then echo "over=true" >> "$GITHUB_OUTPUT"; fi
-      # Only when an assertion went over its budget, so a passing run pays for no install here.
+      # Only when an assertion went over its budget or a shard failed, so a passing run pays for no
+      # install here. A failed shard's failing tests are annotated on this check (GY-471), which the
+      # merge queue reads back to attribute a speculative tip's failure to the change that caused it.
       - uses: actions/checkout@v4
-        if: steps.timing.outputs.over == 'true'
+        if: steps.timing.outputs.over == 'true' || needs.test-shard.result == 'failure'
         with: { persist-credentials: false }
       - uses: actions/setup-node@v4
-        if: steps.timing.outputs.over == 'true'
+        if: steps.timing.outputs.over == 'true' || needs.test-shard.result == 'failure'
         with: { node-version: '24', cache: npm }
       - name: Report timing-dependent assertions on this check run
         # Whatever the suite's verdict, and never changing it: an assertion that went over its
         # budget is annotated on the required check with what it measured, which
-        # `graphyard master status` reads back, beside how many tests failed across every shard.
-        if: steps.timing.outputs.over == 'true'
+        # `graphyard master status` reads back, beside how many tests failed across every shard,
+        # and each failing test is annotated on its file.
+        if: steps.timing.outputs.over == 'true' || needs.test-shard.result == 'failure'
         shell: bash
         run: |
           npm ci --ignore-scripts

@@ -27,6 +27,7 @@ import { docsSyncAdoption, outsideDocs, overlappingPaths, type DocsSync } from '
 import { BoundedCache, EtagCache, blobContentBytes, blobContentValueBytes, etagCacheEntries } from './github-response-cache.js';
 export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
 import { describePushShortfall, grantedPushPermissions, pushShortfallMarker, type PushPermissionShortfall } from './worker-credential.js';
+import { checkFailureOf, type CheckFailure } from './merge-queue.js';
 import { firstObservationOwed, observationBandLag, observationClaim, observationClaimBatch, observationFreshnessMs, observationLag, reviewCadenceCapMs } from './observation-priority.js';
 import { observedReviewBody } from './review-cap.js';
 
@@ -186,6 +187,7 @@ const requestKinds: [RegExp, string][] = [
   [/^\/repos\/[^/]+\/[^/]+\/pulls(\/|\?|$)/, 'pulls'],
   [/^\/repos\/[^/]+\/[^/]+\/commits\/[^/]+\/check-runs/, 'check-runs'],
   [/^\/repos\/[^/]+\/[^/]+\/commits\/[^/]+\/pulls/, 'commit-pulls'],
+  [/^\/repos\/[^/]+\/[^/]+\/check-runs\/\d+\/annotations/, 'check-annotations'],
   [/^\/repos\/[^/]+\/[^/]+\/check-runs/, 'check-publication'],
   [/^\/repos\/[^/]+\/[^/]+\/compare\//, 'compare'],
   [/^\/repos\/[^/]+\/[^/]+\/contents\//, 'contents'],
@@ -1567,6 +1569,7 @@ export class GitHub {
         ? { provider: 'codex' as const, sha: pr.head.sha, approved: false, reason: unready }
         : await observeCodex(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, candidateBase, work.policyRevision, this.config.appId)
       : await this.observeAgent(work, pr, reviews, candidateBase, unready);
+    const checkFailures = await this.checkFailures(work, checks, publishedTip && !pr.merged && pr.state === 'open');
     // A failing published tip carries its docs counts, from which a budget overflow is attributed (GY-574).
     const docsBudget = publishedTip && !pr.merged && pr.state === 'open' ? await this.tipDocs(work, pr.head.sha, bound, checks) : undefined;
     const confirmed = await this.request(`/pulls/${work.submission!.pr}`);
@@ -1591,9 +1594,37 @@ export class GitHub {
       ...(pr.mergeable === null && pr.state === 'open' && !pr.merged ? { mergeabilityUnknown: true } : {}),
       protected: protection.protected, requiredChecks, conversations, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
-      ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}), ...(baseChanges !== undefined ? { baseChanges } : {}), ...(docsBudget ? { docsBudget } : {}),
+      ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}), ...(baseChanges !== undefined ? { baseChanges } : {}), ...(docsBudget ? { docsBudget } : {}), ...(checkFailures.length ? { checkFailures } : {}),
       ...(dismissals.forcePushes.length ? { headForcePushes: dismissals.forcePushes } : {}),
     };
+  }
+  private annotations = new Map<number, any[]>();
+  /**
+   * What each failed required check names on a published speculative tip (GY-471): for the newest
+   * completed run of a policy check from a trusted CI App that failed, the files and failing tests
+   * in its output and annotations, which the merge queue compares with the diffs the tip holds
+   * before blaming the entry under test. A completed run's annotations never change, so each run's
+   * are read once, and an unreadable list is not retried: the run's own output is then the only
+   * record. Only tips are read, so a head that holds nobody else's work costs nothing.
+   */
+  async checkFailures(work: Work, checks: any[], publishedTip: boolean): Promise<CheckFailure[]> {
+    if (!publishedTip) return [];
+    const ciAppIds = work.gates.find(gate => gate.name === 'test')?.ciAppIds ?? [];
+    const failures: CheckFailure[] = [];
+    for (const name of work.policy.checks) {
+      const runs = checks.filter(check => check.name === name && check.status === 'completed' && (!ciAppIds.length || ciAppIds.includes(check.app?.id)));
+      const run = runs.reduce<any>((newest, check) => !newest || (check.id ?? 0) > (newest.id ?? 0) ? check : newest, null);
+      if (!run || !failedCheckConclusions.has(run.conclusion)) continue;
+      const id = Number.isSafeInteger(run.id) ? run.id as number : undefined;
+      let annotations = id === undefined ? [] : this.annotations.get(id);
+      if (!annotations) {
+        annotations = (run.output?.annotations_count ?? 1) > 0 ? await this.pages(`/check-runs/${id}/annotations`).catch(() => []) : [];
+        this.annotations.set(id!, annotations);
+        if (this.annotations.size > ancestryEntries) this.annotations.delete(this.annotations.keys().next().value!);
+      }
+      failures.push(checkFailureOf({ name, id, output: run.output }, annotations));
+    }
+    return failures;
   }
   /**
    * The docs word counts of a published queue tip whose required checks failed (GY-574): the tip's

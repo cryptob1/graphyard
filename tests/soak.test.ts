@@ -641,6 +641,13 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     github.slowMergeable.set(items[options.queued.failTip - 2].key, 45 * minute);
     github.refusedBranches.add(items[options.queued.failTip - 1].key);
   }
+  // GY-471: the failing tip's `test` failure names a file only the `blamedPredecessor`'s change
+  // holds, and that predecessor's own tip passed but GitHub is slow to make it mergeable, so it is
+  // still queued, unlanded, when the failure is attributed to it.
+  if (options.queued?.failTip && blamedPredecessor) {
+    github.failureNames.set(items[options.queued.failTip - 1].key, file(blamedPredecessor));
+    github.slowMergeable.set(items[blamedPredecessor - 1].key, 45 * minute);
+  }
   // GY-854: GitHub refuses every write of every restore of the failing entry's branch.
   // GY-831: the lostCarry item's reviews are the bound reviewer App's own, whose approval a
   // Graphyard-authored tip carries — and whose review the day will take away once it is carried.
@@ -2457,6 +2464,57 @@ test('unit:soak-invariants-hold — an ejected tip whose restore GitHub refuses 
   // rework round for the failed tip then replaced the branch head, which ends the contamination.
   const escalation = day.restoreLines.find(entry => /the restore is not on the branch .* escalated: it stops repeating/.test(entry));
   assert.ok(escalation?.includes(restore!.failure!), `master status named the escalation: ${JSON.stringify(day.restoreLines)}`);
+});
+
+// GY-471: the queued day's predecessor whose change explains the failing tip's `test` failure; a test
+// sets it around its own day.
+let blamedPredecessor: number | undefined;
+test('unit:soak-invariants-hold — a speculative tip failure a predecessor\'s change explains is attributed to it: the predecessor leaves the queue and is asked for one rework of its head, the entry re-enters and lands with no rework of its own, each failed run\'s annotations are read once, and every invariant holds', { timeout: 300_000 }, async () => {
+  // GY-471: a queue-only day in which item three's first tip, chained behind item two's, fails
+  // `test` and keeps failing after its rerun, and the failing test's annotation names
+  // src/soak/item-2.ts — a file only item two's change holds. Item two's own tip passes but GitHub
+  // is slow to make it mergeable, so item two is still queued, unlanded, when the failure is judged.
+  // The real observer reads the failing run's annotations; the real queue attributes the failure
+  // to item two, ejects it, and asks for its rework once; item three waits for it without a rework
+  // of its own, re-enters on its own head and lands. This runs per cycle, head and entry over the
+  // whole day, so a repeated attribution, a second rework or an eject/re-enter churn fails here.
+  const failTip = 3, blamed = 2;
+  blamedPredecessor = blamed;
+  const day = await simulateDay({ hours: 3, queued: { window: 4, failTip, releaseEveryMs: 3 * minute },
+    plan: { items: 4, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), breaksMain: 0, flaky: { rerunPasses: 0, rerunFails: 0 } } }).finally(() => { blamedPredecessor = undefined; });
+  const { items, final, github, violations, failures, lost } = day;
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'every item is delivered');
+  const entry = final.find(item => item.key === items[failTip - 1].key)!, culprit = final.find(item => item.key === items[blamed - 1].key)!;
+  const ejections = (work: Work) => (work.queueHistory ?? []).filter(event => event.event === 'ejected');
+  const trace = (work: Work) => JSON.stringify((work.queueHistory ?? []).map(event => [event.event, event.reason]));
+  // The entry left once, on the failure attributed to the predecessor, and asked for no rework.
+  const entryEjections = ejections(entry);
+  assert.equal(entryEjections.length, 1, `the entry was ejected once: ${trace(entry)}`);
+  assert.match(entryEjections[0].reason!, new RegExp(`^Required CI check test did not pass on speculative tip [0-9a-f]{12}.*; attributed to predecessor ${culprit.key} \\(${culprit.key}'s diff changes src/soak/item-${blamed}\\.ts, which the failing test output names, and ${entry.key}'s diff does not\\), so ${entry.key} waits for it and asks no rework$`), 'the ejection names the predecessor and the evidence');
+  assert.doesNotMatch(entryEjections[0].reason!, /attributed to this entry/, 'the window\'s own attribution to the entry is dropped once a predecessor explains the failure');
+  const failedTip = entryEjections[0].tip!;
+  const culpritPr = [...github.prs.values()].find(pr => pr.key === culprit.key)!;
+  assert.ok([...culpritPr.pushed.keys()].some(head => head !== failedTip && github.contains(failedTip, head)), 'the failed tip held the predecessor\'s change');
+  assert.ok((entry.queueHistory ?? []).some((event, index) => event.event === 'enqueued' && index > (entry.queueHistory ?? []).indexOf(entryEjections[0])), 'the entry re-entered the queue');
+  assert.ok(github.merges.some(merge => merge.key === entry.key && !github.contains(merge.sha, failedTip)), 'the entry landed on a tip rebuilt without the failed one');
+  // The predecessor left on the same record, with the check, the tip and the evidence named.
+  const culpritEjections = ejections(culprit);
+  assert.ok(culpritEjections.some(event => event.reason === `Required CI check test failed on speculative tip ${failedTip.slice(0, 12)} of ${entry.key} and is attributed to this entry: ${culprit.key}'s diff changes src/soak/item-${blamed}.ts, which the failing test output names, and ${entry.key}'s diff does not`),
+    `the predecessor was ejected with the failure named: ${trace(culprit)}`);
+  assert.equal(culpritEjections.length, 1, `the predecessor was ejected once: ${trace(culprit)}`);
+  // One rework per culprit head, none for the entry.
+  const reworks = async (work: Work) => ((await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions as { action: string; reason?: string; input?: { binding?: string } }[]).filter(decision => decision.action === 'rework');
+  const culpritReworks = await reworks(culprit);
+  assert.equal(culpritReworks.length, 1, `the predecessor was asked for one rework: ${JSON.stringify(culpritReworks)}`);
+  assert.match(culpritReworks[0].input?.binding ?? '', new RegExp(`^[0-9a-f]{40}:ci-attributed:${entry.key}:${failedTip}$`), 'the rework binds the culprit head and the tip it broke');
+  assert.match(culpritReworks[0].reason ?? '', new RegExp(`failed on speculative tip ${failedTip.slice(0, 12)} of ${entry.key}, built behind predecessors .*${culprit.key}.*, and is attributed to this item`), 'the request names the tip, its predecessors and the evidence');
+  assert.deepEqual(await reworks(entry), [], 'the entry was never asked for a rework');
+  // The annotation reads are bounded: each failed run is read once however many cycles observe it.
+  assert.ok(github.annotationReads.length >= 1, 'the observer read the failing run\'s annotations');
+  assert.equal(new Set(github.annotationReads).size, github.annotationReads.length, `no failed run's annotations were read twice: ${github.annotationReads.join(', ')}`);
 });
 
 const docsTotalDebug = (count: Record<string, number> | undefined) => count === undefined ? undefined : Object.values(count).reduce((a: number, b: number) => a + b, 0);
