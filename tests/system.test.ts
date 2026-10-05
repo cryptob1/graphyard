@@ -1362,7 +1362,7 @@ test('existing GitHub and Codex review policies keep their original behavior', a
 });
 
 // integration:app-permissions-preflight
-const shortfall = 'App graphyard-owner-project lacks Contents: write (installed with read), which the merge queue needs to publish speculative merge-queue tips; accept the pending permission request at https://github.com/settings/installations/4242';
+const shortfall = 'App graphyard-owner-project lacks Contents: write (installed with read), which branch refresh needs to push base refreshes, branch restores and main-guard revert branches onto the managed repository; accept the pending permission request at https://github.com/settings/installations/4242';
 async function jobRow(w: Work) {
   return (await store.pool.query("SELECT error,token,held_reason,held_until,held_on,refusals,attempts,held_until>now() AS held,available_at<=now() AS due FROM jobs WHERE work_id=$1", [w.id])).rows[0];
 }
@@ -1461,7 +1461,7 @@ test('a hold decided against a permission shortfall is released by the preflight
 });
 test('the status API reports the App permission preflight and held jobs, and master status raises them as control-plane attention', async () => {
   const report = { appId: 1234, installationId: 4242, app: 'graphyard-owner-project', account: 'owner', installationUrl: 'https://github.com/settings/installations/4242', observedAt: new Date().toISOString(), verifiedAt: new Date().toISOString(), error: null, suspended: false,
-    required: { contents: 'write' }, granted: { contents: 'read' }, missing: [{ permission: 'contents', required: 'write', granted: 'read', features: ['merge-queue'], reasons: ['publish speculative merge-queue tips'] }], blockedFeatures: ['merge-queue'], attention: [shortfall] };
+    required: { contents: 'write' }, granted: { contents: 'read' }, missing: [{ permission: 'contents', required: 'write', granted: 'read', features: ['merge-queue'], reasons: ['push base refreshes, branch restores and main-guard revert branches onto the managed repository'] }], blockedFeatures: ['merge-queue'], attention: [shortfall] };
   const fake = { config: { repository: 'owner/project', base: 'main', appId: 1234, installationId: 4242, reviewerApps: [] }, reviewRepository: async () => ({ id: 1, fullName: 'owner/project' }), reviewPermissions: async () => ({ pull_requests: 'write', issues: 'read', checks: 'write' }), permissionReport: () => structuredClone(report) } as unknown as GitHub;
   const isolated = new Engine(store, [15368], 120, 'owner/project'); isolated.reviewerApps = reviewerApps; isolated.controlPlaneAppId = 1234;
   const http = server(isolated, [{ ...coordinator, token: 'm'.repeat(32) }], fake);
