@@ -227,6 +227,18 @@ test('unit:host-install-plan — the Graphyard server starts on the host even wh
   } finally { await fixture.cleanup(); }
 });
 
+test('unit:host-install-plan — a re-apply whose pull fails rebuilds the server image even when a stale image with the same tag is present', async () => {
+  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test',
+    extraResponses: [{ match: 'compose.yaml pull', result: { stdout: '', stderr: 'manifest unknown', code: 1 } }] });
+  try {
+    await applyHost(fixture, hostInputs());
+    const lines = hostLines(fixture);
+    const build = lines.findIndex(line => line.startsWith('docker build ') && line.endsWith(' /home/graphyard/graphyard'));
+    assert.ok(build >= 0, 'a failed pull is never trusted to have left the right image');
+    assert.ok(build < lines.indexOf('systemctl restart graphyard-server.service graphyard-proxy.service'), 'the rebuilt image exists before the server restarts');
+  } finally { await fixture.cleanup(); }
+});
+
 test('unit:host-install-plan — a server image that can be neither pulled nor built fails the install with the reason', async () => {
   const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test',
     extraResponses: [

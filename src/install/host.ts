@@ -770,11 +770,15 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
  * The server image must exist on the host before its unit starts. When the registry has no such
  * image (the release was never published, or the pull is denied), the host builds it from its own
  * Graphyard checkout, which provision placed at the installer's commit, so one command still ends
- * in a running server.
+ * in a running server. A local image counts only when this deploy's pull succeeded: the tag names
+ * the package version, not the commit, so after a failed pull an image left by an earlier install
+ * may be stale, and the host rebuilds rather than restart an old server beside a new loop.
  */
-export async function ensureServerImage(ctx: AdapterContext, remote: Transport) {
-  const present = await remote.exec('docker', ['image', 'inspect', '--format', '{{.Id}}', ctx.image], { allowFailure: true, timeout: 120_000 });
-  if (present.code === 0) return 'pulled' as const;
+export async function ensureServerImage(ctx: AdapterContext, remote: Transport, pulled: boolean) {
+  if (pulled) {
+    const present = await remote.exec('docker', ['image', 'inspect', '--format', '{{.Id}}', ctx.image], { allowFailure: true, timeout: 120_000 });
+    if (present.code === 0) return 'pulled' as const;
+  }
   const source = ctx.host!.layout.graphyard;
   const built = await remote.exec('docker', ['build', '--build-arg', `GRAPHYARD_VERSION=${packageVersion}`, '--build-arg', `GRAPHYARD_BUILD_REVISION=${ctx.host!.ref}`, '--tag', ctx.image, source], { allowFailure: true, timeout: 1_800_000 });
   if (built.code !== 0) throw new Error(`The server image ${ctx.image} could not be pulled, and building it from ${source} at ${ctx.host!.ref} failed: ${failure(ctx, built)}`);
@@ -818,8 +822,8 @@ export function selfContainedAdapter(base: ProviderAdapter): ProviderAdapter & {
     async deploy(ctx) {
       const remote = await hostRemote(ctx);
       await remote.exec('systemctl', ['daemon-reload'], { timeout: 120_000 });
-      await remote.exec('docker', ['compose', '--project-directory', ctx.workdir, '-f', `${ctx.workdir}/compose.yaml`, 'pull', '--quiet'], { allowFailure: true, timeout: 900_000 });
-      await ensureServerImage(ctx, remote);
+      const pull = await remote.exec('docker', ['compose', '--project-directory', ctx.workdir, '-f', `${ctx.workdir}/compose.yaml`, 'pull', '--quiet'], { allowFailure: true, timeout: 900_000 });
+      await ensureServerImage(ctx, remote, pull.code === 0);
       await remote.exec('systemctl', ['enable', '--now', 'graphyard-postgres.service'], { timeout: 300_000 });
       for (let attempt = 0; attempt < 60; attempt++) {
         const ready = await remote.exec('docker', ['compose', '--project-directory', ctx.workdir, '-f', `${ctx.workdir}/compose.yaml`, 'exec', '-T', 'db', 'pg_isready', '-U', 'graphyard'], { allowFailure: true, timeout: 60_000 });
