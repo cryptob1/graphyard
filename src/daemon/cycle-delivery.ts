@@ -117,18 +117,17 @@ export async function deploymentStep(cycle: Cycle) {
   //       four scheduled runs in a row (GY-1302): when the base branch has moved past the last
   //       promoted SHA, no candidate is in validation and run.promoteEveryMinutes have passed since
   //       the last dispatch, the release-candidate workflow is dispatched with promote=true.
-  const promotion = effects.promotion;
-  if (promotion) {
-    try {
-      const result = await promotionCycle(state.promotion ?? null, promotion, { now: now(), everyMinutes: config.run.promoteEveryMinutes ?? defaultPromoteEveryMinutes });
-      state.promotion = result.state;
-      if (result.dispatched) performed.push(await record(state, `promotion:${result.state.mainSha}`, { kind: 'deployment', work: null, principal: null, state: 'done', detail: result.state.reason ?? `Dispatched ${promotionWorkflow}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
-    } catch (error) {
-      const key = `promotion:${state.promotion?.mainSha ?? 'unknown'}`;
-      const detail = `Promotion could not be checked or dispatched: ${message(error)}`;
-      if (state.promotion) state.promotion = { ...state.promotion, checkedAt: new Date(now()).toISOString(), reason: detail.slice(0, 500) };
-      if (detailChanged(state.actions[key], detail)) performed.push(await record(state, key, { kind: 'deployment', work: null, principal: null, state: 'failed', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-    }
+  //       A failed read or dispatch is recorded under one key and retried with backoff, and the
+  //       cycle's read and dispatch stamps are kept, so a failure never repeats every cycle.
+  const promotion = effects.promotion, promotionFailure = 'promotion:failed';
+  if (promotion && readyToRetry(state.actions[promotionFailure], state.cycle)) {
+    const result = await promotionCycle(state.promotion ?? null, promotion, { now: now(), everyMinutes: config.run.promoteEveryMinutes ?? defaultPromoteEveryMinutes });
+    state.promotion = result.state;
+    if (result.failure) {
+      const detail = `Promotion could not be checked or dispatched: ${result.failure}`;
+      performed.push(await record(state, promotionFailure, { kind: 'deployment', work: null, principal: null, state: 'failed', detail, attempts: (state.actions[promotionFailure]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+    } else if (state.actions[promotionFailure]) delete state.actions[promotionFailure];
+    if (result.dispatched) performed.push(await record(state, `promotion:${result.state.mainSha}`, { kind: 'deployment', work: null, principal: null, state: 'done', detail: result.state.reason ?? `Dispatched ${promotionWorkflow}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   }
 
   // 7b. The second confidence layer. For each delivery whose policy asks for a smoke proof: record

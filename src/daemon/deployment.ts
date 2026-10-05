@@ -325,33 +325,52 @@ const later = (...times: (string | null | undefined)[]) => times.filter((time): 
  * `everyMinutes` have passed since the last dispatch — the loop's own or a run GitHub lists (a
  * scheduled run that does fire counts too, so the cadence never doubles). Runs a pushed `rc-*` tag
  * starts validate one pinned commit and promote nothing, so they never hold a promotion back.
+ *
+ * It never throws. A failed read or dispatch comes back as `failure` with the cycle's stamps kept:
+ * a failed ledger read waits out `promotionLedgerReadMs` and a failed run read `promotionRunsReadMs`
+ * like a successful one, and a dispatch attempt is stamped before it is made, so a dispatch that
+ * fails (or that GitHub accepted before `gh` failed) counts toward the interval and is never
+ * repeated cycle after cycle.
  */
-export async function promotionCycle(previous: PromotionState | null, reads: PromotionReads, options: { now: number; everyMinutes: number }): Promise<{ state: PromotionState; dispatched: boolean }> {
+export async function promotionCycle(previous: PromotionState | null, reads: PromotionReads, options: { now: number; everyMinutes: number }): Promise<{ state: PromotionState; dispatched: boolean; failure: string | null }> {
   const at = new Date(options.now).toISOString(), everyMs = options.everyMinutes * 60_000;
-  const settle = (state: Omit<PromotionState, 'nextDueAt' | 'reason'>, reason: string, due: boolean) => ({ ...state, reason,
+  const settle = (state: Omit<PromotionState, 'nextDueAt' | 'reason'>, reason: string, due: boolean) => ({ ...state, reason: reason.slice(0, 500),
     nextDueAt: due && state.lastDispatchAt ? new Date(Math.max(options.now, Date.parse(state.lastDispatchAt) + everyMs)).toISOString() : due ? at : null });
+  const done = (state: Omit<PromotionState, 'nextDueAt' | 'reason'>, reason: string, due: boolean, dispatched = false) => ({ state: settle(state, reason, due), dispatched, failure: null });
+  const failed = (state: Omit<PromotionState, 'nextDueAt' | 'reason'>, failure: string) => ({ state: settle(state, failure, true), dispatched: false, failure });
   const kept = { mainSha: previous?.mainSha ?? null, promotedSha: previous?.promotedSha ?? null, promotedAt: previous?.promotedAt ?? null, behind: previous?.behind ?? null, ledgerReadAt: previous?.ledgerReadAt ?? null };
   const carried = { inFlight: previous?.inFlight ?? false, runsReadAt: previous?.runsReadAt ?? null, dispatchedAt: previous?.dispatchedAt ?? null, lastDispatchAt: previous?.lastDispatchAt ?? null };
   // Off reads nothing at all: no fetch, no GitHub request.
-  if (options.everyMinutes <= 0) return { state: settle({ checkedAt: at, ...kept, ...carried }, 'Promotion by the loop is off (run.promoteEveryMinutes is 0)', false), dispatched: false };
-  const fresh = kept.ledgerReadAt && options.now - Date.parse(kept.ledgerReadAt) < promotionLedgerReadMs;
-  const ledger = fresh ? kept : { ...await reads.ledger(), ledgerReadAt: at };
+  if (options.everyMinutes <= 0) return done({ checkedAt: at, ...kept, ...carried }, 'Promotion by the loop is off (run.promoteEveryMinutes is 0)', false);
+  let ledger = kept;
+  if (!kept.ledgerReadAt || options.now - Date.parse(kept.ledgerReadAt) >= promotionLedgerReadMs) {
+    try { ledger = { ...await reads.ledger(), ledgerReadAt: at }; } catch (error) {
+      return failed({ checkedAt: at, ...kept, ledgerReadAt: at, ...carried }, `The base branch and the promotion record could not be read: ${message(error)}`);
+    }
+  }
   const base = { checkedAt: at, ...ledger, ...carried };
-  if (!ledger.mainSha) return { state: settle(base, 'The base branch tip could not be read, so nothing is promoted', false), dispatched: false };
-  if (ledger.mainSha === ledger.promotedSha) return { state: settle(base, 'Production runs the base branch tip; nothing to promote', false), dispatched: false };
+  if (!ledger.mainSha) return done(base, 'The base branch tip could not be read, so nothing is promoted', false);
+  if (ledger.mainSha === ledger.promotedSha) return done(base, 'Production runs the base branch tip; nothing to promote', false);
   const sinceLast = base.lastDispatchAt ? options.now - Date.parse(base.lastDispatchAt) : Number.POSITIVE_INFINITY;
-  if (sinceLast < everyMs) return { state: settle(base, `The last promotion was dispatched ${Math.round(sinceLast / 60_000)} minute(s) ago; the next is due ${options.everyMinutes} minute(s) after it`, true), dispatched: false };
+  if (sinceLast < everyMs) return done(base, `The last promotion was dispatched ${Math.round(sinceLast / 60_000)} minute(s) ago; the next is due ${options.everyMinutes} minute(s) after it`, true);
   let state = base;
   if (!base.runsReadAt || options.now - Date.parse(base.runsReadAt) >= promotionRunsReadMs) {
-    const cuts = (await reads.runs()).filter(run => run.event === 'workflow_dispatch' || run.event === 'schedule');
+    let listed: PromotionRun[];
+    try { listed = await reads.runs(); } catch (error) {
+      return failed({ ...base, runsReadAt: at }, `The ${promotionWorkflow} runs could not be read: ${message(error)}`);
+    }
+    const cuts = listed.filter(run => run.event === 'workflow_dispatch' || run.event === 'schedule');
     state = { ...base, runsReadAt: at, inFlight: cuts.some(run => runningStates.has(run.status)), lastDispatchAt: later(base.dispatchedAt, ...cuts.map(run => run.createdAt)) };
     const since = state.lastDispatchAt ? options.now - Date.parse(state.lastDispatchAt) : Number.POSITIVE_INFINITY;
-    if (since < everyMs) return { state: settle(state, `A release candidate was started ${Math.round(since / 60_000)} minute(s) ago; the next promotion is due ${options.everyMinutes} minute(s) after it`, true), dispatched: false };
+    if (since < everyMs) return done(state, `A release candidate was started ${Math.round(since / 60_000)} minute(s) ago; the next promotion is due ${options.everyMinutes} minute(s) after it`, true);
   }
-  if (state.inFlight) return { state: settle(state, 'A release candidate is still in validation; the next promotion waits for it to conclude', true), dispatched: false };
-  await reads.dispatch();
-  const dispatched = { ...state, dispatchedAt: at, lastDispatchAt: at, inFlight: true, runsReadAt: at };
-  return { state: settle(dispatched, `Dispatched ${promotionWorkflow} with promote=true to carry ${ledger.mainSha.slice(0, 12)} to production`, true), dispatched: true };
+  if (state.inFlight) return done(state, 'A release candidate is still in validation; the next promotion waits for it to conclude', true);
+  // The attempt is stamped before it is made: whatever the dispatch's outcome, the next is due an interval later.
+  const attempted = { ...state, dispatchedAt: at, lastDispatchAt: at, runsReadAt: at };
+  try { await reads.dispatch(); } catch (error) {
+    return failed(attempted, `Dispatching ${promotionWorkflow} with promote=true failed; the next attempt is due ${options.everyMinutes} minute(s) after this one: ${message(error)}`);
+  }
+  return done({ ...attempted, inFlight: true }, `Dispatched ${promotionWorkflow} with promote=true to carry ${ledger.mainSha.slice(0, 12)} to production`, true, true);
 }
 
 /** What `master status` reports of the promotion drive: the last promoted SHA, how far production is behind, and when the next promotion is due. */

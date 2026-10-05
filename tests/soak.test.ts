@@ -1407,10 +1407,18 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // GY-1302: the loop's promotion drive. Main moves with every merge of the day while production
   // moves only on its deploys, so a promotion is due all day; each dispatched candidate validates
   // for ninety minutes and GitHub lists it only two minutes after the dispatch, so the loop's own
-  // record of its dispatch is what holds the next one back meanwhile.
-  const promotion = { ledgerReads: 0, runReads: 0, dispatches: [] as number[], violations: [] as string[], validationMs: 90 * minute, listedAfterMs: 2 * minute };
+  // record of its dispatch is what holds the next one back meanwhile. For the day's first hour every
+  // dispatch is refused (a token without actions: write), and for the half hour after it the remote
+  // cannot be fetched: neither failure is repeated every cycle.
+  const promotion = { ledgerReads: 0, runReads: 0, dispatches: [] as number[], violations: [] as string[], validationMs: 90 * minute, listedAfterMs: 2 * minute,
+    failDispatchUntil: hour, failLedger: [hour, hour + 30 * minute] as const, failedDispatches: [] as number[], failedLedgerReads: 0 };
   const promotionEffect: DaemonEffects['promotion'] = options.promotion ? {
-    ledger: async () => { promotion.ledgerReads++; return { mainSha: github.tip, promotedSha: production.sha, promotedAt: null, behind: github.tip === production.sha ? 0 : 1 }; },
+    ledger: async () => {
+      promotion.ledgerReads++;
+      const into = clock.now() - dayStart;
+      if (into >= promotion.failLedger[0] && into < promotion.failLedger[1]) { promotion.failedLedgerReads++; throw new Error('git fetch: Could not resolve host: github.com'); }
+      return { mainSha: github.tip, promotedSha: production.sha, promotedAt: null, behind: github.tip === production.sha ? 0 : 1 };
+    },
     runs: async () => {
       promotion.runReads++;
       return promotion.dispatches.filter(at => clock.now() - at >= promotion.listedAfterMs).reverse()
@@ -1418,9 +1426,12 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     },
     dispatch: async () => {
       const now = clock.now(), last = promotion.dispatches.at(-1);
+      if (now - dayStart < promotion.failDispatchUntil) { promotion.failedDispatches.push(now); throw new Error('gh: HTTP 403: Resource not accessible by integration'); }
       if (github.tip === production.sha) promotion.violations.push(`+${Math.round((now - dayStart) / minute)} min: dispatched while production runs main`);
       if (last !== undefined && now < last + promotion.validationMs) promotion.violations.push(`+${Math.round((now - dayStart) / minute)} min: dispatched while the candidate of +${Math.round((last - dayStart) / minute)} min is in validation`);
       if (last !== undefined && now - last < 120 * minute) promotion.violations.push(`+${Math.round((now - dayStart) / minute)} min: dispatched ${Math.round((now - last) / minute)} min after the last`);
+      const refused = promotion.failedDispatches.at(-1);
+      if (refused !== undefined && now - refused < 120 * minute) promotion.violations.push(`+${Math.round((now - dayStart) / minute)} min: dispatched ${Math.round((now - refused) / minute)} min after a refused attempt`);
       promotion.dispatches.push(now);
     },
   } : undefined;
@@ -2497,6 +2508,10 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.deepEqual(promotion.violations, [], 'never twice in a window, never while a candidate is in validation, never when production runs main');
   assert.ok(promotion.ledgerReads <= Math.ceil(hours * hour / (5 * minute)) + 2 * basePlan.loopRestarts.length + 2, `fetches once per five-minute read window (${promotion.ledgerReads} over ${cycles} cycles)`);
   assert.ok(promotion.runReads <= Math.ceil(hours * hour / minute) + 2 * basePlan.loopRestarts.length + 2 && promotion.runReads < cycles, `run reads at most once a minute (${promotion.runReads} over ${cycles} cycles)`);
+  // A refused dispatch counts as an attempt: one per interval, not one per cycle, and the failed
+  // fetches of the unreachable half hour at most one per read window.
+  assert.ok(promotion.failedDispatches.length >= 1 && promotion.failedDispatches.length <= 1 + basePlan.loopRestarts.length, `refused dispatches are not repeated every cycle: ${promotion.failedDispatches.length} in the first hour`);
+  assert.ok(promotion.failedLedgerReads <= Math.ceil(30 * minute / (5 * minute)) + 1, `failed fetches stay bounded (${promotion.failedLedgerReads} in half an hour)`);
   // GY-806: webhooks drove observation all day — every woken job claimed ahead of the polled ones
   // and re-observed within the minute of its delivery, and no poll skipped outside a refresh.
   const { webhook } = day;

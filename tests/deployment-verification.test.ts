@@ -93,6 +93,54 @@ test('unit:loop-dispatches-promotion — the ledger read fetches from the remote
   assert.deepEqual([off.reads.ledgerReads, off.reads.runReads, off.reads.dispatches], [0, 0, 0], 'promotion that is off fetches nothing');
 });
 
+test('unit:loop-dispatches-promotion — a failing fetch, run read or dispatch never repeats every cycle: the attempt is stamped, a dispatch that fails (or that GitHub accepted before gh failed) counts toward the interval, and none of them throws', async () => {
+  const { reads, api } = stubReads({ mainSha: MAIN, promotedSha: PROMOTED, promotedAt: null, behind: 2 }, []);
+  const failing = { ledger: false, runs: false, dispatch: true };
+  const counted: PromotionReads = {
+    ledger: async () => { if (failing.ledger) { reads.ledgerReads++; throw new Error('fetch: network is unreachable'); } return api.ledger(); },
+    runs: async () => { if (failing.runs) { reads.runReads++; throw new Error('gh: HTTP 502'); } return api.runs(); },
+    // GitHub may have accepted the dispatch before gh failed: a run the next read does not list yet.
+    dispatch: async () => { reads.dispatches++; if (failing.dispatch) throw new Error('gh: HTTP 403: Resource not accessible by integration'); },
+  };
+  const step = 20_000;
+  let state: PromotionState | null = null, failures = 0;
+  const run = async (from: number, to: number) => {
+    for (let now = from; now < to; now += step) {
+      const result = await promotionCycle(state, counted, { now, everyMinutes: 120 });
+      state = promotionStateSchema.parse(result.state);
+      if (result.failure) failures++;
+    }
+  };
+
+  // Six hours of a dispatch that keeps failing: one attempt per interval, not one per cycle.
+  await run(T0, T0 + minutes(360));
+  assert.equal(reads.dispatches, 3, `one dispatch attempt per 120-minute interval (${reads.dispatches} over ${minutes(360) / step} cycles)`);
+  assert.equal(failures, 3);
+  assert.ok(reads.ledgerReads <= Math.ceil(minutes(360) / promotionLedgerReadMs) + 1, `${reads.ledgerReads} fetches`);
+  assert.ok(reads.runReads <= 3, `runs are read only when a dispatch is due (${reads.runReads})`);
+  assert.equal(state!.dispatchedAt, new Date(T0 + minutes(240)).toISOString(), 'the failed attempt is stamped as the last dispatch');
+
+  // An hour of an unreachable remote: one fetch per read window.
+  failing.dispatch = false; failing.ledger = true;
+  const before = { ledger: reads.ledgerReads, failures };
+  await run(T0 + minutes(360), T0 + minutes(420));
+  assert.ok(reads.ledgerReads - before.ledger <= Math.ceil(minutes(60) / promotionLedgerReadMs) + 1, `${reads.ledgerReads - before.ledger} failed fetches in an hour`);
+  assert.equal(failures - before.failures, reads.ledgerReads - before.ledger);
+
+  // Half an hour of failing run reads once a dispatch is due: one read per run-read window.
+  failing.ledger = false; failing.runs = true;
+  const runsBefore = reads.runReads;
+  await run(T0 + minutes(480), T0 + minutes(510));
+  assert.ok(reads.runReads - runsBefore <= Math.ceil(minutes(30) / promotionRunsReadMs) + 1, `${reads.runReads - runsBefore} failed run reads in half an hour`);
+
+  // Everything recovers: the next promotion is dispatched.
+  failing.runs = false;
+  const dispatchesBefore = reads.dispatches;
+  await run(T0 + minutes(510), T0 + minutes(515));
+  assert.equal(reads.dispatches - dispatchesBefore, 1);
+  assert.equal(state!.inFlight, true);
+});
+
 test('unit:loop-dispatches-promotion — the dispatch asks GitHub to run the release-candidate workflow on the base branch with promote=true, and the ledger reads the newest rc-production record and the merges since it', async () => {
   const calls: string[][] = [];
   const run = async (command: string, args: string[]) => {
