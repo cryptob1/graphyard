@@ -5,6 +5,7 @@ import { type Work } from '../model/work.js';
 import { installationMerger } from '../executor.js';
 import { baseFailureAttention, daemonSummary, loopAttention, readDaemonState } from '../master-daemon.js';
 import { slowCycleAttention } from '../daemon/liveness.js';
+import { promotionStatus } from '../daemon/deployment.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, loopMemoryAttention, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
 import { approverLaunchAttention, nameBaseBreaks } from './status-attention.js';
@@ -152,6 +153,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     unavailable: sections.unavailable,
     docsBudget: docs,
     delivery: delivery.report,
+    // The loop's promotion drive (GY-1302): the last promoted SHA, merges production is behind, the next due promotion.
+    promotion: promotionStatus('error' in daemonState ? null : daemonState.promotion),
     // Every open item the control plane names no action for, with the account it names and how
     // long it has held its failing gate.
     actionless: { bound: stallBoundMs, items: actionless },
