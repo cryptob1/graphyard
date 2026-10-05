@@ -690,9 +690,11 @@ test('manual:fault-class-resources — GY-1272: the 5 October merge burst replay
   const github = api.client();
   const { charged } = labelledCompares(github);
   // The fleet of unit:merge-burst-request-budget: 80 open candidates, half awaiting review (BLOCKED), over twenty areas.
+  // The other half are approved with CI still running: an approved, green candidate is GitHub's to merge (GY-1235) and
+  // leaves the fleet within the burst, so the ones still open through the hour are those GitHub cannot merge yet.
   const blocked = (index: number) => index % 2 === 0;
   const candidates = Array.from({ length: 80 }, (_, index) => {
-    const pr = api.open(600 + index, `graphyard/gy-b${index}-1`, { approved: !blocked(index) }); api.files.set(600 + index, [`src/area-${index % 20}.ts`, `src/own-${index}.ts`]);
+    const pr = api.open(600 + index, `graphyard/gy-b${index}-1`, { approved: !blocked(index), checks: blocked(index) ? 'success' : 'in_progress' }); api.files.set(600 + index, [`src/area-${index % 20}.ts`, `src/own-${index}.ts`]);
     if (blocked(index)) api.states.set(600 + index, 'blocked');
     return item(`GY-B${index}`, 600 + index, pr.head, api.main);
   });
