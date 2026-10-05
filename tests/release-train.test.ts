@@ -117,9 +117,9 @@ test('unit:merge-gate-fast-checks-only — merging is never blocked by a release
 });
 
 test('unit:merge-gate-fast-checks-only — docs describe the fast merge gate and per-candidate validation', () => {
-  const delivery = readFileSync('docs/delivery.md', 'utf8'), github = readFileSync('docs/github.md', 'utf8');
-  assert.match(github, /merge gate is build, typecheck, the pre-merge unit set and one independent review/i);
-  assert.match(github, /`integration:` and `e2e:` proofs? (are|is) never/i);
+  const delivery = readFileSync('docs/delivery.md', 'utf8');
+  assert.match(delivery, /merge gate is build, typecheck, the pre-merge unit set and one independent review/i);
+  assert.match(delivery, /`integration:` and `e2e:` proofs? (are|is) never/i);
   assert.match(delivery, /merged-pending-release/);
   assert.match(delivery, /Done only when/i);
   assert.match(delivery, /release proofs/);
