@@ -59,20 +59,15 @@ export const refusalRules: { gate: string | null; match: RegExp; kind: NextActio
   { gate: 'test', match: ciCheckRefusalPattern, kind: 'resync' },
   // A check only the base branch's protection requires (GY-430) is named only once it failed.
   { gate: 'test', match: requiredCheckFailurePattern, kind: 'request-rework' },
-  // acceptance
-  { gate: 'acceptance', match: /is no longer independent:/, kind: 'escalate' },
-  { gate: 'acceptance', match: /needs trusted passing evidence/, kind: 'dispatch' },
   // merge
-  { gate: 'merge', match: /^GitHub observation missing or older than two minutes$/, kind: 'resync' },
+  // Nothing gates the merge on the observation's age (GY-1235): only a reading of the current head.
+  { gate: 'merge', match: /^GitHub has not been observed at the current candidate$/, kind: 'resync' },
   // Mergeability not established: GitHub reports the head unmergeable, or has not finished
   // computing it (GY-548). Either way only a fresh read answers it.
   { gate: 'merge', match: /^(Pull request is not mergeable against the current base$|GitHub is computing mergeability against the current base)/, kind: 'resync' },
-  { gate: 'merge', match: /branch protection have not been verified$/, kind: 'escalate' },
-  { gate: 'merge', match: /^Ejected from the merge queue:/, kind: 'request-rework' },
   // Unresolved review threads never refuse a merge in Graphyard's gate; a branch that still requires
   // conversation resolution is protection drift, reconciled with graphyard master protection --apply.
   { gate: 'merge', match: /^Branch protection still requires conversation resolution, which Graphyard's review gate does not use: /, kind: 'escalate' },
-  { gate: 'merge', match: /^Candidate has not entered the merge queue$/, kind: 'merge' },
   { gate: null, match: /.*/, kind: 'escalate' },
 ];
 

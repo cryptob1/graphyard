@@ -66,9 +66,9 @@ The master never launches reviews or producers by hand, except `master review GY
 
 A passing producer records `"exercise"`: rerun without the criterion's behaviour, the proof must fail with a case executed, else the pass is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`). Then the next action is `request-rework` naming proof, criterion and surviving mutation. Unexercised `manual:` proofs re-attest, never rework.
 
-## Guarded merges
+## GitHub merges
 
-`master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only when currently authorized for exact head, base and policy; protocol skew refuses (`… deploy main first`).
+GitHub merges a head whose gates pass: the [delivery](delivery.md#one-delivery-path); the loop only reconciles. A failing head's merge is a violation until two-party `master decide GY-N merge`. Skew: `… deploy main first`.
 
 A required check the base head fails too is a [base failure](development.md#base-failures): no rework, one P0 repair item, candidates refreshed once repaired.
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); approvals list each under `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).

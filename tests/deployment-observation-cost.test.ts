@@ -191,7 +191,6 @@ function cycleEffects(overrides: Partial<DaemonEffects> = {}): DaemonEffects {
     closeSession: () => {},
     dispatch: async () => {},
     requestProof: () => {},
-    merge: async () => ({ result: 'merge requested' }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},

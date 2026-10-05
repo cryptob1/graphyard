@@ -70,7 +70,7 @@ function effects(w: World): DaemonEffects {
   return {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: w.work, now: new Date(w.now).toISOString() }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(w.now).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {},
     decide: async (work, action, reason) => { w.decided.push({ key: work.key, action, reason }); return { id: randomUUID() }; },

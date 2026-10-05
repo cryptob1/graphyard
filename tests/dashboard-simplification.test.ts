@@ -132,7 +132,8 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
     ['acceptance', 'AC-2: e2e:checkout needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy; scenario v3 in staging; previously accepted evidence was revoked'],
     ['acceptance', 'Bootstrap obligation inherited from GY-4 AC-1: unit:x needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy'],
     ['acceptance', 'Trusted unit:x evidence from ci is no longer independent: ci has since held an assignment on GY-9'],
-    ['merge', 'GitHub observation missing or older than two minutes'], ['merge', 'Required Graphyard check and merge-queue branch protection have not been verified'],
+    // GY-1235: the merge gate reads no observation age and no protection verification, only whether GitHub was seen at the candidate.
+    ['merge', 'GitHub has not been observed at the current candidate'],
     ['merge', 'Pull request is not mergeable against the current base'], ['merge', 'Unresolved lease-loss escalation requires operator resolution: worker vanished'],
     ['merge', 'Slice lead lead-1 ruled hold under rule R-2; delivery is blocked until the authorized recovery: redo the migration'],
     ['merge', 'Merge queue position 2 of 2: GY-10 is ahead'], ['merge', 'Speculative tip on predicted base abcdef123456 has not been published and validated for this candidate'],

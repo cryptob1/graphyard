@@ -274,7 +274,7 @@ test('unit:review-followups-triaged — syncProjectMemory caps retention and cha
     autoMerge: true, mergeMethod: 'merge', workers: [], run: { worktreeRoot: join(secrets, 'checkouts') } });
   const effects = daemonEffects(root, master, {
     snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate: async () => ({}),
-    executor: { principal: 'coordinator-1', instance: 'persist' }, run: async () => '',
+    run: async () => '',
   });
   const state = { ...emptyDaemonState(master), projectMemory: fromDisk };
   try {

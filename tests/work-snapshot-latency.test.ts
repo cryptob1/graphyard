@@ -286,7 +286,7 @@ test('integration:cycle-within-interval — a coordination cycle over the 100-it
     agents: () => [],
     credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
     snapshot,
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({ result: 'merge requested' }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {},
     persist: async () => {},
