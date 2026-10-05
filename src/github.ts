@@ -29,6 +29,7 @@ import { describePushShortfall, grantedPushPermissions, pushShortfallMarker, typ
 import { firstObservationOwed, observationBandLag, observationClaim, reviewCadenceCapMs } from './observation-priority.js';
 import { observedReviewBody } from './review-cap.js';
 import { botCommitSubjectPattern, parseClassifiedFindings } from './mechanical-findings.js';
+import { noSaveRetry, observationEscalatedRetryMs, observationNoSaveLimit } from './model/observation-save.js';
 
 /** How many of an approval's nits are classified mechanical (GY-971): the review gate holds such an approval for its bot round. */
 const mechanicalNitCount = (body: unknown) => parseClassifiedFindings(body).filter(finding => finding.classification === 'mechanical').length;
@@ -3014,7 +3015,15 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     const retry = error instanceof ReconciliationRetry;
     // A concurrency retry comes back within seconds and is not an operator error, but a run that
     // saved no observation never ends silent: the reason stands on the job record (GY-506).
-    if (retry && !observed) { await engine.store.retryJob(job.work_id, job.token, message, observed); return true; }
+    // The retry is bounded (GY-1310): the run that reaches the limit records the fault on the item's
+    // ledger with its cause and policy, and the job then retries at the poll cadence, not every two seconds.
+    if (retry && !observed) {
+      const policy = noSaveRetry(job.unobserved ?? 0, message);
+      await engine.store.retryJob(job.work_id, job.token, policy.reason, observed, policy.delayMs);
+      if (policy.escalating) await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [job.work_id, 'graphyard', 'observation.no-save-escalated',
+        JSON.stringify({ details: { cause: message, finishes: policy.finishes, limit: observationNoSaveLimit, retryMs: observationEscalatedRetryMs, reason: policy.reason } })]);
+      return true;
+    }
     await engine.store.finishJob(job.work_id, job.token, retry ? undefined : message, retry, undefined, observed);
   } finally {
     // The throughput ledger (GY-492): how long the claimed job took, however it ended, so master

@@ -31,6 +31,7 @@ import { submittedBranchMoved } from './model/assignment.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
 import { recordScenarioRun } from './test-runs.js';
+import { sameObservationInputs } from './model/observation-save.js';
 import type { ObservationJobState } from './model/action-kinds.js';
 import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
 import { recordStallRemedy, remedyFlows, remedyOutcomes, stallRemedyKinds } from './stall-remedies.js';
@@ -2461,6 +2462,9 @@ export class Engine {
    * reading the row was waiting for, so the item stayed stale and the row was claimed again,
    * forever (GY-607). The loop's own bookkeeping counts the same way (`sameBesideBookkeeping`,
    * GY-1257): its per-cycle writes refused the very observation it had woken for a rework decision.
+   * Any other move that left everything the observation was derived from unchanged counts the same
+   * (`sameObservationInputs`, GY-1310): a session, lease, evidence or dispatch write raced every poll,
+   * so gate claims waited minutes for an observation that was taken and then discarded.
    */
   async observe(id: string, expectedRevision: number, observation: Observation, jobToken?: string) {
     return this.store.transaction(async (db, now) => {
@@ -2477,7 +2481,7 @@ export class Engine {
       }
       const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
-      requireCurrent(work && (work.revision === expectedRevision || await onlyActionsMovedSince(db, work, expectedRevision, sameBesideBookkeeping)), 'Task changed while GitHub was being observed; retry');
+      requireCurrent(work && (work.revision === expectedRevision || await onlyActionsMovedSince(db, work, expectedRevision, sameObservationInputs)), 'Task changed while GitHub was being observed; retry');
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
