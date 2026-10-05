@@ -46,11 +46,11 @@ Every `run.doctor.intervalMinutes` (default 10) the loop's [doctor](onboarding.m
 
 ## Research and diagnosis
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); quota refusals read `waiting` in `daemon.diagnoses` until `retryAt`, then one probe; its `stale`/`withdrawn` decisions are re-requested (≤3), then escalated; stale backlog releases stay owed. Branch restores, base conflicts under 30m and restart-resumed merges aren't `merge` faults.
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); quota refusals read `waiting` in `daemon.diagnoses` until `retryAt`, then one probe; its `stale`/`withdrawn` decisions are re-requested (≤3), then escalated, revision-raced requests retried; restart-lost diagnoses file no `loop` fault; stale backlog releases stay owed. Branch restores, base conflicts under 30m and restart-resumed merges aren't `merge` faults.
 
 ## Machine-filed backlog
 
-Review follow-ups are never filed: worth-fixing findings are fixed on the same pull request. Pi (`run.research`) triages follow-up and fault items (closure needs approval; `triageConcurrency` 2).
+Review follow-ups are never filed: worth-fixing findings are fixed in-PR. Pi (`run.research`) triages follow-up and fault items (closure needs approval; `triageConcurrency` 2).
 
 ## Automatic dispatch at submit
 
@@ -64,7 +64,7 @@ The master never launches reviews or producers by hand, except `master review GY
 
 ### Proofs must exercise their criterion
 
-A passing producer records `"exercise"`: rerun without the criterion's behaviour, the proof must fail with a case executed, else the pass is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`). Then the next action is `request-rework` naming proof, criterion and surviving mutation. Unexercised `manual:` proofs re-attest, never rework.
+A passing producer records `"exercise"`: rerun without the criterion's behaviour, the proof must fail with a case executed, else the pass is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`). Next: `request-rework` naming proof, criterion, surviving mutation. Unexercised `manual:` proofs re-attest, never rework.
 
 ## GitHub merges
 

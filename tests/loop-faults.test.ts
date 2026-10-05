@@ -551,3 +551,104 @@ test(`manual:fault-class-loop — ${gy1286Instances[1].id}: a head under GitHub 
   const subjects = actionableSubjects(master, [gy1135], at);
   assert.ok(!subjects.some(subject => subject.kind === 'proof'), JSON.stringify(subjects));
 });
+
+// ---- GY-1318: three loop faults filed for handled outcomes on 2026-10-05 ------------------------
+//
+// GY-1318 names this file for its proof too. Its three instances were outcomes the loop handles by
+// design, each recorded as a failed action of a kind the catalogue files under the loop class:
+// (1) GY-1304's diagnosis release decide refused 409 "Task revision changed (now 2)" at request
+//     time, the loop's own next write having moved the item after the cycle's snapshot;
+// (2) doctor:2026-10-05T15:21:52.963Z, a doctor run with no report (replayed in
+//     tests/pipeline-doctor.test.ts, unit:doctor-no-report-not-a-loop-fault);
+// (3) GY-1308's diagnosis, orphaned by the loop's restart and handed off past its lost bound.
+
+const gy1318Instances = [
+  { id: 'action:diagnosis|GY-1304|2026-10-05T14:49:10.057Z', kind: 'action:diagnosis', subject: 'GY-1304', at: '2026-10-05T14:49:10.057Z' },
+  { id: 'action:fault|doctor:2026-10-05T15:21:52.963Z|2026-10-05T15:34:34.669Z', kind: 'action:fault', subject: 'doctor:2026-10-05T15:21:52.963Z', at: '2026-10-05T15:34:34.669Z' },
+  { id: 'action:diagnosis|GY-1308|2026-10-05T16:11:29.481Z', kind: 'action:diagnosis', subject: 'GY-1308', at: '2026-10-05T16:11:29.481Z' },
+];
+const raced = (revision: number) => new Error(`Graphyard refused work/work-GY-1304/decide (409): Task revision changed (now ${revision}); reload and request again`);
+type Decisions = Awaited<ReturnType<NonNullable<DaemonEffects['decisions']>>>['decisions'];
+/** One diagnosis step with the effects the decide path reads: the fresh snapshot, the decision history and the approver. */
+async function decideStep(state: DaemonState, effects: DiagnosticianEffects, work: Work[], fresh: () => Work[], history: Decisions, at: number) {
+  const fx = { diagnostician: effects, persist: async () => {}, snapshot: async () => ({ work: fresh(), now: iso(at) }), decisions: async () => ({ decisions: history }),
+    approver: async () => ({ agentName: 'gy-approver', pane: null }) } as unknown as DaemonEffects;
+  const cycle = { config: config(), state, effects: fx, now: () => at, snapshot: { work, now: iso(at) }, clock: at, performed: [] as DaemonAction[],
+    isolate: async (_kind: string, _item: unknown, _name: string, body: () => Promise<unknown>) => body() } as unknown as Cycle;
+  await diagnosisStep(cycle);
+  await diagnosesSettled();
+  return cycle.performed;
+}
+/** GY-1304 diagnosed, its covering item named: the next step requests the close decision. */
+async function diagnosed(decide: DiagnosticianEffects['decide'], at: number) {
+  const state = emptyDaemonState(config()), starts: string[] = [];
+  const subject = recurring('GY-1304', 'loop', at - minute);
+  const effects = { ...diagnostician(() => 'diagnose', starts), decide };
+  await decideStep(state, effects, [subject, covering], () => [subject, covering], [], at);
+  return { state, effects, subject };
+}
+
+test('manual:fault-class-loop — GY-1318 lists three instances, and every one is replayed', () => {
+  assert.deepEqual(gy1318Instances.map(entry => entry.subject), ['GY-1304', 'doctor:2026-10-05T15:21:52.963Z', 'GY-1308']);
+});
+
+test(`unit:diagnosis-decide-revision-race — ${gy1318Instances[0].id}: a decide refused for a revision change reloads the item and requests again against its current revision, with no loop fault`, async () => {
+  const at = Date.parse(gy1318Instances[0].at), asked: number[] = [];
+  const decide: DiagnosticianEffects['decide'] = async work => { asked.push(work.revision); if (work.revision < 2) throw raced(2); return { id: 'decision-2' }; };
+  const { state, effects, subject } = await diagnosed(decide, at);
+  const moved = { ...subject, revision: 2 } as Work;
+  const performed = await decideStep(state, effects, [subject, covering], () => [moved, covering], [], at + minute);
+  assert.deepEqual(asked, [1, 2], 'asked once at the snapshot\'s revision, then again at the reloaded one');
+  const entry = state.diagnoses['GY-1304'];
+  assert.equal(entry.state, 'closing');
+  assert.equal(entry.decision?.id, 'decision-2');
+  assert.deepEqual(performed.filter(action => action.state === 'failed'), []);
+  assert.deepEqual(diagnosisFaults(state), [], 'no action:diagnosis loop fault');
+});
+
+test(`unit:diagnosis-decide-revision-race — ${gy1318Instances[0].id}: a retry spent, raced again or no longer applicable records no failed action, and the next cycle decides afresh`, async () => {
+  const at = Date.parse(gy1318Instances[0].at);
+  const stale = (index: number) => ({ id: `stale-${index}`, action: 'close', state: 'stale', input: {}, approvedBy: null, outcome: 'Task revision changed' });
+  for (const [why, fresh, history, again] of [
+    ['spent', 2, [0, 1, 2].map(stale), false],
+    ['raced again', 2, [], true],
+    ['no longer applicable', null, [], false],
+  ] as const) {
+    clearDiagnoses();
+    const asked: number[] = [];
+    let raceAgain = again;
+    const decide: DiagnosticianEffects['decide'] = async work => { asked.push(work.revision); if (work.revision < 2 || raceAgain) throw raced(3); return { id: 'decision-next' }; };
+    const { state, effects, subject } = await diagnosed(decide, at);
+    const reloaded = fresh === null ? { ...subject, stage: 'done', revision: 2, closure: { kind: 'duplicate', ref: 'GY-50', at: iso(at) } } as unknown as Work : { ...subject, revision: fresh } as Work;
+    const performed = await decideStep(state, effects, [subject, covering], () => [reloaded, covering], history as unknown as Decisions, at + minute);
+    assert.deepEqual(asked, again ? [1, 2] : [1], `${why}: asked again only while applicable and unspent`);
+    assert.equal(state.diagnoses['GY-1304'].state, 'diagnosed', `${why}: the entry keeps its state for the next cycle`);
+    assert.deepEqual(performed.filter(action => action.state === 'failed'), [], `${why}: no failed loop action`);
+    assert.deepEqual(diagnosisFaults(state), [], `${why}: no loop fault`);
+    // The next cycle decides afresh from its fresh snapshot.
+    raceAgain = false;
+    if (fresh !== null && !history.length) {
+      await decideStep(state, effects, [reloaded, covering], () => [reloaded, covering], [], at + 2 * minute);
+      assert.equal(state.diagnoses['GY-1304'].state, 'closing', `${why}: the next cycle requests it`);
+    }
+  }
+});
+
+test(`unit:diagnosis-decide-revision-race — any other decide refusal still fails the diagnosis step`, async () => {
+  const at = Date.parse(gy1318Instances[0].at);
+  const { state, effects, subject } = await diagnosed(async () => { throw new Error('Graphyard refused work/work-GY-1304/decide (403): not permitted'); }, at);
+  await assert.rejects(decideStep(state, effects, [subject, covering], () => [subject, covering], [], at + minute), /403/);
+});
+
+test(`unit:diagnosis-lost-run-not-a-loop-fault — ${gy1318Instances[2].id}: a diagnosis orphaned by a restart is handed off past its lost bound with no loop fault`, async () => {
+  const at = Date.parse(gy1318Instances[2].at), startedAt = Date.parse('2026-10-05T15:23:42.185Z');
+  const state = emptyDaemonState(config()), starts: string[] = [];
+  state.diagnoses['GY-1308'] = { subject: 'GY-1308', kind: 'recurring', faultClass: 'loop', work: 'GY-1308', state: 'running', startedAt: iso(startedAt), updatedAt: iso(startedAt),
+    runs: [], diagnosis: null, fix: null, decision: null, answeredBy: null, retryAt: null, refusedAt: null, detail: '' };
+  const performed = await step(state, diagnostician(() => 'diagnose', starts), [recurring('GY-1308', 'loop', startedAt)], at);
+  assert.deepEqual(starts, [], 'nothing is relaunched in its place');
+  assert.equal(state.diagnoses['GY-1308'].state, 'failed', 'the handoff is still recorded');
+  assert.deepEqual(performed.filter(action => action.state === 'failed').map(action => action.detail),
+    ['The diagnosis of GY-1308 started 2026-10-05T15:23:42.185Z never ended in this process; the master diagnoses it by hand']);
+  assert.deepEqual(diagnosisFaults(state), [], 'no action:diagnosis loop fault');
+});
