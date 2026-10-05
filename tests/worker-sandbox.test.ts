@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
+import { existsSync } from 'node:fs';
 import { chmod, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { delimiter, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -53,7 +54,7 @@ test('unit:worker-sandbox-grants-git-admin-dir — every runtime that takes a sa
       assert.ok(runtimeSandboxes[kind], `${kind} has a sandbox grant`);
       const granted = addedDirectories(args, fixture.worktree);
       assert.ok(granted.includes(fixture.gitDir), `${kind} grants ${fixture.gitDir}: ${args.join(' ')}`);
-      assert.ok(granted.includes(fixture.commonDir), `${kind} grants the shared Git directory`);
+      assert.ok(granted.includes(join(fixture.commonDir, 'objects')), `${kind} grants the shared object store`);
       // The session starts in the worktree, which the workspace-write sandbox makes writable as its root.
       assert.equal(runtimeSandboxes[kind].mode(args), 'workspace-write');
       assert.equal(new Set(granted).size, granted.length, 'each path is granted once');
@@ -64,7 +65,7 @@ test('unit:worker-sandbox-grants-git-admin-dir — every runtime that takes a sa
     // A profile that turns the sandbox off, or that is not Codex, is left exactly as configured.
     assert.deepEqual(grantWorkerPaths('codex', ['--sandbox', 'danger-full-access'], writablePaths(paths), fixture.worktree), ['--sandbox', 'danger-full-access']);
     // Real Codex, when this host has it: the old grant (shared directory only) is refused on the
-    // admin directory, and the built grant writes all three paths.
+    // admin directory, and the built grant writes every path.
     if (codexInstalled) {
       const base = accountLaunch({ kind: 'codex', approvals: 'auto', agentArgs: [], environment: {} }, null, { writable: [fixture.commonDir] }).args;
       assert.throws(() => verifyWorkerSandbox({ kind: 'codex', args: base }, fixture.worktree, writablePaths(paths)), (error: any) => error instanceof WorkerSandboxError && error.path === fixture.gitDir);
@@ -85,7 +86,8 @@ function codexLikeSandbox(calls: string[][]): SandboxExec {
     assert.equal(command, 'codex'); assert.deepEqual(args.slice(0, 4), ['sandbox', '-P', 'graphyard-launch-probe', '-C']);
     const policy = /filesystem=\{(.*)\}$/.exec(args[args.indexOf('-c') + 1])![1];
     const writable = [...policy.matchAll(/"([^"]+)"="write"/g)].map(match => match[1] === ':workspace_roots' ? options.cwd : match[1]);
-    const protectedDirs = writable.flatMap(root => { try { return [git(root, 'rev-parse', '--absolute-git-dir')]; } catch { return []; } }).filter(dir => !writable.includes(dir));
+    // Only a root holding a `.git` of its own is protected; a granted path inside the Git directory holds none.
+    const protectedDirs = writable.flatMap(root => { if (!existsSync(join(root, '.git'))) return []; try { return [git(root, 'rev-parse', '--absolute-git-dir')]; } catch { return []; } }).filter(dir => !writable.includes(dir));
     const script = args.slice(args.indexOf('--') + 1), paths = script.slice(4);
     for (const path of paths) {
       const allowed = writable.some(root => path === root || path.startsWith(`${root}/`)) && !protectedDirs.some(dir => path === dir || path.startsWith(`${dir}/`));
@@ -123,13 +125,14 @@ test('integration:unwritable-workspace-fails-launch — a sandbox that denies th
     assert.deepEqual(released, [3], 'the claim is released like any failed launch');
     // The probe ran in the sandbox the launch built: every grant of the launch is in its policy.
     const policy = sandboxCalls[0][sandboxCalls[0].indexOf('-c') + 1];
-    for (const path of [fixture.gitDir, fixture.commonDir]) assert.ok(policy.includes(`"${path}"="write"`), `the probe's policy grants ${path}`);
+    for (const path of [fixture.gitDir, join(fixture.commonDir, 'objects')]) assert.ok(policy.includes(`"${path}"="write"`), `the probe's policy grants ${path}`);
+    assert.ok(!policy.includes(`"${fixture.commonDir}"=`), 'never the common Git directory itself');
     assert.equal(sandboxCalls[0][sandboxCalls[0].indexOf('-C') + 1], fixture.worktree, 'the probe runs in the worktree the session starts in');
 
     // The same launch in a sandbox that honours the grant starts, and the typed line carries it.
     sandboxCalls.length = 0;
     const started = await dispatchWork(fixture.main, fixture.item, fixture.profile, [], herdr, [fixture.item], prepare, release, 1, new Date().toISOString(), { sandbox: codexLikeSandbox(sandboxCalls) });
-    assert.deepEqual(started.sandbox?.verified, [fixture.worktree, fixture.gitDir, fixture.commonDir]);
+    assert.deepEqual(started.sandbox?.verified, writablePaths(workerPaths(fixture.worktree)));
     const typed = herdrCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3];
     assert.ok(Buffer.byteLength(typed) <= launchCommandLimit);
     const launched = expandTypedCommand(typed);
@@ -146,6 +149,74 @@ test('integration:unwritable-workspace-fails-launch — a sandbox that denies th
       finally { await chmod(fixture.gitDir, 0o755); }
     }
   } finally { await fixture.cleanup(); }
+});
+
+test('unit:codex-grant-excludes-common-git-dir — a linked worktree\'s codex launch grants the paths the confinement re-exposes writable, never the common Git directory', async () => {
+  const fixture = await linkedWorktree('GY-1321-2');
+  try {
+    // GY-1321: codex 0.160's bwrap creates <root>/.git under every granted root, and the coordinator
+    // confinement binds the common Git directory read-only, so granting it killed every command.
+    const launch = accountLaunch({ kind: 'codex', approvals: 'auto', agentArgs: [], environment: {} }, null);
+    const args = grantWorkerPaths('codex', launch.args, writablePaths(workerPaths(fixture.worktree)), fixture.worktree);
+    const granted = addedDirectories(args, fixture.worktree);
+    assert.ok(!granted.includes(fixture.commonDir), `no --add-dir names ${fixture.commonDir}: ${args.join(' ')}`);
+    assert.ok(!args.includes('../../../.git'), 'nor its relative form');
+    const shared = ['objects', 'refs/remotes', 'logs/refs/remotes', 'refs/heads/graphyard', 'logs/refs/heads/graphyard'].map(path => join(fixture.commonDir, path));
+    assert.deepEqual(granted, [fixture.gitDir, ...shared], 'the admin directory (FETCH_HEAD, index, HEAD) and the shared paths the confinement re-exposes, each once');
+    // A shared path that does not exist is not granted: the confinement re-exposes only existing ones.
+    await rm(join(fixture.commonDir, 'logs/refs/remotes'), { recursive: true, force: true });
+    assert.ok(!writablePaths(workerPaths(fixture.worktree)).includes(join(fixture.commonDir, 'logs/refs/remotes')));
+    // A checkout that is not a linked worktree writes through its own Git directory, which stays granted.
+    assert.deepEqual(writablePaths({ worktree: fixture.main, gitDir: fixture.commonDir, commonDir: fixture.commonDir }), [fixture.main, fixture.commonDir]);
+  } finally { await rm(fixture.root, { recursive: true, force: true }); }
+});
+
+test('integration:sandbox-probe-inside-confinement-fails-launch — the sandbox probe runs under the launch\'s coordinator-confinement words, and a sandbox that cannot start there fails the launch naming the path and the runtime', async () => {
+  const fixture = await dispatchFixture();
+  // A bubblewrap on PATH whose namespace probe succeeds, so the launch builds its read-only mount wrapper.
+  const bin = join(fixture.root, 'bin'); await mkdir(bin);
+  const bwrap = join(bin, 'bwrap'); await writeFile(bwrap, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const path = process.env.PATH;
+  process.env.PATH = `${bin}${delimiter}${path}`;
+  try {
+    const herdrCalls: string[][] = [], probes: string[][] = [], released: number[] = [];
+    const herdr = (_command: string, args: string[]) => { herdrCalls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: {} }); };
+    const prepare = async () => ({ epoch: 3, path: fixture.worktree, base: 'c'.repeat(40) });
+    const release = async (_root: string, _key: string, epoch: number) => { released.push(epoch); };
+    // The confinement refuses the mount point codex's sandbox creates, exactly as on vishrog.
+    const refused = `${fixture.commonDir}/.git`;
+    const refusing: SandboxExec = (command, args) => {
+      probes.push([command, ...args]);
+      throw Object.assign(new Error(`Command failed: ${command}`), { status: 1, stdout: '', stderr: `bwrap: Can't create file ${refused}: Read-only file system\n` });
+    };
+    await assert.rejects(dispatchWork(fixture.main, fixture.item, fixture.profile, [], herdr, [fixture.item], prepare, release, 1, new Date().toISOString(), { sandbox: refusing, coordinatorRoot: fixture.main }),
+      (error: any) => {
+        assert.ok(error instanceof WorkerSandboxError, error.message);
+        assert.equal(error.path, refused, 'the launch names the path the sandbox could not start on');
+        assert.equal(error.runtime, 'codex');
+        assert.match(error.message, /the codex sandbox cannot write .*inside the coordinator confinement .*Read-only file system/);
+        return true;
+      });
+    assert.equal(herdrCalls.length, 0, 'no tab and no session: the worker is never reported started');
+    assert.deepEqual(released, [3], 'the claim is released like any failed launch');
+    // The probe ran behind the coordinator confinement: bubblewrap, the checkout read-only, then the codex sandbox.
+    const [command, ...args] = probes[0];
+    assert.equal(command, 'bwrap', 'the wrapper words the session itself is launched behind');
+    const ro = args.indexOf('--ro-bind', args.indexOf('/proc'));
+    assert.deepEqual(args.slice(ro, ro + 3), ['--ro-bind', fixture.main, fixture.main]);
+    assert.ok(args.includes(fixture.gitDir) && args.includes(join(fixture.commonDir, 'objects')), 'the worker\'s own Git paths are re-exposed writable');
+    assert.deepEqual(args.slice(args.indexOf('--') + 1, args.indexOf('--') + 3), ['codex', 'sandbox']);
+    assert.ok(!args.some(arg => arg.includes(`"${fixture.commonDir}"="write"`)), 'the probe\'s sandbox never grants the common Git directory');
+
+    // A confinement that lets the sandbox start passes the same probe through to it.
+    const wrapper = [bwrap, '--ro-bind', fixture.main, fixture.main, '--'];
+    const through: SandboxExec = (cmd, words, options) => { assert.equal(cmd, bwrap); assert.deepEqual(words.slice(0, 4), wrapper.slice(1)); return codexLikeSandbox([])(words[4], words.slice(5), options); };
+    const granted = grantWorkerPaths('codex', ['--sandbox', 'workspace-write'], writablePaths(workerPaths(fixture.worktree)), fixture.worktree);
+    assert.deepEqual(verifyWorkerSandbox({ kind: 'codex', args: granted, confinement: wrapper }, fixture.worktree, writablePaths(workerPaths(fixture.worktree)), through).verified, writablePaths(workerPaths(fixture.worktree)));
+    // A runtime with no sandbox of its own is probed inside the confinement too, not from the launcher.
+    const shell: SandboxExec = (cmd, words) => { assert.equal(cmd, bwrap); assert.equal(words[4], '/bin/sh'); throw Object.assign(new Error('failed'), { stdout: `unwritable\t${fixture.gitDir}\tsh: Read-only file system\n`, stderr: '' }); };
+    assert.throws(() => verifyWorkerSandbox({ kind: 'claude', args: [], confinement: wrapper }, fixture.worktree, writablePaths(workerPaths(fixture.worktree)), shell), (error: any) => error instanceof WorkerSandboxError && error.path === fixture.gitDir);
+  } finally { process.env.PATH = path; await fixture.cleanup(); }
 });
 
 async function fakeServer(item: () => any, blocked: any[]) {
