@@ -43,7 +43,6 @@ import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordInt
 import { dispatchFailureBlockAfter } from './daemon/dispatch-failures.js';
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
-import { repairAuditEvent, repairScopeRefusal, type RepairAudit } from './master/repair-lane.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
 import { coordinationProjection, isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type SavedVersion } from './store/locked-read.js';
 
@@ -510,13 +509,23 @@ export function contentionView(work: Work, now: Date) {
 interface ReconcileEntry { number: number; work: Work; version: string; settled: boolean; face: string }
 /**
  * What other items' evaluations can read of an item (GY-1124): its document without the fields a
- * lease renewal moves — the revision, the update time and the lease's expiry. A heartbeat leaves
- * the face unchanged, so the pass after it evaluates only the renewed item; any other write
- * changes it, and the pass evaluates every live item against it.
+ * renewal moves — the revision, the update time, the lease's expiry, and an action claim's expiry
+ * and renewal count (GY-1276). A heartbeat or an executor's claim renewal leaves the face
+ * unchanged, so the pass after it evaluates only the renewed item; any other write changes it, and
+ * the pass evaluates every live item against it. A claim expiring is a move of the clock alone,
+ * which the bounded full evaluation (`reconcileFullEvaluationMs`) catches up.
  */
 function fleetFace(work: Work) {
-  const { revision: _revision, updatedAt: _updatedAt, lease, ...rest } = work;
-  return stableJson({ ...rest, lease: lease ? { owner: lease.owner, epoch: lease.epoch } : null });
+  const { revision: _revision, updatedAt: _updatedAt, lease, actionQueue, ...rest } = work;
+  const actions = actionQueue && {
+    ...actionQueue,
+    actions: actionQueue.actions.map(row => {
+      if (!row.claim) return row;
+      const { expiresAt: _expiresAt, renewedAt: _renewedAt, renewals: _renewals, ...claim } = row.claim;
+      return { ...row, claim };
+    }),
+  };
+  return stableJson({ ...rest, actionQueue: actions, lease: lease ? { owner: lease.owner, epoch: lease.epoch } : null });
 }
 /** The longest reconciliation goes between full evaluations: `GRAPHYARD_RECONCILE_FULL_MS`, 2000..300000 ms, default 10000 (GY-1124). */
 export function configuredReconcileFullMs(value = process.env.GRAPHYARD_RECONCILE_FULL_MS, fallback = 10_000): number {
@@ -829,7 +838,9 @@ export class Engine {
     // Provider I/O stays outside the coordination transaction.
     // A renewal changes one item's lease and reads nothing else of the fleet (GY-1124): it takes that
     // item's lock alone, so renewals of different items never wait for each other or for a fleet
-    // command. The item is re-evaluated by the next reconciliation pass, which sees its row move.
+    // command. It neither evaluates the item nor records a dispatch: both are left to the next
+    // reconciliation pass, which sees the row move, so a gate change that waited on this renewal
+    // lands one reconcile tick after it rather than in the renewal's own response.
     if (command === 'heartbeat' && actor.role !== 'operator-agent') return this.store.transaction(async (db, now) => {
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
       if (receipt) {
@@ -849,10 +860,14 @@ export class Engine {
       return work;
     }, { lane: 'lease', fleetLock: false, itemLock: id });
     const observation = command === 'submit' ? context.observation ?? await this.observeSubmission(actor, id, data, key) : null;
+    // The transaction reruns this closure on a stale write: each run authorizes the principal as the
+    // caller presented it, never the one an earlier run already resolved (GY-1276).
+    const caller = actor;
     return this.store.transaction(async (db, now) => {
+      actor = caller;
       if (actor.role === 'operator-agent') {
         demand(this.operatorAuthorizer, 'Operator-agent authorization is unavailable', 503);
-        actor = await this.operatorAuthorizer(db, now, actor);
+        actor = await this.operatorAuthorizer(db, now, caller);
       }
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
       if (receipt) {
@@ -875,8 +890,6 @@ export class Engine {
         if (reviewProviderOf(data.policy) === 'agent') assertReviewerProfiles(data.policy.reviewerProfiles, this.reviewerApps, this.controlPlaneAppId);
         demand(data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown dependency');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
-        // A merge-path repair (GY-406) plans only files within the merge path.
-        const repairScope = repairScopeRefusal(data); demand(!repairScope, repairScope!, 422);
         const criteria = this.declareBootstrap(actor, data, [], 1, now);
         const scenarioRequirements: Work['scenarioRequirements'] = [];
         const proofNames: string[] = [...new Set<string>(data.criteria.flatMap((ac: { proofs: string[] }) => ac.proofs))];
@@ -1006,8 +1019,6 @@ export class Engine {
           demand(!leaseLive, 'Stop and release the active worker before revising requirements');
         }
         demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
-        // A merge-path repair (GY-406) keeps its plannedFiles within the merge path on every revision, not only at creation (GY-428).
-        const repairScope = repairScopeRefusal({ plannedFiles: data.plannedFiles, repair: work.repair, key: work.key }); demand(!repairScope, repairScope!, 422);
         // A widening that answers one attempt's scope request (the loop's, on a review finding)
         // holds only while that request is open, its attempt holds a live lease and the head the
         // findings were read for is still the candidate: a claim, a lease end or a push changes
@@ -1566,8 +1577,10 @@ export class Engine {
   }
 
   /** The one item holding action row `id`, found by containment rather than by loading every document. */
-  private async actionOwner(db: { query: (text: string, values: unknown[]) => Promise<{ rows: { document: Work }[] }> }, id: string): Promise<Work | undefined> {
-    return (await db.query(`SELECT document FROM work_items w WHERE w.id IN (SELECT id FROM work_index WHERE NOT settled) AND document->'actionQueue'->'actions' @> jsonb_build_array(jsonb_build_object('id', $1::text)) ORDER BY number LIMIT 1`, [id])).rows[0]?.document;
+  private async actionOwner(db: { query: (text: string, values: unknown[]) => Promise<{ rows: { document: Work }[] }> }, id: string, item?: string): Promise<Work | undefined> {
+    // Given the owning item's id, the owner is read again by its primary key instead of found by a scan (GY-1276).
+    const scope = item === undefined ? 'w.id IN (SELECT id FROM work_index WHERE NOT settled)' : 'w.id=$2::uuid AND w.id IN (SELECT id FROM work_index WHERE NOT settled)';
+    return (await db.query(`SELECT document FROM work_items w WHERE ${scope} AND document->'actionQueue'->'actions' @> jsonb_build_array(jsonb_build_object('id', $1::text)) ORDER BY number LIMIT 1`, item === undefined ? [id] : [id, item])).rows[0]?.document;
   }
   /**
    * Claim the next action for a stateless executor.
@@ -1652,9 +1665,10 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const owner = await this.actionOwner(db, id);
       demand(owner, 'Action is not open on any work item', 404);
-      // The item's lock, which a heartbeat takes alone (GY-1124), then the item as it stands under it.
+      // The item's lock, which a heartbeat takes alone (GY-1124), then the item as it stands under it,
+      // read again by its id: the action can only have left it, never moved to another item.
       await lockItem(db, owner!.id);
-      const work = await this.actionOwner(db, id);
+      const work = await this.actionOwner(db, id, owner!.id);
       demand(work, 'Action is not open on any work item', 404);
       const row = renewClaim(work!, id, { executor: data.executor ?? actor.id, principal: actor.id }, now, data.leaseSeconds ? data.leaseSeconds * 1000 : undefined);
       // A renewal is a fact about a claim, not a decision: it is persisted without re-evaluating
@@ -2703,7 +2717,6 @@ export class Engine {
       let mergedAtRepository: string | null = null; let repositoryClockOffsetMs: number | null = null;
       let reconciliation: MergeReconciliation | null = null; let refusedReconciliation: { decision: string; reasons: string[] } | null = null;
       let operatorAuthorization: OperatorAuthorizedDelivery | null = null;
-      let repairLane: RepairAudit | null = null;
       if (observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))) {
         const providerMergedTime = Date.parse(observation.mergedAt);
         // Never allow evidence from after the earliest possible merge instant.
@@ -2778,14 +2791,6 @@ export class Engine {
           const snapshot = past ?? structuredClone(work);
           authorizedSnapshot = snapshot; authorizationRevision = snapshot.revision;
           operatorAuthorization = directMergeAuthorization(directMerge, { sha: observation.mergeSha!, at: observation.mergedAt }, snapshot.revision, new Date(cutoff).toISOString(), historical);
-        }
-        // A merge the repair lane made (GY-406) is delivered on its audit entry, which the lane
-        // appended for exactly this head before it asked GitHub to merge (github.ts repairLaneStep).
-        const repaired = !authorizedSnapshot && observation.mergeSha ? (await db.query(`SELECT payload->'details' AS audit FROM events WHERE work_id=$1 AND kind=$2 AND payload->'details'->>'head'=$3 AND created_at<$4 ORDER BY seq DESC LIMIT 1`,
-          [id, repairAuditEvent, observation.candidate.sha, new Date(cutoff)])).rows[0]?.audit as RepairAudit | undefined : undefined;
-        if (repaired) {
-          const snapshot = past ?? structuredClone(work);
-          authorizedSnapshot = snapshot; authorizationRevision = snapshot.revision; repairLane = repaired;
         }
         if (!authorizedSnapshot && past && observation.mergeSha) {
           const decisions = await postMergeDecisions(db, work, observation, past.policyRevision, cutoff);
@@ -2890,13 +2895,12 @@ export class Engine {
           // recorded as a second violation.
           // An operator-authorized delivery is judged by the operator, not the gates: what the
           // record lacked is on the delivery, and the violation it owns leaves the record the same way.
-          if (reconciliation || operatorAuthorization || repairLane) work.violations = work.violations.filter(entry => entry !== violation && !entry.startsWith(reconciliationRefusalPrefix));
+          if (reconciliation || operatorAuthorization) work.violations = work.violations.filter(entry => entry !== violation && !entry.startsWith(reconciliationRefusalPrefix));
           else if (work.gates.some(g => !g.passed)) work.violations.push('Post-merge checks differ from the recorded authorization; follow-up required');
           work.stage = 'done'; work.stageEnteredAt = now.toISOString();
           const delivery: Work['delivery'] = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision!, ...(evidenceAsOf ? { evidenceAsOf } : {}),
             ...(mergedAtRepository ? { mergedAtRepository, repositoryClockOffsetMs: repositoryClockOffsetMs! } : {}) };
           work.delivery = reconciliation ? Object.assign(delivery, { reconciliation }) : operatorAuthorization ? Object.assign(delivery, { operatorAuthorization }) : delivery;
-          if (repairLane) work.repairLane = repairLane;
           if (reconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, reconciliation.requestedBy, 'merge.reconciled',
             JSON.stringify({ details: { ...reconciliation, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision, evidenceAsOf, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
           if (operatorAuthorization) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, operatorAuthorization.operator, 'merge.operator-authorized',
