@@ -1,6 +1,8 @@
 <!-- page: Operate Graphyard | 4 | review follow-ups: recorded on the item until it ships, retrieved, promoted on demand. -->
 # Review follow-ups
 
+With `GRAPHYARD_FOLLOW_UP_ITEMS=off` in the loop's environment, no follow-up item is filed: the reviewer requests changes on the same pull request for anything worth fixing, and the nits it lists stay recorded on their item.
+
 The independent reviewer's approval may name findings beyond an item's acceptance criteria and
 judge each FOLLOW-UP. Graphyard records them against the approved item itself and holds them there
 until it ships — no work item per review, and none for an item that may still change. Once the
@@ -25,8 +27,7 @@ pull request and head):
 
 ## Filed once the item ships
 
-The item ships when it is delivered and, if it was merged optimistically, once main's required
-suite passes on the merge (until then a failing suite reverts it). The loop then files the held
+The item ships when it is delivered. The loop then files the held
 findings not promoted as one follow-up item, `Follow-ups from the approved review of GY-N (PR #M)`,
 depending on nothing (`POST /api/work/GY-N/followups` with `{"ship":true}`), once: a retried filing
 answers the same item, and a filing refused with one unchanged client error stops after 10

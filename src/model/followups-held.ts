@@ -16,7 +16,13 @@ export const heldFollowUps = (parent: Pick<Parent, 'pendingFollowUps'>) => {
   return held && !held.filed && !held.dropped ? held.findings : [];
 };
 /** Whether a delivered parent's held findings are owed a follow-up item now. */
-export const shippedFollowUpsOwed = (parent: Parent) => hasShipped(parent) && heldFollowUps(parent).length > 0;
+/**
+ * Whether held review findings become a follow-up item at all. With GRAPHYARD_FOLLOW_UP_ITEMS=off
+ * nothing is filed: findings worth fixing are requested as changes on the same pull request, and
+ * the nits a reviewer lists stay recorded on the item they were found on.
+ */
+export const followUpItemsFiled = (env: NodeJS.ProcessEnv = process.env) => env.GRAPHYARD_FOLLOW_UP_ITEMS?.trim() !== 'off';
+export const shippedFollowUpsOwed = (parent: Parent) => followUpItemsFiled() && hasShipped(parent) && heldFollowUps(parent).length > 0;
 /**
  * `findings` held on the parent, deduplicated as a follow-up item's are; `added` names the new ones.
  * Findings held after the parent's earlier ones were filed (its item since closed) start a new hold
