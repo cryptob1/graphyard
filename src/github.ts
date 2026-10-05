@@ -14,11 +14,12 @@ import { changedTestFiles, judgeTimingCompanion, timingBaselineCompanion, timing
 import type { GitHubCacheStore } from './github-cache.js';
 import type { GitHubChargeLedger } from './github-charges.js';
 import { nextAction } from './model/next-action.js';
-import { applyMainGuardRevert, runMainGuard, type CommitVerdict, type MainCommit, type MainGuardRevert, type MainGuardTick } from './main-guard.js';
+import { applyMainGuardRevert, runMainGuard, type CommitVerdict, type FileChange, type MainCommit, type MainGuardRevert, type MainGuardTick } from './main-guard.js';
 import { githubDelivery } from './model/delivery-mode.js';
 import { lockedWork } from './store/locked-read.js';
 import { save } from './store/store.js';
 export { CHECK_NAME, LANDABLE_CHECK };
+import { baseBreakRefreshNeeded, readBaseBreak, type BaseBreak } from './master/base-break-refresh.js';
 import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind, type CheckRerun } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
@@ -561,7 +562,12 @@ export function tightBudgetDecision(band: CadenceBand, budget: Pick<GitHubBudget
 export function dismissedReviewIds(reviews: readonly { id?: unknown; state?: unknown }[]): number[] {
   return reviews.flatMap(review => review.state === 'DISMISSED' && Number.isSafeInteger(review.id) && (review.id as number) > 0 ? [review.id as number] : []);
 }
-export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string; reviewerApps?: ReviewerApp[] }
+export interface GitHubConfig {
+  repository: string; base: string; appId: number; installationId: number; privateKey: string; reviewerApps?: ReviewerApp[];
+  /** The independent App that approves the main guard's exact-inverse reverts (GY-1291); never the control-plane App. */
+  revertApprover?: RevertApprover;
+}
+export interface RevertApprover { appId: number; installationId: number; privateKey: string }
 /**
  * A 401 or a non-rate-limit 403. Retrying it does not help: the credentials or the installed
  * permissions have to change. It is classified apart from rate limiting so it never pauses the
@@ -1562,6 +1568,15 @@ export class GitHub {
         ? { provider: 'codex' as const, sha: pr.head.sha, approved: false, reason: unready }
         : await observeCodex(this, pr.number, pr.head.sha, reviews, pr.user.id, work.reviewRequest, candidateBase, work.policyRevision, this.config.appId)
       : await this.observeAgent(work, pr, reviews, candidateBase, unready);
+    const observedChecks: Observation['checks'] = checks.filter(c => c.name !== CHECK_NAME && c.name !== LANDABLE_CHECK).sort((a, b) => (a.id ?? 0) - (b.id ?? 0)).map(c => ({ name: c.name, result: c.status === 'completed' ? c.conclusion : c.status, appId: c.app.id,
+      ...(Number.isSafeInteger(c.id) ? { id: c.id } : {}), ...(Number.isSafeInteger(c.run_attempt) ? { attempt: c.run_attempt } : {}) })).concat(statuses);
+    // A required check that failed only on tests the base branch broke, and the tip has since
+    // fixed, is the control plane's to answer with a refresh, not the worker's (GY-793). Read only
+    // for an open head behind the tip with a failed required check; the base it was built against
+    // is the bound one, or, for a head bound to the tip it does not contain, GitHub's recorded base.
+    const baseBreak = pr.merged || pr.state !== 'open' || contained ? null : await readBaseBreak(
+      { required: work.policy.checks, checks: observedChecks, head: pr.head.sha, built: bound !== branch.tip ? bound : typeof pr.base.sha === 'string' ? pr.base.sha : null, tip: branch.tip, at: startedAt },
+      { checkRun: (sha, name) => this.latestCheckRun(sha, name), annotations: id => this.pages(`/check-runs/${id}/annotations`) });
     // A failing published tip carries its docs counts, from which a budget overflow is attributed (GY-574).
     const docsBudget = publishedTip && !pr.merged && pr.state === 'open' ? await this.tipDocs(work, pr.head.sha, bound, checks) : undefined;
     const confirmed = await this.request(`/pulls/${work.submission!.pr}`);
@@ -1571,8 +1586,7 @@ export class GitHub {
       candidate: { sha: pr.head.sha, baseSha: candidateBase, pr: pr.number, branch: pr.head.ref, author: pr.user.login, ...(Number.isFinite(Date.parse(pr.created_at)) ? { createdAt: pr.created_at } : {}) },
       // Canonical oldest-to-newest ordering makes legacy consumers deterministic;
       // gates also compare immutable run IDs rather than trusting response order.
-      checks: checks.filter(c => c.name !== CHECK_NAME && c.name !== LANDABLE_CHECK).sort((a, b) => (a.id ?? 0) - (b.id ?? 0)).map(c => ({ name: c.name, result: c.status === 'completed' ? c.conclusion : c.status, appId: c.app.id,
-        ...(Number.isSafeInteger(c.id) ? { id: c.id } : {}), ...(Number.isSafeInteger(c.run_attempt) ? { attempt: c.run_attempt } : {}) })).concat(statuses),
+      checks: observedChecks,
       ...(agentReview ? { agentReview } : {}),
       reviewIds: reviews.every(r => Number.isSafeInteger(r.id) && r.id > 0) ? reviews.map(r => r.id) : undefined,
       // Every review GitHub now reports dismissed, not only each identity's latest (GY-486): an
@@ -1590,7 +1604,14 @@ export class GitHub {
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
       ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}), ...(docsBudget ? { docsBudget } : {}),
       ...(dismissals.forcePushes.length ? { headForcePushes: dismissals.forcePushes } : {}),
+      ...(baseBreak ? { baseBreak } : {}),
     };
+  }
+  /** The latest run of one check on one commit, other than this App's own, or null when it has none. */
+  private async latestCheckRun(sha: string, name: string): Promise<{ id: number; conclusion: string | null } | null> {
+    const runs = (await this.pages(`/commits/${sha}/check-runs?check_name=${encodeURIComponent(name)}&filter=latest`, 'check_runs'))
+      .filter(run => run.app?.id !== this.config.appId && Number.isSafeInteger(run.id)).sort((a, b) => b.id - a.id);
+    return runs.length ? { id: runs[0].id, conclusion: runs[0].status === 'completed' ? runs[0].conclusion : null } : null;
   }
   /**
    * The docs word counts of a published queue tip whose required checks failed (GY-574): the tip's
@@ -2267,6 +2288,32 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     } catch { return null; }
   }
   /**
+   * Brings a candidate held only by a base-branch breakage onto the base tip that fixed it (GY-793):
+   * the same merge of the tip into the candidate's own branch the merge queue makes for its tip,
+   * recorded with trigger `base breakage` and the breakage it answers, so the engine decides the
+   * carry exactly as for any refresh. A conflict writes nothing and goes back to the worker.
+   */
+  async refreshOntoFixedBase(work: Work, found: BaseBreak, beforeWrite: () => Promise<void> = async () => {}): Promise<BaseRefresh> {
+    const candidate = work.candidate;
+    demand(candidate && !work.queue && candidate.sha === found.head, 'An unqueued candidate held by a base-branch breakage is required');
+    const pr = await this.request(`/pulls/${candidate!.pr}`);
+    requireCurrent(pr.head.sha === candidate!.sha && pr.base.ref === this.config.base && pr.state === 'open' && pr.draft === false,
+      'Pull request changed before the base refresh; retry');
+    const branch = await this.baseBranch();
+    requireCurrent(branch.tip === found.fixedBy, `Base branch ${this.config.base} moved before the base refresh; retry`);
+    const from = { sha: candidate!.sha, baseSha: candidate!.baseSha };
+    const record = (fields: Partial<BaseRefresh>): BaseRefresh => ({ from, base: branch.tip, baseTree: branch.tree, policyRevision: work.policyRevision, at: new Date().toISOString(),
+      head: null, conflict: null, merge: null, carry: null, trigger: 'base breakage', baseBreak: found, ...fields });
+    await beforeWrite();
+    let merged: string | null;
+    try { merged = await this.mergeBranch(pr.head.ref, branch.tip, `Graphyard base refresh for ${work.key} onto ${this.config.base}: its failing tests were broken on ${found.builtOn.slice(0, 12)} and fixed by ${found.fixedBy.slice(0, 12)}`); }
+    catch (error) {
+      if (!(error instanceof SpeculativeConflict)) throw error;
+      return record({ conflict: `Candidate ${candidate!.sha.slice(0, 12)} failed only on tests the base branch broke, but it cannot be brought onto base branch tip ${branch.tip.slice(0, 12)} that fixed them without resolving a conflict, which is content nobody reviewed or proved: ${error.message}. Run graphyard sync ${work.key}, resolve it and push.` });
+    }
+    return merged ? record({ head: merged, merge: await this.describeMerge(candidate!.sha, merged, candidate!.baseSha, branch.tip) }) : record({ head: candidate!.sha });
+  }
+  /**
    * Whether `head` merges cleanly onto `base`, without writing to any branch a person or a check
    * reads (GY-375): the merge is tried on a scratch branch created at `head` for this one check and
    * deleted afterwards. Returns the conflict, or null when the merge is clean.
@@ -2419,6 +2466,53 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const pull = await this.request(`/pulls/${pr}`);
     demand(typeof pull?.head?.sha === 'string', `GitHub did not return pull request #${pr}`, 502);
     return { merged: !!pull.merged, mergeSha: typeof pull.merge_commit_sha === 'string' ? pull.merge_commit_sha : null, open: pull.state === 'open', mergeable: typeof pull.mergeable === 'boolean' ? pull.mergeable : null, head: pull.head.sha };
+  }
+  /** The files a merge commit changed against its first parent, with their patches (GY-1291). */
+  async mergeChanges(mergeSha: string): Promise<FileChange[]> {
+    const merge = await this.request(`/commits/${mergeSha}`);
+    const parent = merge?.parents?.[0]?.sha;
+    demand(typeof parent === 'string' && /^[a-f0-9]{40}$/.test(parent), `GitHub did not return the first parent of ${mergeSha}`, 502);
+    const compare = await this.request(`/compare/${parent}...${mergeSha}`);
+    demand(Array.isArray(compare?.files), `GitHub did not compare ${mergeSha} with its parent`, 502);
+    // A compare lists at most 300 files; a longer list may be incomplete, so it cannot verify a revert.
+    demand(compare.files.length < 300, `merge ${mergeSha.slice(0, 12)} changes 300 or more files, more than GitHub's compare lists`, 502);
+    return compare.files.map(fileChange);
+  }
+  /** The files a revert pull request changes against main, with their patches (GY-1291). */
+  async revertChanges(pr: number): Promise<FileChange[]> {
+    return (await this.pages(`/pulls/${pr}/files`)).map(fileChange);
+  }
+  /**
+   * Approves a main guard revert at exactly `head` as the independent revert approver App (GY-1291):
+   * branch protection requires an approval from someone other than the last pusher, and the
+   * control-plane App pushed the revert. The guard calls this only for a revert it verified is
+   * exactly the inverse of the merge it names. An approval already standing on `head` is not posted again.
+   */
+  async approveRevert(pr: number, head: string, body: string): Promise<'approved' | 'unconfigured'> {
+    const approver = this.config.revertApprover;
+    if (!approver) return 'unconfigured';
+    demand(approver.appId !== this.config.appId, 'The revert approver must be an App other than the control-plane App that pushed the revert');
+    const minted = await this.fetch(`https://api.github.com/app/installations/${approver.installationId}/access_tokens`, {
+      method: 'POST', signal: AbortSignal.timeout(15_000),
+      headers: { Authorization: `Bearer ${appJwt(approver.appId, approver.privateKey)}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
+      body: JSON.stringify({ repositories: [this.config.repository.split('/')[1]], permissions: { pull_requests: 'write' } }),
+    });
+    demand(minted.ok, `the revert approver App ${approver.appId} could not mint an installation token (${minted.status})`, 502);
+    const token = ((await minted.json()) as any)?.token;
+    demand(typeof token === 'string' && token.length >= 20, `GitHub returned no token for the revert approver App ${approver.appId}`, 502);
+    const call = async (path: string, method = 'GET', payload?: unknown) => {
+      const response = await this.fetch(`https://api.github.com/repos/${this.config.repository}${path}`, {
+        method, signal: AbortSignal.timeout(15_000), body: payload === undefined ? undefined : JSON.stringify(payload),
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
+      });
+      demand(response.ok, `GitHub refused the revert approver's ${method} ${path} (${response.status})`, 502);
+      return response.json() as Promise<any>;
+    };
+    const reviews = await call(`/pulls/${pr}/reviews?per_page=100`);
+    if (Array.isArray(reviews) && reviews.some((review: any) => review?.state === 'APPROVED' && review.commit_id === head && review.performed_via_github_app?.id === approver.appId)) return 'approved';
+    const review = await call(`/pulls/${pr}/reviews`, 'POST', { commit_id: head, event: 'APPROVE', body });
+    demand(review?.state === 'APPROVED' && review.commit_id === head, `GitHub did not record the revert approver's approval of PR #${pr} at ${head.slice(0, 12)}`, 502);
+    return 'approved';
   }
   /** Closes a revert pull request the main guard gave up on, saying why, and deletes its branch. */
   async closeRevert(pr: number, reason: string): Promise<void> {
@@ -2792,6 +2886,8 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
   } catch (error) { return { action: { kind: 'hold', reason: `GitHub refused to ${action.kind} ${work.key}: ${error instanceof Error ? error.message : String(error)}` }, state }; }
   return { action, state };
 }
+/** A file of a GitHub compare or pull request file list, as the main guard compares them. */
+const fileChange = (file: any): FileChange => ({ filename: String(file?.filename ?? ''), status: String(file?.status ?? ''), previousFilename: typeof file?.previous_filename === 'string' ? file.previous_filename : null, patch: typeof file?.patch === 'string' ? file.patch : null });
 /** How often the job loop runs the main guard (see guardGitHubMain). */
 export const mainGuardIntervalMs = 30_000;
 /**
@@ -2800,7 +2896,7 @@ export const mainGuardIntervalMs = 30_000;
  * one whose delivery is the merge that broke main — and records each revert step on that item under
  * `main-guard.revert.<state>`, reopening it for rework when its revert merged.
  */
-export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'evaluate'>, github: Pick<GitHub, 'mainHistory' | 'commitChecks' | 'openMainRevert' | 'revertPull' | 'mergeRevert' | 'closeRevert'>, now = new Date(), verdicts = new Map<string, CommitVerdict>()): Promise<MainGuardTick> {
+export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'evaluate'>, github: Pick<GitHub, 'mainHistory' | 'commitChecks' | 'openMainRevert' | 'revertPull' | 'mergeChanges' | 'revertChanges' | 'approveRevert' | 'mergeRevert' | 'closeRevert'>, now = new Date(), verdicts = new Map<string, CommitVerdict>(), approved = new Set<string>()): Promise<MainGuardTick> {
   const pool = engine.store.pool;
   const required: string[] = (await pool.query("SELECT document->'policy'->'checks' AS checks FROM work_items WHERE document->>'stage'='done' AND document ? 'delivery' ORDER BY number DESC LIMIT 1")).rows[0]?.checks ?? [];
   return runMainGuard({
@@ -2810,6 +2906,9 @@ export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' 
     checks: sha => github.commitChecks(sha),
     openRevert: (work, mergeSha, reason) => github.openMainRevert(work, mergeSha, reason),
     pull: pr => github.revertPull(pr),
+    mergeChanges: mergeSha => github.mergeChanges(mergeSha),
+    revertChanges: pr => github.revertChanges(pr),
+    approveRevert: (pr, head, body) => github.approveRevert(pr, head, body),
     mergeRevert: (work, revert) => github.mergeRevert(work, revert),
     closeRevert: (pr, reason) => github.closeRevert(pr, reason),
     record: (snapshot, revert: MainGuardRevert) => engine.store.transaction(async (db, at) => {
@@ -2819,14 +2918,23 @@ export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' 
       if (reopened) engine.evaluate(work, (await lockedWork(db, [work.id])).map(item => item.id === work.id ? work : item), at);
       await save(db, work, 'graphyard', `main-guard.revert.${revert.state}`, at, { revert, reopened });
     }),
-  }, { required, ciAppIds: engine.ciAppIds, now, verdicts });
+  }, { required, ciAppIds: engine.ciAppIds, now, verdicts, approved });
 }
-const mainGuardRead = new WeakMap<Engine, number>(), mainGuardVerdicts = new WeakMap<Engine, Map<string, CommitVerdict>>(), mainGuardFailure = new WeakMap<Engine, string>();
+const mainGuardRead = new WeakMap<Engine, number>(), mainGuardVerdicts = new WeakMap<Engine, Map<string, CommitVerdict>>(), mainGuardApproved = new WeakMap<Engine, Set<string>>(), mainGuardFailure = new WeakMap<Engine, string>();
+/** The revert approver App from `GRAPHYARD_REVERT_APPROVER_APP_ID`/`_INSTALLATION_ID`/`_PRIVATE_KEY` (or `_FILE`); undefined when unset. */
+export async function revertApproverFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<RevertApprover | undefined> {
+  if (!env.GRAPHYARD_REVERT_APPROVER_APP_ID) return undefined;
+  const appId = Number(env.GRAPHYARD_REVERT_APPROVER_APP_ID), installationId = Number(env.GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID);
+  demand(Number.isSafeInteger(appId) && appId > 0 && Number.isSafeInteger(installationId) && installationId > 0, 'GRAPHYARD_REVERT_APPROVER_APP_ID and GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID must be GitHub App and installation ids');
+  const privateKey = env.GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY ?? (env.GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY_FILE ? await readFile(env.GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY_FILE, 'utf8') : '');
+  demand(/^-----BEGIN (RSA )?PRIVATE KEY-----/m.test(privateKey), 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY (or _FILE) must be the PEM GitHub issued for the revert approver App');
+  return { appId, installationId, privateKey };
+}
 export async function githubFromEnv() {
   if (!process.env.GITHUB_APP_ID || !process.env.GITHUB_REPOSITORY) return null;
   const privateKey = process.env.GITHUB_PRIVATE_KEY ?? await readFile(process.env.GITHUB_PRIVATE_KEY_FILE!, 'utf8');
   const reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
-  return new GitHub({ repository: process.env.GITHUB_REPOSITORY, base: process.env.GITHUB_BASE_BRANCH ?? 'main', appId: Number(process.env.GITHUB_APP_ID), installationId: Number(process.env.GITHUB_INSTALLATION_ID), privateKey, reviewerApps }, processTokenBudgets);
+  return new GitHub({ repository: process.env.GITHUB_REPOSITORY, base: process.env.GITHUB_BASE_BRANCH ?? 'main', appId: Number(process.env.GITHUB_APP_ID), installationId: Number(process.env.GITHUB_INSTALLATION_ID), privateKey, reviewerApps, revertApprover: await revertApproverFromEnv() }, processTokenBudgets);
 }
 /**
  * Moves one queued candidate onto the tip it is predicted to land. Entries publish head-first:
@@ -2854,12 +2962,14 @@ async function advanceQueue(engine: Engine, github: GitHub, work: Work, job: { w
  * written to the candidate's branch: a test merge on a scratch branch either disproves GitHub's
  * reading, which is recorded, or confirms the conflict, which goes back to the worker.
  */
-async function refreshBase(engine: Engine, github: GitHub, work: Work, job: { work_id: string; token: string }, guard: (snapshot: Work, success: boolean) => () => Promise<void>, hold: (feature: PermissionFeature) => string | null) {
-  // The refresh's test merge creates and writes a scratch branch; without Contents: write the
+async function refreshBase(engine: Engine, github: GitHub, work: Work, job: { work_id: string; token: string }, guard: (snapshot: Work, success: boolean) => () => Promise<void>, hold: (feature: PermissionFeature) => string | null, broken: BaseBreak | null = null) {
+  // A conflict refresh's test merge creates and writes a scratch branch, and a base-breakage
+  // refresh (GY-793) writes its merge commit onto the candidate's own branch; without Contents:
+  // write the call can only 403. The candidate keeps its held base and waits for the permission instead.
   // call can only 403. The candidate keeps its held base and waits for the permission instead.
   const held = hold('merge-queue');
   if (held) return { work, published: false, held };
-  const refresh = await github.refreshCandidateBase(work, guard(work, false));
+  const refresh = broken ? await github.refreshOntoFixedBase(work, broken, guard(work, false)) : await github.refreshCandidateBase(work, guard(work, false));
   const updated = await engine.bindBaseRefresh(work.id, work.revision, refresh, job.token);
   return { work: updated, published: !!refresh.head && refresh.head !== refresh.from.sha, held: null };
 }
@@ -3009,7 +3119,10 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     if (!mainGuardVerdicts.has(engine)) mainGuardVerdicts.set(engine, new Map());
     const verdicts = mainGuardVerdicts.get(engine)!;
     if (verdicts.size > historyEntries) verdicts.clear();
-    const failed = await guardGitHubMain(engine, github, new Date(), verdicts).then(tick => tick.errors.join('; '), error => error instanceof Error ? error.message : String(error));
+    if (!mainGuardApproved.has(engine)) mainGuardApproved.set(engine, new Set());
+    const approved = mainGuardApproved.get(engine)!;
+    if (approved.size > historyEntries) approved.clear();
+    const failed = await guardGitHubMain(engine, github, new Date(), verdicts, approved).then(tick => tick.errors.join('; '), error => error instanceof Error ? error.message : String(error));
     if (failed && mainGuardFailure.get(engine) !== failed) await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', 'main-guard.failed', JSON.stringify({ details: { error: failed, at: new Date().toISOString() } })]).catch(() => {});
     mainGuardFailure.set(engine, failed);
   }
@@ -3199,6 +3312,14 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       // refresh runs before any review is dispatched and the job requeues onto the new head.
       if (baseRefreshNeeded(work)) {
         const refreshed = await refreshBase(engine, github, work, job, guard, hold);
+        work = refreshed.work; held ??= refreshed.held;
+        if (refreshed.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true, undefined, observed); return true; }
+      }
+      // A required check that failed only on tests the base branch broke and its tip fixed is
+      // answered the same way (GY-793): the candidate is brought onto the tip and CI runs again.
+      const broken = baseBreakRefreshNeeded(work);
+      if (broken) {
+        const refreshed = await refreshBase(engine, github, work, job, guard, hold, broken);
         work = refreshed.work; held ??= refreshed.held;
         if (refreshed.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true, undefined, observed); return true; }
       }

@@ -1,4 +1,5 @@
 // Concern: the effects a cycle acts through — their interface, cursor records, and the production wiring.
+import { wakeOwnObservation } from '../master/base-break-refresh.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { productionEnvironmentFromEnv } from '../flow-analytics.js';
@@ -44,6 +45,7 @@ import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timin
 import type { RunRecord, Runner } from '../runner/types.js';
 import { loopRunAdoption, type AdoptedRun } from './run-adoption.js';
 import type { ResearchEvent } from '../research.js';
+import { doctorEffects, doctorSettings, type DoctorEffects } from './doctor.js';
 import { docsSyncEffects, type DocsSyncEffects } from '../docs-sync.js';
 import { diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
 import { diagnosticianSettings } from '../runner/payloads.js';
@@ -74,13 +76,11 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   requestProof: (work: Work) => void | Promise<void>;
-  /**
-   * Asks the control plane to decide the item's open scope request and returns the decided document.
-   * The loop carries no verdict: Graphyard decides from the item's own criteria. A loop wired
-   * without it never decides one, and every request waits for the operator as before.
-   */
+  /** Asks the control plane to decide the item's open scope request and returns the decided document. */
   decideScope?: (work: Work) => Promise<Work>;
   wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: a prioritized `resync` now (GY-1266), for a step refused on a stale observation
+  /** Wake the item's own observation; the item once a newer reading is saved, else null (GY-793). */
+  observe?: (work: Work, waitMs: number) => Promise<Work | null>;
   /**
    * The review findings standing against the item's head — its unresolved threads and its
    * reviewer's latest change request (review-scope.ts) — read outside every transaction.
@@ -207,11 +207,8 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
    * Returns what it ended. A loop wired without it leaves the registry to its own time windows.
    */
   reconcileSessions?: (runtime: { agents: HerdrAgent[]; available: boolean }, finished: ReadonlyMap<string, string>) => Promise<{ session: string; role: string; work: string | null; account: string; reason: string }[]>;
-  /**
-   * One item's decision history: the approved merge decision automatic merging asks for, and what
-   * became of every decision this loop requested.
-   */
-  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; pin?: { escalations?: { trigger: string; at: string }[] } | null; reason?: string; precedent?: string[]; situation?: DecisionSituation | null; approvedBy: string | null; approvedAt?: string | null; approvalReason?: string | null; outcome?: string | null; refusal?: { approver: string; reason: string; at?: string } | null }[] }>;
+  /** One item's decision history: the approved merge decision automatic merging asks for, and what became of every decision this loop requested. */
+  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; requestedBy?: string; requestedAt?: string; pin?: { escalations?: { trigger: string; at: string }[] } | null; reason?: string; precedent?: string[]; situation?: DecisionSituation | null; approvedBy: string | null; approvedAt?: string | null; approvalReason?: string | null; outcome?: string | null; refusal?: { approver: string; reason: string; at?: string } | null }[] }>;
   /**
    * GY-1142. The items whose decision ledger moved after ledger seq `after`, in one read per cycle,
    * and the seq it now stands at; `after` null reads only where it stands. `complete` false means
@@ -331,12 +328,13 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
    */
   followUpThreads?: (work: Work[], now: number) => Promise<Map<string, Set<string>>>;
   persist: (state: DaemonState) => Promise<void>;
-  /**
-   * Files the one backlog item a recurring fault class gets (GY-173), as the master's own
-   * operator-agent identity, under an idempotency key naming the class and its instances. Absent
-   * while no such identity is provisioned: the classes are still recorded and reported.
-   */
+  /** Files the one backlog item a recurring fault class gets (GY-173), as the operator-agent identity, keyed by the class and its instances. */
+  // Absent while no such identity is provisioned: the classes are still recorded and reported.
   fileFaultClass?: (input: LoopFiledItem, key: string) => Promise<Work>;
+  /** The pipeline doctor (GY-711, src/daemon/doctor.ts): absent while `run.doctor.enabled` is false or the operator-agent identity is missing, the loop then running only the deterministic remedies. */
+  doctor?: DoctorEffects;
+  /** Clears an item's blocker as the operator-agent identity, bound to the revision the loop read (GY-711 remedy 2): only for a scope refusal plannedFiles already covers. */
+  unblock?: (work: Work, reason: string) => Promise<Work>;
   /**
    * The diagnostician (GY-439): its settings, the runners of its primary and fallback runs, the
    * excerpts it reads, and filing and deciding as the master's operator-agent identity. Absent while
@@ -645,6 +643,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
     decideScope: work => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }), wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true }),
+    observe: (work, waitMs) => wakeOwnObservation(body => mutate(`work/${work.id}/resync`, { ...body, prioritized: true }, randomUUID()), ms => delay(ms), { waitMs }),
     // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.
     // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.
     reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null,
@@ -748,6 +747,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // The diagnostician acts only through the two identities a two-party decision needs (GY-439).
     get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnostician(config) : undefined; },
     get fileFaultClass() { return current().operatorAgent ? (input: LoopFiledItem, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
+    get unblock() { return current().operatorAgent ? (work: Work, reason: string) => asOperatorAgent('POST', `work/${work.id}/unblock`, { reason, expectedRevision: work.revision }) as Promise<Work> : undefined; },
+    get doctor() { const config = current(); return config.operatorAgent && doctorSettings(config.run).enabled ? doctorEffects(config, root, asOperatorAgent) : undefined; },
     controlPlaneClock: () => readControlPlaneClock(current().url, { fetcher }),
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, probe: async target => annotatePaneShell(await probeSupervisorAbsence(target, { run }),
       work.find(item => item.key === target.key && item.containmentQuarantine?.epoch === target.epoch), pane => herdrJson(['pane', 'process-info', '--pane', pane], run), undefined, () => herdrJson(['pane', 'list'], run),

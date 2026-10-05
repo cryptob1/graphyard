@@ -1484,6 +1484,12 @@ export interface ExecutorEffects {
    * that outlives that is taken from it by the next executor.
    */
   renew?: (action: ActionRow) => Promise<unknown>;
+  /**
+   * Say this executor is alive without claiming (GY-1288): a claim poll is how the control plane
+   * hears from an executor, so one that may not claim for a while — behind a fleet restart's
+   * fence — says so here instead of falling silent and reading as a dead fleet.
+   */
+  present?: (request: { host: string; executor: string; kinds: NextActionKind[] }) => Promise<unknown>;
   /** One handler per action kind this executor can run. A kind with no handler is never claimed. */
   handlers: Partial<Record<NextActionKind, ExecutorHandler>>;
   /**
@@ -1618,6 +1624,7 @@ export function executorEffects(config: { url: string; token: string; fetcher?: 
     // The same claim, named the same way: a renewal from any other executor or credential is
     // refused, so holding a row is as bounded as claiming one.
     renew: action => post(`actions/${action.id}/renew`, { ...(action.claim?.executor ? { executor: action.claim.executor } : {}) }),
+    present: request => post('actions/presence', request),
     handlers,
   };
 }

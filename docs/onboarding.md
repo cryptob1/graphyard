@@ -98,6 +98,10 @@ Run as an OS user whose GitHub credentials workers cannot read. `--browser-profi
 
 `master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master.service` and runs `systemctl --user enable --now` and `loginctl enable-linger` (restarts on crash, reboot, hang); never a side effect: worker checkouts and temp directories are refused. Move: `master init --token-stdin --replace-supervisor` from the new checkout. `master status` shows `setup.supervisor`.
 
+### The pipeline doctor (on by default)
+
+Every `run.doctor.intervalMinutes` (default 10) the loop launches the **doctor**, a Pi session fixing stuck, overdue work by sanctioned commands (`master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`), never merging, dispatching or evidencing. Each run posts per-item findings and a summary (`doctor` in `master status`); the rest escalate or file deduplicated fault items. The loop itself settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
+
 ## 4. Prove the first PR
 
 `graphyard doctor --profile through-merge` names gaps; `master run` dispatches a small item, merged once protection requires `Graphyard / merge`; `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).

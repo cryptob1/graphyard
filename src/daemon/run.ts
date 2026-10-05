@@ -1,6 +1,13 @@
 // Concern: the long-running loop — cycle scheduling, config reload, the watchdog and its summary.
 import { setTimeout as delay } from 'node:timers/promises';
+import { existsSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
 import type { ConfigReload, MasterConfig } from '../master.js';
+import type { HerdrAgent } from '../master/herdr.js';
+import { defaultChildRun } from '../child-runner.js';
+import { allocateManagedCheckout } from '../master/worktrees.js';
+import { worktreeRoot } from '../install/worktree-root.js';
+import { loopScratchCheckout } from '../producer.js';
 import { checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutEscalation, dirtyCheckoutLeases, dirtyCheckoutPaths, readCoordinatorCheckout, type CoordinatorCheckout } from '../master/profiles.js';
 import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, message, storeAction, touchStanding } from './state.js';
 import { faultClassPolicyFromEnv, type FaultClassPolicy } from '../model/fault-classes.js';
@@ -11,8 +18,9 @@ import { boundedPersist, cycleCost, cycleTimes, cycleDelay, cycleFailureCeiling,
 import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { detailChanged } from './decisions.js';
-import { describeSelfUpgrade } from './upgrade.js';
+import { describeSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
 import { describeTimings } from '../master/timings.js';
+import { stopDoctorRuns, doctorReport } from './doctor.js';
 import { detachRuns } from '../runner/registry.js';
 
 /**
@@ -66,6 +74,10 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     diagnoses: diagnosisReport(state),
     // The system invariants as the last observation judged them (GY-404): one line per invariant, with its threshold and reading.
     invariants: { at: state.invariants.at, violated: state.invariants.report.filter(check => !check.holds).length, lines: state.invariants.report.map(check => check.line), checks: state.invariants.report },
+    // The pipeline doctor as this cursor holds it (GY-711): whether a run is in flight right now —
+    // which the control plane's posted runs cannot show, they settle only afterwards — and its
+    // recent runs, newest first.
+    doctor: doctorReport(state),
   };
 }
 
@@ -157,7 +169,46 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   // Progress goes to stderr so stdout stays the machine-readable result the CLI prints.
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
   const interval = () => typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
-  const effects = boundedPersist(namedEffects(raw)), host = options.process ?? process;
+  // GY-866: research and triage sessions have no checkout of their own, so they read the code they
+  // judge from a scratch checkout of their own under the managed worktree root — a detached
+  // worktree of the release this loop runs, when one can be made, so the session still reads real
+  // code — never from the coordinator checkout: a session that works where it starts rewrites the
+  // control plane's own code. A root that cannot hold the scratch leaves the loop without research
+  // and triage rather than with sessions working in the coordinator checkout.
+  // The diagnostician reads the repository from the same scratch checkout: it too is a session the
+  // loop launches, and without the scratch it does not run at all.
+  // A loop with neither has no scratch to place, so it needs no CLI launcher to place it from.
+  const needsScratch = Boolean(raw.research) || 'diagnostician' in raw;
+  const scratchRoot = needsScratch ? coordinatorCheckoutRoot(config.cliPath) : '';
+  let scratchDirectory: string | null = null;
+  if (needsScratch) {
+    try {
+      // The path is the repository's, not this process's: a restarted loop takes up the scratch
+      // the loop before it left, so the detached research runs registered there (GY-453) stay in a
+      // directory that exists and are adopted from the registry they were written to.
+      const stable = loopScratchCheckout(worktreeRoot(scratchRoot, config));
+      const scratch = existsSync(stable.directory) ? stable : await allocateManagedCheckout(scratchRoot, config, 'approval', 'loop-scratch', '0'.repeat(40), '0'.repeat(8));
+      scratchDirectory = scratch.directory;
+      const release = raw.loadedRelease?.commit;
+      if (release) {
+        try {
+          // A worktree the loop before left is moved onto this loop's release; the run registry
+          // under its ignored .graphyard/ stays where it is.
+          if (existsSync(scratch.worktree)) await defaultChildRun('git', ['-C', scratch.worktree, 'checkout', '--detach', '--force', '--quiet', release]);
+          else await defaultChildRun('git', ['-C', scratchRoot, 'worktree', 'add', '--detach', '--quiet', scratch.worktree, release]);
+          scratchDirectory = scratch.worktree;
+        } catch (error) { log(`[graphyard-master] the research scratch checkout holds no worktree of ${release.slice(0, 12)}: ${message(error)}`); }
+      }
+    } catch (error) {
+      log(`[graphyard-master] research, triage and the diagnostician are off: no scratch checkout outside the coordinator checkout could be allocated: ${message(error)}`);
+    }
+  }
+  const scoped = new Proxy(raw, { get(target, property, receiver) {
+    if (property === 'research') return target.research && scratchDirectory ? { ...target.research, cwd: scratchDirectory } : undefined;
+    if (property === 'diagnostician') { const diagnostician = target.diagnostician; return diagnostician && scratchDirectory ? { ...diagnostician, cwd: scratchDirectory } : undefined; }
+    return Reflect.get(target, property, receiver);
+  } });
+  const effects = boundedPersist(namedEffects(scoped)), host = options.process ?? process;
   acquireDaemonLock(state, options.identity, now(), interval());
   // GY-437: the release is this process's, never the cursor's: a loop re-executed onto a moved
   // checkout must not report the release the process before it loaded.
@@ -198,26 +249,9 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   // files they match: those matches are the checkout's writes attributed to the attempts most
   // likely to have made them.
   const checkoutOf = async () => options.checkout?.() ?? await readCoordinatorCheckout(coordinatorCheckoutRoot(config.cliPath));
-  const escalationKey = 'escalation:dirty-checkout';
-  const escalate = async (checkout: CoordinatorCheckout) => {
-    if (!checkoutGuardApplies(checkout.root)) return null;
-    const refusal = coordinatorCheckoutRefusal(checkout, 'the master loop');
-    if (!refusal) return null;
-    let detail = refusal;
-    try {
-      const snapshot = await raw.snapshot();
-      detail = dirtyCheckoutEscalation(refusal, dirtyCheckoutLeases(snapshot.work, dirtyCheckoutPaths(checkout), Date.parse(snapshot.now) || undefined));
-    } catch { /* the refusal stands alone when the plane cannot be read */ }
-    const existing = state.actions[escalationKey];
-    if (detailChanged(existing, detail)) {
-      storeAction(state, escalationKey, { kind: 'escalation', work: null, principal: null, state: 'failed', detail, attempts: (existing?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: new Date(now()).toISOString() }, 'action:config');
-      await effects.persist(state);
-      log(`[graphyard-master] escalation failed: ${detail}`);
-    } else touchStanding(state, escalationKey, new Date(now()).toISOString());
-    return detail;
-  };
+  const guard = coordinatorCheckoutGuard({ state: () => state, read: checkoutOf, agents: raw.agents, snapshot: raw.snapshot, persist: effects.persist, now, log });
   try {
-    const startRefusal = await escalate(await checkoutOf());
+    const startRefusal = await guard.start(raw.loadedRelease?.commit ?? null);
     if (startRefusal) {
       // The refused loop keeps its process for its supervisor — a crash would only be restarted
       // onto the same dirty checkout — and cycles nothing until it is restarted on a clean one.
@@ -259,18 +293,12 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       // here: the supervisor starts the next one on the code the checkout now holds.
       // GY-857: never while the checkout is dirty — the alignment would check out over work it
       // holds and re-execute the loop onto code no commit names.
-      if (effects.selfUpgrade && !stopping) {
-        const upgradeRefusal = await escalate(await checkoutOf());
-        if (!upgradeRefusal) {
-          try {
-            // The executor restart can wait minutes on held claims and re-registration: the
-            // watchdog is fed on each poll so that wait is not mistaken for a hung loop (GY-916).
-            const keepAlive = watchdog.supervised ? async () => { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } } : undefined;
-            const upgraded = await effects.selfUpgrade(state, keepAlive);
-            if (upgraded.outcome !== 'skipped') log(`[graphyard-master] upgrade ${describeSelfUpgrade(upgraded)}`);
-          } catch (error) { log(`[graphyard-master] upgrade failed: ${message(error)}`); }
-        }
-      }
+      // GY-866: the guard reads the checkout every cycle, not only when an alignment is due.
+      // The executor restart can wait minutes on held claims and re-registration: the watchdog is
+      // fed on each poll so that wait is not mistaken for a hung loop (GY-916).
+      const keepAlive = watchdog.supervised ? async () => { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } } : undefined;
+      const selfUpgrade = effects.selfUpgrade;
+      await guard.betweenCycles(stopping || !selfUpgrade ? undefined : current => selfUpgrade(current, keepAlive));
       // The keep-alive says the process is alive, which a failed cycle leaves true: the watchdog
       // is for a cycle that hangs, and a thrown one has just proved it did not.
       if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
@@ -282,7 +310,11 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // they did is logged here since no next cycle will report it.
     if (launcher.pending) log(`[graphyard-master] waiting for ${launcher.pending} launch(es) in flight before stopping`);
     await launcher.idle();
+    // A pipeline-doctor run in flight is cancelled and its outcome recorded before the lock is released (GY-711).
+    await stopDoctorRuns();
     for (const action of launcher.drain()) log(`[graphyard-master] launch ${action.kind} ${action.state}: ${action.detail}`);
+    // GY-866: the scratch checkout outlives the loop: research runs detached into it keep working
+    // and the next loop adopts them from it.
     for (const signal of signals) host.off(signal, stop);
     host.off('unhandledRejection', onRejection); host.off('uncaughtException', onException);
     // Headless runs are detached (GY-453): the loop stops watching them and sends none of them a
@@ -293,4 +325,114 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     await effects.persist(state).catch(() => {});
   }
   return { cycles, failed, stopped: stopping };
+}
+
+const escalationKey = 'escalation:dirty-checkout';
+/**
+ * GY-857/GY-866: the coordinator checkout guard the loop runs at startup and after every cycle.
+ * A tree holding uncommitted work, or a HEAD that moved away from the commit the loop runs, is
+ * attention naming the paths, the HEAD, the live leases whose planned files the paths match and
+ * the sessions whose panes point at the checkout — and the loop neither self-upgrades nor restarts
+ * from it until it is clean and back at that commit. The commit the loop runs is the HEAD it
+ * loaded its code from; every move its own alignment makes rewrites the expectation, and anything
+ * else that moves HEAD under a running loop is drift.
+ */
+export function coordinatorCheckoutGuard(deps: {
+  state: () => DaemonState; read: () => Promise<CoordinatorCheckout>; agents: DaemonEffects['agents']; snapshot: DaemonEffects['snapshot'];
+  persist: DaemonEffects['persist']; now: () => number; log: (line: string) => void; applies?: (root: string) => boolean; enrichMs?: number;
+}) {
+  const applies = deps.applies ?? checkoutGuardApplies, enrichMs = deps.enrichMs ?? 10 * 60_000;
+  let expectedHead: string | null = null, enriched: { refusal: string; detail: string; at: number } | null = null;
+  const headDrift = (checkout: CoordinatorCheckout) => checkout.commit && expectedHead && checkout.commit !== expectedHead
+    ? `the master loop refuses to restart or self-upgrade from the coordinator checkout at ${checkout.root}: its HEAD moved from ${expectedHead.slice(0, 12)} to ${checkout.commit.slice(0, 12)} while the loop was running, so HEAD is not the commit it runs. It keeps running the code it loaded; restore the checkout with git -C ${checkout.root} checkout --detach ${expectedHead.slice(0, 12)}, then restart the loop`
+    : null;
+  // The sessions working where they started, the ones to close first. Graphyard's own managed area
+  // under `.graphyard/` is not the checkout's working files and is never named. An inventory that
+  // cannot be read (Herdr down: `agents` answers null or throws) leaves the sessions unknown,
+  // never the refusal unrecorded.
+  const pointingSessions = async (checkoutRoot: string): Promise<string[] | null> => {
+    const base = resolve(checkoutRoot), managed = `${base}${sep}.graphyard`;
+    let agents: HerdrAgent[] | null;
+    try { agents = (await deps.agents()) as HerdrAgent[] | null; } catch { agents = null; }
+    if (!Array.isArray(agents)) return null;
+    return agents.flatMap(agent => {
+      const cwd = agent.cwd ? resolve(agent.cwd) : null;
+      if (!cwd) return [];
+      const inside = cwd === base || cwd.startsWith(`${base}${sep}`);
+      if (!inside || cwd === managed || cwd.startsWith(`${managed}${sep}`)) return [];
+      return [`${agent.name ?? agent.agent ?? 'an unnamed session'} (pane ${agent.pane_id ?? 'unknown'}, cwd ${agent.cwd})`];
+    });
+  };
+  const escalate = async (checkout: CoordinatorCheckout) => {
+    if (!applies(checkout.root)) return null;
+    const refusal = coordinatorCheckoutRefusal(checkout, 'the master loop') ?? headDrift(checkout);
+    if (!refusal) {
+      enriched = null;
+      // A checkout clean again and back at the commit the loop runs settles the attention it raised.
+      const state = deps.state(), raised = state.actions[escalationKey];
+      if (raised?.state === 'failed') {
+        storeAction(state, escalationKey, { ...raised, state: 'done', detail: `the coordinator checkout at ${checkout.root} is clean again at ${(checkout.commit ?? 'an unreadable HEAD').slice(0, 12)}, the commit the loop runs`, cycle: state.cycle, at: new Date(deps.now()).toISOString() }, 'action:config');
+        await deps.persist(state);
+      }
+      return null;
+    }
+    // A standing refusal keeps the leases and sessions it named: the plane and the Herdr inventory
+    // are read again when what the checkout holds changes, and at most every enrichMs while it does
+    // not, never once per cycle.
+    let detail: string;
+    if (enriched && enriched.refusal === refusal && deps.now() - enriched.at < enrichMs) detail = enriched.detail;
+    else {
+      detail = refusal;
+      try {
+        const snapshot = await deps.snapshot();
+        detail = dirtyCheckoutEscalation(refusal, dirtyCheckoutLeases(snapshot.work, dirtyCheckoutPaths(checkout), Date.parse(snapshot.now) || undefined));
+      } catch { /* the refusal stands alone when the plane cannot be read */ }
+      const pointing = await pointingSessions(checkout.root);
+      if (!pointing) detail += ' The sessions whose panes point at it are unknown: the Herdr inventory could not be read.';
+      else if (pointing.length) detail += ` ${pointing.length === 1 ? 'One session\'s pane still points at it' : `${pointing.length} sessions' panes still point at it`}: ${pointing.slice(0, 8).join('; ')}${pointing.length > 8 ? `; and ${pointing.length - 8} more` : ''}.`;
+      enriched = { refusal, detail, at: deps.now() };
+    }
+    const state = deps.state(), existing = state.actions[escalationKey];
+    if (detailChanged(existing, detail)) {
+      storeAction(state, escalationKey, { kind: 'escalation', work: null, principal: null, state: 'failed', detail, attempts: (existing?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: new Date(deps.now()).toISOString() }, 'action:config');
+      await deps.persist(state);
+      deps.log(`[graphyard-master] escalation failed: ${detail}`);
+    } else touchStanding(state, escalationKey, new Date(deps.now()).toISOString());
+    return detail;
+  };
+  return {
+    /** The startup read: the HEAD found here is the commit the loop runs. The refusal, or null. */
+    async start(loaded: string | null) {
+      const checkout = await deps.read();
+      expectedHead = checkout.commit ?? loaded;
+      return escalate(checkout);
+    },
+    /**
+     * The between-cycles read, then the self-upgrade only when the checkout stands clean and at
+     * the commit the loop runs. The loop's own alignment is the one move it sanctions.
+     */
+    async betweenCycles(selfUpgrade?: (state: DaemonState) => Promise<SelfUpgradeOutcome>) {
+      const refusal = await escalate(await deps.read());
+      if (refusal || !selfUpgrade) return { refusal, upgraded: null };
+      let upgraded: SelfUpgradeOutcome | null = null;
+      try {
+        upgraded = await selfUpgrade(deps.state());
+        if (upgraded.outcome !== 'skipped') deps.log(`[graphyard-master] upgrade ${describeSelfUpgrade(upgraded)}`);
+      } catch (error) { deps.log(`[graphyard-master] upgrade failed: ${message(error)}`); }
+      // The loop's own alignment is never foreign drift. A pending upgrade has moved the checkout too:
+      // only the restarts it owes wait (GY-916). An upgrade that failed, or threw, after its checkout
+      // (an executor or self restart it could not make) still left HEAD at the target its cursor
+      // records, so that HEAD is adopted as well; any other HEAD stays drift for the next cycle.
+      if (upgraded?.outcome !== 'skipped') {
+        const sanctioned = upgraded?.outcome === 'upgraded' || upgraded?.outcome === 'up-to-date' || upgraded?.outcome === 'pending';
+        const cursor = deps.state().upgrade, targets = [cursor?.pending?.to, cursor?.last?.to];
+        try {
+          const aligned = await deps.read();
+          if (aligned.commit && (sanctioned || targets.includes(aligned.commit))) expectedHead = aligned.commit;
+        } catch { /* the next cycle's read reports what it finds */ }
+      }
+      return { refusal: null, upgraded };
+    },
+    expected: () => expectedHead,
+  };
 }
