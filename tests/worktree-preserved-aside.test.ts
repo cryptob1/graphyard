@@ -95,6 +95,7 @@ test('unit:worktree-preserved-aside — kept files outlive the worktree, a file 
     // a named-only binary file that pushes the record past its limit.
     const own = attemptWorktree(root, 'GY-894', 1);
     const common = git(own.path, 'rev-parse', '--path-format=absolute', '--git-common-dir');
+    // Sized from a timestamp taken here, not in the release: an ISO timestamp has a fixed length, so the note's length matches.
     const keptNote = `\n-- untracked files not recorded in full are kept under ${join(common, 'graphyard-preserved', 'GY-894-1', new Date().toISOString().replace(/[:.]/g, '-'))} --`;
     const heading = '-- untracked files --\n', header = '-- untracked file a-edge.txt --\n';
     const edge = 'e'.repeat(100_000 - keptNote.length - 10 - heading.length - header.length);
