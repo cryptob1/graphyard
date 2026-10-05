@@ -121,10 +121,10 @@ Only `admin` grants or revokes, to `producer` principals: exact name, `kind:*` o
 
 ### Concurrent reconciliation
 
-A tick runs every 2 s and should finish within 5 s (slower logs `reconciliation tick took N ms`, with its writes and longest lock wait). Locks, in order:
+A tick runs every 2 s and should finish within 5 s (slower logs `reconciliation tick took N ms`, with writes and longest lock wait). Locks, in order:
 
 1. Opening: the coordination lock, briefly, to read row versions and sweep direct merges.
-2. Each batch evaluates up to 250 ms with no lock, writing nothing, and plans at most 8 writes; renewals, observations and requests on any item proceed.
-3. Each planned write is its own transaction: the coordination lock (waiting at most 500 ms, holding no row), then that item's row (`FOR NO KEY UPDATE`), then commit. The batch's evaluation is written as is unless the item or another item's face moved since; then the item is re-evaluated on the current fleet. Job wakes follow at commit, in work-id order.
+2. Each batch evaluates up to 250 ms holding no lock, planning at most 8 writes; renewals, observations and requests proceed.
+3. Each write is its own transaction: the coordination lock (waiting at most 500 ms, holding no row), then the item's row (`FOR NO KEY UPDATE`), then commit. If the item or another item's face moved since evaluation, the item is re-evaluated first. Job wakes follow at commit, in work-id order.
 
-A write whose lock wait expires three times defers the batch's unwritten items to the next tick. A renewal takes only its item's lock and waits at most for one write of that item. Before each evaluation and write, reconciliation lets pending requests run and waits up to 1 s for renewals in flight, so a renewal waits on at most the one evaluation it arrived during. Stale observation snapshots retry after 2 s.
+Three expired lock waits defer the batch's unwritten items to the next tick. A renewal takes only its item's lock. Before each evaluation and write, reconciliation lets pending requests run and waits up to 1 s for renewals in flight, so a renewal waits on at most one evaluation. Stale observation snapshots retry after 2 s.
