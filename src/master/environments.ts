@@ -51,6 +51,7 @@ export const providerLimitNotices: Readonly<Record<string, readonly RegExp[]>> =
   // OpenCode 1.18 on a spent plan: `Weekly/Monthly Limit Exhausted. Your limit will reset at …` (GY-973).
   opencode: [...providerUsageErrors, /\b(?:weekly|monthly|daily|hourly|usage)(?:\/(?:weekly|monthly|daily|hourly))? limit exhausted\b/i],
   cursor: [...providerUsageErrors],
+  agy: [...providerUsageErrors, /\bIndividual quota reached\b(?=.*\b(?:upgrade your subscription|resets? in)\b)/i], // GY-1135
 };
 /** The notices a session on `runtime` is judged against; an unnamed runtime gets the shared provider errors. */
 export const runtimeLimitNotices = (runtime: string | null | undefined): readonly RegExp[] => providerLimitNotices[runtime ?? ''] ?? providerUsageErrors;
@@ -63,8 +64,8 @@ const severityLabel = /^(?:\[[^\]]*\]\s*)?(?:api\s+)?error(?:\s+code)?\s*[:#]?\s
  * spent. The same tail, lead-of-line and reset-time rules as `detectExhaustion`, matched against
  * the runtime's own provider-authored notices instead of generic quota wording, so a worker's own
  * prose about a quota — a disk's, not the account's — is never a failover. A leading severity
- * label is stripped before the label words are counted: it is the runtime's rendering of the
- * provider's answer, not words the session wrote.
+ * label (the runtime's rendering of the provider's answer) is not counted as label words, and a
+ * compact wait (agy's `Resets in 1h31m31s`) is spaced into units the reset parser reads.
  */
 export function detectRuntimeExhaustion(output: string, runtime: string | null | undefined, now: number): ExhaustionSignal | null {
   const notices = runtimeLimitNotices(runtime);
@@ -75,7 +76,7 @@ export function detectRuntimeExhaustion(output: string, runtime: string | null |
     if (line.length > exhaustionNoticeMaxLength) continue;
     const at = notices.map(notice => notice.exec(line)?.index ?? -1).filter(offset => offset >= 0);
     if (!at.length || (line.slice(0, Math.min(...at)).match(/\S+/g) ?? []).length > exhaustionNoticeLabelWords) continue;
-    const context = [line, ...lines.slice(index + 1, index + 3)].join(' ');
+    const context = [line, ...lines.slice(index + 1, index + 3)].join(' ').replace(/(\d+[dhms])(?=\d)/gi, '$1 ');
     return { reason: line.slice(0, 300), resetsAt: parseResetTime(context, now) };
   }
   return null;

@@ -14,6 +14,7 @@ import { githubPauseReset, pauseRetry, submitThroughPause } from '../src/cli/com
 import { ensureWorktreeDependencies, installMatchesLockfile } from '../src/repository-setup.js';
 import { installUnderLease } from '../src/cli/workspace.js';
 import { runTests } from './helpers/run-tests.js';
+import { hostMemoryVariable } from '../src/master-resources.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const repository = new URL('..', import.meta.url);
@@ -88,7 +89,7 @@ import { createServer } from 'node:net';
 test('holds its database port', async () => {
   // Harness controls the caller set on purpose (CI's timing record) pass; nothing else of the session's does.
   const controls = new Set(${JSON.stringify(passedTestControls)});
-  assert.deepEqual(Object.keys(process.env).filter(name => /^(GRAPHYARD|HERDR)_/.test(name) && !controls.has(name)).sort(), ['GRAPHYARD_DATA_HOME', 'GRAPHYARD_EVENTS_TEST_PORT', 'GRAPHYARD_TEST_PORT']);
+  assert.deepEqual(Object.keys(process.env).filter(name => /^(GRAPHYARD|HERDR)_/.test(name) && !controls.has(name)).sort(), ['GRAPHYARD_DATA_HOME', 'GRAPHYARD_EVENTS_TEST_PORT', ${JSON.stringify(hostMemoryVariable)}, 'GRAPHYARD_TEST_PORT']);
   // Managed checkouts go inside the tree under test, the one place a worker's sandbox can write (GY-498).
   assert.equal(process.env.GRAPHYARD_DATA_HOME, process.cwd() + '/.graphyard/test-data');
   const port = Number(process.env.GRAPHYARD_TEST_PORT) + 7;
