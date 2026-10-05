@@ -5,15 +5,18 @@ import { execFileSync } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadMasterConfig, setupMaster, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { agentOwner, loadMasterConfig, masterConfigSchema, setupMaster, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { cycleFaults, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { launchAppearanceMs } from '../src/daemon/effects.js';
 import type { Work } from '../src/model.js';
 import type { ReviewRecord } from '../src/reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from '../src/producer.js';
-import { baseReclaimGates, describeReclaim, finishedSessionGraceMs, ledgerRetentionMs, loadedRevision, nameReclaimBoundMs, readReclaimReports, readResources, reclaimResources, resourceAttention, selfUpgradeBoundMs, stuckSessionMs, unownedPaneConfirmMs, type ResourceInputs } from '../src/master-resources.js';
+import { baseReclaimGates, describeReclaim, finishedSessionGraceMs, ledgerRetentionMs, loadedRevision, nameReclaimBoundMs, readReclaimReports, readResources, readGitHubBudget, reclaimResources, resourceAttention, resourceReportFile, selfUpgradeBoundMs, stuckSessionMs, unownedPaneConfirmMs, type PlaneReading, type ResourceInputs } from '../src/master-resources.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { classifyAttention } from '../src/model/fault-classes.js';
+import { classifyAttention, trackFaults } from '../src/model/fault-classes.js';
+import { attributeAttention, resourceStatus } from '../src/master-status.js';
+import * as masterResources from '../src/master-resources.js';
+import { writeFile } from 'node:fs/promises';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -782,4 +785,250 @@ test('GY-1192: a recordless producer pane blocked or unknown waits the stuck-ses
   await pass(now + stuckSessionMs);
   assert.deepEqual(closed.map(entry => entry.pane).sort(), ['w1V:pR1', 'w1V:pR2', 'w1V:pR3']);
   for (const entry of closed.filter(entry => entry.pane !== 'w1V:pR3')) assert.match(entry.reason, /left no record: never started: (blocked|unknown) in Herdr for over 10 minutes/);
+});
+
+test('integration:resources-recurrence-reproduces-gy-1272-budget-shape — one rate-limit pause and its held subjects record no resources instance; a budget spent with no pause records one', async () => {
+  // GY-1272: at 06:36:13.546Z, three seconds after the loop restarted, one pause until 06:38:26.160Z
+  // became six resources instances: resource:github-budget and five held subjects whose own lines
+  // named the pause. Four held subjects' symptom lines are rebuilt here beside the pause.
+  const at = Date.parse('2026-10-05T06:36:13.546Z');
+  const until = Date.parse('2026-10-05T06:38:26.160Z');
+  const held = ['installation', 'GY-711', 'GY-1052', 'GY-1241'].map(subject => ({ subject, role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: 'Clear what that reason names',
+    text: `${subject}'s observe action is stalled — GitHub requests paused until ${iso(until)} after a rate/access refusal` }));
+  const client = (blockedUntil: number, core: { limit: number; remaining: number } | null) => ({ blockedUntil, apiRequest: async () => {
+    if (!core) throw new Error('rate limited; requests paused');
+    return { resources: { core: { ...core, reset: Math.floor(until / 1000) } } };
+  } });
+  /** The resources-class instances the loop records from one budget reading and the held lines. */
+  const instances = (github: PlaneReading, lines = held) => {
+    const readings = readResources(inputs({ now: at, plane: { writable: true, writeError: null, database: null, github } }));
+    return classifyAttention([...resourceAttention(readings), ...attributeAttention(lines, readings)]).filter(item => item.faultClass === 'resources').map(item => item.subject).sort();
+  };
+
+  // REPRODUCE against base: base's pause branch read the budget used to its bound by construction.
+  const base = { used: 5000, bound: 5000, detail: `the GitHub client paused every request until ${iso(until)} after a rate-limit refusal; the budget is spent until then` };
+  assert.deepEqual(instances(base), ['GY-1052', 'GY-1241', 'GY-711', 'installation', 'resource:github-budget'], 'base records the pause once per held subject plus the budget');
+
+  // CANDIDATE: the same pause is the remediation under way, and records nothing in the resources class.
+  const paused = (await readGitHubBudget(client(until, null), at))!;
+  assert.equal(paused.used, null);
+  assert.match(paused.detail!, new RegExp(`paused every request until ${iso(until).replace(/\./g, '\\.')}`));
+  assert.deepEqual(instances(paused), []);
+  // The pause still counts once, in the observation class, from the plane's own githubBudget.paused.
+  assert.equal(classifyAttention([{ subject: 'github', text: `GitHub requests are paused until ${iso(until)}`, role: 'control plane', approvedBy: null, human: false, humanOnly: null, next: '' }])[0].faultClass, 'observation');
+
+  // A budget GET /rate_limit reads spent with no pause in force still records the one instance.
+  const spent = (await readGitHubBudget(client(at - 1, { limit: 5000, remaining: 0 }), at))!;
+  assert.deepEqual([spent.used, spent.bound], [5000, 5000]);
+  assert.deepEqual(instances(spent, []), ['resource:github-budget']);
+});
+
+/**
+ * GY-1198: the two readings faulted on remediation the product was still performing. The loop's
+ * self-upgrade owes a restart that a claim held across every cycle refuses, and the cursor keeps
+ * it owed and retries it each cycle; the reclaim pass closes a pane on its own two-pass clock, at
+ * one pass per cycle. Each reading now runs on the remediation's clock: the owed restart's latest
+ * attempt, and the pane's first seen-unowned time.
+ */
+const gy1198 = (() => {
+  const sha = (label: string) => label.padEnd(40, '0');
+  const cycleMs = 12 * 60_000;
+  // The GY-1196 loaded-revision instances, read again hours later as the live status still read them.
+  const revisions = [
+    { at: Date.parse('2026-10-04T11:07:12.746Z'), revision: { loaded: sha('dd13101b84ed'), checkout: sha('b289b9137069'), behind: 4, movedAt: Date.parse('2026-10-04T11:06:39Z') } },
+    { at: Date.parse('2026-10-04T11:47:27.419Z'), revision: { loaded: sha('b289b9137069'), checkout: sha('6bfc6514ab1a'), behind: 7, movedAt: Date.parse('2026-10-04T11:46:54Z') } },
+  ];
+  /** The restart the cursor owes onto `to`, last attempted `ago` before `now`. */
+  const owed = (to: string, attemptedAt: number | null, code = true) => ({ from: null, to, code, attemptedAt });
+  // The agent-names instance: graphyard-claude-1 settled at 12:30Z, the reading ran at 12:41:53Z,
+  // and the pass first saw the pane unowned on the cycle's pass at 12:33Z; the next pass, ~12 minutes on, closes it.
+  const settled = Date.parse('2026-10-04T12:30:00.000Z'), readAt = Date.parse('2026-10-04T12:41:53.835Z'), firstSeen = Date.parse('2026-10-04T12:33:00.000Z');
+  const profiles = { workers: [{ name: 'claude-primary', principal: 'graphyard-claude-1', agentName: 'graphyard-claude-1', mode: 'launch' }], reviewers: [], producers: [] };
+  const pane = agent('graphyard-claude-1', 'idle', 'w1V:pHAS');
+  const work = [workerItem('graphyard-claude-1', { startedAt: settled - 3_600_000, endedAt: settled, state: 'done' })];
+  const names = (overrides: Partial<ResourceInputs>): ResourceInputs => ({ now: readAt, reviews: [], producers: [], agents: [pane], work, plane: null, loop: null, revision: null, disk: null, profiles, ...overrides });
+  return { sha, cycleMs, revisions, owed, settled, readAt, firstSeen, pane, work, names };
+})();
+
+test('unit:loaded-revision-owed-restart-is-not-a-fault — commits behind while the cursor owes a code restart attempted within two cycle intervals is the restart under way', () => {
+  const { revisions, owed, cycleMs } = gy1198;
+  for (const { at, revision } of revisions) {
+    // Hours on, past the move's own bound: the restart is still owed and was retried a cycle ago.
+    const now = at + 4 * 3_600_000;
+    for (const ago of [0, cycleMs, selfUpgradeBoundMs - 1]) {
+      const input = inputs({ now, revision, upgrade: owed(revision.checkout, now - ago) });
+      assert.deepEqual(faults(input), []);
+      const reading = readResources(input).find(entry => entry.id === 'loaded-revision')!;
+      assert.equal(reading.state, 'ok');
+      assert.equal(reading.used, 0);
+      assert.match(reading.detail!, new RegExp(`${revision.behind} commits behind; the self-upgrade's owed restart onto it is under way, last attempted ${new Date(now - ago).toISOString()}`));
+    }
+    // The cursor may name the commit abbreviated; the owed restart still matches the checkout.
+    assert.deepEqual(faults(inputs({ now, revision, upgrade: owed(revision.checkout.slice(0, 12), now - cycleMs) })), []);
+  }
+  // A loop that spaces its cycles further apart gets two of its own intervals (GY-1255's bound).
+  const { revision, at } = revisions[0];
+  const loop = { lagMs: 0, stalledAfterMs: 2 * 3_600_000, detail: '' };
+  assert.deepEqual(faults(inputs({ now: at + 8 * 3_600_000, loop, revision, upgrade: owed(revision.checkout, at + 8 * 3_600_000 - 90 * 60_000) })), []);
+});
+
+test('unit:loaded-revision-stale-past-grace-faults — commits behind with no owed restart, or one not attempted within the grace, still faults with the restart remedy', () => {
+  const { revisions, owed } = gy1198;
+  for (const { at, revision } of revisions) {
+    const now = at + 4 * 3_600_000;
+    const raises = (upgrade: ResourceInputs['upgrade']) => {
+      const input = inputs({ now, revision, upgrade });
+      assert.deepEqual(faults(input), ['resource:loaded-revision'], JSON.stringify(upgrade));
+      const item = resourceAttention(readResources(input)).find(entry => entry.subject === 'resource:loaded-revision')!;
+      assert.match(item.next, /graphyard master restart/);
+    };
+    raises(null);
+    raises(undefined);
+    raises(owed(revision.checkout, now - selfUpgradeBoundMs));
+    raises(owed(revision.checkout, null));
+    raises(owed(revision.checkout, now - 1, false)); // a move the upgrade owes no code restart for
+    raises(owed(gy1198.sha('0123456789ab'), now - 1)); // a restart owed onto another revision
+    const reading = readResources(inputs({ now, revision, upgrade: owed(revision.checkout, now - selfUpgradeBoundMs) })).find(entry => entry.id === 'loaded-revision')!;
+    assert.match(reading.detail!, /the self-upgrade owes a restart onto it, last attempted/);
+  }
+});
+
+test('unit:agent-name-holder-with-close-under-way-not-overdue — a holder settled past the bound whose pane the pass first saw unowned within it is a reclaim under way', () => {
+  const { names, readAt, firstSeen, settled } = gy1198;
+  assert.ok(readAt - settled >= nameReclaimBoundMs, 'settled past the bound');
+  for (const seen of [firstSeen, readAt - nameReclaimBoundMs + 1, readAt]) {
+    const input = names({ reclaimSeen: { 'w1V:pHAS': new Date(seen).toISOString() } });
+    assert.deepEqual(faults(input), []);
+    const reading = readResources(input).find(entry => entry.id === 'agent-names:claude-primary')!;
+    assert.equal(reading.overdue, 0);
+    assert.equal(reading.reclaimable, 1);
+    assert.match(reading.detail!, new RegExp(`no live session, reclaim under way \\(seen unowned since ${new Date(seen).toISOString()}\\)`));
+  }
+});
+
+test('unit:agent-name-holder-past-seen-bound-faults — a holder seen unowned for the bound, or holding no pane the pass can close, still faults', () => {
+  const { names, readAt, settled } = gy1198;
+  for (const seen of [readAt - nameReclaimBoundMs, readAt - 3 * nameReclaimBoundMs]) {
+    const input = names({ reclaimSeen: { 'w1V:pHAS': new Date(seen).toISOString() } });
+    assert.deepEqual(faults(input), ['resource:agent-names:claude-primary']);
+    assert.match(readResources(input).find(entry => entry.id === 'agent-names:claude-primary')!.detail!, /not reclaimed within 10 minutes of the reclaim pass first seeing it unowned/);
+  }
+  // No pane the pass can close: the settling clock still judges it, and past the bound it faults.
+  const paneless = { name: 'graphyard-claude-1', agent_status: 'idle', agent: 'claude' } as HerdrAgent;
+  assert.deepEqual(faults(names({ agents: [paneless], reclaimSeen: { 'w1V:pHAS': new Date(readAt).toISOString() } })), ['resource:agent-names:claude-primary']);
+  // A pane the pass has not seen yet keeps the settling clock, so a holder the pass never records still faults.
+  assert.deepEqual(faults(names({ reclaimSeen: {} })), ['resource:agent-names:claude-primary']);
+  assert.deepEqual(faults(names({ reclaimSeen: { 'w1V:other': new Date(readAt).toISOString() } })), ['resource:agent-names:claude-primary']);
+  // A sighting never spares a live lease's loss of guards: a running pane is still never a fault, a fresh settle is still under way.
+  assert.deepEqual(faults(names({ now: settled + 60_000, reclaimSeen: {} })), []);
+  assert.deepEqual(faults(names({ agents: [agent('graphyard-claude-1', 'working', 'w1V:pHAS')], reclaimSeen: { 'w1V:pHAS': new Date(readAt - 3 * nameReclaimBoundMs).toISOString() } })), []);
+});
+
+test('unit:resource-fault-recurrence-reproduces-gy-1196-subjects — the three GY-1196 shapes fault on the base\'s inputs and not on the candidate\'s', async () => {
+  const { revisions, owed, cycleMs, names, readAt, firstSeen, sha } = gy1198;
+  for (const { at, revision } of revisions) {
+    // At the instant and hours on, the restart is owed onto the checkout and retried each cycle.
+    for (const now of [at, at + 4 * 3_600_000]) {
+      const upgrade = owed(revision.checkout, now - cycleMs);
+      // REPRODUCE against base: its reading had no upgrade input, and hours on the move's own bound had passed.
+      if (now !== at) assert.deepEqual(faults(inputs({ now, revision })), ['resource:loaded-revision']);
+      assert.deepEqual(faults(inputs({ now, revision: { ...revision, movedAt: undefined } })), ['resource:loaded-revision'], 'the base before GY-1196 faulted at the instant too');
+      // CANDIDATE: the owed restart under way is no fault.
+      assert.deepEqual(faults(inputs({ now, revision, upgrade })), []);
+      assert.deepEqual(faults(inputs({ now, revision: { ...revision, movedAt: undefined }, upgrade })), []);
+    }
+  }
+  // Instance 3: graphyard-claude-1 at 11m53s of settling, the pass's first sighting 8m53s before the reading.
+  assert.deepEqual(faults(names({})), ['resource:agent-names:claude-primary'], 'REPRODUCE: base judged it on its settling clock');
+  assert.deepEqual(faults(names({ reclaimSeen: { 'w1V:pHAS': new Date(firstSeen).toISOString() } })), []);
+
+  // The inputs reach the readings through master status: the cursor's owed restart and the pass's record.
+  const directory = await temporaryDirectory('gy-1198-status');
+  await mkdir(join(directory, '.graphyard'), { recursive: true });
+  await writeFile(resourceReportFile(directory), JSON.stringify({ version: 1, reports: [], seen: { 'w1V:pHAS': new Date(firstSeen).toISOString() } }), { mode: 0o600 });
+  const { revision } = revisions[1];
+  const now = readAt;
+  const run = (command: string, args: string[]) => command === 'ps' ? `${Math.floor((now + selfUpgradeBoundMs - Date.parse('2026-10-04T11:19:50Z')) / 1000)}\n`
+    : args.includes('rev-parse') ? `${revision.checkout}\n`
+    : args.includes('reflog') ? `${revision.checkout} HEAD@{${Math.floor(Date.parse('2026-10-04T11:46:54Z') / 1000)}}\n${revision.loaded} HEAD@{${Math.floor(Date.parse('2026-10-04T11:06:39Z') / 1000)}}\n`
+    : args.includes('diff') ? 'src/master.ts\n' : `${revision.behind}\n`;
+  const master = { url: 'http://127.0.0.1:9', hostId: 'vishrog', workers: gy1198.names({}).profiles.workers, reviewers: [], producers: [], credentialFile: join(directory, 'graphyard.token') } as unknown as MasterConfig;
+  const cursor = { upgrade: { pending: { from: revision.loaded, to: revision.checkout, code: true } }, actions: { [`upgrade:${sha('release')}`]: { at: new Date(now - cycleMs).toISOString() }, 'upgrade:refused': { at: new Date(now).toISOString() } } };
+  // Looked up at run time, so the base (which has no such reader) fails here as a test case.
+  const owedUpgrade = (masterResources as Partial<typeof masterResources>).owedUpgrade;
+  assert.equal(typeof owedUpgrade, 'function', 'master status reads the owed restart from the cursor');
+  assert.deepEqual(owedUpgrade!(cursor), { from: revision.loaded, to: revision.checkout, code: true, attemptedAt: now - cycleMs }, 'the latest attempt is the upgrade action, not its refusal record');
+  assert.equal(owedUpgrade!({ upgrade: { pending: null }, actions: {} }), null);
+  const loop = { lagMs: 0, stalledAfterMs: 120_000, detail: '', lock: { pid: 1, host: 'vishrog' } };
+  const status = (withCursor: boolean) => resourceStatus(directory, master, { reviews: [], producers: [], agents: [gy1198.pane], work: gy1198.work, loop },
+    { run, now: now + selfUpgradeBoundMs, fetcher: (async () => { throw new Error('no plane'); }) as unknown as typeof fetch, cursor: async () => withCursor ? cursor : { upgrade: { pending: null }, actions: {} } });
+  const subjects = async (withCursor: boolean) => classifyAttention((await status(withCursor)).attention).filter(item => item.faultClass === 'resources').map(item => item.subject).sort();
+  // At now + 30 minutes the cursor's attempt is 42 minutes old: past the grace, it faults; the pane is seen 39 minutes: overdue.
+  assert.deepEqual(await subjects(true), ['resource:agent-names:claude-primary', 'resource:loaded-revision']);
+  cursor.actions[`upgrade:${sha('release')}`].at = new Date(now + selfUpgradeBoundMs - cycleMs).toISOString();
+  await writeFile(resourceReportFile(directory), JSON.stringify({ version: 1, reports: [], seen: { 'w1V:pHAS': new Date(now + selfUpgradeBoundMs - 60_000).toISOString() } }), { mode: 0o600 });
+  assert.deepEqual(await subjects(true), [], 'with the restart retried a cycle ago and the pane freshly seen, nothing is a fault');
+  assert.deepEqual(await subjects(false), ['resource:loaded-revision'], 'with no owed restart on the cursor, the loaded revision faults');
+});
+
+test('unit:resource-fault-recurrence-real-stuck-states-still-raise — an owed restart never retried, a pane seen unowned past the bound and a holder with no pane still fault', () => {
+  const { revisions, owed, names, readAt } = gy1198;
+  const { at, revision } = revisions[1];
+  const now = at + 4 * 3_600_000;
+  assert.deepEqual(faults(inputs({ now, revision, upgrade: owed(revision.checkout, now - selfUpgradeBoundMs - 1) })), ['resource:loaded-revision']);
+  assert.deepEqual(faults(inputs({ now, revision, upgrade: null })), ['resource:loaded-revision']);
+  assert.deepEqual(faults(names({ reclaimSeen: { 'w1V:pHAS': new Date(readAt - nameReclaimBoundMs).toISOString() } })), ['resource:agent-names:claude-primary']);
+  assert.deepEqual(faults(names({ agents: [{ name: 'graphyard-claude-1', agent_status: 'done', agent: 'claude' } as HerdrAgent], reclaimSeen: {} })), ['resource:agent-names:claude-primary']);
+});
+
+/**
+ * GY-1272: seven resources faults in 24 hours. Six were one event — the plane's GitHub App budget
+ * spent at 06:36:13Z on 5 October 2026 — counted once for the resource and once more for each subject
+ * it held (installation, GY-711, GY-1052, GY-1241, GY-1245): the report attributes each held
+ * subject's symptom to the resource, and the loop tracked each under its own subject. The seventh,
+ * loaded-revision at 05:29:45Z, was the self-upgrade's own checkout move read 32 seconds later by a
+ * loop that had loaded 5f2df649, which predates the upgrade grace GY-1196 delivered (9961b70f5).
+ * The budget's own cause, one SHA pair compared under three queries on every base move, is removed
+ * in src/github.ts and replayed in tests/github-rate-budget.test.ts; here the spent budget, should
+ * it recur, is one fault rather than six.
+ */
+const budgetConfig: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/nonexistent/coordinator.token', cliPath: '/nonexistent/graphyard.mjs',
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'host-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
+const spentAt = Date.parse('2026-10-05T06:36:13.546Z'), pausedUntil = '2026-10-05T06:38:26.160Z';
+const budgetSpent = readResources(inputs({ now: spentAt, plane: { writable: true, writeError: null, database: null,
+  github: { used: 5000, bound: 5000, detail: `the GitHub client paused every request until ${pausedUntil} after a rate-limit refusal; the budget is spent until then` } } }));
+const heldByBudget = ['installation', 'GY-711', 'GY-1052', 'GY-1241', 'GY-1245'];
+/** What each held subject showed before the report attributed it: its own stalled read. */
+const budgetSymptom = (subject: string): AttentionItem => ({ subject, text: `${subject}'s observe action is stalled — GitHub requests paused until ${pausedUntil} after a rate/access refusal`, ...agentOwner('master', 'Clear what that reason names') });
+const attributeToBudget = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(status.attentionItems, budgetSpent);
+const budgetReport = () => ({ reported: [...resourceAttention(budgetSpent), ...heldByBudget.map(budgetSymptom)], attribute: attributeToBudget });
+const unloaded = { behind: 24, loaded: '5f2df649755cfc8f637c558a24b28a19d9c5ced7', checkout: '6b0e67da1b29e796415a00f763da73095ef9fe50', movedAt: Date.parse('2026-10-05T05:29:13.000Z') };
+const unloadedReadAt = Date.parse('2026-10-05T05:29:45.052Z');
+
+test('manual:fault-class-resources — GY-1272: one GitHub budget at its bound is one resources fault however many subjects it holds (the six 06:36:13Z instances)', () => {
+  assert.equal(budgetSpent.find(reading => reading.id === 'github-budget')!.state, 'exhausted', 'the recorded reading is the budget at its bound');
+  // The report still names the resource on every subject it holds: master status shows it where it is held.
+  const attributed = attributeAttention([...resourceAttention(budgetSpent), ...heldByBudget.map(budgetSymptom)], budgetSpent);
+  assert.deepEqual(attributed.filter(item => /is held by a registered resource at its bound: GitHub App request budget/.test(item.text)).map(item => item.subject), heldByBudget);
+  // REPRODUCE against base: the loop tracked each held subject as its own resources fault, six for one bound.
+  // CANDIDATE: the spent budget is one fault, on its own subject and in its own words.
+  const state = emptyDaemonState(budgetConfig);
+  const tracked = cycleFaults(state, [], spentAt, { config: budgetConfig, ...budgetReport() }).filter(fault => fault.faultClass === 'resources');
+  assert.deepEqual(tracked.map(fault => [fault.kind, fault.subject]), [['resource-bound', 'resource:github-budget']], `one fault for the spent budget: ${JSON.stringify(tracked.map(fault => fault.subject))}`);
+  assert.match(tracked[0].text, /^GitHub App request budget is at its bound: 5000 requests used of 5000 requests/);
+  assert.equal(trackFaults(state.faults, tracked, iso(spentAt)).length, 1, 'one instance where the loop recorded six');
+  // It stands while the budget stays spent: the next cycle opens nothing.
+  assert.deepEqual(trackFaults(state.faults, cycleFaults(state, [], spentAt + 30_000, { config: budgetConfig, ...budgetReport() }), iso(spentAt + 30_000)), []);
+  // Where only the held subjects were listed, the first stands for the resource: still one.
+  const symptomsOnly = cycleFaults(emptyDaemonState(budgetConfig), [], spentAt, { config: budgetConfig, reported: heldByBudget.map(budgetSymptom), attribute: attributeToBudget });
+  assert.deepEqual(symptomsOnly.filter(fault => fault.faultClass === 'resources').map(fault => fault.subject), ['resource:github-budget']);
+});
+
+test('manual:fault-class-resources — GY-1272: the 05:29:45Z loaded-revision instance is the upgrade\'s own move, which the loaded code read without its move time', () => {
+  // REPRODUCE against the code that filed it (5f2df649, before GY-1196): no move time, every commit behind counted at once.
+  const { movedAt: _, ...untimed } = unloaded;
+  assert.deepEqual(faults(inputs({ now: unloadedReadAt, revision: untimed })), ['resource:loaded-revision']);
+  // CANDIDATE: 32 seconds after the move is the upgrade under way; the bound still holds once it passes.
+  assert.deepEqual(faults(inputs({ now: unloadedReadAt, revision: unloaded })), []);
+  assert.deepEqual(faults(inputs({ now: unloaded.movedAt + selfUpgradeBoundMs, revision: unloaded })), ['resource:loaded-revision']);
 });

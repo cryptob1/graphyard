@@ -49,16 +49,15 @@ function work(overrides: Partial<Work> = {}): Work {
     observation: observation(candidate), blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [], ...overrides } as Work;
 }
 /**
- * Since GY-115 a review request is raised only once the head's mechanical proofs pass, so it no
- * longer stands beside producer requests from reconciliation alone. The retry schedule is the
- * launcher's, whatever raised the request: this fixture holds the review request a proven twin of
- * the head raises beside the producers the unproven head raises, so one tick exercises both.
+ * Under GitHub delivery (GY-1235) the control plane requests a review at once and no producer. The
+ * retry schedule, the role rules and the session prompts are the launcher's, whatever raised the
+ * request: this fixture holds the review request reconciliation raises beside producer requests
+ * standing on the record for the head's two proof groups, so one tick exercises both launchers.
  */
 const requested = (overrides: Partial<Work> = {}) => {
   const item = work(overrides); reconcileAutoDispatch(item, [item], new Date());
-  const proven = ['integration:producer-session-retry', 'unit:autonomous-session-prompts'].map((proof, index) => ({ id: `twin-${index}`, proof, sha: H, baseSha: B, policyRevision: 1, producer: 'independent-runner', trusted: true, result: 'pass' as const, executed: 1, skipped: 0, at }));
-  const twin = work({ ...overrides, evidence: proven }); reconcileAutoDispatch(twin, [twin], new Date());
-  item.autoDispatch!.review = twin.autoDispatch!.review;
+  const producer = (group: 'unit' | 'integration', proofs: string[]) => ({ kind: 'producer' as const, group, proofs, sha: H, baseSha: B, policyRevision: 1, pr: 69, reason: 'a standing producer request', id: `producer-${group}`, requestedAt: at, state: 'requested' as const });
+  item.autoDispatch!.producers = [producer('unit', ['unit:autonomous-session-prompts']), producer('integration', ['integration:producer-session-retry'])];
   return item;
 };
 
@@ -101,7 +100,7 @@ function stubDispatch(items: () => Work[], log: string[], overrides: Partial<Dis
 function daemonEffects(overrides: Partial<DaemonEffects> = {}, log: string[] = []): DaemonEffects {
   return { agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: [], now: iso(0) }), closeSession: pane => { log.push(`close:${pane}`); }, dispatch: async item => { log.push(`dispatch:${item.key}`); },
-    requestProof: item => { log.push(`proof:${item.key}`); }, merge: async item => { log.push(`merge:${item.key}`); return { result: 'merge requested' }; },
+    requestProof: item => { log.push(`proof:${item.key}`); },
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'none', deployed: [], pending: [] }), recordDeployment: async () => ({}), requestSmoke: () => {},
     persist: async () => {}, ...overrides };
 }
@@ -126,7 +125,7 @@ test('integration:producer-session-retry — a failed or expired producer sessio
   const { root, credentials, token, cleanup } = await installed();
   try {
     const credential = await token('producer');
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential }, producerVerify('proof-runner'));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, concurrency: 1 }, producerVerify('proof-runner'));
     const config = await loadMasterConfig(root);
     const item = requested();
     const request = item.autoDispatch!.producers.find(entry => entry.group === 'integration')!;
@@ -234,14 +233,12 @@ test('integration:master-config-reload — a running loop adopts master.json cha
       { config: automatic, changed: [], refused: '.graphyard/master.json changes url, which a running master loop is bound to; restart master run to adopt it', at: iso(3000) },
     ];
     const state = emptyDaemonState(manual);
-    // Cycles are counted at the reload that opens each one, not per snapshot read: the merge step
-    // re-reads the item immediately before the guarded merge (GY-192), so a cycle that merges reads twice.
+    // Cycles are counted at the reload that opens each one, not per snapshot read. GitHub merges
+    // (GY-1235): autoMerge changes no loop step, but the reload still adopts it as a recorded change.
     const effects = daemonEffects({ snapshot: async () => { if (cycles >= 4) process.emit('SIGUSR2' as NodeJS.Signals); return { work: [mergeable], now: iso(0) }; } }, log);
     const result = await runDaemon(manual, state, effects, { intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], log: () => {}, reload: async () => reloads[Math.min(cycles++, reloads.length - 1)] });
     assert.equal(result.cycles.length, 4);
     const actions = Object.values(state.actions);
-    assert.ok(actions.some(action => action.kind === 'escalation' && /Automatic merging is disabled/.test(action.detail)), 'the first cycle ran with autoMerge off');
-    assert.ok(log.includes('merge:GY-69'), 'a later cycle merged under the reloaded autoMerge, without a restart');
     assert.ok(actions.some(action => action.kind === 'config' && /Adopted .*autoMerge/.test(action.detail)));
     assert.equal(actions.filter(action => action.kind === 'escalation' && /bound to; restart master run/.test(action.detail)).length, 1, 'a standing refusal is recorded once');
     assert.equal(state.config!.refused, reloads[3].refused);
@@ -572,7 +569,7 @@ test('unit:autonomous-session-prompts — reviewer, producer and worker sessions
   const { root, token, cleanup } = await installed({ reviewer: true });
   try {
     const credential = await token('producer');
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential }, producerVerify('proof-runner'));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, concurrency: 1 }, producerVerify('proof-runner'));
     const master = await loadMasterConfig(root);
     const item = requested();
     await launchProducer(root, item, item.autoDispatch!.producers[0], master.producers[0], [], new Date().toISOString(), { run: herdr([]) });

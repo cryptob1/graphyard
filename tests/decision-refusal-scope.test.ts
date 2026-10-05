@@ -130,7 +130,7 @@ function effects(work: Work, history: Recorded[], read: 'ok' | 'fails', sent: st
     agents: () => [], herdr: () => ({ agents: [], available: true }),
     credentials: async () => ({}),
     snapshot: async () => ({ work: [work], now: iso(0), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {},
     decide: async (target, action, reason) => {

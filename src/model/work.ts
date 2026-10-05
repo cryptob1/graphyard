@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { BaseRefresh, LandingCheck, MergeRefusal, QueueEjection, QueueEntry, QueueHistoryEntry, RevertedDelivery } from '../merge-queue.js';
+import type { BaseRefresh, BaseRefreshRequest, LandingCheck, MergeRefusal, QueueEjection, QueueEntry, QueueHistoryEntry, RevertedDelivery } from '../merge-queue.js';
 import { criterionSchema, policySchema, resourcesSchema, type Criterion, type Lane } from './policy.js';
 import type { Evidence } from './evidence.js';
 import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
@@ -106,7 +106,7 @@ export interface Observation {
   agentReview?: AgentReview;
   prState?: 'open' | 'closed'; draft?: boolean; prCreatedAt?: string;
   candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number; source?: 'status' }[]; // `status`: a required context's commit status, app 0 (GY-1060)
-  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string; body?: string; blocking?: string[] }[]; // body: a change request's text, read past the review-round cap; blocking: its BLOCKING: findings, read from the whole body (GY-1118)
+  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string; body?: string; blocking?: string[]; mechanical?: number }[]; // body: a change request's text, read past the review-round cap; blocking: its BLOCKING: findings, read from the whole body (GY-1118); mechanical: an approval's nits classified mechanical, which hold the review gate for their bot round (GY-971)
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean; mergeableState?: string; // GitHub's `mergeable_state` as last read (clean, unstable, blocked, behind, dirty, unknown, ...); unset before GY-1231
   // GitHub computed a merge conflict with the base (`pr.mergeable === false`), not merely still computing it;
   // a conflicting head is withheld and sent back (GY-191). `disproved` keeps GitHub's raw reading a test merge disproved (GY-390).
@@ -181,11 +181,12 @@ export interface Work extends Create {
    * under it, or refused to because the merge conflicts. Decided and written by Graphyard
    * alone; see merge-queue.ts for the rule and model/carry.ts for what the refresh carries.
    */
-  baseRefresh?: BaseRefresh | null; mergeRefusal?: MergeRefusal | null; // mergeRefusal: the guarded merge's refusal of this candidate (GY-831, merge-queue.ts)
+  baseRefresh?: BaseRefresh | null; baseRefreshRequest?: BaseRefreshRequest | null; mergeRefusal?: MergeRefusal | null; // baseRefreshRequest: the standing request to merge a repaired base in (GY-528); mergeRefusal: the guarded merge's refusal (GY-831)
   reworkRequested: boolean;
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
   reviewRequest?: ReviewRequest | null;
   reviewFailovers?: ReviewFailover[];
+  /** Recorded before GY-1235 and only cleared since: GitHub merges on every passing gate, with no separate authorization. */
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
   /** What the exact head still needs from a launched reviewer or producer; see model/dispatch.ts. */
   autoDispatch?: AutoDispatch | null;
@@ -200,6 +201,7 @@ export interface Work extends Create {
   agentRequests?: AgentRequest[];
   /** Durable handles for the sessions launched on this item; see model/sessions.ts. */
   sessions?: SessionHandle[];
+  /** Recorded before GY-258 and only cleared since: Graphyard issues no merge executions. */
   mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; committingAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null } | null;
   delivery?: Delivery;
   /** Retired repair lane (GY-406, removed by GY-1234): stored items keep loading; nothing reads these. */

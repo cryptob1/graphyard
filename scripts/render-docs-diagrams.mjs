@@ -123,12 +123,12 @@ function rolesAndAuthority() {
   const human = c.box({ x: 20, y, w: 520, kind: 'human', title: 'Human operator', body: 'admin credential declaring sessionKind: "human". Sets goals, releases backlog work, revises requirements, resolves escalations, attests manual proofs, and approves merges when automatic merging is off. No session below can resolve an escalation or attest a proof.', tags: ['admin', 'sessionKind: human'] });
   c.arrow(human.cx, human.bottom, human.cx, human.bottom + 44, { label: 'human-only decisions', labelSide: 'right' });
   y = human.bottom + 46;
-  const gy = c.box({ x: 20, y, w: 520, kind: 'graphyard', title: 'Graphyard control plane', body: 'Server, Postgres, dashboard, and CLI. Records ownership (lease + epoch), requirements, the candidate (PR, head SHA, base SHA), evidence, gate decisions, and merge authorization. Gates are deterministic; there is no lifecycle-state endpoint and no merge bypass.' });
+  const gy = c.box({ x: 20, y, w: 520, kind: 'graphyard', title: 'Graphyard control plane', body: 'Server, Postgres, dashboard, and CLI. Records ownership (lease + epoch), requirements, the candidate (PR, head SHA, base SHA), evidence, gate decisions. Gates are deterministic; there is no lifecycle-state endpoint and no merge bypass.' });
   y = gy.bottom + 88;
   // Sessions row: Herdr container on the left with the three runtime-hosted roles, independent identities on the right.
   const herdrTop = y;
   const index = c.mark();
-  const master = c.box({ x: 32, y: herdrTop + 40, w: 296, kind: 'agent', title: 'Master (coordinator)', body: 'Durable loop plus an optional visible session. Dispatches ready work, shepherds review, requests the guarded merge.', tags: ['coordinator'] });
+  const master = c.box({ x: 32, y: herdrTop + 40, w: 296, kind: 'agent', title: 'Master (coordinator)', body: 'Durable loop plus an optional visible session. Dispatches ready work, shepherds review, records what GitHub merged.', tags: ['coordinator'] });
   const lead = c.box({ x: 32, y: master.bottom + 10, w: 296, kind: 'agent', title: 'Slice lead', body: 'Rules on plans and failures inside one slice, citing a rule ID. Never implements or merges.', tags: ['slice-lead'] });
   const worker = c.box({ x: 32, y: lead.bottom + 10, w: 296, kind: 'agent', title: 'Worker', body: 'Claims one item, edits only its assigned worktree, opens the PR, submits the exact commit. Stops on lease loss.', tags: ['worker', 'lease · epoch', 'worktree'] });
   c.container(index, { x: 20, y: herdrTop, w: 320, h: worker.bottom + 12 - herdrTop, kind: 'herdr', title: 'Herdr runtime hosts the sessions' });
@@ -143,11 +143,11 @@ function rolesAndAuthority() {
   const github = c.box({ x: 20, y, w: 520, kind: 'external', title: 'GitHub', body: 'Pull request, reviews, CI checks, branch protection, and the observed merge. Graphyard reads these facts; it never trusts a session’s report of them.' });
   c.arrow(worker.x + 100, sessionsBottom + 4, worker.x + 100, y - 4, { label: 'push branch, open PR', labelSide: 'right' });
   c.arrow(reviewer.x + 94, sessionsBottom + 4, reviewer.x + 94, y - 4, { label: 'approve exact head', labelSide: 'left' });
-  y = c.note(github.bottom + 14, 'Graphyard and GitHub: Graphyard observes the PR, reviews, checks, and protection; publishes the required "Graphyard / merge" check; and merges only through the guarded, exact-candidate path. Herdr reports whether a session is alive; it never decides ownership or progression.');
+  y = c.note(github.bottom + 14, 'Graphyard and GitHub: Graphyard observes the PR, reviews, checks, and protection; publishes the required "Graphyard / merge" check; and GitHub merges a head whose gates passed. Herdr reports whether a session is alive; it never decides ownership or progression.');
   c.legend(y + 16);
   return c.render({
     title: 'Who holds which authority in Graphyard',
-    desc: 'The human operator, holding an admin credential declared human, makes the human-only decisions and sends them to the Graphyard control plane. Below the control plane, the Herdr runtime hosts three agent sessions, each with one credential: the master (coordinator), the slice lead (slice-lead), and the worker (worker credential, lease epoch, and assigned worktree). Beside them are the reviewer (a separate GitHub identity with no Graphyard credential), the proof producer (producer credential with a grant), and the optional scoped operator agent. Sessions send authenticated commands to Graphyard; the worker pushes its branch and opens the pull request on GitHub; the reviewer approves the exact head on GitHub. Graphyard observes GitHub facts and merges only through the guarded path.',
+    desc: 'The human operator, holding an admin credential declared human, makes the human-only decisions and sends them to the Graphyard control plane. Below the control plane, the Herdr runtime hosts three agent sessions, each with one credential: the master (coordinator), the slice lead (slice-lead), and the worker (worker credential, lease epoch, and assigned worktree). Beside them are the reviewer (a separate GitHub identity with no Graphyard credential), the proof producer (producer credential with a grant), and the optional scoped operator agent. Sessions send authenticated commands to Graphyard; the worker pushes its branch and opens the pull request on GitHub; the reviewer approves the exact head on GitHub. Graphyard observes GitHub facts; GitHub merges a head whose gates passed.',
   });
 }
 
@@ -168,10 +168,10 @@ function bootstrapVersusNormal() {
   c.arrow(120, human2.bottom, 120, human2.bottom + 44, { label: 'goals', labelSide: 'right' });
   c.arrow(440, human2.bottom, 440, human2.bottom + 44, { label: 'human-only decisions', labelSide: 'left' });
   const op = c.box({ x: 20, y: human2.bottom + 46, w: 236, kind: 'agent', title: 'Operator agent (optional)', body: 'Scoped, opt-in credential provisioned by the administrator. Sends bounded intent: it adds work and requirements, never removes them.', tags: ['operator-agent'] });
-  const gy2 = c.box({ x: 304, y: human2.bottom + 46, w: 236, kind: 'graphyard', title: 'Graphyard control plane', body: 'Ownership, candidates, evidence, gates, merge authorization. Unchanged from phase 1.' });
+  const gy2 = c.box({ x: 304, y: human2.bottom + 46, w: 236, kind: 'graphyard', title: 'Graphyard control plane', body: 'Ownership, candidates, evidence, gates. Unchanged from phase 1.' });
   c.arrow(op.x + op.w + 4, op.y + 34, gy2.x - 4, gy2.y + 34);
   const rowY = Math.max(op.bottom, gy2.bottom) + 50;
-  const master = c.box({ x: 20, y: rowY, w: 165, kind: 'agent', title: 'Master loop', body: 'Dispatches, shepherds, requests guarded merges.', tags: ['coordinator'] });
+  const master = c.box({ x: 20, y: rowY, w: 165, kind: 'agent', title: 'Master loop', body: 'Dispatches, shepherds, records merges.', tags: ['coordinator'] });
   const leads = c.box({ x: 197, y: rowY, w: 165, kind: 'agent', title: 'Slice leads', body: 'Optional. One per slice; rulings cite a rule ID.', tags: ['slice-lead'] });
   const reviewers = c.box({ x: 374, y: rowY, w: 166, kind: 'agent', title: 'Reviewer / proof producers', body: 'Independent of every implementer.', tags: ['producer'] });
   c.arrow(gy2.cx, gy2.bottom + 2, gy2.cx, rowY - 4, { label: 'ready work, gate state', labelSide: 'left' });
@@ -202,7 +202,7 @@ function controlPlaneComponents() {
   const db = c.box({ x: 20, y: engine.bottom + 46, w: 520, kind: 'graphyard', title: 'Postgres', body: 'work_items aggregate, append-only events and receipts, jobs queue, releases and delivery observations. Triggers reject ledger edits.' });
   c.arrow(engine.cx, engine.bottom + 2, engine.cx, db.y - 4, { label: 'aggregate + event in one transaction', labelSide: 'right' });
   // A 60 px gap between these two boxes keeps the "webhook" label clear of both outlines.
-  const recon = c.box({ x: 20, y: db.bottom + 46, w: 230, kind: 'graphyard', title: 'Reconciliation worker', body: 'Two-second tick: expires leases, leases jobs with SKIP LOCKED, applies observations, publishes the required check, runs the guarded merge.' });
+  const recon = c.box({ x: 20, y: db.bottom + 46, w: 230, kind: 'graphyard', title: 'Reconciliation worker', body: 'Two-second tick: expires leases, leases jobs with SKIP LOCKED, applies observations, publishes the required check, hands passing heads to GitHub to merge.' });
   const github = c.box({ x: 310, y: db.bottom + 46, w: 230, kind: 'external', title: 'GitHub', body: 'PR, reviews, checks, branch protection, merge facts. Read by the worker; never trusted from a session.' });
   c.arrow(db.x + 138, db.bottom + 2, db.x + 138, recon.y - 4, { label: 'jobs', labelSide: 'right' });
   c.both(recon.x + recon.w + 4, recon.y + 34, github.x - 4, github.y + 34);
@@ -212,7 +212,7 @@ function controlPlaneComponents() {
   c.legend(noteY + 16);
   return c.render({
     title: 'Graphyard control-plane components',
-    desc: 'Agent sessions in a runtime such as Herdr, the human dashboard, and a proof producer each call the HTTP API and CLI under their own principals. The API hands each mutation to the coordination engine, which runs one advisory-locked transaction that writes the work aggregate and an event to Postgres. A reconciliation worker ticks every two seconds, expires leases, leases integration jobs, exchanges pull request, check, review, and protection facts with GitHub, publishes the required check, and runs the guarded merge. GitHub webhooks wake jobs but are never trusted as workflow truth.',
+    desc: 'Agent sessions in a runtime such as Herdr, the human dashboard, and a proof producer each call the HTTP API and CLI under their own principals. The API hands each mutation to the coordination engine, which runs one advisory-locked transaction that writes the work aggregate and an event to Postgres. A reconciliation worker ticks every two seconds, expires leases, leases integration jobs, exchanges pull request, check, review, and protection facts with GitHub, publishes the required check, and hands passing heads to GitHub to merge. GitHub webhooks wake jobs but are never trusted as workflow truth.',
   });
 }
 

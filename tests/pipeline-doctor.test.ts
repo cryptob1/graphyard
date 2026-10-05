@@ -7,7 +7,10 @@ import { Launcher, type Cycle } from '../src/daemon/cycle.js';
 import { Timings } from '../src/master/timings.js';
 import { approverSessionName } from '../src/master/autonomy.js';
 import { clearDoctorRuns, clearCoveredBlockers, coveredScopePaths, decisionCheckMs, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorReportPayloadSchema, doctorRunsSettled, doctorSanctionedCommands, doctorSessionArgs, doctorSessionTools, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, stopDoctorRuns, unansweredDecisionMs, type DoctorEffects } from '../src/daemon/doctor.js';
-import { doctorTool } from '../src/daemon/doctor.js';
+import { applyDoctorRun, doctorTool } from '../src/daemon/doctor.js';
+import { loopAttention, type LoopLiveness } from '../src/daemon/liveness.js';
+import { silenceBudgetMs, type SilenceEntry } from '../src/daemon/metrics.js';
+import { faultClassOf } from '../src/model/fault-classes.js';
 import { doctorRunRecordSchema, type DoctorRunRecord } from '../src/daemon/state.js';
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
 import graphyardExtension, { doctorSanctionedCommands as piSanctioned, doctorRedirects, doctorSegmentAllowed, graphyardTools as piTools } from '../integrations/pi/index.js';
@@ -44,7 +47,7 @@ function cycle(work: Work[], overrides: Partial<Omit<Cycle, 'effects'>> & { doct
     agents: () => overrides.agents ?? [],
     credentials: async () => ({}),
     snapshot: async () => ({ work, now: observedAt }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: observedAt, reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
   };
@@ -638,4 +641,40 @@ test('unit:loop-applies-routine-remedies — the loop settles a lapsed containme
   for (const entry of many) capped.state.doctor.decisionsCheckedAt[entry.id] = new Date(capped.clock - decisionCheckMs).toISOString();
   await relaunchUnansweredApprovers(capped);
   assert.equal(cappedReads, decisionReadConcurrency, 'the cycle reads only up to its bound; the rest wait for the next cycle');
+});
+
+// GY-1295: the six instances of "Recurring loop faults: 6 in 24 hours", replayed as the loop recorded them.
+test('fault-class-loop — a doctor command its allowlist refused and a decision waiting on its approver are not loop faults', async () => {
+  // Instances 1–5: one doctor run whose read-only attempts the allowlist refused, each adapted around.
+  const refused = [
+    ['node /home/vish/code/graphyard/bin/graphyard.mjs --help | head -60', 'Allowlist refusal (pipe outside the doctor\'s allowlist); not retried — CLI surface was read from src/cli/master.ts instead'],
+    ['node /home/vish/code/graphyard/bin/graphyard.mjs master --help | head -80', 'Allowlist refusal (pipe); not retried'],
+    ['node /home/vish/code/graphyard/bin/graphyard.mjs', 'Allowlist refusal (bare invocation outside the allowlist); not retried'],
+    ['rg -n "command === |case \'|subcommand" /home/vish/code/graphyard/src/cli.ts /home/vish/code/graphyard/src/cli/master.ts /home/vish/code/graphyard/src/cli/master/ --glob *.ts -l', 'Allowlist refusal (glob expansion cannot be checked); not retried — directory listing used instead'],
+    ['sed -n 30,110p /home/vish/code/graphyard/src/cli/master.ts', 'Allowlist refusal (sed is a wrapper outside the allowlist); not retried — rg -n -A/-B context used instead'],
+  ] as const;
+  const actions = refused.map(([command, detail]) => ({ subject: 'installation', command, outcome: 'refused' as const, detail }));
+  const replay = cycle([item()]);
+  const run = doctorRunRecordSchema.parse({ at: observedAt, state: 'running', actions });
+  const effects = { file: async () => { throw new Error('nothing is filed'); }, recordRun: async () => {} } as unknown as DoctorEffects;
+  await applyDoctorRun(replay, effects, run, { findings: [], actions, filed: [] }, () => replay.clock);
+  const recorded = Object.values(replay.state.actions).filter(action => action.detail.startsWith('Was refused'));
+  assert.equal(recorded.length, 5, 'every refusal is still recorded, so master status shows what the doctor could not run');
+  assert.deepEqual(recorded.map(action => action.state), Array(5).fill('done'), 'a refusal the doctor adapted around is not a failed loop action');
+  assert.deepEqual(replay.state.faults.instances.filter(entry => faultClassOf(entry.kind) === 'loop'), [], 'and opens no loop fault instance');
+
+  // Instance 6: GY-949's rework decision waiting on its approver past the silence bound.
+  const liveness = { state: 'running', detail: 'cycling', restart: 'restart' } as unknown as LoopLiveness;
+  const silent = (entry: Pick<SilenceEntry, 'kind' | 'work' | 'detail'>) => {
+    const longest = { key: `${entry.kind}:${entry.work}`, since: observedAt, idleMs: 34 * 60_000, ...entry };
+    return loopAttention({ liveness, silence: { actionable: 7, longestIdleMs: longest.idleMs, longest, budgetMs: silenceBudgetMs, breached: true, lastActionAt: observedAt, subjects: [longest] } })[0];
+  };
+  const approver = silent({ kind: 'decision', work: 'GY-949', detail: 'GY-949\'s rework decision 8b62b40b-0f3d-4cd6-b3c0-3920340a512b is requested and waiting for approver session graphyard-approver-gy-949-8b62b4 to judge it' });
+  assert.match(approver.text, /^Nothing has acted on GY-949's rework decision .+ past the 20-minute bound, while 7 subject\(s\) were actionable/, 'the wait is still raised');
+  assert.deepEqual([approver.kind, approver.faultClass], ['decision-unanswered', 'decision'], 'as the decision fault it is, not the loop failing to cycle');
+  const exhausted = silent({ kind: 'decision', work: 'GY-949', detail: 'GY-949\'s rework decision 8b62b40b is unjudged after 3 approver session(s)' });
+  assert.equal(exhausted.faultClass, 'decision', 'an approver wait past its launches is a decision fault too');
+  // What the loop itself owes stays loop silence.
+  assert.equal(silent({ kind: 'decision', work: 'GY-949', detail: 'GY-949 needs a rework decision requested and approved' }).faultClass, 'loop', 'a decision nobody requested is the loop\'s to request');
+  assert.equal(silent({ kind: 'dispatch', work: 'GY-949', detail: 'GY-949 is claimable and waiting for a worker' }).kind, 'loop-silence');
 });

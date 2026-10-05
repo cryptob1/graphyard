@@ -156,7 +156,7 @@ test('integration:every-launch-registered — the executor, the loop\'s reviewer
       snapshot: async () => ({ work: [withReview(await reload(item.id))], now: new Date().toISOString() }), mutate, agents: () => [],
       workerCredentials: async () => ({}), producerCredentials: async () => ({}), dispatchWorker: async () => { throw new Error('unused'); },
       launchReview: async () => { order.push('start:executor-review'); return { pane: 'wA:p70', agentName: 'review-claude' }; },
-      launchProducer: async () => { throw new Error('unused'); }, merge: async () => ({}), observeDeployment: async () => ({}) as any, recordSession: record,
+      launchProducer: async () => { throw new Error('unused'); }, observeDeployment: async () => ({}) as any, recordSession: record,
     });
     await handlers['request-review']!({ id: 'row', work: item.id, key: item.key, kind: 'request-review', inputs: { kind: 'request-review' } } as any, { host: 'machine-a', executor: 'executor-a' } as any);
     assert.deepEqual(order, [`record:${request.id}:running`, 'start:executor-review', `record:${request.id}:running:wA:p70`], 'registered, started, then its pane written');

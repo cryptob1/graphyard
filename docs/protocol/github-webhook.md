@@ -7,13 +7,15 @@
 
 ## Reads that are not repeated
 
-Commits and exact-SHA compares are cached once (`github_cache`); the base ref is read once per 15 s per replica, protection and rulesets every 5 min or on their events. `pull_request`, `pull_request_review`, `check_run`, `check_suite` and `push` webhooks claim items first; a poll they cover is skipped (`poll skipped: a webhook refreshed this item`).
+Commits and exact-SHA compares are cached once (`github_cache`), and every question about one SHA pair (ancestry, commit list, landing diff, changed files) reads its one first page (`?per_page=100&page=1`), so a base move costs each open candidate one compare; the base ref is read once per 15 s per replica, protection and rulesets every 5 min or on their events. `pull_request`, `pull_request_review`, `check_run`, `check_suite` and `push` webhooks claim items first; a poll they cover is skipped (`poll skipped: a webhook refreshed this item`).
 
 A base push wakes only open items whose files overlap it or whose last `mergeable_state` was not `CLEAN`/`UNSTABLE` (all when the payload names no files; `unit:merge-burst-request-budget`).
 
 ## Prioritized wakes
 
-A merge refused only for a stale observation keeps its queue place: the loop sends `POST /api/work/:id/resync` with `prioritized: true` (at most every two minutes), claimed like a webhook wake. A rework decision waiting on a stale observation sends one such wake and decides from its observation while under 15 minutes old.
+`POST /api/work/:id/resync` with `prioritized: true` is claimed like a webhook wake. A rework decision waiting on a stale observation sends one such wake and decides from the observation it brought in, whatever its age, provided it reads the candidate head and no GitHub pause stands; a decision the candidate moved past is withdrawn. Loop bookkeeping saved meanwhile (sessions, next action, gates, escalations) does not refuse that observation. The loop's wakes add `wait: false`, so the route answers without waiting for a reconcile tick. A rework dispatch refused because its PR branch moved (`Submitted PR branch changed`) releases its claim with a prioritized wake, so the next dispatch starts from the new head.
+
+The loop's decisions step has a budget: two fifths of `run.intervalSeconds`, at least 30 s. Items not reached keep their standing decisions but make no request that cycle; `decisions:deferred` names them (and is superseded once a cycle reaches every item). Both of the step's passes, rework and routine decisions then attestations, start the next cycle with what they put off and always reach their first item, so the oldest deferred item is requested even past the budget.
 
 ## Automatic dispatch records
 

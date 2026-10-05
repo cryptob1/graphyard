@@ -1,6 +1,6 @@
 // Concern: cycle step 2d — every standing blocker re-checked each cycle (GY-1008): environmental causes probed and cleared, a needs-decision blocker's approver launched.
 import type { Work } from '../model.js';
-import { blockerClassMeaning, environmentalBlockerClasses, itemBlockerClass, maxAutomaticClears, needsSomeone, uncoveredBlockerPaths, unrepresentableScope, type BlockerClassification } from '../model/blocker-class.js';
+import { blockerClassMeaning, environmentalBlockerClasses, itemBlockerClass, itemSpecificPlaneError, maxAutomaticClears, needsSomeone, uncoveredBlockerPaths, unrepresentableScope, type BlockerClassification } from '../model/blocker-class.js';
 import { scopeRefusalBlocker } from '../model/scope.js';
 import { approvalWatchSchema, message, type DaemonAction } from './state.js';
 import { handWatchPrefix } from './cycle-decisions.js';
@@ -15,11 +15,19 @@ import type { Cycle } from './cycle.js';
 /** How often an unchanged failing probe is written to the item again, so the board's "last probe" stays current without a revision every cycle. */
 export const blockerRecordMs = 5 * 60_000;
 export const blockerKey = (item: Pick<Work, 'id'>) => `blocker:${item.id}`;
-// Both are per blocker episode: the base tip keyed by the attempt that met the failure, the approver
-// launch by its decision. Each is retired with the blocker, so the cursor holds none past it.
-const baseKey = (item: Pick<Work, 'id' | 'epoch'>, blocker: string) => `blocker:base:${item.id}:${item.epoch}:${blocker.length}:${blocker.slice(0, 40)}`;
+/** How long an environmental probe may keep failing before the loop reports the blocker to the master; it keeps probing, and still clears it if the cause goes. */
+export const blockerEscalateMs = 2 * 60 * 60_000;
+/** How many blocker probes run at once: each child probe may take up to 30 s, so a serial cycle with several stalled ones would hold for minutes. */
+export const blockerProbeConcurrency = 4;
+// All are per blocker episode: keyed by the attempt that met the blocker and its text — the base
+// tip it failed on, when its probe first failed, its report to the master, the decisions it was
+// seen waiting on — and the approver launch by its decision. Each is retired with the blocker, so
+// the cursor holds none past it.
+const episodeKinds = ['base', 'failing', 'escalated', 'awaited', 'approver'] as const;
+const episodeRow = (kind: typeof episodeKinds[number]) => (item: Pick<Work, 'id' | 'epoch'>, blocker: string) => `blocker:${kind}:${item.id}:${item.epoch}:${blocker.length}:${blocker.slice(0, 40)}`;
+const baseKey = episodeRow('base'), failingKey = episodeRow('failing'), escalatedKey = episodeRow('escalated'), awaitedKey = episodeRow('awaited');
 const approverKey = (item: Pick<Work, 'id'>, decision: string) => `blocker:approver:${item.id}:${decision}`;
-const episodeKey = (item: Pick<Work, 'id'>, key: string) => key.startsWith(`blocker:base:${item.id}:`) || key.startsWith(`blocker:approver:${item.id}:`);
+const episodeKey = (item: Pick<Work, 'id'>, key: string) => episodeKinds.some(kind => key.startsWith(`blocker:${kind}:${item.id}:`));
 const episodeKeys = (state: { actions: Record<string, unknown> }, item: Pick<Work, 'id'>) => Object.keys(state.actions).filter(key => episodeKey(item, key));
 
 /**
@@ -49,16 +57,37 @@ export async function blockerStep(cycle: Cycle) {
   const orphaned = Object.keys(state.actions).filter(key => key.startsWith('blocker:') && !open.some(item => key === blockerKey(item) || episodeKey(item, key)));
   if (orphaned.length) { for (const key of orphaned) delete state.actions[key]; await effects.persist(state); }
   const intervalMs = (config.run.intervalSeconds ?? 20) * 1000;
-  // One probe per cause per cycle: eight items blocked on one credential cost one `gh auth status`.
+  // One probe per cause per cycle. The server's health and the base tip are one cause for every
+  // item; a probe run inside a worker's confinement is one per launch — the principal the attempt
+  // ran under, in its worktree, or for the item itself when it registered none here, since the
+  // account and launch are chosen per item — and the path it names.
   const probes = new Map<string, Promise<BlockerProbeResult | null>>();
+  const slots = limiter(blockerProbeConcurrency);
   const probe = (item: Work, classification: BlockerClassification) => {
     const workspace = item.workspaces.find(entry => entry.epoch === item.epoch && entry.host === config.hostId);
-    const memo = `${classification.class}:${classification.class === 'worktree-mismatch' ? item.id : `${workspace?.path ?? ''}:${classification.path ?? ''}`}`;
-    if (!probes.has(memo)) probes.set(memo, effects.probeBlocker ? effects.probeBlocker(item, classification) : Promise.resolve(null));
+    const launch = `${item.lease?.owner ?? item.lastAssignment?.owner ?? ''}:${workspace?.path ?? `item:${item.id}`}`;
+    const memo = classification.class === 'control-plane-error' || classification.class === 'outside-scope-test-failure' ? classification.class
+      : classification.class === 'worktree-mismatch' ? `${classification.class}:${item.id}` : `${classification.class}:${launch}:${classification.path ?? ''}`;
+    if (!probes.has(memo)) {
+      const running = effects.probeBlocker ? slots(() => effects.probeBlocker!(item, classification)) : Promise.resolve(null);
+      // Started ahead of the item's turn: a failure is met when the item awaits it, inside its isolation.
+      running.catch(() => {});
+      probes.set(memo, running);
+    }
     return probes.get(memo)!;
   };
   const note = async (key: string, item: Work, outcome: DaemonAction['state'], detail: string, attempts = 1) =>
     record(state, key, { kind: 'blocker', work: item.key, principal: null, epoch: item.epoch, state: outcome, detail: boundDetail(detail), attempts, cycle: state.cycle }, now(), effects.persist);
+
+  // Every environmental probe this cycle will await starts now, a bounded number at a time, so
+  // independent probes in distinct worktrees run side by side rather than one after another.
+  for (const item of open) {
+    const classification = itemBlockerClass(item);
+    if (!classification || !item.blocker || !environmentalBlockerClasses.includes(classification.class)) continue;
+    if ((item.blockerProbe?.clears ?? 0) >= maxAutomaticClears || item.blocker.startsWith(scopeRefusalBlocker)) continue;
+    if (classification.class === 'control-plane-error' && itemSpecificPlaneError(item.blocker)) continue;
+    void probe(item, classification);
+  }
 
   for (const item of open) await isolate('blocker', item, item.key, async () => {
     const classification = itemBlockerClass(item);
@@ -85,15 +114,31 @@ export async function blockerStep(cycle: Cycle) {
       return;
     }
 
+    // A server error on the item's own request (HTTP 500) can stand while the server reports
+    // healthy, so health cannot show it gone: the master rechecks the failed operation.
+    if (classification.class === 'control-plane-error' && itemSpecificPlaneError(blocker)) {
+      await handOver(`${item.key} is blocked on a server error its own request met, which the server's health cannot show fixed, so it needs the master to recheck that operation: ${blocker}`);
+      return;
+    }
+
     let result: BlockerProbeResult | null = null;
     if (environmentalBlockerClasses.includes(classification.class)) {
       result = await probe(item, classification);
       if (!result) return;
-      // The base tip the failure was met on is the first one the loop read; a later tip is a new base.
+      // A cause that keeps failing its probe is reported to the master once it has failed for
+      // `blockerEscalateMs`; the loop keeps probing it, and clears it if the cause goes.
+      if (!result.passed) {
+        const since = state.actions[failingKey(item, blocker)]?.detail;
+        if (!since) await note(failingKey(item, blocker), item, 'done', new Date(clock).toISOString());
+        else if (clock - Date.parse(since) >= blockerEscalateMs && !state.actions[escalatedKey(item, blocker)])
+          performed.push(await note(escalatedKey(item, blocker), item, 'done', `${item.key} is blocked (${classification.class}) and its probe has failed since ${since}, so it is reported to the master; the loop keeps probing: ${result.probe} fails (${result.detail}); it is: ${blocker}`));
+      } else if (state.actions[failingKey(item, blocker)]) delete state.actions[failingKey(item, blocker)];
+      // The base the failure was met on is the one the attempt's branch was built on when its
+      // worktree is here, else the first tip the loop read; a later tip is a new base.
       if (classification.class === 'outside-scope-test-failure' && result.baseTip) {
-        const seen = state.actions[baseKey(item, blocker)];
-        if (!seen) await note(baseKey(item, blocker), item, 'done', result.baseTip);
-        else if (seen.detail !== result.baseTip) result = { ...result, passed: true, detail: `the base tip moved from ${seen.detail.slice(0, 12)} to ${result.baseTip.slice(0, 12)}` };
+        const seen = state.actions[baseKey(item, blocker)]?.detail ?? result.failedOn;
+        if (!state.actions[baseKey(item, blocker)]) await note(baseKey(item, blocker), item, 'done', seen ?? result.baseTip);
+        if (seen && seen !== result.baseTip) result = { ...result, passed: true, detail: `the base tip moved from ${seen.slice(0, 12)} to ${result.baseTip.slice(0, 12)}` };
       }
     } else if (classification.class === 'planned-file-scope') {
       const missing = uncoveredBlockerPaths(item, classification);
@@ -101,10 +146,24 @@ export async function blockerStep(cycle: Cycle) {
         : { probe: 'plannedFiles cover the named files', passed: true, detail: `plannedFiles now cover ${namePaths(classification.paths)}` };
     } else if (classification.class === 'needs-decision') {
       if (!effects.decisions) return;
-      const requested = (await effects.decisions(item)).decisions.filter(decision => decision.state === 'requested');
+      const decisions = (await effects.decisions(item)).decisions;
+      const requested = decisions.filter(decision => decision.state === 'requested');
       const decision = requested.find(entry => entry.id === classification.decision) ?? requested[0];
-      if (!decision) result = { probe: 'no decision on the item stands requested', passed: true, detail: classification.decision ? `decision ${classification.decision} was judged` : 'every decision on the item was judged' };
-      else {
+      // The decisions this blocker was seen waiting on: only one of them being judged clears it.
+      const awaitedRow = state.actions[awaitedKey(item, blocker)];
+      const awaited = new Set([...(awaitedRow?.detail ? awaitedRow.detail.split(',') : []), ...requested.map(entry => entry.id)]);
+      if (requested.length && awaited.size !== (awaitedRow?.detail ? awaitedRow.detail.split(',').length : 0)) await note(awaitedKey(item, blocker), item, 'done', [...awaited].join(','));
+      if (!decision) {
+        // Judged means a decision this blocker names, or one it was seen waiting on, now stands
+        // judged. Prose that reads like a decision wait ("waiting for approval") on an item with
+        // no such decision is not one the loop can act on: the master reads it.
+        const judged = classification.decision ? decisions.some(entry => entry.id === classification.decision) : awaited.size > 0;
+        if (!judged) {
+          await handOver(`${item.key} is blocked on what reads as a decision wait, but ${classification.decision ? `no decision ${classification.decision} exists on it` : 'it names no decision and none on it was requested'}, so it needs the master: ${blocker}`);
+          return;
+        }
+        result = { probe: 'no decision on the item stands requested', passed: true, detail: classification.decision ? `decision ${classification.decision} was judged` : `every decision it waited on (${[...awaited].join(', ')}) was judged` };
+      } else {
         result = { probe: 'no decision on the item stands requested', passed: false, detail: `decision ${decision.id} (${decision.action}) waits on its approver` };
         const watched = Object.values(state.approvals).some(watch => watch.decision === decision.id && !watch.settledAt) || launcher.busy(`launch:approver:${decision.id}`)
           || (await effects.approverLaunches?.().catch(() => []) ?? []).some(entry => entry.decision === decision.id);
@@ -169,4 +228,14 @@ async function endCredentialBlockedSession(cycle: Cycle, item: Work) {
   await workerHandle(cycle, item, profile, epoch, pane ?? 'none', `closed as failed: credential-blocked attempt on epoch ${epoch}`, true);
   performed.push(await record(state, key, { kind: 'session', work: item.key, principal: owner, epoch, state: 'done', attempts: 1, cycle: state.cycle,
     detail: boundDetail(`${profile.agentName} on ${item.key} recorded a GitHub credential failure, which ended epoch ${epoch} with its work kept; ${closed}, and ${item.key} is launched again with a freshly minted push credential once its blocker clears`) }, now(), effects.persist));
+}
+
+/** Runs at most `size` of the tasks handed to it at once, the rest as slots free, each answering its own task's promise. */
+function limiter(size: number) {
+  let active = 0;
+  const waiting: (() => void)[] = [];
+  return <T>(task: () => Promise<T>): Promise<T> => new Promise<T>((resolve, reject) => {
+    const start = () => { active++; Promise.resolve().then(task).then(resolve, reject).finally(() => { active--; waiting.shift()?.(); }); };
+    if (active < size) start(); else waiting.push(start);
+  });
 }

@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { baseRefreshNeeded, pendingBaseRefresh, predictQueue, queuePlacement, queueRef, queueSequencingReason } from '../src/merge-queue.js';
+import { baseRefreshNeeded, pendingBaseRefresh, queueSequencingReason } from '../src/merge-queue.js';
 import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
 import { refusalAction } from '../src/model/next-action.js';
 import { checkStates, prSteps } from '../src/model/pr-steps.js';
 
-// GY-292: a merge moves main under every open candidate. Only the merge-queue head (through its
-// speculative tip) and a candidate that conflicts with the new base are brought onto it; the rest
-// keep their head, CI, review, proofs and stage. Each test is named for the proof it produces.
+// GY-292: a merge moves main under every open candidate. Only a candidate that conflicts with the
+// new base is brought onto it; the rest keep their head, CI, review, proofs and stage. Each test is
+// named for the proof it produces.
 
 const ciAppIds = [15368];
 const commit = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
@@ -41,13 +41,6 @@ function work(key: string, head: string, overrides: Partial<Observation> = {}): 
   item.evidence = [evidence(item)];
   return item;
 }
-/** A queued entry whose speculative tip Graphyard published on `main`: the candidate is the tip. */
-function queuedTip(item: Work, sequence: number) {
-  item.queue = { sequence, enqueuedAt: now.toISOString(), policyRevision: item.policyRevision,
-    speculation: { ref: queueRef(item.key), tip: item.candidate!.sha, base: main, baseTree: commit('b0'), predecessors: [], policyRevision: item.policyRevision, publishedAt: now.toISOString() } };
-  item.queueSequence = sequence;
-  return item;
-}
 /** The evaluation the engine stores after every observation. */
 function evaluated(item: Work, all: Work[]): Work {
   const result = evaluate(item, all, now, ciAppIds);
@@ -55,81 +48,60 @@ function evaluated(item: Work, all: Work[]): Work {
 }
 const gate = (item: Work, name: string) => item.gates.find(entry => entry.name === name)!;
 
-test('unit:refresh-only-head-and-conflicts — main moving under three candidates rebuilds only the queue head and the conflicting one; the clean one keeps its head, CI, review, proofs and stage', () => {
-  // Before the merge: the queue head validated its tip; two others are in review on main.
-  let head = queuedTip(work('GY-1', commit('c1')), 1);
+// GitHub delivery is the only delivery (GY-1235): no candidate enters a Graphyard merge queue, so
+// nothing is republished as a speculative tip; GitHub merges each passing head on its own protection.
+test('unit:refresh-only-head-and-conflicts — main moving under three candidates rebuilds only the conflicting one; the clean ones keep their head, CI, review, proofs and stage', () => {
+  // Before the merge: one candidate passes every gate; two others are in review on main.
+  let ready = work('GY-1', commit('c1'));
   let clean = work('GY-2', commit('c2'), { reviews: [] });
   let conflicting = work('GY-3', commit('c3'), { reviews: [] });
-  let all = [head, clean, conflicting];
-  [head, clean, conflicting] = all.map(item => evaluated(item, all));
-  all = [head, clean, conflicting];
-  assert.deepEqual([head.stage, clean.stage, conflicting.stage], ['merge', 'review', 'review']);
-  const before = { clean: { candidate: { ...clean.candidate! }, gates: clean.gates.map(entry => [entry.name, entry.passed]), evidence: clean.evidence.map(entry => entry.id) } };
+  let all = [ready, clean, conflicting];
+  [ready, clean, conflicting] = all.map(item => evaluated(item, all));
+  all = [ready, clean, conflicting];
+  assert.deepEqual([ready.stage, clean.stage, conflicting.stage], ['merge', 'review', 'review']);
+  assert.equal(ready.queue, null, 'no candidate is placed in a Graphyard merge queue');
+  const snapshot = (item: Work) => ({ candidate: { ...item.candidate! }, gates: item.gates.map(entry => [entry.name, entry.passed]), evidence: item.evidence.map(entry => entry.id), stage: item.stage });
+  const before = { ready: snapshot(ready), clean: snapshot(clean) };
 
   // Another item merges: main moves to `moved`. Every candidate still holds the base it was built
-  // on and is behind the new tip; GitHub reports the second clean and the third conflicting.
+  // on and is behind the new tip; GitHub reports two clean and the third conflicting.
   const behind = { baseTip: moved, baseTree: commit('b1'), baseTipContained: false };
-  head = { ...head, observation: { ...head.observation!, ...behind } };
+  ready = { ...ready, observation: { ...ready.observation!, ...behind } };
   clean = { ...clean, observation: { ...clean.observation!, ...behind } };
   conflicting = { ...conflicting, observation: { ...conflicting.observation!, ...behind, mergeable: false, conflicting: true } };
-  all = [head, clean, conflicting];
-  [head, clean, conflicting] = all.map(item => evaluated(item, all));
-  all = [head, clean, conflicting];
+  all = [ready, clean, conflicting];
+  [ready, clean, conflicting] = all.map(item => evaluated(item, all));
+  all = [ready, clean, conflicting];
 
-  // The queue head: its tip is republished onto the new main just before it merges.
-  assert.equal(baseRefreshNeeded(head), null, 'the queue refreshes its head through the speculative tip');
-  const placement = queuePlacement(head, all, now.getTime())!;
-  assert.deepEqual([placement.position, placement.predictedBase, placement.current, placement.publishable], [0, moved, false, true]);
   // The conflicting one: the control plane tries the merge, which records the conflict for its worker.
   assert.deepEqual(baseRefreshNeeded(conflicting), { head: commit('c3'), boundBase: main, baseTip: moved });
-  // The clean one: nothing is rebuilt, and nothing about it changes.
-  assert.equal(baseRefreshNeeded(clean), null);
-  assert.equal(pendingBaseRefresh(clean), null);
-  assert.equal(queuePlacement(clean, all, now.getTime()), null);
-  assert.deepEqual(clean.candidate, before.clean.candidate, 'the clean candidate keeps its head and bound base');
-  assert.deepEqual(clean.gates.map(entry => [entry.name, entry.passed]), before.clean.gates, 'its CI, review and proofs stand');
-  assert.deepEqual(clean.evidence.map(entry => entry.id), before.clean.evidence);
-  assert.equal(clean.stage, 'review', 'the clean candidate stays in its stage');
-
-  const rebuilt = all.filter(item => baseRefreshNeeded(item) || predictQueue(all, now.getTime()).find(entry => entry.id === item.id)?.publishable).map(item => item.key);
-  assert.deepEqual(rebuilt, ['GY-1', 'GY-3'], 'only the queue head and the conflicting candidate are refreshed');
+  // The clean ones: nothing is rebuilt, and nothing about them changes.
+  for (const [item, recorded] of [[ready, before.ready], [clean, before.clean]] as const) {
+    assert.equal(baseRefreshNeeded(item), null, `${item.key}: no refresh`);
+    assert.equal(pendingBaseRefresh(item), null);
+    assert.deepEqual(snapshot(item), recorded, `${item.key} keeps its head, bound base, CI, review, proofs and stage`);
+  }
+  const rebuilt = all.filter(item => baseRefreshNeeded(item)).map(item => item.key);
+  assert.deepEqual(rebuilt, ['GY-3'], 'only the conflicting candidate is refreshed');
 
   // Mergeability GitHub has not computed yet is not a conflict: the candidate waits for the next reading.
   const unknown = { ...clean, observation: { ...clean.observation!, mergeable: false, conflicting: undefined } };
   assert.equal(baseRefreshNeeded(unknown), null);
 });
 
-test('unit:queue-validation-is-merge-substate — the queue head running CI on its combined tip is at merge, validating, never back at test', () => {
-  // The queue head's tip was just published on the moved main: CI on it is still running.
-  const head = queuedTip(work('GY-1', commit('c1'), { checks: [{ name: 'test', result: 'in_progress', appId: 15368 }] }), 1);
-  const validating = evaluated(head, [head]);
-  assert.equal(queuePlacement(validating, [validating], now.getTime())!.position, 0);
-  assert.equal(validating.stage, 'merge', 'combined-tip CI is a merge-step substate');
-  assert.equal(gate(validating, 'test').passed, true, 'the test gate judges the candidate\'s own change');
-  const tip = commit('c1').slice(0, 12);
-  const reason = `Merge queue is validating speculative tip ${tip}: Required CI check test has not passed on the current candidate`;
-  assert.deepEqual(gate(validating, 'merge').reasons, [reason]);
-  assert.equal(queueSequencingReason(reason), true);
-  assert.equal(refusalAction(validating, 'merge', reason), 'merge', 'the queue making progress, not a refusal anyone acts on');
+test('unit:queue-validation-is-merge-substate — a candidate running CI on its own head is at test, reaches merge once CI passes, and returns to test when it fails; no queue validation substate remains', () => {
+  const running = evaluated(work('GY-1', commit('c1'), { checks: [{ name: 'test', result: 'in_progress', appId: 15368 }] }), []);
+  assert.equal(running.stage, 'test', 'stage comes from the candidate\'s own gates');
+  assert.equal(running.queue, null);
+  assert.equal(gate(running, 'merge').reasons.some(reason => queueSequencingReason(reason)), false, 'no queue sequencing reason is ever given');
+  assert.equal(prSteps(running, now.getTime()).current, 'test');
+  assert.deepEqual(checkStates(running, ciAppIds), [{ name: 'test', state: 'running' }]);
 
-  // The dashboard shows it at Merge, validating, with the tip's checks.
-  const steps = prSteps(validating, now.getTime());
-  assert.equal(steps.current, 'merge');
-  assert.equal(steps.steps.find(step => step.id === 'test')!.state, 'done');
-  assert.equal(steps.label, 'Merging · validating the combined tip · 0 of 1 checks done');
-  assert.deepEqual(checkStates(validating, ciAppIds), [{ name: 'test', state: 'running' }]);
-
-  // CI passing on the tip leaves nothing to validate.
-  const passed = evaluated({ ...head, observation: { ...head.observation!, checks: [{ name: 'test', result: 'success', appId: 15368 }] } }, [head]);
+  const passed = evaluated(work('GY-1', commit('c1')), []);
   assert.deepEqual([passed.stage, gate(passed, 'merge').passed, gate(passed, 'merge').reasons], ['merge', true, []]);
 
-  // CI failing on the tip is an adverse conclusion: the entry is ejected and the test gate refuses as ever.
-  const failed = evaluated({ ...head, observation: { ...head.observation!, checks: [{ name: 'test', result: 'failure', appId: 15368 }] } }, [head]);
-  assert.equal(failed.queue, null);
+  const failed = evaluated(work('GY-1', commit('c1'), { checks: [{ name: 'test', result: 'failure', appId: 15368 }] }), []);
   assert.equal(failed.stage, 'test');
   assert.deepEqual(gate(failed, 'test').reasons, ['Required CI check test has not passed on the current candidate']);
-
-  // A candidate outside the queue running CI on its own head is at test: stage comes from its own gates.
-  const own = evaluated(work('GY-2', commit('c2'), { checks: [{ name: 'test', result: 'in_progress', appId: 15368 }] }), []);
-  assert.equal(own.stage, 'test');
+  assert.equal(refusalAction(failed, 'test', gate(failed, 'test').reasons[0]) === 'merge', false, 'a failing check is a refusal someone acts on');
 });

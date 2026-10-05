@@ -2,14 +2,12 @@
 import { type Work, productionLatencyMs, postDeployMs, deliveryState, currentEvidence, deploySmokeRequired } from '../model.js';
 import { routableScopeRequest, scopeDecisionSample, scopeDecisionBudgetMs, scopeBlockedBudgetMs, redecidableScopeRefusal } from '../model/scope.js';
 import { pendingBaseRefresh } from '../merge-queue.js';
-import { deliveredByGitHub } from '../model/delivery-mode.js';
-import { unexercisedFindings } from '../model/mechanical-proofs.js';
 import { standingCapacity } from '../model/capacity.js';
 import { stalledItems } from '../model/action-account.js';
 import { type MasterConfig, type ContainmentAssessment, assertDispatchable, containmentPhase } from '../master.js';
 import { type DaemonAction, type DaemonActionKind, type DaemonState, type CycleMetrics, type ItemClock, itemClockSchema, type LatencySample, latencySampleSchema, type ScopeMeasurement } from './state.js';
 import { decisionKey } from './reconcile.js';
-import { boundDetail, mergeableCandidate, namePaths, routineDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { boundDetail, mergeableCandidate, namePaths, routineDecision, withheldDecision } from './decisions.js';
 
 export function percentiles(values: number[]) {
   const sorted = [...values].sort((a, b) => a - b);
@@ -101,9 +99,17 @@ export function missingProofs(work: Work, now: Date) {
  * longest such wait is what `master status` reports and what the 20-minute bound is judged on.
  */
 export const silenceBudgetMs = 1_200_000;
+/** The fixed wording of a decision subject that waits on an approver session, which `approverWait` reads back. */
+export const approverWaitWording = { waiting: 'is requested and waiting for approver session', unjudged: 'is unjudged after' } as const;
+/**
+ * A silent subject that is a decision with an approver (GY-1295): the wait is the approver's to end, a
+ * decision fault, not the loop failing to cycle. Counted as loop silence, it filed loop items for it.
+ */
+export const approverWait = (entry: Pick<SilenceEntry, 'kind' | 'detail'>) => entry.kind === 'decision'
+  && (entry.detail.includes(approverWaitWording.waiting) || entry.detail.includes(approverWaitWording.unjudged));
 export interface ActionableSubject { key: string; kind: DaemonActionKind; work: string | null; detail: string }
 export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run'>, work: Work[], now: number,
-  context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals'] } = {}): ActionableSubject[] {
+  context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals']; baseFailed?: Map<string, Set<string>> } = {}): ActionableSubject[] {
   const subjects: ActionableSubject[] = [];
   // The silence record keeps each detail to 500 characters; a refusal or proof list quoted here is cut to fit.
   const add = (kind: DaemonActionKind, item: Work | null, detail: string) => subjects.push({ key: `${kind}:${item?.key ?? 'pipeline'}`, kind, work: item?.key ?? null, detail: boundDetail(detail, 500) });
@@ -117,12 +123,12 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     // It stays a subject until it is applied. A decision sitting with an approver is the pipeline
     // waiting on its own agent, and counting that as nothing to act on is how a dead approver used
     // to make an item disappear from the one measure built to notice it.
-    const decision = routineDecision(item, config, now, context.assessments?.[item.id]);
+    const decision = routineDecision(item, config, now, context.assessments?.[item.id], context.baseFailed?.get(item.id));
     const watch = decision ? context.approvals?.[decisionKey(item, decision)] : undefined;
     // A decision waiting for an approver account to reset is the one capacity line, not a stall per item (GY-182).
     if (decision && !watch?.settledAt && !(watch && standingCapacity(item, 'approver').length)) add('decision', item, !watch ? `${item.key} needs a ${decision.action} decision requested and approved`
-      : watch.exhaustedAt ? `${item.key}'s ${decision.action} decision ${watch.decision} is unjudged after ${watch.launches} approver session(s)`
-        : `${item.key}'s ${decision.action} decision ${watch.decision} is requested and waiting for approver session ${watch.agentName ?? '(not launched)'} to judge it`);
+      : watch.exhaustedAt ? `${item.key}'s ${decision.action} decision ${watch.decision} ${approverWaitWording.unjudged} ${watch.launches} approver session(s)`
+        : `${item.key}'s ${decision.action} decision ${watch.decision} ${approverWaitWording.waiting} ${watch.agentName ?? '(not launched)'} to judge it`);
     const withheld = decision ? null : withheldDecision(item, config, now, context.assessments?.[item.id]);
     if (withheld) add('decision', item, withheld.reason.slice(0, 500));
     if (item.stage === 'done') continue;
@@ -138,26 +144,10 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     // silence it filed a loop fault for a wait no cycle could end (GY-393).
     if (item.containmentQuarantine && containmentPhase(item, now)?.state === 'lapsed' && (!context.assessments || context.assessments[item.id]?.settleable))
       add('settle', item, `${item.key} holds a lapsed containment quarantine from epoch ${item.containmentQuarantine.epoch}`);
-    if (config.autoMerge && mergeableCandidate(item)) add('merge', item, `${item.key} is mergeable: every gate passes for ${item.candidate!.sha.slice(0, 12)}`);
     if (pendingBaseRefresh(item)) add('refresh', item, `${item.key} conflicts with the moved base and is waiting for the control plane to try bringing its candidate onto it`);
-    // The same heads step 5 shepherds: one a verdict stands against is going back to a worker,
-    // so nothing asks for its proofs and nothing is waiting on them.
-    // A head the build gate refuses is owed no proof: the control plane requests producers only past
-    // that gate and cancels them when it closes, so the wait is the build's, not the loop's (GY-402).
-    // A proof a producer request pending for the head names is that request's to answer, bounded by
-    // the producer timeout like every obligation the control plane holds (GY-404).
-    // A proof recorded on the head as not exercising its criterion is owed no producer either: no
-    // path re-produces a proof on an unchanged head, so it waits on the rework decision that sends
-    // the head back — the routine decision above counts that wait as its own subject (GY-1092, GY-727).
-    // GY-1266: so is any head the routine decision sends back to a worker, and under GitHub delivery
-    // no head is owed a proof at all — CI runs the unit tests, UAT the end-to-end ones, and the control
-    // plane requests no producer — so a missing proof there was a silence no cycle could end.
-    if (item.submission && item.candidate && !item.reworkRequested && !standingVerdict(item) && decision?.action !== 'rework' && !deliveredByGitHub(item) && config.run.proofWorkflow && buildPasses(item)) {
-      const owned = producerOwnedProofs(item, now, (config.run.producerTimeoutMinutes ?? 120) * 60_000);
-      for (const finding of unexercisedFindings(item)) owned.add(finding.proof);
-      const outstanding = missingProofs(item, new Date(now)).filter(proof => !proof.startsWith('manual:') && !owned.has(proof));
-      if (outstanding.length) add('proof', item, `${item.key} is missing trusted evidence for ${outstanding.join(', ')}`);
-    }
+    // No head is owed a proof the loop asks for: CI runs the unit tests, UAT the end-to-end ones,
+    // and the control plane requests no producer (GY-1266, GY-1235). A mergeable candidate is not
+    // the loop's either: GitHub merges it on its branch protection.
   }
   for (const item of work.filter(entry => entry.stage === 'done' && entry.delivery && deploySmokeRequired(entry.policy))) {
     const outcome = deliveryState(item);
@@ -165,15 +155,6 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     else if (outcome === 'awaiting-smoke') add('smoke', item, `${item.key} is deployed at ${item.delivery!.deployment.sha.slice(0, 12)} and waiting for its smoke proof`);
   }
   return subjects;
-}
-
-const buildPasses = (item: Work) => item.gates.find(gate => gate.name === 'build')?.passed !== false;
-/** The proofs a producer request pending for the item's head still answers for, within the producer timeout. */
-function producerOwnedProofs(item: Work, now: number, timeoutMs: number) {
-  const head = item.candidate?.sha;
-  return new Set((item.autoDispatch?.producers ?? [])
-    .filter(request => request.state === 'requested' && request.sha === head && Date.parse(request.requestedAt) + timeoutMs > now)
-    .flatMap(request => request.proofs ?? []));
 }
 
 export interface SilenceEntry { key: string; kind: string; work: string | null; detail: string; since: string; idleMs: number }

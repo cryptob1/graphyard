@@ -40,7 +40,7 @@ The filter cannot select keyring items: keep other secrets out of that keyring, 
 - Workers never hold `admin`/`coordinator`/`producer` tokens; No AI principal can hold `admin`.
 - Proof authority is a live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs.
 - Operator agents add requirements, never remove.
-- Only guarded merges: no bypass, no lifecycle-state endpoint.
+- GitHub merges on passing gates: no bypass, no lifecycle-state endpoint.
 - Non-master sessions run in their own checkout, never the coordinator's.
 - Coordination-lock writes read whole only their item, overlaps and dependencies: under 500 ms at 1,000 items; a worker's heartbeat takes only its item's lock.
 - History is append-only; only routine rows past retention are [compacted](operations-reference.md#storage-retention), each batch audited.

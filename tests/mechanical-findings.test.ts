@@ -5,7 +5,11 @@ import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { appliedMechanicalRework, classifyFinding, judgeBotCommit, mechanicalFixPlan, mechanicalMergeHold, mechanicalRoundStartMs, parseClassifiedFindings, planMechanicalFix, readMechanicalFixRequests, readMechanicalFixState, verifyBotCommit, type BotCommitObservation, type MechanicalFixPlan } from '../src/mechanical-findings.js';
+import { appliedMechanicalRework, botCommitSubject, botCommitSubjectPattern, classifyFinding, judgeBotCommit, mechanicalFixPlan, mechanicalRoundStartMs, parseClassifiedFindings, planMechanicalFix, readMechanicalFixRequests, verifyBotCommit, type BotCommitObservation, type MechanicalFixPlan } from '../src/mechanical-findings.js';
+import { evaluate } from '../src/model/gates.js';
+import { refusalAction } from '../src/model/refusal-mapping.js';
+import { gateRefusalCatalogue } from '../src/model/refusal-catalogue.js';
+import { GitHub } from '../src/github.js';
 import { loadMasterConfig, saveWorkerProfile, setupMaster } from '../src/master.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewPrompt, reviewRetryPrompt, saveReviewerProfile, type ReviewRecord } from '../src/reviewer.js';
 import { neededDecision } from '../src/daemon/decisions.js';
@@ -95,6 +99,31 @@ const verdictOf = (reviewId: number, state: string) => () => ({ state, reviewer,
 const launch = (root: string, work: Work, run: ReturnType<typeof herdr>['run'], commit?: { parents: string[]; files: string[] }) =>
   launchReview(root, work, 'claude-reviewer', [], new Date().toISOString(), { run, mint, threads: async () => [], ...(commit ? { observeCommit: async () => ({ ...commit, at: '2026-09-30T12:00:00Z' }) } : {}) });
 const recordOf = (records: ReviewRecord[], sha: string) => records.find(record => record.sha === sha)!;
+/** An approval of `sha` as the observation records it: `mechanical` counts its nits classified mechanical (none on a bot commit's head). */
+const approvalOf = (sha: string, id: number, mechanical?: number, submittedAt = new Date().toISOString()) => ({ reviewer, sha, state: 'APPROVED', id, submittedAt, ...(mechanical ? { mechanical } : {}) });
+/** The review gate's refusals for the item at `now`: what GitHub's merge of the head waits on. */
+const reviewRefusals = (work: Work, now = Date.now()) => evaluate(work, [work], new Date(now), []).gates.find(gate => gate.name === 'review')!.reasons;
+
+/** GitHub's observation of PR #7 at `head`, approved by review 901 with `body`; the head commit's message is `message`. */
+async function observeApproval(head: string, body: string, message: string) {
+  const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used-in-adapter-test' });
+  const pr = { number: 7, head: { sha: head, ref: 'graphyard/gy-7-1', repo: { full_name: 'owner/project' } }, base: { sha: B, ref: 'main', repo: { full_name: 'owner/project' } }, user: { login: 'author', id: 1 }, merged: false, mergeable: true, draft: false, state: 'open', merge_commit_sha: null };
+  github.request = async (path: string, method = 'GET') => {
+    if (method !== 'GET') return {};
+    if (path === `/commits/${head}`) return { sha: head, commit: { message, tree: { sha: 'e'.repeat(40) } } };
+    if (/^\/commits\/[a-f0-9]{40}$/.test(path)) return { sha: path.slice(9), commit: { message: 'base', tree: { sha: 'f'.repeat(40) } } };
+    if (path === '/git/ref/heads/main') return { ref: 'refs/heads/main', object: { type: 'commit', sha: B } };
+    if (path.startsWith('/compare/')) return { status: 'ahead', files: [] };
+    if (path === '/pulls/7') return structuredClone(pr);
+    if (path.includes('/protection')) return { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true }, required_status_checks: { strict: false, checks: [] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
+    if (path.includes('/reviews')) return [{ id: 901, user: { login: reviewer }, commit_id: head, state: 'APPROVED', submitted_at: '2026-09-30T12:20:00Z', body }];
+    if (path.includes('/files')) return [{ filename: 'src/widget.ts', status: 'modified', additions: 1, deletions: 1, patch: '@@' }];
+    if (path.includes('/check-runs')) return { check_runs: [] };
+    if (path.startsWith('/rules/branches/')) return [];
+    throw new Error(`Unexpected request ${path}`);
+  };
+  return github.observe({ ...item(head, 1), plannedFiles: ['src/'] } as Work);
+}
 
 /**
  * The approved head's round, end to end: the approval of H is recorded and planned, the loop asks
@@ -105,11 +134,11 @@ async function approvedThenBotRound(root: string, body: string, commit: { parent
   const config = await loadMasterConfig(root);
   const first = herdr();
   await launch(root, item(H, 1), first.run);
-  const approved = item(H, 1, [{ reviewer, sha: H, state: 'APPROVED', id: 901 }]);
+  const approved = item(H, 1, [approvalOf(H, 901, parseClassifiedFindings(body).filter(finding => finding.classification === 'mechanical').length)]);
   const planned = await reconcileReviews(root, config, { run: first.run, observe: verdictOf(901, 'APPROVED'), work: [approved], threadsRun: github({ 901: { body, sha: H, state: 'APPROVED' } }) });
   const requests = await readMechanicalFixRequests(root);
-  const held = mechanicalMergeHold(approved, await readMechanicalFixState(root), Date.now());
-  const decision = neededDecision(approved, { autoMerge: true }, [], requests);
+  const held = reviewRefusals(approved);
+  const decision = neededDecision(approved, { autoMerge: true }, undefined, [], requests);
   // The approver applied that rework decision: the next attempt's launch reads it and is the bot round.
   const reviewId = appliedMechanicalRework(approved, [{ action: 'rework', state: 'applied', input: { previousWorkerStopped: true, binding: decision?.binding }, approvedAt: new Date().toISOString() }]);
   const worker = workerPrompt({ cliPath: '/opt/graphyard/bin/graphyard.mjs', repository: 'owner/project' }, approved, { principal: botWorker }, 2, null, reviewId === null ? null : { requests, reviewId });
@@ -163,20 +192,22 @@ test('unit:mechanical-findings-auto-fixed — review findings are classified, an
     assert.equal(approvalRecord.mechanicalFix?.mechanical.length, 4);
     assert.equal(approvalRecord.followUps, undefined, 'the approval\'s follow-ups wait while the bot round is owed');
     assert.ok(round.planned.threads.some(line => /4 finding\(s\) classified mechanical/.test(line)), round.planned.threads.join('\n'));
-    // The approved head is not merged ahead of its round: the loop's merge step holds it while the plan stands, within a bound.
-    assert.match(round.held ?? '', /candidate aaaaaaaaaaaa is not merged while review 901's 4 findings classified mechanical wait/);
-    const plannedState = { requests: round.requests, unclassified: [] };
-    assert.equal(mechanicalMergeHold(item(H, 1), plannedState, Date.parse(round.requests[0]!.at) + mechanicalRoundStartMs), null, 'a plan whose round never starts holds nothing past the bound');
-    assert.equal(mechanicalMergeHold(item(BOT, 2), plannedState, Date.now()), null, 'the bot round\'s own head is not held by the plan');
-    // An approval the loop has recorded but not yet read for its findings holds the merge too, so no merge lands ahead of the plan.
-    const unclassified = { requests: [], unclassified: [{ key: 'GY-7', sha: H, since: new Date().toISOString() }] };
-    assert.match(mechanicalMergeHold(item(H, 1), unclassified, Date.now()) ?? '', /until its review is classified/);
+    // The approved head is not merged ahead of its round: GitHub merges once build, review and checks
+    // pass, and the review gate does not pass an approval naming mechanical nits until the round, within a bound.
+    assert.equal(round.held.length, 1, round.held.join('\n'));
+    assert.match(round.held[0]!, /^Approval 901 of aaaaaaaaaaaa names 4 findings classified mechanical, which the worker bot fixes before the reviewer's fresh read \(GY-971\)/);
+    const nitted = item(H, 1, [approvalOf(H, 901, 4)]);
+    assert.equal(refusalAction(nitted, 'review', round.held[0]!), 'request-rework', 'the hold is answered by the bot round\'s rework');
+    assert.ok(gateRefusalCatalogue.some(shape => shape.id === 'mechanical-hold' && shape.match.test(round.held[0]!)), 'the hold is a declared refusal');
+    assert.deepEqual(reviewRefusals(nitted, Date.now() + mechanicalRoundStartMs), [], 'an approval whose round never starts holds nothing past the bound');
+    assert.deepEqual(reviewRefusals(item(H, 1, [approvalOf(H, 901)])), [], 'an approval with no mechanical nit is not held');
+    assert.deepEqual(reviewRefusals(item(BOT, 2, [approvalOf(BOT, 902)])), [], 'the fresh read\'s approval of the bot round\'s head is not held');
     // 2. The loop's routine decision returns the approved head to a worker-class bot round.
     assert.equal(round.decision?.action, 'rework');
     assert.equal(round.decision?.binding, `${H}:mechanical:901`);
     assert.match(round.decision!.reason, /approved candidate aaaaaaaaaaaa with 4 findings classified mechanical/);
-    assert.equal(neededDecision({ ...item(H, 1, [{ reviewer, sha: H, state: 'APPROVED', id: 901 }]), reworkRequested: true }, { autoMerge: true }, [], round.requests), null, 'asked once');
-    assert.equal(neededDecision(item(H, 2, [{ reviewer, sha: H, state: 'APPROVED', id: 901 }]), { autoMerge: true }, [], round.requests), null, 'not again once the round has run');
+    assert.equal(neededDecision({ ...item(H, 1, [{ reviewer, sha: H, state: 'APPROVED', id: 901 }]), reworkRequested: true }, { autoMerge: true }, undefined, [], round.requests), null, 'asked once');
+    assert.equal(neededDecision(item(H, 2, [{ reviewer, sha: H, state: 'APPROVED', id: 901 }]), { autoMerge: true }, undefined, [], round.requests), null, 'not again once the round has run');
     // 3. The worker launcher gives that round exactly the mechanical findings, bounded to their files, as one commit on the head.
     for (const fragment of ['mechanical-fix round', '"recieve" is a typo', 'frobCnt', `whose only parent is ${H}`, `change only ${paths.join(', ')}`, 'change no behaviour', 'complete GY-7 2 7']) assert.ok(round.worker.includes(fragment), `worker prompt: ${fragment}`);
     assert.ok(!round.worker.includes('retry loop is unbounded'), 'the bot is never handed a substantive finding');
@@ -204,6 +235,16 @@ test('unit:mechanical-findings-auto-fixed — review findings are classified, an
     assert.equal(recordOf(done.reviews, H).mechanicalFix?.commit, BOT);
     assert.equal(recordOf(done.reviews, BOT).followUps?.reviewId, 902, 'the fresh read\'s own follow-ups are handled as any approval\'s');
   } finally { await cleanup(); }
+
+  // The observation is where the hold starts: it counts an approval's mechanical nits, except on a
+  // head that is itself the bot round's commit (one round per approved head).
+  const observed1 = await observeApproval(H, verdict, 'GY-7: tidy the widget');
+  assert.equal(observed1.reviews.find(review => review.id === 901)?.mechanical, 4);
+  assert.equal(botCommitSubjectPattern.test(botCommitSubject({ key: 'GY-7', reviewId: 901 })), true);
+  const observedBot = await observeApproval(BOT, verdict, `${botCommitSubject({ key: 'GY-7', reviewId: 901 })}\n\nFixes four nits.`);
+  assert.equal(observedBot.reviews.find(review => review.id === 901)?.mechanical, undefined, 'the bot commit\'s own head is not held again');
+  const plainObserved = await observeApproval(H, 'AC-1 met.\nNit: src/a.ts:1 — the retry is unbounded', 'GY-7: tidy the widget');
+  assert.equal(plainObserved.reviews.find(review => review.id === 901)?.mechanical, undefined, 'no mechanical nit, nothing held');
 
   // The bot commit is accepted only as planned: a worker identity other than the reviewer, on the approved head, within the findings' files.
   const plannedFix = mechanicalFixPlan(approval)!;
@@ -256,7 +297,7 @@ test('unit:mechanical-findings-auto-fixed — review findings are classified, an
     assert.equal(recordOf(after.reviews, H).mechanicalFix?.state, 'fallback');
     assert.match(recordOf(after.reviews, H).mechanicalFix?.reason ?? '', /no mechanical-fix round started within 60 minutes/);
     assert.equal(recordOf(after.reviews, H).followUps?.reviewId, 901, 'its findings return to ordinary follow-up handling');
-    assert.equal(mechanicalMergeHold(approved, await readMechanicalFixState(stalled.root), late.getTime()), null, 'nothing holds the merge any more');
+    assert.deepEqual(reviewRefusals(item(H, 1, [approvalOf(H, 901, 4)]), late.getTime()), [], 'nothing holds the merge any more');
   } finally { await stalled.cleanup(); }
 });
 

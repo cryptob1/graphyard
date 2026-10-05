@@ -79,6 +79,12 @@ function deliveries(commits: string[], at: number): Work[] {
 
 /** What the loop counts: the deployment-class faults master status reports for production. */
 const deploymentFaults = (report: Parameters<typeof productionSummary>[0]) => statusFaults({ github: {}, production: productionSummary(report) }).filter(fault => fault.faultClass === 'deployment');
+/**
+ * The deployment faults the base counted: since GY-1209 a lag inside the merge→deploy grace raises no
+ * line, and these deliveries are seconds old, so the base reproduction reads the report without its
+ * rollout fields, as the base's attentionLines did (tests/production-watch.test.ts proves the grace itself).
+ */
+const baseDeploymentFaults = (report: Parameters<typeof productionSummary>[0]) => deploymentFaults({ ...report, ahead: report.ahead && { by: report.ahead.by, head: report.ahead.head, commits: report.ahead.commits } });
 
 function setup(instance: typeof instances[number], releaseBranch: string | null) {
   const at = Date.parse(instance.at);
@@ -96,7 +102,7 @@ for (const [number, instance] of instances.entries()) {
   test(`manual:fault-class-deployment — GY-1207 instance ${number + 1} (${instance.at}) reproduces against the base: a watch measured against main counts the merges awaiting a release as a deployment fault`, async () => {
     const { watch, advance } = setup(instance, null);
     let report = await watch.tick(true);
-    assert.deepEqual(deploymentFaults(report).map(fault => fault.text), [text], 'the instance line, exactly as the loop recorded it');
+    assert.deepEqual(baseDeploymentFaults(report).map(fault => fault.text), [text], 'the instance line, exactly as the loop recorded it');
     // Past the grace period the base escalates the same pipeline lag into missing-deployment incidents.
     advance(2 * 3_600_000);
     report = await watch.tick(true);
@@ -159,7 +165,7 @@ test('manual:fault-class-deployment — without a release branch production is m
   missing.repo.state.release = null;
   let report = await missing.watch.tick(true);
   assert.equal(report.release, null);
-  assert.deepEqual(deploymentFaults(report).map(fault => fault.text), [`main is ${instance.ahead} commits ahead of production (serving ${instance.serving.slice(0, 12)})`]);
+  assert.deepEqual(baseDeploymentFaults(report).map(fault => fault.text), [`main is ${instance.ahead} commits ahead of production (serving ${instance.serving.slice(0, 12)})`]);
 
   const flaky = setup(instance, RELEASE);
   flaky.repo.state.failing = true;

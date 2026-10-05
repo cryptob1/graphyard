@@ -103,6 +103,8 @@ test('unit:every-role-carries-autonomy-contract — worker, reviewer, producer, 
     await saveProducerProfile(root, { name: 'producer-codex', principal: 'proof-runner', agentName: 'produce-codex', kind: 'codex', credentialFile: await token('producer') }, producerVerify);
     const config = await loadMasterConfig(root);
     const item = work(); reconcileAutoDispatch(item, [item], new Date(Date.parse(at)));
+    // Dispatch opens no producer request any more (GY-1235); the launcher still binds one, built by hand.
+    item.autoDispatch!.producers.push({ id: 'producer-unit', kind: 'producer', group: 'unit', proofs: ['unit:every-role-carries-autonomy-contract'], sha: H, baseSha: B, policyRevision: 1, pr: 184, requestedAt: at, reason: 'unproven', state: 'requested' });
     await launchProducer(root, item, item.autoDispatch!.producers[0], config.producers[0], [], new Date().toISOString(), { run: stub.run });
     capture('producer', stub);
 

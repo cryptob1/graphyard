@@ -9,7 +9,7 @@ Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit
 
 ## Dispatch optimistically, smallest scope first
 
-`plannedFiles` (paths, `/`-ending prefixes) is the scope contract, not a lock: the [merge queue](github.md#merge-queue), `sync` integrate overlaps. `master status` shows `overlap.concurrent`, `git merge-tree` failures. Root-level directories are `highConflict`, refused without `--allow-broad-scope`; only `exclusiveResources` (reserved at claim) hold dispatch.
+`plannedFiles` (paths, `/`-ending prefixes) is the scope contract, not a lock: `sync` and GitHub's merges into main ([one delivery path](delivery.md#one-delivery-path)) integrate overlaps. `master status` shows `overlap.concurrent`, `git merge-tree` failures. Root-level directories are `highConflict`, refused without `--allow-broad-scope`; only `exclusiveResources` (reserved at claim) hold dispatch.
 
 `worktree GY-N EPOCH` frees the branch first: an earlier attempt's worktree is recorded (`workspace.preserved`) and detached, abandoned ones removed (`reclaimed`). A workspace failure releases the claim without spending the epoch. After **3** single-cause dispatch failures, the loop records a `dispatchblock` blocker until `graphyard unblock GY-N REASON`.
 
@@ -17,13 +17,13 @@ Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit
 
 Reviewer approval of the exact head plus required CI gates landing; threads are inputs. Approvals mark each listed thread resolved, follow-up (a nit, answered and resolved, never filed; anything worth fixing is `BLOCKING` and fixed on that PR) or overridden, by thread or comment ID; a missed thread withdraws the approval. After two rework rounds bot threads are advisory. Past the review-round cap (default 3) only a `BLOCKING:` finding holds a head, escalating rather than reworking; a capped request without one is withdrawn and re-reviewed. Required conversation resolution is drift: `master protection --apply`.
 
-Each nit is a `Nit: PATH:LINE — FINDING` line ending with its class: `(mechanical: typo|docs-placement|formatting|naming)` or `(substantive: behavior|criteria|scope)`; any sign of behaviour, a criterion or scope, or no placeable path, makes it substantive. An approval raising mechanical findings holds its follow-up handling and its merge (an unclassified approval holds too, recorded as a merge refusal) while the loop requests a bot `rework`: one worker commit on the approved head, or the Graphyard tip or refresh carrying its approval, touching only those findings' files. The fresh read sees the bot commit, the full diff and the substantive findings; `Rejected bot commit: SHA — reason` with REQUEST_CHANGES records a `misclassified-finding` [intervention](dashboard.md). A head resubmitted unchanged, or no round within 60 minutes, falls back to ordinary nits (`src/mechanical-findings.ts`).
+Each nit is a `Nit: PATH:LINE — FINDING` line ending with its class: `(mechanical: typo|docs-placement|formatting|naming)` or `(substantive: behavior|criteria|scope)`; any sign of behaviour, a criterion or scope, or no placeable path, makes it substantive. An approval raising mechanical findings holds its follow-up handling, and the review gate refuses it (so GitHub does not merge the head) unless the head is itself the bot commit, while the loop requests a bot `rework`: one worker commit on the approved head, or the Graphyard tip or refresh carrying its approval, touching only those findings' files. The fresh read sees the bot commit, the full diff and the substantive findings; `Rejected bot commit: SHA — reason` with REQUEST_CHANGES records a `misclassified-finding` [intervention](dashboard.md). A head resubmitted unchanged, or no round within 60 minutes, falls back to ordinary nits (`src/mechanical-findings.ts`).
 
 ## Refuse candidates that revert shipped code outside their scope
 
 `plannedFiles` bounds changes at `complete`, new heads and landings: files in scope, new files and touched `tests/helpers/timing-baseline.json` lines pass; others must match base byte-for-byte. Scope requests or audited revisions widen it.
 
-`evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: gate failures and ejections are its non-sticky refusals, published as required check `graphyard/landable`, never a verdict input.
+`evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: gate failures are its non-sticky refusals, published as required check `graphyard/landable`, never a verdict input.
 
 Out-of-scope files three-way merge onto the landing commit: extended or base-only changes pass; reverts, deletions, rewrites refuse.
 

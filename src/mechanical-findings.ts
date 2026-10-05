@@ -14,7 +14,7 @@
 import { z } from 'zod';
 import type { InterventionRecordInput } from './model/interventions.js';
 import type { Work } from './model.js';
-import { carriedApproval } from './model/carry.js';
+import { bindingApproval, carriedApproval } from './model/carry.js';
 import type { ChildRun } from './child-runner.js';
 
 export const mechanicalCategories = ['typo', 'docs-placement', 'formatting', 'naming'] as const;
@@ -122,6 +122,8 @@ export function mechanicalFixPrompt(repository: string, plan: Pick<MechanicalFix
     + 'If any listed issue cannot be fixed without changing behaviour, fix none of them and submit the head unchanged: the findings then stay ordinary follow-ups.';
 }
 export const botCommitSubject = (plan: Pick<MechanicalFixPlan, 'key' | 'reviewId'>) => `${plan.key}: mechanical review fixes (review ${plan.reviewId})`;
+/** A bot commit's subject line, whatever item and review it names. */
+export const botCommitSubjectPattern = /^[A-Z][A-Z0-9]*-\d+: mechanical review fixes \(review \d+\)$/;
 
 /** The commit the bot pushed, as GitHub reports it. */
 export const botCommitObservationSchema = z.object({
@@ -273,51 +275,40 @@ export const mechanicalFixRequests = (records: readonly PlannedRecord[]): Mechan
   .map(record => { const fix = record.mechanicalFix!; return { key: record.key, pr: record.pr, head: fix.head, reviewId: fix.reviewId, epoch: fix.epoch, at: fix.at, mechanical: fix.mechanical, substantive: fix.substantive, paths: fix.paths }; });
 /**
  * How long a plan waits for its bot round to start — the rework decision requested, judged and
- * applied — before it falls back to filing its findings as follow-ups, and how long the merge of
- * the approved head is held for it meanwhile. A refused or unjudged decision never holds a head for ever.
+ * applied — before it falls back to filing its findings as follow-ups, and how long the review gate
+ * holds the approved head for it meanwhile. A refused or unjudged decision never holds a head for ever.
  */
 export const mechanicalRoundStartMs = 60 * 60_000;
-/**
- * A review of a head the ledger holds and has not yet classified: a session still pending on it, or
- * an approval recorded but not yet read for its findings. The merge of that head waits for the
- * classification (within `mechanicalRoundStartMs` of `since`), so it never lands ahead of a plan.
- */
-export interface UnclassifiedReview { key: string; sha: string; since: string }
-export const unclassifiedReviews = (records: readonly PlannedRecord[]): UnclassifiedReview[] => records
-  .filter(record => !record.mechanicalFix && !record.followUps && !record.freshRead
-    && (record.state === 'pending' || record.state === 'completed' && record.verdict?.state === 'APPROVED'))
-  .map(record => ({ key: record.key, sha: record.sha, since: record.verdict?.submittedAt ?? record.requestedAt ?? new Date(0).toISOString() }));
-/** What the loop reads of the review ledger each cycle: the planned fixes, and the reviews not yet classified. */
-export interface MechanicalFixState { requests: MechanicalFixRequest[]; unclassified: UnclassifiedReview[] }
-export const mechanicalFixState = (records: readonly PlannedRecord[]): MechanicalFixState => ({ requests: mechanicalFixRequests(records), unclassified: unclassifiedReviews(records) });
+/** What the loop reads of the review ledger each cycle: the planned fixes. */
+export interface MechanicalFixState { requests: MechanicalFixRequest[] }
+export const mechanicalFixState = (records: readonly PlannedRecord[]): MechanicalFixState => ({ requests: mechanicalFixRequests(records) });
 /** The review ledger's mechanical-fix state, read from `.graphyard/reviews.json` under `root`; empty when there is no ledger (no reviewer is bound). */
 export async function readMechanicalFixState(root: string): Promise<MechanicalFixState> {
   const { readFile } = await import('node:fs/promises');
   const { resolve } = await import('node:path');
   let text: string;
   try { text = await readFile(resolve(root, '.graphyard/reviews.json'), 'utf8'); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { requests: [], unclassified: [] }; throw error; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { requests: [] }; throw error; }
   return mechanicalFixState(JSON.parse(text).reviews ?? []);
 }
 /** The planned fixes alone; none when the ledger cannot be read. */
 export const readMechanicalFixRequests = (root: string): Promise<MechanicalFixRequest[]> => readMechanicalFixState(root).then(state => state.requests, () => []);
 
 /**
- * Why the guarded merge of the item's candidate waits (GY-971), or null: an approval of that head
- * planned a mechanical fix whose bot round has not run, or a review of it is not yet classified.
- * Either wait is bounded by `mechanicalRoundStartMs`, after which the plan falls back to follow-ups.
+ * The review gate's hold (GY-971): GitHub merges a head once build, review and required checks pass
+ * (docs/delivery.md), so an approval naming nits classified mechanical does not pass the gate until
+ * its bot round has run — the rework that round's decision applies refuses the build gate from then
+ * on — or, at most, until `mechanicalRoundStartMs` after the approval, when the plan falls back to
+ * follow-ups. The observation counts such nits only on a head that is not itself a bot commit.
  */
-export function mechanicalMergeHold(work: Work, state: MechanicalFixState, now: number): string | null {
-  const sha = work.candidate?.sha;
-  if (!sha) return null;
-  // A Graphyard-authored tip carrying the approval is held for that approval's review as its head is.
-  const reviewed = carriedApproval(work)?.originalSha;
-  const within = (since: string) => now - Date.parse(since) < mechanicalRoundStartMs;
-  const planned = state.requests.find(request => request.key === work.key && request.head === sha && within(request.at));
-  if (planned) return `${work.key}: candidate ${sha.slice(0, 12)} is not merged while review ${planned.reviewId}'s ${planned.mechanical.length} finding${planned.mechanical.length === 1 ? '' : 's'} classified mechanical wait${planned.mechanical.length === 1 ? 's' : ''} for the worker bot's fix and the fresh read (GY-971); the plan falls back to follow-ups if no bot round starts by ${new Date(Date.parse(planned.at) + mechanicalRoundStartMs).toISOString()}`;
-  const unclassified = state.unclassified.find(review => review.key === work.key && (review.sha === sha || review.sha === reviewed) && within(review.since));
-  if (unclassified) return `${work.key}: candidate ${sha.slice(0, 12)} is not merged until its review is classified mechanical or substantive (GY-971), which the loop's next review reconciliation does`;
-  return null;
+export function mechanicalReviewHold(work: Work, now: number): string | null {
+  const approval = bindingApproval(work);
+  const review = approval && work.observation?.reviews.find(entry => entry.state === 'APPROVED' && entry.sha === approval.sha && (entry.mechanical ?? 0) > 0 && !!entry.submittedAt);
+  if (!review) return null;
+  const until = Date.parse(review.submittedAt!) + mechanicalRoundStartMs;
+  if (!(now < until)) return null;
+  const count = review.mechanical!;
+  return `Approval${review.id !== undefined ? ` ${review.id}` : ''} of ${review.sha.slice(0, 12)} names ${count} finding${count === 1 ? '' : 's'} classified mechanical, which the worker bot fixes before the reviewer's fresh read (GY-971); the head is not merged before that round, or before ${new Date(until).toISOString()} if it never starts`;
 }
 
 /**

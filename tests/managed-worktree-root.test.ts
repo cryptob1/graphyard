@@ -71,7 +71,7 @@ async function installation(run: Partial<MasterRun> = {}) {
   await saveReviewerProfile(root, { name: 'reviewer-a', agentName: 'review-a', kind: 'codex' });
   const credential = join(credentialDirectory, 'producer.token'); await writeFile(credential, 'producer-token-'.padEnd(40, 'x'), { mode: 0o600 });
   const verify = (id: string) => async () => ({ actor: { id, role: 'producer', proofs: ['unit:*', 'integration:*'] } });
-  await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'codex', credentialFile: credential }, verify('proof-runner'));
+  await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'codex', credentialFile: credential, concurrency: 1 }, verify('proof-runner'));
   return { scratch, root, managed, git, cleanup: () => rm(scratch, { recursive: true, force: true }) };
 }
 
@@ -708,7 +708,7 @@ test('unit:dispatch-defers-on-host-memory — below the memory floor the loop de
   assert.deepEqual(hostMemoryAttention(state.memory), []);
   launched.length = 0;
   await runDispatchTick(config, emptyDispatchCursor(config), dispatchEffects, () => at);
-  assert.ok(launched.includes('producer'), 'producer launches resume');
+  assert.ok(launched.includes('review'), 'reviewer launches resume (GitHub delivery requests no producer at submit)');
   claims.length = 0;
   await runExecutorTick({ id: 'executor-a', host: 'machine-a' }, { claim: async request => { claims.push(request.kinds); return { action: null }; }, settle: async () => {},
     handlers: { dispatch: async () => 'launched', resync: async () => 'resynced' }, launchHold: () => hostMemoryHold('machine-a', async () => memory, () => at) });

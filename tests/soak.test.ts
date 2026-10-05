@@ -16,7 +16,7 @@ import { GitHubCacheStore } from '../src/github-cache.js';
 import { GitHubChargeLedger } from '../src/github-charges.js';
 import { createHash } from 'node:crypto';
 import { Refusal, type Principal, type Work } from '../src/model.js';
-import { approverSessionName, assessContainment, atomicPrivateWrite, automaticReviewerConcurrency, containmentPhase, containmentQuarantines, decisionInput, dispatchWork, loadMasterConfig, masterConfigSchema, mergeExecutor, profileConcurrency, setupMaster, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { approverSessionName, assessContainment, atomicPrivateWrite, automaticReviewerConcurrency, containmentPhase, containmentQuarantines, decisionInput, dispatchWork, loadMasterConfig, masterConfigSchema, profileConcurrency, setupMaster, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { readAccountStartFailures, readProfileLaunchRecords, workerLaunchStatus, worktreeFailure } from '../src/master/dispatch.js';
 import { readControlPlaneClock, unmeasured } from '../src/master/containment.js';
 import { containmentRefusalCause } from '../src/daemon/cycle-reclaim.js';
@@ -29,7 +29,6 @@ import { headlessConfinementWrapper, sessionConfinement } from '../src/master/la
 import { answeringWidening, daemonEffects, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { memoryActionKey } from '../src/daemon/cycle-dispatch.js';
 import type { HostMemoryReading } from '../src/master-resources.js';
-import { staleObservationReason } from '../src/daemon/cycle-delivery.js';
 import { retainedActions } from '../src/daemon/state.js';
 import { adoptHeadlessRuns, noteWatchdog } from '../src/daemon/run.js';
 import { maxApproverLaunches, maxLostApproverRuns } from '../src/daemon/decisions.js';
@@ -68,16 +67,20 @@ import { loopWatchdogSeconds } from '../src/supervisor.js';
 import { queuePlacement } from '../src/merge-queue.js';
 import { ChildProcessError } from '../src/child-runner.js';
 import { probeBlocker } from '../src/daemon/blocker-probes.js';
-import { classifyBlocker, maxAutomaticClears, type BlockerClass } from '../src/model/blocker-class.js';
+import { blockerEscalateMs } from '../src/daemon/cycle-blockers.js';
+import { classifyBlocker, itemSpecificPlaneError, maxAutomaticClears, type BlockerClass } from '../src/model/blocker-class.js';
 import { SimulatedGitHub, SimulatedHerdr, SimulatedPi, blockedMergeMs, brokenBaseTest, clock, protectionOnlyCheck, statusContext, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 import { mergeStallAttention } from '../src/cli/master-status.js';
 import { laneApprover } from '../src/server/decisions.js';
+import { approvedDecisionBoundMs } from '../src/model/approval.js';
 import { itemLane, lanes, laneSpeedTargets } from '../src/model/policy.js';
 import { appliedMechanicalRework, freshReadFor, mechanicalFixRequests, mechanicalFixState, type MechanicalFixRequest } from '../src/mechanical-findings.js';
+import { mechanicalHoldPattern } from '../src/model/refusal-catalogue.js';
 import type { InterventionRecordInput } from '../src/model/interventions.js';
 import { doctorRunEvent } from '../src/server/routes/status.js';
 import { containmentSettlementRefusals, containmentVerificationSchema } from '../src/quarantine.js';
 import { scopeRefusalBlocker } from '../src/model/scope.js';
+import { RefusedResponse } from '../src/model/refusal.js';
 import type { DoctorEffects } from '../src/daemon/doctor.js';
 
 /**
@@ -98,7 +101,9 @@ import type { DoctorEffects } from '../src/daemon/doctor.js';
  * runs are killed, then fail until the request is spent (GY-496), two flaky tips
  * rerun once (GY-516), one passing on the rerun and one failing again, and the
  * between-cycles self-upgrade (GY-437) against a simulated coordinator checkout that stands dirty
- * across the second deploy for a while. The plane also reports a held integration job in three
+ * across the second deploy for a while, and a test that breaks on main for eleven minutes (GY-528) —
+ * the candidates it fails are held without rework, one P0 item is filed, and once main is repaired
+ * each is rerun and refreshed onto it. The plane also reports a held integration job in three
  * separate windows, so the `held-jobs` fault class recurs past its threshold and the loop files one
  * recurring-fault item for it (GY-173): the diagnostician (GY-439) is wired as a fake, so the real
  * loop diagnoses the recurring item within the cycle that files it and closes it, on the approved
@@ -169,6 +174,7 @@ const basePlan = {
   // minutes. Item six hosts it because its approval lands past the day's first merges, so the base
   // move does not churn the early cadence, and the regression day reuses it.
   docsConflict: { item: 6, page: 'docs/master-agent.md', syncMs: 4 * minute },
+  baseFailure: { breaks: 183 * minute, repaired: 194 * minute },
   // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
   flaky: { rerunPasses: 10, rerunFails: 14 },
   // GY-793: item 2's worker pushes while a broken commit stands on main, so its candidate's `test`
@@ -391,37 +397,49 @@ function diagnosisRunner(seen: DiagnosisRun[], attempt: 'primary' | 'fallback', 
  * asks a wide ask only a review finding grounds: the loop widens by posting the folded revision.
  * Item `unrepresentable` asks the one path no fold can represent under the plannedFiles cap: the
  * rule refuses it, nothing routes or retries it, and the item stays blocked with the escalation.
+ *
+ * GY-1293: item `partial` asks a documentation page the item implies and a file nothing grounds:
+ * the loop widens by the page and puts the rest to the approver against the widened revision.
+ * The control plane answers the loop's first widening of `wideFinding` with a 5xx and its first of
+ * `partial` with a stale-revision refusal, and `partial`'s first decision-history read outlasts the
+ * decisions step's deadline: each is retried on the next cycle and none is a fault.
  */
 const scopePlan = {
-  wideRule: 16, wideFinding: 17, unrepresentable: 18,
+  wideRule: 16, wideFinding: 17, unrepresentable: 18, partial: 19,
+  partialPage: 'docs/soak-partial-19.md', partialFile: 'src/soak/ungrounded-19.ts',
   wideRuleDir: 'tests/soak-wide/', wideFindingDir: 'src/soak/extra-17/', unrepresentablePath: 'newtop-18/next.ts',
   wideRulePlanned: 20, wideRuleAsked: 90, wideFindingAsked: 100, unrepresentablePlanned: plannedFilesMax - 1,
 };
 const padded = (n: number) => String(n).padStart(3, '0');
 
 /**
- * GY-1008: the blocked day. Each of the first seven items' first attempt records one of the
+ * GY-1008: the blocked day. Each of the first eight items' first attempt records one of the
  * 2026-09-30 blocker texts a few minutes in, which ends the attempt; the loop re-checks each one
  * every cycle and nobody else touches them. The credential, sandbox and control-plane probes run
  * through the real probe code and fail until their cause clears at the minute below; the
- * outside-scope failure clears once the base moves (items eight and nine land meanwhile); the
+ * outside-scope failure clears once the base moves (items nine and ten land meanwhile); the
  * planned-file-scope blocker becomes a widening decision its approver judges; the needs-decision
  * blocker names a decision the master requested and never put to an approver, which the loop
  * launches. Item `repeating` blocks on every attempt, so the loop clears it `maxAutomaticClears`
  * times in a row and then leaves it to the master.
+ * GY-1055: the control-plane blockers that clear on health name the whole plane (503, a refused
+ * connection); item `requestError` met a 500 on its own request, which health cannot show fixed,
+ * so the loop hands it to the master once and never probes it. The credential cause stands past
+ * `blockerEscalateMs`, so the loop reports it to the master once and still clears it when it goes.
  */
 const blockerPlan = {
-  items: 9, repeating: 7, blockAfterMs: 5 * minute,
-  clearsAt: { 'github-credential': 60 * minute, 'sandbox-path': 75 * minute, 'control-plane-error': 30 * minute } as Partial<Record<BlockerClass, number>>,
-  classes: { 1: 'github-credential', 2: 'sandbox-path', 3: 'control-plane-error', 4: 'outside-scope-test-failure', 5: 'planned-file-scope', 6: 'needs-decision', 7: 'control-plane-error' } as Record<number, BlockerClass>,
+  items: 10, repeating: 7, requestError: 8, blockAfterMs: 5 * minute,
+  clearsAt: { 'github-credential': 150 * minute, 'sandbox-path': 75 * minute, 'control-plane-error': 30 * minute } as Partial<Record<BlockerClass, number>>,
+  classes: { 1: 'github-credential', 2: 'sandbox-path', 3: 'control-plane-error', 4: 'outside-scope-test-failure', 5: 'planned-file-scope', 6: 'needs-decision', 7: 'control-plane-error', 8: 'control-plane-error' } as Record<number, BlockerClass>,
   text: (n: number, branch: string, decision: string | null): string | null => ({
     1: "git push failed: fatal: could not read Username for 'https://github.com': terminal prompts disabled",
     2: `error: unable to append to '.git/logs/refs/remotes/origin/${branch}': Read-only file system`,
-    3: 'graphyard complete command failed with Internal error',
+    3: 'graphyard complete command failed with HTTP 503 Service Unavailable',
     4: "The test suite fails in tests/shared.test.ts on the base branch, outside this item's plannedFiles",
     5: `SCOPE NEEDED: ${extraFile(5)} (https://github.com/owner/project/issues/5 explains why) for commit 8106499e9f`,
     6: `Waiting on decision ${decision}: its approver was never launched`,
-    7: 'graphyard complete command failed with Internal error (HTTP 500)',
+    7: 'graphyard complete command failed: connect ECONNREFUSED 127.0.0.1:8787',
+    8: 'graphyard complete command failed with Internal error (HTTP 500)',
   } as Record<number, string>)[n] ?? null,
 };
 const extraFile = (n: number) => `src/soak/item-${n}-extra.ts`;
@@ -543,7 +561,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * (`rejected`).
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
   failover?: Failover }) {
@@ -554,6 +572,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const failover = options.failover;
   const config: MasterConfig = failover ? failover.master : options.queued
     ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...queueWorkers], mergeQueue: { parallelTips: options.queued.window } })
+    // GY-1286: the slow-server day staffs every item at once, so their decisions fall due together.
+    : options.slowDecisions ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...queueWorkers] })
     : options.master ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, masterSessionMinutes: options.master.sessionMinutes, masterHeartbeatMinutes: options.master.heartbeatMinutes } })
     : options.decomposition ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, research: { command: 'pi', model: 'research-pi-model' }, decomposition: { concurrency: options.decomposition.concurrency ?? 2 } } })
     : soakConfig;
@@ -561,7 +581,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // The spent producer request (GY-496) is a main-day fault, like the blind window and the split:
   // the queue-only, hand-approver and regression days exercise their own faults and would only
   // inherit this one's rework round.
-  const mainDay = !options.queued && !options.handApprovers && !options.regression && !options.scope && !options.headless && !options.blockers && !options.starved && !options.decomposition;
+  const mainDay = !options.queued && !options.handApprovers && !options.stranded && !options.regression && !options.scope && !options.headless && !options.blockers && !options.starved && !options.decomposition;
   // GY-793's base breakage runs only on the day that asserts it (`github806`): on any other day it
   // would reshape that day's own scenario (a rework or fenced item doubling as the broken one).
   const baseBreakDay = mainDay && !!options.github806;
@@ -719,7 +739,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
 
   // ---- The fifteen items, created in the backlog and released one every fifteen minutes. ----
   const releaseEveryMs = options.queued?.releaseEveryMs ?? plan.releaseEveryMs;
-  for (let n = 1; n <= plan.items + (options.scope ? 3 : 0); n++) {
+  for (let n = 1; n <= plan.items + (options.scope ? 4 : 0); n++) {
     // The scope scenarios carry their own intake: item wideRule plans twenty files under the
     // directory its criterion names; item unrepresentable plans plannedFilesMax entries outside
     // every directory of the one path its criterion implies.
@@ -809,7 +829,11 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     scopeAsks.set(items[scopePlan.wideFinding - 1].key, findingPaths);
     findings.set(items[scopePlan.wideFinding - 1].key, new Set(findingPaths));
     scopeAsks.set(items[scopePlan.unrepresentable - 1].key, [scopePlan.unrepresentablePath]);
+    scopeAsks.set(items[scopePlan.partial - 1].key, [scopePlan.partialPage, scopePlan.partialFile]);
   }
+  // GY-1293: the refusals that judge nothing about scope, each answered once, and the slow read.
+  const transientWidenings = new Map<number, number>([[scopePlan.wideFinding, 500], [scopePlan.partial, 409]]);
+  const transientRefused: { n: number; status: number; elapsed: number }[] = [], lateReads: { n: number; elapsed: number }[] = [];
   // The unrepresentable ask's worker never pushes or submits: its item stays blocked on scope.
   const hold = new Set(options.scope ? [items[scopePlan.unrepresentable - 1].key] : []);
 
@@ -831,6 +855,13 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       return [`AC-1 met.`, `Nit: ${file(n)}:3 — "recieve" is a typo (mechanical: typo)`, `Nit: ${file(n)}:9 — the retry is unbounded when the source keeps failing (substantive: behavior)`].join('\n');
     return 'AC-1 met.';
   };
+  // Each review's body is written once, when GitHub's observation or the ledger first reads it: the
+  // observation counts an approval's mechanical nits from it, which hold the review gate (GY-971).
+  const bodyOf = (key: string, review: { id: number; sha: string; state: string }) => {
+    if (!bodies.has(review.id)) bodies.set(review.id, { sha: review.sha, state: review.state, body: reviewBody(key, review) });
+    return bodies.get(review.id)!.body;
+  };
+  if (mechanicalDay) github.reviewBody = (key, review) => review.state === 'APPROVED' && review.reviewer === 'reviewer' && mechanicalItem(key) ? bodyOf(key, review) : '';
   const ledgerRun = async (_command: string, args: string[]) => {
     const match = /^repos\/owner\/project\/pulls\/\d+\/reviews\/(\d+)$/.exec(args[1] ?? ''), entry = match ? bodies.get(Number(match[1])) : undefined;
     if (!entry) throw new Error(`the simulated GitHub cannot answer gh ${args.join(' ')}`);
@@ -841,8 +872,11 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     const commit = github.commits.get(head)!, parent = github.commits.get(commit.parents[0]!);
     return { parents: commit.parents, files: commit.files.filter(path => commit.contents.get(path) !== parent?.contents.get(path)), at: new Date(commit.at).toISOString() };
   };
+  // Each head the review gate held for its mechanical-fix round (GY-971), as the loop's passes saw it.
+  const reviewHolds = new Set<string>();
   const reconcileLedger = async () => {
     const work = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
+    for (const item of work) if (item.candidate && item.gates.some(gate => gate.name === 'review' && gate.reasons.some(reason => mechanicalHoldPattern.test(reason)))) reviewHolds.add(`${item.key} ${item.candidate.sha}`);
     const at = new Date(clock.now());
     await planMechanicalFixes(ledger, work, repository, ledgerRun, at);
     await judgeFreshReads(ledger, repository, ledgerRun, async (signal, key) => { misclassified.push({ signal, key }); await api(principals.coordinator, 'POST', 'interventions', signal, key); }, at);
@@ -850,7 +884,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       const item = work.find(entry => entry.key === pr.key);
       if (ledgered.has(review.id) || review.reviewer !== 'reviewer' || !item) continue;
       ledgered.add(review.id);
-      bodies.set(review.id, { sha: review.sha, state: review.state, body: reviewBody(item.key, review) });
+      bodyOf(item.key, review);
       const bot = botRounds.find(round => round.head === review.sha);
       const fresh = (await freshReadFor(mechanicalFixRequests(ledger), item.key, review.sha, { principal: bot?.bot ?? pr.author, role: 'worker' }, review.reviewer, observeCommit))?.fresh;
       ledger.push(reviewRecordSchema.parse({ id: randomUUID(), key: item.key, pr: pr.number, sha: review.sha, baseSha: item.candidate?.baseSha ?? github.tip, policyRevision: item.policyRevision,
@@ -1248,6 +1282,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // sessions all end without judging: the first vanishes or stops, each relaunch the loop makes
   // stops `done`, and one relaunch is refused by a registry timeout.
   const hand = new Map<string, { key: string; launches: number; refused: number }>();
+  // GY-1297: approvals a fault left with no outcome — the ledger holds the approval and nothing
+  // after it — and every withdrawal the loop sent for each.
+  const stranded = new Map<string, { key: string; workId: string; kind: 'moved' | 'holds'; watched: boolean; pane: string | null }>(), withdrawals = new Map<string, number>();
   // The first attestation the loop requests is overtaken: its worker pushes a new head before the
   // approver judges, so the loop must withdraw it, close its approver and ask afresh for the new head.
   const attestations: { decision: string; sha: string; judged: 'overtaken' | 'approved' }[] = [];
@@ -1408,20 +1445,6 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // and keeps the filter so it does not depend on where it falls in the file.
   const ownItems = options.reassigned || options.headless || options.blockers || options.credentialBlocked || options.dispatchFailing || options.containment || options.mechanical || failover ? new Set(items.map(item => item.id)) : null;
   const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: ownItems ? read.work.filter(item => ownItems.has(item.id)) : read.work, now: read.now, jobs: read.jobs }; };
-  const transport = async (path: string, data: any, key: string = id()) => {
-    const match = /^work\/([^/]+)\/merge-acquire$/.exec(path);
-    if (!match) {
-      // A carried approval the re-post could not use is reported by the guarded merge itself
-      // (GY-831), through the same mutation path as the merge request.
-      const stale = /^work\/([^/]+)\/mergerefused$/.exec(path);
-      if (stale) return await engine.execute(principals.coordinator, 'mergerefused', stale[1], data, key);
-      // The loop's own configuration publication (GY-330, GY-498, GY-500, GY-516) goes the same way.
-      if (path === 'merge-queue') return await api(principals.coordinator, 'POST', 'merge-queue', data);
-      throw new Error(`Unexpected mutation ${path}`);
-    }
-    try { return await engine.requestEnqueue(principals.coordinator, match[1], data, key); }
-    catch (error) { if (error instanceof Refusal) throw Object.assign(new Error(JSON.stringify({ error: error.message })), { confirmedRefusal: error.status >= 400 && error.status < 500 }); throw error; }
-  };
   // ---- Host memory (GY-612): below its floor the loop launches nothing, recording the crossing once each way. ----
   const dip = plan.memoryDip;
   const GiB = 2 ** 30;
@@ -1435,9 +1458,6 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     if (memoryReads++ % 2 === 1) consumers.reverse();
     return { totalBytes: 62 * GiB, availableBytes: 2 * GiB, consumers };
   };
-  // One executor instance for the loop's process, and a fresh request per merge the loop asks for, as `master run` wires it.
-  const executor = { principal: principals.coordinator.id, instance: `soak-${randomUUID()}` };
-  const merge: DaemonEffects['merge'] = work => mergeExecutor(config, snapshot, transport, executor, randomUUID(), github.gh(repository))(work);
   // The pipeline doctor (GY-711) fires inside this world too: a scripted Pi run reports the first
   // item as stuck, the loop applies the report through its real path, and every run summary is
   // posted to the control plane the dashboard reads. The day thus proves the doctor step fires
@@ -1452,13 +1472,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     file: async input => api(principals.operatorAgent, 'POST', 'work', input) as Promise<Work>,
     recordRun: async run => api(principals.operatorAgent, 'POST', 'doctor', run),
   };
-  const refuseMerge: DaemonEffects['refuseMerge'] = (work, reason, since) => api(principals.coordinator, 'POST', `work/${work.id}/mergerefused`, { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, reason: reason.slice(0, 2000), since });
-  // GY-1099: the prioritized observation a merge refused only for a stale observation is owed, through the resync route as `daemonEffects` wires it.
   const observeRequests: { key: string; sha: string; at: number }[] = [];
-  const observeCandidate: DaemonEffects['observeCandidate'] = async work => {
-    observeRequests.push({ key: work.key, sha: work.candidate!.sha, at: clock.now() - dayStart });
-    return await api(principals.coordinator, 'POST', `work/${work.id}/resync`, { prioritized: true });
-  };
   // The diagnostician (GY-439), faked: its run answers from the evidence the prompt carries, and
   // its filing and deciding ride the same routes the production wiring uses, as the master's
   // operator-agent identity.
@@ -1518,7 +1532,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     panes: async () => ({ panes: herdr.paneList(), available: true }),
     recordSession,
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, accountHeld(`account-${profile.name}`) ? { available: false, reason: `account-${profile.name} is held until ${heldAccounts.get(`account-${profile.name}`)!.resetsAt}` } : { available: true, reason: null }])),
-    snapshot, dispatch, requestProof, approver, merge, refuseMerge, docsSync, doctor, containment, settleContainment, unblock, observeCandidate,
+    snapshot, dispatch, requestProof, approver, docsSync, doctor, containment, settleContainment, unblock,
     closeSession: pane => {
       const name = herdr.agents.get(pane)?.name ?? '';
       if ((options.regression?.includes('approvers-left-open') && /approver/.test(name)) || (options.regression?.includes('docs-syncs-left-open') && /docs-sync/.test(name))) return;
@@ -1530,7 +1544,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       return api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: bound, reason });
     },
     decisions: work => api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`),
-    withdraw: (work, decision, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason }),
+    withdraw: (work, decision, reason) => { withdrawals.set(decision, (withdrawals.get(decision) ?? 0) + 1); return api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason }); },
     faultClassPolicy: { threshold: 3, windowHours: 24 },
     fileFaultClass: (input, key) => {
       // The documentation trim item is what the once-only filing assertion reads (GY-574).
@@ -1549,8 +1563,23 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         return named ? [{ ground: 'review thread 1', text: `Please also update ${[...named].join(', ')} in this round.` }] : [];
       },
       basePaths: async (paths: readonly string[]) => new Set<string>(paths),
-      widenScope: (work: Work, request: ScopeRequestState, paths: string[], reason: string) =>
-        api(principals.operatorAgent, 'POST', `work/${work.id}/requirements`, answeringWidening(work, request, paths, reason)),
+      widenScope: async (work: Work, request: ScopeRequestState, paths: string[], reason: string) => {
+        const status = transientWidenings.get(numberOf(work));
+        if (status) {
+          transientWidenings.delete(numberOf(work)); transientRefused.push({ n: numberOf(work), status, elapsed });
+          const error = status === 409 ? 'Policy revision changed; reload before revising' : 'Internal error; consult server logs';
+          throw new RefusedResponse(`Graphyard refused work/${work.id}/requirements (${status}): ${error}`, status, { error });
+        }
+        return api(principals.operatorAgent, 'POST', `work/${work.id}/requirements`, answeringWidening(work, request, paths, reason));
+      },
+      // The first read of the partial item's history once its request is refused answers past the step's deadline.
+      decisions: async (work: Work) => {
+        if (numberOf(work) === scopePlan.partial && !lateReads.length && work.scopeRequest?.decision?.state === 'refused') {
+          lateReads.push({ n: numberOf(work), elapsed });
+          await new Promise(resolve => setTimeout(resolve, decisionReadDeadlineMs + 500));
+        }
+        return api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`);
+      },
     } : {}),
     controlPlane: async () => ({ build: { commit: production.build }, ...(heldJobs ? { heldJobs: 1 } : {}) }),
     observeDeployment: async delivered => {
@@ -1558,6 +1587,12 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       return { source: 'endpoint', sha: production.sha, at: new Date(clock.now()).toISOString(), reason: null, deployed: serving.map(item => item.key), pending: delivered.filter(item => !serving.includes(item)).map(item => item.key) };
     },
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    // The base failure (GY-528): CI logs and the base head's run read from GitHub, reruns, and what the operator-agent files and asks for.
+    failedTests: async job => github.failedTests(job),
+    baseCheck: async check => github.baseCheck(check),
+    rerunJob: async job => { await github.rerun(job, 'loop'); },
+    fileBaseFailure: async (input, key) => { const filed = await api(principals.operatorAgent, 'POST', 'work', input, key); baseFailure.filed.push(filed); return filed; },
+    refreshCandidate: async (work, reason, key) => { baseFailure.refreshes.push(work.key); return api(principals.operatorAgent, 'POST', `work/${work.id}/refresh`, { reason, base: work.observation?.baseTip }, key); },
     hostMemory: async () => memoryReading(),
     // A rework refused on a stale observation wakes the item's observation job (GY-710) through
     // the server's own resync endpoint, as `master run` wires it.
@@ -1659,21 +1694,36 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     wakes: [] as { at: number; cycle: number; text: string; clock?: number }[],
     ended: [] as string[], refusedEnds: [] as string[], killed: null as string | null,
     maxLive: 0, cycleOf: 0, rotations: [] as { at: number; detail: string; before: number; after: number }[],
+    // GY-1223: the master pane the day set working, every read of a master screen, the accounts each launch took and the loop held.
+    worked: null as string | null, bannerAt: null as number | null, reads: [] as { at: number; pane: string; status: string }[],
+    accounts: [] as string[], holds: [] as { account: string; resetsAt: string | null; at: number }[],
   };
   if (options.master) {
     const plan = options.master, name = config.masterAgentName!;
     // Timed on the day's schedule position, as every other fault of the day is.
     const refusing = () => elapsed >= plan.refuseRelease.from && elapsed < plan.refuseRelease.to;
+    // The registry launches the master role on its first account the loop does not hold (GY-1223).
     effects.masterSession = { launch: async () => {
       const pane = herdr.open(name, 'idle'), session = `master-registry-${master.launches.length + 1}`;
+      const account = ['claude-master', 'claude-master-b'].find(candidate => !accountHeld(candidate)) ?? 'claude-master';
       master.launches.push({ at: elapsed, pane, session });
-      return { agentName: name, pane, runtime: 'claude', account: 'claude-master', session };
+      master.accounts.push(account);
+      return { agentName: name, pane, runtime: 'claude', account, session };
     } };
     effects.endRegistrySession = async session => {
       if (refusing()) { master.refusedEnds.push(session); throw new Error('the agent registry is unreachable: timeout'); }
       master.ended.push(session);
     };
-    effects.holdAccount = async () => {};
+    effects.holdAccount = async (account, observed) => { heldAccounts.set(account, { resetsAt: observed.resetsAt }); master.holds.push({ account, resetsAt: observed.resetsAt, at: elapsed }); };
+    // GY-1223: the loop reads the master's screen every cycle it supervises it. A working master
+    // shows its own prose — which names the limit banner with no retry marker — until the day
+    // prints its runtime's retry banner; any other pane reads as no screen, as on the other days.
+    const workerOutput = effects.sessionOutput;
+    effects.sessionOutput = agent => {
+      if (agent.name !== name) return workerOutput ? workerOutput(agent) : null;
+      master.reads.push({ at: elapsed, pane: agent.pane_id ?? '', status: agent.agent_status ?? '' });
+      return screens.get(agent.pane_id ?? '') ?? '● Waiting for the next wake\n';
+    };
     const workerPrompt = effects.promptSession!;
     // A wake leaves the master idle, as a session that read master status and found nothing to do.
     effects.promptSession = async (agent, text) => agent.name === name ? void master.wakes.push({ at: elapsed, cycle: master.cycleOf, text }) : workerPrompt(agent, text);
@@ -1738,6 +1788,21 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       fenced.settled.push({ key: work.key, epoch: assessment.epoch, elapsed, cycle: cycles });
     };
   }
+  // ---- GY-1286: the slow-server day. Inside the window every decision request and observation wake
+  // ---- the loop sends takes `ms` of the clock before the plane answers, as the 30s-timeout writes of
+  // ---- cycles 12285 and 12293 did, so the decisions step runs past its budget and puts items off.
+  const budgetDay = { cycles: [] as { cycle: number; elapsed: number; spentMs: number; slow: number; deferred: string[] }[], withdrawn: [] as { key: string; cycle: number }[], slowCalls: 0, cycleSlow: 0 };
+  if (options.slowDecisions) {
+    const window = options.slowDecisions, { decide, wakeObservation, withdraw } = effects;
+    const slow = async () => {
+      const at = clock.now() - dayStart;
+      if (at < window.from || at >= window.to) return;
+      budgetDay.slowCalls++; budgetDay.cycleSlow++; fenced.drift += window.ms; await moveClock(window.ms);
+    };
+    effects.decide = async (work, action, reason, input) => { await slow(); return decide!(work, action, reason, input); };
+    effects.wakeObservation = async work => { await slow(); return wakeObservation!(work); };
+    effects.withdraw = async (work, decision, reason) => { budgetDay.withdrawn.push({ key: work.key, cycle: cycles }); return withdraw!(work, decision, reason); };
+  }
   let publishedMergeQueue: string | null = null;
   const mergeQueuePosts: { at: number; settings: Record<string, number> }[] = [];
   effects.publishMergeBatchSize = async () => {
@@ -1748,6 +1813,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     await api(principals.coordinator, 'POST', 'merge-queue', settings);
     publishedMergeQueue = published;
   };
+  const baseFailure = { filed: [] as Work[], refreshes: [] as string[] };
 
   // ---- The coordinator checkout the loop runs from, and its supervisor (GY-437). ----
   // A detached checkout of the base branch, at the tip the day starts on; git answers from the
@@ -1857,7 +1923,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const chainedTips = new Set<string>();
   let peakWindow = 0;
   const seenTips = new Set<string>();
-  let released = 0, split = false, noticed = false, deploys = 0, cycles = 0, reportedDispatches = 0, restarted = false, exitedRowsSeen = 0;
+  let released = 0, split = false, noticed = false, deploys = 0, cycles = 0, reportedDispatches = 0, restarted = false, exitedRowsSeen = 0, broken = false, repaired = false, repairClosed = false;
   // GY-574: the documentation day records the trim filings, the loop's trim actions, and when the
   // trim item was closed with the documentation still saturated, so the once-only filing and the
   // bounded action count are what the day itself observed.
@@ -1971,7 +2037,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     while (released < plan.items && elapsed >= released * releaseEveryMs) await engine.execute(principals.operator, 'ready', items[released++].id, {}, id());
     // The scope scenarios release beside the fifteen: the wide asks early enough to decide well
     // before their workers push, the unrepresentable one so its refusal stands for hours.
-    for (const [slot, n] of [[30, scopePlan.wideRule], [35, scopePlan.wideFinding], [40, scopePlan.unrepresentable]] as const)
+    for (const [slot, n] of [[30, scopePlan.wideRule], [35, scopePlan.wideFinding], [40, scopePlan.unrepresentable], [45, scopePlan.partial]] as const)
       if (options.scope && !releasedScope.has(n) && elapsed >= slot * minute) { await engine.execute(principals.operator, 'ready', items[n - 1].id, {}, id()); releasedScope.add(n); }
     const splitAt = options.queued ? options.hours * hour + hour : plan.split.at;
     if (!split && elapsed >= splitAt) {
@@ -1990,6 +2056,26 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       ? new Set([...github.prs.values()].filter(pr => pr.open).map(pr => pr.head)) : new Set<string>();
     // A change landed on main outside Graphyard, moving the base under candidates already pushed.
     if (!noticed && elapsed >= plan.notice) { noticed = true; github.commit('Add NOTICE to the base branch', [...github.files, 'NOTICE']); }
+    // A test breaks on main outside Graphyard, and is repaired eleven minutes later (GY-528). Only
+    // the 24-hour main day runs it: its candidates are held without rework either way, and that
+    // day is where the filing, rerun and refresh recovery is asserted. The window is sized to the
+    // push cadence — one worker pushes every fifteen minutes — so exactly one push lands inside it
+    // (item twelve's first head) and is held, and the repair lands early enough that the refreshed
+    // candidate re-merges into the long gap before the next release's merge: every merge the day
+    // delays otherwise moves the base under a queued tip and reads as churn beside the remedy
+    // refresh itself. It stands three hours in, clear of the morning's scenarios: the memory dip
+    // holds the first launches, so items one and two push together past half an hour, and a hold
+    // there would replace the spent producer's head (GY-496) before its request is spent.
+    if (mainDay && options.hours >= 24 && !broken && elapsed >= plan.baseFailure.breaks) { broken = true; github.baseFailure.broken = github.commit('Add a test holding a fixed date against the clock', github.files).sha; }
+    if (mainDay && options.hours >= 24 && !repaired && elapsed >= plan.baseFailure.repaired) { repaired = true; github.baseFailure.repaired = github.commit('Repair the fixed-date test', github.files).sha; }
+    // Once the repair has landed and the loop has retired the base failure, the person who repaired
+    // main closes the P0 item filed for it as obsolete, naming the repair commit: an open item would keep
+    // the day stepping one minute at a time to its end, and leave work for the next day's loop.
+    const repairItem = baseFailure.filed[0];
+    if (repaired && !repairClosed && repairItem && !Object.keys(state.baseFailures).length) {
+      repairClosed = true;
+      await api(principals.operator, 'POST', `work/${repairItem.key}/close`, { kind: 'obsolete', reason: `soak: main was repaired outside Graphyard by ${github.baseFailure.repaired}` });
+    }
     // GY-793: main is briefly broken by a direct commit and fixed by the next one. Item 2's worker
     // pushes inside the window, so its candidate is built against the broken commit; the fix's own
     // run completes one CI duration after it, which is when the judgement can first name the tip
@@ -2026,6 +2112,21 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       const pane = herdr.open(approverSessionName(current, decision.id));
       // Each ends a minute after the loop first lists it.
       pending.push(async () => { pending.push(async () => { if (ending === 'vanishes') herdr.kill(pane); else herdr.status(pane, 'done'); }); });
+    }
+    // GY-1297: once each scenario item has a candidate, a fault strands an approval on it — approved,
+    // its application never recorded. Item 1's rework is bound to a head the item never had (it moved
+    // past it) and item 2's unblock judged no head (its situation holds), each put to an approver
+    // session by hand; item 3's rework, bound to a head it left, has no session at all, so the loop's
+    // own rework request for it when its reviewer sends it back meets it standing.
+    if (options.stranded) for (const [n, action, kind, watched] of [[1, 'rework', 'moved', true], [2, 'unblock', 'holds', true], [3, 'rework', 'moved', false]] as const) {
+      if ([...stranded.values()].some(entry => entry.workId === items[n - 1].id)) continue;
+      const current = (await store.list()).find(item => item.id === items[n - 1].id)!;
+      if (!current.candidate) continue;
+      const id = randomUUID(), input = action === 'rework' ? { previousWorkerStopped: true } : { expectedRevision: current.revision };
+      const situation = kind === 'moved' ? { situation: { sha: sha('stranded', n), baseSha: current.candidate.baseSha } } : {};
+      await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [current.id, principals.operatorAgent.id, 'decision.requested', JSON.stringify({ id, action, input, reason: `Soak: a ${action} of ${current.key} whose application a fault interrupts`, requester: { id: principals.operatorAgent.id, role: 'admin' }, capabilities: [], ...situation })]);
+      await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [current.id, principals.approver.id, 'decision.approved', JSON.stringify({ id, action, reason: 'Soak: approved, then the application is interrupted', requestedBy: principals.operatorAgent.id, approver: { id: principals.approver.id, role: 'admin' } })]);
+      stranded.set(id, { key: current.key, workId: current.id, kind, watched, pane: watched ? herdr.open(approverSessionName(current, id)) : null });
     }
     // GY-475: once the loop has settled the scenario's refused rework decisions (each approver
     // session closed, its refusal escalated and never re-requested), the daemon restarts: the
@@ -2072,7 +2173,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     }
     // The docs-conflict scenario is a main-day and regression-day fault: the other days' own
     // rework accounting and windows would only absorb a base move this day must hold.
-    if (!options.queued && !options.headless && !options.scope && !options.handApprovers && !options.capacityWait && !options.refuseReworkOf?.length && !options.containment && !failover && !docs) docsTick();
+    if (!options.queued && !options.headless && !options.scope && !options.handApprovers && !options.stranded && !options.capacityWait && !options.refuseReworkOf?.length && !options.containment && !failover && !docs) docsTick();
     await workersTick(now);
     docsSyncTick(now);
     await producersTick(now);
@@ -2205,11 +2306,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       // fresh observation; its evidence lands three minutes later, on an observation by then stale.
       if (options.starved) for (const item of await store.list()) {
         if (item.stage === 'done') continue;
-        if (!options.starved.items.includes(numberOf(item))) {
-          const merge = item.gates.find(gate => gate.name === 'merge');
-          if (item.stage === 'merge' && merge?.reasons.includes(staleObservationReason)) starvation.peersStale.push(`+${Math.round(elapsed / minute)} min ${item.key}`);
-          continue;
-        }
+        if (!options.starved.items.includes(numberOf(item))) continue;
         const held = starvedProof.get(item.id);
         if (!held || !item.candidate || held.candidate?.sha !== item.candidate.sha) continue;
         if (!starvation.armed.has(item.id) && item.gates.every(gate => gate.passed || gate.name === 'acceptance' || gate.name === 'merge')) starvation.armed.set(item.id, elapsed);
@@ -2290,6 +2387,18 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         const live = herdr.byName(config.masterAgentName!);
         if (live?.pane_id) { herdr.kill(live.pane_id); master.killed = live.pane_id; }
       }
+      // GY-1223: from `working.from` the live master works (Herdr reports it working) and its screen
+      // carries a bare limit notice it wrote itself; at `working.retryAt` its runtime prints the
+      // retry banner on its spent account and keeps retrying, still working, until the loop acts.
+      const working = options.master?.working;
+      if (working && !master.worked && elapsed >= working.from) {
+        const live = herdr.byName(config.masterAgentName!);
+        if (live?.pane_id) {
+          herdr.status(live.pane_id, 'working'); master.worked = live.pane_id;
+          screens.set(live.pane_id, `● Reading docs/master-agent-sessions.md\n\nWeekly/Monthly Limit Exhausted. Your limit will reset at ${hostWallClock(retryReset)} is the banner a working session must carry its retry marker beside\n● Working as ${config.masterAgentName}…\n`);
+        }
+      }
+      if (working && master.worked && master.bannerAt === null && elapsed >= working.retryAt) { screens.set(master.worked, retryBanner); master.bannerAt = elapsed; }
       if (options.staleRework && await restartOnVerdict(now)) { elapsed += minute; await moveClock(minute); continue; }
       if (options.staleMerge && await restartOnMerge(now)) { elapsed += minute; await moveClock(minute); continue; }
       master.cycleOf = cycles;
@@ -2303,7 +2412,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
           // An adopted run that already ended is applied on adoption, before the cycle judges its decision.
           headless.adoptedEnded++; await run.settled; headless.settling.delete(run.directory); await new Promise(resolve => setImmediate(resolve));
         }
+        const cycleStart = clock.now(); budgetDay.cycleSlow = 0;
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
+        if (options.slowDecisions) budgetDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, slow: budgetDay.cycleSlow, deferred: [...state.decisionsDeferred] });
         if (options.workspaceFailure) for (const [name, entry] of Object.entries(state.profiles)) if (/worktree/.test(entry.reason ?? '')) workspaceCooled.push(`+${Math.round(elapsed / minute)} min ${name}: ${entry.reason}`);
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
         escalations.push(...result.actions.filter(action => action.kind === 'escalation').map(action => action.detail));
@@ -2405,13 +2516,13 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     }
   }
 
-  // The blocked day ends with its repeating item left to the master: it is closed here, so the
-  // next day's loop does not inherit it.
+  // The blocked day ends with its repeating and request-error items left to the master: they are
+  // closed here, so the next day's loop does not inherit them.
   if (options.blockers) {
     await moveClock(5 * minute);
     for (const leftover of await store.list()) {
       if (leftover.stage === 'done' || leftover.closure || !items.some(item => item.id === leftover.id)) continue;
-      await api(principals.operator, 'POST', `work/${leftover.key}/close`, { kind: 'obsolete', reason: 'soak: the blocked day ends with its repeating blocker left to the master' });
+      await api(principals.operator, 'POST', `work/${leftover.key}/close`, { kind: 'obsolete', reason: 'soak: the blocked day ends with its repeating and request-error blockers left to the master' });
     }
     // One more cycle sees it closed: the rows the loop kept for its blocker go with it.
     await runCycle(config, state, effects, clock.now, launcher); await launcher.idle();
@@ -2433,11 +2544,11 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane,
+  return { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
-    decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master,
-    blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, staleMerges, restartLog, guardDay, decompositionDay: decompositionHistory };
+    decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master, baseFailure,
+    blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
+    wakes, staleMerges, restartLog, guardDay, budgetDay, decompositionDay: decompositionHistory, transientRefused, lateReads };
 }
 
 /**
@@ -2475,7 +2586,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const hours = Number(process.env.SOAK_HOURS ?? 24);
   const day = await simulateDay({ hours, github806: true, remedies: true, plan: { blockedMerge: blockedMergeItem, ...memoryDay }, diagnosisLimit });
   assertLaunchesConfined(day, coordinatorRoot!);
-  const { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, diagnosisRuns, decideCalls, baseBreak, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks } = day;
+  const { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, diagnosisRuns, decideCalls, baseBreak, baseFailure, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks } = day;
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   // GY-1060: every item merged under protection requiring `secrets` beside the policy's checks, so
@@ -2603,6 +2714,28 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(final.find(item => item.key === items[basePlan.split.item - 1].key)!.plannedFiles.includes(`src/soak/item-${basePlan.split.item}-a.ts`), 'the split file re-planned its item onto the successors');
   const reviewed = final.find(item => item.key === items[basePlan.exhaustedReviewer - 1].key)!;
   assert.ok(reviewed.reviewFailovers?.some(failover => failover.profile === 'claude-reviewer' && failover.exhaustion === 'usage-limit' && failover.nextProfile === 'cursor-reviewer'), `the exhausted reviewer bot failed over to the next profile: ${JSON.stringify(reviewed.reviewFailovers)}`);
+  // The base failure (GY-528): the candidate its window caught was held without rework — the rework
+  // decisions above are the reviewers' three and the spent producer's — one P0 item names it, and
+  // once main was repaired its failed job was rerun once and it was refreshed onto the repaired
+  // base once, then delivered. The window is sized to hold the one push that lands inside it (see
+  // the plan comment); that several candidates share one item is the unit test's assertion.
+  const [filed, ...more] = baseFailure.filed;
+  assert.ok(filed && !more.length, `one P0 item for the failing test: ${baseFailure.filed.map(item => item.key).join(', ')}`);
+  assert.equal(filed.priority, 0);
+  const blocked = final.filter(item => item.baseRefresh?.trigger === 'base failure repaired').map(item => item.key).sort();
+  assert.ok(blocked.length >= 1 && blocked.every(key => filed.description.includes(`${key} (`)), `the base failure blocked the window's candidate(s), which its item names: ${blocked.join(', ')}; ${filed.description}`);
+  assert.deepEqual([...baseFailure.refreshes].sort(), blocked, 'each blocked candidate was refreshed onto the repaired base, once, by a Graphyard-authored merge');
+  // Each blocked candidate's failed job was rerun by the loop's remedy step exactly once — the
+  // engine's own first check-rerun (GY-516) may have run beside it, on superseded heads too.
+  const loopReruns = github.baseReruns.filter(entry => entry.by === 'loop').map(entry => entry.jobId);
+  assert.ok(new Set(loopReruns).size === blocked.length && loopReruns.length === blocked.length, `each blocked job rerun once by the loop's remedy: ${JSON.stringify(github.baseReruns)}`);
+  assert.deepEqual(Object.keys(state.baseFailures), [], 'the base failure retired once its candidates were refreshed');
+  // Distinct items: the low-lane rework (GY-883) is refused once at apply and requested again.
+  assert.deepEqual([...new Set(decideCalls.filter(call => call.action === 'rework').map(call => call.key))].sort(),
+    items.filter((_, index) => basePlan.rework.has(index + 1) || index + 1 === basePlan.spentProducer).map(item => item.key).sort(),
+    'the only rework decisions are the reviewers\' three and the spent producer\'s — no base-failure blocked candidate was sent back');
+  // GY-500: disjoint items merged optimistically and infrastructure changes queued; the one that
+  // broke main was reverted head-bound within one CI duration of its failing post-merge run, and
   // The docs-only conflict went to one docs-sync session, not a worker: its push was adopted as the
   // refresh's outcome with the approval kept, the session was closed, and the loop's records of it are bounded.
   const conflicted = items[basePlan.docsConflict.item - 1].key;
@@ -3075,6 +3208,31 @@ test('unit:soak-invariants-hold — hand-launched approvers that vanish or stop 
   assert.equal([...hand.values()].reduce((total, entry) => total + entry.refused, 0), 1, 'one relaunch was refused by a registry timeout, and retried');
 });
 
+test('unit:soak-invariants-hold — approvals a fault left with no outcome, on a head the item left and on one that holds, hand-watched and met by the loop\'s own request, each settle once, with at most one withdrawal, no approver session left open, and every invariant holding', { timeout: 300_000 }, async () => {
+  // GY-1297: the settlement runs every cycle — the loop's request path and both watch kinds look at
+  // every standing approval — so it must settle each stranded one exactly once and then stay quiet.
+  const day = await simulateDay({ hours: 4, stranded: true });
+  const { final, violations, failures, herdr, stranded, withdrawals, state } = day;
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'every item is delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.equal(stranded.size, 3, 'all three approvals were stranded');
+  for (const [decision, { key, workId, kind, watched }] of stranded) {
+    const settled = (await store.pool.query("SELECT kind, payload, created_at AS at FROM events WHERE work_id=$1 AND payload->>'id'=$2 AND kind = ANY($3::text[])", [workId, decision, ['decision.superseded', 'decision.applied', 'decision.failed', 'decision.withdrawn']])).rows;
+    assert.equal(settled.length, 1, `${key}: decision ${decision} settled once (${settled.map(row => row.kind).join(', ')})`);
+    const [approved] = (await store.pool.query("SELECT created_at AS at FROM events WHERE work_id=$1 AND payload->>'id'=$2 AND kind='decision.approved'", [workId, decision])).rows;
+    // Only the loop's own request meets item 3's: it is settled when the item next needs a rework, not on a bound.
+    if (watched) assert.ok(new Date(settled[0].at).getTime() - new Date(approved.at).getTime() <= approvedDecisionBoundMs, `${key}: settled within the decision bound`);
+    // One bound to a head the item left can never apply; one whose situation holds is resumed and applied, or fails naming why.
+    if (kind === 'moved') assert.equal(settled[0].kind, 'decision.superseded', `${key}: superseded`);
+    else assert.match(`${settled[0].kind} ${settled[0].payload.error ?? ''}`, /^decision\.applied |^decision\.failed Approved by graphyard-approver at .+ but its application was never recorded; resuming it was refused: /, `${key}: applied, or failed naming why`);
+    assert.ok((withdrawals.get(decision) ?? 0) <= 1, `${key}: at most one withdrawal was sent for ${decision} (${withdrawals.get(decision)})`);
+    if (watched) assert.equal(withdrawals.get(decision), 1, `${key}: the hand watch sent the one withdrawal that settled it`);
+    assert.ok(![...herdr.agents.values()].some(agent => agent.name === approverSessionName(final.find(item => item.key === key)!, decision)), `${key}: no approver session for ${decision} is left open`);
+    assert.ok(!Object.values(state.approvals).some(watch => watch.decision === decision), `${key}: no watch for ${decision} is left`);
+  }
+});
+
 // Keep restart-induced stale observations in their own day, trimmed to six items so it adds
 // little to the soak file's runtime: pausing the whole loop changes which heads need speculative
 // tips, so the baseline day's CI-flake schedule stays intact.
@@ -3119,7 +3277,7 @@ test('unit:soak-invariants-hold — a guarded merge that refuses a queue head is
   const stuck = 4, lostCarry = 2;
   const { items, final, github, violations, failures, lost, escalations, state, herdr, stale, config, dayStart } =
     await simulateDay({ hours: 4, queued: { window: 4, releaseEveryMs: 3 * minute }, stale: { stuck, lostCarry }, plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set([5]), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 } } });
-  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all ten items are delivered');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all seven items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds across the refusals, the rereviews and the rework');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no worker lost its lease');
@@ -3192,63 +3350,6 @@ test('unit:soak-invariants-hold — a guarded merge that refuses a queue head is
   assert.ok(seconds < 200, `the day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
 
-test('unit:soak-invariants-hold — candidates whose polled observation is starved keep their place and are delivered, never reworked or ejected: any prioritized request comes past the bound, once per observation window, stopping once they merge, with no peer starved and every invariant holding', { timeout: 600_000 }, async () => {
-  // GY-1099 in the real loop: three items whose observation workers never reach their polled job
-  // once every other gate passes, except for the merge queue's own work on them (placing the entry,
-  // publishing its tip and reading the tip's CI), which the queue-head band claims. Each must be
-  // kept in place and delivered rather than sent to the GY-831 rework. Every merge now goes through
-  // the queue, whose own work refreshes the observation, so a guarded merge refused only for a stale
-  // observation — the state the loop answers with a prioritized request (unit-tested in
-  // tests/merge-stall-attention.test.ts) — may not arise; any request the loop does make must still
-  // follow its rules. Item four's first prioritized wake, if it has one, is lost.
-  const began = performance.now();
-  const starved = [2, 4, 5], dropFirst = 4;
-  const far = 100 * hour;
-  const { items, final, github, violations, failures, lost, state, observeRequests, starvation, escalations, dayStart } = await simulateDay({ hours: 4, starved: { items: starved, dropFirst },
-    plan: { items: 6, leftovers: 2, releaseEveryMs: 10 * minute, workMs: 15 * minute, rework: new Set(), deaths: new Set(), slowRecompute: 0, unstable: 0, exhaustedReviewer: 0,
-      flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), split: { at: far, item: 6 }, blind: { from: far, to: far }, notice: far, deploys: [],
-      heldJob: { at: [], forMs: 0 }, dirtyCheckout: { from: far, to: far }, outOfQueue: { item: 6, afterMs: far } } });
-  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all six items are delivered');
-  assert.deepEqual(violations, [], 'every system invariant holds across the starved observations');
-  assert.deepEqual(failures, [], 'no cycle failed');
-  assert.deepEqual(lost, [], 'no worker lost its lease');
-  const keys = starved.map(n => items[n - 1].key);
-  assert.deepEqual([...starvation.armed.keys()].map(id => items.find(item => item.id === id)!.key).sort(), [...keys].sort(), 'every staged item was starved once its other gates passed');
-  assert.ok(starvation.dropped.every(entry => entry.endsWith(` ${items[dropFirst - 1].key}`)) && starvation.dropped.length <= 1, `only the dropped item's first prioritized wake was lost: ${JSON.stringify(starvation.dropped)}`);
-
-  for (const key of keys) {
-    const item = final.find(entry => entry.key === key)!;
-    // Kept in place: never marked for rework, never ejected, never refused to the control plane.
-    assert.equal(item.pipeline?.reworkRounds ?? 0, 0, `${key} was never sent back for rework`);
-    assert.ok(!(item.queueHistory ?? []).some(entry => entry.event === 'ejected'), `${key} was never ejected: ${JSON.stringify(item.queueHistory)}`);
-    assert.ok(!item.mergeRefusal, `${key} was never reported as a merge refusal`);
-    assert.ok(!escalations.some(detail => detail.includes(key) && /for a rework decision/.test(detail)), `${key} raised no rework attention`);
-    // Any request came past the bound, at most one per observation window, and none after GitHub merged it.
-    const requests = observeRequests.filter(entry => entry.key === key);
-    const evidenced = starvation.evidenced.get(item.id)!;
-    const merged = github.merges.find(entry => entry.key === key)!;
-    assert.ok(merged, `${key} merged`);
-    const lostWake = starvation.dropped.some(entry => entry.endsWith(` ${key}`));
-    assert.ok(requests.length <= (lostWake ? 2 : 1), `${key}: at most one prioritized request per wake the world needed: ${JSON.stringify(requests)}`);
-    if (!requests.length) continue;
-    assert.ok(requests[0].at - evidenced >= 10 * minute, `${key}: the first request waited out the ten-minute bound (+${Math.round((requests[0].at - evidenced) / minute)} min)`);
-    for (let index = 1; index < requests.length; index++) assert.ok(requests[index].at - requests[index - 1].at >= 2 * minute, `${key}: asked again only in the next observation window: ${JSON.stringify(requests)}`);
-    assert.ok(requests.every(entry => dayStart + entry.at <= merged.at), `${key}: no request came after GitHub merged it: ${JSON.stringify(requests)}`);
-    assert.ok(requests.every(entry => entry.sha === item.candidate!.sha), `${key}: every request named the candidate that merged`);
-    assert.ok(starvation.claimed.some(entry => entry.key === key && entry.at >= requests.at(-1)!.at), `${key}: the last prioritized wake was claimed ahead of the backlog`);
-    // The loop's own record: one attributable refresh action for the standing refusal, bounded.
-    const marker = Object.entries(state.actions).filter(([action]) => action.endsWith(':repeated:observe') && action.includes(item.id));
-    assert.equal(marker.length, 1, `${key}: one observation marker: ${JSON.stringify(marker)}`);
-    assert.ok(marker[0][1].kind === 'refresh' && marker[0][1].state === 'done' && marker[0][1].attempts === requests.length, `${key}: the marker counts its requests: ${JSON.stringify(marker[0][1])}`);
-    assert.match(marker[0][1].detail, /neither marked for rework nor ejected/);
-  }
-  assert.ok(observeRequests.every(request => keys.includes(request.key)), `only the starved items were observed on request: ${JSON.stringify(observeRequests)}`);
-  // The prioritized wakes starved no peer: no other item was ever merge-ready on a stale observation.
-  assert.deepEqual(starvation.peersStale, [], 'no other candidate waited on a stale observation');
-  const seconds = (performance.now() - began) / 1000;
-  assert.ok(seconds < 200, `the starved day runs inside its budget (${seconds.toFixed(1)} s)`);
-});
-
 test('unit:soak-invariants-hold — approver launches refused for capacity wait uncounted and relaunch oldest-first within two cycles of capacity freeing, with no hand action and every invariant holding', { timeout: 360_000 }, async () => {
   // GY-849: between minute 50 and minute 130 no approver account is eligible, which spans the
   // rework rounds of items three and seven (requested about minutes 58 and 118), so both decisions
@@ -3289,11 +3390,13 @@ test('unit:soak-invariants-hold — approver launches refused for capacity wait 
   assert.ok(seconds < 200, `the capacity-wait day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
 
-test('unit:soak-invariants-hold — the loop\'s own master session across a day: launched once, relaunched within three cycles of dying while the registry refuses to end its session (which stays owed until it is ended), rotated at its budget, never two at once, and woken only by material events with the heartbeat as the fallback', { timeout: 600_000 }, async () => {
+test('unit:soak-invariants-hold — the loop\'s own master session across a day: launched once, relaunched within three cycles of dying while the registry refuses to end its session (which stays owed until it is ended), rotated at its budget, never two at once, woken only by material events with the heartbeat as the fallback, and rotated once off a spent account it keeps retrying on while working', { timeout: 600_000 }, async () => {
   // GY-898: the master-session step runs every cycle of the real loop here. The session dies at
   // minute 70, inside a window (minutes 60–100) in which the registry refuses every end, so the
   // rotation's release is owed and retried; the relaunched session passes its 90-minute budget.
-  const plan = { exitAt: 70 * minute, refuseRelease: { from: 60 * minute, to: 100 * minute }, sessionMinutes: 90, heartbeatMinutes: 30 };
+  // GY-1223: the third session works from minute 200 with a bare limit notice of its own on screen,
+  // and from minute 230 its runtime retries on its spent account, still working.
+  const plan = { exitAt: 70 * minute, refuseRelease: { from: 60 * minute, to: 100 * minute }, sessionMinutes: 90, heartbeatMinutes: 30, working: { from: 200 * minute, retryAt: 230 * minute } };
   const day = await simulateDay({ hours: 6, master: plan });
   const { final, violations, failures, state, master, cycles } = day;
   assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all fifteen items are delivered with the master session in the loop');
@@ -3318,6 +3421,26 @@ test('unit:soak-invariants-hold — the loop\'s own master session across a day:
   assert.ok(budget && budget.after >= relaunched + plan.sessionMinutes * minute && budget.before <= relaunched + (plan.sessionMinutes + 32) * minute,
     `the relaunched session rotated at its ${plan.sessionMinutes}-minute budget: ${JSON.stringify({ relaunched, rotations: master.rotations })}`);
   assert.equal(master.launches.length, master.rotations.length + 1, 'every rotation relaunched exactly one session');
+  // GY-1223: a working master is read and judged every cycle by the real loop; its own prose about
+  // the banner never rotates it, the retry banner rotates it exactly once, its account is held to
+  // the banner's reset, and no later launch takes that account before the reset.
+  const worked = master.launches.findIndex(launch => launch.pane === master.worked);
+  assert.ok(worked >= 0 && master.bannerAt !== null, `the scenario set a live master working and printed its retry banner: ${JSON.stringify({ worked: master.worked, bannerAt: master.bannerAt })}`);
+  const workingReads = master.reads.filter(read => read.pane === master.worked && read.status === 'working');
+  assert.ok(workingReads.some(read => read.at < master.bannerAt!), `the loop read the working master's own prose before the banner: ${workingReads.length} reads`);
+  // The soak cadence equals workingOutputReadMs, so this proves one read per cycle, not the
+  // throttle itself; unit:working-session-output-read-throttled pins the throttle.
+  assert.ok(workingReads.length <= new Set(workingReads.map(read => read.at)).size, 'a working master is read at most once a cycle (the throttle is pinned by its unit test)');
+  const exhausted = master.rotations.filter(rotation => /\(exhausted\)/.test(rotation.detail));
+  assert.equal(exhausted.length, 1, `exactly one rotation off the spent account: ${JSON.stringify(master.rotations)}`);
+  assert.ok(exhausted[0].at >= master.bannerAt! && exhausted[0].at <= master.bannerAt! + 2 * minute, `the retrying master rotated within two cycles of its banner: ${JSON.stringify({ bannerAt: master.bannerAt, rotation: exhausted[0] })}`);
+  assert.match(exhausted[0].detail, /is retrying on its provider's limit notice/);
+  assert.ok(!master.rotations.some(rotation => rotation.at >= plan.working.from && rotation.at < master.bannerAt!), 'the working master\'s own prose about the banner rotated nothing');
+  assert.deepEqual(master.holds.map(hold => hold.account), [master.accounts[worked]], 'the spent account, and only it, was held');
+  assert.equal(master.holds[0].resetsAt, day.retryReset.toISOString(), 'the hold lasts until the banner\'s reset');
+  assert.ok(master.accounts.slice(worked + 1).length > 0 && master.accounts.slice(worked + 1).every(account => account !== master.accounts[worked]),
+    `no later master launched into the held account before its reset: ${JSON.stringify(master.accounts)}`);
+  assert.equal(master.launches[worked + 1]?.at !== undefined && master.launches[worked + 1].at <= exhausted[0].at + 3 * minute, true, 'the role relaunched within three cycles of the rotation');
   // AC-2: at most one wake per cycle, every event wake names its causes, heartbeats are spaced by
   // the configured window, and no cycle repeats the previous cycle's causes (a wake storm).
   const perCycle = new Map<number, number>();
@@ -3379,10 +3502,10 @@ test('unit:soak-invariants-hold — after a restart the first request for a refu
   assert.ok(![...herdr.agents.values()].some(agent => /approver/i.test(agent.name ?? '')), 'no approver session is left open at the end of the day');
 });
 
-test('unit:soak-invariants-hold — direct wide scope requests: a rule-approved ask folds and answers once, a finding-grounded ask widens once, and an unrepresentable ask is refused with nothing retrying it', { timeout: 600_000 }, async () => {
+test('unit:soak-invariants-hold — direct wide scope requests: a rule-approved ask folds and answers once, a finding-grounded ask widens once, an unrepresentable ask is refused with nothing retrying it, and a partly grounded ask reaches its approver through transient refusals and a late history read with no scope fault', { timeout: 600_000 }, async () => {
   const day = await simulateDay({ hours: 4, scope: true });
   assertLaunchesConfined(day, coordinatorRoot!);
-  const { items, final, violations, failures, state, escalations } = day;
+  const { items, final, violations, failures, state, escalations, transientRefused, lateReads, decideCalls } = day;
   assert.deepEqual(violations, [], 'every system invariant holds with the scope scenarios in the day');
   assert.deepEqual(failures, [], 'no cycle failed');
 
@@ -3419,6 +3542,27 @@ test('unit:soak-invariants-hold — direct wide scope requests: a rule-approved 
   assert.ok(judging && judging[1].state === 'done' && /no unresolved review finding/.test(judging[1].detail), `the finding rule judged the refusal and left it standing: ${judging?.[1].detail}`);
   assert.equal((await api(principals.operatorAgent, 'GET', `work/${blocked.id}/decisions`)).decisions.filter((decision: any) => decision.action === 'requirements').length, 0, 'an unrepresentable fold is never routed to a decision the schema would refuse');
   assert.equal(escalations.filter(detail => detail.includes(blocked.key) && /blocked on scope/.test(detail)).length, 1, 'exactly one escalation stands for the blocked item');
+
+  // GY-1293. The partly grounded ask: the page is granted on the rule, the rest goes to the approver
+  // against the widened revision, once, and is applied. The control plane refused the first widening
+  // of it (stale revision) and of the finding item (5xx), and the first read of its decision history
+  // missed the step's deadline: each was asked again on the next cycle, and none is a fault.
+  assert.deepEqual(transientRefused.map(entry => [entry.n, entry.status]).sort(), [[scopePlan.wideFinding, 500], [scopePlan.partial, 409]], 'each transient refusal was served once');
+  assert.equal(lateReads.length, 1, 'the partial item\'s history read once past the deadline');
+  const partial = final.find(item => item.key === items[scopePlan.partial - 1].key)!;
+  assert.equal(partial.stage, 'done', 'the partial item was delivered');
+  assert.ok(partial.plannedFiles.includes(scopePlan.partialPage) && partial.plannedFiles.includes(scopePlan.partialFile), `both paths were granted: ${partial.plannedFiles.join(', ')}`);
+  const partialRows = Object.entries(state.actions).filter(([key]) => key.startsWith(`scope:${partial.id}:`));
+  assert.equal(partialRows.filter(([, action]) => /^Partly widened /.test(action.detail)).length, 2, `the partial widening is recorded for the revision it judged and the one it made, and made once: ${partialRows.map(([key, action]) => `${key} ${action.state} ${action.detail.slice(0, 80)}`).join(' | ')}`);
+  assert.ok(partialRows.length <= 3, `the request's rows stay bounded (its decision and one judgement per revision): ${partialRows.map(([key]) => key).join(', ')}`);
+  const asked = decideCalls.filter(call => call.key === partial.key && call.action === 'requirements');
+  assert.equal(asked.length, 1, 'the rest was put to the approver exactly once');
+  assert.ok((asked[0].input as { plannedFiles: string[] }).plannedFiles.includes(scopePlan.partialPage), 'against the widened plannedFiles');
+  const requirements = (await api(principals.operatorAgent, 'GET', `work/${partial.id}/decisions`)).decisions.filter((decision: any) => decision.action === 'requirements');
+  assert.deepEqual(requirements.map((decision: any) => decision.state), ['applied'], 'and its approval applied');
+  const scoped = [items[scopePlan.wideFinding - 1].key, partial.key];
+  const instances = state.faults.instances.filter(instance => scoped.includes(instance.subject) && (instance.faultClass === 'scope' || instance.faultClass === 'decision'));
+  assert.deepEqual(instances.map(instance => [instance.subject, instance.kind]), [], 'no transient refusal or late read is counted as a scope or decision fault');
 });
 
 test('unit:soak-invariants-hold — a loop change that breaks an invariant fails the soak: approver and docs-sync sessions the loop no longer closes are named within the hour', { timeout: 600_000 }, async () => {
@@ -3453,7 +3597,7 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
     hours: 6, reassigned: n,
     plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
   });
-  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all six items are delivered');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all seven items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds across the idle re-prompt and the reclaim');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no lease was lost: the idle attempt was reclaimed');
@@ -3590,20 +3734,20 @@ test('unit:soak-invariants-hold — blocked work unblocks itself: every routine 
     plan: { items: blockerPlan.items, releaseEveryMs: 5 * minute, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 9, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 9 } },
   });
   const { items, final, violations, failures, state, herdr, blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts } = day;
-  const repeating = items[blockerPlan.repeating - 1].key;
-  assert.deepEqual(final.filter(item => item.key !== repeating && item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.blocker ?? ''} ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'every item but the repeating one is delivered');
+  const repeating = items[blockerPlan.repeating - 1].key, requestError = items[blockerPlan.requestError - 1].key;
+  assert.deepEqual(final.filter(item => item.key !== repeating && item.key !== requestError && item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.blocker ?? ''} ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'every item but the repeating and request-error ones is delivered');
   assert.deepEqual(violations, [], 'every system invariant holds across the blockers, their probes and their approvers');
   assert.deepEqual(failures, [], 'no cycle failed');
 
   // AC-2 in the loop: every recorded blocker ended its attempt — the item held no lease after it.
-  assert.ok(blockerEvents.length >= 7, `each blocked item recorded its blocker: ${JSON.stringify(blockerEvents)}`);
+  assert.ok(blockerEvents.length >= 8, `each blocked item recorded its blocker: ${JSON.stringify(blockerEvents)}`);
   assert.deepEqual(blockerEvents.filter(entry => entry.lease !== null), [], 'a recorded blocker leaves no lease behind');
 
   const cleared = (key: string) => blockerActions.filter(action => action.work === key && action.state === 'done' && /^Cleared /.test(action.detail));
   for (const [n, blockerClass] of Object.entries(blockerPlan.classes).map(([n, cls]) => [Number(n), cls] as const)) {
     const key = items[n - 1].key;
     assert.equal(classifyBlocker(blockerPlan.text(n, 'graphyard/x', 'decision')).class, blockerClass, `item ${n}'s blocker text reads as ${blockerClass}`);
-    if (key === repeating) continue;
+    if (key === repeating || key === requestError) continue;
     const clear = cleared(key);
     assert.equal(clear.length, 1, `${key}'s ${blockerClass} blocker was cleared by the loop exactly once: ${JSON.stringify(blockerActions.filter(action => action.work === key))}`);
     assert.match(clear[0].detail, new RegExp(`Cleared ${key}'s ${blockerClass} blocker`));
@@ -3630,6 +3774,21 @@ test('unit:soak-invariants-hold — blocked work unblocks itself: every routine 
   assert.ok(day.decideCalls.some(call => call.key === scoped.key && call.action === 'requirements'), 'the loop requested the scope widening itself');
   assert.ok(blockerActions.some(action => action.work === decided.key && new RegExp(`blocked on decision ${decision} .*launched approver`).test(action.detail)), `the loop launched the waiting decision's approver: ${JSON.stringify(blockerActions.filter(action => action.work === decided.key))}`);
 
+  // GY-1055: a 500 on the item's own request is the master's to recheck: handed over once, never
+  // probed on health nor cleared; the plane-wide errors beside it cleared on health above.
+  assert.deepEqual([3, 7, 8].map(n => itemSpecificPlaneError(blockerPlan.text(n, 'graphyard/x', null))), [false, false, true], 'only the request-level 500 reads as the item\'s own server error');
+  assert.deepEqual(cleared(requestError), [], `${requestError}'s request-level server error was never cleared on health`);
+  assert.deepEqual(blockerProbes.filter(probe => probe.key === requestError), [], `${requestError}'s blocker was never probed`);
+  assert.equal(blockerActions.filter(action => action.work === requestError && /server error its own request met, .*needs the master to recheck that operation/.test(action.detail)).length, 1, `${requestError} was handed to the master once: ${JSON.stringify(blockerActions.filter(action => action.work === requestError))}`);
+  assert.equal(attempts.get(requestError), 1, `${requestError} was not dispatched again`);
+  // GY-1055: the credential cause stood past blockerEscalateMs: reported to the master once, after
+  // that long, while the loop kept probing it and cleared it when it went. No shorter cause was.
+  const credential = items[0].key, firstFailed = blockerProbes.find(probe => probe.key === credential && !probe.passed)!;
+  const escalations = blockerActions.filter(action => /its probe has failed since .* so it is reported to the master/.test(action.detail));
+  assert.deepEqual(escalations.map(action => action.work), [credential], `only the long-standing credential blocker was reported to the master, once: ${JSON.stringify(escalations)}`);
+  assert.ok(escalations[0].elapsed >= firstFailed.elapsed + blockerEscalateMs && escalations[0].elapsed <= firstFailed.elapsed + blockerEscalateMs + 2 * minute && escalations[0].elapsed < blockerPlan.clearsAt['github-credential']!,
+    `${credential} was reported within two cycles of its probe having failed for blockerEscalateMs, before its cause went (+${escalations[0].elapsed / minute} min, first failed at +${firstFailed.elapsed / minute} min)`);
+
   // The repeating blocker: cleared maxAutomaticClears times in a row, then left to the master.
   assert.equal(cleared(repeating).length, maxAutomaticClears, `${repeating} was cleared ${maxAutomaticClears} times and no more`);
   assert.ok(blockerActions.some(action => action.work === repeating && new RegExp(`again after the loop cleared its blocker ${maxAutomaticClears} times in a row`).test(action.detail)), `${repeating} was left to the master once spent`);
@@ -3643,7 +3802,9 @@ test('unit:soak-invariants-hold — blocked work unblocks itself: every routine 
   assert.deepEqual(approvers.map(agent => agent.name), [], 'no approver session of a blocked item is left open');
   assert.ok(!Object.values(state.approvals).some(watch => watch.decision === decision), 'the launched approver\'s watch went with its judged decision');
   assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('blocker:')), [], 'no blocker row outlives its item');
-  assert.ok(blockerKeysPeak <= 2 * 7, `the blocker rows stayed bounded by the blocked items (peak ${blockerKeysPeak})`);
+  // Per blocked item: its blocker row and its episode's rows (the failing probe's start and its
+  // report to the master, the base tip, the decisions awaited, the approver launched).
+  assert.ok(blockerKeysPeak <= 3 * 8, `the blocker rows stayed bounded by the blocked items (peak ${blockerKeysPeak})`);
 });
 
 test('unit:soak-invariants-hold — start failures on the real dispatch path fall forward across the day: three consecutive failures of one account across items raise one attention item, a later start on the account clears it, and every failed pane is closed at its bound', { timeout: 300_000 }, async () => {
@@ -3992,6 +4153,44 @@ test('unit:soak-invariants-hold — launches that keep failing for one cause are
   assert.deepEqual(state.dispatchFailures, {}, 'every failure run was retired: by the blocker, or by the launch that landed');
 });
 
+test('unit:soak-invariants-hold — a slow control plane carries the decisions step past its budget for an hour and a half: every cycle stays within the interval, every item put off is reached within a few cycles, attestations included, none has its standing decision withdrawn while put off, nothing is left put off once the plane is fast, and every invariant holds', { timeout: 600_000 }, async () => {
+  // GY-1286: for the window every decision request and observation wake takes 12 s to answer, so
+  // the step's 30 s budget (two fifths of the 60 s interval, never under the actionable cadence)
+  // holds two requests a cycle and the rest are put off; ten items release thirty seconds apart
+  // and nine of them are sent back once, so several need a decision at once, and item 3's `manual:` proof needs the loop's attestation.
+  const slow = { from: 5 * minute, to: 150 * minute, ms: 15_000 }, rework = new Set([1, 2, 4, 5, 6, 7]);
+  const { items, final, violations, failures, lost, decideCalls, budgetDay } = await simulateDay({
+    hours: 5, slowDecisions: slow,
+    plan: { items: 7, leftovers: 0, slowRecompute: 0, releaseEveryMs: 1_000, workMs: 50 * minute, rework, deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, attested: 3, exhaustedReviewer: 0, unstable: 0, lowLane: 0, outOfQueue: { item: 7, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 7 } },
+  });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all seven items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds while the step is bounded and once the plane is fast');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  const cycles = budgetDay.cycles, deferring = cycles.filter(entry => entry.deferred.length);
+  assert.ok(budgetDay.slowCalls >= 6 && deferring.length >= 2, `the window ran and the step put items off across cycles (${budgetDay.slowCalls} slow calls, ${deferring.length} cycles deferring)`);
+  // The step's budget plus the request in flight at the bound and each pass's one guaranteed
+  // request: never the whole interval, however many items wait.
+  assert.deepEqual(cycles.filter(entry => entry.spentMs > soakConfig.run.intervalSeconds * 1000).map(entry => `cycle ${entry.cycle} +${Math.round(entry.elapsed / minute)} min: ${entry.spentMs}ms, ${entry.slow} slow calls`), [], 'every cycle stays within the interval');
+  // Nothing waits for good: an item stays put off a handful of consecutive cycles at most.
+  const runs = new Map<string, number>(), longest = new Map<string, number>();
+  for (const entry of cycles) for (const key of new Set([...runs.keys(), ...entry.deferred])) {
+    const run = entry.deferred.includes(key) ? (runs.get(key) ?? 0) + 1 : 0;
+    if (run) runs.set(key, run); else runs.delete(key);
+    longest.set(key, Math.max(longest.get(key) ?? 0, run));
+  }
+  assert.deepEqual([...longest].filter(([, run]) => run > 4), [], `no item is put off more than four cycles running: ${JSON.stringify([...longest])}`);
+  assert.ok(Math.max(...cycles.map(entry => entry.deferred.length)) <= items.length, 'what is put off is bounded by the open items');
+  assert.deepEqual(cycles.filter(entry => entry.elapsed >= slow.to + 2 * minute && entry.deferred.length).map(entry => `+${Math.round(entry.elapsed / minute)} min: ${entry.deferred.join(', ')}`), [], 'once the plane is fast, nothing is put off');
+  // A decision the step still needs is never withdrawn while its item waits for the next cycle.
+  const withdrawnDeferred = budgetDay.withdrawn.filter(entry => cycles.find(cycle => cycle.cycle === entry.cycle)?.deferred.includes(entry.key));
+  assert.deepEqual(withdrawnDeferred, [], 'no standing decision is withdrawn for an item put off');
+  // The attested item's attestation is requested, and it is delivered on it.
+  const attested = items[2].key;
+  assert.ok(decideCalls.some(call => call.key === attested && call.action === 'attest'), `${attested}'s attestation was requested: ${JSON.stringify(decideCalls.filter(call => call.key === attested).map(call => call.action))}`);
+  assert.ok(final.find(item => item.key === attested)!.evidence.some(entry => entry.proof === MANUAL && entry.result === 'pass'), `${attested} was delivered on its attestation`);
+});
+
 test('unit:soak-invariants-hold — containment quarantines of dead workers stand across many cycles while the timed clock read fails and then answers slowly, one read a cycle and none without an assessable quarantine, each escalation recorded once, and they settle once reads are fast, with every invariant holding', { timeout: 600_000 }, async () => {
   // GY-811: every supervised launch raises a containment quarantine; two workers die, so their
   // fences outlive them and only the loop can lower them. The work snapshot takes 6 s to read, so
@@ -4007,7 +4206,7 @@ test('unit:soak-invariants-hold — containment quarantines of dead workers stan
     hours: 3, containment: { failUntil, slowUntil },
     plan: { items: 6, leftovers: 2, slowRecompute: 0, releaseEveryMs: 5 * minute, workMs: 20 * minute, rework: new Set(), deaths: new Set(deaths), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set([3]), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
   });
-  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all six items are delivered');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all seven items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds while the fences stand and once they settle');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no lease was lost: a dead worker lapses and its fence waits for the loop');
@@ -4129,7 +4328,7 @@ test('unit:decisions-step-bounded — at the 2026-10-03 load (90 open items, 360
   const effects = {
     agents: () => agents, herdr: () => ({ agents, available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: items, now: iso(cycleNo * minute), jobs: [] }),
-    closeSession: (pane: string) => { closed.push(pane); }, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    closeSession: (pane: string) => { closed.push(pane); }, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
     decide: async (work: Work, action: string) => {
@@ -4197,12 +4396,12 @@ test('unit:decisions-step-bounded — at the 2026-10-03 load (90 open items, 360
       return new Response(JSON.stringify({ events, page: { hasMore: false } }), { status: 200 });
     }) as typeof fetch;
     const live = daemonEffects(root, { ...config, credentialFile: coordinator, operatorAgent: { id: 'graphyard-master-operator', credentialFile: operator } } as MasterConfig,
-      { snapshot: async () => ({ work: items, now: iso(0) }), mutate: async () => ({}), executor: { principal: 'coordinator', instance: 'decision-changes' }, fetcher });
+      { snapshot: async () => ({ work: items, now: iso(0) }), mutate: async () => ({}), fetcher });
     assert.deepEqual(await live.decisionChanges!(null), { seq: '1200', work: [items[0].id], complete: false }, 'the first read keeps nothing: it only finds where the ledger stands');
     assert.deepEqual(await live.decisionChanges!('1200'), { seq: '1209', work: [items[1].id, items[2].id], complete: true });
     assert.deepEqual(asked.map(url => [url.pathname, url.searchParams.get('order'), url.searchParams.get('cursor'), url.searchParams.get('payload')]), [['/api/events', 'desc', null, 'none'], ['/api/events', 'asc', '1200', 'none']]);
-    assert.deepEqual(asked[1].searchParams.get('kind')!.split(','), ['requested', 'concurred', 'refused', 'declined', 'approved', 'applied', 'failed', 'stale', 'withdrawn'].map(kind => `decision.${kind}`));
-    assert.equal(daemonEffects(root, { ...config, credentialFile: coordinator } as MasterConfig, { snapshot: async () => ({ work: items, now: iso(0) }), mutate: async () => ({}), executor: { principal: 'coordinator', instance: 'decision-changes' }, fetcher }).decisionChanges,
+    assert.deepEqual(asked[1].searchParams.get('kind')!.split(','), ['requested', 'concurred', 'refused', 'declined', 'approved', 'applied', 'failed', 'stale', 'withdrawn', 'superseded'].map(kind => `decision.${kind}`));
+    assert.equal(daemonEffects(root, { ...config, credentialFile: coordinator } as MasterConfig, { snapshot: async () => ({ work: items, now: iso(0) }), mutate: async () => ({}), fetcher }).decisionChanges,
       undefined, 'without the operator-agent identity there are no decision reads to keep');
   } finally { await Promise.all([rm(root, { recursive: true, force: true }), rm(secrets, { recursive: true, force: true })]); }
 });
@@ -4234,7 +4433,7 @@ test('unit:decisions-step-bounded — a history read slower than the step\'s dea
   const effects = {
     agents: () => agents, herdr: () => ({ agents, available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: items, now: iso(elapsed), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
     decide: async (work: Work, action: string) => {
@@ -4302,8 +4501,8 @@ test('unit:decisions-step-bounded — a history read slower than the step\'s dea
 
 test('unit:soak-invariants-hold — review findings classified mechanical under the real loop: each approved head is planned once and held from merging until its one bot round, the fresh read settles every plan, and a rejected bot commit is recorded once as a misclassified finding, with every invariant holding', { timeout: 300_000 }, async () => {
   // GY-971: every approval of the day is read from the review ledger the dispatcher keeps. Two
-  // items' first approvals raise a finding classified mechanical: the loop holds each approved head
-  // from merging, asks for one bot round, and the round's commit on that head is read afresh. One
+  // items' first approvals raise a finding classified mechanical: the review gate holds each approved
+  // head from merging, the loop asks for one bot round, and the round's commit on that head is read afresh. One
   // fresh read accepts it; the other rejects it as a misclassification, which is recorded once, and
   // that item is reworked and delivered like any change request. The plan, the hold, the rework
   // decision and the fresh-read judgement repeat per cycle, head and item, which is why they live here.
@@ -4313,7 +4512,7 @@ test('unit:soak-invariants-hold — review findings classified mechanical under 
   await controlPlane('soak_mechanical');
   const { items, final, violations, failures, lost, github, actionKeys, mechanical: world } = await simulateDay({
     hours: 6, mechanical,
-    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, exhaustedReviewer: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
   });
   assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all six items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds across the mechanical-fix rounds');
@@ -4339,7 +4538,7 @@ test('unit:soak-invariants-hold — review findings classified mechanical under 
     const merged = github.merges.filter(entry => entry.key === key);
     assert.equal(merged.length, 1, `${key} merged once`);
     assert.notEqual(github.commits.get(merged[0]!.sha)!.parents[1], plan.head, `${key}: the approved head ${plan.head.slice(0, 12)} was not merged ahead of its bot round`);
-    assert.ok([...actionKeys].some(entry => entry.startsWith(`escalation:${id}:${plan.head}:`) && entry.endsWith(':mechanical')), `${key}: the loop's merge step held the approved head for the round: ${[...actionKeys].filter(entry => entry.includes(id)).join(', ')}`);
+    assert.ok(world.reviewHolds.has(`${key} ${plan.head}`), `${key}: the review gate held the approved head for the round: ${[...world.reviewHolds].join(', ')}`);
   }
   // The accepted bot commit is what landed for its item.
   const accepted = world.botRounds.find(round => round.key === items[mechanical.applied - 1].key)!;

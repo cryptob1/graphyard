@@ -102,11 +102,6 @@ test('unit:retro-synthesis-drafts-prevention — a cause past the threshold draf
   assert.equal(scopeDrafts[2].entry?.faultClass, 'scope'); assert.equal(scopeDrafts[2].entry?.cause, 'build/out-of-scope-count');
   for (const draft of scopeDrafts) assert.match(draft.proposal, /3 instances of .* in 7 days \(threshold 3\): GY-s1 \(s1\)/);
 
-  // A recurring acceptance refusal corrects the producers' method.
-  const proof = detectRecurringCauses([1, 2, 3].map(n => signal(`p${n}`, { kind: 'escalation', resolution: `Trusted integration:example evidence from agent-${n} is no longer independent: agent-${n} has since held an assignment on GY-${n}` })), [], policy, now);
-  assert.deepEqual(draftPrevention(proof[0]).map(draft => draft.kind), ['producer-method', 'fault-catalogue-entry']);
-  assert.equal(draftPrevention(proof[0])[1].entry?.faultClass, 'proof');
-
   // A recurring review finding becomes a coding-standards update quoting it.
   const review = detectRecurringCauses([1, 2, 3].map(n => signal(`r${n}`, { resolution: `Reviewer on GY-${n}: the new route skips the operator-agent guard` })), [], policy, now);
   const standard = draftPrevention(review[0])[0];

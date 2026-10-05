@@ -1,4 +1,3 @@
-import { deliveredByGitHub } from './model/delivery-mode.js';
 import type { Evidence, Observation, ScopeFile, Work } from './model.js';
 import { CHECK_NAME, LANDABLE_CHECK } from './model/work.js';
 import { isClosed } from './model/closure.js';
@@ -594,6 +593,8 @@ export interface BaseRefresh {
    * refresh. `head` is then the unchanged candidate, and whatever the record carried onto it stays.
    */
   stale?: StaleMergeability | null;
+  /** The coordinator's request this refresh answered (GY-528), when it was one; see `BaseRefreshRequest`. */
+  requested?: { by: string; at: string; reason: string } | null;
   /** The base-branch breakage a `base breakage` refresh answered (GY-793): the failing tests, the base that broke them and the tip that fixed them. */
   baseBreak?: BaseBreak | null;
   /**
@@ -614,11 +615,18 @@ export function conflictSince(previous: Pick<BaseRefresh, 'from' | 'policyRevisi
   return same ? previous!.conflictSince ?? previous!.at : refresh.at;
 }
 /**
- * Why a branch was written by the control plane rather than by its worker (GY-375), or, for
+ * The coordinator's request that a base tip be merged into this head although GitHub reports no
+ * conflict (GY-528): the head carries a base failure the base has since repaired, and a CI rerun
+ * reuses the merge commit the failure was built on. Kept beside `baseRefresh`, not in it, so an
+ * approval an earlier refresh carried onto the head still binds until this one runs.
+ */
+export interface BaseRefreshRequest { head: string; base: string; policyRevision: number; by: string; at: string; reason: string }
+/**
+ * Why a branch was written by the control plane rather than by its worker (GY-375, GY-528), or, for
  * `base breakage` (GY-793), why a candidate whose required check failed only on tests the base
  * branch broke and has since fixed was brought onto the fixed tip.
  */
-export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair' | 'docs sync' | 'base breakage';
+export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair' | 'docs sync' | 'base failure repaired' | 'base breakage';
 /**
  * A GitHub `mergeable: false` the control plane's own test merge showed to be clean (GY-375).
  * GitHub recomputes mergeability lazily after the base moves and can report a clean head
@@ -756,6 +764,23 @@ export function baseRefreshNeeded(work: Work): { head: string; boundBase: string
   const restore = currentRestore(work)?.restore;
   if (restore && restore.contaminated === candidate.sha && (restore.performedAt === null || restore.outcome === 'unrepairable' || restore.outcome === 'unpublished')) return null;
   return { head: candidate.sha, boundBase: candidate.baseSha, baseTip };
+}
+
+/**
+ * The base refresh the coordinator requested for exactly the current head, not yet run (GY-528),
+ * or null. It runs whether or not GitHub reports a conflict: the head carries
+ * a base failure the base has since repaired, and only the repaired base merged in clears it.
+ */
+export function requestedBaseRefresh(work: Work): BaseRefreshRequest | null {
+  const request = work.baseRefreshRequest, refresh = work.baseRefresh, candidate = work.candidate, observation = work.observation;
+  if (!request || !candidate || !observation) return null;
+  if (!work.submission || work.reworkRequested || work.stage === 'done' || work.queue || observation.merged || observation.prState === 'closed' || observation.draft) return null;
+  if (observation.candidate.sha !== candidate.sha || request.head !== candidate.sha || request.policyRevision !== work.policyRevision) return null;
+  // Answered already: a refresh of this head since the request is recorded, merged or conflicting.
+  if (refresh && refresh.from.sha === candidate.sha && refresh.policyRevision === work.policyRevision && Date.parse(refresh.at) >= Date.parse(request.at)) return null;
+  // The base tip observed now is the one merged in: a base that moved on again since the request
+  // still holds the repair, and merging an older tip would leave the head behind it anyway.
+  return observation.baseTip && observation.baseTipContained === false ? request : null;
 }
 
 /** The unresolved conflict a base refresh reported for exactly this candidate and branch head, or null. */
@@ -1081,6 +1106,14 @@ export function requiredCheck(work: Pick<Work, 'candidate' | 'observation' | 'ga
  * that refusal is the one exit a merged queue entry has (GY-94), and by master status.
  */
 export const reconciliationRefusalPrefix = 'Reconciliation by decision ';
+/**
+ * The violation an observed merge records when the record before the merge cutoff did not show
+ * every gate passing for the merged head (GY-1235). The wording predates GitHub delivery and is
+ * kept so violations already on the ledger still match.
+ */
+export const unauthorizedMergeViolation = 'Merge observed without a prior authorization for this candidate';
+/** True for an item held at the merge stage by an observed merge its gates did not pass (GY-92). */
+export const mergedWithoutAuthorization = (work: Work) => work.stage !== 'done' && !!work.observation?.merged && work.violations.includes(unauthorizedMergeViolation);
 export function refusedReconciliation(work: Pick<Work, 'violations'>): { decision: string; violation: string } | null {
   const violation = work.violations.find(entry => entry.startsWith(reconciliationRefusalPrefix));
   return violation ? { decision: violation.slice(reconciliationRefusalPrefix.length).split(' ')[0], violation } : null;
@@ -1190,7 +1223,7 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   // A refused reconciliation is a reported adverse conclusion about the entry itself (GY-94).
   if (work.observation?.merged) {
     const refusal = refusedReconciliation(work);
-    return refusal ? `Pull request was merged without a valid merge execution and can never publish a speculative tip; reconciliation by decision ${refusal.decision} was refused, so the entry leaves the queue undelivered` : null;
+    return refusal ? `Pull request was merged though its gates had not passed and can never publish a speculative tip; reconciliation by decision ${refusal.decision} was refused, so the entry leaves the queue undelivered` : null;
   }
   if (!work.submission || work.reworkRequested) return 'Implementation returned to the worker for a new attempt';
   if (work.policyRevision !== work.queue.policyRevision) return `Policy revision changed from ${work.queue.policyRevision} to ${work.policyRevision} after this entry was queued`;
@@ -1490,21 +1523,17 @@ export interface GitHubMergeQueueState {
 }
 declare module './model/work.js' { interface Observation { githubQueue?: GitHubMergeQueueState | null } }
 
-/** The coordinator's request that GitHub merge exactly this candidate: what `merge-acquire` with `enqueue` records. */
+/** A coordinator's request that GitHub merge exactly this candidate, as `merge-acquire` recorded it before GY-1235. */
 export interface MergeEnqueueRequest { sha: string; baseSha: string; policyRevision: number; requestedBy: string; at: string }
 
 /**
- * Whether the item is authorized to merge right now: every gate passes, nothing stands against it,
- * and the recorded all-gates authorization binds exactly the current candidate at the current policy.
- * The same judgement the check publication makes, read from the record as it stands.
+ * Whether GitHub may merge the item right now: every gate passes for its current candidate and
+ * nothing stands against it. Every passing gate is the authorization — GitHub's branch protection
+ * decides the merge, and no separate authorization, execution or observation age is consulted.
  */
 export function mergeAuthorized(work: Work): boolean {
-  const authorization = work.mergeAuthorization, candidate = work.candidate;
-  // Under GitHub delivery every passing gate is the authorization: GitHub's branch protection decides the merge.
-  const github = deliveredByGitHub(work);
-  return work.stage === 'merge' && !!candidate && (github || !!authorization) && !work.observation?.merged
-    && work.gates.every(gate => gate.passed) && !work.violations.length && !work.leadHold
-    && (github || (authorization!.sha === candidate.sha && authorization!.baseSha === candidate.baseSha && authorization!.policyRevision === work.policyRevision));
+  return work.stage === 'merge' && !!work.candidate && !work.observation?.merged
+    && work.gates.every(gate => gate.passed) && !work.violations.length && !work.leadHold;
 }
 /** Whether the coordinator's enqueue request binds the current candidate and policy. */
 export function enqueueRequestCurrent(work: Work, request: Pick<MergeEnqueueRequest, 'sha' | 'baseSha' | 'policyRevision'> | null | undefined): boolean {
@@ -1615,9 +1644,8 @@ export function mergeQueueAction(work: Work, state: GitHubMergeQueueState, reque
   const held = state.mode !== 'none';
   const sha = work.candidate?.sha;
   const withdrawn = !mergeAuthorized(work) ? `${work.key} is no longer authorized to merge: ${[...work.gates.flatMap(gate => gate.reasons), ...work.violations].join('; ') || 'no all-gates authorization binds the current candidate'}`
-    : !deliveredByGitHub(work) && !enqueueRequestCurrent(work, request) ? `${work.key}: no merge was requested for candidate ${sha?.slice(0, 12)} at policy revision ${work.policyRevision}`
-      : state.head !== sha ? `${work.key}: GitHub holds head ${state.head.slice(0, 12)}, not the authorized candidate ${sha?.slice(0, 12)}`
-        : null;
+    : state.head !== sha ? `${work.key}: GitHub holds head ${state.head.slice(0, 12)}, not the authorized candidate ${sha?.slice(0, 12)}`
+      : null;
   if (withdrawn) return held ? { kind: 'dequeue', reason: withdrawn } : { kind: 'hold', reason: withdrawn };
   const waitedMs = request ? now - Date.parse(request.at) : 0;
   if (state.mode === 'auto-merge' && state.mergeStateStatus === 'BLOCKED' && waitedMs > blockedAutoMergeProbeMs)

@@ -125,7 +125,6 @@ function fleetExecutor(launched: string[], only?: string): ExecutorEffects {
     },
     launchReview: async () => { throw new Error('no review is launched here'); },
     launchProducer: async () => { throw new Error('no producer is launched here'); },
-    merge: async () => { throw new Error('no merge is brokered here'); },
     observeDeployment: async () => { throw new Error('no deployment is observed here'); },
   });
   return {

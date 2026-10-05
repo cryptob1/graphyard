@@ -48,7 +48,7 @@ const providerUsageErrors: readonly RegExp[] = [
 export const providerLimitNotices: Readonly<Record<string, readonly RegExp[]>> = {
   claude: [...providerUsageErrors, /\bClaude AI usage limit reached\b/],
   codex: [...providerUsageErrors],
-  opencode: [...providerUsageErrors],
+  opencode: [...providerUsageErrors, /\b(?:weekly|monthly|daily|hourly|usage)(?:\/(?:weekly|monthly|daily|hourly))? limit exhausted\b/i], // OpenCode 1.18's `Weekly/Monthly Limit Exhausted` (GY-973)
   cursor: [...providerUsageErrors],
   agy: [...providerUsageErrors, /\bIndividual quota reached\b(?=.*\b(?:upgrade your subscription|resets? in)\b)/i], // GY-1135
 };
@@ -68,9 +68,9 @@ const severityLabel = /^(?:\[[^\]]*\]\s*)?(?:api\s+)?error(?:\s+code)?\s*[:#]?\s
  */
 export function detectRuntimeExhaustion(output: string, runtime: string | null | undefined, now: number): ExhaustionSignal | null {
   const notices = runtimeLimitNotices(runtime);
-  const lines = output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n').map(line => line.replace(/[│┃|]\s*$/, '').trim()).filter(Boolean).slice(-exhaustionTailLines);
+  const lines = output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n').map(line => line.replace(/[│┃|]\s*$/, '').trim().replace(/\s{2,}/g, ' ')).filter(Boolean).slice(-exhaustionTailLines);
   for (let index = lines.length - 1; index >= 0; index--) {
-    // The banner itself, with whatever the terminal drew in front of it removed.
+    // The banner, with what the terminal drew before it removed and its padding collapsed (as in findExhaustion).
     const line = lines[index].replace(/^[^A-Za-z0-9]+/, '').replace(severityLabel, '');
     if (line.length > exhaustionNoticeMaxLength) continue;
     const at = notices.map(notice => notice.exec(line)?.index ?? -1).filter(offset => offset >= 0);

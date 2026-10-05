@@ -14,7 +14,7 @@ import { defaultReviewRoundCap, pastReviewCap, reviewRoundCapOf, reviewRoundStat
 import { criteriaRuleSection, followUpFilingKey, listedThreadAliases, listedThreadLimit, readUnresolvedThreads, resolveFollowUpThreads, resolveNamedThreads, threadAliasLimit, threadReadFailureSection, threadSection, unaccountedThreads, type LaunchThread, type ThreadResolution } from './review-threads.js';
 import type { FleetProbe } from './fleet.js';
 import { carriedApproval, type Work } from './model.js';
-import { removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
+import { dataDirectory, removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
 import { documentationReviewSection, type DocumentationObligation } from './model/documentation.js';
 import { researchReviewSection } from './research.js';
@@ -1058,6 +1058,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
    * `observe` is substituted and this is not.
    */
   recordIntervention?: (signal: InterventionRecordInput, key: string) => Promise<void>;
+  /** Takes one approval's follow-up lock; tryFollowUpLock by default. */
+  followUpLock?: typeof tryFollowUpLock;
 } = {}) {
   const ledger = await readReviewLedger(root);
   if (!config.reviewer) return { reviews: ledger.reviews, changed: 0, threads: [] as string[], released: [] as { pane: string; agentName: string }[] };
@@ -1225,7 +1227,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   changed += threads.changed;
   // The threads the approval judged FOLLOW-UP are nits: each is answered with a reply and resolved,
   // so conversation resolution no longer holds the merge on them; nothing is filed (GY-1249).
-  const followUps = await resolveApprovedFollowUps(root, ledger.reviews, reviewer, config.repository, dependencies.work, threadsRun, now);
+  const followUps = await resolveApprovedFollowUps(root, ledger.reviews, reviewer, config.repository, dependencies.work, threadsRun, now, dependencies.followUpLock);
   changed += followUps.changed;
   // A request the control plane no longer holds open releases its records to the retention window.
   if (dependencies.work) changed += releaseClosedRequests(ledger.reviews, dependencies.work, now);
@@ -1235,8 +1237,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
 
 /**
  * GY-971. Each approval of the current candidate is read once and its plan recorded
- * (`planMechanicalFix`): `planned` holds its follow-up handling, and the head's merge
- * (daemon/cycle-delivery.ts), while its head is the candidate, for the loop's mechanical-fix round
+ * (`planMechanicalFix`): `planned` holds its follow-up handling while its head is the candidate
+ * (the review gate holds the head's merge, model/gates.ts), for the loop's mechanical-fix round
  * (daemon/decisions.ts). A plan whose round never produced a bot commit falls back, and its findings
  * return to ordinary follow-ups: the item was delivered at the approved head, the round submitted that
  * head unchanged, or no round started within `mechanicalRoundStartMs`. The fresh read of a bot round's head,
@@ -1400,8 +1402,14 @@ function ledgerThread(thread: LaunchThread): LaunchThread {
     ...(createdAt && createdAt.length <= 40 ? { createdAt } : {}), ...(url && url.length <= 1000 ? { url } : {}) };
 }
 
-/** Where the follow-up locks are kept: one private file per approval. */
-const followUpCreateDirectory = (root: string) => resolve(root, '.graphyard/review-followups');
+/**
+ * Where the follow-up locks are kept: one private file per approval, under the installation's
+ * managed data root rather than the checkout (GY-1301). The coordinator checkout may be mounted
+ * read-only, and a lock that has to be written there aborted every reconcile pass. The directory is
+ * keyed by the checkout, so two installations on one host never share a lock.
+ */
+const followUpCreateDirectory = (root: string, environment: Record<string, string | undefined> = process.env) =>
+  resolve(dataDirectory(environment), 'review-followups', createHash('sha256').update(resolve(root)).digest('hex').slice(0, 12));
 /**
  * The lock one approval's nit-thread resolution holds (GY-166). The dispatcher and `master status` both
  * reconcile, and each would read the thread for an existing reply, find none, and post one: the
@@ -1409,29 +1417,52 @@ const followUpCreateDirectory = (root: string) => resolve(root, '.graphyard/revi
  * so a second pass sees the first one's replies instead of repeating them. A pass that finds the
  * lock held skips the approval; the holder is filing it, and the next pass retries.
  */
-const followUpLockFile = (root: string, key: string) => resolve(followUpCreateDirectory(root), `${createHash('sha256').update(key).digest('hex')}.lock`);
+const followUpLockFile = (root: string, key: string, environment?: Record<string, string | undefined>) => resolve(followUpCreateDirectory(root, environment), `${createHash('sha256').update(key).digest('hex')}.lock`);
 /** A filing holding its lock this long is wedged (each GitHub call is bounded well within it); its lock is broken. */
 export const followUpLockStaleMs = 15 * 60_000;
-export async function tryFollowUpLock(root: string, key: string): Promise<(() => Promise<void>) | null> {
-  const file = followUpLockFile(root, key);
-  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-  const { open, readFile: read, unlink } = await import('node:fs/promises');
+/** The errors of a lock location this process may not write: a read-only mount, or one it lacks permission on. */
+const unwritableLockCodes = new Set(['EROFS', 'EACCES', 'EPERM']);
+/** A held lock's release; `lockless` names why the pass runs without one, when the lock location could not be written. */
+export type FollowUpLockRelease = (() => Promise<void>) & { lockless?: string };
+export interface FollowUpLockOptions {
+  environment?: Record<string, string | undefined>;
+  /** The filesystem calls the lock makes; node:fs/promises by default. */
+  fs?: Pick<typeof import('node:fs/promises'), 'mkdir' | 'open' | 'readFile' | 'unlink' | 'rm'>;
+}
+/**
+ * Takes one approval's follow-up lock: its release, or null while another live pass holds it.
+ * A lock location this process cannot write (EROFS, EACCES, EPERM) never fails the reconcile: the
+ * pass runs without the lock (`lockless` on the release), as the single writer it then is, so
+ * reviewer verdicts still reconcile.
+ */
+export async function tryFollowUpLock(root: string, key: string, options: FollowUpLockOptions = {}): Promise<FollowUpLockRelease | null> {
+  const fs = options.fs ?? await import('node:fs/promises');
+  const file = followUpLockFile(root, key, options.environment);
+  const lockless = (error: any): FollowUpLockRelease => Object.assign(async () => {}, { lockless: `the follow-up lock ${file} cannot be written (${error.code}: ${String(error.message ?? '').split('\n')[0]!.slice(0, 200)})` });
+  try { await fs.mkdir(dirname(file), { recursive: true, mode: 0o700 }); }
+  catch (error: any) { if (unwritableLockCodes.has(error.code)) return lockless(error); throw error; }
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const handle = await open(file, 'wx', 0o600); await handle.writeFile(`${process.pid} ${Date.now()}`); await handle.close();
-      return async () => { await rm(file, { force: true }); };
-    } catch (error: any) { if (error.code !== 'EEXIST') throw error; }
-    const [pid, at] = (await read(file, 'utf8').catch(() => '')).split(' ').map(Number);
+      const handle = await fs.open(file, 'wx', 0o600);
+      try { await handle.writeFile(`${process.pid} ${Date.now()}`); }
+      catch (error: any) { await handle.close().catch(() => {}); await fs.rm(file, { force: true }).catch(() => {}); if (unwritableLockCodes.has(error.code)) return lockless(error); throw error; }
+      await handle.close();
+      return async () => { await fs.rm(file, { force: true }).catch(() => {}); };
+    } catch (error: any) {
+      if (unwritableLockCodes.has(error.code)) return lockless(error);
+      if (error.code !== 'EEXIST') throw error;
+    }
+    const [pid, at] = (await fs.readFile(file, 'utf8').catch(() => '')).split(' ').map(Number);
     let alive = true;
     try { if (pid) process.kill(pid, 0); } catch (error: any) { alive = error.code !== 'ESRCH'; }
     if (alive && !(Number.isFinite(at) && Date.now() - at > followUpLockStaleMs)) return null;
-    await unlink(file).catch(() => {});
+    await fs.unlink(file).catch(() => {});
   }
   return null;
 }
 
 /** The approved records whose follow-up (nit) threads the loop answers and resolves on this pass; each outcome is kept on the record. */
-async function resolveApprovedFollowUps(root: string, records: ReviewRecord[], reviewer: string, repository: string, work: Work[] | undefined, run: ChildRun | undefined, now: Date) {
+async function resolveApprovedFollowUps(root: string, records: ReviewRecord[], reviewer: string, repository: string, work: Work[] | undefined, run: ChildRun | undefined, now: Date, lock: typeof tryFollowUpLock = tryFollowUpLock) {
   const events: string[] = [];
   let changed = 0;
   if (!run || !work) return { events, changed };
@@ -1442,7 +1473,7 @@ async function resolveApprovedFollowUps(root: string, records: ReviewRecord[], r
     // A planned mechanical fix holds the filing while its head is the candidate (GY-971): the bot
     // round's fresh read judges the findings again, and a plan that falls back files them here.
     if (record.mechanicalFix?.state === 'planned' && record.mechanicalFix.reviewId === verdict.reviewId && approvesCurrentHead(record, work)) continue;
-    const release = await tryFollowUpLock(root, followUpFilingKey(repository, record.pr, verdict.reviewId));
+    const release = await lock(root, followUpFilingKey(repository, record.pr, verdict.reviewId));
     if (!release) continue;
     try {
       // The step as last saved, which another pass may have advanced since this pass read the ledger.

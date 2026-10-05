@@ -15,12 +15,11 @@ import type { GitHubCacheStore } from './github-cache.js';
 import type { GitHubChargeLedger } from './github-charges.js';
 import { nextAction } from './model/next-action.js';
 import { applyMainGuardRevert, runMainGuard, type CommitVerdict, type FileChange, type MainCommit, type MainGuardRevert, type MainGuardTick } from './main-guard.js';
-import { githubDelivery } from './model/delivery-mode.js';
 import { lockedWork } from './store/locked-read.js';
 import { save } from './store/store.js';
 export { CHECK_NAME, LANDABLE_CHECK };
 import { baseBreakRefreshNeeded, readBaseBreak, type BaseBreak } from './master/base-break-refresh.js';
-import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind, type CheckRerun } from './merge-queue.js';
+import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, requestedBaseRefresh, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind, type CheckRerun } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsWordBudget, type DocsWordCount, type TipDocs } from './model/documentation.js';
@@ -31,6 +30,10 @@ export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
 import { describePushShortfall, grantedPushPermissions, pushShortfallMarker, type PushPermissionShortfall } from './worker-credential.js';
 import { firstObservationOwed, observationBandLag, observationClaim, observationClaimBatch, observationFreshnessMs, observationLag, reviewCadenceCapMs } from './observation-priority.js';
 import { observedReviewBody } from './review-cap.js';
+import { botCommitSubjectPattern, parseClassifiedFindings } from './mechanical-findings.js';
+
+/** How many of an approval's nits are classified mechanical (GY-971): the review gate holds such an approval for its bot round. */
+const mechanicalNitCount = (body: unknown) => parseClassifiedFindings(body).filter(finding => finding.classification === 'mechanical').length;
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
@@ -39,6 +42,18 @@ export const scopeLookupBudget = 200;
  * so a list this long may be truncated: it is treated as incomplete and nothing is carried.
  */
 export const compareFileCap = 300;
+/**
+ * GY-1272. The one page every compare of two exact SHAs is read as. GitHub lists the changed files,
+ * the status, `ahead_by` and the merge base on a compare's first page whatever its size, so the
+ * ancestry question (`contains`), the commit list (`historySince`), the landing diff and every
+ * file listing of one pair are a single immutable read. Asked each under its own query, one base
+ * move cost each open candidate two to three charged compares of the same pair, which spent the
+ * App's hourly budget during the 5 October merge burst.
+ */
+export const comparePage = '?per_page=100&page=1';
+const shaPair = (from: string, to: string) => /^[a-f0-9]{40}$/.test(from) && /^[a-f0-9]{40}$/.test(to);
+/** The compare path of `from...to`: the shared first page (`comparePage`) for two exact SHAs, `query` otherwise. */
+export const comparePath = (from: string, to: string, query = '') => `/compare/${from}...${to}${shaPair(from, to) && (query === '' || query === '?per_page=1') ? comparePage : query}`;
 /** Re-requests of a pull request GitHub answered with `mergeable: null`, `mergeabilityRetryMs` apart: at most 10 seconds (GY-548). */
 export const mergeabilityRetries = 3, mergeabilityRetryIntervalMs = 3_000;
 /** One file of a GitHub compare, as far as a patch-id reads it. */
@@ -209,7 +224,7 @@ export const requestEndpoint = (method: string, path: string) => `${method} ${pa
  * request at all — not even a conditional one — for as long as the entry is kept.
  */
 export const immutableRead = (path: string) => /^\/repos\/[^/]+\/[^/]+\/(commits\/[a-f0-9]{40}|compare\/[a-f0-9]{40}\.\.\.[a-f0-9]{40}(\?[^/]*)?)$/.test(path)
-  // `contains` keeps the one answer it needs from its `?per_page=1` compare in the ancestry cache already.
+  // A bare `?per_page=1` compare is no reader's own any more (`comparePath` reads the shared page); its answer is not kept.
   && !/\?per_page=1$/.test(path);
 /**
  * One observation cycle (GY-806): every observation that starts within it shares one read of the
@@ -1427,7 +1442,7 @@ export class GitHub {
     await this.warm();
     const known = /^[a-f0-9]{40}\.\.\.[a-f0-9]{40}$/.test(key) ? this.ancestry.get(key) : undefined;
     if (known !== undefined) { this.persisted?.touch('ancestry', key); return known; }
-    const comparison = await this.request(`/compare/${base}...${head}?per_page=1`);
+    const comparison = await this.request(comparePath(base, head, '?per_page=1'));
     demand(typeof comparison?.status === 'string', `GitHub did not compare ${base.slice(0, 12)} with ${head.slice(0, 12)}`, 502);
     const contained = comparison.status === 'ahead' || comparison.status === 'identical';
     if (/^[a-f0-9]{40}\.\.\.[a-f0-9]{40}$/.test(key)) {
@@ -1458,6 +1473,7 @@ export class GitHub {
     if (pinned && this.histories.has(key)) { this.persisted?.touch('history', key); return this.histories.get(key)!; }
     const shas = new Set<string>(); let total = 0;
     for (let page = 1; page <= 3; page++) {
+      // Page 1 is `comparePage`, the read every other question about this pair shares.
       const comparison = await this.request(`/compare/${base}...${head}?per_page=100&page=${page}`);
       // No commit list means no shortcut: containment is then asked per commit, exactly as before.
       if (!Array.isArray(comparison?.commits) || !Number.isSafeInteger(comparison?.total_commits)) return null;
@@ -1533,6 +1549,12 @@ export class GitHub {
     // given on (GY-127): the review list alone cannot tell a reviewer withdrawing a verdict from
     // GitHub withdrawing an approval because the merge base moved under an unchanged head.
     const dismissals = [...latest.values()].some(r => r.state === 'DISMISSED') ? await this.reviewDismissals(pr.number) : { read: new Map<number, ReviewDismissal>(), unread: null as string | null, forcePushes: [] as HeadForcePush[] };
+    // An approval of the head naming mechanical nits holds the review gate for their bot round
+    // (GY-971), unless the head is that round's bot commit: one round per approved head, so the fresh
+    // read's own nits stay follow-ups. The head commit is read only when such an approval exists.
+    const nitted = [...latest.values()].some(r => r.state === 'APPROVED' && r.commit_id === pr.head.sha && mechanicalNitCount(r.body) > 0);
+    const botHead = nitted && await this.request(`/commits/${pr.head.sha}`).then(commit => botCommitSubjectPattern.test(String(commit?.commit?.message ?? '').split('\n')[0]!), () => false);
+    const mechanicalNits = (r: any) => { const count = r.state === 'APPROVED' && !botHead ? mechanicalNitCount(r.body) : 0; return count ? { mechanical: count } : {}; };
     const dismissalOf = (id: number): ReviewDismissal | undefined => dismissals.read.get(id) ?? (dismissals.unread ? { reason: null, mergeBase: false, verdict: null, commit: null, at: null, by: null, unread: dismissals.unread } : undefined);
     // A published speculative tip carries its own validated base. The candidate stays bound to
     // that exact commit while the managed branch advances underneath it through queue merges. A
@@ -1595,6 +1617,7 @@ export class GitHub {
       dismissedReviewIds: dismissedReviewIds(reviews),
       reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at,
         ...(r.state === 'CHANGES_REQUESTED' && typeof r.body === 'string' && r.body.trim() ? observedReviewBody(r.body) : {}),
+        ...mechanicalNits(r),
         ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open', conflicting: pr.mergeable === false && pr.state === 'open',
       ...(pr.mergeable === null && pr.state === 'open' && !pr.merged ? { mergeabilityUnknown: true } : {}),
@@ -1697,7 +1720,7 @@ export class GitHub {
    */
   private async landingCheck(work: Work, head: string, files: any[], bound: string, speculative: string | null, branch: { tip: string; tree: string }, peers: Work[] | undefined, budget: { remaining: number }): Promise<LandingCheck> {
     return landingCheck({
-      compare: (from, to, query = '') => this.request(`/compare/${from}...${to}${query}`),
+      compare: (from, to, query = '') => this.request(comparePath(from, to, query)),
       pull: pr => this.request(`/pulls/${pr}`),
       blobAt: (path, ref) => this.blobAt(path, ref),
       blobContent: sha => this.blobContent(sha),
@@ -1975,7 +1998,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    */
   async changedFiles(from: string, to: string): Promise<string[] | null> {
     if (from === to) return [];
-    const comparison = await this.request(`/compare/${from}...${to}`);
+    const comparison = await this.request(comparePath(from, to));
     const files = comparison?.files;
     demand(Array.isArray(files), `GitHub did not list the files changed between ${from.slice(0, 12)} and ${to.slice(0, 12)}`, 502);
     if (files.length >= compareFileCap) return null;
@@ -1984,7 +2007,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // backwards or sideways — the entry between this one and its new base was ejected — has changes
     // on the `from` side too, and a tip rebuilt onto it no longer holds them; both sides are listed.
     if (comparison.status === 'behind' || comparison.status === 'diverged') {
-      const reverse = await this.request(`/compare/${to}...${from}`);
+      const reverse = await this.request(comparePath(to, from));
       demand(Array.isArray(reverse?.files), `GitHub did not list the files changed between ${to.slice(0, 12)} and ${from.slice(0, 12)}`, 502);
       if (reverse.files.length >= compareFileCap) return null;
       return [...new Set([...paths(files), ...paths(reverse.files)])];
@@ -1998,7 +2021,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    */
   async diffPatchId(base: string, head: string): Promise<string | null> {
     if (base === head) return null;
-    try { return patchId((await this.request(`/compare/${base}...${head}`))?.files); }
+    try { return patchId((await this.request(comparePath(base, head)))?.files); }
     catch { return null; }
   }
   /**
@@ -2238,6 +2261,20 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const record = (fields: Partial<BaseRefresh>): BaseRefresh => ({ from, base: branch.tip, baseTree: branch.tree,
       policyRevision: work.policyRevision, at: new Date().toISOString(), head: null, conflict: null, merge: null, carry: null, trigger: 'conflict confirmed', ...fields });
     await beforeWrite();
+    // A refresh the coordinator requested for a base failure the base has since repaired (GY-528) is
+    // the one refresh that writes to the branch: the repaired base is merged in by this App, and the
+    // binding carry (model/carry.ts) decides on GitHub's account of that merge what the new head keeps.
+    const requested = requestedBaseRefresh(work);
+    if (requested) {
+      const trigger = 'base failure repaired' as const;
+      try {
+        const merged = await this.mergeBranch(pr.head.ref, branch.tip, `Graphyard base refresh for ${work.key} onto ${this.config.base}`);
+        return record({ head: merged ?? candidate!.sha, merge: merged ? await this.describeMerge(candidate!.sha, merged, candidate!.baseSha, branch.tip) : null, trigger, requested: { by: requested.by, at: requested.at, reason: requested.reason } });
+      } catch (error) {
+        if (!(error instanceof SpeculativeConflict)) throw error;
+        return record({ trigger, requested: { by: requested.by, at: requested.at, reason: requested.reason }, conflict: `Candidate ${candidate!.sha.slice(0, 12)} cannot be brought onto the repaired base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${error.message}. Run graphyard sync ${work.key}, resolve it and push.` });
+      }
+    }
     // GitHub's `mergeable: false` is not trusted on its own (GY-375): it is recomputed lazily after
     // the base moves and read clean candidates as conflicting, and every refresh they were given
     // dropped their review and proofs. The conflict is confirmed first by a test merge that never
@@ -2269,7 +2306,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
   /** The paths `head` changed against its merge base with `base`, or null when GitHub could not list them completely. */
   async sideFiles(base: string, head: string): Promise<string[] | null> {
     try {
-      const files = (await this.request(`/compare/${base}...${head}`))?.files;
+      const files = (await this.request(comparePath(base, head)))?.files;
       if (!Array.isArray(files) || files.length >= compareFileCap) return null;
       return [...new Set(files.flatMap((file: any) => [file?.filename, file?.previous_filename]).filter((path: unknown): path is string => typeof path === 'string'))];
     } catch { return null; }
@@ -2282,7 +2319,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    */
   async nonDocsPatchId(base: string, head: string): Promise<string | null> {
     try {
-      const files = base === head ? [] : (await this.request(`/compare/${base}...${head}`))?.files;
+      const files = base === head ? [] : (await this.request(comparePath(base, head)))?.files;
       if (!Array.isArray(files) || files.length >= compareFileCap) return null;
       return patchId(files.filter((file: any) => !isDocsPage(String(file?.filename ?? '')) || (typeof file?.previous_filename === 'string' && !isDocsPage(file.previous_filename))));
     } catch { return null; }
@@ -2472,7 +2509,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const merge = await this.request(`/commits/${mergeSha}`);
     const parent = merge?.parents?.[0]?.sha;
     demand(typeof parent === 'string' && /^[a-f0-9]{40}$/.test(parent), `GitHub did not return the first parent of ${mergeSha}`, 502);
-    const compare = await this.request(`/compare/${parent}...${mergeSha}`);
+    const compare = await this.request(comparePath(parent, mergeSha));
     demand(Array.isArray(compare?.files), `GitHub did not compare ${mergeSha} with its parent`, 502);
     // A compare lists at most 300 files; a longer list may be incomplete, so it cannot verify a revert.
     demand(compare.files.length < 300, `merge ${mergeSha.slice(0, 12)} changes 300 or more files, more than GitHub's compare lists`, 502);
@@ -3111,10 +3148,10 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     batchSizeRead.set(engine, Date.now());
     await Promise.all([engine.loadMergeBatchSize(), engine.loadParallelTips(), engine.loadRerunFailedChecks()]).catch(() => batchSizeRead.delete(engine));
   }
-  // Under GitHub delivery the main guard (GY-1250) runs here on the same interval: a merge that
-  // broke main is reverted and its item reopened. A failure is recorded once and retried next interval.
+  // The main guard (GY-1250) runs here on the same interval: a merge that broke main is reverted
+  // and its item reopened. A failure is recorded once and retried next interval.
   const mainGuardedAt = mainGuardRead.get(engine);
-  if (githubDelivery() && typeof github.mainHistory === 'function' && (mainGuardedAt === undefined || Date.now() - mainGuardedAt >= mainGuardIntervalMs)) {
+  if (typeof github.mainHistory === 'function' && (mainGuardedAt === undefined || Date.now() - mainGuardedAt >= mainGuardIntervalMs)) {
     mainGuardRead.set(engine, Date.now());
     if (!mainGuardVerdicts.has(engine)) mainGuardVerdicts.set(engine, new Map());
     const verdicts = mainGuardVerdicts.get(engine)!;
@@ -3164,28 +3201,24 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   }
   const startedAt = Date.now();
   let work: Work | undefined;
-  const guard = (snapshot: Work, success: boolean) => async () => {
-    const result = await engine.store.pool.query(`SELECT w.document,clock_timestamp() AS now FROM work_items w JOIN jobs j ON j.work_id=w.id
+  const guard = (snapshot: Work, _success: boolean) => async () => {
+    const result = await engine.store.pool.query(`SELECT w.document FROM work_items w JOIN jobs j ON j.work_id=w.id
       WHERE w.id=$1 AND j.token=$2 AND j.locked_until>clock_timestamp()`, [job.work_id, job.token]);
     const row = result.rows[0];
     requireCurrent(row && row.document.revision === snapshot.revision, 'Work or job ownership changed before publication; retry');
-    if (success) requireCurrent(snapshot.observation && row.now.getTime() - Date.parse(snapshot.observation.at) < observationFreshnessMs, 'Observation expired before publication; retry');
   };
   // The merge gate's success writes — the passing check and the request that GitHub merge the head —
   // are bound to what they act on, not to the item's revision (GY-1112): the job still holds the
-  // item, which still has the same candidate, policy and all-gates authorization, every gate still
-  // passes, and the observation is fresh. Any other save (an executor claiming one of the item's
-  // action rows, a session update) changed nothing the write depends on, and refusing over it kept
-  // the blocked-auto-merge probe from ever reaching GitHub on consecutive observations.
+  // item, which still has the same candidate and policy, and every gate still passes. Any other save
+  // (an executor claiming one of the item's action rows, a session update) changed nothing the write
+  // depends on. The observation's age is not read (GY-1235): GitHub merges on its own protection.
   const mergeGuard = (snapshot: Work) => async () => {
-    const result = await engine.store.pool.query(`SELECT w.document,clock_timestamp() AS now FROM work_items w JOIN jobs j ON j.work_id=w.id
+    const result = await engine.store.pool.query(`SELECT w.document FROM work_items w JOIN jobs j ON j.work_id=w.id
       WHERE w.id=$1 AND j.token=$2 AND j.locked_until>clock_timestamp()`, [job.work_id, job.token]);
-    const row = result.rows[0], current = row?.document as Work | undefined;
+    const current = result.rows[0]?.document as Work | undefined;
     const bound = (a: Work, b: Work) => a.candidate!.sha === b.candidate?.sha && a.candidate!.baseSha === b.candidate?.baseSha && a.candidate!.pr === b.candidate?.pr
-      && a.policyRevision === b.policyRevision && a.mergeAuthorization?.sha === b.mergeAuthorization?.sha && a.mergeAuthorization?.baseSha === b.mergeAuthorization?.baseSha
-      && a.mergeAuthorization?.policyRevision === b.mergeAuthorization?.policyRevision;
-    requireCurrent(current && bound(snapshot, current) && mergeAuthorized(current), 'Candidate, policy or merge authorization changed before publication; retry');
-    requireCurrent(snapshot.observation && row.now.getTime() - Date.parse(snapshot.observation.at) < observationFreshnessMs, 'Observation expired before publication; retry');
+      && a.policyRevision === b.policyRevision;
+    requireCurrent(current && bound(snapshot, current) && mergeAuthorized(current), 'Candidate, policy or passing gates changed before publication; retry');
   };
   // A feature whose permission the last preflight found missing is not attempted: the job is
   // held with the operator-facing reason instead of retrying into a 403. Adapters without a
@@ -3310,7 +3343,9 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       // A base branch that moved under this candidate is Graphyard's to absorb, not the worker's.
       // The republished head is what the review, the checks and the proofs then bind to, so the
       // refresh runs before any review is dispatched and the job requeues onto the new head.
-      if (baseRefreshNeeded(work)) {
+      // GY-528: the coordinator-requested refresh of a base failure's blocked candidates rides the
+      // same job, once the repaired base has passed again.
+      if (baseRefreshNeeded(work) || requestedBaseRefresh(work)) {
         const refreshed = await refreshBase(engine, github, work, job, guard, hold);
         work = refreshed.work; held ??= refreshed.held;
         if (refreshed.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true, undefined, observed); return true; }
