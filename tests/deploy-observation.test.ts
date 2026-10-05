@@ -114,7 +114,7 @@ test('integration:deploy-observation — a merged commit with no deployment at a
   clock = T0 + 300_000 + DEPLOYMENT_GRACE_MS + 60_000;
   report = await watch.tick();
   assert.equal(report.incidents.length, 1); assert.equal(report.incidents[0].status, 'missing');
-  assert.match(report.incidents[0].reason, /no deployment of 333333333333 was observed within 5 minutes of the merge; production serves 222222222222, which does not contain it\. Configure RAILWAY_API_TOKEN/);
+  assert.match(report.incidents[0].reason, /no deployment of 333333333333 was observed within 5 minutes of the merge; production serves 222222222222, which does not contain it\. No deployment list is readable: with the GitHub App configured the watch reads the GitHub deployments/);
   assert.match(report.attention[0], /^main is 1 commit ahead of production \(serving 222222222222\): no deployment of 333333333333/);
   assert.equal((await events(three.id)).length, 1);
   // A new process reads the open incident back from the ledger instead of raising it again.

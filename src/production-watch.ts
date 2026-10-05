@@ -42,7 +42,8 @@ const railwayQuery = `query graphyardDeployments($input: DeploymentListInput!, $
  * RAILWAY_SERVICE_ID, RAILWAY_ENVIRONMENT_ID and RAILWAY_PROJECT_ID into the container; the
  * only variable an operator adds is the token that may read the deployment list:
  * RAILWAY_API_TOKEN (an account or team token) or RAILWAY_TOKEN (a project token). Absent
- * a token the provider is not configured and the watch falls back to the build identity.
+ * a token the provider is not configured and the watch reads GitHub deployments instead
+ * (`githubDeploymentsProvider`), or the build identity without the GitHub App.
  */
 export function railwayProvider(env: Record<string, string | undefined> = process.env, fetcher: typeof fetch = fetch): DeploymentProvider | null {
   const accountToken = env.RAILWAY_API_TOKEN?.trim(), projectToken = env.RAILWAY_TOKEN?.trim();
@@ -69,6 +70,65 @@ export function railwayProvider(env: Record<string, string | undefined> = proces
       }).filter((deployment: ProviderDeployment) => deployment.id);
     },
   };
+}
+
+const githubStatus: Record<string, ProviderDeploymentStatus> = {
+  success: 'success', failure: 'failed', error: 'failed', in_progress: 'deploying', queued: 'queued', pending: 'queued', waiting: 'queued', inactive: 'removed',
+};
+/** Deployments whose latest status is read each pass; older ones keep the last status read, or are left out. */
+const GITHUB_STATUS_READS = 5;
+/**
+ * The deployments Railway reports to GitHub for the connected repository (GY-1327): each deploy
+ * is a GitHub deployment in the production environment carrying the commit sha and statuses
+ * (queued, in_progress, success, failure, error, inactive), read with the control plane's GitHub
+ * App credential. The fallback when no Railway token is set, since Railway issues API and project
+ * tokens only from its dashboard. A concluded status (success, failure, error) is kept per
+ * deployment and never read again — Railway marks a success inactive minutes later though
+ * production still serves it — so a steady pass costs one listing request plus one status read
+ * per deployment still in flight.
+ */
+export function githubDeploymentsProvider(github: { request(path: string): Promise<any>; config?: { repository?: string } }, environment = 'production'): DeploymentProvider {
+  const concluded = new Map<string, { status: ProviderDeploymentStatus; providerStatus: string; url: string | null; updatedAt: string | null }>();
+  return {
+    name: 'github', description: `GitHub deployments to ${environment}${github.config?.repository ? ` of ${github.config.repository}` : ''}`,
+    async list() {
+      const listed = await github.request(`/deployments?environment=${encodeURIComponent(environment)}&per_page=10`);
+      if (!Array.isArray(listed)) throw new Error('GitHub returned no deployment list');
+      const deployments: ProviderDeployment[] = [];
+      let reads = 0;
+      for (const deployment of listed) {
+        const id = String(deployment?.id ?? '');
+        if (!id || deployment?.environment !== environment) continue;
+        const sha = typeof deployment.sha === 'string' && /^[0-9a-f]{40}$/i.test(deployment.sha) ? deployment.sha.toLowerCase() : null;
+        const ref = typeof deployment.ref === 'string' && deployment.ref.toLowerCase() !== sha ? deployment.ref : null;
+        let state = concluded.get(id);
+        if (!state) {
+          if (reads >= GITHUB_STATUS_READS) continue;
+          reads++;
+          const latest = (await github.request(`/deployments/${encodeURIComponent(id)}/statuses?per_page=1`))?.[0];
+          const raw = typeof latest?.state === 'string' ? latest.state : 'queued';
+          state = { status: githubStatus[raw] ?? 'unknown', providerStatus: raw.toUpperCase(), url: typeof latest?.log_url === 'string' && latest.log_url ? latest.log_url : typeof latest?.target_url === 'string' && latest.target_url ? latest.target_url : null, updatedAt: typeof latest?.created_at === 'string' ? latest.created_at : null };
+          if (['success', 'failure', 'error'].includes(raw)) concluded.set(id, state);
+        }
+        deployments.push({ id, ...state, commit: sha, branch: ref, createdAt: String(deployment.created_at ?? '') });
+      }
+      for (const id of concluded.keys()) if (!listed.some((deployment: any) => String(deployment?.id) === id)) concluded.delete(id);
+      return deployments;
+    },
+  };
+}
+
+/**
+ * The deployment list the watch reads: Railway's API when a Railway token is configured, else the
+ * GitHub deployments Railway reports for the managed repository, read with the App credential.
+ */
+export function productionProvider(env: Record<string, string | undefined> = process.env, github: Parameters<typeof githubDeploymentsProvider>[0] | null = null, fetcher: typeof fetch = fetch): DeploymentProvider | null {
+  return railwayProvider(env, fetcher) ?? (github ? githubDeploymentsProvider(github, env.GRAPHYARD_PRODUCTION_ENVIRONMENT?.trim() || 'production') : null);
+}
+
+/** The startup log's account of where production observation comes from. */
+export function observationLine(provider: DeploymentProvider | null, build: Pick<BuildIdentity, 'commit'>) {
+  return `production observation ${provider ? `via ${provider.description}` : build.commit ? 'from the build identity only; configure the GitHub App to read GitHub deployments' : 'unavailable: set GRAPHYARD_BUILD_SHA or RAILWAY_GIT_COMMIT_SHA'}`;
 }
 
 export interface ProductionIncident {
@@ -364,7 +424,7 @@ export class ProductionWatch {
       // Unknown containment (no serving commit, or GitHub could not compare) is not evidence
       // of a miss; only a serving commit known not to contain the merge is.
       if (now - since < this.grace || contained === null) { report.pending.push(item.key); continue; }
-      await this.raise(item, report, at, 'missing', null, `no ${this.options.provider ? `${this.options.provider.name} deployment` : 'deployment'} of ${mergeSha.slice(0, 12)} was observed within ${Math.round(this.grace / 60_000)} minutes of ${tip ? `its promotion to ${this.options.releaseBranch} (${tip.slice(0, 12)})` : 'the merge'}; production serves ${report.serving!.slice(0, 12)}, which does not contain it${this.options.provider ? '' : '. Configure RAILWAY_API_TOKEN (or RAILWAY_TOKEN) so the provider reports the failing deployment'}`);
+      await this.raise(item, report, at, 'missing', null, `no ${this.options.provider ? `${this.options.provider.name} deployment` : 'deployment'} of ${mergeSha.slice(0, 12)} was observed within ${Math.round(this.grace / 60_000)} minutes of ${tip ? `its promotion to ${this.options.releaseBranch} (${tip.slice(0, 12)})` : 'the merge'}; production serves ${report.serving!.slice(0, 12)}, which does not contain it${this.options.provider ? '' : '. No deployment list is readable: with the GitHub App configured the watch reads the GitHub deployments the host reports, which name the failing deployment'}`);
       report.pending.push(item.key);
     }
     if (report.serving) await this.recordPending(report.serving, at);

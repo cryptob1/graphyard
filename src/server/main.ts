@@ -14,7 +14,7 @@ import { openPatternItems } from '../interventions.js';
 import { startRetroIndexWatch, synthesizeRetro } from '../retro-synthesis.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
-import { ProductionWatch, railwayProvider, startProductionWatch } from '../production-watch.js';
+import { ProductionWatch, observationLine, productionProvider, startProductionWatch } from '../production-watch.js';
 import { productionBranch } from '../release-candidate.js';
 import { configuredGeneratedFiles } from '../generated-files.js';
 import { generatedFilesVariable } from '../install/generated-files.js';
@@ -67,7 +67,8 @@ export async function main(options: MainOptions = {}) {
   // with a warning; only a principal added beyond the limit refuses, naming the variable.
   const knownPrincipals = (await store.pool.query('SELECT principal_id FROM proof_grants')).rows.map(row => String(row.principal_id));
   const build = buildIdentity();
-  const provider = railwayProvider();
+  // Railway's API when a Railway token is set, else the GitHub deployments Railway reports (GY-1327).
+  const provider = productionProvider(process.env, github);
   // Production deploys the release branch when the release pipeline owns it (GY-1207); GRAPHYARD_PRODUCTION_BRANCH names another.
   const production = new ProductionWatch(store, { provider, github, build, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', releaseBranch: process.env.GRAPHYARD_PRODUCTION_BRANCH?.trim() || productionBranch });
   const http = server(engine, credentials, github, artifacts, { knownPrincipals, production });
@@ -77,7 +78,7 @@ export async function main(options: MainOptions = {}) {
   http.services.delegationLimits.deployed[generatedFilesVariable] = process.env.GRAPHYARD_GENERATED_FILES ?? null;
   for (const line of http.services.delegationLimits.attention) console.error(`Delegation limits: ${line}`);
   console.log(`Generated files: ${generatedFiles.length ? generatedFiles.join(', ') : 'none declared; the regression guard exempts nothing'}`);
-  console.log(`Build ${build.commit ?? 'commit unknown'} (merge protocol ${build.protocol}); production observation ${provider ? `via ${provider.description}` : build.commit ? 'from the build identity only; set RAILWAY_API_TOKEN or RAILWAY_TOKEN to read the deployment list' : 'unavailable: set GRAPHYARD_BUILD_SHA or RAILWAY_GIT_COMMIT_SHA'}`);
+  console.log(`Build ${build.commit ?? 'commit unknown'} (merge protocol ${build.protocol}); ${observationLine(provider, build)}`);
 
   const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
   validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
