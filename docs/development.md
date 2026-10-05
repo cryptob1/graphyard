@@ -21,7 +21,7 @@ npm ci && npm run build && npm test
 
 ### Base failures
 
-A required check failure the base branch head fails too is a base failure: the loop requests no rework and launches no approver (waiting while a base log is unreadable). It raises one attention entry and one P0 repair item per distinct failing test and base head. Once the base check passes again, attention clears, failed jobs rerun, and each blocked candidate is refreshed onto the repaired base by a Graphyard-authored merge of the base into its branch (`refresh`), carrying its approval.
+A required check failure the base branch head fails too is a base failure: the loop requests no rework and launches no approver (waiting while a base log is unreadable). It raises one attention entry and one P0 repair item per distinct failing test and base head. Once the base check passes again, attention clears, failed jobs rerun, and each blocked candidate is refreshed onto the repaired base by a Graphyard-authored merge of the base into its branch (`refresh`), carrying its approval. A failure whose tests the base tip already passes is not held: the observation refreshes the candidate onto that tip at once (trigger `base breakage`).
 
 ## Documentation
 

@@ -164,7 +164,7 @@ const basePlan = {
   // minutes. Item six hosts it because its approval lands past the day's first merges, so the base
   // move does not churn the early cadence, and the regression day reuses it.
   docsConflict: { item: 6, page: 'docs/master-agent.md', syncMs: 4 * minute },
-  baseFailure: { breaks: 31 * minute, repaired: 42 * minute },
+  baseFailure: { breaks: 183 * minute, repaired: 194 * minute },
   // GY-516: a flake on a speculative tip whose one rerun passes, and one whose rerun fails again.
   flaky: { rerunPasses: 10, rerunFails: 14 },
   // GY-793: item 2's worker pushes while a broken commit stands on main, so its candidate's `test`
