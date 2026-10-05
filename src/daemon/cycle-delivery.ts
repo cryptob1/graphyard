@@ -3,6 +3,7 @@ import { carriedApproval, reviewProviderOf, reviewerProfileFor, exhaustedReviewe
 import { mergedWithoutAuthorization, unauthorizedMergeViolation, approvedMerge, transientMergeRace } from '../master.js';
 import { type Work } from '../model.js';
 import { queueSequencingReason } from '../merge-queue.js';
+import { mergeabilityComputingRefusal } from '../model/gates.js';
 import type { DaemonAction } from './state.js';
 import { boundDeployment, deploymentObservationSchema, maxProofAttempts, message } from './state.js';
 import { candidateKey, decisionKey } from './reconcile.js';
@@ -76,13 +77,14 @@ export const repeatedMergeRefusalMs = 10 * 60_000;
  * carry gone, the refusal standing — re-arms the handling and moves the candidate on to the rework
  * action instead of being deduplicated away by the first phase's marker (GY-831 review). A carry
  * re-bound to another review is a phase of its own. A refusal standing only on a stale GitHub
- * observation takes neither step: the candidate keeps its position and is observed (GY-1099).
+ * observation takes neither step: the candidate keeps its position and is observed (GY-1099), and so
+ * does one whose authorization lapsed only with its observation's age (GY-1216).
  */
 export async function actOnRepeatedRefusal(cycle: Cycle, item: Work, mergeKey: string, reason: string, since: string) {
   const { state, effects, now, performed } = cycle;
   const minutes = Math.floor((now() - Date.parse(since)) / 60_000);
   if (now() - Date.parse(since) < repeatedMergeRefusalMs) return;
-  if (staleObservationOnly(item)) return requestCandidateObservation(cycle, item, mergeKey, reason, since, minutes);
+  if (staleObservationOnly(item) || staleAuthorizationOnly(item, reason)) return requestCandidateObservation(cycle, item, mergeKey, reason, since, minutes);
   const carry = carriedApproval(item), carried = !!carry;
   const key = `${mergeKey}:repeated:${carry ? `carry:${carry.reviewId ?? 'unnumbered'}:${carry.originalSha}` : 'rework'}`, previous = state.actions[key];
   if (previous?.state === 'done' && previous.since === since) return;
@@ -119,9 +121,26 @@ const observationMaxAgeMs = 120_000;
  */
 export function staleObservationOnly(work: Work) {
   const merge = work.gates.find(gate => gate.name === 'merge');
-  const owed = (reason: string) => reason === staleObservationReason || (!work.observation && reason === unverifiedProtectionReason);
-  return !work.violations.length && !!merge && !merge.passed && merge.reasons.includes(staleObservationReason) && merge.reasons.every(owed)
+  return !work.violations.length && !!merge && !merge.passed && merge.reasons.includes(staleObservationReason) && merge.reasons.every(reason => owedToObservation(work, reason))
     && work.gates.every(gate => gate.name === 'merge' || gate.passed);
+}
+/**
+ * GY-1216. A merge-gate reason a fresh observation answers, or that names only the entry's place:
+ * the stale observation itself, protection only an observation verifies, a mergeability GitHub is
+ * still computing, and the queue's own sequencing. On 2026-10-04 a queued entry whose merge gate
+ * carried the stale reason beside its queue position failed GY-1099's test and was marked for rework
+ * and ejected; none of these is anything a new head fixes.
+ */
+function owedToObservation(work: Work, reason: string) {
+  return reason === staleObservationReason || (!work.observation && reason === unverifiedProtectionReason) || reason === mergeabilityComputingRefusal || queueSequencingReason(reason);
+}
+/**
+ * GY-1216. A guarded merge refused only because its authorization lapsed — the observation crossed
+ * its two-minute bound between the loop's read and the server's check — on a candidate whose every
+ * gate passed: the observation is stale, not the candidate. The same hold as `staleObservationOnly`.
+ */
+export function staleAuthorizationOnly(work: Work, reason: string) {
+  return staleMergeRefusal.test(reason) && !work.violations.length && work.gates.every(gate => gate.passed || gate.name === 'merge' && gate.reasons.every(entry => owedToObservation(work, entry)));
 }
 /**
  * GY-1099. On 2026-10-02 seven candidates whose every other gate passed were ejected by GY-831's

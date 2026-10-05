@@ -9,6 +9,11 @@ import { save, Store } from '../src/store.js';
 import { refusedReworkLiftsMergeRefusal } from '../src/server/decision-refusal.js';
 import { standingMergeRefusal } from '../src/merge-queue.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { mergeStep, repeatedMergeRefusalMs, staleObservationReason } from '../src/daemon/cycle-delivery.js';
+import { emptyDaemonState } from '../src/daemon/state.js';
+import type { Cycle } from '../src/daemon/cycle.js';
+import type { MasterConfig } from '../src/master.js';
+import { collapseStaleObservations } from '../src/cli/master-status.js';
 
 // 2026-10-01: after the guarded merge refused a candidate (a `rework` merge refusal, GY-831), the
 // loop asked for a rework decision and the independent approver refused it — nothing in the
@@ -113,4 +118,98 @@ test('integration:refused-rework-lift-transactional — refusing the rework requ
   const stale = await held('stale-policy', { policyRevision: 0 }, { sha: head, baseSha: base });
   assert.ok(stale.work.mergeRefusal);
   assert.deepEqual(stale.events.map(row => row.kind), ['decision.declined']);
+});
+
+// GY-1216: on 2026-10-04 lock contention kept observation saves past the merge gate's two-minute
+// bound. A queued entry whose merge gate carried the stale reason beside its queue position, or
+// whose guarded merge was refused only because the authorization lapsed with the observation, was
+// marked for rework past the repeat bound and ejected — fifteen green candidates, nothing wrong with
+// any of them. A stale observation holds the entry; it never costs it its approval or its place.
+test('unit:stale-observation-holds-entry — a queued, approved candidate refused only for a stale observation past the repeat bound is held and observed, never marked for rework or ejected, and merges once a fresh observation is saved', async () => {
+  const sha = 'c'.repeat(40);
+  let clock = Date.parse('2026-10-04T12:00:00.000Z');
+  const gate = (name: string, reasons: string[] = []) => ({ name, passed: !reasons.length, reasons });
+  const approved = ['build', 'review', 'test', 'acceptance'].map(name => gate(name));
+  const queue = { sequence: 7, policyRevision: 1 };
+  let observedAt = clock - 30 * 60_000;
+  let mergeGate = gate('merge', [staleObservationReason, 'Merge queue position 1 of 3: GY-1216 heads the queue']);
+  const view = () => ({ id: 'work-1216', key: 'GY-1216', stage: 'merge', policyRevision: 1, epoch: 1, violations: [], submission: { pr: 702 }, queue,
+    candidate: { sha, baseSha: base, pr: 702 }, mergeRefusal: null, gates: [...approved, mergeGate],
+    observation: { at: new Date(observedAt).toISOString(), candidate: { sha, baseSha: base }, merged: false } }) as unknown as Work;
+  const master = { url: 'https://graphyard.example', repository: 'owner/project', autoMerge: true } as MasterConfig;
+  const state = emptyDaemonState(master);
+  const calls = { refused: [] as string[], observed: 0, merged: 0 };
+  let mergeOutcome: () => unknown = () => { throw new Error('Merge authorization is no longer current'); };
+  const effects = {
+    snapshot: async () => ({ work: [view()], now: new Date(clock).toISOString() }),
+    persist: async () => {},
+    merge: async () => { calls.merged++; return mergeOutcome(); },
+    refuseMerge: async (work: Work, text: string) => { calls.refused.push(text); return work; },
+    observeCandidate: async () => { calls.observed++; },
+  };
+  const cycle = async () => {
+    state.cycle++;
+    await mergeStep({ config: master, state, effects, now: () => clock, performed: [], open: [view()], isolate: async (_kind: unknown, _item: unknown, _name: unknown, body: () => Promise<unknown>) => body() } as unknown as Cycle);
+  };
+  const reworked = () => Object.keys(state.actions).filter(key => key.endsWith(':repeated:rework') || key.includes(':repeated:carry'));
+
+  // The merge gate refuses for the stale observation, beside the entry's queue position, past the bound.
+  const start = clock;
+  while (clock - start < repeatedMergeRefusalMs + 3 * 60_000) { await cycle(); clock += 61_000; observedAt = Math.min(observedAt, clock - 30 * 60_000); }
+  assert.deepEqual(calls.refused, [], 'no rework or rereview merge refusal is recorded');
+  assert.deepEqual(reworked(), [], 'no rework decision is marked');
+  assert.ok(calls.observed >= 1, 'an observation refresh is requested');
+  assert.equal(calls.merged, 0, 'a gate refusing for staleness is not asked to merge');
+  assert.deepEqual(view().queue, queue, 'the entry is still queued at its sequence');
+  assert.equal(standingMergeRefusal(view()), null, 'nothing ejects it');
+  assert.match(Object.entries(state.actions).find(([key]) => key.endsWith(':repeated:observe'))![1].detail, /keeps its queue position; it is neither marked for rework nor ejected/);
+
+  // Every gate passes on the loop's read, but the guarded merge is refused because the authorization
+  // lapsed with the observation's age before the server checked it, past the bound too.
+  mergeGate = gate('merge'); calls.observed = 0;
+  const lapse = clock;
+  while (clock - lapse < repeatedMergeRefusalMs + 3 * 60_000) { await cycle(); clock += 61_000; }
+  assert.ok(calls.merged > 1, 'the guarded merge was retried');
+  assert.deepEqual(calls.refused, [], 'a lapsed authorization records no merge refusal either');
+  assert.deepEqual(reworked(), []);
+  assert.ok(calls.observed >= 1, 'an observation refresh is requested for it');
+  assert.deepEqual(view().queue, queue);
+
+  // A fresh observation is saved: the merge is asked and lands.
+  observedAt = clock; mergeOutcome = () => ({ merged: true, result: 'GitHub shows the pull request merged' });
+  const before = calls.merged;
+  for (let pass = 0; pass < 3 && calls.merged === before; pass++) { clock += 61_000; observedAt = clock - 1000; await cycle(); }
+  assert.equal(calls.merged, before + 1, 'the merge is retried on the fresh observation');
+  assert.ok(Object.values(state.actions).some(action => action.kind === 'merge' && action.state === 'done' && /Guarded merge observed for GY-1216/.test(action.detail)));
+  assert.deepEqual(calls.refused, []);
+});
+
+test('unit:stale-band-single-attention — three stale merge-band entries are one observation-health attention line naming the oldest age and the server-side causes, not a refusal per item', () => {
+  const now = Date.parse('2026-10-04T12:00:00.000Z');
+  const entry = (key: string, agoMs: number | null, sequence: number) => ({ id: `id-${key}`, key, stage: 'merge', submission: { pr: sequence }, queue: { sequence },
+    observation: agoMs === null ? null : { at: new Date(now - agoMs).toISOString(), merged: false } }) as unknown as Work;
+  const work = [entry('GY-1', 5 * 60_000, 1), entry('GY-2', 9 * 60_000 + 30_000, 2), entry('GY-3', 3 * 60_000, 3), entry('GY-4', 10_000, 4)];
+  const owner = { role: 'control plane' as const, approvedBy: null, human: false, humanOnly: null, next: 'x' };
+  const items = [
+    { subject: 'loop', text: 'The loop is cycling', ...owner },
+    ...['GY-1', 'GY-2', 'GY-3'].map(key => ({ subject: key, text: staleObservationReason, ...owner })),
+    { subject: 'github', text: 'The merge-queue head GY-1 has gone 5m0s without an observation while the merge gate refuses anything older than two minutes: the queue stalls until its head is observed', ...owner },
+    { subject: 'github', text: 'The merge band has 2 of 4 item(s) observed longer ago than its 2m0s bound (oldest GY-2, 9m30s): the merge gate refuses them until the observation workers reach them', ...owner },
+    { subject: 'GY-4', text: 'Review requested changes', ...owner },
+  ];
+  const coordinator = { githubBudget: { deferrals: [{ work: 'id-GY-3', until: new Date(now + 60_000).toISOString(), reason: 'batch deferred behind the merge path' }], throughput: { jobsPerMinute: 2, medianDurationMs: 40_000, p90DurationMs: 95_000 } },
+    jobs: [{ work_id: 'id-GY-2', error: 'deadlock detected (40P01) saving the observation' }], reconciliation: { tickMs: 65_000, step: 'merge queue' } };
+  const collapsed = collapseStaleObservations(items, { work, now: new Date(now).toISOString() }, coordinator);
+  const health = collapsed.filter(item => /observation/i.test(item.text));
+  assert.equal(health.length, 1, collapsed.map(item => item.text).join('\n'));
+  const [line] = health;
+  assert.match(line.text, /^observation-health: 3 of 4 merge-band entries wait on a GitHub observation older than two minutes \(oldest GY-2, 9m30s\): GY-2, GY-1, GY-3\./);
+  assert.match(line.text, /none is ejected or sent to rework/);
+  assert.match(line.text, /reconciliation tick last took 1m5s \(in merge queue\)/);
+  assert.match(line.text, /1 observation\(s\) deferred \(batch deferred behind the merge path\)/);
+  assert.match(line.text, /1 observation job\(s\) refused on a database deadlock or lock timeout/);
+  assert.deepEqual(collapsed.map(item => item.subject), ['loop', 'github', 'GY-4'], 'other attention is kept, in place');
+  // Nothing stale: the attention is untouched.
+  const fresh = work.map(item => ({ ...item, observation: { at: new Date(now).toISOString(), merged: false } })) as unknown as Work[];
+  assert.equal(collapseStaleObservations(items, { work: fresh, now: new Date(now).toISOString() }, coordinator), items);
 });

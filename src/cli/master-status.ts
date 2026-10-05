@@ -43,6 +43,7 @@ import { slowReportReader } from '../master/report-cache.js';
 import { hotspots } from './hotspots.js';
 import { stallAttention } from './stall-attention.js';
 import { coordinationStep } from './coordination-snapshot.js';
+import { observationLag } from '../observation-priority.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 // Read from here as they always were.
@@ -162,6 +163,10 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   attentionItems.push(...setupItems);
   attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []));
   attentionItems.splice(loopItems.length + dispatchItems.length, 0, ...resources.attention);
+  // Stale merge-band observations are one line, not a refusal per item (GY-1216).
+  const uncollapsed = attentionItems.length;
+  attentionItems.splice(0, attentionItems.length, ...collapseStaleObservations(attentionItems, snapshot, coordinator));
+  const collapsedAway = uncollapsed - attentionItems.length;
   // Everything the control plane takes from the operator's own credential alone, from the
   // human-only rule table, answered on the dashboard's Needs you page (GY-102).
   const humanOnly = (coordinator?.humanOnly ?? []) as HumanRequestRow[];
@@ -173,7 +178,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
       ...backlog,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + triage.length + ahead.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length } }, snapshot.work);
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + triage.length + ahead.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length - collapsedAway } }, snapshot.work);
   return { ...directMergeLine(coordinator), ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
     // The board (GY-200): what the master owes first, with commands, then the rest.
     board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator, decisions.unanswered)),
@@ -214,6 +219,55 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // What the host has left, what a reclaim would free, and the bound judged against.
     disk: { ...disk, worktreeRoot: managedRoot.health, idleMs: reclaimIdleMs(master), inventory: { at: inventory.at, cached: inventory.cached }, reclaimable: reclaimPlan.filter(entry => entry.disposable).map(entry => ({ path: entry.path, key: entry.key, epoch: entry.epoch, disposition: entry.disposition, detail: entry.detail })) },
     runtime: { herdr: { available: runtime.available, reason: runtime.reason }, reviews: reviewRuntime } };
+}
+
+/** The age past which the merge gate refuses an observation (model/gates.ts). */
+const observationMaxAgeMs = 120_000;
+/** A per-item or per-band line that only restates a stale merge-band observation. */
+const staleObservationLine = /GitHub observation (missing or )?(is )?older than two minutes|waits for a fresh GitHub observation/;
+const staleBandLine = /^(The merge-queue head \S+ has (no observation at all|gone \S+ without an observation)|The merge band has \d+ of \d+ item\(s\) observed longer ago)/;
+/** What the server reports that can keep observations stale (GY-1216). Every field is optional: an older server, or a scoped read, publishes fewer. */
+export interface ObservationHealthReading {
+  githubBudget?: { deferrals?: { work: string; until: string; reason: string }[] | null; throughput?: { jobsPerMinute?: number | null; medianDurationMs?: number | null; p90DurationMs?: number | null } | null } | null;
+  jobs?: { work_id: string; error: string | null }[] | null;
+  starvedJobs?: { key: string; unobserved: number }[] | null;
+  reconciliation?: { tickMs?: number | null; step?: string | null } | null;
+}
+/**
+ * GY-1216. While observations are stale across the merge band, the per-item merge-gate refusals
+ * and the per-band lag lines all restate one fact about the observer, not about any candidate: it is
+ * reported as one observation-health line naming how many merge-band entries wait, the oldest
+ * observation's age, and every server-side cause the status read carries — the reconciliation
+ * tick, deferred observations, lock deadlocks or timeouts on jobs, and starved jobs. The entries
+ * keep their queue positions and approvals meanwhile (cycle-delivery.ts `staleObservationOnly`).
+ */
+export function collapseStaleObservations(items: AttentionItem[], snapshot: { work: Work[]; now: string }, coordinator: ObservationHealthReading | null | undefined): AttentionItem[] {
+  const now = Date.parse(snapshot.now);
+  const age = (work: Work) => work.observation?.at ? Math.max(0, now - Date.parse(work.observation.at)) : Infinity;
+  const band = snapshot.work.filter(work => work.stage !== 'done' && !!work.submission && !work.observation?.merged && (work.stage === 'merge' || !!work.queue));
+  const stale = band.filter(work => age(work) >= observationMaxAgeMs).sort((a, b) => age(b) - age(a));
+  if (!stale.length) return items;
+  const keys = new Set(stale.map(work => work.key));
+  const restates = (item: AttentionItem) => keys.has(item.subject) && staleObservationLine.test(item.text) || item.subject === 'github' && staleBandLine.test(item.text);
+  const oldest = stale[0], oldestAge = age(oldest);
+  const causes: string[] = [];
+  const tick = coordinator?.reconciliation;
+  if (tick?.tickMs != null) causes.push(`the reconciliation tick last took ${observationLag(tick.tickMs)}${tick.step ? ` (in ${tick.step})` : ''}`);
+  const deferrals = coordinator?.githubBudget?.deferrals ?? [];
+  if (deferrals.length) causes.push(`${deferrals.length} observation(s) deferred (${deferrals[0].reason})`);
+  const locked = (coordinator?.jobs ?? []).filter(job => job.error && /deadlock|40P01|lock timeout|55P03|lock_timeout/i.test(job.error));
+  if (locked.length) causes.push(`${locked.length} observation job(s) refused on a database deadlock or lock timeout (${locked[0].error!.slice(0, 160)})`);
+  const starved = coordinator?.starvedJobs ?? [];
+  if (starved.length) causes.push(`${starved.length} job(s) rescheduled ${Math.max(...starved.map(job => job.unobserved))}+ times without saving an observation`);
+  const throughput = coordinator?.githubBudget?.throughput;
+  if (throughput?.jobsPerMinute != null) causes.push(`the workers observe ${throughput.jobsPerMinute} job(s)/min (median ${throughput.medianDurationMs ?? '?'} ms, p90 ${throughput.p90DurationMs ?? '?'} ms)`);
+  const line: AttentionItem = { subject: 'github',
+    text: `observation-health: ${stale.length} of ${band.length} merge-band entr${band.length === 1 ? 'y' : 'ies'} wait on a GitHub observation older than two minutes (oldest ${oldest.key}, ${oldestAge === Infinity ? 'never observed' : observationLag(oldestAge)}): ${[...keys].join(', ')}. Each keeps its queue position and approval and merges once a fresh observation is saved; none is ejected or sent to rework. Server-side: ${causes.length ? causes.join('; ') : 'the status read names no cause'}`,
+    ...agentOwner('control plane', 'Nothing to run: the loop requests an observation of each held entry ahead of the backlog; if the age keeps growing, the causes named here are the server\'s to clear (graphyard status shows githubBudget and the jobs)') };
+  const at = items.findIndex(restates);
+  const kept = items.filter(item => !restates(item));
+  kept.splice(at === -1 ? kept.length : items.slice(0, at).filter(item => !restates(item)).length, 0, line);
+  return kept;
 }
 
 /** What the report adds after buildMasterStatus; the loop reads it too, to track every class (GY-173). */
