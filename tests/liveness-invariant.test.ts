@@ -27,7 +27,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * gone — rather than states this test invents.
  */
 const repository = 'owner/project';
-const PROOF = 'integration:liveness-proof';
+const PROOF = 'unit:liveness-proof';
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
 const coordinator: Principal = { id: 'coordinator', role: 'coordinator' };

@@ -238,7 +238,7 @@ test('integration:failed-candidate-fix-forward — a failed candidate files one 
   assert.equal(result.followUp, 'GY-900');
   assert.equal(filed.length, 1, 'exactly one follow-up item');
   assert.match(filed[0].item.title, new RegExp(`${candidate.id} failed UAT suite long at ${sha.slice(0, 12)}`));
-  assert.match(filed[0].item.description, new RegExp(sha)); assert.match(filed[0].item.description, /GY-41.*stay delivered/);
+  assert.match(filed[0].item.description, new RegExp(sha)); assert.match(filed[0].item.description, /GY-41.*stay merged-pending-release and are not reworked or reverted/);
   assert.equal(filed[0].requestId, `release-candidate-follow-up:${candidate.id}`, 'a retried filing is idempotent');
   assert.ok(!('plannedFiles' in filed[0].item) && !('reopen' in filed[0].item), 'the follow-up is new work; the included delivery is not reworked');
 

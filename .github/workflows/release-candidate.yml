@@ -209,10 +209,12 @@ jobs:
         # reads the board and status through UAT's own API, and `browser` loads the dashboard UAT
         # serves in Chromium, signs in with the UAT token and opens the Work view. Those three exercise
         # the UAT deployment itself; the long suites ran on runners at the candidate SHA, so each
-        # long-suite job's result above joins the record as a suite of its own. A failure files one
-        # follow-up item naming the failing
-        # suite and the candidate SHA; only that filing uses GRAPHYARD_TOKEN, which no --suite
-        # command is given.
+        # long-suite job's result above joins the record as a suite of its own, and so does each
+        # integration:/e2e: proof the candidate's merged items owe (`release proofs`, GY-1101), run on
+        # this checkout of the candidate SHA. A failure files one fix-forward item naming the failing
+        # suites and proofs, the candidate SHA and the commit range; only that filing and the report of
+        # the verdict to the control plane use GRAPHYARD_TOKEN, which no --suite command or proof run
+        # is given.
         run: |
           # The suite commands expand their variables when the suite runs, not here.
           # shellcheck disable=SC2016
@@ -244,7 +246,12 @@ jobs:
         with: { node-version: '24', cache: npm }
       - run: npm ci
       - name: Promote the UAT-passed candidate to production by its exact SHA
+        # Promotion is what makes the candidate's merged items Done (GY-1101): the CLI reports it to
+        # the control plane with the release credential; `release settle ID` resends a failed report.
         run: node bin/graphyard.mjs release promote "${{ needs.candidate.outputs.id }}"
+        env:
+          GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
+          GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
       - name: Confirm production serves the promoted SHA
         run: node bin/graphyard.mjs release verify --url "$PRODUCTION_URL" --wait 1200
         env:

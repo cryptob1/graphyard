@@ -50,8 +50,8 @@ const worker: Principal = { id: 'agent-a', role: 'worker', runtime: 'claude' };
 const otherWorker: Principal = { id: 'agent-b', role: 'worker', runtime: 'cursor' };
 const executorA: Principal = { id: 'executor-a', role: 'coordinator' };
 const executorB: Principal = { id: 'executor-b', role: 'coordinator' };
-const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['integration:inverted-loop'] };
-const PROOF = 'integration:inverted-loop';
+const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['unit:inverted-loop'] };
+const PROOF = 'unit:inverted-loop';
 const head = 'a'.repeat(40), base = 'b'.repeat(40), mergeSha = 'c'.repeat(40);
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
 
@@ -155,7 +155,7 @@ test('integration:typed-next-action — the control plane names one typed action
   // next, and no reviewer is asked about it yet.
   item = await engine.observe(item.id, item.revision, observation(item, { reviews: [] }));
   assert.equal(item.nextAction!.kind, 'dispatch');
-  assert.deepEqual(inputs(item), { kind: 'dispatch', target: 'proof', group: 'integration', proofs: [PROOF], requestId: item.autoDispatch!.producers[0].id, pr: item.submission!.pr, sha: head, baseSha: base, policyRevision: 1 });
+  assert.deepEqual(inputs(item), { kind: 'dispatch', target: 'proof', group: 'unit', proofs: [PROOF], requestId: item.autoDispatch!.producers[0].id, pr: item.submission!.pr, sha: head, baseSha: base, policyRevision: 1 });
   assert.equal(item.nextAction!.llmRole, 'produce-evidence');
   assert.equal(item.nextAction!.gate, 'review'); assert.equal(item.autoDispatch!.review, null);
   assert.equal(refusalAction(item, 'review', item.nextAction!.refusal!), 'dispatch');

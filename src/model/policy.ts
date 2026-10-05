@@ -80,17 +80,27 @@ export function laneRequirements(lane: Lane): LaneRequirements {
 }
 
 /**
- * Whether the lane requires one proof family of the change: the producer-run `unit:` and
- * `integration:` proofs from medium, `manual:` attestations only in high, and `e2e:` in every lane
- * — it runs against the deployed or CI-built system, not in a producer session.
+ * GY-1101: the automatable proof families collected against a release candidate rather than per
+ * pull request. A merged item's `integration:` and `e2e:` proofs run once against the first release
+ * candidate that contains its merge commit (model/release.ts); they never hold its merge. Only
+ * `unit:` proofs (GY-1093's pre-merge set) and `manual:` attestations stay pre-merge.
+ */
+export const releaseCandidateFamilies = ['integration', 'e2e'] as const;
+export const proofFamily = (proof: string) => proof.slice(0, Math.max(0, proof.indexOf(':')));
+export const releaseCandidateProof = (proof: string) => (releaseCandidateFamilies as readonly string[]).includes(proofFamily(proof));
+
+/**
+ * Whether the lane requires one proof family of the change before it merges: producer-run `unit:`
+ * proofs from medium and `manual:` attestations only in high. `integration:` and `e2e:` are never
+ * merge requirements in any lane (GY-1101): they are release-candidate proofs.
  */
 export function laneRequiresFamily(lane: Lane, family: string): boolean {
   const requirements = laneRequirements(lane);
-  return family === 'unit' || family === 'integration' ? requirements.producerProofs
+  return family === 'unit' ? requirements.producerProofs
     : family === 'manual' ? requirements.manualAttestations
-    : true;
+    : !(releaseCandidateFamilies as readonly string[]).includes(family);
 }
-export const laneRequiresProof = (lane: Lane, proof: string) => laneRequiresFamily(lane, proof.slice(0, Math.max(0, proof.indexOf(':'))));
+export const laneRequiresProof = (lane: Lane, proof: string) => laneRequiresFamily(lane, proofFamily(proof));
 
 /**
  * The changed paths an item's lane is decided from: every observed scope file's path and, for a

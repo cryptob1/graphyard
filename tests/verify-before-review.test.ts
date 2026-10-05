@@ -56,30 +56,30 @@ const gate = (item: Work, name: string) => item.gates.find(entry => entry.name =
 
 test('integration:proofs-precede-review — no review request is raised before the head\'s mechanical proofs have run, and a head that fails one returns to its worker naming the criterion without a reviewer session', async () => {
   let item = await submitted('Proofs precede review', [
-    { id: 'AC-1', text: 'Parses', proofs: ['unit:vbr-parse', 'integration:vbr-flow'] },
+    { id: 'AC-1', text: 'Parses', proofs: ['unit:vbr-parse', 'unit:vbr-flow'] },
     { id: 'AC-2', text: 'Documented', proofs: ['manual:vbr-docs'] },
   ]);
   item = await engine.observe(item.id, item.revision, observed(item, H));
   // The head builds and its producers are asked for; the reviewer is not.
   assert.ok(gate(item, 'build').passed);
-  assert.deepEqual(item.autoDispatch!.producers.map(request => request.group), ['unit', 'integration']);
+  assert.deepEqual(item.autoDispatch!.producers.map(request => request.group), ['unit'], 'both mechanical proofs are one unit producer group');
   assert.equal(item.autoDispatch!.review, null, 'no review request stands for an unverified head');
   assert.deepEqual(await reviewRequests(item), []);
   const pending = reviewNeed(item, [item]);
-  assert.equal(pending.state, 'proofs-pending'); assert.match(pending.reason, /AC-1 unit:vbr-parse, AC-1 integration:vbr-flow have not passed on/);
+  assert.equal(pending.state, 'proofs-pending'); assert.match(pending.reason, /AC-1 unit:vbr-parse, AC-1 unit:vbr-flow have not passed on/);
   const waiting = nextAction(item, [item], new Date())!;
   assert.equal(waiting.kind, 'dispatch'); assert.equal(waiting.inputs.kind === 'dispatch' && waiting.inputs.target, 'proof', 'what the head waits on is its producers, not a reviewer');
 
   // One proof passes and the other fails: the head goes back to its worker with the criterion named.
   item = await prove(item, 'unit:vbr-parse', H, 'pass');
   assert.equal(item.autoDispatch!.review, null, 'a partly verified head is still not reviewed');
-  item = await prove(item, 'integration:vbr-flow', H, 'fail');
+  item = await prove(item, 'unit:vbr-flow', H, 'fail');
   assert.equal(item.stage, 'build');
-  assert.deepEqual(gate(item, 'build').reasons, [`AC-1: integration:vbr-flow failed on ${H.slice(0, 12)} (trusted evidence from proof-runner); the head returns to its worker before review`]);
+  assert.deepEqual(gate(item, 'build').reasons, [`AC-1: unit:vbr-flow failed on ${H.slice(0, 12)} (trusted evidence from proof-runner); the head returns to its worker before review`]);
   assert.equal(item.autoDispatch!.review, null);
   assert.deepEqual(await reviewRequests(item), [], 'the failing head never consumed a reviewer session');
   const returned = nextAction(item, [item], new Date())!;
-  assert.equal(returned.kind, 'request-rework'); assert.match(returned.reason, /AC-1: integration:vbr-flow failed/);
+  assert.equal(returned.kind, 'request-rework'); assert.match(returned.reason, /AC-1: unit:vbr-flow failed/);
   // Every review provider holds the same way: the control plane's own codex/agent dispatch reads mechanicalHold.
   for (const reviewProvider of ['codex', 'agent'] as const) assert.equal(mechanicalHold({ ...item, policy: { ...item.policy, reviewProvider } }, [item], new Date())?.state, 'proof-failed');
 
@@ -87,7 +87,7 @@ test('integration:proofs-precede-review — no review request is raised before t
   item = await engine.observe(item.id, item.revision, observed(item, H2));
   assert.ok(gate(item, 'build').passed); assert.equal(item.autoDispatch!.review, null);
   item = await prove(item, 'unit:vbr-parse', H2, 'pass');
-  item = await prove(item, 'integration:vbr-flow', H2, 'pass');
+  item = await prove(item, 'unit:vbr-flow', H2, 'pass');
   const review = item.autoDispatch!.review!;
   assert.deepEqual([review.state, review.sha], ['requested', H2]);
   const requested = await reviewRequests(item);

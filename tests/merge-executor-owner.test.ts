@@ -25,7 +25,7 @@ const approver: Principal = { id: 'approver-agent', role: 'admin', sessionKind: 
 const worker: Principal = { id: 'implementer', role: 'worker' };
 // The one coordinator credential both executors run under: the durable loop and `master merge`.
 const coordinator: Principal = { id: 'graphyard-master', role: 'coordinator' };
-const producer: Principal = { id: 'proof-runner', role: 'producer', proofs: ['integration:claim-safety'] };
+const producer: Principal = { id: 'proof-runner', role: 'producer', proofs: ['unit:claim-safety'] };
 const principals = [operator, approver, worker, coordinator, producer];
 const credentials = principals.map(principal => ({ ...principal, token: `${principal.id}-token-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
@@ -70,14 +70,14 @@ async function mergeDecision(work: Work, reason: string) {
 /** A candidate at the merge stage with every gate passed and its queue tip published: what the broker acquires. */
 async function candidate(proven = true) {
   const n = ++serial;
-  let w = await engine.execute(operator, 'create', null, { title: `Merge executor ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
+  let w = await engine.execute(operator, 'create', null, { title: `Merge executor ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:claim-safety'] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/merge-executor-${n}`, branch: `graphyard/gy-92-${n}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 900 + n }, id());
   // One item at a time is under test; the rest never occupy the queue ahead of it.
   await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [w.id]);
   w = await engine.observe(w.id, w.revision, observation(w));
-  if (proven) w = await engine.execute(producer, 'evidence', w.id, { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
+  if (proven) w = await engine.execute(producer, 'evidence', w.id, { proof: 'unit:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
   const speculation: QueueSpeculation = { ref: queueRef(w.key), tip: head, base, baseTree: '7e'.repeat(20), predecessors: [], policyRevision: w.policyRevision, publishedAt: new Date().toISOString() };
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [w.id, JSON.stringify(speculation)]);
   w = await engine.observe(w.id, (await reload(w.id)).revision, observation(w));
@@ -183,7 +183,7 @@ test('integration:merged-without-authorization-recovery — an observed merge th
   assert.equal(delivery.reconciliation.requestedBy, operator.id); assert.equal(delivery.reconciliation.approvedBy, approver.id);
   assert.match(delivery.reconciliation.reason, /Reconcile/); assert.match(delivery.reconciliation.approvalReason, /Approved/);
   assert.match(delivery.reconciliation.judgement, /every required proof was live/);
-  assert.deepEqual(delivery.reconciliation.proofs, ['integration:claim-safety']); assert.equal(delivery.reconciliation.violation, unauthorizedMergeViolation);
+  assert.deepEqual(delivery.reconciliation.proofs, ['unit:claim-safety']); assert.equal(delivery.reconciliation.violation, unauthorizedMergeViolation);
   const reconciled = await events(work.id, 'merge.reconciled');
   assert.equal(reconciled.length, 1); assert.equal(reconciled[0].actor, operator.id); assert.equal(reconciled[0].payload.details.decision, decision.id); assert.equal(reconciled[0].payload.details.evidenceAsOf, delivery.evidenceAsOf);
   // A later decision on the early item, requested after its merge, recovers it the same way.
@@ -200,7 +200,7 @@ test('integration:merged-without-authorization-recovery — an observed merge th
   refused = await engine.observe(unproven.id, (await reload(unproven.id)).revision, { ...refused.observation!, at: new Date().toISOString() });
   assert.equal(refused.stage, 'acceptance', 'the stage still reads from the first failing gate');
   const reason = refused.violations.find(entry => entry.startsWith(`Reconciliation by decision ${hopeless.id} refused: `))!;
-  assert.ok(reason, refused.violations.join(' | ')); assert.match(reason, /gate acceptance had not passed/); assert.match(reason, /integration:claim-safety had no live trusted evidence/);
+  assert.ok(reason, refused.violations.join(' | ')); assert.match(reason, /gate acceptance had not passed/); assert.match(reason, /unit:claim-safety had no live trusted evidence/);
   refused = await engine.observe(unproven.id, refused.revision, { ...refused.observation!, at: new Date().toISOString() });
   assert.equal(refused.violations.filter(entry => entry.startsWith('Reconciliation by decision ')).length, 1, 'the refusal is recorded once');
   assert.equal((await events(unproven.id, 'merge.reconciliation.refused')).length, 1);
@@ -209,7 +209,7 @@ test('integration:merged-without-authorization-recovery — an observed merge th
 
 test('unit:stuck-merge-attention — master status names an item held at the merge stage by an observed unauthorized merge as the violation with its recovery command, apart from a candidate waiting for its queue tip, and the loop asks the guarded merge for the waiting candidate only', async () => {
   const at = new Date().toISOString();
-  const shape = (key: string, overrides: Partial<Work>): Work => ({ id: `id-${key}`, key, title: key, description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:x'] }],
+  const shape = (key: string, overrides: Partial<Work>): Work => ({ id: `id-${key}`, key, title: key, description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }],
     policy: { checks: ['test'], review: true }, stage: 'merge', revision: 12, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: new Date(Date.now() - 7_200_000).toISOString(), ready: true, epoch: 1, lease: null,
     workspaces: [{ host: 'h', path: '/w', branch: `graphyard/${key.toLowerCase()}-1`, epoch: 1, owner: 'implementer' }], candidate: { sha: head, baseSha: base, pr: 81, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' },
     submission: { epoch: 1, pr: 81 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [],

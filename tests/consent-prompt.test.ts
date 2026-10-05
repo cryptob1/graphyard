@@ -203,10 +203,10 @@ test('integration:known-consent-answered-unknown-escalated — the launcher answ
     // A producer launch on Codex stopped on the hooks dialog: answered `3`, the session takes its
     // request, and the answer is kept on the session's record.
     const credential = await token('producer');
-    await saveProducerProfile(root, { name: 'codex-producer', principal: 'proof-runner', agentName: 'produce-c', kind: 'codex', credentialFile: credential }, async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] } }));
+    await saveProducerProfile(root, { name: 'codex-producer', principal: 'proof-runner', agentName: 'produce-c', kind: 'codex', credentialFile: credential }, async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*'] } }));
     const config = await loadMasterConfig(root);
     const item = work({ stage: 'review', epoch: 1, candidate: { sha: H, baseSha: B, pr: 130, branch: 'graphyard/gy-130-1', author: 'implementer' }, submission: { epoch: 1, pr: 130 },
-      criteria: [{ id: 'AC-2', text: 'Consent', proofs: ['integration:known-consent-answered-unknown-escalated'] }],
+      criteria: [{ id: 'AC-2', text: 'Consent', proofs: ['unit:known-consent-answered-unknown-escalated'] }],
       observation: { candidate: { sha: H, baseSha: B, pr: 130, branch: 'graphyard/gy-130-1', author: 'implementer' }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [], at: new Date().toISOString(), prState: 'open', draft: false, baseTip: B, baseTree: sha40('7b'), baseTipContained: true } as Work['observation'],
       gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }] });
     reconcileAutoDispatch(item, [item], new Date(clock));

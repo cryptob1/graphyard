@@ -26,7 +26,7 @@ const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 
 const approver: Principal = { id: 'approver', role: 'admin', sessionKind: 'ai' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
 const coordinator: Principal = { id: 'graphyard-master', role: 'coordinator' };
-const producer: Principal = { id: 'proof-runner', role: 'producer', proofs: ['integration:claim-safety'] };
+const producer: Principal = { id: 'proof-runner', role: 'producer', proofs: ['unit:claim-safety'] };
 const principals = [operator, approver, worker, coordinator, producer];
 const credentials = principals.map(principal => ({ ...principal, token: `${principal.id}-token-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
@@ -86,13 +86,13 @@ async function mergeDecision(work: Work, reason: string, requester = token(opera
 async function candidate(options: { proven?: boolean; queue?: boolean; alone?: boolean } = {}) {
   const { proven = true, queue = true, alone = false } = options;
   const n = ++serial;
-  let w = await engine.execute(operator, 'create', null, { title: `Reconciliation ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
+  let w = await engine.execute(operator, 'create', null, { title: `Reconciliation ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:claim-safety'] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/reconciliation-${n}`, branch: `graphyard/gy-94-${n}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 900 + n }, id());
   if (alone) await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [w.id]);
   w = await engine.observe(w.id, w.revision, observation(w));
-  if (proven) w = await engine.execute(producer, 'evidence', w.id, { proof: 'integration:claim-safety', sha: head(w), baseSha: base, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
+  if (proven) w = await engine.execute(producer, 'evidence', w.id, { proof: 'unit:claim-safety', sha: head(w), baseSha: base, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
   w = await engine.observe(w.id, (await reload(w.id)).revision, observation(w));
   if (proven && queue) {
     assert.ok(w.queue, `${w.key} entered the merge queue: ${w.gates.flatMap(gate => gate.reasons).join('; ')}`);
@@ -187,7 +187,7 @@ test('integration:reconciliation-refusal-not-circular — the unauthorized-merge
   const otherViolation: Work = { ...poisoned, violations: [...poisoned.violations, 'Post-merge checks differ from the recorded authorization; follow-up required'] };
   assert.deepEqual(judge(otherViolation, { reconciling: true }), ['violation stood: Post-merge checks differ from the recorded authorization; follow-up required']);
   const unproven: Work = { ...poisoned, evidence: [] };
-  assert.ok(judge(unproven, { reconciling: true }).some(reason => reason.startsWith('required proof integration:claim-safety had no live trusted evidence')));
+  assert.ok(judge(unproven, { reconciling: true }).some(reason => reason.startsWith('required proof unit:claim-safety had no live trusted evidence')));
   // End to end: a merge with no execution at all, whose only pre-merge record is sound, reconciles
   // on the decision although every post-merge observation carries both artifacts.
   let current = await engine.observe(work.id, sound.revision, merged);
@@ -287,7 +287,7 @@ test('integration:operator-authorized-delivery — a merge no execution authoriz
   current = await engine.observe(work.id, (await reload(work.id)).revision, { ...merged, at: new Date().toISOString() });
   assert.equal(current.stage, 'acceptance');
   const refusal = current.violations.find(entry => entry.startsWith(`Reconciliation by decision ${first} refused: `))!;
-  assert.match(refusal, /gate acceptance had not passed/); assert.match(refusal, /integration:claim-safety had no live trusted evidence/);
+  assert.match(refusal, /gate acceptance had not passed/); assert.match(refusal, /unit:claim-safety had no live trusted evidence/);
   // The same pair citing the refusal is still not an operator: refused again, saying why.
   const pair = await mergeDecision(current, `Operator authorized the administrative merge; overrides ${first}`, masterAgent.token, approverAgent.token);
   current = await engine.observe(work.id, (await reload(work.id)).revision, { ...merged, at: new Date().toISOString() });

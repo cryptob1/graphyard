@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
-import { demand, type Principal, type Work } from './model.js';
+import { demand, pendingRelease, type Principal, type Work } from './model.js';
 import type { Store } from './store.js';
 import { save, wakeJob } from './store.js';
 import { settleDelivered } from './model/actions.js';
@@ -101,6 +101,7 @@ export async function sweepDirectMerges(db: pg.PoolClient, all: Work[], windows:
     work.violations = work.violations.filter(entry => entry !== unauthorizedMergeViolation && !entry.startsWith(reconciliationRefusalPrefix));
     work.stage = 'done'; work.stageEnteredAt = now.toISOString();
     work.delivery = Object.assign({ mergedAt: observation.mergedAt, mergeSha: observation.mergeSha, authorizationRevision: work.revision }, { operatorAuthorization: record });
+    work.releaseTrain = pendingRelease(work, work.delivery); // GY-1101: merged, pending a promoted release candidate
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, window.setBy, 'merge.operator-authorized',
       JSON.stringify({ details: { ...record, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision: work.revision, evidenceAsOf: null, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
     // What the delivery still owes, in the same transaction: nothing retries against it (GY-185).

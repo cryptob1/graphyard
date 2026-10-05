@@ -1,6 +1,6 @@
 import type { Work } from './work.js';
 import { isClosed } from './closure.js';
-import { deliveryState } from './delivery.js';
+import { deliveryState } from './delivery.js'; import { pendingReleaseOf } from './release-train.js';
 import { answerCommand, parkedOnHuman, type HumanRequestRow } from './human-request.js';
 import { scopeRefusalBlocker, terminalScopeRefusal } from './scope.js';
 import { shortShas } from './format.js';
@@ -76,9 +76,9 @@ export function mergedAt(work: Work): number {
 export function groupOf(work: Work, now: number, humanOnly: ReadonlySet<string> = new Set(), stalled: ReadonlySet<string> = new Set(), release: ReleaseView = noRelease): Group | null {
   if (isClosed(work)) return null;
   if (work.stage === 'done') {
-    // Shipped whether or not a per-item deployment record exists; only an outstanding
-    // post-deployment check, or production observed not serving it yet, keeps it at Deploy.
-    // Work merged before delivery records existed has nothing left to wait on.
+    // Shipped unless a post-deployment check is outstanding or production is not serving it yet (work merged
+    // before delivery records has nothing to wait on); merged pending release (GY-1101) is moving, never blocked.
+    if (pendingReleaseOf(work)) return 'moving';
     if (!work.delivery || leftFlowAt(work, release)) return 'shipped';
     return deliveryState(work) === 'delivered-with-failure' || release.failed.has(work.key) ? 'blocked' : 'moving';
   }

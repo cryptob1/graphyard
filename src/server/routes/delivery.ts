@@ -9,6 +9,8 @@ import { defineRoutes, parseJson } from '../routes.js';
 export const deliveryRoutes = defineRoutes('delivery', [
   { method: 'GET', path: '/api/delivery', handle: ({ services }) => services.delivery.status() },
   { method: 'GET', path: '/api/delivery/observations', handle: ({ url, services }) => services.delivery.observations(url.searchParams.get('environment') ?? '', url.searchParams.get('cursor') ?? undefined) },
+  // GY-1101: one release-candidate ledger step (UAT verdict, promotion), applied to every merged item it contains.
+  { method: 'POST', path: '/api/release-candidates', async handle(context) { return context.services.engine.reportReleaseCandidate(context.actor, await parseJson(context, undefined, '{}')); } },
   {
     method: 'POST', path: /^\/api\/delivery\/(build|release|approve|select|lease|observe|notify|sweep|rollback|rollback-claim|rollback-settle|rollback-resolve)$/,
     async handle(context, [command]) {

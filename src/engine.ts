@@ -10,7 +10,7 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, admin, applyCandidateReport, candidateContains, candidateReportRefusal, pendingRelease, releaseState, type ReleaseState, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
@@ -164,6 +164,14 @@ const commands = {
   // for a fresh review of the tip, and otherwise the candidate is marked for a rework decision.
   mergerefused: z.object({ sha, baseSha: sha, policyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), since: z.iso.datetime().optional() }).strict(),
 } as const;
+// GY-1101: one release-candidate ledger step, reported by the release CLI after the candidate's UAT
+// verdict or promotion is recorded as a tag. The ledger is the authority; each contained item's
+// record mirrors it so the control plane knows when the item is Done.
+export const candidateReportSchema = z.object({
+  candidate: z.object({ id: z.string().regex(/^\d{8}T\d{6}Z$/), sha, items: z.array(z.object({ key: z.string().min(1).max(200), mergeSha: sha, pr: z.number().int().positive().nullable() }).strict()).max(1000) }).strict(),
+  uat: z.object({ result: z.enum(['passed', 'failed']), suites: z.array(z.object({ name: z.string().min(1).max(300), passed: z.boolean(), detail: z.string().max(4000) }).strict()).max(200), followUp: z.string().max(200).nullable() }).strict().nullable(),
+  production: z.object({ at: z.iso.datetime() }).strict().nullable(),
+}).strict();
 const executorName = z.string().trim().min(1).max(200).regex(/^[^\u0000-\u001f\u007f]+$/);
 const actionClaimSchema = z.object({
   /** The identity the claim is recorded under; the credential's own principal by default. */
@@ -1756,6 +1764,33 @@ export class Engine {
    * read on the merge commit or on `on` (the revert it is re-tested on), written onto the merge and
    * to the ledger as `optimistic.post-merge` when it changed.
    */
+  /**
+   * GY-1101: apply one release-candidate ledger step to every delivered item the candidate contains
+   * (by key or merge commit). It is reported by a coordinator, the operator, or the release
+   * workflow's own credential — the operator agent that files a failed candidate's follow-up, so the
+   * workflow holds no second credential. A delivered item stays immutable: only its release-train
+   * record moves, and a released item never moves back.
+   */
+  async reportReleaseCandidate(actor: Principal, input: unknown) {
+    if (actor.role === 'operator-agent') operatorCapability(actor, 'intent:create', undefined, this.repository);
+    else demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+    const report = candidateReportSchema.parse(input);
+    return this.store.transaction(async (db, now) => {
+      const all: Work[] = (await db.query("SELECT document FROM work_items WHERE document->>'stage'='done' AND document->'releaseTrain'->>'state'='pending' ORDER BY number FOR UPDATE")).rows.map(row => row.document);
+      const settled: { key: string; state: ReleaseState | null; changed: boolean }[] = [];
+      for (const work of all) {
+        if (!work.delivery || !candidateContains(report.candidate, work) || candidateReportRefusal(work, report)) continue;
+        const applied = applyCandidateReport(work, report, now);
+        if (applied.changed) {
+          work.releaseTrain = applied.train;
+          await save(db, work, actor.id, applied.train.state === 'released' ? 'release.promoted' : 'release.candidate', now,
+            { candidate: report.candidate.id, sha: report.candidate.sha, uat: report.uat?.result ?? null, promoted: report.production?.at ?? null, state: applied.train.state });
+        }
+        settled.push({ key: work.key, state: releaseState(work), changed: applied.changed });
+      }
+      return { candidate: report.candidate.id, items: settled };
+    });
+  }
   async recordPostMerge(id: string, mergeSha: string, verdict: PostMergeVerdict, on?: string): Promise<Work> {
     return this.store.transaction(async (db, now) => {
       const work: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [id])).rows[0]?.document;
@@ -2763,6 +2798,9 @@ export class Engine {
             ...(mergedAtRepository ? { mergedAtRepository, repositoryClockOffsetMs: repositoryClockOffsetMs! } : {}) };
           work.delivery = reconciliation ? Object.assign(delivery, { reconciliation }) : operatorAuthorization ? Object.assign(delivery, { operatorAuthorization }) : delivery;
           if (repairLane) work.repairLane = repairLane;
+          // GY-1101: merged is not Done. The item rides the release train until a candidate containing
+          // this merge commit passes UAT and is promoted (model/release-train.ts); it stays immutable.
+          work.releaseTrain = pendingRelease(work, delivery);
           // A head merged on its optimistic lane (GY-500) is guarded after the merge: its merge
           // commit's required suite is read by the main guard, which reverts it if main broke.
           const lane = work.optimistic;

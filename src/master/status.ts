@@ -5,7 +5,7 @@ import { hotFileSet } from '../daemon/hotspots.js';
 import type { ConflictReport } from '../conflicts.js';
 import { standingCapacity, describeCapacity, quotaRoles } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
-import { type Work, carriedBindings, describeGround, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, describeQueueBinding, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance, type QueueBindingReport } from '../model.js';
+import { type Work, carriedBindings, pendingReleases, describeGround, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, describeQueueBinding, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance, type QueueBindingReport } from '../model.js';
 import { containmentAttestation, containmentGraceMs } from '../quarantine.js';
 import { defaultMergeBatchSize, describeMergeBatches, describeTipWindow, windowBatchView, type MergeBatchView, type TipView, predictQueue, describeGitHubQueue, pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, branchContamination, currentRestore, ejectedTipRestore, restoredApproval, unpublishableEntry, refusedReconciliation, blockedPastProbe, type QueuePlacement } from '../merge-queue.js';
 import { MERGE_PROTOCOL } from '../protocol-version.js';
@@ -157,6 +157,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const queueRows = placements.map(placement => { const work = snapshot.work.find(item => item.id === placement.id)!; return { ...queueRow(placement, describeQueueBinding(work, snapshot.work, new Date(now), placement)), ...githubQueueRow(work) }; });
   // The cause each row's attention was raised for, which is the fault kind its attention item carries.
   const causes = new Map<string, WorkAttentionCause>();
+  const releasePending = pendingReleases(snapshot.work);
   const rows = snapshot.work.filter(work => work.stage !== 'done').map(work => {
     const placement = placements.find(entry => entry.id === work.id) ?? null;
     const active = !!work.lease && Date.parse(work.lease.expiresAt) > now;
@@ -357,7 +358,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length, unrunnableRemedies: remedies.length, effectiveConcurrency: fleet.effective, idleWorkers: idle.length,
       contaminatedBranches: rows.filter(row => row.contamination && row.contamination.source.length).length, restoredApprovals: rows.filter(row => row.restoredApproval).length,
       // Closed without delivery (model/closure.ts): never open, never delivered, counted only here.
-      closed: snapshot.work.filter(isClosed).length },
+      closed: snapshot.work.filter(isClosed).length,
+      // GY-1101: merged items waiting for a promoted release candidate; a healthy resting state, never attention.
+      releasePending: releasePending.length },
     // Every attention item with the role that resolves it and the next command, work items first.
     attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner, ...classified(causes.get(row.key) ?? 'gate') }] : []), ...remedyItems, ...capacityItems, ...concurrencyItems, ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
     // What waits on the human, longest first, with how to answer; the roles out of capacity; each
@@ -368,6 +371,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     closed: closedHistory(snapshot.work),
     // Review follow-ups held on a parent until it ships (GY-845), apart from the backlog they have not joined yet.
     pendingFollowUps: pendingFollowUpsReport(snapshot.work),
+    // Each merged item still pending release (GY-1101), with the candidate carrying it and its UAT state.
+    releasePending,
     workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation, fleet: registry.fleet,
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) },
     // The shared project memory the loop keeps (GY-1125), as its cursor holds it; null while the cursor is unreadable.

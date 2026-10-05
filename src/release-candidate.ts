@@ -116,24 +116,37 @@ export function assessPromotion(candidate: ReleaseCandidate, uat: UatRecord | nu
 export const failingSuites = (uat: UatRecord) => uat.suites.filter(suite => !suite.passed);
 
 /**
- * The one follow-up item a failed candidate files. It names the failing suite and the candidate
- * SHA, and lists the deliveries the candidate carried for context only: they stay delivered, and
- * the fix arrives as new work merged to main and carried by a later candidate.
+ * The one fix-forward item a failed candidate files. It names the failing suites and, among them,
+ * the failing release-candidate proofs (GY-1101), the candidate SHA and the commit range since the
+ * last promoted candidate, and lists the deliveries the candidate carried for context only: they
+ * stay merged-pending-release, are never reworked or reverted, and the next candidate cut after the
+ * fix carries them again.
  */
 export function followUpItem(candidate: ReleaseCandidate, uat: UatRecord) {
   const failing = failingSuites(uat);
   if (uat.result !== 'failed' || !failing.length) throw new Error(`Candidate ${candidate.id} did not fail UAT; it files no follow-up`);
   const first = failing[0];
+  const proofs = failing.flatMap(suite => suite.name.startsWith('proof ') ? [suite.name.slice(6)] : []);
   const carried = candidate.items.length ? candidate.items.map(item => `${item.key} (${item.mergeSha.slice(0, 12)})`).join(', ') : 'no named deliveries';
+  const range = candidate.since ? `${candidate.since.sha}..${candidate.sha} (since promoted candidate ${candidate.since.id})` : `up to ${candidate.sha} (no candidate promoted yet)`;
   return {
-    title: `Release candidate ${candidate.id} failed UAT suite ${first.name} at ${candidate.sha.slice(0, 12)}`,
+    title: `Release candidate ${candidate.id} failed UAT ${proofs.length ? `proof ${proofs[0]}` : `suite ${first.name}`} at ${candidate.sha.slice(0, 12)}`,
     description: `Release candidate ${candidate.id} at ${candidate.sha} failed UAT. Failing suite${failing.length > 1 ? 's' : ''}: ${failing.map(suite => `${suite.name} — ${suite.detail}`).join('; ')}. `
-      + `It carried ${carried}; those deliveries stay delivered and are not reworked. Fix forward on main; the next candidate cut after the fix carries it to UAT.`,
+      + `Failing proofs: ${proofs.length ? proofs.join(', ') : 'none (no release-candidate proof failed)'}. Commit range: ${range}. `
+      + `It carried ${carried}; those items stay merged-pending-release and are not reworked or reverted. Fix forward on main; the next candidate cut after the fix carries them and this fix to UAT.`,
     type: 'bug', priority: 1,
     criteria: [{ id: 'AC-1', text: `The ${first.name} suite that failed on candidate ${candidate.id} (${candidate.sha}) passes against the UAT deployment of a later candidate`, proofs: ['manual:release-candidate-uat-pass'] }],
     policy: { checks: ['test', 'typecheck'], review: true },
   };
 }
+
+/** The candidate report the release CLI sends the control plane (GY-1101): the candidate, its UAT record and its promotion. */
+export const candidateReport = (ledger: Ledger, candidate: ReleaseCandidate) => {
+  const uat = ledger.uat.find(record => record.id === candidate.id) ?? null;
+  const production = ledger.production.find(record => record.id === candidate.id) ?? null;
+  return { candidate: { id: candidate.id, sha: candidate.sha, items: candidate.items },
+    uat: uat ? { result: uat.result, suites: uat.suites, followUp: uat.followUp } : null, production: production ? { at: production.at } : null };
+};
 
 /** Pure: which promoted candidate a production deployment serves, or why it serves none. */
 export function assessProductionServing(servedSha: string | null, promoted: readonly ProductionRecord[]) {
@@ -237,6 +250,26 @@ export const commandSuite = (name: string, command: string, timeoutMs = 3_600_00
   const passed = child.status === 0;
   return { name, passed, detail: passed ? `\`${command}\` passed` : `\`${command}\` exited ${child.status ?? child.signal}` };
 } });
+
+/**
+ * One release-candidate proof (GY-1101) run against the candidate's own checkout: the test cases
+ * whose titles carry the proof id. It passes only when at least one such case ran and none failed,
+ * so a proof no test names never passes by matching nothing. Like every suite command it never
+ * sees `GRAPHYARD_TOKEN`.
+ */
+export const testProofSuite = (proof: string, cwd = process.cwd(), timeoutMs = 3_600_000): Suite => ({ name: `proof ${proof}`, run: async () => {
+  const { GRAPHYARD_TOKEN: _release, ...env } = process.env;
+  const pattern = proof.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+  const child = spawnSync('node', ['--import', 'tsx', 'tests/helpers/run-tests.ts', `--test-name-pattern=${pattern}`, '--test-reporter=tap'], { cwd, encoding: 'utf8', timeout: timeoutMs, env, maxBuffer: 256 * 1024 * 1024 });
+  return proofRunResult(proof, child.status, `${child.stdout ?? ''}`);
+} });
+/** Pure: a proof run's verdict from its TAP stream and exit status. */
+export function proofRunResult(proof: string, status: number | null, tap: string): SuiteResult {
+  const lines = tap.split('\n').filter(line => line.includes(proof) && /^\s*(not )?ok \d+/.test(line) && !/# SKIP/i.test(line));
+  const passed = lines.filter(line => /^\s*ok /.test(line)).length, failed = lines.filter(line => /^\s*not ok /.test(line)).length;
+  const ok = status === 0 && passed > 0 && failed === 0;
+  return { name: `proof ${proof}`, passed: ok, detail: ok ? `${passed} case${passed === 1 ? '' : 's'} naming ${proof} passed` : passed + failed === 0 ? `no test case names ${proof}` : `${failed} of ${passed + failed} cases naming ${proof} failed (exit ${status})` };
+}
 
 export const endpointSuite = (paths: readonly string[], fetcher: typeof fetch = fetch): Suite => ({ name: 'endpoints', run: async url => {
   const failures: string[] = [];

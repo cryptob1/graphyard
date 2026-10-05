@@ -11,6 +11,7 @@ import { redactString, type ReplayRecord } from '../src/evidence-replay.js';
 import { defineScenario } from '../src/scenarios.js';
 import { server } from '../src/server.js';
 import { currentEvidence } from '../src/model.js';
+import { evidenceProves } from '../src/model/mechanical-proofs.js';
 import type { Principal, ScopeFile, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -109,7 +110,17 @@ async function newRequest(f: Fixture, candidateId: string) {
   const w = await current(f.w.id);
   return await validation.createRequest(operator, { candidateId, expectedWorkRevision: w.revision, runner: f.runnerRef, collector: f.collectorRef, deadline: new Date(Date.now() + 600_000).toISOString(), maxAttempts: 3 }, id()) as ValidationRequest;
 }
-const acceptance = (w: Work) => w.gates.find(g => g.name === 'acceptance')!;
+const acceptanceGate = (w: Work) => w.gates.find(g => g.name === 'acceptance')!;
+/**
+ * GY-1101: an `e2e:` scenario proof is a release-candidate proof, so it no longer holds the merge-time
+ * acceptance gate. Whether the fixture's criterion is satisfied for the current head is the gate plus
+ * the scenario proof's own current, trusted, passing evidence — the binding reuse decides.
+ */
+const acceptance = (w: Work) => {
+  const gate = acceptanceGate(w), proof = w.criteria[0].proofs[0], evidence = currentEvidence(w, proof);
+  const proven = !!evidence && evidenceProves(proof, evidence);
+  return { passed: gate.passed && proven, reasons: [...gate.reasons, ...(proven ? [] : [`${proof} has no current trusted passing evidence`])] };
+};
 const playwrightDocument = (executions: boolean) => ({ format: 'graphyard-playwright-v1', declared: [{ id: 'a'.repeat(64), expected: 'passed', location: { file: 'tests/behavior.spec.ts', line: 1, column: 1 } }, { id: 'b'.repeat(64), expected: 'passed', location: { file: 'tests/behavior.spec.ts', line: 9, column: 1 } }],
   executions: executions ? [{ id: 'a'.repeat(64), status: 'passed', retry: 0 }, { id: 'b'.repeat(64), status: 'passed', retry: 0 }] : [], steps: [], errors: 0, overflow: false, status: 'passed' });
 const upload = (command: { requestId: string; attemptId: string; epoch: number }, name: string, document: unknown) => ({ ...command, name, mediaType: 'application/json', bytes: Buffer.from(JSON.stringify(document)).toString('base64'), capturePolicy: 'approved-test-data-only' });
@@ -138,6 +149,8 @@ test('D6-1 relevant dependency and configuration changes invalidate reuse; an ig
   assert.equal(dependency.of?.sequence, 1); assert.equal(dependency.candidateId, null);
   let w = await current(f.w.id);
   assert.equal(acceptance(w).passed, false, 'the pass for the previous head does not carry over by itself');
+  assert.equal(acceptanceGate(w).passed, true, 'the scenario proof is a release-candidate proof: it does not hold the merge gate (GY-1101)');
+  assert.ok(!acceptanceGate(w).reasons.some(reason => reason.includes(f.proof)), acceptanceGate(w).reasons.join('; '));
   assert.equal(currentEvidence(w, f.proof), undefined);
   // A configuration change on the same head: refused as configuration, whatever the ignorable docs beside it.
   const configuration = await decide(f, heads.two, [...filesOne, file('config/app.yaml', 'y'), file('docs/guide.md', 'h')]);

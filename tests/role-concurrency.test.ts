@@ -30,7 +30,8 @@ const clock = Date.parse(at);
 const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 
 function observation(candidate: { sha: string; baseSha: string; pr: number; branch: string }, extra: Partial<Observation> = {}): Observation {
-  // GY-883: the observed scope rides the public API path, the high lane, whose full path demands all three proof groups this file dispatches.
+  // GY-883: the observed scope rides the public API path, the high lane, whose full path demands both proof groups this file dispatches
+  // (unit and the producer-runnable manual one). GY-1101: its integration criterion is a release-candidate proof, so no group is requested for it.
   return { candidate: { ...candidate, author: 'implementer' }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
     files: ['src/server/routes/a.ts'], scopeFiles: [{ path: 'src/server/routes/a.ts', status: 'modified' as const, sha: sha40('s'), additions: 1, deletions: 1, binary: false }], at: new Date().toISOString(), prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: sha40('7b'), baseTipContained: true, ...extra };
 }
@@ -41,11 +42,11 @@ function observation(candidate: { sha: string; baseSha: string; pr: number; bran
  * (12345678, 00000000) exposed the misread this file guards against only when the draw fell on
  * it (GY-122). The tags are fixed here instead, per item and per request slot (the review, or a
  * proof group): the reviews of the first three items carry the two all-digit tags and a plain hex
- * one, the first item's unit and integration groups carry all-digit tags of their own, and every
+ * one, the first item's unit and manual groups carry all-digit tags of their own, and every
  * other slot's tag is a fixed hex digest of its item and slot, so every run exercises the shape
  * that failed and no two requests of one item share a tag.
  */
-const fixedTags: Record<string, string[]> = { review: ['12345678', '00000000', 'a1b2c3d4'], unit: ['00000000'], integration: ['87654321'] };
+const fixedTags: Record<string, string[]> = { review: ['12345678', '00000000', 'a1b2c3d4'], unit: ['00000000'], manual: ['87654321'] };
 const fixedTag = (n: number, slot: string) => fixedTags[slot]?.[n - 1] ?? createHash('sha256').update(`tag-${slot}-${n}`).digest('hex').slice(0, 8);
 /** A fixed 32-hex request id for one of item N's requests: the slot's tag, then a digest of the item and slot. */
 const fixedRequestId = (n: number, slot: string) => `${fixedTag(n, slot)}${createHash('sha256').update(['request', n, slot].join('\0')).digest('hex').slice(0, 24)}`;
@@ -62,7 +63,7 @@ function requested(n: number, overrides: Partial<Work> = {}, now = new Date()): 
   // longer raises it beside the producer requests. The dispatcher's slots do not care why a request
   // stands: the review request is the one a proven twin of this head raises.
   const twin = structuredClone(item);
-  twin.evidence = ['unit:concurrency', 'integration:concurrency'].map(proof => ({ id: `twin-${proof}`, proof, sha: candidate.sha, baseSha: B, policyRevision: 1, producer: 'independent-runner', trusted: true, result: 'pass' as const, executed: 1, skipped: 0, at }));
+  twin.evidence = ['unit:concurrency'].map(proof => ({ id: `twin-${proof}`, proof, sha: candidate.sha, baseSha: B, policyRevision: 1, producer: 'independent-runner', trusted: true, result: 'pass' as const, executed: 1, skipped: 0, at }));
   twin.autoDispatch = undefined; reconcileAutoDispatch(twin, [twin], now);
   item.autoDispatch!.review = twin.autoDispatch!.review;
   if (item.autoDispatch?.review) item.autoDispatch.review = { ...item.autoDispatch.review, id: fixedRequestId(n, 'review') };
@@ -170,33 +171,33 @@ test('integration:concurrent-producers — three proof groups run at once across
   try {
     const config = await loadMasterConfig(host.root);
     assert.deepEqual(config.producers.map(profile => profileConcurrency(profile)), [2, 1]);
-    // Three groups on one head: unit, integration, and the manual proof the item marks producer-runnable.
+    // Two groups on one head: unit, and the manual proof the item marks producer-runnable. GY-1101:
+    // the integration criterion is a release-candidate proof, so no integration group is requested.
     const item = requested(1, { producerProofs: ['manual:concurrency'] });
     const groups = item.autoDispatch!.producers;
-    assert.deepEqual(groups.map(request => request.group), ['unit', 'integration', 'manual']);
+    assert.deepEqual(groups.map(request => request.group), ['unit', 'manual']);
     const tick = await runDispatchTick(config, emptyDispatchCursor(config), host.effects(() => [item], () => config), Date.now);
-    assert.deepEqual(tick.launched.filter(entry => entry.kind === 'producer').map(entry => [entry.group, entry.profile]), [['unit', 'producer-a'], ['integration', 'producer-a'], ['manual', 'producer-b']]);
+    assert.deepEqual(tick.launched.filter(entry => entry.kind === 'producer').map(entry => [entry.group, entry.profile]), [['unit', 'producer-a'], ['manual', 'producer-a']]);
     assert.deepEqual(tick.waiting.filter(entry => entry.kind === 'producer'), []);
     const pending = (await readProducerLedger(host.root)).producers.filter(record => record.state === 'pending');
-    assert.equal(pending.length, 3);
+    assert.equal(pending.length, 2);
     // Each binding is independent: its own request, group, proofs and session name, on the exact head.
     assert.deepEqual(pending.map(record => [record.requestId, record.group, record.proofs, record.principal, record.agentName]),
-      [[groups[0].id, 'unit', ['unit:concurrency'], 'proof-runner', `produce-a-${tag(groups[0].id)}`], [groups[1].id, 'integration', ['integration:concurrency'], 'proof-runner', `produce-a-${tag(groups[1].id)}`], [groups[2].id, 'manual', ['manual:concurrency'], 'proof-runner-b', 'produce-b']]);
-    assert.equal(new Set(pending.map(record => record.requestId)).size, 3); assert.equal(new Set(pending.map(record => record.agentName)).size, 3);
+      [[groups[0].id, 'unit', ['unit:concurrency'], 'proof-runner', `produce-a-${tag(groups[0].id)}`], [groups[1].id, 'manual', ['manual:concurrency'], 'proof-runner', `produce-a-${tag(groups[1].id)}`]]);
+    assert.equal(new Set(pending.map(record => record.requestId)).size, 2); assert.equal(new Set(pending.map(record => record.agentName)).size, 2);
     assert.ok(pending.every(record => record.sha === item.candidate!.sha && record.baseSha === B && record.policyRevision === 1));
-    assert.equal(new Set(pending.map(record => record.checkout)).size, 3, 'each session builds in its own checkout');
+    assert.equal(new Set(pending.map(record => record.checkout)).size, 2, 'each session builds in its own checkout');
     const producing = (name: string) => host.seen[name].filter(seen => seen.startsWith('produce-'));
     assert.deepEqual(producing(pending[1].agentName), [pending[0].agentName], 'the second group launched while the first ran');
-    assert.deepEqual(producing(pending[2].agentName), [pending[0].agentName, pending[1].agentName]);
     // The producer session receives its own credential path and its own head binding.
     const tabs = host.calls.filter(entry => entry[0] === 'tab' && entry.some(argument => / proofs · produce-/.test(argument)));
-    assert.equal(tabs.length, 3);
+    assert.equal(tabs.length, 2);
     for (const call of tabs) assert.ok(call.some(argument => argument === `GRAPHYARD_PRODUCER=${item.key}@${item.candidate!.sha}`), 'every producer tab binds the exact head');
     assert.equal(JSON.stringify(host.calls).includes('-token-'), false, 'no credential value reaches a command line');
     // Independence is per item, not per process: proof-runner held an assignment on GY-202, so
     // producer-a is refused for it while producer-b answers, and producer-a keeps serving GY-203.
-    const dependent = requested(2, { implementers: ['proof-runner'] });
-    const free = requested(3);
+    const dependent = requested(2, { implementers: ['proof-runner'], producerProofs: ['manual:concurrency'] });
+    const free = requested(3, { producerProofs: ['manual:concurrency'] });
     assert.deepEqual(independentProducerProfiles(dependent, config.producers).map(profile => profile.name), ['producer-b']);
     await assert.rejects(launchProducer(host.root, dependent, dependent.autoDispatch!.producers[0], config.producers[0], host.agents, new Date().toISOString(), { run: host.run }), /Producer principal proof-runner has held an assignment on GY-202; its evidence would not be trusted/);
     // Free the first head's sessions, then dispatch both items together.
@@ -205,9 +206,9 @@ test('integration:concurrent-producers — three proof groups run at once across
     assert.deepEqual(host.agents.map(agent => agent.name), ['review-claude'], 'every producer session closed on its evidence; the reviewer runs on');
     const second = await runDispatchTick(config, emptyDispatchCursor(config), host.effects(() => [dependent, free], () => config), Date.now);
     const launched = second.launched.filter(entry => entry.kind === 'producer').map(entry => [entry.work, entry.group, entry.profile]);
-    assert.deepEqual(launched, [['GY-202', 'unit', 'producer-b'], ['GY-203', 'unit', 'producer-a'], ['GY-203', 'integration', 'producer-a']]);
+    assert.deepEqual(launched, [['GY-202', 'unit', 'producer-b'], ['GY-203', 'unit', 'producer-a'], ['GY-203', 'manual', 'producer-a']]);
     const waiting = second.waiting.filter(entry => entry.kind === 'producer');
-    assert.deepEqual(waiting.map(entry => [entry.work, entry.group]), [['GY-202', 'integration']]);
+    assert.deepEqual(waiting.map(entry => [entry.work, entry.group]), [['GY-202', 'manual']]);
     assert.match(waiting[0].reason, /every independent producer profile is busy or unavailable \(producer-b: at its concurrency limit \(1 running, limit 1\)\)/);
     assert.equal(waiting[0].reason.includes('producer-a'), false, 'a dependent profile is not offered as capacity for the item');
   } finally { await host.cleanup(); }
@@ -363,7 +364,7 @@ test('unit:role-concurrency-deterministic-tags — this suite\'s request ids are
     assert.equal(new Set(tags).size, tags.length, `${item.key}: no two requests of one item share a tag, so two sessions of one profile never share a name`);
   }
   const groups = requested(1, { producerProofs: ['manual:concurrency'] }).autoDispatch!.producers;
-  assert.deepEqual(groups.map(request => [request.group, tag(request.id)]).slice(0, 2), [['unit', '00000000'], ['integration', '87654321']], 'the first item\'s proof groups carry all-digit tags too, so integration:concurrent-producers counts a producer session named with one on every run');
+  assert.deepEqual(groups.map(request => [request.group, tag(request.id)]).slice(0, 2), [['unit', '00000000'], ['manual', '87654321']], 'the first item\'s proof groups carry all-digit tags too, so integration:concurrent-producers counts a producer session named with one on every run');
   // The names the configured test derives from these ids, on both the plain and the digest-shortened profile, round-trip on every run.
   const short = { name: 'claude-reviewer', agentName: 'review-claude', concurrency: 3 }, long = { name: 'long', agentName: 'review-claude-on-the-second-acct', concurrency: 2 };
   for (const item of items) for (const profile of [short, long]) {
@@ -413,7 +414,7 @@ test('unit:role-capacity-visible — master status reports, per role, the sessio
   // Producers: a request no independent profile could ever take is not a wait for a slot.
   const dependent = requested(10, { implementers: ['proof-runner'] }, new Date(clock - 20 * 60_000));
   const producer = roleConcurrency('producer', config.producers, [dependent, waiting[0]], [], { pending: [], completed: [] }, { failures: [], retries: [] }, clock);
-  assert.deepEqual({ limit: producer.limit, running: producer.running, waiting: producer.waiting, longestWaitMs: producer.longestWaitMs, starved: producer.starved }, { limit: 2, running: 0, waiting: 2, longestWaitMs: 2 * 60_000, starved: false });
+  assert.deepEqual({ limit: producer.limit, running: producer.running, waiting: producer.waiting, longestWaitMs: producer.longestWaitMs, starved: producer.starved }, { limit: 2, running: 0, waiting: 1, longestWaitMs: 2 * 60_000, starved: false });
   assert.deepEqual(producer.longest, { work: 'GY-203', requestId: waiting[0].autoDispatch!.producers[0].id, group: 'unit', waitedMs: 2 * 60_000 });
   // Without the role profiles the report is empty and nothing else changes; a role with no profile has a limit of zero and is never starved.
   assert.deepEqual(buildMasterStatus({ work: running, now: at }, [], agents).concurrency, []);

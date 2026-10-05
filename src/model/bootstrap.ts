@@ -1,5 +1,5 @@
 import type { Work } from './work.js';
-import { itemLane, laneRequiresProof, type BootstrapMode } from './policy.js';
+import { itemLane, laneRequiresProof, releaseCandidateProof, type BootstrapMode } from './policy.js';
 import { evidenceBindsCandidate } from './carry.js';
 import { evidenceProves } from './mechanical-proofs.js';
 import { pathScopesOverlap } from './scope.js';
@@ -48,9 +48,10 @@ export function inheritedObligations(work: Work, all: Work[]): BootstrapObligati
 /**
  * Exactly the proofs the acceptance gate demands for the current candidate: the criteria's proofs
  * the item's risk lane requires (GY-883: low none of its producer-run or manual ones, medium no
- * manual one) and every inherited obligation, which no lane waives.
+ * manual one) and every inherited obligation, which no lane waives. Release-candidate proofs
+ * (`integration:`, `e2e:`) are never among them (GY-1101): they run against the candidate after merge.
  */
 export function requiredProofs(work: Work, all: Work[]): string[] {
   const lane = itemLane(work);
-  return [...new Set([...work.criteria.flatMap(ac => ac.bootstrap ? [] : ac.proofs.filter(proof => laneRequiresProof(lane, proof))), ...inheritedObligations(work, all).map(obligation => obligation.proof)])];
+  return [...new Set([...work.criteria.flatMap(ac => ac.bootstrap ? [] : ac.proofs.filter(proof => laneRequiresProof(lane, proof))), ...inheritedObligations(work, all).map(obligation => obligation.proof).filter(proof => !releaseCandidateProof(proof))])];
 }

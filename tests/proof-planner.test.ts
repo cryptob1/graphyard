@@ -93,7 +93,7 @@ test('unit:planner-matches-reconciler — a group one of whose proofs failed whi
 });
 
 test('unit:planner-matches-reconciler — a group with something left to prove and no open request names a wait, and the dispatch once the reconciler opens it carries that request', () => {
-  const unread = item({ 'unit:a': 'none', 'integration:b': 'none' });
+  const unread = item({ 'unit:a': 'none', 'unit:b': 'none' });
   assert.equal(unread.autoDispatch, undefined, 'no reading has run the reconciler yet');
   const account = actionAccount(unread, [unread], now);
   assert.equal(account.action, null, 'no dispatch is named without an open request');
@@ -138,7 +138,7 @@ function random(seed: number) {
 }
 
 test('unit:planner-matches-reconciler — property: every dispatch/proof action has an open, bound request for its group that the reconciler keeps, asking for the proofs it names', () => {
-  const pool = ['unit:a', 'unit:b', 'integration:c', 'integration:d', 'manual:e', 'manual:f'];
+  const pool = ['unit:a', 'unit:b', 'unit:c', 'unit:d', 'manual:e', 'manual:f'];
   const outcomes: Outcome[] = ['pass', 'fail', 'none'];
   const next = random(188);
   const pick = <T>(values: T[]) => values[Math.floor(next() * values.length)];
