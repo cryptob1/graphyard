@@ -302,7 +302,6 @@
     "tests/deploy-smoke.test.ts": 265,
     "tests/deployment-observation-cost.test.ts": 12937,
     "tests/deployment-packaging.test.ts": 2845,
-    "tests/deployment-verification.test.ts": 300,
     "tests/diagnosis-hold.test.ts": 943,
     "tests/diagnostician.test.ts": 2224,
     "tests/diff-bound-carry.test.ts": 617,
