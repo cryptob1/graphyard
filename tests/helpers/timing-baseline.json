@@ -448,6 +448,7 @@
     "tests/reblocked-attempt.test.ts": 1636,
     "tests/receipt-retention.test.ts": 2396,
     "tests/reconcile-batch-setting.test.ts": 1027,
+    "tests/reconcile-contention.test.ts": 22485,
     "tests/reconcile-scale.test.ts": 17577,
     "tests/reconciliation-snapshot.test.ts": 10034,
     "tests/recovery-docs.test.ts": 714,
@@ -544,6 +545,7 @@
     "tests/worker-sandbox.test.ts": 4037,
     "tests/workers-tab.test.ts": 961,
     "tests/workflow-lint.test.ts": 566,
+    "tests/worktree-branch-lock.test.ts": 1600,
     "tests/worktree-reclaim.test.ts": 3560,
     "tests/agents-page-status.test.ts": 488,
     "tests/approver-capacity.test.ts": 878,
@@ -551,6 +553,7 @@
     "tests/attestation-carry.test.ts": 612,
     "tests/automatic-review-concurrency.test.ts": 5000,
     "tests/coordinator-os-confinement.test.ts": 1100,
+    "tests/keyring-probe-backoff.test.ts": 300,
     "tests/delivery-causes.test.ts": 461,
     "tests/diagnostician.test.ts": 2769,
     "tests/dispatch-recovers-from-jam.test.ts": 1181,
@@ -577,6 +580,7 @@
     "tests/test-case-repository-ui.test.ts": 744,
     "tests/test-case-repository.test.ts": 4051,
     "tests/tmp-cleanup.test.ts": 13603,
-    "tests/unblock-stale-revision.test.ts": 4873
+    "tests/unblock-stale-revision.test.ts": 4873,
+    "tests/exhausted-proof-runtime.test.ts": 350
   }
 }
