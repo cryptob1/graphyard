@@ -7,7 +7,7 @@
 // not optional add-ons" (GY-945, GY-883). These rules ground them per path,
 // so the loop grants them with no approver, and `derivePlannedFiles` plans them at authoring time.
 import { documentationGlobMatches } from './documentation-glob.js';
-import { followUpPaths, pathScope, pathScopeContains, testFile } from './scope.js';
+import { namedPaths, pathScope, pathScopeContains, testFile } from './scope.js';
 
 interface CompanionCriterion { id: string; text: string; proofs?: readonly string[] }
 
@@ -67,6 +67,19 @@ export function proofTestFiles(criteria: readonly CompanionCriterion[], layout =
 const webUi = /\b(?:web (?:UI|app|page|dashboard)|dashboard)\b/i;
 
 import type { WorkOrigin } from './interventions.js';
+
+/** The fields of an item that make it a review follow-up and say what it names (GY-1116). */
+export type FollowUpSource = { origin?: WorkOrigin | null; description?: string | null };
+
+/**
+ * The files a review follow-up names (GY-1116): each finding's own path, and the paths its text or the
+ * item's description name unambiguously — a directory and a file extension. A dotted API name
+ * (`store.init`) is prose, not a file, so it never lands in plannedFiles or implies scope.
+ */
+export function followUpPaths(findings: readonly { path?: string | null; text: string }[], description?: string | null): string[] {
+  const named = (text: string) => namedPaths(text).filter(token => /\/[^/]+\.[A-Za-z0-9]{1,5}$/.test(token));
+  return [...new Set([...findings.flatMap(finding => [...(finding.path ? [finding.path] : []), ...named(finding.text)]), ...(description ? named(description) : [])])];
+}
 
 /**
  * Structural ground for a peer module: an existing source module that a planned file directly

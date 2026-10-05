@@ -1,7 +1,6 @@
 import { documentationGlobMatches } from './documentation-glob.js';
-import type { WorkOrigin } from './interventions.js';
-import { companionGround as recordCompanionGround, timingBaseline } from './scope-companions.js';
-export { plannedCompanions } from './scope-companions.js';
+import { companionGround as recordCompanionGround, followUpPaths, timingBaseline, type FollowUpSource } from './scope-companions.js';
+export { followUpPaths, plannedCompanions } from './scope-companions.js';
 import { addsTestFile, timingBaselinePath } from './timing-companion.js';
 import { type CollapsedScope, collapseArea, collapsePlannedFiles, describeWidening, plannedFilesCovered, routableScopeRequest, terminalScopeRefusal } from './scope-collapse.js';
 // Deliberately bounded scope syntax: exact paths or directory prefixes ending /, /*, /**.
@@ -118,29 +117,16 @@ export const wellFormed = (path: string) => {
 export function namedPaths(text: string) {
   return [...new Set((text.match(pathToken) ?? []).map(token => token.replace(/[.,;:)\]]+$/, '')).filter(token => token.includes('/') || /^[\w-]+\.[A-Za-z0-9]{1,5}$/.test(token)).filter(wellFormed))];
 }
-
-/**
- * The files a review follow-up names (GY-1116): each finding's own path, and the paths its text or the
- * item's description name unambiguously — a directory and a file extension. A dotted API name
- * (`store.init`) is prose, not a file, so it never lands in plannedFiles or implies scope.
- */
-export function followUpPaths(findings: readonly { path?: string | null; text: string }[], description?: string | null): string[] {
-  const named = (text: string) => namedPaths(text).filter(token => /\/[^/]+\.[A-Za-z0-9]{1,5}$/.test(token));
-  return [...new Set([...findings.flatMap(finding => [...(finding.path ? [finding.path] : []), ...named(finding.text)]), ...(description ? named(description) : [])])];
-}
-
 export interface ScopeImplication { scope: string; kind: 'criteria' | 'documentation' | 'documentation-consumer' | 'companion' | 'timing-companion'; why: string }
 /**
  * Every path scope the item itself already implies: the files its criteria name, and the
- * documentation the repository requires updating for the behaviour those criteria change.
- * GY-1116: also includes paths named in follow-up findings and description.
+ * documentation the repository requires updating for the behaviour those criteria change — and, on a
+ * review follow-up (GY-1116), the files its findings and description name.
  */
-export function impliedScopes(criteria: readonly ScopeCriterion[], documentation: readonly string[] = documentationScopes,
-  origin?: WorkOrigin | null, description?: string | null): ScopeImplication[] {
-  const followUps = origin?.reviewFollowUps ? followUpPaths(origin.reviewFollowUps.findings ?? [], description) : [];
+export function impliedScopes(criteria: readonly ScopeCriterion[], documentation: readonly string[] = documentationScopes, origin?: FollowUpSource['origin'], description?: string | null): ScopeImplication[] {
   return [
     ...criteria.flatMap(criterion => namedPaths(criterion.text).map(scope => ({ scope, kind: 'criteria' as const, why: `${criterion.id} names ${scope}` }))),
-    ...followUps.map(scope => ({ scope, kind: 'criteria' as const, why: `review follow-up names ${scope}` })),
+    ...(origin?.reviewFollowUps ? followUpPaths(origin.reviewFollowUps.findings ?? [], description) : []).map(scope => ({ scope, kind: 'criteria' as const, why: `review follow-up names ${scope}` })),
     ...documentation.map(scope => ({ scope, kind: 'documentation' as const, why: `${scope} is documentation this repository requires updating when behaviour changes` })),
   ];
 }
@@ -191,7 +177,7 @@ export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; p
  * audited reason; everything else is refused with the reason it was refused for.
  */
 export function decideScopeRequest(
-  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[] } | null; origin?: WorkOrigin | null; description?: string | null },
+  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[] } | null } & FollowUpSource,
   request: Pick<ScopeRequestState, 'paths' | 'remove' | 'criteria'>,
   options: { documentation?: readonly string[]; documentationConsumers?: readonly string[] } = {},
 ): ScopeVerdict {
