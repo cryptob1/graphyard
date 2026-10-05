@@ -318,7 +318,7 @@ export const resourceRegistry: ResourceDefinition[] = [
   {
     id: 'github-budget', title: 'GitHub App request budget', unit: 'requests',
     bound: 'the installation token\'s hourly core rate limit, as GitHub reports it on GET /rate_limit',
-    usage: '/healthz resources.github, read by the plane from GET /rate_limit (cached for a minute; that read costs nothing against the budget); while the client is paused after a rate-limit refusal it reads as spent until the pause ends', owner: 'the control plane\'s GitHub client (src/github.ts) and its observation jobs',
+    usage: '/healthz resources.github, read by the plane from GET /rate_limit (cached for a minute; that read costs nothing against the budget); while the client is paused after a rate-limit refusal its usage is unread (the pause is the remediation under way, counted once as an observation fault) until the pause ends, when the read resumes', owner: 'the control plane\'s GitHub client (src/github.ts) and its observation jobs',
     reclaim: 'GitHub restores the budget at the reset time it reports; the client pauses every request until then once it is spent',
     remedy: 'lower observation load (fewer open candidates, a longer job interval) until the reset; every merge waits on fresh observations',
     warnBelow: tenthOf, symptoms: [/GitHub requests paused until/, /rate limited; requests paused/],
@@ -1070,9 +1070,12 @@ const budgetCache = new WeakMap<object, { at: number; reading: PlaneReading }>()
 const minimumInstallationLimit = 5000;
 /**
  * The App installation's core budget, read at most once a minute; `/rate_limit` costs nothing
- * against it. The client pauses every request once a rate limit refuses one (src/github.ts), and
- * only a rate limit pauses it, so a live pause is the budget spent: it reads as used to its bound
- * until the pause ends, and no request is made while it lasts.
+ * against it. The client pauses every request once a rate limit refuses one (src/github.ts) until
+ * the reset GitHub reported: that pause is the remediation under way, healing itself at the reset,
+ * and the observation class already counts it once. No request is made while it lasts, so its
+ * usage is unread rather than fabricated at the bound (GY-1278): the reading names the pause and
+ * its reset, faults nothing and leaves the plane healthy. Once the pause ends the real read
+ * resumes, and a budget still spent then reads exhausted as before.
  */
 export async function readGitHubBudget(github: object | null, now = Date.now()): Promise<PlaneReading | null> {
   if (!github) return null;
@@ -1081,7 +1084,7 @@ export async function readGitHubBudget(github: object | null, now = Date.now()):
     const until = client.blockedUntil ?? 0;
     if (until <= now) return null;
     const bound = budgetCache.get(github)?.reading.bound ?? minimumInstallationLimit;
-    return { used: bound, bound, detail: `the GitHub client paused every request until ${new Date(until).toISOString()} after a rate-limit refusal; the budget is spent until then` };
+    return { used: null, bound, detail: `the GitHub client paused every request until ${new Date(until).toISOString()} after a rate-limit refusal; the budget is read again once the pause ends at that reset` };
   };
   const pause = paused();
   if (pause) return pause;

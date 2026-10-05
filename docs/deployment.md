@@ -31,7 +31,7 @@ Installers derive the limits; an unset one is `delegationLimits` drift.
 
 ### Production deployment observation
 
-A merge unserved five minutes after a new `GRAPHYARD_BUILD_SHA` is a `delivery.deployment-incident`; when `release/production` (or `GRAPHYARD_PRODUCTION_BRANCH`) exists, production is measured against it instead, and an unpromoted merge is pipeline lag, not an incident. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
+A merge unserved five minutes after a new `GRAPHYARD_BUILD_SHA` is a `delivery.deployment-incident`; when `release/production` (or `GRAPHYARD_PRODUCTION_BRANCH`) exists, production is measured against it instead, and an unpromoted merge is pipeline lag, not an incident. Measured against main, the "main is N commits ahead of production" attention line waits out the same five minutes: while every unserved merge is younger (or a provider attempt past the serving commit is in flight), `production` still reports `aheadBy` with `rollingOut: true`, but raises no deployment attention. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
 
 ## Backup, upgrade, rollback
 
