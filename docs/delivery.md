@@ -21,7 +21,7 @@ The required pre-merge set is `typecheck` and `test` (`.github/workflows/ci.yml`
 
 With `GRAPHYARD_DELIVERY=github` on the server, GitHub merges: once a candidate's build, review and required checks pass, the observation that saw it enables auto-merge on that head. No proof, queue or observation age gates the merge, the loop skips its guarded merge, and proofs are neither requested nor counted against the loop's silence; UAT validates before promotion.
 
-To keep main green under parallel merges, every 30 s the main guard reverts a merge commit failing a required check its parent passed through a `graphyard-revert/` pull request the App merges once its own checks pass, and reopens the item naming the check and commit. A revert that conflicts, fails or stalls an hour is closed after one attempt with one attention line naming the merge, check and revert PR; nothing waits on it: fix main forward.
+To keep main green, every 30 s the main guard reverts a merge commit failing a required check its parent passed via a `graphyard-revert/` pull request the App merges once its checks pass, and reopens the item naming the check and commit. A revert that conflicts, fails or stalls an hour is closed after one attempt with one attention line naming merge, check and revert PR; nothing waits on it: fix main forward.
 
 ## Managed repositories
 
