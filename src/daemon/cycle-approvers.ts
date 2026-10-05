@@ -9,6 +9,7 @@ import { type DaemonEffects, failoverKey, record, stoppedStates } from './effect
 import { capacityRefusal } from '../fleet.js';
 import type { Cycle } from './cycle.js';
 import { sessionExhaustion } from './cycle-sessions.js';
+import { resumedApplication } from './decision-reads.js';
 
 /**
  * The approver sessions step 4c puts its decisions to (GY-1147 moved them here from
@@ -283,7 +284,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       const settled = await effects.withdraw(item, watch.decision, detail) as { state?: string; outcome?: string | null } | undefined;
       await note(key, item, 'decision', 'done', `${detail}; the control plane settled it ${settled?.state ?? 'as asked'}${settled?.outcome ? `: ${boundDetail(settled.outcome, 400)}` : ''}`);
     } catch (error) {
-      const applied = /its application was resumed and it is applied now/.test(message(error));
+      const applied = resumedApplication.test(message(error));
       await note(key, item, 'decision', applied ? 'done' : 'failed', applied ? `${detail}; the control plane applied it` : `${detail}; settling it failed and is tried again next cycle: ${message(error)}`);
     }
   };
