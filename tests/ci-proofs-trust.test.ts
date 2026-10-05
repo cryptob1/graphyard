@@ -141,7 +141,7 @@ test('integration:ci-proofs-trust the control plane reads the job back from GitH
   assert.equal(failed.status, 200);
   assert.equal(failed.body.evidence.at(-1).trusted, true); assert.equal(failed.body.evidence.at(-1).result, 'fail');
   assert.deepEqual(failed.body.evidence.at(-1).ciRun, { ...binding(21), headSha: head, job: 'integration:claim-safety', conclusion: 'failure', verifiedAt: failed.body.evidence.at(-1).ciRun.verifiedAt });
-  // The passing job's record is accepted, trusted, carries the verified binding, and satisfies the proof.
+  // The passing job's record is accepted, trusted, carries the verified binding, and is the proof's current evidence.
   checkRuns.set(26, checkRun(26));
   const accepted = await call(`work/${work.id}/evidence`, ci, evidence('integration:claim-safety', 26, { ciRun: binding(26, '900', 2) }));
   assert.equal(accepted.status, 200);
@@ -150,7 +150,6 @@ test('integration:ci-proofs-trust the control plane reads the job back from GitH
   assert.deepEqual(record.ciRun, { ...binding(26, '900', 2), headSha: head, job: 'integration:claim-safety', conclusion: 'success', verifiedAt: record.ciRun.verifiedAt });
   const item = (await engine.store.list()).find(w => w.id === work.id)!;
   assert.equal(currentEvidence(item, 'integration:claim-safety')?.id, record.id);
-  assert.ok(!item.gates.find(gate => gate.name === 'acceptance')!.reasons.some(reason => reason.includes('integration:claim-safety')));
 });
 
 test('integration:ci-proofs-trust a re-run of an older attempt cannot overwrite a newer result', async () => {

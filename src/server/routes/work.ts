@@ -112,19 +112,6 @@ export const workRoutes = defineRoutes('work', [
       return judgeClosedQuestion(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
     },
   },
-  {
-    // GitHub executes merges; Graphyard only gates them (GY-258). The merge step's one route
-    // records the coordinator's request that GitHub merge exactly this candidate: no execution,
-    // verification window or provider clock reading is issued, and nothing here calls a merge.
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/merge-acquire$/,
-    async handle(context, [id]) {
-      const { actor, services: { engine } } = context;
-      // This route sits above the generic work route, so its own refusal
-      // is recorded here rather than inherited from a handler never reached.
-      await refuseLead(context, id, 'merge-acquire');
-      return engine.requestEnqueue(actor, id, await parseJson(context, undefined, '{}'), context.idempotencyKey());
-    },
-  },
   // A worker session's short-lived push credential (GY-999), for the lease holder only.
   {
     method: 'POST', path: /^\/api\/work\/([^/]+)\/push-credential$/,

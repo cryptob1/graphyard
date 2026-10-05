@@ -330,7 +330,7 @@ test('unit:broad-items-split-before-dispatch — across loop cycles the broad it
   const effects: DaemonEffects = {
     agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(entry => [entry.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: structuredClone(items), now: new Date(NOW).toISOString() }),
-    closeSession: () => {}, dispatch: async item => { log.push(item.key); }, requestProof: () => {}, merge: async () => ({}),
+    closeSession: () => {}, dispatch: async item => { log.push(item.key); }, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(NOW).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
     research: { cwd: process.cwd(), runner }, recordDecomposition: record,

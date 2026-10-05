@@ -94,7 +94,6 @@ function loopEffects(root: string, master: MasterConfig, server: ReturnType<type
   const effects = daemonEffects(root, master, {
     snapshot: () => server.read('work-snapshot') as Promise<{ work: Work[]; now: string }>,
     mutate: async (path: string) => { await sleep(scaled(measured.mutation)); return { path }; },
-    executor: { principal: 'coordinator-1', instance: 'latency' },
     run: async (command: string) => { await sleep(3); if (command === 'herdr') return JSON.stringify({ result: { agents: [] } }); return ''; },
     fetcher: server.fetcher,
     // A cold loop waits this long for the report's first copy: the default bound, scaled.

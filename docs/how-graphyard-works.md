@@ -40,6 +40,6 @@ Text equivalent: operator makes human-only decisions; Herdr hosts master (`coord
 
 ![Control plane: callers, engine, Postgres, reconciliation worker, GitHub.](diagrams/control-plane-components.svg)
 
-Text equivalent: callers use the API; the engine applies mutations with events in locked Postgres transactions; reconciliation syncs GitHub and merges; webhooks wake jobs.
+Text equivalent: callers use the API; the engine applies mutations with events in locked Postgres transactions; reconciliation syncs GitHub and hands passing heads to GitHub to merge; webhooks wake jobs.
 
 Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`; claims bump the epoch; latest trusted proof wins; merge is not [delivery](delivery.md).

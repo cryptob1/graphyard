@@ -34,7 +34,7 @@ export type HandAction = typeof handActions[number];
 /** The command a master types for each hand action, and the loop step that performs it instead. */
 export const loopOwned: Record<HandAction, { command: string; step: string }> = {
   dispatch: { command: 'master dispatch', step: "the loop's dispatch step: master run's dispatcher claims the item's dispatch action and launches a worker" },
-  merge: { command: 'master merge', step: "the loop's merge step: master run performs the guarded merge of the authorized candidate" },
+  merge: { command: 'master merge', step: "GitHub's merge: GitHub merges a candidate whose gates passed, and the loop records the delivery" },
   review: { command: 'master review', step: "the loop's dispatch step: master run launches the bound reviewer on every submitted head; master review is open only as the recovery of a review request the loop has stopped relaunching" },
   evidence: { command: 'master decide attest', step: "the loop's dispatch step: master run launches an independent proof producer on the exact head; a manual proof no producer runs is attested through the attest decision the loop's decisions step requests itself, and a hand attestation stays open only to answer a refusal or a producer request the loop stopped relaunching" },
   'merge-decision': { command: 'master decide merge', step: "the loop's decisions step: master run requests the merge decision when automatic merging is off" },
@@ -60,13 +60,13 @@ export function handDecision(work: Work, action: string | undefined, input: unkn
 }
 /**
  * Why a hand merge decision is the one the loop sends the master to, or null while the loop
- * requests it itself. Two cases: a merge GitHub already made without a valid execution, which
+ * requests it itself. Two cases: a merge GitHub already made though its gates had not passed, which
  * only a two-party decision reconciles and the loop names rather than requests; and a loop with
  * no operator-agent identity (`requestsDecisions: false`), whose merge step says the master puts
  * the decision to the approver by hand.
  */
 export function mergeDecisionRecovery(work: Work, loop: Pick<LoopSessions, 'requestsDecisions'>): string | null {
-  if (mergedWithoutAuthorization(work)) return `${work.key} was merged on GitHub without a valid merge execution; only a two-party merge decision reconciles it`;
+  if (mergedWithoutAuthorization(work)) return `${work.key} was merged on GitHub though its gates had not passed on that head; only a two-party merge decision reconciles it`;
   if (loop.requestsDecisions === false) return 'no master operator-agent identity is provisioned, so the loop cannot request the merge decision itself';
   return null;
 }

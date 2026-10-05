@@ -48,7 +48,7 @@ test('unit:module-budgets — the original paths re-export the split modules, so
   for (const name of ['runCycle', 'runDaemon', 'daemonEffects', 'emptyDaemonState', 'readDaemonState', 'retriedSnapshot', 'observeDeployment', 'approvalStep', 'loopLiveness', 'scopeBudget'])
     assert.equal(typeof (daemon as Record<string, unknown>)[name], 'function', `src/master-daemon.ts still exports ${name}`);
   const master = await import('../src/master.js');
-  for (const name of ['loadMasterConfig', 'dispatchWork', 'mergeExecutor', 'buildMasterStatus', 'launchApprover', 'runAutonomyCommand', 'selectAccount', 'startAgentSession', 'reclaimWorktrees', 'verifyContainmentDeath', 'listHerdrAgents', 'workerHarnessPlan'])
+  for (const name of ['loadMasterConfig', 'dispatchWork', 'buildMasterStatus', 'launchApprover', 'runAutonomyCommand', 'selectAccount', 'startAgentSession', 'reclaimWorktrees', 'verifyContainmentDeath', 'listHerdrAgents', 'workerHarnessPlan'])
     assert.equal(typeof (master as Record<string, unknown>)[name], 'function', `src/master.ts still exports ${name}`);
   assert.ok('parse' in master.masterConfigSchema, 'src/master.ts still exports masterConfigSchema');
   const cli = await import('../src/cli/master.js');

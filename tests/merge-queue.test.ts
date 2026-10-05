@@ -174,38 +174,7 @@ test('an unrelated CI app cannot eject an entry and a stale observation is not a
   assert.equal(ejectionReason(stale, ciAppIds), null);
 });
 
-test('evaluation enqueues a proven candidate, ejects a failed one, and refuses its requeue on the same commit', () => {
-  const item = work('GY-1');
-  const entered = evaluate(item, [item], now, ciAppIds);
-  assert.equal(entered.queue?.sequence, 1);
-  assert.deepEqual(entered.queueHistory!.map(entry => entry.event), ['enqueued']);
-  assert.match(entered.gates.find(gate => gate.name === 'merge')!.reasons[0], /has not been published and validated/);
-  Object.assign(item, entered);
-  item.observation = observation(item, { checks: [{ name: 'test', result: 'failure', appId: 15368 }] });
-  const ejected = evaluate(item, [item], now, ciAppIds);
-  assert.equal(ejected.queue, null);
-  assert.match(ejected.queueEjection!.reason, /Required CI check test did not pass/);
-  assert.deepEqual(ejected.queueHistory!.map(entry => entry.event), ['enqueued', 'ejected']);
-  Object.assign(item, ejected);
-  item.observation = observation(item);
-  const requeued = evaluate(item, [item], now, ciAppIds);
-  assert.equal(requeued.queue, null, 'the same commit that failed cannot re-enter the queue');
-  assert.match(requeued.gates.find(gate => gate.name === 'merge')!.reasons[0], /Ejected from the merge queue/);
-  Object.assign(item, requeued);
-  item.candidate = { ...item.candidate!, sha: commit('fixed') };
-  item.observation = observation(item); item.evidence = [evidence(item)];
-  const reentered = evaluate(item, [item], now, ciAppIds);
-  assert.equal(reentered.queue?.sequence, 2, 'a new candidate re-enters at the back with a new sequence');
-});
-
-test('a queued entry behind the head has no merge authorization, and the queue ref is Graphyard-owned', () => {
-  const head = published(enqueue(work('GY-1'), 1));
-  const second = behind(enqueue(work('GY-2'), 2), head);
-  const all = [head, second];
-  assert.deepEqual(evaluate(head, all, now, ciAppIds).gates.find(gate => gate.name === 'merge')!.reasons, []);
-  const waiting = evaluate(second, all, now, ciAppIds).gates.find(gate => gate.name === 'merge')!;
-  assert.equal(waiting.passed, false);
-  assert.match(waiting.reasons[0], /position 2 of 2: GY-1 is ahead/);
+test('the queue ref is Graphyard-owned', () => {
   assert.equal(queueRef('GY-41'), 'refs/graphyard/queue/gy-41');
   assert.equal(queueRef('GY-41').startsWith('refs/heads/') || queueRef('GY-41').startsWith('refs/tags/'), false);
 });
@@ -287,17 +256,12 @@ test('unit:unvalidated-predecessor-skipped — an entry sent back to review is n
     predecessor: { key: 'GY-A', validated: false }, reviewedFiles: ['src/engine.ts'], approval: { provider: 'github', reviewer: 'reviewer', sha: headB }, proofs: [{ proof: 'integration:queue', evidence: reviewed }], app: 'control-plane' });
   assert.match(refused.approval.reason, /predecessor GY-A is not fully validated/);
 
-  // Bound, the rebuilt tip is the queue's head: review and acceptance pass on the carried bindings,
-  // and the merge gate waits on nothing A does.
+  // Bound, the rebuilt tip is the queue's head and waits on nothing A does.
   b.candidate = { ...b.candidate!, sha: rebuilt, baseSha: main };
   b.queue!.speculation = { ref: queueRef('GY-B'), tip: rebuilt, base: main, baseTree: commit('maintree'), predecessors: head.predecessors, policyRevision: 1, publishedAt: now.toISOString(), reviewedHead: headB, merge, carry };
   b.observation = observation(b, { baseTip: main, baseTree: commit('maintree'), reviews: [{ reviewer: 'reviewer', sha: headB, state: 'APPROVED' }] });
   const bound = predictQueue([a, b], now.getTime())[1];
   assert.deepEqual([bound.position, bound.current, bound.tip, bound.predecessors], [0, true, rebuilt, []]);
-  const gates = evaluate(b, [a, b], now, ciAppIds);
-  for (const name of ['review', 'acceptance']) assert.equal(gates.gates.find(gate => gate.name === name)!.passed, true, `${name}: ${gates.gates.find(gate => gate.name === name)!.reasons.join('; ')}`);
-  assert.deepEqual(gates.gates.find(gate => gate.name === 'merge')!.reasons, [], 'B lands first; A is not ahead of it');
-  assert.equal(gates.stage, 'merge');
 
   // Once A is validated again it is a predecessor again, in its sequence.
   a.stage = 'merge'; a.observation = observation(a); a.gates = [];
@@ -333,11 +297,7 @@ test('unit:no-ejection-on-unvalidated-conflict — an entry that conflicts with 
   assert.equal(skipped.ejected, null);
   assert.deepEqual(merges, [main], 'the only merge made is onto the base branch');
   assert.equal(ejectionReason(b, ciAppIds, [a, b]), null);
-  const evaluated = evaluate(b, [a, b], now, ciAppIds);
-  assert.equal(evaluated.queue?.sequence, 2, 'B keeps its entry');
-  assert.equal(evaluated.queueEjection ?? null, null);
-  assert.deepEqual(evaluated.queueHistory ?? [], [], 'nothing was ejected');
-  assert.equal(evaluated.gates.find(gate => gate.name === 'merge')!.reasons.some(reason => reason.includes('GY-A')), false);
+  assert.equal(skipped.placement.reasons.some(reason => reason.includes('GY-A')), false);
 });
 
 test('an entry passed over shares its chain position with the entry behind it, and a merged entry\'s waiters are the entries behind it by sequence', () => {

@@ -3,16 +3,16 @@ import assert from 'node:assert/strict';
 import { Engine } from '../src/engine.js';
 import type { Store } from '../src/store.js';
 import { evaluate, type Evidence, type Observation, type Principal, type Work } from '../src/model.js';
-import { openProducerRequest, producerGroupDecisions, producerGroupOf, reconcileAutoDispatch } from '../src/model/dispatch.js';
+import { openProducerRequest, producerGroupDecisions, reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { actionAccount, nextAction } from '../src/model/next-action.js';
 
 /**
  * GY-188: proofs that can never pass before merge held items for days.
  *
  * - `unit:planner-matches-reconciler` — the next-action planner names a proof dispatch only for a
- *   group the reconciler has opened a producer request for. A group one of whose proofs already
- *   failed names rework (escalate for a manual proof) and a group with nothing open names a wait,
- *   never a dispatch the executor would refuse with "no open producer request" forever.
+ *   group the reconciler has opened a producer request for. Since GY-1235 proofs gate nothing and
+ *   the reconciler opens no producer request, so the planner names no proof dispatch at all, never
+ *   one the executor would refuse with "no open producer request" forever.
  * - `unit:postmerge-proof-refused-premerge` — create and requirements refuse a pre-merge proof
  *   that can only pass after merge or deployment, naming the delivery obligation to use instead.
  *
@@ -73,7 +73,7 @@ const proofDispatch = (work: Work) => {
   return action?.kind === 'dispatch' && action.inputs.kind === 'dispatch' && action.inputs.target === 'proof' ? action : null;
 };
 
-test('unit:planner-matches-reconciler — a group one of whose proofs failed while another is unproven yields no proof dispatch: rework for a mechanical group, escalate for a manual one', () => {
+test('unit:planner-matches-reconciler — a group one of whose proofs failed while another is unproven yields no proof dispatch: rework for a mechanical group, and a manual failure gates nothing', () => {
   // A mechanical group: unit:a failed on the head and unit:b has not run.
   const mechanical = reconciled(item({ 'unit:a': 'fail', 'unit:b': 'none' }));
   assert.equal(openProducerRequest(mechanical, 'unit'), null, 'the reconciler opens no unit request once a unit proof failed');
@@ -82,53 +82,31 @@ test('unit:planner-matches-reconciler — a group one of whose proofs failed whi
   assert.equal(nextAction(mechanical, [mechanical], now)?.kind, 'request-rework', 'the head returns to its worker');
 
   // The GY-72 shape: a manual group whose first proof failed and whose second is unproven, on an
-  // approved head whose unit proof passed, so the acceptance gate is the one refusing.
+  // approved head whose unit proof passed. Since GY-1235 proofs gate nothing (there is no
+  // acceptance gate), so no gate refuses and still no producer is asked for.
   const manual = reconciled(item({ 'unit:a': 'pass', 'manual:live-x': 'fail', 'manual:live-y': 'none' }, { producerProofs: ['manual:live-x', 'manual:live-y'], approved: true }));
-  assert.equal(manual.gates.find(gate => !gate.passed)?.name, 'acceptance');
+  assert.equal(manual.gates.find(gate => gate.name === 'acceptance'), undefined);
   assert.equal(openProducerRequest(manual, 'manual'), null, 'the reconciler opens no manual request once a manual proof failed');
   assert.equal(proofDispatch(manual), null, 'no dispatch/proof action is named for the failed group');
-  const escalation = nextAction(manual, [manual], now);
-  assert.equal(escalation?.kind, 'escalate');
-  assert.match(escalation!.reason, /manual:live-x/, 'the escalation names the failed proof');
 });
 
-test('unit:planner-matches-reconciler — a group with something left to prove and no open request names a wait, and the dispatch once the reconciler opens it carries that request', () => {
+test('unit:planner-matches-reconciler — a group with something left to prove names no proof dispatch, read or unread, because the reconciler opens no producer request', () => {
   const unread = item({ 'unit:a': 'none', 'integration:b': 'none' });
   assert.equal(unread.autoDispatch, undefined, 'no reading has run the reconciler yet');
   const account = actionAccount(unread, [unread], now);
-  assert.equal(account.action, null, 'no dispatch is named without an open request');
   assert.equal(account.defect, null);
-  assert.equal(account.wait?.kind, 'session');
-  assert.equal(account.wait?.on, 'graphyard');
-  assert.match(account.wait!.detail, /no unit producer request is open yet/);
+  assert.equal(proofDispatch(unread), null, 'no dispatch is named without an open request');
+  // Review is never held for proofs: CI runs them on the head.
+  assert.equal(account.action?.kind, 'request-review');
 
   const read = reconciled(unread);
-  const action = proofDispatch(read);
-  assert.ok(action, 'the open request is dispatched');
-  assert.equal(action!.inputs.kind === 'dispatch' && action!.inputs.target === 'proof' && action!.inputs.requestId, openProducerRequest(read, 'unit')!.id);
+  assert.equal(openProducerRequest(read, 'unit'), null, 'proofs gate nothing, so no producer request is opened');
+  assert.equal(openProducerRequest(read, 'integration'), null);
+  assert.equal(proofDispatch(read), null);
 
   // A head no request may stand for (a draft) never names a dispatch either.
   const draft = reconciled(item({ 'unit:a': 'none' }, { observation: { draft: true } }));
   assert.equal(proofDispatch(draft), null);
-});
-
-test('unit:planner-matches-reconciler — a retained request answers to its whole group: a sibling proof that fails later resolves it, so no producer is launched on a head the planner escalates', () => {
-  // A mechanical failure already refuses the build gate and cancels every request; a manual one
-  // does not, so the manual group is where a retained request could outlive its group's failure.
-  // manual:live-y already passed, so the manual request asks only for manual:live-x.
-  const options = { producerProofs: ['manual:live-x', 'manual:live-y'], approved: true };
-  const held = reconciled(item({ 'unit:a': 'pass', 'manual:live-x': 'none', 'manual:live-y': 'pass' }, options));
-  const request = openProducerRequest(held, 'manual')!;
-  assert.deepEqual(request.proofs, ['manual:live-x']);
-  // A later trusted run fails manual:live-y on the same head: the group is failed as a whole.
-  const failedAgain = grade({ ...held, evidence: [...held.evidence, { ...evidence('manual:live-y', 'fail', 9), at: at(0) }] });
-  assert.deepEqual(producerGroupDecisions(failedAgain, [failedAgain], now).filter(entry => entry.group === 'manual').map(entry => entry.state), ['failed']);
-  const transitions = reconcileAutoDispatch(failedAgain, [failedAgain], now);
-  assert.deepEqual(transitions.map(entry => [entry.event, entry.request.id]), [['dispatch.satisfied', request.id]], 'the retained manual:live-x request is resolved, not kept');
-  assert.match(transitions[0].request.resolution!, /trusted evidence failed for manual:live-y \(ci-runner\); the next head is requested afresh/);
-  assert.equal(openProducerRequest(failedAgain, 'manual'), null);
-  assert.equal(proofDispatch(failedAgain), null);
-  assert.equal(nextAction(failedAgain, [failedAgain], now)?.kind, 'escalate');
 });
 
 /** A deterministic generator, so a failing case reproduces from its seed. */
@@ -137,12 +115,12 @@ function random(seed: number) {
   return () => { state = (state + 0x6d2b79f5) >>> 0; let t = state; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
 }
 
-test('unit:planner-matches-reconciler — property: every dispatch/proof action has an open, bound request for its group that the reconciler keeps, asking for the proofs it names', () => {
+test('unit:planner-matches-reconciler — property: no item, read or unread, current or stale, ever names a dispatch/proof action or holds an open producer request', () => {
   const pool = ['unit:a', 'unit:b', 'integration:c', 'integration:d', 'manual:e', 'manual:f'];
   const outcomes: Outcome[] = ['pass', 'fail', 'none'];
   const next = random(188);
   const pick = <T>(values: T[]) => values[Math.floor(next() * values.length)];
-  let dispatched = 0, held = 0;
+  let checked = 0;
   for (let run = 0; run < 600; run++) {
     const chosen = pool.filter(() => next() < 0.5);
     const proofs = chosen.length ? chosen : [pick(pool)];
@@ -156,23 +134,11 @@ test('unit:planner-matches-reconciler — property: every dispatch/proof action 
     const state = pick(['unread', 'read', 'stale']);
     let subject = state === 'unread' ? work : reconciled(work);
     if (state === 'stale') subject = { ...subject, candidate: { ...subject.candidate!, sha: 'd'.repeat(40) } };
-    const action = proofDispatch(subject);
-    const failed = producerGroupDecisions(subject, [subject], now).some(entry => entry.state === 'failed');
-    if (failed) assert.equal(action, null, `run ${run}: a failed proof group never yields a proof dispatch`);
-    if (!action) { held++; continue; }
-    dispatched++;
-    assert.ok(action.inputs.kind === 'dispatch' && action.inputs.target === 'proof');
-    const { group, requestId, proofs: named } = action.inputs as Extract<typeof action.inputs, { target: 'proof' }>;
-    const request = openProducerRequest(subject, group);
-    assert.ok(request, `run ${run} (${state}, ${variant}): a dispatch/proof action for ${group} has an open request for its group`);
-    assert.equal(requestId, request!.id, `run ${run}: the action carries that request`);
-    assert.ok(named.length > 0 && named.every(proof => producerGroupOf(proof) === group && request!.proofs!.includes(proof)), `run ${run}: it asks only for proofs the request asks for`);
-    // The reconciler, reading the same item again, keeps the request rather than resolving it.
-    const again = structuredClone(subject);
-    const transitions = reconcileAutoDispatch(again, [again], now);
-    assert.ok(!transitions.some(entry => entry.request.id === request!.id), `run ${run}: the reconciler keeps the request the planner dispatches`);
+    assert.equal(proofDispatch(subject), null, `run ${run} (${state}, ${variant}): no dispatch/proof action is named`);
+    for (const group of ['unit', 'integration', 'manual'] as const) assert.equal(openProducerRequest(subject, group), null, `run ${run}: no ${group} producer request is open`);
+    checked++;
   }
-  assert.ok(dispatched > 20 && held > 20, `both answers are exercised (${dispatched} dispatched, ${held} not)`);
+  assert.equal(checked, 600);
 });
 
 // ---- AC-2 --------------------------------------------------------------------------------------

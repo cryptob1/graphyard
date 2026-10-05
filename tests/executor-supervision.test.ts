@@ -365,8 +365,12 @@ test('integration:unserved-queue-visible: a pending action whose kind no live ex
 
   // Nobody polls. The queue alone cannot tell this from every executor being busy; presence can,
   // once the control plane has listened for a whole liveness window (GY-1086) — before that an
-  // empty registry is a fleet not yet heard from. This one has been listening that long.
+  // empty registry is a fleet not yet heard from. This one has been listening that long, and so
+  // has its durable presence table (GY-1289): an empty table proves silence only a window after it
+  // began recording.
   Object.assign(executorRegistry(engine), { since: new Date(Date.now() - executorLiveMs - 1) });
+  await ok(coordinator, 'GET', 'actions');
+  await store.pool.query(`UPDATE executor_presence SET seen_at = $1 WHERE principal = '' AND executor = ''`, [new Date(Date.now() - executorLiveMs - 1)]);
   const before = await ok(coordinator, 'GET', 'actions');
   assert.deepEqual(before.executors.live, []);
   assert.deepEqual(before.executors.unserved.map((entry: any) => [entry.key, entry.kind]), [[item.key, 'dispatch']]);
@@ -502,7 +506,7 @@ test('integration:killed-worker-work-preserved: a worker killed outright keeps i
       agents.push({ name: profile.agentName, pane_id: `pane-${dispatched.length}`, pid: child.pid! });
       dispatched.push({ work: work.key, epoch: claimed.epoch });
     },
-    requestProof: () => {}, merge: async () => ({}), observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'none', deployed: [], pending: [] }),
+    requestProof: () => {}, observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'none', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
     sessionOutput: () => '',
     reportCapacity: (work, event) => ok(coordinator, 'POST', `work/${work.id}/capacity`, event) as Promise<Work>,
