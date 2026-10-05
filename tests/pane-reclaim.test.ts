@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { paneSweepLimit } from '../src/daemon/cycle-reclaim.js';
 import { agentlessPaneAttentionBound, paneReclaimStatus } from '../src/master-resources.js';
-import { daemonEffects } from '../src/daemon/effects.js';
+import { daemonEffects, launchAppearanceMs } from '../src/daemon/effects.js';
 import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer } from '../src/producer.js';
 import { dispatchWork, launchApprover, launchEscalationHandler, loadMasterConfig, saveProducerProfile, setupMaster, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
@@ -379,10 +379,9 @@ test('unit:agentless-pane-sweep — the sweep closes only the agentless panes Gr
     // Inside the launch bound nothing closes yet.
     await runCycle(config, state, base(agentsAt(false), clockStart + 60_000), () => clockStart + 60_000);
     assert.equal(closed.length, 0, 'nothing closes within the launch bound of its sighting');
-    // The fresh pane's runtime exits now: its own bound starts here.
+    // Past the bound of their first sighting the first pass closes; the fresh pane's runtime exits
+    // only now, so its own bound starts here.
     await runCycle(config, state, base(agentsAt(true), clockStart + 130_000), () => clockStart + 130_000);
-    assert.equal(closed.length, 0, 'nor has the fresh pane stood agentless past it');
-    await runCycle(config, state, base(agentsAt(true), clockStart + 260_000), () => clockStart + 260_000);
     const firstPass: string[] = [...closed];
     assert.ok(firstPass.includes('pane-ended') && firstPass.includes('pane-deleted'), 'the ended launched panes close');
     assert.equal(firstPass.length, paneSweepLimit, `the pass is bounded at ${paneSweepLimit} closes`);
@@ -390,6 +389,7 @@ test('unit:agentless-pane-sweep — the sweep closes only the agentless panes Gr
     assert.ok(!firstPass.includes('pane-live-lease') && !firstPass.includes('pane-live-agent') && !firstPass.includes('pane-foreign'),
       'a pane whose worktree holds a live lease, a pane with an agent, and a pane Graphyard did not launch never close');
     // The rest of the backlog drains on the next cycle, the fresh pane with it.
+    await runCycle(config, state, base(agentsAt(true), clockStart + 260_000), () => clockStart + 260_000);
     await runCycle(config, state, base(agentsAt(true), clockStart + 390_000), () => clockStart + 390_000);
     assert.deepEqual(closed.filter(pane => pane === 'pane-ended').length, 1, 'a pane is closed exactly once');
     assert.deepEqual([...new Set(closed)].sort(), standing.filter(pane => !['pane-live-lease', 'pane-live-agent', 'pane-foreign'].includes(pane)).sort(),
@@ -399,11 +399,9 @@ test('unit:agentless-pane-sweep — the sweep closes only the agentless panes Gr
     // pass starts its bound and the next one takes it, like any first sighting.
     await runCycle(config, state, base(agentsAt(true), clockStart + 520_000), () => clockStart + 520_000);
     assert.ok(!closed.includes('pane-live-lease'), 'the lapsed pane was first seen agentless only now: its own bound starts');
+    // The sighting is a wait, not an interrupted request, so the cycle's reconciliation leaves its
+    // bound alone (GY-980): the next pass takes it, and the drain lands on the record with it.
     await runCycle(config, state, base(agentsAt(true), clockStart + 650_000), () => clockStart + 650_000);
-    // A pending close request the cycle left standing is resumed as interrupted, which restarts
-    // its bound: one more pass takes it, and the drain lands on the record with it.
-    assert.ok(!closed.includes('pane-live-lease'), 'the resumed close request stands its bound again');
-    await runCycle(config, state, base(agentsAt(true), clockStart + 780_000), () => clockStart + 780_000);
     assert.ok(closed.includes('pane-live-lease'), 'the pane whose lease lapsed is closable: the lease, not the pane, was the protection');
     const status = state.actions['sweep:panes:status'];
     assert.ok(status, 'the sweep records what the host holds');
@@ -449,6 +447,10 @@ test('unit:sweep-closes-unrecorded-worktree-shells — agentless shells in Graph
       item('GY-23', { stage: 'build', lease: lease(5, clockStart + 24 * 3_600_000) }),
       // A running session recorded outside the worktrees (a review checkout): not the sweep's.
       item('GY-25', {}, [handle({ id: 'rev-25', kind: 'review', host: local, pane: 'pane-recorded-outside' })]),
+      // An ended session recorded outside the worktrees, even one whose checkout is gone: never the
+      // sweep's, for AC-1 closes no pane whose cwd is outside .graphyard/worktrees.
+      item('GY-26', {}, [handle({ id: 'rev-26', kind: 'review', host: local, pane: 'pane-ended-outside', state: 'finished' })]),
+      item('GY-27', {}, [handle({ id: 'rev-27', kind: 'review', host: local, pane: 'pane-ended-outside-deleted', state: 'finished' })]),
     ];
     const inventory: HerdrAgent[] = [
       { name: 'shell-unrecorded', pane_id: 'pane-unrecorded', agent_status: 'unknown', cwd: `${worktrees}/GY-20-3` },
@@ -463,6 +465,8 @@ test('unit:sweep-closes-unrecorded-worktree-shells — agentless shells in Graph
       { pane_id: 'pane-lookalike', agent_status: 'unknown', cwd: '/repo/worktrees/GY-24-1' },
       { pane_id: 'pane-no-cwd', agent_status: 'unknown' },
       { pane_id: 'pane-recorded-outside', agent_status: 'unknown', cwd: '/repo/.graphyard/checkouts/review-25' },
+      { pane_id: 'pane-ended-outside', agent_status: 'unknown', cwd: '/repo/.graphyard/reviews/GY-26' },
+      { pane_id: 'pane-ended-outside-deleted', agent_status: 'unknown', cwd: '/repo/.graphyard/reviews/GY-27 (deleted)' },
     ];
     const closed: string[] = [];
     const state = emptyDaemonState(config);
@@ -484,20 +488,27 @@ test('unit:sweep-closes-unrecorded-worktree-shells — agentless shells in Graph
     assert.match(state.actions['sweep:pane:pane-unrecorded'].detail, /GY-20 epoch 3, which holds no live lease and no Graphyard session recorded it/);
     assert.match(state.actions['sweep:pane:pane-stuck'].detail, /implementation session worker-a:2 is still recorded running/);
 
-    // AC-3: a backlog of 300 agentless worktree shells, at the default interval, drains within an hour.
-    const intervalMs = config.run.intervalSeconds * 1000;
+    // AC-3: a backlog of 300 agentless worktree shells drains within an hour at the default interval,
+    // and at two-minute cycles too: the cycle's reconciliation of pending actions must not restart
+    // the bound the first sighting started, which would cost the drain a cycle.
     const backlog: HerdrAgent[] = Array.from({ length: 300 }, (_, index) => ({ pane_id: `pane-backlog-${index}`, agent_status: 'unknown', cwd: `${worktrees}/GY-${1000 + index}-${1 + index % 7}` }));
-    const drained: string[] = [], fresh = emptyDaemonState(config);
-    let at = clockStart, cycles = 0;
-    while (drained.length < backlog.length && at - clockStart <= 60 * 60_000) {
-      const before = drained.length;
-      await runCycle(config, fresh, sweepEffects(() => [], () => backlog, drained, at), () => at);
-      assert.ok(drained.length - before <= paneSweepLimit, `one pass closes at most ${paneSweepLimit}`);
-      at += intervalMs; cycles += 1;
+    for (const intervalMs of [config.run.intervalSeconds * 1000, 120_000]) {
+      const drained: string[] = [], fresh = emptyDaemonState(config);
+      let at = clockStart, cycles = 0, last = clockStart;
+      while (drained.length < backlog.length && at - clockStart <= 60 * 60_000) {
+        const before = drained.length;
+        await runCycle(config, fresh, sweepEffects(() => [], () => backlog, drained, at), () => at);
+        assert.ok(drained.length - before <= paneSweepLimit, `one pass closes at most ${paneSweepLimit}`);
+        last = at; at += intervalMs; cycles += 1;
+      }
+      assert.equal(new Set(drained).size, 300, `all 300 closed, each once, within the hour (${cycles} cycles of ${intervalMs / 1000}s)`);
+      assert.equal(drained.length, 300);
+      // The first pass past the bound of the first sighting closes, and every pass after it closes
+      // a full limit: no cycle is lost to a restarted bound.
+      const firstClose = Math.ceil(launchAppearanceMs / intervalMs) * intervalMs, passes = Math.ceil(backlog.length / paneSweepLimit);
+      assert.equal(last - clockStart, firstClose + (passes - 1) * intervalMs, `drained in ${passes} closing passes from the first one past the bound (${intervalMs / 1000}s cycles)`);
+      assert.ok(last - clockStart <= 55 * 60_000, `drained in ${(last - clockStart) / 60_000} minutes at ${intervalMs / 1000}s cycles, with margin inside the hour`);
     }
-    assert.equal(new Set(drained).size, 300, `all 300 closed, each once, within the hour (${cycles} cycles of ${intervalMs / 1000}s)`);
-    assert.equal(drained.length, 300);
-    assert.ok(at - clockStart <= 60 * 60_000, `drained in ${(at - clockStart) / 60_000} minutes`);
   } finally { await cleanup(); }
 });
 

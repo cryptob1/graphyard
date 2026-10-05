@@ -57,7 +57,7 @@ Headless Pi runs (`.graphyard/runs/`) survive restarts.
 
 ### Panes are closed and reclaimed
 
-Ending a session closes its pane. Each cycle closes ≤**10** more **on this host**, never one whose item and epoch holds a live lease: agentless past **120 s** with session or worktree gone, or in a Graphyard worktree; an agent named for its ended session after **60 s**. Over **20** agentless raise attention (`daemon.escalations`).
+Ending a session closes its pane. Each cycle closes ≤**12** more **on this host**, never one whose item and epoch holds a live lease: an agentless shell in `.graphyard/worktrees` **120 s** after first sight, recorded or not (never one elsewhere); an agent named for its ended session after **60 s**. Over **20** agentless raise attention (`daemon.escalations`).
 
 ### The dispatcher's own state
 

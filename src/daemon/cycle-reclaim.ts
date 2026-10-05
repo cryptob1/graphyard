@@ -195,10 +195,10 @@ export async function settleEndedAttemptFence(cycle: Cycle, item: Work, ending: 
 
 /**
  * How many leftover panes one pass closes, so a backlog drains over cycles rather than in one burst
- * of closes (GY-842). Ten a pass drains 300 in 30 cycles, inside an hour even at two-minute cycles
- * (GY-980).
+ * of closes (GY-842). Twelve a pass drains 300 in 25 closing cycles: under an hour even at
+ * two-minute cycles, with the first cycle spent on sightings (GY-980).
  */
-export const paneSweepLimit = 10;
+export const paneSweepLimit = 12;
 
 /**
  * The item key and attempt epoch a Graphyard worktree path names (…/.graphyard/worktrees/GY-N-EPOCH,
@@ -216,21 +216,21 @@ export function graphyardWorktree(cwd: string | undefined): { key: string; epoch
  * held 584 of them on 26 September 2026 while the host throttled, and 85 on 30 September that the
  * record never ended or never named. Each cycle this sweep closes a bounded number of:
  *
- * - agentless panes a Graphyard session recorded whose session has ended on the record or whose
- *   worktree no longer exists;
- * - agentless panes standing in a Graphyard worktree (…/.graphyard/worktrees/GY-N-EPOCH), recorded
- *   or not, whatever their record says: a launch whose runtime exited at start, whose handle stayed
- *   'running', or whose pane was never recorded leaves exactly this;
+ * - agentless panes standing in a Graphyard worktree (…/.graphyard/worktrees/GY-N-EPOCH, present or
+ *   deleted), recorded or not, whatever their record says: a session that ended, a launch whose
+ *   runtime exited at start, whose handle stayed 'running', or whose pane was never recorded leaves
+ *   exactly this;
  * - agent panes a Graphyard session recorded, still named for it, whose session has ended and
  *   whose item and epoch hold no live lease — an idle finished agent nothing tracks any more.
  *
  * An agentless pane is closed once it has stood so past `launchAppearanceMs`, so a launch whose
  * runtime has not yet started is never taken for one that exited; an agent pane once it has stood
- * so past `finishedSessionGraceMs`. It never touches an unrecorded pane outside a Graphyard
- * worktree (the operator's own shells, the coordinator checkout), a pane whose worktree's exact item
- * and epoch holds a live lease, or an agent pane whose item and epoch does. What the host holds is
- * reported with it — the pane count, the agentless Graphyard panes and the oldest — and attention
- * is raised once agentless panes pass the bound.
+ * so past `finishedSessionGraceMs`. It never touches an agentless pane outside a Graphyard worktree
+ * (the operator's own shells, the coordinator checkout, review and producer checkouts, whose panes
+ * the session-end steps close), a pane whose worktree's exact item and epoch holds a live lease, or
+ * an agent pane whose item and epoch does. What the host holds is reported with it — the pane
+ * count, the agentless Graphyard panes and the oldest — and attention is raised once agentless
+ * panes pass the bound.
  */
 export async function reclaimLaunchedPanes(cycle: Cycle) {
   const { config, state, effects, now, clock, snapshot, performed, isolate, agents, open, closedPanes } = cycle;
@@ -265,19 +265,21 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
         why: `still holds its ${agent.agent} agent, though its ${hit.handle.kind} session ${hit.handle.id} is ${hit.handle.state} and ${hit.item.key}${hit.handle.epoch != null ? ` epoch ${hit.handle.epoch}` : ''} holds no live lease` });
       continue;
     }
-    const ended = !!hit && hit.handle.state !== 'running', worktreeGone = !!agent.cwd && / \(deleted\)\s*$/.test(agent.cwd);
+    // An agentless pane outside Graphyard's worktrees — the operator's own shells, the coordinator
+    // checkout, a review or producer checkout — is never the sweep's, whatever its record says: the
+    // session-end steps close the panes Graphyard launched there.
+    if (!tree) continue;
+    const ended = !!hit && hit.handle.state !== 'running', worktreeGone = tree.deleted;
     if (hit && (ended || worktreeGone)) {
       agentless.push({ pane: agent.pane_id, name: agent.name, key: hit.item.key, item: hit.item, boundMs: launchAppearanceMs,
         why: ended ? `holds no agent and its ${hit.handle.kind} session ${hit.handle.id} is ${hit.handle.state}` : `holds no agent and its worktree (${agent.cwd}) no longer exists` });
-    } else if (tree) {
+    } else {
       // A bare shell in a Graphyard worktree whose item and epoch hold no live lease: the launch
       // that opened it is over, whether its handle stayed 'running' or it was never recorded.
       const item = hit?.item ?? snapshot.work.find(candidate => candidate.key === tree.key) ?? null;
       agentless.push({ pane: agent.pane_id, name: agent.name, key: tree.key, item, boundMs: launchAppearanceMs,
         why: `holds no agent in the worktree of ${tree.key} epoch ${tree.epoch}, which holds no live lease${hit ? `, though its ${hit.handle.kind} session ${hit.handle.id} is still recorded running` : ' and no Graphyard session recorded it'}` });
     }
-    // Any other agentless pane — outside Graphyard's worktrees and never recorded, or recorded
-    // running outside them — is not the sweep's.
   }
   let closed = 0;
   for (const { pane, name, key: work, item, why, boundMs } of agentless) {
@@ -286,7 +288,9 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
     if (previous?.state === 'done') continue;
     if (!previous) {
       // A runtime that has not started yet looks the same, so nothing closes on the first sighting.
-      await record(state, key, { kind: 'close', work, principal: null, state: 'started', detail: `Pane ${pane} of ${work}${name ? ` (${name})` : ''} ${why}; it is closed if that stands in ${Math.round(boundMs / 1000)}s`, attempts: 1, cycle: state.cycle }, now(), effects.persist);
+      // The sighting is a wait, not an effect in flight: a `started` entry would be reconciled as
+      // interrupted on the next cycle, restarting the bound and costing the drain a cycle.
+      await record(state, key, { kind: 'close', work, principal: null, state: 'waiting', detail: `Pane ${pane} of ${work}${name ? ` (${name})` : ''} ${why}; it is closed if that stands in ${Math.round(boundMs / 1000)}s`, attempts: 1, cycle: state.cycle }, now(), effects.persist);
       continue;
     }
     if (now() - Date.parse(previous.at) < boundMs) continue;

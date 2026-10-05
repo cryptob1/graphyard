@@ -796,7 +796,9 @@ async function simulateDay(options: { hours: number; backlog?: boolean; master?:
   const world = `w${days}:`, leftovers = backlogDay || options.plan?.leftovers != null ? plan.leftovers : sideDayLeftovers, foreignPane = `${world}operator`;
   for (let index = 0; index < leftovers; index++) {
     const work = items[index], pane = `${world}left${index}`;
-    herdr.shell(pane, `/tmp/soak/leftover-${index} (deleted)`);
+    // The sweep closes agentless panes only in Graphyard worktrees (GY-980 AC-1); these stand in
+    // worktrees of attempts no lease holds, reclaimed under them.
+    herdr.shell(pane, `${soakWorktreeRoot}/${work.key}-${60 + index} (deleted)`);
     await api(principals.coordinator, 'POST', `work/${work.id}/session`, { id: `review-leftover-${index}`, kind: 'review', runtime: 'claude', host: 'soak-host',
       subject: `${work.key}: review (previous day)`, state: 'running', pane, attach: `herdr pane attach ${pane}` });
   }
