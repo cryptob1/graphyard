@@ -363,7 +363,8 @@ async function replayBurst(cycles: number) {
     wakeObservation: async work => {
       wakes.push({ key: work.key, cycle });
       const resync = await sent(live => live.wakeObservation!(work));
-      now += 8_000;
+      // GY-1286: a wake that asks for no tick (`wait: false`) is answered once the job is woken.
+      now += resync.wait === false ? 500 : 8_000;
       if (resync.prioritized === true) landing.set(work.key, now + 30_000);
     },
     decide: async (work, action) => { requested.push(work.key); const id = randomUUID(); decisions.set(work.id, [...decisions.get(work.id) ?? [], { id, action, state: 'requested' }]); return { id }; },
@@ -440,4 +441,107 @@ test(`manual:fault-class-loop — ${gy1266Instances[1].id}: a recurring item clo
   assert.equal(entry.answeredBy, 'GY-1272');
   assert.deepEqual(performed.filter(action => action.state === 'failed').map(action => action.detail), []);
   assert.deepEqual(diagnosisFaults(state), [], 'no action:diagnosis loop fault');
+});
+
+// ---- GY-1286: three more loop faults on 2026-10-05 ----------------------------------------------
+//
+// GY-1286 names this file for its proof too (the GY-1234 instance, which needs the control plane's
+// store, is replayed in tests/loop-faults-dispatch-wake.test.ts). The three instances share one
+// cause: the loop waited, serially, on control-plane writes that could not finish inside it.
+//
+// - loop-cost on loop: cycle 12285 spent 319s of its own work in the decisions step against the
+//   300s interval, and cycle 12293, after GY-1266 was loaded, 365s. Its slow calls were rework
+//   `decide` requests and observation wakes (`resync`), each running into its 30s timeout, one
+//   after another: a wake waited on the server's reconcile ticks, and a decision request on the
+//   server's lock. The step now has a budget and hands what is left to the next cycle, which
+//   reaches it first, and a wake waits on no tick.
+// - loop-silence on GY-1135: 28 minutes on "missing trusted evidence" for a head under GitHub
+//   delivery, which no producer serves. The base already clears it: GY-1266 counts no proof under
+//   GitHub delivery. It recurred because the loop process that raised it (started 06:36Z) still
+//   ran the code from before GY-1266's merge at 08:03Z until its upgrade went through at 08:35Z.
+//   The test below pins it.
+// - loop-silence on GY-1234: see tests/loop-faults-dispatch-wake.test.ts.
+
+const gy1286Instances = [
+  { id: 'loop-cost|loop|2026-10-05T08:21:38.779Z', kind: 'loop-cost', subject: 'loop' },
+  { id: 'loop-silence|GY-1135|2026-10-05T08:25:25.831Z', kind: 'loop-silence', subject: 'GY-1135' },
+  { id: 'loop-silence|GY-1234|2026-10-05T08:35:58.217Z', kind: 'loop-silence', subject: 'GY-1234' },
+];
+/** The 30s request timeout every slow call of cycles 12285 and 12293 ran into. */
+const requestTimeoutMs = 30_000;
+/**
+ * Cycle 12293's backlog, replayed: twelve rework heads observed three minutes ago, whose rework
+ * waits for a wake, and twelve observed moments ago, whose decision requests each time out after 30s. The server answers a wake at once when it asks for no tick, and after a 30s tick wait
+ * otherwise, as it did that morning.
+ */
+async function replaySlowServer(cycles: number) {
+  const config = burstConfig(), state = emptyDaemonState(config);
+  const fresh = Array.from({ length: 12 }, (_, index) => `GY-${3000 + index}`), stale = Array.from({ length: 12 }, (_, index) => `GY-${3100 + index}`);
+  const decided: { key: string; cycle: number }[] = [], woken: { key: string; cycle: number; body: Record<string, unknown> }[] = [];
+  let now = burstClock, cycle = 0;
+  const snapshot = () => ({ work: [...stale.map(key => reworkHead(key, burstClock - 3 * minute)), ...fresh.map(key => reworkHead(key, now - 30_000))], now: iso(now), jobs: [] });
+  const effects: DaemonEffects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => snapshot(),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    wakeObservation: async work => {
+      const body = await sent(live => live.wakeObservation!(work));
+      woken.push({ key: work.key, cycle, body });
+      now += body.wait === false ? 500 : requestTimeoutMs;
+    },
+    decide: async work => { decided.push({ key: work.key, cycle }); now += requestTimeoutMs; throw new Error('The operation was aborted due to timeout'); },
+    decisions: async () => ({ decisions: [] }) as never,
+    approver: async work => ({ agentName: `graphyard-approver-${work.key.toLowerCase()}`, pane: `pane-${work.key}` }),
+    persist: async () => {},
+  } as DaemonEffects;
+  const results = [], deferred: string[][] = [];
+  for (cycle = 0; cycle < cycles; cycle++) {
+    now = burstClock + cycle * intervalMs;
+    results.push(await runCycle(config, state, effects, () => now));
+    deferred.push([...state.decisionsDeferred]);
+  }
+  return { results, decided, woken, deferred, fresh, stale };
+}
+
+test('manual:fault-class-loop — GY-1286 lists three instances, and every one is replayed', () => {
+  assert.deepEqual(gy1286Instances.map(entry => entry.subject), ['loop', 'GY-1135', 'GY-1234']);
+});
+
+test(`manual:fault-class-loop — ${gy1286Instances[0].id}: decision requests that each run into the 30s timeout no longer carry the decisions step past the interval`, async () => {
+  const { results } = await replaySlowServer(4);
+  for (const result of results) {
+    const cost = cycleCost(result.metrics, intervalMs)!;
+    assert.ok(cost.withinInterval, `cycle ${result.metrics.cycle} spent ${cost.workMs}ms of work against the ${intervalMs}ms interval: ${cost.breakdown}`);
+  }
+});
+
+test(`manual:fault-class-loop — ${gy1286Instances[0].id}: what the step puts off is reached first on the next cycle, so every head is still requested`, async () => {
+  const { results, decided, deferred, fresh } = await replaySlowServer(4);
+  assert.ok(deferred[0].length, 'the first cycle runs out of budget and puts items off');
+  const first = decided.filter(entry => entry.cycle === 1).map(entry => entry.key);
+  assert.equal(first[0], deferred[0].find(key => fresh.includes(key)), 'the next cycle starts with what the last one put off');
+  assert.deepEqual([...new Set(decided.map(entry => entry.key))].sort(), [...fresh].sort(), 'every fresh head has its rework requested within four cycles');
+  const note = results[0].actions.find(action => action.detail.startsWith('The decisions step spent its'));
+  assert.match(note?.detail ?? '', /120s budget; \d+ item\(s\) wait for the next cycle/);
+});
+
+test(`manual:fault-class-loop — ${gy1286Instances[0].id}: an observation wake asks for no reconcile tick, so it costs the step no tick wait`, async () => {
+  const body = await sent(live => live.wakeObservation!(reworkHead('GY-3100', burstClock)));
+  assert.deepEqual(body, { prioritized: true, wait: false });
+  const { woken, stale } = await replaySlowServer(1);
+  assert.deepEqual(woken.map(entry => entry.key).sort(), [...stale].sort(), 'every stale head is woken in the first cycle');
+});
+
+test(`manual:fault-class-loop — ${gy1286Instances[1].id}: a head under GitHub delivery missing a proof no producer serves is no subject of the loop's silence`, () => {
+  // GY-1135 at 08:25: its rework head 8b364f91 submitted at 08:04, build and review passing, the
+  // required test check failing while its failed jobs reran, unit:agy-quota-notice-detected unproduced.
+  const at = Date.parse(gy1286Instances[1].id.split('|')[2]);
+  const gates = [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: true, reasons: [] },
+    { name: 'test', passed: false, reasons: ['Required CI check test has not passed on the current candidate; rerun: its failed jobs are rerunning (workflow run 37281344467)'] },
+    { name: 'merge', passed: true, reasons: [] }, { name: 'github-delivery', passed: true, reasons: [] }];
+  const gy1135 = reworkHead('GY-1135', at - 21 * minute, { criteria: [{ id: 'AC-1', text: 'Notice detected', proofs: ['unit:agy-quota-notice-detected'] }], gates,
+    observation: { ...reworkHead('GY-1135', at - 21 * minute).observation!, reviews: [] } } as Partial<Work>);
+  const master = burstConfig({ proofWorkflow: 'acceptance.yml' });
+  const subjects = actionableSubjects(master, [gy1135], at);
+  assert.ok(!subjects.some(subject => subject.kind === 'proof'), JSON.stringify(subjects));
 });

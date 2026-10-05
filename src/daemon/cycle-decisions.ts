@@ -17,6 +17,7 @@ import { baseRefreshConflict } from '../merge-queue.js';
 import { docsSyncRoute } from './docs-sync-route.js';
 import { wakeObservationJob } from './cycle-delivery.js';
 import { sessionExhaustion } from './cycle-sessions.js';
+import { decisionBudget, deferredFirst, settleDeferred } from './decision-budget.js';
 
 /** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403). */
 export { handWatchPrefix };
@@ -531,8 +532,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (!state.actions[`${base}:ended`]) await note(`${base}:ended`, item, 'decision', 'failed', `${step.detail}; ${item.key} still needs it, so it is requested again`);
     await request(item, decision, key, watch);
   };
-
-  const needed = new Set<string>(), unattestable = new Set<string>();
+  const needed = new Set<string>(), unattestable = new Set<string>(), budget = decisionBudget(state, now, (config.run.intervalSeconds ?? 20) * 1000);
   const pause = githubPause(snapshot.jobs, clock);
   // A scope request is judged by the review-finding rule (step 2a) before it is the approver's: the
   // findings for this request and policy revision were read and named none of it. A loop that
@@ -562,7 +562,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (held === undefined || age < held) capacityRank.set(watch.work, age);
   }
   const rank = (item: Work) => capacityRank.get(item.key) ?? Number.POSITIVE_INFINITY;
-  const workToProcess = capacityRank.size ? [...snapshot.work].sort((a, b) => rank(a) - rank(b)) : snapshot.work;
+  const ordered = deferredFirst(snapshot.work, state.decisionsDeferred), workToProcess = capacityRank.size ? [...ordered].sort((a, b) => rank(a) - rank(b)) : ordered;
   // A producer request whose attempts are used up calls for rework once its escalation stood a cycle (GY-496).
   const exhausted = (await cycle.exhaustedProofs()).filter(entry => { const raised = state.actions[exhaustedProofKey(entry)]; return !!raised && raised.cycle < state.cycle; });
   // A needed decision with no watch is requested once ready to retry, or escalated.
@@ -591,7 +591,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       if (withheld && !(item.stage !== 'done' && assessment) && detailChanged(state.actions[escalationKey], detail)) await note(escalationKey, item, 'escalation', 'done', detail);
       return;
     }
-    const key = decisionKey(item, decision);
+    const key = decisionKey(item, decision); if (budget.spent()) { needed.add(key); budget.defer(item); return; }
     // A confirmed conflict confined to docs pages is a docs-sync's, not a worker's (GY-566).
     if (decision.action === 'rework' && !state.approvals[key] && baseRefreshConflict(item) && decision.binding === `${item.candidate!.sha}:conflict` && await docsSync.holds(item)) return;
     needed.add(key);
@@ -620,7 +620,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   });
   // 4c+. Attestations (GY-521): one attest decision per `manual:` proof no producer may run, bound to its head, one at a time.
   for (const item of snapshot.work) await isolate('decision', item, item.key, async () => {
-    const attestations = attestDecisions(item, snapshot.work, clock); let judging = false;
+    const attestations = attestDecisions(item, snapshot.work, clock); let judging = false; if (attestations.length && budget.spent()) { for (const decision of attestations) needed.add(decisionKey(item, decision)); budget.defer(item); return; }
     for (const decision of attestations) {
       const key = decisionKey(item, decision), watch = state.approvals[key];
       needed.add(key);
@@ -673,7 +673,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // role's slot, so the watch stays, past any bound, until the registry is told.
     if ((closed && withdrawn) || (watch.closeAttempts >= maxApproverCloses && !watch.session)) delete state.approvals[key];
   });
-
+  await settleDeferred(cycle, budget);
   // 4c'. Approver sessions no request of the loop's launched (GY-403). `master approver` records the
   //      item and decision with its launch, and the loop registers such a session in its approval
   //      watch; one with no record is known by its name, which `approverSessionName` derives from the
@@ -781,7 +781,6 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     }
     await effects.persist(state);
   });
-
   // 4d. Registry sessions end with the sessions they record (GY-190). A registry session is a
   //     launch, not a process, and nothing reports its end: an approver that judged its decision and
   //     exited kept its role's slot, and after `concurrency` launches the role stopped launching.

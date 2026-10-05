@@ -436,6 +436,8 @@ export const daemonStateSchema = z.object({
    * Cleared by a launch that lands and once the blocker naming the cause is recorded.
    */
   dispatchFailures: z.record(z.string(), dispatchFailureRunSchema).default(() => ({})),
+  /** The item keys the decisions step reached past its time budget last cycle, which this cycle reaches first (GY-1286). */
+  decisionsDeferred: z.array(z.string().max(200)).max(5000).default(() => []),
   /** Shared project memory (GY-1125): recent approved decisions, recurring pitfalls with sanctioned remedies, and merges. */
   projectMemory: projectMemorySchema.default(() => emptyProjectMemory()),
 }).strict();
