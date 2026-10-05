@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../../coordination.js';
-import { approvedMerges, continueMergeBatch, currentMergeCandidates, dispatchWork, listHerdrAgents, mergeExecutor, readWorkerCredential, snapshotWithClock, verifyContainmentDeath, withReviewerDefaults } from '../../master.js';
+import { approvedMerges, continueMergeBatch, currentMergeCandidates, dispatchWork, listHerdrAgents, mergeExecutor, readWorkerCredential, snapshotWithClock, verifyContainmentDeath, withReviewerDefaults, withRoleDefaults } from '../../master.js';
 import { readDaemonState } from '../../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../../master-verification.js';
 import { cycleBudget, masterStatusReport } from '../master-status.js';
@@ -15,8 +15,8 @@ import { masterHarnessDrift } from './fleet.js';
 export async function operationsCommand(session: MasterSession): Promise<unknown> {
   const { id, args, print, root, master, masterApi, masterMutation, coordinator, cli, assertProtocol } = session;
   if (id === 'status') {
-    // Sessions are counted as the reviewer launchers count them: the automatic profile's default concurrency included (GY-1072).
-    const report = await masterStatusReport(root, withReviewerDefaults(master), masterApi, coordinator, cli);
+    // Sessions are counted as the reviewer and producer launchers count them: automatic profile defaults included (GY-1072, GY-1113).
+    const report = await masterStatusReport(root, withRoleDefaults(master), masterApi, coordinator, cli);
     const state = await readDaemonState(root, master).catch(() => null);
     // The master session's budgets (GY-898) come from this installation's config, not the cursor.
     const summary = report.daemon as typeof report.daemon & { master?: Record<string, unknown> | null };
