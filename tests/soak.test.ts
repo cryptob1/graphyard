@@ -31,8 +31,8 @@ import { memoryActionKey } from '../src/daemon/cycle-dispatch.js';
 import type { HostMemoryReading } from '../src/master-resources.js';
 import { retainedActions } from '../src/daemon/state.js';
 import { adoptHeadlessRuns, noteWatchdog } from '../src/daemon/run.js';
-import { maxApproverLaunches, maxLostApproverRuns } from '../src/daemon/decisions.js';
-import { decisionReadDeadlineMs, decisionRefreshMs } from '../src/daemon/decision-reads.js';
+import { maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns } from '../src/daemon/decisions.js';
+import { decisionEventKinds, decisionReadDeadlineMs, decisionRefreshMs } from '../src/daemon/decision-reads.js';
 import { adoptRuns, detachRuns, liveRuns, pruneRunDirectories, runDirectoryRetentionMs, runsDirectory, watchedRuns, withRunnerAgents, type Applied } from '../src/runner/registry.js';
 import { applyDecision, approverRunOptions, startNarrowRun } from '../src/runner/roles.js';
 import type { DecidePayload, DecompositionPayload } from '../src/runner/payloads.js';
@@ -566,6 +566,12 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
   staleDiagnosis?: boolean;
+  /**
+   * GY-1315: releases requested outside any diagnosis go stale in backlog. Item `item`'s hand release
+   * races once, item `racing`'s every release races, and `backlog` items never released sit beside
+   * them, each history read taking `readMs` of real time.
+   */
+  staleRelease?: { item: number; racing: number; backlog: number; readMs: number };
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
   failover?: Failover;
   /** GY-1302: wire the loop's promotion drive over the day's moving main, with a stubbed ledger, run list and dispatch. */
@@ -586,7 +592,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // The spent producer request (GY-496) is a main-day fault, like the blind window and the split:
   // the queue-only, hand-approver and regression days exercise their own faults and would only
   // inherit this one's rework round.
-  const mainDay = !options.queued && !options.handApprovers && !options.stranded && !options.regression && !options.scope && !options.headless && !options.blockers && !options.starved && !options.decomposition;
+  const mainDay = !options.queued && !options.handApprovers && !options.stranded && !options.regression && !options.scope && !options.headless && !options.blockers && !options.starved && !options.decomposition && !options.staleRelease;
   // GY-793's base breakage runs only on the day that asserts it (`github806`): on any other day it
   // would reshape that day's own scenario (a rework or fenced item doubling as the broken one).
   const baseBreakDay = mainDay && !!options.github806;
@@ -779,6 +785,12 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' }, { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer' }] }, id());
     items.push(work);
   }
+  // GY-1315: the unreleased backlog the stale-release step reads every cold cycle, beside the day's items.
+  const staleReleaseDay = { hand: [] as { key: string; decision: string; outcome: string }[], races: [] as { key: string; decision: string; outcome: string; at: number }[], handReleased: [] as { key: string; elapsed: number }[],
+    backlog: [] as Work[], backlogReads: 0, steps: [] as { elapsed: number; ms: number; backlogReads: number }[] };
+  for (let index = 0; index < (options.staleRelease?.backlog ?? 0); index++)
+    staleReleaseDay.backlog.push(await engine.execute(principals.operator, 'create', null, { title: `Soak backlog ${days}-${index}`, plannedFiles: [`src/soak/backlog-${days}-${index}.ts`], criteria: [{ id: 'AC-1', text: `Backlog ${index} behaves`, proofs: [PROOF] }] }, id()));
+  const staleReleaseItems = new Set(options.staleRelease ? [options.staleRelease.item, options.staleRelease.racing] : []);
   // ---- The backlog a previous day left (GY-842): panes of review sessions whose worktrees the
   // ---- reclaim removed while the panes stood on. Enough of them that the sweep's per-pass bound
   // ---- is what paces the drain, and one pane Graphyard never launched that it must never touch.
@@ -1400,6 +1412,14 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         herdr.status(pane, 'done');
         return;
       }
+      // GY-1315: every release of the racing item meets the same race, until the loop stops asking.
+      if (options.staleRelease && current.action === 'release' && numberOf(work) === options.staleRelease.racing) {
+        await engine.execute(principals.coordinator, 'request', work.id, { type: 'note', reason: `Soak: a note on ${work.key}, landing before the approver reads ${decision}` }, id());
+        const outcome = await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: release ${work.key}` }).then(() => 'applied', (error: Error) => error.message);
+        staleReleaseDay.races.push({ key: work.key, decision, outcome, at: clock.now() });
+        herdr.status(pane, 'done');
+        return;
+      }
       const refuseDue = !!options.refuseReworkOf?.includes(numberOf(work)) && !refused.some(entry => entry.key === work.key)
         && current.action === 'rework';
       if (refuseDue) {
@@ -1864,6 +1884,26 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     effects.wakeObservation = async work => { await slow(); return wakeObservation!(work); };
     effects.withdraw = async (work, decision, reason) => { budgetDay.withdrawn.push({ key: work.key, cycle: cycles }); return withdraw!(work, decision, reason); };
   }
+  if (options.staleRelease) {
+    // The backlog's history reads take real time, as a slow control plane's do; master status's own
+    // decision report is the attention the loop classifies, so an owed stale release reaches the fault step.
+    const { decisions } = effects, slowReads = new Set(staleReleaseDay.backlog.map(item => item.id)), readMs = options.staleRelease.readMs;
+    effects.decisions = async work => {
+      if (slowReads.has(work.id)) { staleReleaseDay.backlogReads++; await new Promise(resolve => setTimeout(resolve, readMs)); }
+      return decisions!(work);
+    };
+    // The loop's real ledger read (src/daemon/effects.ts), so the kept histories are what production keeps.
+    effects.decisionChanges = async after => {
+      const query = new URLSearchParams({ kind: decisionEventKinds.join(','), payload: 'none', routine: 'include', order: after ? 'asc' : 'desc', limit: after ? '1000' : '1', view: 'page' });
+      if (after) query.set('cursor', after);
+      const read = await api(principals.coordinator, 'GET', `events?${query}`) as { events: { seq: string; work_id: string }[]; page: { hasMore: boolean } };
+      return { seq: (after ? read.events.at(-1)?.seq : read.events[0]?.seq) ?? after ?? '0', work: [...new Set(read.events.map(event => event.work_id))], complete: !!after && !read.page.hasMore };
+    };
+    effects.reportedAttention = async (work, _coordinator, observed) => {
+      const report = await terminalDecisions(path => api(principals.operatorAgent, 'GET', path), work, { approvals: Object.values(state.approvals), runtime: { available: observed.available ?? true, agents: observed.agents }, now: Date.parse(observed.now) });
+      return { items: report.attentionItems } as ReportedAttention;
+    };
+  }
   let publishedMergeQueue: string | null = null;
   const mergeQueuePosts: { at: number; settings: Record<string, number> }[] = [];
   effects.publishMergeBatchSize = async () => {
@@ -2095,7 +2135,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     // Scheduled events: releases, the file split on main, the deploys. The queue-only day runs with
     // the split past its end: the re-plan and its stale-tip flush are the main day's scenario, and
     // a queue of tips built before the split only ejects in a cascade the day cannot recover from.
-    while (released < plan.items && elapsed >= released * releaseEveryMs) await engine.execute(principals.operator, 'ready', items[released++].id, {}, id());
+    while (released < plan.items && elapsed >= released * releaseEveryMs) { const next = items[released++]; if (!staleReleaseItems.has(released)) await engine.execute(principals.operator, 'ready', next.id, {}, id()); }
     // The scope scenarios release beside the fifteen: the wide asks early enough to decide well
     // before their workers push, the unrepresentable one so its refusal stands for hours.
     for (const [slot, n] of [[30, scopePlan.wideRule], [35, scopePlan.wideFinding], [40, scopePlan.unrepresentable], [45, scopePlan.partial]] as const)
@@ -2162,6 +2202,23 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         const contents = new Map(github.commits.get(github.tip)!.contents);
         contents.set('README.md', Array.from({ length: 1_165 }, (_, index) => `t${index}`).join(' '));
         github.commit('Trim the documentation for word-budget headroom', github.files, clock.now(), [github.tip], undefined, {}, contents);
+      }
+    }
+    // GY-1315: two minutes in, the master requests both items' releases by hand, puts them to no
+    // approver, and the loop's own note lands before an approver reads each, so both settle stale.
+    if (options.staleRelease && elapsed === 2 * minute) for (const n of staleReleaseItems) {
+      const current = (await store.list()).find(item => item.id === items[n - 1].id)!;
+      const decision = await api(principals.operatorAgent, 'POST', `work/${current.id}/decide`, { action: 'release', input: decisionInput('release', current, {}), reason: `Soak: a hand-requested release of ${current.key}` });
+      await engine.execute(principals.coordinator, 'request', current.id, { type: 'note', reason: `Soak: a note on ${current.key}, landing before the approver reads ${decision.id}` }, id());
+      const outcome = await api(principals.approver, 'POST', `work/${current.id}/approve`, { decision: decision.id, reason: `Approved: release ${current.key}` }).then(() => 'applied', (error: Error) => error.message);
+      staleReleaseDay.hand.push({ key: current.key, decision: decision.id, outcome });
+    }
+    // Once the loop has escalated the racing item's spent release, the operator releases it by the hand route the escalation names.
+    if (options.staleRelease && !staleReleaseDay.handReleased.length) {
+      const racing = items[options.staleRelease.racing - 1];
+      if (Object.values(state.actions).some(action => action.kind === 'escalation' && action.work === racing.key && /graphyard master release/.test(action.detail))) {
+        await engine.execute(principals.operator, 'ready', racing.id, {}, id());
+        staleReleaseDay.handReleased.push({ key: racing.key, elapsed });
       }
     }
     // GY-551: twenty minutes in, the master requests a release of the last two items by hand and
@@ -2475,6 +2532,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         }
         const cycleStart = clock.now(); budgetDay.cycleSlow = 0;
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
+        if (options.staleRelease) { staleReleaseDay.steps.push({ elapsed, ms: result.metrics.steps?.decisions?.ms ?? 0, backlogReads: staleReleaseDay.backlogReads }); staleReleaseDay.backlogReads = 0; }
         if (options.slowDecisions) budgetDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, slow: budgetDay.cycleSlow, deferred: [...state.decisionsDeferred] });
         if (options.workspaceFailure) for (const [name, entry] of Object.entries(state.profiles)) if (/worktree/.test(entry.reason ?? '')) workspaceCooled.push(`+${Math.round(elapsed / minute)} min ${name}: ${entry.reason}`);
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
@@ -2596,6 +2654,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       await api(principals.operator, 'POST', `work/${leftover.key}/close`, { kind: 'obsolete', reason: 'soak: the credential-blocked day ends with its never-curing item held at the attempt cap' });
     }
   }
+  // A later day's loop must not read this day's backlog.
+  for (const extra of staleReleaseDay.backlog) await api(principals.operator, 'POST', `work/${extra.key}/close`, { kind: 'obsolete', reason: 'soak: the stale-release day ends with its backlog never released' });
   engine.reconcileLanded = reconcileLanded; engine.directMergeEnvironment = null;
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
   if (options.decomposition) {
@@ -2609,7 +2669,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, staleMerges, restartLog, guardDay, budgetDay, decompositionDay: decompositionHistory, diagnosisRaces, transientRefused, lateReads };
+    wakes, staleMerges, restartLog, guardDay, budgetDay, decompositionDay: decompositionHistory, diagnosisRaces, transientRefused, lateReads, staleReleaseDay };
 }
 
 /**
@@ -4413,6 +4473,70 @@ test('unit:soak-invariants-hold — a slow control plane carries the decisions s
   const attested = items[2].key;
   assert.ok(decideCalls.some(call => call.key === attested && call.action === 'attest'), `${attested}'s attestation was requested: ${JSON.stringify(decideCalls.filter(call => call.key === attested).map(call => call.action))}`);
   assert.ok(final.find(item => item.key === attested)!.evidence.some(entry => entry.proof === MANUAL && entry.result === 'pass'), `${attested} was delivered on its attestation`);
+});
+
+test('unit:soak-invariants-hold — releases requested outside any diagnosis that go stale in backlog are asked again by the loop once per stale decision against the current revision, each put to an approver that judges and is closed, a release that keeps racing escalates exactly once at the bound, no owed-decision fault is counted while the loop is still asking, a large slow backlog is read side by side and kept, and every invariant holds', { timeout: 600_000 }, async () => {
+  // GY-1315. GY-1313 and GY-1314 sat in backlog behind stale releases nobody but the diagnosis step
+  // would ask for again, and each owed line counted as a decision fault. Item 4's hand-requested
+  // release races once; item 5's races every time it is judged. Sixty backlog items never released
+  // sit beside them, each history read taking 60 ms of real time, as the stale-release step reads
+  // every unreleased backlog item's history.
+  const backlog = 60, readMs = 60;
+  const day = await simulateDay({
+    hours: 3, staleRelease: { item: 4, racing: 5, backlog, readMs },
+    plan: { items: 5, releaseEveryMs: 5 * minute, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 5, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 5 } },
+  });
+  const { items, final, violations, failures, lost, decideCalls, approverWorks, approverPanes, herdrClosed, state, staleReleaseDay } = day;
+  const [once, racing] = [items[3], items[4]];
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all five items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  assert.deepEqual(staleReleaseDay.hand.map(entry => entry.key), [once.key, racing.key], 'both hand releases were requested');
+  for (const entry of [...staleReleaseDay.hand, ...staleReleaseDay.races]) assert.match(entry.outcome, /Task revision changed/, `${entry.key}'s release ${entry.decision} went stale on the race`);
+  const releases = async (work: Work) => (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions
+    .filter((entry: { action: string }) => entry.action === 'release') as { id: string; state: string; requestedAt: string; input: { expectedRevision?: number } }[];
+
+  // The hand release that raced once: the loop asked again once, bound to the revision the item had
+  // moved to, put it to one approver, and it applied.
+  const onceReleases = await releases(once);
+  assert.deepEqual(onceReleases.map(entry => entry.state), ['stale', 'applied'], `${once.key}'s release went stale once and its one re-request applied: ${JSON.stringify(onceReleases)}`);
+  assert.ok(onceReleases[1].input.expectedRevision! > onceReleases[0].input.expectedRevision!, 'the re-request binds the revision the item moved to');
+  assert.equal(decideCalls.filter(call => call.key === once.key && call.action === 'release').length, 1, 'one re-request per stale release');
+  assert.deepEqual(approverWorks.filter(key => key === once.key), [once.key], 'the re-request had exactly one approver');
+
+  // The release that keeps racing: asked again until maxDecisionRequests releases settled without
+  // applying, each once and against the current revision, then escalated exactly once and asked no more.
+  const racingReleases = await releases(racing);
+  const unapplied = racingReleases.filter(entry => entry.state === 'stale');
+  assert.equal(unapplied.length, maxDecisionRequests, `${racing.key}'s releases went stale up to the bound: ${JSON.stringify(racingReleases.map(entry => entry.state))}`);
+  assert.equal(racingReleases.filter(entry => entry.state !== 'stale').length, 0, 'nothing more was requested once the bound was spent');
+  assert.equal(staleReleaseDay.races.length, maxDecisionRequests - 1, 'every re-request was judged by its approver');
+  assert.equal(decideCalls.filter(call => call.key === racing.key && call.action === 'release').length, maxDecisionRequests - 1, 'one re-request per stale release, up to the bound');
+  for (const [index, entry] of racingReleases.entries()) if (index) assert.ok(entry.input.expectedRevision! > racingReleases[index - 1].input.expectedRevision!, 'each re-request binds the item\'s current revision');
+  const escalated = Object.entries(state.actions).filter(([key, action]) => key.startsWith('release:stale:') && action.kind === 'escalation' && action.work === racing.key);
+  assert.equal(escalated.length, 1, `the spent release escalated exactly once: ${JSON.stringify(escalated)}`);
+  assert.equal(day.escalations.filter(detail => detail.startsWith(`${racing.key} still waits in backlog for its release`)).length, 1, 'and that escalation was performed once across the day');
+  assert.deepEqual(staleReleaseDay.handReleased.map(entry => entry.key), [racing.key], 'the operator released it by the route the escalation named');
+
+  // Every approver the loop launched for a re-request judged and was closed.
+  assert.ok(approverWorks.filter(key => key === racing.key).length >= maxDecisionRequests - 1, `each of ${racing.key}'s re-requests had its approver: ${JSON.stringify(approverWorks)}`);
+  assert.deepEqual(approverPanes.filter(pane => !herdrClosed.includes(pane)), [], `every approver session the day launched was closed: ${JSON.stringify(herdrClosed)}`);
+
+  // No owed-decision fault while the loop was still asking: none for the once-raced item, and none
+  // for the racing one before its last request went stale and spent the bound (past it the loop asks
+  // no more, so the owed release is a fault, as it should be).
+  const spentAt = staleReleaseDay.races.at(-1)!.at;
+  const owed = state.faults.instances.filter(instance => instance.kind === 'owed-decision' && (instance.subject === once.key || instance.subject === racing.key));
+  assert.deepEqual(owed.filter(instance => instance.subject === once.key || Date.parse(instance.at) < spentAt), [], `no owed-decision fault while the loop was asking again: ${JSON.stringify(owed)}`);
+  assert.deepEqual(state.faults.instances.filter(instance => instance.faultClass === 'decision' && instance.subject === once.key), [], `no decision fault of any kind for ${once.key}`);
+
+  // The large backlog: every cold read pass ran side by side and was kept, so the decisions step
+  // never waited out the backlog's reads one after another, nor read a kept history again.
+  const cold = staleReleaseDay.steps.filter(step => step.backlogReads > 0);
+  assert.ok(cold.length >= 1, 'the backlog was read');
+  for (const step of staleReleaseDay.steps) assert.ok(step.ms < backlog * readMs / 2, `the decisions step at +${Math.round(step.elapsed / minute)} min took ${step.ms} ms reading ${step.backlogReads} backlog histories (${backlog * readMs} ms one after another)`);
+  assert.ok(staleReleaseDay.steps.filter(step => step.backlogReads === 0).length > cold.length * 5, `a kept backlog history is not read again each cycle: ${cold.length} of ${staleReleaseDay.steps.length} cycles read the backlog`);
 });
 
 test('unit:soak-invariants-hold — containment quarantines of dead workers stand across many cycles while the timed clock read fails and then answers slowly, one read a cycle and none without an assessable quarantine, each escalation recorded once, and they settle once reads are fast, with every invariant holding', { timeout: 600_000 }, async () => {

@@ -280,7 +280,7 @@ function plainWorld(work: Work[], ledger: Row[], start: number) {
     resume: async (_target: Work, decision: string) => ({ ...ledger.find(entry => entry.id === decision)!, state: 'approved' }),
     decisions: async (target: Work) => ({ decisions: ledger.filter(entry => entry.work === target.key).map(entry => ({ ...entry })) }),
   } as unknown as DaemonEffects;
-  return { state, approvers, at: (instant: number) => { now = instant; }, cycle: () => runCycle(config(), state, effects, () => now) };
+  return { state, approvers, effects, at: (instant: number) => { now = instant; }, cycle: () => runCycle(config(), state, effects, () => now) };
 }
 const staleRow = (release: typeof gy1315.releases[number]): Row => ({ id: release.decision, work: release.key, action: 'release', state: 'stale', input: { expectedRevision: 1 }, requestedAt: release.requestedAt,
   outcome: gy1315.staleOutcome, approvedBy: null, reason: `Release ${release.key}, the root-cause fix the diagnostician found, at priority 1.` });
@@ -330,6 +330,18 @@ test('unit:stale-release-re-requested-by-the-loop — the loop\'s re-request is 
   const escalations = Object.values(w.state.actions).filter(action => action.kind === 'escalation' && action.work === release.key);
   assert.equal(escalations.length, 1, JSON.stringify(w.state.actions));
   assert.match(escalations[0].detail, /graphyard master release GY-1313/);
+});
+
+test('unit:stale-release-re-requested-by-the-loop — a re-request the control plane refuses is asked again on the widening backoff, not every cycle', async () => {
+  const release = gy1315.releases[0], fixItem = item(release.key, { revision: 6 } as Partial<Work>);
+  const ledger = [staleRow(release)];
+  const w = plainWorld([fixItem], ledger, Date.parse(release.instance));
+  const asked: number[] = [];
+  const refusing = { ...w.effects, decide: async () => { asked.push(w.state.cycle); throw new Error('Simulated: the control plane refused the request'); } } as unknown as DaemonEffects;
+  for (let round = 0; round < 8; round += 1) { w.at(Date.parse(release.instance) + round * minute); await runCycle(config(), w.state, refusing, () => Date.parse(release.instance) + round * minute); }
+  assert.ok(asked.length >= 2 && asked.length <= 4, `retried, but on the backoff: asked in cycles ${asked.join(', ')}`);
+  for (const [index, cycleNo] of asked.entries()) if (index) assert.ok(cycleNo - asked[index - 1] >= 2 ** (index - 1), `each retry waits out its widening interval: ${asked.join(', ')}`);
+  assert.equal(w.state.actions[`release:stale:${release.decision}`]?.state, 'failed');
 });
 
 test(`unit:superseded-decision-re-request-not-a-fault — GY-949 (${gy1315.superseded.instance}): a decision the server superseded and the loop asks again is noted as a step, not a failed decision action`, async () => {

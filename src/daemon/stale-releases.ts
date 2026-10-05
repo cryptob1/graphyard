@@ -1,15 +1,17 @@
 // Concern: cycle step 4c — request again the release of every backlog item whose release went stale (GY-1315).
 import type { Work } from '../model.js';
-import { staleRelease, unappliedReleases } from '../cli/owed-report.js';
+import { staleRelease, staleReleaseCandidates, unappliedReleases } from '../model/stale-release.js';
 import { diagnosisSettled } from '../runner/payloads.js';
+import { mapBounded } from '../master/timings.js';
 import { maxDecisionRequests } from './decisions.js';
+import { decisionReadConcurrency } from './decision-reads.js';
 import { type DaemonEffects, record } from './effects.js';
+import { readyToRetry } from './sessions.js';
 import { message } from './state.js';
 import type { Cycle } from './cycle.js';
 
 /** The action key of the loop's re-request of one stale release; done once that release is asked again, so it is asked once. */
 export const staleReleaseKey = (decision: string) => `release:stale:${decision}`;
-type ReleaseDecide = (work: Work, action: 'release', reason: string, input?: Record<string, unknown>) => Promise<{ id: string }>;
 
 /**
  * GY-1315. A release the server settled `stale` — the item revision moved between the request and
@@ -23,24 +25,29 @@ type ReleaseDecide = (work: Work, action: 'release', reason: string, input?: Rec
  * item's own history so it survives a restart), then one escalation naming the manual route. A
  * release a diagnosis is carrying is left to it, so no release is asked twice. An approver that could
  * not be launched is relaunched by the unanswered-decision remedy, as for any decision the loop does
- * not watch.
+ * not watch. A request that failed is asked again on the widening backoff, as every other request
+ * of the decisions step is. The histories are read `decisionReadConcurrency` at a time, through the
+ * step's kept reads (the read-ahead starts them early), and the step runs last in 4c, so a large
+ * cold backlog never draws the shared read deadline down before the watch-close sweep reads.
  */
 export async function staleReleaseStep(cycle: Cycle, effects: DaemonEffects) {
   const { state, snapshot, now, performed, isolate } = cycle;
-  if (!effects.decide || !effects.approver || !effects.decisions) return;
-  const decide = effects.decide as unknown as ReleaseDecide, approver = effects.approver, decisions = effects.decisions;
+  const { decide, approver, decisions } = effects;
+  if (!decide || !approver || !decisions) return;
   const diagnosed = new Set(Object.values(state.diagnoses).filter(entry => !diagnosisSettled(entry) && entry.decision?.action === 'release').map(entry => entry.decision!.work));
   const note = async (key: string, item: Work, kind: 'decision' | 'escalation', outcome: 'done' | 'failed', detail: string) =>
     performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-  for (const item of snapshot.work) {
-    if (item.stage !== 'backlog' || item.ready || diagnosed.has(item.key)) continue;
+  const candidates = staleReleaseCandidates(snapshot.work, diagnosed);
+  // An unreadable history is unknown: nothing is asked on it, and the next cycle reads it again.
+  const histories = await mapBounded(candidates, decisionReadConcurrency, item => decisions(item).then(result => result.decisions, () => null));
+  for (const [index, item] of candidates.entries()) {
+    const history = histories[index];
     await isolate('decision', item, item.key, async () => {
-      // An unreadable history is unknown: nothing is asked on it, and the next cycle reads it again.
-      const history = await decisions(item).then(result => result.decisions, () => null);
       const release = history && staleRelease(item, history);
       if (!history || !release) return;
       const key = staleReleaseKey(release.id);
       if (state.actions[key]?.state === 'done') return;
+      if (state.actions[key]?.state === 'failed' && !readyToRetry(state.actions[key], state.cycle)) return;
       const spent = unappliedReleases(history), why = `release decision ${release.id} on ${item.key} was settled stale: ${release.outcome ?? 'no reason recorded'}`;
       if (spent >= maxDecisionRequests) {
         // The diagnosis step escalates its own spent release; one escalation is enough.

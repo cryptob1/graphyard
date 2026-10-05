@@ -446,8 +446,6 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const next = judging ? undefined : attestations.find(decision => !state.approvals[decisionKey(item, decision)]);
     if (next) await requestNeeded(item, next, decisionKey(item, next));
   });
-  // 4c++. A stale release of a backlog item is asked again, whoever asked first (GY-1315).
-  await staleReleaseStep(cycle, effects);
   // A watch whose item no longer needs its decision is closed rather than left holding a provider seat.
   for (const [key, watch] of Object.entries(state.approvals)) await isolate('decision', snapshot.work.find(candidate => candidate.key === watch.work) ?? null, watch.work, async () => {
     // A watch the loop made for a session it did not launch has no request of the loop's to take back (below).
@@ -494,4 +492,6 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   await settleDeferred(cycle, budget);
   await approvers.superviseHandApprovers();
   await approvers.reconcileRegistrySessions();
+  // 4c++. A stale release of a backlog item is asked again, whoever asked first (GY-1315): last, so its backlog reads hold nothing above.
+  await staleReleaseStep(cycle, effects);
 }

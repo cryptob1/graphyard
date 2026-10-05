@@ -5,6 +5,7 @@ import { humanNeededActions, type HumanNeededRow } from '../model/next-action.js
 import { decideScopeRequest, scopeRefusalBlocker, terminalScopeRefusal } from '../model/scope.js';
 import { elapsed } from '../model/sessions.js';
 import { maxDecisionRequests } from '../daemon/decisions.js';
+import { staleRelease, staleReleaseWaitBoundMs, unappliedReleases, type DecisionHistoryRow } from '../model/stale-release.js';
 import { routedScopeRequests } from './status-attention.js';
 
 /**
@@ -111,7 +112,6 @@ export function owedAttention(snapshot: { work: Work[]; now: string }, rows: { k
     counted: items.length + scopeRequests.filter(item => !rowAttention(item.subject)).length };
 }
 
-type DecisionHistoryRow = { id: string; action: string; state: string; requestedAt?: string; outcome?: string | null };
 /**
  * GY-1294. A release decision the server settled `stale` — the item revision moved between the
  * request and its approver's read — releases nothing, and an item in backlog shows no other sign
@@ -133,14 +133,4 @@ export function staleReleaseAttention(work: { key: string; stage: string; ready?
   return { subject: work.key, text: `${work.key} sits in backlog behind release decision ${release.id}, which went stale: ${release.outcome ?? 'the item revision moved before its approver read it'} — no executor may run it; the release of ${work.key} has been owed for ${elapsed(waited)}`,
     ...agentOwner('master', next, 'approver'), ...(inMotionUntil ? { inMotionUntil } : {}) };
 }
-/** The stale release an unreleased backlog item waits behind: its latest release, settled stale. Null for any other item. */
-export function staleRelease<T extends DecisionHistoryRow>(work: { stage: string; ready?: boolean }, decisions: readonly T[]): T | null {
-  if (work.stage !== 'backlog' || work.ready) return null;
-  const release = decisions.filter(decision => decision.action === 'release').at(-1);
-  return release?.state === 'stale' ? release : null;
-}
-/** The item's release requests that settled without applying: the loop's re-requests stop at maxDecisionRequests of them (GY-1296). */
-export const unappliedReleases = (decisions: readonly DecisionHistoryRow[]) =>
-  decisions.filter(decision => decision.action === 'release' && (decision.state === 'stale' || decision.state === 'withdrawn')).length;
-/** How long after its request a stale release the loop is still re-requesting may stand before it counts as a decision fault (GY-1315). */
-export const staleReleaseWaitBoundMs = 30 * 60_000;
+export { staleReleaseWaitBoundMs };
