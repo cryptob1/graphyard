@@ -99,8 +99,7 @@ export class Store {
       const { rows } = await db.query('SELECT clock_timestamp() AS now');
       // Job wakes are taken last, in work-id order (GY-1115): see `wakeJob`.
       pendingWakes.set(db, new Map());
-      const query = db.query;
-      db.query = guardDeferredWakes(db, query);
+      const query = db.query; db.query = guardDeferredWakes(db, query);
       let result: T;
       try { result = await fn(db, rows[0].now); } finally { db.query = query; }
       const wakes = pendingWakes.get(db)!; pendingWakes.delete(db);
@@ -268,20 +267,12 @@ export async function wakeFromWebhook(db: Pick<pg.PoolClient, 'query'>, subjects
 
 /** The job wakes a `Store.transaction` has asked for and not yet taken, per connection, each with whether it is prioritized (GY-1115). */
 const pendingWakes = new WeakMap<object, Map<string, boolean>>();
-/** A statement that reads or writes the `jobs` table (GY-1212). */
 const jobsStatement = /\b(?:from|into|update|join)\s+jobs\b/i;
-/**
- * A transaction's `query`, refusing any statement on `jobs` once a wake is deferred (GY-1212): the
- * wake is taken only at COMMIT, so a later read would not see it and a later `DELETE FROM jobs`
- * would have its row put back. A transaction touches its job rows before it asks for any wake.
- */
+/** A transaction's `query`, refusing any statement on `jobs` once a wake is deferred (GY-1212): see `wakeJob`. */
 function guardDeferredWakes(db: pg.PoolClient, query: pg.PoolClient['query']): pg.PoolClient['query'] {
   return ((text: unknown, ...rest: unknown[]) => {
-    const sql = typeof text === 'string' ? text : (text as { text?: unknown } | null)?.text;
-    const wakes = pendingWakes.get(db);
-    if (wakes?.size && typeof sql === 'string' && jobsStatement.test(sql)) {
-      return Promise.reject(new Error(`A statement on jobs ran after this transaction deferred a job wake (${[...wakes.keys()].join(', ')}); the wake is taken at COMMIT, so touch job rows before waking any (GY-1212)`));
-    }
+    const sql = typeof text === 'string' ? text : (text as { text?: unknown } | null)?.text, wakes = pendingWakes.get(db);
+    if (wakes?.size && typeof sql === 'string' && jobsStatement.test(sql)) return Promise.reject(new Error(`A jobs statement ran after this transaction deferred a job wake (${[...wakes.keys()].join(', ')}) (GY-1212)`));
     return (query as (...args: unknown[]) => unknown).call(db, text, ...rest);
   }) as pg.PoolClient['query'];
 }
@@ -292,14 +283,12 @@ function guardDeferredWakes(db: pg.PoolClient, query: pg.PoolClient['query']): p
  * `prioritized` also stamps the job's webhook wake, so `takeJob` claims it ahead of the polled
  * backlog as it would a webhook's (GY-1099: a merge refused only for a stale observation). Like a
  * webhook's, a wake still standing keeps its stamp, so prioritized wakes are claimed oldest first.
- * Inside a `Store.transaction` the wake is taken just before
- * COMMIT, with the transaction's other wakes, in work-id order (GY-1115): every transaction then
- * locks its item rows before any job row, and job rows in one stable order, so a reconciliation
- * batch, a resync and an observation can no longer deadlock on a job row one of them took mid-way.
- * The one exception is a job row a transaction locks or deletes itself, by its own statement on
- * `jobs` (an observation's own job, a delivered item's): such a statement must come before the
- * transaction's first wake, and the transaction refuses one that comes after (GY-1212), since a
- * read would miss the deferred wake and a delete would see its row reinserted at COMMIT.
+ * Inside a `Store.transaction` the wake is taken just before COMMIT, with the transaction's other
+ * wakes, in work-id order (GY-1115): every transaction then locks its item rows before any job row,
+ * and job rows in one stable order, so a reconciliation batch, a resync and an observation can no
+ * longer deadlock on a job row one of them took mid-way. A transaction's own statements on `jobs`
+ * (an observation's own job, a delivered item's) must come before its first wake; a later one is
+ * refused (GY-1212), as a read would miss the wake and a delete would see its row put back.
  */
 export async function wakeJob(db: Pick<pg.PoolClient, 'query'>, id: string, prioritized = false) {
   const pending = pendingWakes.get(db);

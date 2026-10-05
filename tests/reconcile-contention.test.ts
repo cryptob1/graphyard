@@ -154,8 +154,8 @@ test('unit:deferred-wake-refuses-later-jobs-statements — inside a transaction,
   const [woken, other] = [items[95].id, items[96].id];
   await store.pool.query('DELETE FROM jobs WHERE work_id = ANY($1::uuid[])', [[woken, other]]);
   // Waking then deleting the same job would have its row reinserted at COMMIT: refused, and nothing commits.
-  await assert.rejects(store.transaction(async db => { await wakeJob(db, woken); await db.query('DELETE FROM jobs WHERE work_id=$1', [woken]); }), /after this transaction deferred a job wake/);
-  await assert.rejects(store.transaction(async db => { await wakeJob(db, woken); await db.query({ text: 'SELECT 1 FROM jobs WHERE work_id=$1', values: [other] }); }), /after this transaction deferred a job wake/);
+  await assert.rejects(store.transaction(async db => { await wakeJob(db, woken); await db.query('DELETE FROM jobs WHERE work_id=$1', [woken]); }), /ran after this transaction deferred a job wake/);
+  await assert.rejects(store.transaction(async db => { await wakeJob(db, woken); await db.query({ text: 'SELECT 1 FROM jobs WHERE work_id=$1', values: [other] }); }), /ran after this transaction deferred a job wake/);
   assert.equal((await store.pool.query('SELECT 1 FROM jobs WHERE work_id = ANY($1::uuid[])', [[woken, other]])).rowCount, 0, 'the refused transactions rolled back their wakes');
   // Job rows touched before any wake, as every current path does, still commit with the wakes.
   await store.transaction(async db => { await db.query('SELECT 1 FROM jobs WHERE work_id=$1', [other]); await db.query('DELETE FROM jobs WHERE work_id=$1', [other]); await wakeJob(db, woken); await db.query('SELECT 1 FROM work_items WHERE id=$1', [woken]); });
