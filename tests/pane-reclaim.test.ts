@@ -7,8 +7,9 @@ import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { paneSweepLimit } from '../src/daemon/cycle-reclaim.js';
 import { agentlessPaneAttentionBound, paneReclaimStatus } from '../src/master-resources.js';
-import { daemonEffects } from '../src/daemon/effects.js';
+import { daemonEffects, launchAppearanceMs } from '../src/daemon/effects.js';
 import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer } from '../src/producer.js';
 import { dispatchWork, launchApprover, launchEscalationHandler, loadMasterConfig, saveProducerProfile, setupMaster, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
@@ -323,7 +324,7 @@ test('unit:agentless-pane-sweep — the sweep closes only the agentless panes Gr
   try {
     const local = config.hostId;
     const live = { owner: 'worker-a', epoch: 3, expiresAt: new Date(clockStart + 450_000).toISOString() } as Work['lease'];
-    const bulk = Array.from({ length: 8 }, (_, index) =>
+    const bulk = Array.from({ length: 12 }, (_, index) =>
       item(`GY-${10 + index}`, {}, [handle({ id: `rev-bulk-${index}`, kind: 'review', pane: `pane-bulk-${index}`, host: local, state: 'finished' })]));
     // A remote host's finished handle that names this host's foreign pane coordinate: the map that
     // matches recorded panes is local, so this must never make the operator's own shell closable,
@@ -338,8 +339,9 @@ test('unit:agentless-pane-sweep — the sweep closes only the agentless panes Gr
       item('GY-3', { stage: 'build' }, [handle({ id: 'proof-1', kind: 'proof', pane: 'pane-deleted', host: local })]),
       // Fresh: its runtime is still on screen in the first cycle and only exits before the second.
       item('GY-4', {}, [handle({ id: 'rev-2', kind: 'review', pane: 'pane-fresh', host: local, state: 'finished' })]),
-      // A finished session whose pane still holds its agent (idle at a prompt): never the sweep's.
-      item('GY-5', {}, [handle({ id: 'rev-3', kind: 'review', pane: 'pane-live-agent', host: local, state: 'finished' })]),
+      // A running session whose pane holds its agent (idle at a prompt): never the sweep's. A
+      // finished one is closed after its grace (GY-980, unit:sweep-closes-finished-agent-panes).
+      item('GY-5', {}, [handle({ id: 'rev-3', kind: 'review', pane: 'pane-live-agent', host: local })]),
       remoteCollision,
       ...bulk,
     ];
@@ -377,17 +379,17 @@ test('unit:agentless-pane-sweep — the sweep closes only the agentless panes Gr
     // Inside the launch bound nothing closes yet.
     await runCycle(config, state, base(agentsAt(false), clockStart + 60_000), () => clockStart + 60_000);
     assert.equal(closed.length, 0, 'nothing closes within the launch bound of its sighting');
-    // The fresh pane's runtime exits now: its own bound starts here.
+    // Past the bound of their first sighting the first pass closes; the fresh pane's runtime exits
+    // only now, so its own bound starts here.
     await runCycle(config, state, base(agentsAt(true), clockStart + 130_000), () => clockStart + 130_000);
-    assert.equal(closed.length, 0, 'nor has the fresh pane stood agentless past it');
-    await runCycle(config, state, base(agentsAt(true), clockStart + 260_000), () => clockStart + 260_000);
     const firstPass: string[] = [...closed];
     assert.ok(firstPass.includes('pane-ended') && firstPass.includes('pane-deleted'), 'the ended launched panes close');
-    assert.equal(firstPass.length, 6, 'the pass is bounded at six closes');
+    assert.equal(firstPass.length, paneSweepLimit, `the pass is bounded at ${paneSweepLimit} closes`);
     assert.ok(!firstPass.includes('pane-fresh'), 'the fresh pane was only just seen agentless');
     assert.ok(!firstPass.includes('pane-live-lease') && !firstPass.includes('pane-live-agent') && !firstPass.includes('pane-foreign'),
       'a pane whose worktree holds a live lease, a pane with an agent, and a pane Graphyard did not launch never close');
     // The rest of the backlog drains on the next cycle, the fresh pane with it.
+    await runCycle(config, state, base(agentsAt(true), clockStart + 260_000), () => clockStart + 260_000);
     await runCycle(config, state, base(agentsAt(true), clockStart + 390_000), () => clockStart + 390_000);
     assert.deepEqual(closed.filter(pane => pane === 'pane-ended').length, 1, 'a pane is closed exactly once');
     assert.deepEqual([...new Set(closed)].sort(), standing.filter(pane => !['pane-live-lease', 'pane-live-agent', 'pane-foreign'].includes(pane)).sort(),
@@ -397,20 +399,189 @@ test('unit:agentless-pane-sweep — the sweep closes only the agentless panes Gr
     // pass starts its bound and the next one takes it, like any first sighting.
     await runCycle(config, state, base(agentsAt(true), clockStart + 520_000), () => clockStart + 520_000);
     assert.ok(!closed.includes('pane-live-lease'), 'the lapsed pane was first seen agentless only now: its own bound starts');
+    // The sighting is a wait, not an interrupted request, so the cycle's reconciliation leaves its
+    // bound alone (GY-980): the next pass takes it, and the drain lands on the record with it.
     await runCycle(config, state, base(agentsAt(true), clockStart + 650_000), () => clockStart + 650_000);
-    // A pending close request the cycle left standing is resumed as interrupted, which restarts
-    // its bound: one more pass takes it, and the drain lands on the record with it.
-    assert.ok(!closed.includes('pane-live-lease'), 'the resumed close request stands its bound again');
-    await runCycle(config, state, base(agentsAt(true), clockStart + 780_000), () => clockStart + 780_000);
     assert.ok(closed.includes('pane-live-lease'), 'the pane whose lease lapsed is closable: the lease, not the pane, was the protection');
     const status = state.actions['sweep:panes:status'];
     assert.ok(status, 'the sweep records what the host holds');
-    assert.match(status!.detail, /Herdr reports 2 pane\(s\) on this host, 13 opened by Graphyard launch\(es\), 0 standing agentless; the backlog has drained/,
+    assert.match(status!.detail, /Herdr reports 2 pane\(s\) on this host, 17 opened by Graphyard launch\(es\), 0 standing agentless; the backlog has drained/,
       `the drained status is the one that stands (${status?.detail})`);
     assert.doesNotMatch(status!.detail, /the oldest is pane/, 'no oldest pane outlives the drain');
     assert.ok(!state.actions['sweep:panes:attention'], 'no attention under the bound');
     // A close that never happened cannot have been recorded: the cursor holds one close per pane.
-    assert.equal(Object.keys(state.actions).filter(key => key.startsWith('sweep:pane:') && state.actions[key].state === 'done').length, 12, 'twelve sweep closes stand on the cursor');
+    assert.equal(Object.keys(state.actions).filter(key => key.startsWith('sweep:pane:') && state.actions[key].state === 'done').length, 16, 'sixteen sweep closes stand on the cursor');
+  } finally { await cleanup(); }
+});
+
+/** The loop's effects around a fixed Herdr inventory: every close is logged, and a closed pane leaves the inventory. */
+function sweepEffects(work: () => Work[], inventory: () => HerdrAgent[], closed: string[], at: number): DaemonEffects {
+  const agents = inventory().filter(agent => !closed.includes(agent.pane_id!));
+  return {
+    agents: () => agents, credentials: async () => ({}),
+    snapshot: async () => ({ work: work().map(entry => ({ ...entry })), now: new Date(at).toISOString() }),
+    closeSession: pane => { closed.push(pane); },
+    herdr: async () => ({ agents, available: true }),
+    panes: async () => ({ panes: agents.map(agent => ({ pane_id: agent.pane_id })), available: true }),
+    persist: async () => {}, recordSession: async () => {}, dispatch: async () => {}, requestProof: () => {},
+    merge: async () => ({ result: 'merged', merged: true }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {},
+  } as DaemonEffects;
+}
+
+// GY-980: on 30 September 2026 Herdr held 85 panes the GY-842 sweep never took — bare shells in
+// .graphyard/worktrees whose launch's runtime exited at start, whose handle stayed 'running', or
+// whose pane was never recorded, and idle finished agents nothing tracked any more.
+test('unit:sweep-closes-unrecorded-worktree-shells — agentless shells in Graphyard worktrees close past the launch bound whatever their record says, never under the exact item and epoch\'s live lease nor outside the worktrees, and a backlog of 300 drains within an hour', async () => {
+  const { config, cleanup } = await launchedMaster();
+  try {
+    const local = config.hostId;
+    const lease = (epoch: number, expiresAt: number) => ({ owner: 'worker-a', epoch, expiresAt: new Date(expiresAt).toISOString() }) as Work['lease'];
+    const work = [
+      // Never recorded: the pane's launch wrote no handle, and its item holds no lease.
+      item('GY-20', { stage: 'build' }),
+      // Stuck 'running': the handle never ended, while the lease it ran under expired.
+      item('GY-22', { stage: 'build', lease: lease(2, clockStart - 60_000) }, [handle({ id: 'worker-a:2', kind: 'implementation', epoch: 2, host: local, pane: 'pane-stuck' })]),
+      // Live: epoch 5's lease stands for the whole test; epoch 4's worktree is another attempt's.
+      item('GY-23', { stage: 'build', lease: lease(5, clockStart + 24 * 3_600_000) }),
+      // A running session recorded outside the worktrees (a review checkout): not the sweep's.
+      item('GY-25', {}, [handle({ id: 'rev-25', kind: 'review', host: local, pane: 'pane-recorded-outside' })]),
+      // An ended session recorded outside the worktrees, even one whose checkout is gone: never the
+      // sweep's, for AC-1 closes no pane whose cwd is outside .graphyard/worktrees.
+      item('GY-26', {}, [handle({ id: 'rev-26', kind: 'review', host: local, pane: 'pane-ended-outside', state: 'finished' })]),
+      item('GY-27', {}, [handle({ id: 'rev-27', kind: 'review', host: local, pane: 'pane-ended-outside-deleted', state: 'finished' })]),
+    ];
+    const inventory: HerdrAgent[] = [
+      { name: 'shell-unrecorded', pane_id: 'pane-unrecorded', agent_status: 'unknown', cwd: `${worktrees}/GY-20-3` },
+      // An item the snapshot no longer holds at all (delivered and gone from the read).
+      { pane_id: 'pane-unknown-item', agent_status: 'unknown', cwd: `${worktrees}/GY-21-9` },
+      { name: 'graphyard-cursor-1', pane_id: 'pane-stuck', agent_status: 'unknown', cwd: `${worktrees}/GY-22-2/src` },
+      { pane_id: 'pane-old-epoch', agent_status: 'unknown', cwd: `${worktrees}/GY-23-4` },
+      { pane_id: 'pane-leased', agent_status: 'unknown', cwd: `${worktrees}/GY-23-5` },
+      { pane_id: 'pane-leased-subdirectory', agent_status: 'unknown', cwd: `${worktrees}/GY-23-5/tests` },
+      { pane_id: 'pane-coordinator', agent_status: 'unknown', cwd: '/repo' },
+      { pane_id: 'pane-home', agent_status: 'unknown', cwd: '/home/vish' },
+      { pane_id: 'pane-lookalike', agent_status: 'unknown', cwd: '/repo/worktrees/GY-24-1' },
+      { pane_id: 'pane-no-cwd', agent_status: 'unknown' },
+      { pane_id: 'pane-recorded-outside', agent_status: 'unknown', cwd: '/repo/.graphyard/checkouts/review-25' },
+      { pane_id: 'pane-ended-outside', agent_status: 'unknown', cwd: '/repo/.graphyard/reviews/GY-26' },
+      { pane_id: 'pane-ended-outside-deleted', agent_status: 'unknown', cwd: '/repo/.graphyard/reviews/GY-27 (deleted)' },
+    ];
+    const closed: string[] = [];
+    const state = emptyDaemonState(config);
+    const pass = (at: number) => runCycle(config, state, sweepEffects(() => work, () => inventory, closed, at), () => at);
+    await pass(clockStart);
+    assert.deepEqual(closed, [], 'nothing closes on first sight: a runtime not yet started looks the same');
+    await pass(clockStart + 60_000);
+    assert.deepEqual(closed, [], 'nothing closes inside the launch bound');
+    await pass(clockStart + 200_000);
+    assert.deepEqual([...closed].sort(), ['pane-old-epoch', 'pane-stuck', 'pane-unknown-item', 'pane-unrecorded'],
+      'the unrecorded shells and the one whose handle stuck running under an expired lease close; the live lease\'s exact epoch keeps its panes');
+    for (let at = clockStart + 330_000; at <= clockStart + 900_000; at += 130_000) await pass(at);
+    // The stuck handle's session is then ended by the loop's own implementation-session step
+    // (1g), whose close of the already-gone pane is that step's; the sweep closes each pane once.
+    assert.deepEqual([...new Set(closed)].sort(), ['pane-old-epoch', 'pane-stuck', 'pane-unknown-item', 'pane-unrecorded'],
+      'no pane outside .graphyard/worktrees, nor under the live lease, is ever closed');
+    assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('sweep:pane:') && state.actions[key].state === 'done').sort(),
+      ['sweep:pane:pane-old-epoch', 'sweep:pane:pane-stuck', 'sweep:pane:pane-unknown-item', 'sweep:pane:pane-unrecorded'], 'the sweep closed each once');
+    assert.match(state.actions['sweep:pane:pane-unrecorded'].detail, /GY-20 epoch 3, which holds no live lease and no Graphyard session recorded it/);
+    assert.match(state.actions['sweep:pane:pane-stuck'].detail, /implementation session worker-a:2 is still recorded running/);
+
+    // A sighting whose pane stops being a candidate — closed by another step or by hand — leaves no
+    // waiting row behind, and a later pane at that coordinate waits out its own bound.
+    const transient: HerdrAgent[] = [{ pane_id: 'pane-transient', agent_status: 'unknown', cwd: `${worktrees}/GY-20-3` }];
+    let standing = transient;
+    const sighted = emptyDaemonState(config), transientClosed: string[] = [];
+    const sweep = (at: number) => runCycle(config, sighted, sweepEffects(() => [], () => standing, transientClosed, at), () => at);
+    await sweep(clockStart);
+    assert.equal(sighted.actions['sweep:pane:pane-transient']?.state, 'waiting', 'the first sighting waits');
+    standing = [];
+    await sweep(clockStart + 60_000);
+    assert.ok(!Object.keys(sighted.actions).some(key => key.startsWith('sweep:pane:')), 'a pane gone from the candidates leaves no waiting row');
+    standing = transient;
+    await sweep(clockStart + 200_000);
+    assert.deepEqual(transientClosed, [], 'a pane sighted again starts its bound over');
+    await sweep(clockStart + 330_000);
+    assert.deepEqual(transientClosed, ['pane-transient'], 'and closes once that bound passes');
+
+    // AC-3: a backlog of 300 agentless worktree shells drains within an hour at the default interval,
+    // and at two-minute cycles too: the cycle's reconciliation of pending actions must not restart
+    // the bound the first sighting started, which would cost the drain a cycle.
+    const backlog: HerdrAgent[] = Array.from({ length: 300 }, (_, index) => ({ pane_id: `pane-backlog-${index}`, agent_status: 'unknown', cwd: `${worktrees}/GY-${1000 + index}-${1 + index % 7}` }));
+    for (const intervalMs of [config.run.intervalSeconds * 1000, 120_000]) {
+      const drained: string[] = [], fresh = emptyDaemonState(config);
+      let at = clockStart, cycles = 0, last = clockStart;
+      while (drained.length < backlog.length && at - clockStart <= 60 * 60_000) {
+        const before = drained.length;
+        await runCycle(config, fresh, sweepEffects(() => [], () => backlog, drained, at), () => at);
+        assert.ok(drained.length - before <= paneSweepLimit, `one pass closes at most ${paneSweepLimit}`);
+        last = at; at += intervalMs; cycles += 1;
+      }
+      assert.equal(new Set(drained).size, 300, `all 300 closed, each once, within the hour (${cycles} cycles of ${intervalMs / 1000}s)`);
+      assert.equal(drained.length, 300);
+      // The first pass past the bound of the first sighting closes, and every pass after it closes
+      // a full limit: no cycle is lost to a restarted bound.
+      const firstClose = Math.ceil(launchAppearanceMs / intervalMs) * intervalMs, passes = Math.ceil(backlog.length / paneSweepLimit);
+      assert.equal(last - clockStart, firstClose + (passes - 1) * intervalMs, `drained in ${passes} closing passes from the first one past the bound (${intervalMs / 1000}s cycles)`);
+      assert.ok(last - clockStart <= 55 * 60_000, `drained in ${(last - clockStart) / 60_000} minutes at ${intervalMs / 1000}s cycles, with margin inside the hour`);
+    }
+  } finally { await cleanup(); }
+});
+
+test('unit:sweep-closes-finished-agent-panes — an agent pane named for a Graphyard session that ended, whose item and epoch hold no live lease, closes after its grace; an agent under a live lease never does', async () => {
+  const { config, cleanup } = await launchedMaster();
+  try {
+    const local = config.hostId;
+    const live = { owner: 'worker-a', epoch: 4, expiresAt: new Date(clockStart + 24 * 3_600_000).toISOString() } as Work['lease'];
+    const work = [
+      // A GY-795-like opencode session: its attempt ended, its agent still idles in the pane.
+      item('GY-30', { stage: 'review' }, [handle({ id: 'worker-b:7', kind: 'implementation', principal: 'worker-b', epoch: 7, host: local, pane: 'pane-finished-worker', agentName: 'graphyard-opencode-2', state: 'finished' })]),
+      // An old PR reviewer whose session finished and whose item holds no lease.
+      item('GY-31', {}, [handle({ id: 'rev-31', kind: 'review', host: local, pane: 'pane-finished-reviewer', agentName: 'review-claude-1', state: 'finished' })]),
+      // A working agent under the live lease of its epoch, even with a stale finished handle.
+      item('GY-32', { stage: 'build', lease: live }, [handle({ id: 'worker-a:4', kind: 'implementation', epoch: 4, host: local, pane: 'pane-working', agentName: 'graphyard-claude-1', state: 'finished' })]),
+      // The same live lease, its session running as recorded.
+      item('GY-33', { stage: 'build', lease: live }, [handle({ id: 'worker-a:4b', kind: 'implementation', epoch: 4, host: local, pane: 'pane-working-running', agentName: 'graphyard-claude-2' })]),
+      // A reviewer still running on the record: not ended, never closed.
+      item('GY-34', {}, [handle({ id: 'rev-34', kind: 'review', host: local, pane: 'pane-running-reviewer', agentName: 'review-claude-2' })]),
+      // The pane now carries another session's name than the ended one recorded on it.
+      item('GY-35', {}, [handle({ id: 'rev-35', kind: 'review', host: local, pane: 'pane-renamed', agentName: 'review-claude-3', state: 'finished' })]),
+      // Another host's finished handle naming a local pane coordinate.
+      item('GY-36', {}, [handle({ id: 'rev-36', kind: 'review', host: 'machine-b', pane: 'pane-remote', state: 'finished' })]),
+      // An ended handle that recorded no agent name, its pane coordinate reused by a live agent
+      // working under another item's live lease: the handle names nobody, so the agent is not its.
+      item('GY-38', {}, [handle({ id: 'rev-38', kind: 'review', host: local, pane: 'pane-reused', state: 'finished' })]),
+      item('GY-39', { stage: 'build', lease: live }, []),
+      // An ended handle that did record a name, its pane now holding an agent Herdr reports unnamed.
+      item('GY-40', {}, [handle({ id: 'rev-40', kind: 'review', host: local, pane: 'pane-unnamed-agent', agentName: 'review-claude-4', state: 'finished' })]),
+    ];
+    const inventory: HerdrAgent[] = [
+      { name: 'graphyard-opencode-2', pane_id: 'pane-finished-worker', agent: 'opencode', agent_status: 'idle', cwd: `${worktrees}/GY-30-7` },
+      { name: 'review-claude-1', pane_id: 'pane-finished-reviewer', agent: 'claude', agent_status: 'idle', cwd: '/repo/.graphyard/checkouts/review-31' },
+      { name: 'graphyard-claude-1', pane_id: 'pane-working', agent: 'claude', agent_status: 'working', cwd: `${worktrees}/GY-32-4` },
+      { name: 'graphyard-claude-2', pane_id: 'pane-working-running', agent: 'claude', agent_status: 'working', cwd: '/elsewhere' },
+      { name: 'review-claude-2', pane_id: 'pane-running-reviewer', agent: 'claude', agent_status: 'idle', cwd: '/repo/.graphyard/checkouts/review-34' },
+      { name: 'review-claude-9', pane_id: 'pane-renamed', agent: 'claude', agent_status: 'idle', cwd: '/repo/.graphyard/checkouts/review-35' },
+      { name: 'operator-claude', pane_id: 'pane-remote', agent: 'claude', agent_status: 'idle', cwd: '/home/vish' },
+      // An agent Graphyard never recorded, even in a lease-less worktree, is named for no Graphyard session.
+      { name: 'someone', pane_id: 'pane-unrecorded-agent', agent: 'claude', agent_status: 'idle', cwd: `${worktrees}/GY-37-1` },
+      { name: 'graphyard-claude-3', pane_id: 'pane-reused', agent: 'claude', agent_status: 'working', cwd: '/elsewhere/GY-39' },
+      { pane_id: 'pane-unnamed-agent', agent: 'claude', agent_status: 'idle', cwd: '/repo/.graphyard/checkouts/review-40' },
+    ];
+    const closed: string[] = [];
+    const state = emptyDaemonState(config);
+    const pass = (at: number) => runCycle(config, state, sweepEffects(() => work, () => inventory, closed, at), () => at);
+    await pass(clockStart);
+    assert.deepEqual(closed, [], 'nothing closes on first sight');
+    await pass(clockStart + 30_000);
+    assert.deepEqual(closed, [], 'nothing closes inside the grace');
+    await pass(clockStart + 100_000);
+    assert.deepEqual([...closed].sort(), ['pane-finished-reviewer', 'pane-finished-worker'], 'the ended sessions\' idle agents close after their grace');
+    for (let at = clockStart + 200_000; at <= clockStart + 800_000; at += 100_000) await pass(at);
+    assert.deepEqual([...closed].sort(), ['pane-finished-reviewer', 'pane-finished-worker'],
+      'a working agent under a live lease, a running session, a renamed pane, another host\'s record, an unrecorded agent, and an agent in a pane whose ended handle or whose agent carries no name are never closed');
+    assert.match(state.actions['sweep:pane:pane-finished-worker'].detail, /implementation session worker-b:7 is finished and GY-30 epoch 7 holds no live lease/);
   } finally { await cleanup(); }
 });
 

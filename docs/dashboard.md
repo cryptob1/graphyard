@@ -21,7 +21,7 @@ Running rows: **Copy local** (launching host) `herdr agent attach w1V:pJD`; **Co
 
 ## Settings › Agents
 
-**Can launch now?** per role; **Accounts** by provider plan, each with one state chip (Disabled, No role, Spent, Launch failing, Unavailable, Working, Idle).
+**Can launch now?** is one line of role chips (each chip's title names its next account), plus one line per role that cannot launch, with its reason and earliest time. **Accounts** is one row per account, ordered working, idle, then out of work, each with one state chip (Disabled, No role, Spent, Launch failing, Unavailable, Working, Idle) and a **Usage** column (bar and percent, reset on hover; a muted — when unreported). Only a plan shared by two or more accounts keeps a header row. **Why** shows live work or a refusal, never what Roles, Back or Usage already say. Spent accounts back on the same day collapse into one *4 spent until Oct 8* row that opens on click. Preference order and launch policy sit behind **Roles (N)**.
 
 ## The status sentence
 

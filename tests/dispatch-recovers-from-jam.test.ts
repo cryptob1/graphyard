@@ -21,8 +21,12 @@ const profile = (index: number): WorkerProfile => ({
   mode: 'launch', kind: 'claude', credentialFile: `/srv/credentials/worker-${index}.token`, agentArgs: [], approvals: 'auto', environment: {},
 } as unknown as WorkerProfile);
 const profiles = Array.from({ length: jamSize }, (_, index) => profile(index));
-/** The Herdr inventory of the jam: every profile's session, attempt ended, runtime still listed. */
-const jamAgents = (): HerdrAgent[] => profiles.map(({ agentName }) => ({ name: agentName, pane_id: `pane-${agentName}`, agent_status: 'done' }));
+/**
+ * The Herdr inventory of the jam: every profile's session, attempt ended, runtime still running.
+ * A runtime that is idle or done instead no longer holds its profile (GY-1322): the dispatch
+ * closes it, so only a session Herdr still reports working jams the fleet.
+ */
+const jamAgents = (): HerdrAgent[] => profiles.map(({ agentName }) => ({ name: agentName, pane_id: `pane-${agentName}`, agent_status: 'working' }));
 
 function item(key: string, overrides: Partial<Work> = {}): Work {
   return {
@@ -109,8 +113,8 @@ test('unit:dispatch-recovers-from-jam — the launcher gate names every ended-se
   const held = health(jamAgents());
   assert.deepEqual(held.map(entry => entry.healthy), profiles.map(() => false), 'no profile can take work while its ended session still holds its name');
   const refusal = `no worker profile can take GY-894: ${held.map(entry => `${entry.profile.name} (${entry.reason})`).join('; ')}`;
-  assert.match(refusal, /^no worker profile can take GY-894: worker-0 \(Herdr agent graphyard-worker-0 is done\)/);
-  for (const entry of profiles) assert.match(refusal, new RegExp(`${entry.name} \\(Herdr agent ${entry.agentName} is done\\)`));
+  assert.match(refusal, /^no worker profile can take GY-894: worker-0 \(Herdr agent graphyard-worker-0 is working\)/);
+  for (const entry of profiles) assert.match(refusal, new RegExp(`${entry.name} \\(Herdr agent ${entry.agentName} is working\\)`));
 
   // The recovery: the same gate, once the ended sessions' names have left Herdr.
   const freed = health([]);
