@@ -32,8 +32,11 @@ export const staleWriteAttempts = 4;
 /**
  * Take one item's transaction lock (GY-1124), keyed by its number in the item lock's own space, so
  * an id, a `GY-N` key and a number name the same lock. An item that does not exist yet (or never
- * will) is locked by its name, which still serialises every command naming it.
+ * will) is locked by its name, which still serialises every command naming it. Names hash into a
+ * space of their own (GY-1276), so an unknown name never shares a lock with a real item's number.
+ * Only an id or a non-numeric key costs a lookup; a number or `GY-N` key is keyed directly.
  */
+const itemNameLock = -advisoryLocks.item;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export async function lockItem(db: pg.PoolClient, item: string | number): Promise<void> {
@@ -41,5 +44,5 @@ export async function lockItem(db: pg.PoolClient, item: string | number): Promis
     : uuidPattern.test(String(item)) ? (await db.query('SELECT number FROM work_items WHERE id=$1::uuid LIMIT 1', [item])).rows[0]?.number
     : (await db.query('SELECT number FROM work_index WHERE key=$1 ORDER BY number LIMIT 1', [item])).rows[0]?.number;
   if (number !== undefined) await db.query('SELECT pg_advisory_xact_lock($1, $2::int)', [advisoryLocks.item, Number(number)]);
-  else await db.query('SELECT pg_advisory_xact_lock($1, hashtext($2))', [advisoryLocks.item, String(item)]);
+  else await db.query('SELECT pg_advisory_xact_lock($1, hashtext($2))', [itemNameLock, String(item)]);
 }
