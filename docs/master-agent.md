@@ -56,7 +56,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ### The pipeline doctor
 
-The loop's [doctor](onboarding.md#the-pipeline-doctor-on-by-default) runs every `run.doctor.intervalMinutes` (default 10).
+Every `run.doctor.intervalMinutes` (default 10) the loop runs the [doctor](onboarding.md#the-pipeline-doctor-on-by-default) on stuck work, sanctioned commands only (`scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`), never merge, dispatch, evidence or leases. Off: `run.doctor.enabled=false`.
 
 ## Research and diagnosis
 

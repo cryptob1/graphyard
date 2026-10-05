@@ -9,7 +9,7 @@ import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
 import { containmentPhase, type MasterConfig } from '../master.js';
 import { selectFleetSession } from '../fleet.js';
-import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
+import { registryHeadlessLaunch, registryRunner, runConfinement } from '../runner/roles.js';
 import { piRunner } from '../runner/pi.js';
 import { doctorActionSchema, doctorFindingsSchema, doctorFiledSchema, doctorRunRecordSchema, type DoctorAction, type DoctorFinding, type DoctorFiled, type DoctorPendingFile, type DoctorRunRecord } from './state.js';
 import { doctorSettingsSchema, type DoctorSettings } from '../master/doctor-settings.js';
@@ -93,7 +93,7 @@ export const doctorEffects = (config: MasterConfig, root: string, post: Operator
         }
       }
       const model = attempt === 'primary' ? settings.model : settings.fallbackModel;
-      return { runner: piRunner({ command: settings.command, model, args: [...doctorSessionArgs] }), runtime: 'pi', model };
+      return { runner: piRunner({ command: settings.command, model, args: [...doctorSessionArgs], confine: runConfinement() }), runtime: 'pi', model };
     },
     file: (input, key) => post('POST', 'work', input, key) as Promise<Work>,
     recordRun: run => post('POST', 'doctor', run),
