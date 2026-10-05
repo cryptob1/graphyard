@@ -1,5 +1,5 @@
 import { documentationGlobMatches } from './documentation-glob.js';
-import { companionGround as recordCompanionGround } from './scope-companions.js';
+import { companionGround as recordCompanionGround, timingBaseline } from './scope-companions.js';
 export { plannedCompanions } from './scope-companions.js';
 import { addsTestFile, timingBaselinePath } from './timing-companion.js';
 import { type CollapsedScope, collapseArea, collapsePlannedFiles, describeWidening, plannedFilesCovered, routableScopeRequest, terminalScopeRefusal } from './scope-collapse.js';
@@ -157,11 +157,14 @@ export const plannedFilesMax = 100;
  * The companion ground a requested path stands on (GY-955), with the timing baseline held to the
  * merge gate's own rule (GY-1187): the baseline is a companion only of a test file it times — a
  * top-level tests/*.test.ts, or the tests/ scope — never a nested or browser test, whose line
- * `timingBaselineCompanion` refuses, so granting it would promise a write the gate rejects.
+ * `timingBaselineCompanion` refuses, so granting it would promise a write the gate rejects. The rule
+ * holds for every spelling `timingBaseline` recognises (GY-1263): the gate judges lines only at
+ * `timingBaselinePath`, so a baseline anywhere else (test/timing_baseline.json) is no companion at all.
  */
 export function companionGround(...args: Parameters<typeof recordCompanionGround>): string | null {
   const [path, item, ask] = args;
-  if (path !== timingBaselinePath) return recordCompanionGround(...args);
+  if (!timingBaseline(path)) return recordCompanionGround(...args);
+  if (path !== timingBaselinePath) return null;
   const timed = [...ask, ...(item.plannedFiles ?? [])].find(entry => entry !== path && addsTestFile({ plannedFiles: [entry] }));
   return timed ? `${path} is the test-duration baseline a change to ${timed} must keep covering` : null;
 }
