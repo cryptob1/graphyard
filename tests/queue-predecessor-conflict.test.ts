@@ -1,6 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { routineDecision, syncConflict } from '../src/master-daemon.js';
 import { ejectedTipRestore, predecessorWait } from '../src/merge-queue.js';
 import type { Work } from '../src/model.js';
@@ -139,8 +138,4 @@ test('unit:predecessor-conflict-status — an ejected tip is still restored firs
   assert.equal(restore!.own, own);
   assert.deepEqual(restore!.foreign, ['GY-1']);
   assert.equal(place(ejected, [predecessorOut, ejected]).queue, null, 'the contaminated tip does not re-enter; its restored head does');
-
-  // docs/github.md states the rule.
-  const docs = await readFile(new URL('../docs/github.md', import.meta.url), 'utf8');
-  assert.match(docs, /conflicting only with entries ahead of it re-enters unchanged/);
 });

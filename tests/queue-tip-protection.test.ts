@@ -466,10 +466,10 @@ test('integration:contaminated-branch-repaired — a branch already carrying ano
   assert.match(buildMasterStatus({ work: [stuck, foreign], now: new Date().toISOString() }, [], []).work.find(entry => entry.key === stuck.key)!.attentionOwner!.next, new RegExp(`graphyard master decide ${stuck.key} rework REASON`));
 });
 
-test('manual:queue-tip-protection-docs-review — docs/ states how speculative tips interact with branch protection, why an approval must survive a publication, what a merge-base dismissal means, and how a contaminated branch is repaired', async () => {
+test('manual:queue-tip-protection-docs-review — docs/ states how base refreshes interact with branch protection, why an approval must survive a refresh, what a merge-base dismissal means, and how a contaminated branch is repaired', async () => {
   const guide = await readMasterGuide();
-  assert.match(guide, /### Speculative tips and branch protection/);
-  assert.match(guide, /\*\*An approval must survive a tip publication\.\*\*/);
+  assert.match(guide, /### Base refreshes and branch protection/);
+  assert.match(guide, /\*\*An approval must survive a base refresh\.\*\*/);
   assert.match(guide, /\*\*A merge-base dismissal is not a reviewer withdrawing a verdict\.\*\*/);
   assert.match(guide, /The merge-base changed after approval/);
   assert.match(guide, /\*\*A branch must never keep another item's unlanded commits\.\*\*/);

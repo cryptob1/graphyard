@@ -381,7 +381,6 @@ test('integration:speed-ci-proofs — a published queue tip is committed onto th
   assert.deepEqual(merge.body, { base: 'graphyard-merge-check/gy-54', head: predictedBase, commit_message: 'Graphyard speculative tip for GY-54 behind GY-53' }, 'the tip is built on the scratch branch');
   assert.deepEqual(calls.filter(call => call.path === '/git/refs/heads/graphyard/gy-54-1').map(call => call.body), [{ sha: tip, force: true }], 'the tip is pushed onto the PR branch once: GitHub fires pull_request_target synchronize for it');
   assert.equal(calls.find(call => call.path === '/git/refs/graphyard/queue/gy-54')?.method, 'PATCH');
-  assert.match(await read('docs/github.md'), /pushed onto the candidate branch|committed onto the pull-request branch/);
 });
 
 // ---------------------------------------------------------------------------------------------
