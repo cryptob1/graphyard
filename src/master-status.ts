@@ -22,7 +22,7 @@ import { consentHoldItems } from './cli/consent-holds.js';
 import { untriagedAttention } from './triage.js';
 import { backlogCounts } from './model/machine-backlog.js';
 import { setupHealth } from './cli/master-setup.js';
-import { attributionFor, describeReading, loadedRevision, owedUpgrade, readDisk, readPlaneResources, readReclaimState, readResources, readTmpInodes, resourceAttention, type ResourceInputs, type ResourceReading } from './master-resources.js';
+import { attributionFor, describeReading, loadedRevision, owedUpgrade, readDisk, readPlaneResources, readReclaimState, readResources, readTmpInodes, resourceAttention, type ResourceReading } from './master-resources.js';
 
 /**
  * A launch refused by a full session ledger is attributed to that ledger (GY-131).
@@ -122,7 +122,7 @@ function attentionLaunchKind(text: string): LedgerKind | null {
  */
 export async function resourceStatus(root: string, master: MasterConfig, observed: {
   reviews: ReviewRecord[] | null; producers: ProducerRecord[] | null; agents: HerdrAgent[] | null; work: Work[];
-  loop: (NonNullable<ResourceInputs['loop']> & { lock: { pid: number; host: string } | null }) | null;
+  loop: { lagMs: number | null; stalledAfterMs: number; detail: string; lock: { pid: number; host: string } | null } | null;
 }, deps: { fetcher?: typeof fetch; run?: (command: string, args: string[]) => string; now?: number; cursor?: () => Promise<Parameters<typeof owedUpgrade>[0]> } = {}) {
   const now = deps.now ?? Date.now();
   const lock = observed.loop?.lock;
