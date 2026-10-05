@@ -639,6 +639,46 @@ test('unit:coordinator-checkout-drift-detected — the loop\u2019s own alignment
   } finally { await fixture.cleanup(); }
 });
 
+for (const ending of ['failed', 'threw', 'foreign'] as const) {
+  test(`unit:coordinator-checkout-drift-detected — an alignment that moves HEAD and then ${ending === 'threw' ? 'throws' : 'fails'} ${ending === 'foreign' ? 'to a commit its cursor does not name is still drift' : 'is not reported as drift on the next cycle'}`, async () => {
+    const fixture = await installed();
+    try {
+      const { config, cleanup } = fixture;
+      let phase = 0;
+      const stop = { fire: () => {} };
+      const fakeProcess = { on: (event: string, handler: () => void) => { if (event === 'SIGTERM') stop.fire = handler; }, off: () => {} } as unknown as NodeJS.Process;
+      // reads 1-2 are the startup read and cycle 1's guard at the loaded commit; from read 3 on the
+      // checkout stands at C2, where the alignment checked it out before its restart failed.
+      const checkout = async () => { phase++; return { root: fixture.root, commit: phase <= 2 ? C1 : C2, modified: [] as string[], untracked: [] as string[] }; };
+      let alignments = 0;
+      const state = emptyDaemonState(config);
+      const effects = loopEffects([], { selfUpgrade: async (current: typeof state) => {
+        alignments++;
+        if (alignments === 1) {
+          // performSelfUpgrade records the cursor and checks out before the restarts it can fail.
+          if (ending !== 'foreign') current.upgrade.last = { at: new Date().toISOString(), from: C1, to: C2, code: true, executors: 'restarted', self: false };
+          if (ending === 'threw') throw new Error('the self restart could not be made');
+          return { outcome: 'failed' as const, reason: 'the loop restart is unavailable outside the graphyard-master unit' };
+        }
+        return { outcome: 'skipped' as const, reason: 'already aligned' };
+      } });
+      const stopTimer = setTimeout(() => stop.fire(), 40);
+      await runDaemon(config, state, effects, { intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGTERM'], process: fakeProcess, checkout, log: () => {} });
+      clearTimeout(stopTimer);
+      assert.ok(phase >= 4, 'the loop checked the coordinator checkout on later cycles');
+      const escalation = state.actions['escalation:dirty-checkout'];
+      if (ending === 'foreign') {
+        assert.ok(escalation, 'a HEAD the cursor does not name stays drift');
+        assert.match(escalation.detail, new RegExp(`moved from ${C1.slice(0, 12)} to ${C2.slice(0, 12)}`));
+      } else {
+        assert.equal(escalation, undefined, 'the alignment\u2019s own HEAD move raises no drift attention, whatever its restart answered');
+        assert.ok(alignments >= 2, 'later cycles offered the alignment again: nothing blocked it');
+      }
+      await cleanup();
+    } finally { await fixture.cleanup(); }
+  });
+}
+
 test('unit:coordinator-checkout-drift-detected — an executor refuses every claim on a dirty coordinator checkout, and runs once it is clean', async () => {
   const fixture = await installed();
   try {

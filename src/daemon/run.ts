@@ -409,12 +409,19 @@ export function coordinatorCheckoutGuard(deps: {
       try {
         upgraded = await selfUpgrade(deps.state());
         if (upgraded.outcome !== 'skipped') deps.log(`[graphyard-master] upgrade ${describeSelfUpgrade(upgraded)}`);
-        // A pending upgrade has moved the checkout too: only the restarts it owes wait (GY-916).
-        if (upgraded.outcome === 'upgraded' || upgraded.outcome === 'up-to-date' || upgraded.outcome === 'pending') {
-          const aligned = await deps.read();
-          if (aligned.commit) expectedHead = aligned.commit;
-        }
       } catch (error) { deps.log(`[graphyard-master] upgrade failed: ${message(error)}`); }
+      // The loop's own alignment is never foreign drift. A pending upgrade has moved the checkout too:
+      // only the restarts it owes wait (GY-916). An upgrade that failed, or threw, after its checkout
+      // (an executor or self restart it could not make) still left HEAD at the target its cursor
+      // records, so that HEAD is adopted as well; any other HEAD stays drift for the next cycle.
+      if (upgraded?.outcome !== 'skipped') {
+        const sanctioned = upgraded?.outcome === 'upgraded' || upgraded?.outcome === 'up-to-date' || upgraded?.outcome === 'pending';
+        const cursor = deps.state().upgrade, targets = [cursor?.pending?.to, cursor?.last?.to];
+        try {
+          const aligned = await deps.read();
+          if (aligned.commit && (sanctioned || targets.includes(aligned.commit))) expectedHead = aligned.commit;
+        } catch { /* the next cycle's read reports what it finds */ }
+      }
       return { refusal: null, upgraded };
     },
     expected: () => expectedHead,
