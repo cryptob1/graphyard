@@ -99,8 +99,6 @@ export function decisionInput(action: string, work: Work, input: Record<string, 
   if (action === 'requirements') return { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies, plannedFiles: work.plannedFiles, exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], ...input };
   if ((action === 'merge' || action === 'attest') && work.candidate) return { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, ...(action === 'attest' ? { result: 'pass', executed: 1, skipped: 0, ...attestationExercise(work, input.proof) } : {}), ...input };
   if (action === 'rework' || action === 'recover') return { previousWorkerStopped: true, ...input };
-  // The repair lane (GY-406) binds the exact head it may merge.
-  if (action === 'repair-merge' && work.candidate) return { sha: work.candidate.sha, ...input };
   return input;
 }
 /**

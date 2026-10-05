@@ -1,6 +1,6 @@
 import { documentationGlobMatches } from './documentation-glob.js';
-import { companionGround as recordCompanionGround, timingBaseline } from './scope-companions.js';
-export { plannedCompanions } from './scope-companions.js';
+import { companionGround as recordCompanionGround, followUpPaths, timingBaseline, type FollowUpSource } from './scope-companions.js';
+export { followUpPaths, plannedCompanions } from './scope-companions.js';
 import { addsTestFile, timingBaselinePath } from './timing-companion.js';
 import { type CollapsedScope, collapseArea, collapsePlannedFiles, describeWidening, plannedFilesCovered, routableScopeRequest, terminalScopeRefusal } from './scope-collapse.js';
 // Deliberately bounded scope syntax: exact paths or directory prefixes ending /, /*, /**.
@@ -117,15 +117,16 @@ export const wellFormed = (path: string) => {
 export function namedPaths(text: string) {
   return [...new Set((text.match(pathToken) ?? []).map(token => token.replace(/[.,;:)\]]+$/, '')).filter(token => token.includes('/') || /^[\w-]+\.[A-Za-z0-9]{1,5}$/.test(token)).filter(wellFormed))];
 }
-
 export interface ScopeImplication { scope: string; kind: 'criteria' | 'documentation' | 'documentation-consumer' | 'companion' | 'timing-companion'; why: string }
 /**
  * Every path scope the item itself already implies: the files its criteria name, and the
- * documentation the repository requires updating for the behaviour those criteria change.
+ * documentation the repository requires updating for the behaviour those criteria change — and, on a
+ * review follow-up (GY-1116), the files its findings and description name.
  */
-export function impliedScopes(criteria: readonly ScopeCriterion[], documentation: readonly string[] = documentationScopes): ScopeImplication[] {
+export function impliedScopes(criteria: readonly ScopeCriterion[], documentation: readonly string[] = documentationScopes, origin?: FollowUpSource['origin'], description?: string | null): ScopeImplication[] {
   return [
     ...criteria.flatMap(criterion => namedPaths(criterion.text).map(scope => ({ scope, kind: 'criteria' as const, why: `${criterion.id} names ${scope}` }))),
+    ...(origin?.reviewFollowUps ? followUpPaths(origin.reviewFollowUps.findings ?? [], description) : []).map(scope => ({ scope, kind: 'criteria' as const, why: `review follow-up names ${scope}` })),
     ...documentation.map(scope => ({ scope, kind: 'documentation' as const, why: `${scope} is documentation this repository requires updating when behaviour changes` })),
   ];
 }
@@ -176,7 +177,7 @@ export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; p
  * audited reason; everything else is refused with the reason it was refused for.
  */
 export function decideScopeRequest(
-  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[] } | null },
+  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[] } | null } & FollowUpSource,
   request: Pick<ScopeRequestState, 'paths' | 'remove' | 'criteria'>,
   options: { documentation?: readonly string[]; documentationConsumers?: readonly string[] } = {},
 ): ScopeVerdict {
@@ -188,7 +189,7 @@ export function decideScopeRequest(
   if (request.remove?.length) return refused(`the request drops planned paths (${request.remove.join(', ')}); only additive scope is decided automatically, and narrowing containment is an operator requirements revision`);
   if (request.criteria?.length) return refused('the request rewrites criteria or proofs; requirements are decided by an operator and approved by an independent agent, never by the loop');
   if (!paths.length) return refused('the request names no path outside the planned scope; nothing is left to widen');
-  const implied = [...impliedScopes(item.criteria, options.documentation ?? itemDocumentationPaths(item)),
+  const implied = [...impliedScopes(item.criteria, options.documentation ?? itemDocumentationPaths(item), item.origin, item.description),
     ...(plansDocumentationTree(item.plannedFiles) ? (options.documentationConsumers ?? documentationConsumerScopes).map(scope => ({ scope, kind: 'documentation-consumer' as const, why: `${scope} renders or tests the documentation this item rewrites` })) : []),
     // A change that adds a test file may record its timing line (GY-1023): the baseline is implied by the test.
     ...(addsTestFile(item) ? [{ scope: timingBaselinePath, kind: 'timing-companion' as const, why: `${timingBaselinePath} records the timing line of a test file this item adds or changes` }] : [])];

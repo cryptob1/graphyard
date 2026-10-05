@@ -20,6 +20,7 @@ import { approverSessionName, assessContainment, atomicPrivateWrite, automaticRe
 import { readAccountStartFailures, readProfileLaunchRecords, workerLaunchStatus, worktreeFailure } from '../src/master/dispatch.js';
 import { readControlPlaneClock, unmeasured } from '../src/master/containment.js';
 import { containmentRefusalCause } from '../src/daemon/cycle-reclaim.js';
+import { loopEndedAttempt } from '../src/quarantine.js';
 import type { SupervisorProbeReport } from '../src/containment-probe.js';
 import { dispatchFailureBlockAfter } from '../src/daemon/dispatch-failures.js';
 import { coordinatorConfinementRefusal, mergeBatchSize, mergeParallelTips, rerunFailedChecks } from '../src/master/profiles.js';
@@ -487,7 +488,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * wake is lost too, so the loop must ask again in the next observation window.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number }; plan?: Partial<typeof basePlan>; github806?: boolean;
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; plan?: Partial<typeof basePlan>; github806?: boolean;
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
   failover?: Failover }) {
   const dayStart = clock.now();
@@ -1351,7 +1352,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // ---- plane, so its own bound is wider than the 5 s tolerance and cannot settle; the loop bounds its clock with the light
   // ---- timed HEAD / instead, which fails, then answers slowly, then answers fast as the day goes on.
   const fenced = { drift: 0, probes: [] as { cycle: number; elapsed: number; phase: 'fail' | 'slow' | 'fast' }[], assessable: new Set<number>(), liveOnly: new Set<number>(), graced: new Set<number>(), bare: new Set<number>(),
-    settled: [] as { key: string; epoch: number; elapsed: number }[], assessed: [] as { key: string; epoch: number; elapsed: number; refusals: string[] }[] };
+    settled: [] as { key: string; epoch: number; elapsed: number; cycle: number }[], assessed: [] as { key: string; epoch: number; elapsed: number; refusals: string[] }[],
+    refused: [] as { key: string; epoch: number; elapsed: number; cycle: number }[] };
   if (options.containment) {
     const phases = options.containment;
     const slowRead = async (ms: number) => { fenced.drift += ms; await moveClock(ms); };
@@ -1361,9 +1363,10 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       const result = await read();
       await slowRead(3_000);
       // What this cycle's reclaim step will see: a quarantine that could settle (past its grace
-      // window), one still in its grace window, only live ones, or none.
+      // window, or of an attempt the loop ended on its record, GY-1155), one still in its grace
+      // window, only live ones, or none.
       const at = Date.parse(result.now), local = containmentQuarantines(result.work, config.hostId);
-      if (local.some(item => containmentPhase(item, at)?.state === 'lapsed')) fenced.assessable.add(cycles);
+      if (local.some(item => containmentPhase(item, at)?.state === 'lapsed' || loopEndedAttempt(item))) fenced.assessable.add(cycles);
       else if (local.some(item => containmentPhase(item, at)?.state === 'grace')) fenced.graced.add(cycles);
       else if (local.length) fenced.liveOnly.add(cycles);
       else fenced.bare.add(cycles);
@@ -1393,9 +1396,14 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       return assessed;
     };
     effects.settleContainment = async (work, assessment) => {
+      // GY-1155: the plane answers one item's first settlement with Railway's 502, as it did on 2026-10-03.
+      if (phases.refuseSettle && work.key === items[phases.refuseSettle - 1].key && !fenced.refused.length) {
+        fenced.refused.push({ key: work.key, epoch: assessment.epoch, elapsed, cycle: cycles });
+        throw new Error(`Graphyard refused work/${work.id}/autosettle: {"status":"error","code":502,"message":"Application failed to respond"}`);
+      }
       await api(principals.coordinator, 'POST', `work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
         reason: `The soak loop verified on ${assessment.host} that the supervisor of epoch ${assessment.epoch} is gone`, verification: assessment.verification });
-      fenced.settled.push({ key: work.key, epoch: assessment.epoch, elapsed });
+      fenced.settled.push({ key: work.key, epoch: assessment.epoch, elapsed, cycle: cycles });
     };
   }
   let publishedMergeQueue: string | null = null;
@@ -3390,6 +3398,52 @@ test('unit:soak-invariants-hold — sessions blocked on a GitHub credential fail
   assert.match(state.actions[`retry:held:${held.id}`]?.detail ?? '', /held: 3 attempts in a row ended without submitting.*credential-blocked attempt on epoch 1.*credential-blocked attempt on epoch 3/, 'the hold names every credential failure');
   assert.ok(state.actions[`retry:cap-request:${held.id}`], 'the loop asked for the decision that alone resumes the item, rather than relaunching it');
   assert.ok(theirs.every(session => session.state === 'reclaimed'), 'no blocked session was left holding its lease');
+});
+
+test('unit:soak-invariants-hold — attempts the loop ends with their containment fences raised are settled by the next cycle without waiting out the grace window, a 502 is retried on the cycle after it, the timed read stays one a cycle and only while such a fence stands, and every invariant holds', { timeout: 600_000 }, async () => {
+  // GY-1155: the credential-blocked day with every launch fenced as `watch` fences it. The loop ends
+  // each blocked attempt on its record, and its supervisor leaves the fence standing; the reclaim
+  // step settles every fence of an attempt the loop ended as soon as the host verifies it gone —
+  // per item, per cycle, which is why it lives here. The plane answers one settlement with Railway's
+  // 502: that fence is retried on the next cycle, not held on the action backoff.
+  const recovers = 2, never = 3;
+  const { items, final, violations, failures, lost, state, fenced } = await simulateDay({
+    hours: 6, credentialBlocked: { recovers, never }, containment: { failUntil: 0, slowUntil: 0, refuseSettle: recovers },
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+  });
+  assert.deepEqual(violations, [], 'every system invariant holds while the ended attempts\' fences stand and once they settle');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no lease was lost');
+  const held = items[never - 1];
+  assert.deepEqual(final.filter(item => item.stage !== 'done' && item.id !== held.id).map(item => `${item.key} ${item.stage}`), [], 'every other item is delivered behind its settled fences');
+  assert.deepEqual(final.filter(item => item.containmentQuarantine).map(item => item.key), [], 'no fence outlives the day');
+
+  // Every attempt the loop ended had its fence settled once, by the cycle after the ending — the
+  // record ended its lease, so nothing waited out the grace window — and the 502 cost one cycle more.
+  const endings = Object.entries(state.actions).filter(([key, action]) => key.startsWith('resume:credential:') && action.state === 'done');
+  assert.equal(endings.length, 5, `two endings of the recovering item and three of the held one: ${endings.map(([key]) => key).join(', ')}`);
+  for (const [key, ending] of endings) {
+    const [id, epoch] = key.slice('resume:credential:'.length).split(':');
+    const settle = state.actions[`settle:${id}:${epoch}`], item = items.find(entry => entry.id === id)!;
+    const refused = fenced.refused.some(entry => entry.key === item.key && entry.epoch === Number(epoch));
+    assert.equal(settle?.state, 'done', `${item.key} epoch ${epoch}: its fence was settled: ${settle?.detail}`);
+    assert.equal(settle.attempts, refused ? 2 : 1, `${item.key} epoch ${epoch}: settled ${refused ? 'on its retry after the 502' : 'at its first attempt'}`);
+    assert.ok(settle.cycle - ending.cycle <= (refused ? 2 : 1), `${item.key} epoch ${epoch}: ended on cycle ${ending.cycle}, settled on cycle ${settle.cycle}`);
+    assert.equal(fenced.settled.filter(entry => entry.key === item.key && entry.epoch === Number(epoch)).length, 1, `${item.key} epoch ${epoch}: lowered exactly once`);
+  }
+  assert.equal(fenced.refused.length, 1, 'the plane refused one settlement');
+  const retried = fenced.settled.find(entry => entry.key === fenced.refused[0].key && entry.epoch === fenced.refused[0].epoch)!;
+  assert.equal(retried.cycle, fenced.refused[0].cycle + 1, 'the refused settlement was retried on the very next cycle');
+
+  // The volume stays bounded: at most one timed read a cycle, only in a cycle with a fence the
+  // loop could settle, and none once the last one settled.
+  const perCycle = new Map<number, number>();
+  for (const probe of fenced.probes) perCycle.set(probe.cycle, (perCycle.get(probe.cycle) ?? 0) + 1);
+  assert.deepEqual([...perCycle.values()].filter(count => count > 1), [], 'never more than one timed read in a cycle');
+  assert.deepEqual([...perCycle.keys()].filter(cycle => !fenced.assessable.has(cycle)), [], 'a timed read only in a cycle with a fence the loop could settle');
+  const lastSettled = Math.max(...fenced.settled.map(entry => entry.elapsed));
+  assert.deepEqual(fenced.probes.filter(probe => probe.elapsed > lastSettled).map(probe => probe.elapsed / minute), [], 'no read after the last fence settled');
+  assert.ok(perCycle.size <= endings.length + fenced.refused.length, `one read per fence, and one more for the 502: ${perCycle.size} reads for ${endings.length} fences`);
 });
 
 test('unit:soak-invariants-hold — sessions Herdr reports working whose runtime retries on a spent account are failed over: the account is held until the reset, the attempt ends with its partial work kept, the next launch takes another account, working sessions with no banner are left alone, and every invariant holds', { timeout: 600_000 }, async () => {

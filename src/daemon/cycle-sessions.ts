@@ -12,6 +12,7 @@ import { paneAlreadyGone } from '../request-settlement.js';
 import { blockedPromptAnswers, blockedPromptFailMs, blockedPromptSettleMs, failoverKey, handlerSettleMs, launchAppearanceMs, launcherRetry, promptDigest, type LaunchedSession, preserveInterruptedAttempt, record, stoppedStates } from './effects.js';
 import { checkPaneStillBelongs, endWorkerAttempt, resumeStep, workerHandle } from './cycle-resume.js';
 import type { Cycle } from './cycle.js';
+import { settleEndedAttemptFence } from './cycle-reclaim.js';
 
 export { idleLeaseMs, resumeWaitKey, idleLeaseKey, resumePromptText, idlePromptText } from './cycle-resume.js';
 
@@ -130,12 +131,14 @@ export async function closeStep(cycle: Cycle) {
         const { account, runtime } = await held('worker', profile.name, item, signal);
         await effects.reportCapacity!(item, { event: 'exhausted', role: 'worker', epoch, profile: profile.name, account, runtime: runtime ?? profile.kind ?? null, reason: signal.reason, resetsAt: signal.resetsAt, partialWork });
         // The lease is over on the record; the supervisor is stopped through the containment scope
-        // it recorded, which is the path that settles its quarantine, so the item is claimable again.
+        // it recorded, and the fence it leaves is settled in this action once the host verifies it
+        // gone (GY-1155), so the item is claimable again.
         const scope = item.containmentQuarantine?.epoch === epoch && item.containmentQuarantine.owner === profile.principal ? item.containmentQuarantine.scope : undefined;
         let stop = 'its supervisor stops on the ended lease';
         try {
           if (scope && effects.stopSupervisor) { await effects.stopSupervisor({ id: item.id, key: item.key, epoch, owner: profile.principal, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: item.lease!.expiresAt }, 'SIGTERM'); stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`; }
         } catch (error) { stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; }
+        if (scope && await settleEndedAttemptFence(cycle, item, { epoch, owner: profile.principal, preserved: signal.reason })) stop += ', its containment fence was settled';
         clearProfileFailure(state, profile);
         performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'done',
           detail: `${item.key} epoch ${epoch} exhausted ${account ?? `${profile.name}'s own account`} mid-session (${signal.reason}; ${resets}). Partial work ${partialWork.state}${partialWork.commit ? ` at ${partialWork.commit.slice(0, 12)}` : ''}; the attempt ended as released, ${stop}, and ${item.key} is re-queued for another account`,
@@ -442,12 +445,15 @@ export async function closeStep(cycle: Cycle) {
       await record(state, key, { kind: 'escalation', work: orphan.key, principal: orphan.owner, epoch: orphan.epoch, state: 'started', detail: `${incident}; stopping it with ${signal} through that scope`, attempts: stops, cycle: state.cycle }, now(), effects.persist);
       // The agent is gone, so its worktree is quiescent: what it left uncommitted is kept and put
       // on the record — which ends the attempt — before the supervisor holding it is stopped.
-      const held = open.find(item => item.id === orphan.id);
-      if (held) await preserveInterruptedAttempt(state, effects, held, orphan.epoch, config.workers.find(profile => profile.principal === orphan.owner), `ended without submitting: its agent session ${orphan.agentName} is gone from Herdr while its supervisor (pid ${orphan.scope.pid}) still renewed the lease`, now, performed);
+      const held = open.find(item => item.id === orphan.id), ended = `ended without submitting: its agent session ${orphan.agentName} is gone from Herdr while its supervisor (pid ${orphan.scope.pid}) still renewed the lease`;
+      const preserved = held && await preserveInterruptedAttempt(state, effects, held, orphan.epoch, config.workers.find(profile => profile.principal === orphan.owner), ended, now, performed);
       try {
         await effects.stopSupervisor!(orphan, signal);
         state.orphans[orphan.id] = { ...state.orphans[orphan.id], stops, stoppedLeaseExpiresAt: orphan.leaseExpiresAt };
-        performed.push(await record(state, key, { kind: 'escalation', work: orphan.key, principal: orphan.owner, epoch: orphan.epoch, state: 'done', detail: `${incident}; stopped with ${signal} through that scope, so the lease lapses instead of renewing`, attempts: stops, cycle: state.cycle }, now(), effects.persist));
+        // GY-1155: the attempt ended on the record and its supervisor was stopped through its scope,
+        // so its fence is settled in this action once the host verifies the supervisor gone.
+        const settled = !!held && preserved?.state === 'done' && await settleEndedAttemptFence(cycle, held, { epoch: orphan.epoch, owner: orphan.owner, preserved: ended });
+        performed.push(await record(state, key, { kind: 'escalation', work: orphan.key, principal: orphan.owner, epoch: orphan.epoch, state: 'done', detail: `${incident}; stopped with ${signal} through that scope, so the lease ${settled ? 'ended and its containment fence was settled' : 'lapses instead of renewing'}`, attempts: stops, cycle: state.cycle }, now(), effects.persist));
       } catch (error) {
         performed.push(await record(state, key, { kind: 'escalation', work: orphan.key, principal: orphan.owner, epoch: orphan.epoch, state: 'failed', detail: `${incident}; it could not be stopped through that scope: ${message(error)}`, attempts: stops, cycle: state.cycle }, now(), effects.persist));
       }
@@ -541,8 +547,14 @@ async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents: HerdrA
           try { await effects.closeSession(handle.pane); closed = `; pane ${handle.pane} closed`; }
           catch (error) { if (!paneAlreadyGone(error)) throw error; closed = `; pane ${handle.pane} was already gone`; }
         }
-        await effects.recordSession!(item, { id: handle.id, kind: 'implementation', runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome: `closed by the loop: ${found}${closed}`.slice(0, 500) });
-        performed.push(await entry('done', `Closed implementation session ${handle.id} of ${item.key}${handle.pane ? ` (pane ${handle.pane})` : ''}: ${found}${closed}`));
+        const outcome = `closed by the loop: ${found}${closed}`.slice(0, 500);
+        await effects.recordSession!(item, { id: handle.id, kind: 'implementation', runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome });
+        // GY-1155: closing a submitted attempt's session ends that attempt on the record, so a fence
+        // its supervisor could not settle is settled with it once the host verifies it gone.
+        const quarantine = item.containmentQuarantine;
+        const settled = !!quarantine && handle.id === `${quarantine.owner}:${quarantine.epoch}` && item.submission?.epoch === quarantine.epoch
+          && await settleEndedAttemptFence(cycle, item, { epoch: quarantine.epoch, owner: quarantine.owner, closed: outcome });
+        performed.push(await entry('done', `Closed implementation session ${handle.id} of ${item.key}${handle.pane ? ` (pane ${handle.pane})` : ''}: ${found}${closed}${settled ? '; its containment fence was settled' : ''}`));
         // Its sighting goes with it, in this cycle's sweep.
         sighted.delete(seenKey);
       } catch (error) {
