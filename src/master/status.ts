@@ -13,7 +13,7 @@ import { mergeBaseDismissal, mergeBaseDismissalAttention } from '../merge-base-a
 import { pipelineSpeed, pipelineSpeedSummary } from '../pipeline-speed.js';
 import { profileSessions, type WorkerProfile } from './profiles.js';
 import { sessionActivity } from './launch.js';
-import { sessionView } from '../model/session-state.js';
+import { launchingSession, sessionView } from '../model/session-state.js';
 import type { HerdrAgent } from './herdr.js';
 import { type ContainmentAssessment, containmentHold, containmentPhase } from './containment.js';
 import { agentOwner, type AttentionItem, controlPlaneAttention, type ControlPlaneStatus, fleetStatus, workAttentionOwner, type WorkAttentionCause } from './attention.js';
@@ -169,7 +169,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     // Herdr's reading of the profile answers only for a session no launcher registered.
     const handle = active ? (work.sessions ?? []).find(entry => entry.kind === 'implementation' && entry.id === `${work.lease!.owner}:${work.lease!.epoch}`) : undefined;
     const recorded = handle ? sessionView(handle, new Date(now)) : null;
-    const sessionState = handle && recorded ? recorded.live ? recorded.observed! : handle.state === 'running' ? `not seen since ${recorded.seenAt ?? handle.updatedAt}` : recorded.observed ?? 'finished' : session?.state ?? 'offline';
+    // A launch still preparing its session is `launching`, not unseen (GY-1287).
+    const sessionState = handle && recorded ? recorded.live ? recorded.observed! : handle.state === 'running' ? launchingSession(work, handle, now) ? 'launching' : `not seen since ${recorded.seenAt ?? handle.updatedAt}` : recorded.observed ?? 'finished' : session?.state ?? 'offline';
     const first = work.gates.find(gate => !gate.passed);
     const freshObservation = !!work.observation && now - Date.parse(work.observation.at) >= 0 && now - Date.parse(work.observation.at) < 120_000;
     const mergeable = freshObservation && work.stage === 'merge' && !!work.candidate && !!work.mergeAuthorization
@@ -261,7 +262,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // (GY-127): the restore is the control plane's, and the row says whether it is owed, requested,
       // ran and published, or failed and escalated (GY-854).
       : contaminated && !(contamination?.restore && contamination.restore.performedAt && contamination.restore.outcome === 'restored' && contamination.restore.head !== contaminated.head) ? [`${work.key} branch head ${contaminated.head.slice(0, 12)} carries the unlanded commits of ${contaminated.foreign.join(', ')} (${contaminated.source.includes('ejection') ? `a speculative tip published behind ${contaminated.foreign.join(', ')} and ejected from the merge queue` : 'found in its history by GitHub'}): kept, it is refused as an out-of-scope regression; landed, it would record ${contaminated.foreign.join(', ')} merged without ${contaminated.foreign.length === 1 ? 'its' : 'their'} content. ${contamination?.restore?.outcome === 'unrepairable' ? 'A restore found no own reviewed head under it: the foreign commits sit under something the control plane cannot move' : contamination?.restore?.outcome === 'unpublished' ? contamination.restore.escalated ? `The restore failed twice without the candidate changing and stopped repeating, escalated: ${contamination.restore.failure}` : contamination.restore.retried ? `The restore could not publish its result and is retried once: ${contamination.restore.failure}` : `The restore could not publish its result and nothing retries it on its own: ${contamination.restore.failure}; graphyard master repair ${work.key} REASON requests it again` : contamination?.restore && !contamination.restore.performedAt ? `A restore is requested (${contamination.restore.cause}) and runs on the next reconciliation` : work.queueEjection?.sha === contaminated.head ? 'The control plane restores it to its own reviewed head merged onto the base on the next reconciliation' : `graphyard master repair ${work.key} REASON restores it to its own reviewed head merged onto the base`}`, 'contaminated']
-      : active && !['working', 'idle'].includes(sessionState) ? [`Assigned worker session is ${sessionState}`, 'session']
+      : active && !['working', 'idle', 'launching'].includes(sessionState) ? [`Assigned worker session is ${sessionState}`, 'session']
       : gaps.length ? [`No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`, 'proof-gap']
       : review?.exhausted ? [`Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`, 'reviewer-exhausted']
       : stalledLaunch ? [`Automatic ${stalledLaunch.failure!.kind} launch for ${work.key} refused ${stalledLaunch.failure!.attempts} time(s): ${stalledLaunch.failure!.reason}`, stalledLaunch.failure!.kind === 'review' ? 'launch-review' : 'launch-producer']
