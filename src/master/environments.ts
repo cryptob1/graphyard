@@ -237,7 +237,9 @@ async function zaiAccount(environment: ProbedEnvironment, probe: EnvironmentProb
   const hasZaiKey = !!key;
   // Z.AI-specific only on Z.AI evidence: the Pi runtime, a declared zai plan, or a key named Z.AI's. A plan id derived
   // from the runtime is no evidence (every OpenCode account defaults to the 'zai' kind), nor is the account's name (GY-1158).
-  const declared = environment.declaredPlan === undefined ? environment.plan : environment.declaredPlan;
+  // The key's presence decides, not its value: a caller that passes an optional plan as `declaredPlan: undefined` has
+  // declared none, and must not fall back to the derived plan's default 'zai' kind (GY-1239).
+  const declared = 'declaredPlan' in environment ? environment.declaredPlan : environment.plan;
   const isZaiSpecific = (environment.kind as string) === 'pi'
     || /^zai/i.test(declared ?? '')
     || keyFileName !== 'zai.key';
