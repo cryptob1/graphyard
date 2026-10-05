@@ -60,7 +60,7 @@ About ten requests uncached; unchanged, none.
 
 ### What a pause means for gates
 
-A rate-limit `403`/`429` pause stops requests; gates read stale until it lifts; nothing merges on an observation over two minutes old. A merge stalled only on freshness gets a [prioritized wake](protocol/github-webhook.md#prioritized-wakes), not rework.
+A rate-limit `403`/`429` pause stops requests; gates read stale until it lifts; nothing merges on an observation over two minutes old. A merge stalled only on freshness gets a [prioritized wake](protocol/github-webhook.md#prioritized-wakes), not rework. The pause is remediation, counted once as an observation fault: `/healthz` stays healthy, dispatch continues and the `github-budget` resource reads unread until the reset; only a budget `GET /rate_limit` reads spent once the pause ends is at its bound.
 
 ### Reading the budget
 
