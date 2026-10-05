@@ -104,6 +104,12 @@ export const CONTAINED_EVENT = 'delivery.deployment-contained';
  * asks none again. A plane event (no work id), written only when the set changes.
  */
 export const PENDING_EVENT = 'production.deployment-pending';
+/**
+ * The first observation of a release tip production tracks, with when it was made: the grace period
+ * a promotion gets is measured from it, so a restart does not hand an already-overdue release a
+ * fresh grace period (GY-1256). A plane event (no work id), written only when the tip moves.
+ */
+export const RELEASE_SEEN_EVENT = 'production.release-observed';
 /** A merged commit not served within this long is a missing deployment. */
 export const DEPLOYMENT_GRACE_MS = 5 * 60_000;
 /** Deliveries older than this are not re-verified against the provider on every pass. */
@@ -119,7 +125,9 @@ export interface ProductionWatchOptions {
    * The adapter answers both with one-commit compares (`contains`, `aheadBy`); a client with only
    * `request` is asked the plain compare.
    */
-  github: { request(path: string): Promise<any>; contains?(base: string, head: string): Promise<boolean>; aheadBy?(base: string, head: string): Promise<number> } | null;
+  github: { request(path: string): Promise<any>; contains?(base: string, head: string): Promise<boolean>; aheadBy?(base: string, head: string): Promise<number>;
+    /** The base branch's tip as the current observation cycle read it, shared with every observation; lets the watch compare exact SHAs it has already compared. */
+    cycleBaseBranch?(): Promise<{ tip: string }> } | null;
   build: BuildIdentity; baseBranch: string;
   /**
    * The branch production deploys when it is not the base branch (`release/production`). Each pass
@@ -149,6 +157,10 @@ export class ProductionWatch {
   private notInRelease = new Map<string, string>();
   /** The release tip last read and when it was first observed unserved, so a promotion gets the grace period to deploy. */
   private releaseSeen: { tip: string; at: number } | null = null;
+  /** Commit counts between two exact SHAs, which never change: each pair is asked of GitHub once (GY-1256). */
+  private aheadMemo = new Map<string, number>();
+  /** Whether the serving commit holds the release tip, for the last pair asked: a decided answer never changes for that pair. */
+  private servedMemo: { tip: string; serving: string; served: boolean } | null = null;
   private report: ProductionReport;
   constructor(private store: Store, private options: ProductionWatchOptions) {
     this.report = { provider: options.provider?.name ?? null, providerDescription: options.provider?.description ?? null, observedAt: null, error: null, running: options.build.commit, serving: null, servingSource: null, latest: null, ahead: null, aheadError: null, release: null, deployed: [], pending: [], incidents: [], attention: [] };
@@ -182,6 +194,12 @@ export class ProductionWatch {
       for (const id of pending.workIds) if (typeof id === 'string' && !this.deployedIn.has(id)) this.notIn.set(id, pending.serving);
       this.recordedPending = pendingKey(pending.serving, pending.workIds.filter((id: unknown) => typeof id === 'string' && !this.deployedIn.has(id)));
     }
+    if (this.options.releaseBranch) {
+      // The newest release tip observation (events_kind_created), so the grace period runs from it across restarts.
+      const seen = (await this.store.pool.query('SELECT payload FROM events WHERE kind=$1 ORDER BY created_at DESC, seq DESC LIMIT 1', [RELEASE_SEEN_EVENT])).rows[0]?.payload;
+      const at = Date.parse(seen?.at);
+      if (seen?.branch === this.options.releaseBranch && typeof seen.tip === 'string' && Number.isFinite(at)) this.releaseSeen = { tip: seen.tip, at };
+    }
     this.loaded = true;
     this.report.incidents = this.openIncidents();
   }
@@ -209,11 +227,29 @@ export class ProductionWatch {
     if (typeof comparison?.ahead_by !== 'number') throw new Error('GitHub did not report ahead_by');
     return comparison.ahead_by;
   }
+  /** `aheadBy` memoized when both sides are exact SHAs: the answer for a pair never changes, so an unmoved pair costs no request. */
+  private async aheadBetween(base: string, head: string): Promise<number> {
+    const pinned = /^[0-9a-f]{40}$/.test(base) && /^[0-9a-f]{40}$/.test(head), key = `${base}...${head}`;
+    if (pinned && this.aheadMemo.has(key)) return this.aheadMemo.get(key)!;
+    const by = await this.aheadBy(base, head);
+    if (pinned) {
+      this.aheadMemo.set(key, by);
+      if (this.aheadMemo.size > 256) this.aheadMemo.delete(this.aheadMemo.keys().next().value!);
+    }
+    return by;
+  }
+  /** How many commits the base branch holds past the release tip: against the observation cycle's shared base tip when the adapter has one, so an unmoved pair is not compared again. */
+  private async unreleased(tip: string): Promise<number> {
+    const github = this.options.github!;
+    const head = github.cycleBaseBranch ? (await github.cycleBaseBranch()).tip?.toLowerCase() : undefined;
+    return head && /^[0-9a-f]{40}$/.test(head) ? this.aheadBetween(tip, head) : this.aheadBy(tip);
+  }
 
   /**
    * The release branch's tip, null when the repository has none (GitHub answers 404), so production
    * is measured against the base branch. Any other failure is thrown: a transient read never turns
-   * pipeline lag back into missing deployments.
+   * pipeline lag back into missing deployments. Only the status decides, never wording: a scope or
+   * repository error that says "not found" is a failure, not a missing branch (GY-1256).
    */
   private async releaseTip(): Promise<string | null> {
     const branch = this.options.releaseBranch, github = this.options.github;
@@ -223,7 +259,8 @@ export class ProductionWatch {
       if (typeof sha !== 'string' || !/^[0-9a-f]{40}$/i.test(sha)) throw new Error(`GitHub reported no commit for ${branch}`);
       return sha.toLowerCase();
     } catch (error) {
-      if ((error as { status?: number })?.status === 404 || /\(404\)|\b404\b|not found/i.test(error instanceof Error ? error.message : String(error))) return null;
+      // The adapter's refusals carry the HTTP status as `failed (404)` in the message; a client error may carry it as `status`.
+      if ((error as { status?: number })?.status === 404 || /\(404\)/.test(error instanceof Error ? error.message : String(error))) return null;
       throw error;
     }
   }
@@ -262,15 +299,21 @@ export class ProductionWatch {
     try { tip = await this.releaseTip(); if (!tip) this.releaseSeen = null; }
     catch (error) { tip = this.releaseSeen?.tip ?? null; releaseUnknown = !tip; report.aheadError = `Release branch ${this.options.releaseBranch} is unavailable: ${error instanceof Error ? error.message : String(error)}`; }
     if (tip) {
-      if (this.releaseSeen?.tip !== tip) this.releaseSeen = { tip, at: now };
-      const served = report.serving ? await this.contains(tip, report.serving) : null;
+      if (this.releaseSeen?.tip !== tip) {
+        this.releaseSeen = { tip, at: now };
+        await this.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', RELEASE_SEEN_EVENT, JSON.stringify({ branch: this.options.releaseBranch, tip, at })]);
+      }
+      const serving = report.serving?.toLowerCase() ?? null, memo = this.servedMemo;
+      const served = !serving ? null : memo?.tip === tip && memo.serving === serving ? memo.served : await this.contains(tip, serving);
+      if (serving && served !== null) this.servedMemo = { tip, serving, served };
       if (served === true) this.releaseSeen.at = now;
       let unreleased: number | null = null;
-      try { unreleased = this.options.github ? await this.aheadBy(tip) : null; } catch { unreleased = null; }
+      try { unreleased = this.options.github ? await this.unreleased(tip) : null; } catch { unreleased = null; }
       report.release = { branch: this.options.releaseBranch!, tip, unservedSince: served === true ? null : new Date(this.releaseSeen.at).toISOString(), overdue: served === false && now - this.releaseSeen.at >= this.grace, unreleased };
       if (report.serving && served === true) report.ahead = { by: 0, head: tip, commits: [] };
       else if (report.serving && this.options.github) {
-        try { report.ahead = { by: await this.aheadBy(report.serving, this.options.releaseBranch!), head: tip, commits: [] }; }
+        // Against the tip just read, not the branch name: an exact pair is compared once while neither side moves.
+        try { report.ahead = { by: await this.aheadBetween(report.serving.toLowerCase(), tip), head: tip, commits: [] }; }
         catch (error) { report.aheadError = `Release branch comparison is unavailable: ${error instanceof Error ? error.message : String(error)}`; }
       }
     } else if (releaseUnknown) {
