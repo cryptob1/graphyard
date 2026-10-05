@@ -83,7 +83,12 @@ export interface ProductionReport {
   serving: string | null; servingSource: 'provider' | 'build' | null;
   latest: ProviderDeployment | null;
   /** How far the branch production deploys (the release branch when there is one, else the base branch) is ahead of what production serves. */
-  ahead: { by: number; head: string | null; commits: { sha: string; message: string }[] } | null; aheadError: string | null;
+  /**
+   * Measured against the base branch, `unservedSince` is when the oldest delivered merge production
+   * does not serve landed, and `rollingOut` says the lag is a rollout still inside its grace: every
+   * unserved merge younger than the grace, or a provider attempt past serving still in flight (GY-1209).
+   */
+  ahead: { by: number; head: string | null; commits: { sha: string; message: string }[]; unservedSince?: string | null; rollingOut?: boolean } | null; aheadError: string | null;
   /**
    * The release branch production tracks, when the release pipeline owns production: its tip, since
    * when that tip has been observed unserved (null when production serves it), whether that is past
@@ -330,6 +335,8 @@ export class ProductionWatch {
     report.deployed = []; report.pending = [];
     const inWindow = new Set(delivered.map(item => item.id));
     for (const map of [this.deployedIn, this.notIn, this.inRelease, this.notInRelease]) for (const id of map.keys()) if (!inWindow.has(id)) map.delete(id);
+    // The oldest delivered merge production does not serve, measured against the base branch: read from the deliveries this pass already lists, no request of its own.
+    let unservedSince: number | null = null;
     for (const item of delivered) {
       const mergeSha = item.delivery!.mergeSha.toLowerCase();
       const mergedAt = Date.parse(item.delivery!.mergedAt);
@@ -340,6 +347,7 @@ export class ProductionWatch {
       // grace starts when a release first holds it. An unreadable release branch decides nothing.
       let since = mergedAt;
       if (releaseUnknown) { report.pending.push(item.key); continue; }
+      if (!tip) unservedSince ??= mergedAt;
       if (tip) {
         const released = await this.releaseContainment(item, mergeSha, tip, now);
         if (released !== true) { report.pending.push(item.key); await this.recover(item, report, at); continue; }
@@ -358,6 +366,14 @@ export class ProductionWatch {
       if (now - since < this.grace || contained === null) { report.pending.push(item.key); continue; }
       await this.raise(item, report, at, 'missing', null, `no ${this.options.provider ? `${this.options.provider.name} deployment` : 'deployment'} of ${mergeSha.slice(0, 12)} was observed within ${Math.round(this.grace / 60_000)} minutes of ${tip ? `its promotion to ${this.options.releaseBranch} (${tip.slice(0, 12)})` : 'the merge'}; production serves ${report.serving!.slice(0, 12)}, which does not contain it${this.options.provider ? '' : '. Configure RAILWAY_API_TOKEN (or RAILWAY_TOKEN) so the provider reports the failing deployment'}`);
       report.pending.push(item.key);
+    }
+    if (report.ahead && !tip) {
+      // A merge→deploy rollout in flight is not a deployment fault: the lag stands as attention only
+      // once a delivered merge has gone unserved past the grace (a failed rollout, a rollback, a stall).
+      const latest = report.latest, servingCommit = report.serving?.toLowerCase();
+      const attempting = !!latest && ['building', 'deploying', 'queued'].includes(latest.status) && !!latest.commit && latest.commit.toLowerCase() !== servingCommit && now - Date.parse(latest.createdAt) <= this.grace * 3;
+      report.ahead.unservedSince = unservedSince === null ? null : new Date(unservedSince).toISOString();
+      report.ahead.rollingOut = report.ahead.by > 0 && unservedSince !== null && (now - unservedSince < this.grace || (attempting && now - unservedSince <= this.grace * 3));
     }
     if (report.serving) await this.recordPending(report.serving, at);
     report.incidents = this.openIncidents();
@@ -430,7 +446,7 @@ export function attentionLines(report: Pick<ProductionReport, 'ahead' | 'aheadEr
       const by = report.ahead?.by;
       lines.push(`${release.branch} (${release.tip.slice(0, 12)}) is ${typeof by === 'number' && by > 0 ? `${by} commit${by === 1 ? '' : 's'} ` : ''}ahead of production (serving ${report.serving?.slice(0, 12) ?? 'unknown'}) since ${release.unservedSince}${failing ? `: ${failing.reason}` : ''}`);
     } else if (failing) lines.push(`Production has not deployed ${failing.key}: ${failing.reason}`);
-  } else if (report.ahead && report.ahead.by > 0) {
+  } else if (report.ahead && report.ahead.by > 0 && !(report.ahead.rollingOut && !report.incidents.length)) {
     lines.push(`main is ${report.ahead.by} commit${report.ahead.by === 1 ? '' : 's'} ahead of production (serving ${report.serving?.slice(0, 12) ?? 'unknown'})${failing ? `: ${failing.reason}` : ''}`);
   } else if (report.incidents.length && failing) lines.push(`Production has not deployed ${failing.key}: ${failing.reason}`);
   if (report.incidents.length) lines.push(`${report.incidents.length} delivered item${report.incidents.length === 1 ? ' has' : 's have'} an open deployment incident: ${report.incidents.map(incident => `${incident.key} (${incident.status})`).join(', ')}`);
