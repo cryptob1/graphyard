@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
@@ -90,7 +90,7 @@ async function installed(options: { research?: boolean } = {}) {
   // Session checkouts go to a durable root of the fixture's own, outside the data directory's shared
   // worktrees/, so a reclaim pass never sweeps the neighbouring roots every other run left there.
   await mkdir(join(dataDirectory(), 'session-cwd'), { recursive: true });
-  const managed = await mkdtemp(join(dataDirectory(), 'session-cwd', 'root-'));
+  const managed = await temporaryDirectory('root', join(dataDirectory(), 'session-cwd'));
   await atomicPrivateWrite(join(directory, '.graphyard/master.json'), { ...config, approver: { id: 'graphyard-approver-project', credentialFile: await token('approver') }, operatorAgent: { id: 'graphyard-operator-project', credentialFile: await token('operator') }, run: { ...config.run, worktreeRoot: managed, ...(options.research ? { research: { command: 'pi' } } : {}) } });
   git('add', '.');
   git('commit', '-q', '-m', 'base');
