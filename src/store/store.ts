@@ -16,6 +16,7 @@ import { coordinationDocumentSql, coordinationRelevance, coordinationTail, coord
 import { namedPool, reportPool, type ReportPoolOptions } from './report-pool.js';
 import { closePool, leasePoolConnections, trackedPool } from './pools.js';
 import { pendingWakes, wakeJobs, webhookWakeTtlMs, observationStarvedAfterMs } from './wake.js';
+import { observationNoSaveLimit } from '../model/observation-save.js';
 
 export * from './snapshot-delta.js';
 export * from './item-lock.js';
@@ -135,16 +136,6 @@ export class Store {
   async workItem(id: string): Promise<Work | undefined> {
     return (await this.pool.query('SELECT document FROM work_items WHERE id=$1', [id])).rows[0]?.document;
   }
-  /**
-   * The live merge-queue entries, which is all a queue position is computed from (GY-1052): the
-   * filter is `queueOrder`'s own, a queue entry on an item not done, so `queuePlacement` over this
-   * equals it over the whole fleet. Selected through the work index, so no unqueued item's
-   * document is read; a settled item has no queue (`settledSql`), so none is read either.
-   */
-  async queuedWork(): Promise<Work[]> {
-    return (await this.pool.query(`SELECT w.document FROM work_index i JOIN work_items w ON w.id=i.id
-      WHERE i.stage IS DISTINCT FROM 'done' AND jsonb_typeof(w.document->'queue')='object' ORDER BY i.number`)).rows.map(row => row.document);
-  }
   async workSnapshot(): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[] }> {
     const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs FROM work_items")).rows[0];
     return { work: row.work, now: row.observed_at.toISOString(), jobs: row.jobs };
@@ -180,10 +171,10 @@ export class Store {
     return (await this.pool.query(`SELECT seq, work_id, actor, kind, ${resolvedPayloadSql()} AS payload, created_at FROM events WHERE ($1::uuid IS NULL OR work_id=$1) ORDER BY seq DESC LIMIT 300`, [id ?? null])).rows;
   }
   /**
-   * Claim the next due job. `order` names work ids in claim-priority order (GY-492) — the
-   * merge-queue head and its batch, then items whose next action waits on an observation; the
-   * unnamed keep the available_at order. `woken` says the claim follows a webhook delivery, observed at once.
-   * The first `headCount` named ids (the queue-head band) always come first; after them any job due
+   * Claim the next due job. `order` names work ids in claim-priority order (GY-492) — the items
+   * GitHub may merge now, then items whose next action waits on an observation; the unnamed keep
+   * the available_at order. `woken` says the claim follows a webhook delivery, observed at once.
+   * The first `headCount` named ids (the merge path) always come first; after them any job due
    * for longer than `starvedAfterMs` is claimed before the rest of the named list, so a job the list
    * never names is still claimed within that bound (2026-09-26: an item whose only refusal was a stale
    * observation waited 40 minutes behind review-waiting items that came due again every cycle).
@@ -197,7 +188,7 @@ export class Store {
     const result = await this.pool.query(`WITH picked AS (SELECT work_id, generation<>claimed_generation AS woken, webhook_at > now() - ($5::text||' milliseconds')::interval AS webhook, refreshed_until > now() AS refreshed FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY CASE WHEN webhook_at > now() - ($5::text||' milliseconds')::interval THEN -1 WHEN array_position($1::uuid[], work_id) <= $3::int THEN 0 WHEN available_at < now() - ($4::text||' milliseconds')::interval * 3 THEN 1 WHEN available_at < now() - ($4::text||' milliseconds')::interval THEN 2 WHEN array_position($1::uuid[], work_id) IS NOT NULL THEN 3 ELSE 4 END, CASE WHEN webhook_at > now() - ($5::text||' milliseconds')::interval THEN webhook_at END, CASE WHEN available_at < now() - ($4::text||' milliseconds')::interval * 3 THEN available_at END, array_position($1::uuid[], work_id), available_at FOR UPDATE SKIP LOCKED LIMIT 1)
       UPDATE jobs SET token=$2, locked_until=now()+interval '90 seconds', attempts=attempts+1,claimed_generation=generation,webhook_at=NULL
       FROM picked WHERE jobs.work_id=picked.work_id RETURNING jobs.*, picked.woken, picked.webhook IS TRUE AS webhook, picked.refreshed IS TRUE AS refreshed`, [order.length ? order : null, token, Math.max(0, Math.floor(headCount)), String(Math.max(0, Math.floor(starvedAfterMs))), String(webhookWakeTtlMs)]);
-    return result.rows[0] as { work_id: string; token: string; attempts: number; woken: boolean; webhook: boolean; refreshed: boolean; refreshed_until: Date | null } | undefined;
+    return result.rows[0] as { work_id: string; token: string; attempts: number; unobserved: number; woken: boolean; webhook: boolean; refreshed: boolean; refreshed_until: Date | null } | undefined;
   }
   /** The items an observation webhook made due and no claim has taken yet (GY-806), oldest delivery first. */
   async webhookDue(): Promise<string[]> {
@@ -255,9 +246,13 @@ export class Store {
   }
   /** Observation jobs starved of observations three times in a row (GY-506), which `/api/status` reports and master status raises. */
   async starvedJobs() { return (await this.pool.query(`SELECT w.document->>'key' AS key, j.unobserved, j.error, j.deferred_reason FROM jobs j JOIN work_items w ON w.id=j.work_id WHERE j.unobserved>=3 AND w.id IN (SELECT id FROM work_index WHERE stage <> 'done') ORDER BY w.number LIMIT 50`)).rows as { key: string; unobserved: number; error: string | null; deferred_reason: string | null }[]; }
-  /** A concurrency retry: back within seconds, never an operator error, never silent (GY-506). */
-  async retryJob(id: string, token: string, reason: string, observed: boolean) {
-    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=NULL,held_until=NULL,held_reason=NULL,held_on=NULL,deferred_reason=$3,refusals=0, unobserved=CASE WHEN $4::boolean IS TRUE THEN 0 WHEN $4::boolean IS FALSE THEN unobserved+1 ELSE unobserved END, available_at=now()+interval '2 seconds' WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, reason, observed]);
+  /**
+   * A concurrency retry: never an operator error, never silent (GY-506), and bounded (GY-1310): back
+   * after `delayMs` (two seconds unless the caller's policy escalated), and the no-save count stops
+   * at the escalation limit rather than counting up without bound.
+   */
+  async retryJob(id: string, token: string, reason: string, observed: boolean, delayMs = 2000) {
+    await this.pool.query(`UPDATE jobs SET token=NULL,locked_until=NULL,error=NULL,held_until=NULL,held_reason=NULL,held_on=NULL,deferred_reason=$3,refusals=0, unobserved=CASE WHEN $4::boolean IS TRUE THEN 0 WHEN $4::boolean IS FALSE THEN LEAST(unobserved+1, $6::int) ELSE unobserved END, available_at=now()+($5::text||' milliseconds')::interval WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp()`, [id, token, reason, observed, String(Math.max(0, Math.floor(delayMs))), observationNoSaveLimit]);
   }
   /** Reschedules past a deferral, keeping its reason on the job record (GY-506); `observed` null leaves the starvation count as it is. */
   async deferJob(id: string, token: string, until: string, reason?: string, observed: boolean | null = false) {

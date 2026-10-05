@@ -10,9 +10,8 @@ const short = (sha: string) => sha.slice(0, 12);
  * Being behind alone never does (GY-191). Main moves on every merge, so a rule that waited for a
  * head containing the tip stalled every candidate under load: nothing requested a review, and
  * nothing refreshed the head once its one refresh was spent. A candidate GitHub reports mergeable
- * against the current base is reviewed and proven as it stands; the merge queue integrates it with
- * the current base and re-tests the combined tip before anything merges (merge-queue.ts), so the
- * merge gate still requires a validated tip that contains the base. Only a head that does not
+ * against the current base is reviewed and proven as it stands, and GitHub integrates it with the
+ * current base when it merges. Only a head that does not
  * merge cleanly — GitHub reports a conflict, or has not yet computed mergeability — is withheld,
  * and that one goes back to its worker for a sync.
  */

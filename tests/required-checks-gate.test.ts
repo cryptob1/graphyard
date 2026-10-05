@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { routineDecision } from '../src/master-daemon.js';
 import { mergeStallAttention } from '../src/cli/master-status.js';
-import { ejectionReason, type GitHubMergeQueueState } from '../src/merge-queue.js';
+import type { GitHubMergeQueueState } from '../src/merge-queue.js';
 import { evaluate } from '../src/model/gates.js';
 import { refusalAction } from '../src/model/refusal-mapping.js';
 import type { Work } from '../src/model.js';
@@ -62,10 +62,6 @@ test('unit:required-checks-gate — a failed branch-protection required check ou
   const unprotected = item([...passing, { name: 'secrets', result: 'failure' }], []);
   assert.equal(testGate(unprotected).passed, true);
   assert.equal(routineDecision(unprotected, { autoMerge: true }, now.getTime()), null);
-
-  // A queued speculative tip whose protection-required check failed leaves the queue.
-  const queued = item([...passing, { name: 'secrets', result: 'failure' }], undefined, { queue: { sequence: 1, sha: head, baseSha: base, policyRevision: 2, enqueuedAt: at } } as unknown as Partial<Work>);
-  assert.match(ejectionReason(queued, ciAppIds) ?? '', /^Required CI check secrets did not pass on speculative tip aaaaaaaaaaaa/);
 });
 
 test('unit:blocked-merge-surfaced — a merge pending under auto-merge for over ten minutes on a BLOCKED head is a merge-stalled attention item naming the failed required check', () => {

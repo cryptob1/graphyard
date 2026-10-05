@@ -13,7 +13,6 @@ import { createBackup, restoreBackup } from '../src/backup.js';
 import { schemaVersion } from '../src/release.js';
 import type { Evidence, Observation, Principal, Work } from '../src/model.js';
 import { actionSettleMs } from '../src/model/action-progress.js';
-import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { coordinationHistoryLimit, coordinationRecordLimit, coordinationSessionLimit, coordinationSnapshot as trimInProcess, coordinationViewHeader, coordinationWork, deliverySettled, type CoordinationOmissions } from '../src/server/work-view.js';
 import { coordinationRecords, coordinationSessions, coordinationTail } from '../src/store/coordination-sql.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -279,9 +278,7 @@ test('integration:index-matches-documents — the index equals the documents aft
   w = await engine.observe(w.id, w.revision, observation()); await check('observed');
   w = await engine.execute(ci, 'evidence', w.id, { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
   await check('evidenced');
-  const speculation: QueueSpeculation = { ref: queueRef(w.key), tip: head, base, baseTree: '7e'.repeat(20), predecessors: [], policyRevision: w.policyRevision, publishedAt: new Date().toISOString() };
-  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [w.id, JSON.stringify(speculation)]);
-  w = await engine.observe(w.id, (await reload(w)).revision, observation()); await check('queued');
+  w = await engine.observe(w.id, (await reload(w)).revision, observation()); await check('reobserved');
   const committed = { revision: (await engine.store.workItem(w.id))!.revision }; await check('merge committed');
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   w = await engine.observe(w.id, committed.revision, { ...observation(), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
@@ -362,7 +359,7 @@ test('integration:index-matches-documents — the index equals the documents aft
     assert.deepEqual(view.body.omitted, expected.omitted);
     for (const [index, item] of (view.body.work as Work[]).entries()) {
       const whole = full.body.work[index] as Work;
-      for (const field of ['id', 'stage', 'gates', 'violations', 'lease', 'candidate', 'submission', 'criteria', 'epoch', 'delivery', 'nextAction', 'queue'] as const) assert.deepEqual(item[field], whole[field], `${item.key} ${field}`);
+      for (const field of ['id', 'stage', 'gates', 'violations', 'lease', 'candidate', 'submission', 'criteria', 'epoch', 'delivery', 'nextAction'] as const) assert.deepEqual(item[field], whole[field], `${item.key} ${field}`);
     }
   } finally { await new Promise<void>(resolve => http.close(() => resolve())); }
 });
@@ -387,7 +384,7 @@ function boardItem(index: number, now: Date, kind: 'settled' | 'active' | 'fresh
     gates: ['ready', 'build', 'review', 'test', 'acceptance', 'merge'].map(name => ({ name, passed: name === 'ready', reasons: name === 'ready' ? [] : [`${name} is still owed`] })),
     nextAction: { kind: 'dispatch', work: id, key, gate: 'build', refusal: null, reason: `${key} is ready and unassigned`, inputs: { kind: 'dispatch', epoch: 0, target: 'implementation', priority: index % 3, plannedFiles: ['src/server/', 'tests/'] }, llmRole: 'implement', binding: 'dispatch:0' },
     actionQueue: { actions: [{ id: `${key}-dispatch`, kind: 'dispatch', work: id, key, gate: 'build', refusal: null, reason: `${key} is ready and unassigned`, binding: 'dispatch:0', inputs: { kind: 'dispatch', epoch: 0, target: 'implementation', priority: index % 3, plannedFiles: ['src/server/', 'tests/'] }, requestedBy: 'graphyard', requestedAt: at, state: 'pending', claim: null, attempts: 0, history: [{ at, event: 'requested', requester: 'graphyard', executor: null, result: null, reason: 'released' }] }], history: [] },
-    autoDispatch: { review: null, producers: [], history: [] }, queue: null,
+    autoDispatch: { review: null, producers: [], history: [] },
   } as unknown as Work;
   const evidence: Evidence[] = [];
   for (let h = 1; h <= HEADS; h++) for (const proof of proofs) evidence.push({
@@ -415,7 +412,7 @@ function boardItem(index: number, now: Date, kind: 'settled' | 'active' | 'fresh
     actionQueue: { actions: [], history: resolvedRows },
     sessions, pipeline: { attempts: Array.from({ length: 20 }, (_, n) => ({ attempt: n, startedAt: at, endedAt: at, outcome: 'rework' })) },
     nextAction: delivered ? null : { kind: 'request-review', work: id, key, gate: 'review', refusal: null, reason: 'waiting on review', inputs: { kind: 'request-review' }, llmRole: null, binding: 'review:1' },
-    queue: null, ...(delivered ? { delivery: { mergeSha: 'f'.repeat(40), mergedAt: at } } : {}),
+    ...(delivered ? { delivery: { mergeSha: 'f'.repeat(40), mergedAt: at } } : {}),
   } as unknown as Work;
 }
 

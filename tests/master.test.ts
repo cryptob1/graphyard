@@ -24,9 +24,7 @@ async function repository() {
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
 function work(overrides: Partial<Work> = {}) {
   const candidate = { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' };
-  const queue = { sequence: 1, enqueuedAt: '2030-01-01T00:30:00Z', policyRevision: 2,
-    speculation: { ref: 'refs/graphyard/queue/gy-42', tip: candidate.sha, base: candidate.baseSha, baseTree: 'e'.repeat(40), predecessors: [], policyRevision: 2, publishedAt: '2030-01-01T00:31:00Z' } };
-  return { id: 'work-id', key: 'GY-42', queue, title: 'Prove the master flow', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:master'] }], policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'merge', revision: 9, policyRevision: 2, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 42 }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'merge', passed: true, reasons: [] }], violations: [], mergeAuthorization: { sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 2, at: new Date().toISOString() }, ...overrides } as Work;
+  return { id: 'work-id', key: 'GY-42', title: 'Prove the master flow', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:master'] }], policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'merge', revision: 9, policyRevision: 2, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 42 }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'merge', passed: true, reasons: [] }], violations: [], mergeAuthorization: { sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 2, at: new Date().toISOString() }, ...overrides } as Work;
 }
 
 test('master instructions are managed idempotently without replacing repository rules', () => {
@@ -51,7 +49,7 @@ test('master init verifies a coordinator and repository before writing private l
     assert.equal(result.autoMerge, true); assert.equal(result.role, 'coordinator');
     assert.deepEqual(result.attention, []); assert.match(result.next, /^Run graphyard master reviewer setup .* then graphyard master start/);
     // A permission the installed App lacks is announced with the migration path, and never blocks setup.
-    const shortfall = 'App graphyard-owner-project lacks Contents: write (installed with read), which branch refresh needs to push base refreshes, branch restores and main-guard revert branches onto the managed repository; accept the pending permission request at https://github.com/settings/installations/4242';
+    const shortfall = 'App graphyard-owner-project lacks Contents: write (installed with read), which branch refresh needs to push base refreshes and main-guard revert branches onto the managed repository; accept the pending permission request at https://github.com/settings/installations/4242';
     const short = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, appPermissions: { app: 'graphyard-owner-project', installationUrl: 'https://github.com/settings/installations/4242', verifiedAt: '2030-01-01T00:00:00Z', error: null, suspended: false, missing: [{ permission: 'contents', required: 'write', granted: 'read', features: ['merge-queue'], reasons: [] }], attention: [shortfall] }, heldJobs: 2 }));
     const announced = await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, short as typeof fetch);
     assert.equal(announced.attention[0], shortfall); assert.match(announced.attention[1], /2 integration jobs are held/);
@@ -399,29 +397,6 @@ test('worker preparation claims and creates the assigned worktree from the curre
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
 });
 
-const queueEntry = (sequence: number, enqueuedAt: string, speculation: any = null) => ({ sequence, enqueuedAt, policyRevision: 2, speculation });
-
-test('master status reports queue position, predicted tip, and per-entry wait time', () => {
-  const observedAt = '2030-01-01T01:00:00Z';
-  const head = work({ id: 'head-id', key: 'GY-42', observation: { at: observedAt, baseTip: 'b'.repeat(40), candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' } } as any, queue: queueEntry(1, '2030-01-01T00:30:00Z', { ref: 'refs/graphyard/queue/gy-42', tip: 'a'.repeat(40), base: 'b'.repeat(40), baseTree: 'e'.repeat(40), predecessors: [], policyRevision: 2, publishedAt: '2030-01-01T00:31:00Z' }) } as Partial<Work>);
-  const next = work({ id: 'next-id', key: 'GY-43', candidate: { sha: 'd'.repeat(40), baseSha: 'a'.repeat(40), pr: 43, branch: 'graphyard/gy-43-1', author: 'worker' },
-    observation: { at: observedAt, baseTip: 'b'.repeat(40), candidate: { sha: 'd'.repeat(40), baseSha: 'a'.repeat(40), pr: 43, branch: 'graphyard/gy-43-1', author: 'worker' } } as any,
-    queue: queueEntry(2, '2030-01-01T00:45:00Z', { ref: 'refs/graphyard/queue/gy-43', tip: 'd'.repeat(40), base: 'a'.repeat(40), baseTree: 'e'.repeat(40), predecessors: ['GY-42'], policyRevision: 2, publishedAt: observedAt }),
-    gates: [{ name: 'merge', passed: false, reasons: ['Merge queue position 2 of 2: GY-42 is ahead'] }] } as Partial<Work>);
-  const status = buildMasterStatus({ work: [head, next], now: observedAt }, [], []);
-  assert.equal(status.counts.queued, 2);
-  assert.deepEqual(status.queue.map(entry => [entry.key, entry.position, entry.size]), [['GY-42', 1, 2], ['GY-43', 2, 2]]);
-  assert.equal(status.queue[0].predictedBase, 'b'.repeat(40));
-  assert.equal(status.queue[0].predictedTip, 'a'.repeat(40));
-  assert.equal(status.queue[0].waitMinutes, 30);
-  assert.equal(status.queue[1].predictedBase, 'a'.repeat(40), 'the entry behind predicts against the tip ahead of it');
-  assert.deepEqual(status.queue[1].ahead, ['GY-42']);
-  assert.equal(status.queue[1].validated, true);
-  assert.equal(status.queue[1].waitMinutes, 15);
-  assert.equal(status.work[1].queue!.position, 2);
-  assert.equal(status.work[1].mergeable, false, 'only the queue head can hold a merge authorization');
-});
-
 test('master status surfaces reviewer failover and exhausted reviewer capacity', () => {
   const profiles = [
     { name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer', timeoutSeconds: 1800 },
@@ -464,7 +439,7 @@ test('master status reports each containment quarantine and only claims verifica
   const lapsed = new Date(Date.parse(observedAt) - 600_000).toISOString();
   const quarantine = { owner: 'worker-a', epoch: 1, at: lapsed, settlementHash: 'a'.repeat(64), launchAcknowledgedAt: lapsed, launchExpiresAt: lapsed, leaseExpiresAt: lapsed };
   const workspace = { host: 'coordinator-host', path: '/srv/worktrees/GY-42-1', branch: 'graphyard/gy-42-1', epoch: 1, owner: 'worker-a' };
-  const stranded = work({ stage: 'build', submission: null, candidate: null, queue: null, mergeAuthorization: null, lease: null, containmentQuarantine: quarantine, workspaces: [workspace] });
+  const stranded = work({ stage: 'build', submission: null, candidate: null, mergeAuthorization: null, lease: null, containmentQuarantine: quarantine, workspaces: [workspace] });
   const clean = { method: 'linux-proc-systemd' as const, platform: 'linux', uid: 1000, workspacePath: workspace.path, processes: [], scopes: [], held: [], recordedScope: null, inaccessible: 0, unverifiable: [] };
   const probe = () => clean;
 

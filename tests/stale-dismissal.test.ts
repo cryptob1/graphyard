@@ -5,11 +5,9 @@ import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { CHECK_NAME, GitHub } from '../src/github.js';
-import { describeQueueBinding, exactApproval, type Observation, type Work } from '../src/model.js';
+import { exactApproval, type Observation, type Work } from '../src/model.js';
 import { nameUnobtainableReviews, reconcileAutoDispatch, reviewNeed, unansweredRequest, unobtainableReview, type RequestProgress, type SettledReviewSession } from '../src/model/dispatch.js';
-import { baseRefreshConflict, keptTipCarry, pendingBaseRefresh, predictQueue, queueRef, treeIdenticalPrediction, type QueueSpeculation } from '../src/merge-queue.js';
-import { carriedApproval, currentCarry, evidenceBindsCandidate, type QueueCarry } from '../src/model/carry.js';
+import { baseRefreshConflict, pendingBaseRefresh } from '../src/merge-queue.js';
 import { buildMasterStatus, loadMasterConfig, setupMaster } from '../src/master.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, saveReviewerProfile, summarizeReviews, withdrawnBeforeLaunch } from '../src/reviewer.js';
 import { sessionRetry } from '../src/producer.js';
@@ -19,12 +17,11 @@ import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Each test is named for the proof it produces: integration:dismissed-review-not-matched,
-// integration:recover-review-without-base-refresh, unit:unobtainable-review-visible and
-// integration:tip-republication-preserves-approval.
+// integration:recover-review-without-base-refresh and unit:unobtainable-review-visible.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
-const H = sha40('a1'), B = sha40('b1'), P1 = sha40('c1'), P2 = sha40('c2'), TIP = sha40('d1');
+const H = sha40('a1'), B = sha40('b1'), P1 = sha40('c1'), TIP = sha40('d1');
 const treeOf = (sha: string) => sha40(`7${sha.slice(0, 3)}`);
 // One fixed clock for the launch and for every GitHub timestamp: the launch cutoff below is a
 // comparison between the two, so a test that mixed a real clock with a fake one would prove
@@ -129,15 +126,13 @@ test('integration:dismissed-review-not-matched — a review GitHub dismissed bef
   } finally { await cleanup(); }
 });
 
-test('integration:recover-review-without-base-refresh — a candidate whose approval was dismissed by a queue tip republication obtains a fresh verdict on the same commit, with no base refresh and no new head', async () => {
+test('integration:recover-review-without-base-refresh — a candidate whose approval GitHub dismissed obtains a fresh verdict on the same commit, with no base refresh and no new head', async () => {
   const { root, config, cleanup } = await reviewerRoot();
   try {
-    // The GY-87 sequence. The queue published tip TIP over the approved head, `master merge`
-    // re-posted the carried approval on it, and GitHub then withdrew that approval: the same
-    // commit is still the candidate and still needs the review the gate refuses without.
+    // The GY-87 sequence: GitHub withdrew the approval of the candidate TIP while the same commit
+    // is still the candidate, so it still needs the review the gate refuses without.
     const candidate = { sha: TIP, baseSha: P1, pr: PR, branch: 'graphyard/gy-100-1', author: 'implementer' };
-    const speculation: QueueSpeculation = { ref: queueRef('GY-100'), tip: TIP, tipTree: treeOf(TIP), base: P1, baseTree: treeOf(P1), predecessors: [], policyRevision: 4, publishedAt: iso(-900_000) };
-    const approved = (state: string, at: number) => work({ candidate, queue: { sequence: 1, enqueuedAt: iso(-900_000), policyRevision: 4, speculation },
+    const approved = (state: string, at: number) => work({ candidate,
       observation: observation(candidate, iso(at), { reviews: [{ id: 21, reviewer, sha: TIP, state, submittedAt: iso(-600_000) }] }) } as Partial<Work>, iso(at));
     const item = approved('APPROVED', 0);
     assert.equal(reviewNeed(item).state, 'approved');
@@ -231,118 +226,4 @@ test('unit:unobtainable-review-visible — master status names the dismissed rev
   assert.match(report, /nameUnobtainableReviews\(attentionItems as \(AttentionItem & \{ requestId\?: string \}\)\[\], unobtainable\)/);
   assert.match(report, /dispatchUnobtainableReview: unobtainable\.length/);
   assert.match(report, /unobtainableReviews: unobtainable\.map\(item => \(\{ work: item\.subject, \.\.\.item\.review \}\)\)/);
-});
-
-/** A GitHub adapter over the same request surface the real one uses, for one queued candidate. */
-function queueProvider(options: { tip: string; boundBase: string; predictedBase: string; branchTip: string; trees: Record<string, string> }) {
-  const writes: { path: string; method: string }[] = [];
-  const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used-in-adapter-test' });
-  github.controlPlaneLogin = async () => 'graphyard-owner-project[bot]';
-  github.request = async (path, method = 'GET', body) => {
-    if (method !== 'GET') writes.push({ path, method });
-    if (path === '/merges' && method === 'POST') return { sha: sha40('e1') };
-    if (method !== 'GET') return { id: 1 };
-    if (path === '/git/ref/heads/main') return { ref: 'refs/heads/main', object: { type: 'commit', sha: options.branchTip } };
-    if (/^\/commits\/[a-f0-9]{40}$/.test(path)) {
-      const sha = path.slice(9);
-      return { sha, commit: { tree: { sha: options.trees[sha] ?? treeOf(sha) }, author: { email: 'noreply@github.com' } }, parents: [], author: null };
-    }
-    if (path.startsWith('/compare/')) {
-      const [from, to] = path.slice(9).split('?')[0].split('...');
-      return { status: from === to ? 'identical' : 'diverged', files: [{ filename: 'src/other.ts' }] };
-    }
-    if (path === `/pulls/${PR}`) return { number: PR, head: { sha: options.tip, ref: 'graphyard/gy-100-1', repo: { full_name: 'owner/project' } },
-      base: { sha: options.boundBase, ref: 'main', repo: { full_name: 'owner/project' } }, user: { login: 'implementer' }, merged: false, mergeable: true, draft: false, state: 'open', merge_commit_sha: null };
-    if (path.includes('/protection')) return { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true }, required_status_checks: { strict: false, checks: [{ context: CHECK_NAME, app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
-    throw new Error(`Unexpected request ${path}`);
-  };
-  return { github, writes };
-}
-
-test('integration:tip-republication-preserves-approval — a merge-queue tip is not republished onto a prediction whose tree it already lands, so the approval of that tree still stands', async () => {
-  // Two queued entries. GY-99 is at the head of the queue on the base branch; GY-100 is behind
-  // it, with its own tip published on GY-99's tip and approved on that exact commit.
-  const trees = { [B]: treeOf(B), [P1]: treeOf('p'), [P2]: treeOf('p'), [TIP]: treeOf(TIP) };
-  const ahead = (tip: string): Work => ({ ...work({ id: 'work-99', key: 'GY-99' }), id: 'work-99', key: 'GY-99', queueSequence: 1,
-    candidate: { sha: tip, baseSha: B, pr: 99, branch: 'graphyard/gy-99-1', author: 'implementer' },
-    queue: { sequence: 1, enqueuedAt: iso(-600_000), policyRevision: 4, speculation: { ref: queueRef('GY-99'), tip, tipTree: trees[tip], base: B, baseTree: trees[B], predecessors: [], policyRevision: 4, publishedAt: iso(-500_000) } },
-    observation: observation({ sha: tip, baseSha: B }, iso(0), { baseTip: B, baseTree: trees[B] }), stage: 'merge' } as Work);
-  // The predecessor's published tip is the base this entry was validated on and approved at.
-  const mine = (): Work => {
-    const candidate = { sha: TIP, baseSha: P1, pr: PR, branch: 'graphyard/gy-100-1', author: 'implementer' };
-    return { ...work({}), queueSequence: 2, candidate, stage: 'merge',
-      queue: { sequence: 2, enqueuedAt: iso(-400_000), policyRevision: 4, speculation: { ref: queueRef('GY-100'), tip: TIP, tipTree: trees[TIP], base: P1, baseTree: trees[P1], predecessors: ['GY-99'], policyRevision: 4, publishedAt: iso(-300_000) } },
-      observation: observation(candidate, iso(0), { baseTip: B, baseTree: trees[B], reviews: [{ id: 31, reviewer, sha: TIP, state: 'APPROVED', submittedAt: iso(-200_000) }] }) } as Work;
-  };
-  // Stable: the prediction is the exact commit this tip was built on.
-  const before = predictQueue([ahead(P1), mine()], clock);
-  assert.deepEqual(before.map(entry => [entry.key, entry.current, entry.binding]), [['GY-99', true, 'exact'], ['GY-100', true, 'exact']]);
-  assert.equal(before[0].tipTree, trees[P1]);
-  // GY-99 republishes its tip: a new commit, the same tree. GY-100's prediction moved in sha
-  // only, so nothing of its own may be republished — a tip push would replace the head GitHub
-  // bound the approval to, and dismiss it for content nobody changed.
-  const republished = [ahead(P2), mine()];
-  const after = predictQueue(republished, clock + 1000);
-  assert.deepEqual(after.map(entry => [entry.key, entry.current, entry.binding, entry.publishable]), [['GY-99', true, 'exact', false], ['GY-100', true, 'tree-equivalent', false]]);
-  assert.equal(after[1].predictedBase, P2);
-  // The approval of that tree still stands, exactly as it was given.
-  const item = republished[1];
-  assert.equal(exactApproval(item)!.reviewId, 31);
-  assert.equal(reviewNeed(item).state, 'approved');
-  assert.equal(describeQueueBinding(item, republished, new Date(clock + 1000), after[1])!.approval.state, 'exact');
-  assert.deepEqual(reconcileAutoDispatch(item, republished, new Date(clock + 1000)).map(entry => entry.event), [], 'no review is asked for again');
-  // A tip published before tips carried their own tree cannot be judged from the record here, so
-  // the publisher itself declines the republication: it writes nothing, keeps the tip and the
-  // base it was validated on, and records the tree-identical advance instead.
-  const legacy = [ahead(P2), mine()];
-  delete legacy[0].queue!.speculation!.tipTree;
-  const unjudged = predictQueue(legacy, clock + 1000);
-  assert.deepEqual([unjudged[1].current, unjudged[1].publishable], [false, true]);
-  assert.match(unjudged[1].reasons.join(' '), /has not been published and validated for this candidate/);
-  assert.equal(treeIdenticalPrediction(legacy[1], P2, trees[P2])!.tip, TIP);
-  assert.equal(treeIdenticalPrediction(legacy[1], sha40('f1'), treeOf('f1')), null, 'a prediction that brings content is merged as it always was');
-  const provider = queueProvider({ tip: TIP, boundBase: P1, predictedBase: P2, branchTip: B, trees });
-  const speculation = await provider.github.publishSpeculativeTip(legacy[1], unjudged[1], async () => { throw new Error('nothing may be written'); });
-  assert.deepEqual([speculation.tip, speculation.base, speculation.baseTree], [TIP, P1, trees[P1]]);
-  assert.deepEqual(speculation.carriedBase, { sha: P2, tree: trees[P2], at: speculation.carriedBase!.at });
-  assert.deepEqual(provider.writes, [], 'no merge commit, no ref update, no push that could dismiss the approval');
-  // The record it returns is what binds the tip to the prediction on the next cycle.
-  legacy[1].queue!.speculation = speculation;
-  const rebound = predictQueue(legacy, clock + 2000);
-  assert.deepEqual([rebound[1].current, rebound[1].binding, rebound[1].publishable], [true, 'tree-equivalent', false]);
-  assert.equal(exactApproval(legacy[1])!.reviewId, 31);
-  // Nearly every follower's tip is Graphyard's own merge of the reviewed head: its approval and
-  // proofs bind through the carry decided when the tip first replaced that head. Re-binding the
-  // same tip keeps that decision — the engine binds the returned record with keptTipCarry — so
-  // the carried approval and every carried proof still stand on the unchanged commit.
-  const carry: QueueCarry = { from: { sha: H, baseSha: B }, to: { sha: TIP, baseSha: P1 }, policyRevision: 4, at: iso(-300_000), predecessor: 'GY-99', changedFiles: ['README.md'], reviewedFiles: ['src/reviewer.ts'],
-    approval: { carried: true, provider: 'github', reviewer, sha: TIP, reviewId: 30, originalSha: H, reason: 'approval of H carried' },
-    evidence: [{ proof: 'manual:stale-dismissal', carried: true, evidenceId: 'evidence-h', producer: 'producer', reason: 'scope disjoint' }] };
-  const merged = [ahead(P2), mine()];
-  delete merged[0].queue!.speculation!.tipTree;
-  merged[1].observation!.reviews = [];
-  merged[1].queue!.speculation!.carry = carry;
-  const carriedEvidence = { id: 'evidence-h', proof: 'manual:stale-dismissal', sha: H, baseSha: B };
-  const bound = (item: Work) => [currentCarry(item)?.from.sha, carriedApproval(item)?.reviewId, evidenceBindsCandidate(item, carriedEvidence)];
-  assert.deepEqual(bound(merged[1]), [H, 30, true]);
-  const again = await queueProvider({ tip: TIP, boundBase: P1, predictedBase: P2, branchTip: B, trees }).github
-    .publishSpeculativeTip(merged[1], predictQueue(merged, clock + 1000)[1], async () => { throw new Error('nothing may be written'); });
-  const kept = keptTipCarry(merged[1], again);
-  assert.deepEqual(kept, carry, 'the carry decided for the tip is kept, not reset');
-  merged[1].queue!.speculation = { ...again, carry: kept };
-  assert.deepEqual(bound(merged[1]), [H, 30, true], 'the carried approval and the carried proof still bind the unchanged tip');
-  assert.deepEqual([predictQueue(merged, clock + 2000)[1].current, again.predecessors], [true, ['GY-99']]);
-  // A tip that replaces the head is decided afresh; a tip the record does not hold carries nothing.
-  assert.equal(keptTipCarry(merged[1], { ...again, tip: sha40('e2') }), undefined);
-  assert.equal(keptTipCarry(merged[1], { ...again, base: sha40('c4') }), null);
-  assert.match(await readFile(fileURLToPath(new URL('../src/engine.ts', import.meta.url)), 'utf8'), /const kept = keptTipCarry\(work, speculation\);\n\s*const carry = kept === undefined \? this\.decideTipCarry\(/);
-  // A prediction that really brings content is still merged and published, as before.
-  const moved = [ahead(sha40('c3')), mine()];
-  const ahead3 = predictQueue(moved, clock + 3000);
-  assert.deepEqual([ahead3[1].current, ahead3[1].publishable], [false, true]);
-  const merging = queueProvider({ tip: TIP, boundBase: P1, predictedBase: sha40('c3'), branchTip: B, trees });
-  const published = await merging.github.publishSpeculativeTip(moved[1], ahead3[1]);
-  assert.deepEqual([published.tip, published.base], [sha40('e1'), sha40('c3')]);
-  assert.equal(published.tipTree, treeOf(sha40('e1')));
-  assert.deepEqual(merging.writes.map(entry => `${entry.method} ${entry.path}`), ['PATCH /git/refs/heads/graphyard-merge-check/gy-100', 'POST /merges', 'DELETE /git/refs/heads/graphyard-merge-check/gy-100', 'PATCH /git/refs/heads/graphyard/gy-100-1', `PATCH /git/${queueRef('GY-100')}`]);
 });

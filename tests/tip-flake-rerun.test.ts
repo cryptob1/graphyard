@@ -12,7 +12,7 @@ import { daemonEffects, routineDecision } from '../src/master-daemon.js';
 import { checkStates } from '../src/model/pr-steps.js';
 import { plainReason } from '../src/model/plain-status.js';
 import { refusalAction } from '../src/model/refusal-mapping.js';
-import { checkRerunVisibilityMs, queueRef, reconcileCheckReruns, rerunFailedChecksEvent, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
+import { checkRerunVisibilityMs, reconcileCheckReruns, rerunFailedChecksEvent } from '../src/merge-queue.js';
 import { defaultRerunFailedChecks, masterConfigSchema, maxRerunFailedChecks, rerunFailedChecks } from '../src/master/profiles.js';
 import { evaluate, type Observation, type Principal, type Work } from '../src/model.js';
 
@@ -41,7 +41,6 @@ const run = (name: string, id: number, result: string): Check => ({ name, result
 const reload = async (work: Work) => (await store.list()).find(item => item.id === work.id)!;
 const kinds = async (work: Work) => (await store.events(work.id)).map(event => event.kind).reverse();
 const gate = (work: Work, name: string) => work.gates.find(entry => entry.name === name)!;
-async function clearQueue() { await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE document->>'stage'<>'done'"); }
 async function onlyJob(work: Work) {
   await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
   await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [work.id]);
@@ -59,19 +58,17 @@ function seen(work: Work, candidate: { sha: string; baseSha: string }, checks: C
     merged: false, mergeSha: null, prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: treeOf(candidate.baseSha), baseTipContained: true,
     files: ['src/flake.ts'], scopeFiles: [], at: new Date().toISOString() };
 }
-/** GitHub as the job loop reaches it: it observes `checks()` on the tip and reruns failed jobs as `rerun` answers. */
+/** GitHub as the job loop reaches it: it observes `checks()` on the head and reruns failed jobs as `rerun` answers. */
 function adapter(candidate: { sha: string; baseSha: string }, checks: () => Check[], rerun: ((checkRunId: number) => Promise<{ runId: number }>) | null) {
   const reruns: number[] = [];
   return { reruns, github: {
     observe: async (work: Work) => seen(work, candidate, checks()),
-    publishSpeculativeTip: async (work: Work, placement: QueuePlacement): Promise<QueueSpeculation> =>
-      ({ ref: queueRef(work.key), tip: candidate.sha, base: placement.predictedBase!, baseTree: treeOf(placement.predictedBase!), predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge: null }),
     ...(rerun ? { rerunFailedJobs: async (id: number) => { reruns.push(id); return rerun(id); } } : {}),
     requestCodex: async () => { throw new Error('no review request expected'); },
     publish: async () => {},
   } as unknown as GitHub };
 }
-/** One reconciliation of `work` through the job loop, observing `checks` on its tip. */
+/** One reconciliation of `work` through the job loop, observing `checks` on its head. */
 async function reconcile(work: Work, checks: Check[], rerun: ((id: number) => Promise<{ runId: number }>) | null = async () => ({ runId: 9001 })) {
   await onlyJob(work);
   const github = adapter({ sha: work.candidate!.sha, baseSha: work.candidate!.baseSha }, () => checks, rerun);
@@ -80,7 +77,6 @@ async function reconcile(work: Work, checks: Check[], rerun: ((id: number) => Pr
 }
 
 test('unit:tip-flake-rerun-once — a failed check on a candidate head outside the queue is rerun once before the head is left at test', async () => {
-  await clearQueue();
   const main = sha40('b4'), head = sha40('a4');
   let work = await submitted('Flaky head');
   work = await engine.observe(work.id, work.revision, seen(work, { sha: head, baseSha: main }, [run('test', 41, 'failure'), run('typecheck', 42, 'success')]));
@@ -138,12 +134,11 @@ test('unit:tip-flake-rerun-configurable — mergeQueue.rerunFailedChecks default
     assert.equal((await api('merge-queue', tokens.worker, { rerunFailedChecks: 0 })).status, 403, 'only the master (or an operator) sets it');
     assert.equal((await api('merge-queue', tokens.coordinator, { rerunFailedChecks: maxRerunFailedChecks + 1 })).status, 400);
     assert.equal((await api('merge-queue', tokens.coordinator, {})).status, 400);
-    await effects.publishMergeBatchSize!();
-    await effects.publishMergeBatchSize!();
-    assert.deepEqual(posted, [{ batchSize: 4, parallelTips: 4, rerunFailedChecks: 0 }], 'published once, not every cycle');
+    await effects.publishMergeSettings!();
+    await effects.publishMergeSettings!();
+    assert.deepEqual(posted, [{ rerunFailedChecks: 0 }], 'published once, not every cycle');
     assert.equal(engine.rerunFailedChecks, 0, 'the control plane applies the master\'s setting at once');
     assert.equal(await new Engine(store).loadRerunFailedChecks(), 0, 'a restarted control plane reads it back from the installation ledger');
-    await clearQueue();
     let work = await submitted('No rerun');
     work = await engine.observe(work.id, work.revision, seen(work, { sha: sha40('a5'), baseSha: sha40('b5') }, [run('test', 51, 'failure'), run('typecheck', 52, 'success')]));
     const step = await reconcile(work, [run('test', 51, 'failure'), run('typecheck', 52, 'success')]);
@@ -152,8 +147,8 @@ test('unit:tip-flake-rerun-configurable — mergeQueue.rerunFailedChecks default
     assert.equal(refusalAction(step.work, 'test', 'Required CI check test has not passed on the current candidate'), 'request-rework', 'the first failure is the worker\'s at once');
     // Removing the setting publishes the product default again.
     configured = undefined;
-    await effects.publishMergeBatchSize!();
-    assert.deepEqual(posted.at(-1), { batchSize: 4, parallelTips: 4, rerunFailedChecks: 1 });
+    await effects.publishMergeSettings!();
+    assert.deepEqual(posted.at(-1), { rerunFailedChecks: 1 });
     assert.equal(await new Engine(store).loadRerunFailedChecks(), 1);
     assert.equal((await store.pool.query('SELECT count(*)::int AS n FROM events WHERE work_id IS NULL AND kind=$1', [rerunFailedChecksEvent])).rows[0].n, 2, 'one ledger entry per change');
   } finally {
@@ -170,7 +165,6 @@ test('unit:tip-flake-rerun-configurable — mergeQueue.rerunFailedChecks default
 });
 
 test('manual:review-followups-triaged GY-731.1: gate, rerun hold and rework select the same trusted run by ID', async () => {
-  await clearQueue();
   const main = sha40('b731'), head = sha40('a731');
   let work = await submitted('Trusted rerun selection');
   const checks = [
@@ -179,7 +173,6 @@ test('manual:review-followups-triaged GY-731.1: gate, rerun hold and rework sele
     { ...run('test', 999, 'failure'), appId: 777, attempt: 99 },
   ];
   work = await engine.observe(work.id, work.revision, seen(work, { sha: head, baseSha: main }, checks));
-  assert.equal(work.queue ?? null, null);
   assert.match(gate(work, 'test').reasons[0], /rerun: one rerun of its failed jobs is owed/);
   assert.equal(checkStates(work, [15368]).find(check => check.name === 'test')?.state, 'failed');
   assert.match(plainReason(gate(work, 'test').reasons[0], 'test').text, /rerun: one rerun.*owed/);
@@ -199,7 +192,6 @@ test('manual:review-followups-triaged GY-731.1: gate, rerun hold and rework sele
 });
 
 test('manual:review-followups-triaged GY-731.2: custom and empty CI trust configurations reach downstream rework decisions', async () => {
-  await clearQueue();
   const custom = new Engine(store, [777], 120, 'owner/project');
   let work = await submitted('Custom CI rerun selection');
   const candidate = { sha: sha40('a732'), baseSha: sha40('b732') };
@@ -218,7 +210,6 @@ test('manual:review-followups-triaged GY-731.2: custom and empty CI trust config
 });
 
 test('manual:review-followups-triaged GY-731.4: owed reruns expire without a visible run and are never requested twice', async () => {
-  await clearQueue();
   let work = await submitted('Lost rerun request');
   const candidate = { sha: sha40('a733'), baseSha: sha40('b733') };
   work = await engine.observe(work.id, work.revision, seen(work, candidate, [run('test', 10, 'failure')]));
@@ -236,7 +227,6 @@ test('manual:review-followups-triaged GY-731.4: owed reruns expire without a vis
 });
 
 test('manual:review-followups-triaged GY-731.3: a known missing Actions grant holds the job before calling GitHub', async () => {
-  await clearQueue();
   let work = await submitted('Missing rerun permission');
   const candidate = { sha: sha40('a734'), baseSha: sha40('b734') };
   const checks = [run('test', 10, 'failure'), run('typecheck', 11, 'success')];
@@ -253,7 +243,6 @@ test('manual:review-followups-triaged GY-731.3: a known missing Actions grant ho
 
 
 test('manual:review-followups-triaged GY-731.2b: unqueued terminal rerun outcomes stay visible and classify as rework', async () => {
-  await clearQueue();
   let work = await submitted('Rerun outcome visibility');
   const candidate = { sha: sha40('a735'), baseSha: sha40('b735') };
   work = await engine.observe(work.id, work.revision, seen(work, candidate, [run('test', 10, 'failure'), run('typecheck', 11, 'success')]));

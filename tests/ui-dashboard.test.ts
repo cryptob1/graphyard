@@ -5,7 +5,6 @@ import { readFile } from 'node:fs/promises';
 import { createElement, isValidElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Work } from '../src/model.js';
-import { predictQueue } from '../src/merge-queue.js';
 import { NOW, boardApi, boardStatus, boardWork, realDeliveredWork } from '../browser-tests/ui-board.js';
 // @ts-expect-error Dependency-free fixture script.
 import { fixtureApi, flowApi, flowDataset, visibleWords } from '../scripts/dashboard-fixture.mjs';
@@ -50,7 +49,7 @@ function dashboard(overrides: Partial<Dashboard> = {}, role = 'admin'): Dashboar
     token: 'fixture', work, status: boardStatus(role), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
     operatorAgents: [], operatorAgentsError: null, features: { validation: null, releases: null, automation: null }, events: [], editingRequirements: false, setEditingRequirements: noop,
-    codexAvailable: false, queue: predictQueue(work, NOW), sessionEpoch: { current: 0 }, api: async (path: string) => boardApi(path, role), refresh: async () => {},
+    codexAvailable: false, sessionEpoch: { current: 0 }, api: async (path: string) => boardApi(path, role), refresh: async () => {},
     action: async () => {}, setError: noop, signOut: noop, ...overrides,
   };
   // The board GET /api/board serves over the same work (GY-200): the Work page renders its groups.
@@ -315,7 +314,6 @@ test('unit:ui-pr-steps — every moving item shows the seven steps from its gate
     ['proofs pending on an inherited obligation', withReasons(find('GY-16', work), { acceptance: ['Bootstrap obligation inherited from GY-9 AC-2: integration:contract needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy'] }), 'prove', 'Proving · 3 of 4 proofs passed', 'Prover agent'],
     ['proofs no longer independent', withReasons(find('GY-16', work), { acceptance: [`Trusted ${find('GY-16', work).criteria[0].proofs[0]} evidence from producer-1 is no longer independent: producer-1 has since held an assignment on GY-16`] }), 'prove', 'Proving · 2 of 3 proofs passed', 'Prover agent'],
     ['merging', find('GY-21', work), 'merge', 'Merging · Graphyard is merging it', 'Graphyard (automatic)'],
-    ['queued to merge', withReasons(find('GY-21', work), { merge: ['Merge queue position 2 of 3: GY-5 is ahead'] }), 'merge', 'Merging · 2nd in line, after GY-5', 'Graphyard (automatic)'],
     // Deploy is a step only where the policy asks for the check after deploying (GY-161, AC-11).
     ['deploying', { ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true }, delivery: { ...find('GY-18', work).delivery!, deployment: undefined } } as Work, 'deploy', 'Deploying · waiting for the live release to serve it', 'Graphyard (automatic)'],
     ['checking the live release', { ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true } } as Work, 'deploy', 'Deploying · checking the live release', 'Prover agent'],
@@ -1036,12 +1034,11 @@ test('unit:ui-short-sha-text — commit SHAs render as 8 characters in the page 
   const loaded = { ...reviewing, candidate: { ...reviewing.candidate!, sha: head, baseSha: base },
     blocker: `Rebase onto ${base}`, violations: [`Commit ${head} was pushed after review`],
     gates: reviewing.gates.map(gate => gate.name === 'review' ? { ...gate, passed: false, reasons: [`Independent approval of ${head} is required`] }
-      : gate.name === 'merge' ? { ...gate, passed: false, reasons: [`Speculative tip on predicted base ${base} is stale`] } : gate),
+      : gate.name === 'merge' ? { ...gate, passed: false, reasons: [`Branch protection requires conversation resolution and 1 review threads are unresolved on ${base}: a on b:1. GitHub blocks the merge until each is resolved`] } : gate),
     observation: { ...reviewing.observation!, agentReview: { reason: `Reviewed ${head} against ${base}` } },
     nextAction: { kind: 'review', gate: 'review', refusal: `Independent approval of ${head} is required`, reason: `review the head ${head}`, llmRole: null },
     actionQueue: { actions: [{ id: 'a1', kind: 'review', state: 'pending', claim: null, requestedBy: 'graphyard', requestedAt: at(hour), attempts: 1, resolution: `reviewed ${base}`,
       history: [{ at: at(hour), event: 'requested', reason: `review ${head}`, result: null, executor: null, requester: 'graphyard' }] }], history: [] },
-    queueEjection: { at: at(2 * hour), reason: `Speculative tip ${base} was stale` },
     // Revoked evidence, whose recorded reason names the commit it no longer binds.
     evidence: [{ ...board().flatMap(item => item.evidence)[0], id: 'e-revoked', sha: head, revocation: { actor: 'operator', at: at(hour), reason: `Proof run against ${base}, not ${head}` } }],
     agentRequests: [{ id: 'q1', type: 'scope', state: 'open', requestedBy: 'worker-1', reason: `Widen scope for ${head}`, paths: ['web/'], decider: { who: 'Master agent', command: null }, at: at(hour), releasedLease: false }],

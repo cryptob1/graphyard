@@ -15,7 +15,7 @@ import type { Services } from './server/routes.js';
 // Splitting broad items before dispatch (GY-1126).
 //
 // A broad item (many criteria, root-level planned directories such as src/ tests/ docs/) builds
-// into a large pull request that collides with others in the merge queue and is ejected, costing
+// into a large pull request that conflicts with others merging beside it and returns for rework, costing
 // a CI and a review round each time. Before an item is first dispatched the loop judges it against
 // size bounds (`run.decomposition`: criteria count, planned-file breadth, an estimated change
 // size). An item over them gets one Pi session on the research account (src/decomposition-step.ts)

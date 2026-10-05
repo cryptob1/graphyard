@@ -10,16 +10,15 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type ApprovalIdentity, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
+import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, submittedEpoch, type Attestation, requireCurrent, createSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability } from './model.js';
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
 import { unauthorizedMergeViolation } from './merge-queue.js';
-import { branchContamination, conflictSince, requestedBaseRefresh, nextQueueEntries, disprovedConflict, withDisprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, defaultParallelTips, mergeParallelTipsEvent, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, tipReplacesHead, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { conflictSince, requestedBaseRefresh, disprovedConflict, withDisprovedConflict, dismissedApproval, onto, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type RestoredApproval } from './merge-queue.js';
 import { docsSyncCarry } from './model/docs-sync.js';
-import { liftedEjection, queueEjectionRecord } from './model/queue.js';
-import { githubFromEnv, mergeBandQueueDepth } from './github.js';
+import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
 import { retroCheckRefusals } from './model/retro-synthesis.js';
 import { readAppliedRetroChecks } from './retro-synthesis.js';
@@ -32,6 +31,7 @@ import { submittedBranchMoved } from './model/assignment.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
 import { recordScenarioRun } from './test-runs.js';
+import { sameObservationInputs } from './model/observation-save.js';
 import type { ObservationJobState } from './model/action-kinds.js';
 import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
 import { recordStallRemedy, remedyFlows, remedyOutcomes, stallRemedyKinds } from './stall-remedies.js';
@@ -134,7 +134,7 @@ const commands = {
   // operator clears it. It needs no lease — no attempt is running — and is refused while one is.
   dispatchblock: z.object({ reason: z.string().trim().min(1).max(2000) }).strict(),
   // `scopeFiles` is the producer's declaration of what the proof depends on, in the planned-files
-  // scope syntax; the merge queue carries a proof across its own authored tip only inside it.
+  // scope syntax; a base refresh carries a proof across its own authored merge only inside it.
   evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: publicArtifactUrl.optional(), artifacts: z.array(evidenceArtifact).max(30).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional(),
     scopeFiles: z.array(z.string().min(1).max(500)).min(1).max(100).optional(), provenance: z.object({
     provider: z.literal('github-actions'), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/), workflowCommit: sha,
@@ -156,10 +156,6 @@ const commands = {
   // A typed ask recorded instead of blocking on a prose question. The decider is derived, the
   // attempt ends in the same transaction, and the item is free again; see model/agent-requests.ts.
   request: agentRequestSchema,
-  // The coordinator asking the control plane to restore a branch found carrying another item's
-  // unlanded commits (GY-127). It carries no head: the restore is decided from the record and the
-  // observation, run by the reconciliation job, and recorded on `baseRefresh.restore`.
-  repair: z.object({ reason: z.string().trim().min(1).max(2000) }).strict(),
   // The coordinator — the master loop's operator-agent identity — asking the control plane to merge
   // the base tip it names into a candidate a repaired base failure held (GY-528). The reconciliation
   // job runs it and records it on `baseRefresh`, where the binding carry decides what the head keeps.
@@ -380,11 +376,10 @@ export function historicalAuthorizationRefusals(past: Work, _all: Work[], observ
     refusals.push(`the record named candidate ${past.candidate?.sha.slice(0, 12) ?? 'none'}, not the merged head ${observation.candidate.sha.slice(0, 12)}`);
   if (past.submission?.pr !== observation.candidate.pr) refusals.push(`the record named pull request #${past.submission?.pr ?? 'none'}, not #${observation.candidate.pr}`);
   // A reconciliation judges the merge that happened, so nothing that merge itself wrote can refuse
-  // it (GY-94): the unauthorized-merge violation it exists to clear, a refusal of an earlier
-  // decision, and a merge gate that only reports the queue position the merge left behind.
+  // it (GY-94): the unauthorized-merge violation it exists to clear, and a refusal of an earlier
+  // decision.
   const circular = (violation: string) => options.reconciling && (violation === unauthorizedMergeViolation || violation.startsWith(reconciliationRefusalPrefix));
-  const githubAnswers = (reason: string) => reason === mergeabilityComputingRefusal || reason === 'Pull request is not mergeable against the current base'
-    || (!!options.reconciling && queueSequencingReason(reason));
+  const githubAnswers = (reason: string) => reason === mergeabilityComputingRefusal || reason === 'Pull request is not mergeable against the current base';
   for (const gate of past.gates) {
     const reasons = gate.name === 'merge' ? gate.reasons.filter(reason => !githubAnswers(reason)) : gate.reasons;
     if (!gate.passed && reasons.length) refusals.push(`gate ${gate.name} had not passed: ${reasons.join('; ')}`);
@@ -583,30 +578,6 @@ export class Engine {
   /** This repository's documentation policy (GY-215): the deployed GRAPHYARD_DOCUMENTATION, or the default. */
   documentation: DocumentationPolicy = configuredDocumentation();
   /**
-   * How many consecutive queue entries one combined tip validates (GY-330): the master's
-   * `mergeQueue.batchSize` as it last published it (POST /api/merge-queue), read back from the
-   * installation ledger by `loadMergeBatchSize`, else the default.
-   */
-  mergeBatchSize = defaultMergeBatchSize;
-  /** Reads the batch size the master last published from the installation ledger. */
-  async loadMergeBatchSize() {
-    const row = (await this.store.pool.query('SELECT (payload->>\'batchSize\')::int AS size FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [mergeBatchSizeEvent])).rows[0];
-    this.mergeBatchSize = Number.isSafeInteger(row?.size) && row.size >= 1 ? row.size : defaultMergeBatchSize;
-    return this.mergeBatchSize;
-  }
-  /**
-   * How many queue positions are validated at once (GY-498): the master's `mergeQueue.parallelTips`
-   * as it last published it, read back from the installation ledger by `loadParallelTips`, else
-   * the default of 4. Every evaluation validates the first that many speculative tips at once.
-   */
-  parallelTips = defaultParallelTips;
-  /** Reads the parallel-tip window the master last published from the installation ledger. */
-  async loadParallelTips() {
-    const row = (await this.store.pool.query('SELECT (payload->>\'parallelTips\')::int AS tips FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [mergeParallelTipsEvent])).rows[0];
-    this.parallelTips = Number.isSafeInteger(row?.tips) && row.tips >= 1 ? row.tips : defaultParallelTips;
-    return this.parallelTips;
-  }
-  /**
    * How many times a required check that failed on a candidate sha is rerun before the failure
    * counts (GY-516): `mergeQueue.rerunFailedChecks` as the master publishes it, else the product
    * default (src/master/profiles.ts); 0 disables.
@@ -621,7 +592,7 @@ export class Engine {
   /**
    * Records the outcome of asking GitHub to rerun an owed check (GY-516), made by the integration
    * job outside any transaction: `requested` holds the failure until the rerun concludes,
-   * `refused` lets it stand, and the entry is re-evaluated at once either way.
+   * `refused` lets it stand, and the item is re-evaluated at once either way.
    */
   async recordCheckRerun(id: string, jobToken: string, owed: Pick<CheckRerun, 'sha' | 'check' | 'failedRunId'>, outcome: { state: 'requested' | 'refused'; runId?: number; attempt?: number; detail?: string }) {
     return this.store.transaction(async (db, now) => {
@@ -634,9 +605,7 @@ export class Engine {
       if (index < 0 || work.checkReruns![index].state !== 'owed') return work;
       const rerun: CheckRerun = { ...work.checkReruns![index], state: outcome.state, ...(outcome.runId !== undefined ? { runId: outcome.runId } : {}), ...(outcome.attempt !== undefined ? { attempt: outcome.attempt } : {}), ...(outcome.detail ? { detail: outcome.detail } : {}), ...(outcome.state === 'refused' ? { resolvedAt: now.toISOString() } : {}) };
       work.checkReruns = work.checkReruns!.map((entry, at) => at === index ? rerun : entry).slice(-checkRerunLimit);
-      const queuedBefore = work.queue?.sequence ?? null;
       this.evaluate(work, all, now);
-      await this.recordEjection(db, work, all, queuedBefore, now);
       await this.recordDispatch(db, work, now);
       await save(db, work, 'github', `check.rerun.${outcome.state}`, now, rerun);
       return work;
@@ -675,22 +644,11 @@ export class Engine {
         await rewriteDocument(db, work);
         return work;
       }
-      const queuedBefore = work.queue?.sequence ?? null;
       this.evaluate(work, all, now);
-      await this.recordEjection(db, work, all, queuedBefore, now);
       await this.recordDispatch(db, work, now);
       await save(db, work, 'github', `check.rerun.${outcome.kind === 'recancelled' ? 'requested' : outcome.kind}`, now, next);
       return work;
     }, { itemLock: id });
-  }
-  /** A queue entry the evaluation just derived out is recorded as an ejection, and the entries behind it are woken. */
-  private async recordEjection(db: PoolClient, work: Work, all: Work[], queuedBefore: number | null, now: Date, extra: Record<string, unknown> = {}) {
-    const lifted = liftedEjection(work, queuedBefore, now);
-    if (lifted) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.ejection-lifted', JSON.stringify({ details: { ...lifted, at: now.toISOString() } })]);
-    if (queuedBefore === null || work.queue || work.queueEjection?.sequence !== queuedBefore) return;
-    await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.ejected',
-      JSON.stringify({ details: { sequence: queuedBefore, reason: work.queueEjection.reason, conflict: work.queueEjection.conflict ?? null, ...extra, at: now.toISOString() } })]);
-    for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize, this.parallelTips))) await wakeJob(db, behind.id);
   }
   // The launch fence is a deployment-independent safety default; only tests shorten it.
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
@@ -1001,30 +959,11 @@ export class Engine {
         work.reviewFailovers = (work.reviewFailovers ?? []).filter(failover => failover.sha !== work.candidate?.sha
           || failover.baseSha !== work.candidate?.baseSha || failover.policyRevision !== work.policyRevision);
       }
-      if (command === 'repair') {
-        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-        demand(work.submission && !work.observation?.merged && work.stage !== 'done', 'Open submitted work is required');
-        demand(work.observation?.candidate.sha === work.candidate?.sha && work.observation?.prState === 'open' && work.observation.draft === false, 'An open pull request observed at the current head is required');
-        demand(!work.queue, `${work.key} is a live merge-queue entry; its tip is rebuilt from its own reviewed head when the queue changes, and is not repaired by hand`);
-        // Decided from the record and the observation alone; the command asserts nothing.
-        const contamination = branchContamination(work, all);
-        demand(contamination, `${work.key} head ${work.candidate!.sha.slice(0, 12)} carries no other item's unlanded commits; there is nothing to repair`);
-        demand(!pendingRestore(work), `A repair of ${work.key} head ${work.candidate!.sha.slice(0, 12)} is already requested; the reconciliation job runs it`);
-        const performed = currentRestore(work);
-        demand(!performed || performed.restore!.contaminated !== work.candidate!.sha || performed.restore!.outcome !== 'unrepairable',
-          `${work.key} head ${work.candidate!.sha.slice(0, 12)} was found unrepairable: the foreign commits sit under something the record cannot move; request rework instead`);
-        const candidate = work.candidate!, observation = work.observation!;
-        work.baseRefresh = { from: { sha: candidate.sha, baseSha: candidate.baseSha }, base: observation.baseTip ?? candidate.baseSha, baseTree: observation.baseTree ?? '', policyRevision: work.policyRevision, at: now.toISOString(),
-          head: null, conflict: null, merge: null, carry: null,
-          restore: { contaminated: candidate.sha, foreign: contamination!.foreign, own: contamination!.own, cause: 'repair', requested: { by: actor.id, at: now.toISOString(), reason: data.reason },
-            reason: `head ${candidate.sha.slice(0, 12)} carries the unlanded commits of ${contamination!.foreign.join(', ')} (${contamination!.source.join(' and ')})`, performedAt: null, outcome: null } };
-      }
       if (command === 'refresh') {
         if (actor.role !== 'operator-agent') demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
         demand(work.submission && !work.observation?.merged && work.stage !== 'done' && !work.reworkRequested, 'Open submitted work is required');
         const candidate = work.candidate, observation = work.observation;
         demand(candidate && observation?.candidate.sha === candidate.sha && observation.prState === 'open' && observation.draft === false, 'An open pull request observed at the current head is required');
-        demand(!work.queue, `${work.key} is a live merge-queue entry; its tip is rebuilt on the base branch when the queue changes`);
         demand(observation!.baseTip === data.base, `The base branch tip last observed for ${work.key} is ${observation!.baseTip?.slice(0, 12) ?? 'unknown'}, not ${data.base.slice(0, 12)}; retry once it is observed`, 409);
         demand(observation!.baseTipContained === false, `${work.key} head ${candidate!.sha.slice(0, 12)} already contains base branch tip ${data.base.slice(0, 12)}; there is nothing to merge in`);
         const refresh = work.baseRefresh;
@@ -1933,131 +1872,10 @@ export class Engine {
     });
   }
   /**
-   * Records the Graphyard-published speculative tip this candidate must now be validated on, and
-   * decides — once, from the record as it stands and GitHub's account of the tip — which of the
-   * replaced head's bindings carry to it. A carried binding and a re-required one are both
-   * written to the ledger with the reason, so the audit trail says why no fresh round was needed.
-   */
-  async bindSpeculativeTip(id: string, expectedRevision: number, speculation: QueueSpeculation, jobToken: string) {
-    return this.store.transaction(async (db, now) => {
-      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
-      requireCurrent(job, 'Integration job lease expired or superseded');
-      const all = await lockedWork(db, [id]);
-      const work = all.find(w => w.id === id);
-      requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the speculative tip was built');
-      requireCurrent(work.queue && speculation.policyRevision === work.policyRevision, 'Queue entry or policy changed while the speculative tip was built');
-      // A tip re-bound to a tree-identical prediction keeps the carry it was first bound with (GY-100).
-      const kept = keptTipCarry(work, speculation);
-      const carry = kept === undefined ? this.decideTipCarry(work, all, speculation, now) : kept;
-      work.queue!.speculation = { ...speculation, carry };
-      // The prediction names what the tip was built behind and from, so the restore an ejection
-      // owes (see merge-queue.ts ejectedTipRestore) reads it from the record alone.
-      work.queueHistory = [...(work.queueHistory ?? []), { at: now.toISOString(), event: 'predicted' as const, sequence: work.queue!.sequence, tip: speculation.tip,
-        predecessors: speculation.predecessors, from: speculation.reviewedHead ?? speculation.merge?.from ?? speculation.tip }].slice(-queueHistoryLimit);
-      this.evaluate(work, all, now);
-      if (carry && kept === undefined) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.carry', JSON.stringify({ details: { ...carry, merge: speculation.merge ?? null } })]);
-      await this.recordDispatch(db, work, now);
-      await save(db, work, 'graphyard', 'queue.predicted', now, { tip: speculation.tip, base: speculation.base, ref: speculation.ref, predecessors: speculation.predecessors, trigger: speculation.trigger ?? null,
-        ...(kept !== undefined && speculation.carriedBase ? { carriedBase: speculation.carriedBase } : {}),
-        ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
-      await wakeJob(db, work.id);
-      // Publication makes the next prediction buildable before this tip's CI finishes.
-      // Each successor publishes under its own integration lease and request budget.
-      for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.parallelTips))) await wakeJob(db, behind.id);
-      return work;
-    });
-  }
-  /** The carry decision for a tip that replaced the candidate's head; see model/carry.ts for the rule. */
-  private decideTipCarry(work: Work, all: Work[], speculation: QueueSpeculation, now: Date) {
-    const candidate = work.candidate!;
-    const aheadKey = speculation.predecessors.at(-1) ?? null;
-    const ahead = aheadKey ? all.find(item => item.key === aheadKey) : undefined;
-    // The base branch is validated by definition. A queue entry is validated when every gate
-    // passes on exactly the tip predicted here, the merge gate refusing only for its turn.
-    const validated = !aheadKey ? true : !!ahead && ahead.stage === 'merge' && ahead.candidate?.sha === speculation.base && !ahead.violations.length
-      && ahead.gates.every(gate => gate.passed || gate.name === 'merge' && gate.reasons.every(queueSequencingReason));
-    // A tip is built from the item's own reviewed head (GY-127): the replaced head when the worker
-    // pushed it, or the head under the tip it replaces. The bindings carried are the ones that
-    // bind the replaced head now — exact on it, or already carried onto it. `from` is that
-    // reviewed head in every case; a record that predates `reviewedHead` names the merge's own.
-    const from = { sha: speculation.reviewedHead ?? speculation.merge?.from ?? candidate.sha, baseSha: candidate.baseSha };
-    // The record's own binding first; the publisher's fresh read of the replaced tip's approval
-    // (GY-519) fills in when the stored observation predates it — a republication must never drop
-    // an approval of the patch it re-shows just because the observation had not caught up.
-    const approval = bindingApproval(work) ?? this.publicationApproval(work, speculation);
-    // What the reviewer read is the reviewed head's own change, never the replaced tip's pull
-    // request diff: GitHub lists that against the base branch, so a tip built behind an entry that
-    // has not landed lists the entry's files too, and a rebuild after the entry is ejected would
-    // then be refused for files nobody reviewed. An approval read off the replaced tip itself
-    // (GY-519) was given on that tip's diff, so the tip's own recorded files are what it read.
-    const reviewedFiles = reviewedFilesOf(work, from.sha)
-      ?? (approval?.sha === candidate.sha ? reviewedFilesOf(work, candidate.sha) : null);
-    const input = {
-      from, to: { sha: speculation.tip, baseSha: speculation.base }, policyRevision: work.policyRevision, at: now.toISOString(),
-      predecessor: { key: aheadKey, validated }, reviewedFiles: reviewedFiles ?? [],
-      approval, proofs: requiredProofs(work, all).map(proof => ({ proof, evidence: currentEvidence(work, proof, now) })),
-    };
-    // A tip that is the reviewed head itself — no merge, because the head already contained its
-    // predicted base — is decided as an identity carry on the files the predicted base changed,
-    // never refused for lacking a merge (see merge-queue.ts decideIdentityCarry).
-    const carry = !speculation.merge && speculation.tip === from.sha ? decideIdentityCarry({ ...input, baseChanges: speculation.baseChanges })
-      : decideCarry({ ...input, merge: speculation.merge, app: this.controlPlaneAppId ? `control-plane (App ${this.controlPlaneAppId})` : 'control-plane' });
-    // A binding carries only from the head the tip was built from. One given on another commit
-    // binds it anyway when a recorded decision already carried it onto that head — or, for an
-    // approval of the tip being replaced (GY-519), when the replaced tip was itself the control
-    // plane's own Graphyard-authored publication over the same author head with the same patch:
-    // the reviewer judged exactly the change this tip re-shows.
-    const reaches = onto(work, from.sha);
-    const bound = !!approval && approval.sha !== from.sha && (reaches.some(entry => entry.approval.carried && entry.approval.originalSha === approval.sha)
-      || this.replacedTipOfAuthor(work, from.sha) && (approval.sha === candidate.sha
-        || onto(work, candidate.sha).some(entry => entry.approval.carried && entry.approval.originalSha === approval.sha)));
-    if (carry.approval.carried && approval && approval.sha !== from.sha && !bound) {
-      carry.approval = { carried: false, reason: `the approval by ${approval.reviewer} was given on ${approval.sha.slice(0, 12)}, not on the reviewed head ${from.sha.slice(0, 12)} tip ${speculation.tip.slice(0, 12)} was built from, and no recorded decision carried it there; a fresh independent approval of ${speculation.tip.slice(0, 12)} is required` };
-    }
-    if (carry.approval.carried && reviewedFiles === null) {
-      carry.approval = { carried: false, reason: `the files the reviewed head ${from.sha.slice(0, 12)} changed are not recorded, so its independence from what the predicted base changed cannot be shown; a fresh independent approval of ${speculation.tip.slice(0, 12)} is required` };
-    }
-    carry.evidence = carry.evidence.map(entry => {
-      const evidence = entry.carried ? work.evidence.find(item => item.id === entry.evidenceId) : undefined;
-      if (!evidence || evidence.sha === from.sha || reaches.some(decision => decision.evidence.some(carried => carried.carried && carried.evidenceId === evidence.id))) return entry;
-      return { ...entry, carried: false, reason: `evidence ${evidence.id} was produced on ${evidence.sha.slice(0, 12)}, not on the reviewed head ${from.sha.slice(0, 12)} tip ${speculation.tip.slice(0, 12)} was built from, and no recorded decision carried it there; fresh evidence for ${speculation.tip.slice(0, 12)} is required` };
-    });
-    return carry;
-  }
-  /**
-   * The approval of the tip being replaced that the publisher read from GitHub immediately before
-   * the force-push (GY-519), as the binding the carry decides from when the record has none of its
-   * own: the stored observation can predate the approval, and without it a republication would
-   * re-require a review of the patch being republished. Only a GitHub review provider binds it.
-   */
-  private publicationApproval(work: Work, speculation: QueueSpeculation): ApprovalIdentity | null {
-    const observed = speculation.observedApproval;
-    if (!observed || !work.policy.review || reviewProviderOf(work.policy) !== 'github') return null;
-    return { provider: 'github', reviewer: observed.reviewer, sha: observed.sha, ...(observed.reviewId !== undefined ? { reviewId: observed.reviewId } : {}) };
-  }
-  /**
-   * Whether the head this tip replaces (the candidate as the record still binds it) was itself the
-   * control plane's own Graphyard-authored tip over `authorHead` (GY-519): the record names the
-   * same author head under it, GitHub's account recorded at its publication shows the App authored
-   * it over exactly that head and its predicted base without a conflict, and the patch-id it was
-   * approved under is the one on record wherever both sides could be read.
-   */
-  private replacedTipOfAuthor(work: Work, authorHead: string): boolean {
-    const candidate = work.candidate!, previous = work.queue?.speculation;
-    if (!previous || previous.tip !== candidate.sha || candidate.sha === authorHead || previous.policyRevision !== work.policyRevision) return false;
-    if ((previous.reviewedHead ?? previous.merge?.from ?? null) !== authorHead) return false;
-    const merge = previous.merge;
-    if (!merge || merge.from !== authorHead || !merge.authoredByApp || merge.conflicts) return false;
-    const parents = new Set(merge.parents);
-    if (parents.size !== 2 || !parents.has(authorHead) || !parents.has(previous.base)) return false;
-    return !merge.diff?.reviewed || !merge.diff?.tip || merge.diff.reviewed === merge.diff.tip;
-  }
-  /**
    * Records what the control plane did about a base branch that moved under an in-flight
    * candidate: the head it republished on the new base, or the conflict that stopped it. The
-   * carry is decided here, once, from the record as it stands and GitHub's account of the merge —
-   * the same rule the merge queue uses for its own tip — so a clean advance costs no rework round
-   * and a conflicting one carries nothing. The worker asserts none of it and never pushes for it.
+   * carry is decided here, once, from the record as it stands and GitHub's account of the merge
+   * (model/carry.ts), so a clean advance costs no rework round and a conflicting one carries nothing. The worker asserts none of it and never pushes for it.
    */
   async bindBaseRefresh(id: string, expectedRevision: number, refresh: BaseRefresh, jobToken: string) {
     return this.store.transaction(async (db, now) => {
@@ -2066,8 +1884,8 @@ export class Engine {
       const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the base was refreshed');
-      requireCurrent(!work.queue && refresh.policyRevision === work.policyRevision
-        && work.candidate?.sha === refresh.from.sha && work.candidate.baseSha === refresh.from.baseSha, 'Candidate, queue entry or policy changed while the base was refreshed');
+      requireCurrent(refresh.policyRevision === work.policyRevision
+        && work.candidate?.sha === refresh.from.sha && work.candidate.baseSha === refresh.from.baseSha, 'Candidate or policy changed while the base was refreshed');
       if (refresh.stale) {
         // GitHub's conflict reading was stale (GY-375): the test merge was clean and nothing was
         // written. The reading replaces the refresh record for this head, keeping what it carried
@@ -2098,9 +1916,6 @@ export class Engine {
         ...(refresh.docsSync ? { docsSync: { paths: refresh.docsSync.paths, reviewed: refresh.docsSync.reviewed, synced: refresh.docsSync.synced } } : {}),
         ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
       await wakeJob(db, work.id);
-      // Publication makes the next prediction buildable before this tip's CI finishes.
-      // Each successor publishes under its own integration lease and request budget.
-      for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.parallelTips))) await wakeJob(db, behind.id);
       return work;
     });
   }
@@ -2118,39 +1933,10 @@ export class Engine {
     });
   }
   /**
-   * Records what the control plane did about a branch found carrying another item's unlanded
-   * commits (GY-127): the head it restored — the item's own reviewed head merged onto the base —
-   * or the conflict or the missing own head that stopped it. Nothing carries across a restore:
-   * the contaminated head's bindings were bindings of foreign content, and the restored head is
-   * observed, checked, reviewed and proved as any new head is.
-   */
-  async bindBranchRestore(id: string, expectedRevision: number, refresh: BaseRefresh, jobToken: string) {
-    return this.store.transaction(async (db, now) => {
-      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
-      requireCurrent(job, 'Integration job lease expired or superseded');
-      const all = await lockedWork(db, [id]);
-      const work = all.find(w => w.id === id);
-      requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the branch was restored');
-      const restore = refresh.restore;
-      requireCurrent(!work.queue && !!restore && restore.contaminated === work.candidate?.sha && refresh.policyRevision === work.policyRevision, 'Candidate, queue entry or policy changed while the branch was restored');
-      work.baseRefresh = { ...refresh, carry: null };
-      this.evaluate(work, all, now);
-      await this.recordDispatch(db, work, now);
-      await save(db, work, 'graphyard', restore!.outcome === 'restored' ? 'branch.restored' : restore!.outcome === 'conflict' ? 'branch.restore-conflict' : restore!.outcome === 'unpublished' ? 'branch.restore-unpublished' : 'branch.unrepairable', now,
-        { contaminated: restore!.contaminated, foreign: restore!.foreign, own: restore!.own, head: refresh.head, base: refresh.base, trigger: refresh.trigger ?? null, cause: restore!.cause, requested: restore!.requested, reason: restore!.reason,
-          ...(refresh.conflict ? { conflict: refresh.conflict } : {}), ...(restore!.failure ? { failure: restore!.failure } : {}), ...(restore!.failureKind ? { failureKind: restore!.failureKind } : {}), ...(restore!.attempts ? { attempts: restore!.attempts } : {}), ...(restore!.escalated ? { escalated: restore!.escalated } : {}) });
-      await wakeJob(db, work.id);
-      return work;
-    });
-  }
-  /**
-   * Restores an approval GitHub dismissed for a merge-base change as the binding one, carried from
-   * the head it was given on to the current candidate: unchanged heads (GY-127) and replaced tips
-   * whose dismissal was the control plane's own republication (GY-519, see `dismissedApproval`).
-   * The reviewed content is exactly what the reviewer approved, so no review round and no reviewer
-   * attempt is spent on it, and the merge broker re-posts it through the reviewer App before the
-   * merge as it re-posts any carried approval. Decided before the gates are evaluated, so no
-   * review request is ever opened for it.
+   * Restores an approval GitHub dismissed for a merge-base change of the unchanged head as the
+   * binding one (GY-127, see `dismissedApproval`). The reviewed content is exactly what the
+   * reviewer approved, so no review round and no reviewer attempt is spent on it. Decided before
+   * the gates are evaluated, so no review request is ever opened for it.
    */
   private restoreDismissedApproval(work: Work, now: Date): RestoredApproval | null {
     if (exactApproval(work) || carriedApproval(work)) return null;
@@ -2164,69 +1950,29 @@ export class Engine {
     const candidate = work.candidate!, observation = work.observation!, at = now.toISOString();
     const short = candidate.sha.slice(0, 12);
     const review = dismissed.reviewId !== undefined ? ` (review ${dismissed.reviewId})` : '';
-    // A replaced tip's approval names both tips: the one it was given on, and the one it binds now.
-    const originalSha = dismissed.originalSha !== undefined && dismissed.originalSha !== candidate.sha ? dismissed.originalSha : null;
-    const replaced = originalSha !== null;
-    const approval: CarriedApproval = { provider: 'github', reviewer: dismissed.reviewer, sha: candidate.sha, ...(dismissed.reviewId !== undefined ? { reviewId: dismissed.reviewId } : {}), carried: true, originalSha: originalSha ?? candidate.sha,
-      reason: replaced
-        ? `approval of ${originalSha!.slice(0, 12)} by ${dismissed.reviewer}${review} restored and carried to tip ${short}: GitHub dismissed it for the control plane's own force-push of ${short} over the unchanged author head (patch-id unchanged), so the reviewed content is exactly what was approved; the reviewer App re-posts it before the merge`
-        : `approval of ${short} by ${dismissed.reviewer}${review} restored: GitHub dismissed it with "${dismissed.dismissal.reason}" while the head was unchanged, so the reviewed content is exactly what was approved; the reviewer App re-posts it before the merge` };
-    const restored: RestoredApproval = { reviewer: dismissed.reviewer, ...(dismissed.reviewId !== undefined ? { reviewId: dismissed.reviewId } : {}), sha: candidate.sha, ...(replaced ? { originalSha } : {}), dismissal: dismissed.dismissal, at };
+    const approval: CarriedApproval = { provider: 'github', reviewer: dismissed.reviewer, sha: candidate.sha, ...(dismissed.reviewId !== undefined ? { reviewId: dismissed.reviewId } : {}), carried: true, originalSha: candidate.sha,
+      reason: `approval of ${short} by ${dismissed.reviewer}${review} restored: GitHub dismissed it with "${dismissed.dismissal.reason}" while the head was unchanged, so the reviewed content is exactly what was approved` };
+    const restored: RestoredApproval = { reviewer: dismissed.reviewer, ...(dismissed.reviewId !== undefined ? { reviewId: dismissed.reviewId } : {}), sha: candidate.sha, dismissal: dismissed.dismissal, at };
     const same = { sha: candidate.sha, baseSha: candidate.baseSha };
-    const from = replaced ? { sha: originalSha!, baseSha: candidate.baseSha } : same;
     const carry = (existing: BaseRefresh['carry'] | undefined) => existing && existing.to.sha === candidate.sha && existing.to.baseSha === candidate.baseSha && existing.policyRevision === work.policyRevision
       ? { ...existing, approval }
-      : { from, to: same, policyRevision: work.policyRevision, at, predecessor: 'base branch', changedFiles: [], reviewedFiles: observation.files, approval, evidence: [] };
-    const speculation = work.queue?.speculation;
-    if (speculation && speculation.tip === candidate.sha && speculation.policyRevision === work.policyRevision) {
-      speculation.carry = carry(speculation.carry);
-      if (!replaced) speculation.restoredApproval = restored;
-    } else if (work.baseRefresh && work.baseRefresh.head === candidate.sha && work.baseRefresh.policyRevision === work.policyRevision && !replaced) {
+      : { from: same, to: same, policyRevision: work.policyRevision, at, predecessor: 'base branch', changedFiles: [], reviewedFiles: observation.files, approval, evidence: [] };
+    if (work.baseRefresh && work.baseRefresh.head === candidate.sha && work.baseRefresh.policyRevision === work.policyRevision) {
       work.baseRefresh.carry = carry(work.baseRefresh.carry); work.baseRefresh.restoredApproval = restored;
     } else if (work.baseRefresh && work.baseRefresh.head === null && work.baseRefresh.from.sha === candidate.sha && work.baseRefresh.policyRevision === work.policyRevision) {
-      // A record of this very head that republished nothing — a refresh whose merge conflicted, or
-      // a repair the coordinator requested that has not run yet — is left as it says, and nothing
-      // is restored: such a head is replaced before it could land (the worker resolves the
-      // conflict, the repair moves the branch), and replacing the record would drop the conflict
-      // the worker owes or the pending repair, and have the refresh retried for a conflict already
-      // recorded. No review is asked for it meanwhile: the head does not contain the base tip.
-      return null;
-    } else if (replaced) {
-      // A replaced tip's approval is restored only onto the queue tip that replaced it; anything
-      // else has no record to carry it through, and the review stays required.
+      // A record of this very head that republished nothing — a refresh whose merge conflicted —
+      // is left as it says, and nothing is restored: such a head is replaced before it could land
+      // (the worker resolves the conflict), and replacing the record would drop the conflict the
+      // worker owes and have the refresh retried for a conflict already recorded. No review is
+      // asked for it meanwhile: the head does not contain the base tip.
       return null;
     } else {
-      // The head is neither a queue tip nor a refreshed head: the restored binding is recorded as
-      // a refresh of the head onto the base it is bound to, which republished nothing.
+      // The head is not a refreshed head: the restored binding is recorded as a refresh of the
+      // head onto the base it is bound to, which republished nothing.
       work.baseRefresh = { from: same, base: candidate.baseSha, baseTree: observation.baseTip === candidate.baseSha ? observation.baseTree ?? '' : '', policyRevision: work.policyRevision, at,
         head: candidate.sha, conflict: null, merge: null, carry: carry(undefined), restoredApproval: restored };
     }
     return restored;
-  }
-  /**
-   * Removes an entry whose speculative validation cannot succeed, with the reason on the record.
-   * `conflict` says the speculative merge conflicted; the record carries it as a typed flag (GY-252).
-   */
-  async ejectFromQueue(id: string, expectedRevision: number, reason: string, jobToken: string, conflict = false) {
-    return this.store.transaction(async (db, now) => {
-      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
-      requireCurrent(job, 'Integration job lease expired or superseded');
-      const all = await lockedWork(db, [id]);
-      const work = all.find(w => w.id === id);
-      requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done', 'Task changed before the queue ejection');
-      requireCurrent(work.queue, 'Queue entry already left the merge queue');
-      const sequence = work.queue!.sequence;
-      // A speculative conflict records the predecessors its prediction held (GY-321, model/queue.ts).
-      const ejected = queueEjectionRecord(work, all, reason, now, conflict);
-      work.queueEjection = ejected.ejection;
-      work.queueHistory = ejected.history;
-      work.queue = null;
-      this.evaluate(work, all, now);
-      await this.recordDispatch(db, work, now);
-      await save(db, work, 'graphyard', 'queue.ejected', now, { sequence, reason, conflict: ejected.ejection.conflict ?? null });
-      for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
-      return work;
-    });
   }
   /**
    * Record provider exhaustion for the dispatched reviewer profile and release the request so
@@ -2268,21 +2014,17 @@ export class Engine {
     // One request, one verdict (GY-124): two verdicts from one identity on one head for one request
     // are recorded as a conflict and withheld from the observation before any gate reads it.
     this.conflictTransitions.set(work, [...(this.conflictTransitions.get(work) ?? []), ...reconcileReviewConflict(work, now)]);
-    // The queue is validated by the parallel-tip window (GY-498): entries carry the tips they merge
-    // behind, ejection is decided by prefix attribution, and the test and merge gates read the
-    // window's validation instead of the batch's combined tip.
-    const result = evaluate(work, all, now, this.ciAppIds, { batchSize: this.mergeBatchSize, parallelTips: this.parallelTips });
+    const result = evaluate(work, all, now, this.ciAppIds);
     if (work.stage !== result.stage) work.stageEnteredAt = now.toISOString();
     Object.assign(work, result);
+    // Graphyard keeps no merge queue (GY-1236): a document stored before then drops its fields here.
+    dropRetiredQueueFields(work);
     // GitHub merges on every passing gate (GY-1235): no merge authorization is recorded, and one a
     // record carried from before is cleared.
     if (work.mergeAuthorization) work.mergeAuthorization = null;
     // What the exact head still needs from a launched reviewer or producer, decided from the
     // gates just evaluated; the transitions reach the ledger with the document (recordDispatch).
-    // A queued entry whose published tip is not this head is being replaced by it (GY-127): the
-    // tip is observed and bound on the next reconciliation, and a request opened for the replaced
-    // head now would be cancelled as stale then — after a session had been launched for it.
-    this.dispatchTransitions.set(work, tipReplacesHead(work) ? [] : reconcileAutoDispatch(work, all, now));
+    this.dispatchTransitions.set(work, reconcileAutoDispatch(work, all, now));
     // The typed instruction the inverted loop runs on: what this item needs next, named from the
     // gates just evaluated, and the durable row that says whether an executor has it.
     // The queue's own transitions are recorded on each row's history and travel to the ledger
@@ -2466,7 +2208,7 @@ export class Engine {
           if (opening) {
             // Versions first: a row that moves after them reads as moved, so the first batch reads it again.
             const listed = (await db.query(reconcileRowsSql)).rows as { id: string; number: string; version: string; settled: boolean }[];
-            config = stableJson({ ciAppIds: this.ciAppIds, batch: this.mergeBatchSize, tips: this.parallelTips });
+            config = stableJson({ ciAppIds: this.ciAppIds });
             // Measured on the clock evaluation reads, so time the gates see pass is what brings the catch-up.
             full = !fleet.size || config !== this.reconcileConfig || !(now.getTime() - this.reconcileFullAt < this.reconcileFullEvaluationMs);
             if (full) this.reconcileFullAt = now.getTime();
@@ -2639,11 +2381,11 @@ export class Engine {
    * when the evaluation would write, which is all the batch's lock-free phase asks.
    */
   private async reconcileItem(db: PoolClient, work: Work, all: Work[], now: Date, { dryRun = false }: { dryRun?: boolean } = {}): Promise<boolean> {
-    // A delivered item is not re-evaluated, but one still holding rows, a queue entry or an
-    // action from before its delivery — every item delivered before GY-185 — is settled here
-    // once, and the check that finds nothing to settle costs no evaluation.
+    // A delivered item is not re-evaluated, but one still holding rows, a merge-queue entry (stored
+    // before GY-1236) or an action from before its delivery — every item delivered before GY-185 —
+    // is settled here once, and the check that finds nothing to settle costs no evaluation.
     if (work.stage === 'done') {
-      const leftover = !!work.queue || (work.actionQueue?.actions ?? []).some(row => row.kind !== 'verify-deployment') || (!!work.nextAction && work.nextAction.kind !== 'verify-deployment');
+      const leftover = !!(work as Work & { queue?: unknown }).queue || (work.actionQueue?.actions ?? []).some(row => row.kind !== 'verify-deployment') || (!!work.nextAction && work.nextAction.kind !== 'verify-deployment');
       if (!leftover || !settleDelivered(work, all, now)) return false;
       this.reconcileWrites.set(work, { delivered: true });
       if (!dryRun) await this.writeReconciled(db, work, all, now);
@@ -2689,41 +2431,27 @@ export class Engine {
       resolveEscalation(work, settled.escalation.trigger);
       ledger.push({ kind: 'escalation.auto-settled', details: { trigger: settled.escalation.trigger, epoch: settled.epoch, escalation: settled.escalation, note: settled.note, cause: settled.cause, attestation: settled.attestation, submission: work.submission } });
     }
-    const queuedBefore = work.queue?.sequence ?? null;
-    const dissolvedBefore = work.queue?.batchDissolved ?? null;
     this.evaluate(work, all, now);
-    // A queue entry the evaluation derived out — here, a merged entry whose reconciliation a
-    // standing refusal already answered (GY-94) — is recorded as an ejection, and the entries
-    // behind it are woken to predict against the real base.
-    const ejected = queuedBefore !== null && !work.queue && work.queueEjection?.sequence === queuedBefore;
-    if (ejected) ledger.push({ kind: 'queue.ejected', details: { sequence: queuedBefore, reason: work.queueEjection!.reason, conflict: work.queueEjection!.conflict ?? null } });
-    // A CI ejection a passing rerun on the same tip lifted (GY-1095) is recorded naming the check and run.
-    const lifted = liftedEjection(work, queuedBefore, now);
-    if (lifted) ledger.push({ kind: 'queue.ejection-lifted', details: { ...lifted } });
-    // A stuck batch the evaluation dissolved (GY-506) is recorded on the ledger once, when it happened.
-    const dissolved = work.queue?.batchDissolved ?? null;
-    if (dissolved && JSON.stringify(dissolved) !== JSON.stringify(dissolvedBefore)) ledger.push({ kind: 'queue.batch-dissolved', details: { ...dissolved } });
     // Every violation found at the start of the tick is repaired by the evaluation above — the
     // derivation names its successor and the queue opens its row — and the ledger says so.
     if (stranded) ledger.push(livenessRepairEntry(stranded, work, all, now));
     if (!jsonChanged(before, work)) return false;
-    this.reconcileWrites.set(work, { ledger, ejected });
+    this.reconcileWrites.set(work, { ledger });
     if (!dryRun) await this.writeReconciled(db, work, all, now);
     return true;
   }
   /** What `reconcileItem`'s evaluation of a document decided to write, kept until it is written (GY-1290). */
-  private readonly reconcileWrites = new WeakMap<Work, { delivered: true } | { ledger: { kind: string; details: Record<string, unknown> }[]; ejected: boolean }>();
+  private readonly reconcileWrites = new WeakMap<Work, { delivered: true } | { ledger: { kind: string; details: Record<string, unknown> }[] }>();
   /** Write `work` as `reconcileItem` evaluated it at `now`: its ledger entries, its dispatch transitions, the document and its wakes. */
   private async writeReconciled(db: PoolClient, work: Work, all: Work[], now: Date) {
     const write = this.reconcileWrites.get(work)!;
     this.reconcileWrites.delete(work);
     if ('delivered' in write) { await save(db, work, 'graphyard', 'delivery.settled', now); return; }
-    const { ledger, ejected } = write;
+    const { ledger } = write;
     for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
     await this.recordDispatch(db, work, now);
     await save(db, work, 'graphyard', 'reconciled', now, ledger.length ? { ledger: ledger.map(entry => entry.kind) } : undefined);
     if (work.submission) await wakeJob(db, work.id);
-    if (ejected) for (const behind of all) if (behind.queue && behind.id !== work.id) await wakeJob(db, behind.id);
   }
   /**
    * Save a provider observation of the item, read at `expectedRevision`.
@@ -2734,6 +2462,9 @@ export class Engine {
    * reading the row was waiting for, so the item stayed stale and the row was claimed again,
    * forever (GY-607). The loop's own bookkeeping counts the same way (`sameBesideBookkeeping`,
    * GY-1257): its per-cycle writes refused the very observation it had woken for a rework decision.
+   * Any other move that left everything the observation was derived from unchanged counts the same
+   * (`sameObservationInputs`, GY-1310): a session, lease, evidence or dispatch write raced every poll,
+   * so gate claims waited minutes for an observation that was taken and then discarded.
    */
   async observe(id: string, expectedRevision: number, observation: Observation, jobToken?: string) {
     return this.store.transaction(async (db, now) => {
@@ -2750,12 +2481,10 @@ export class Engine {
       }
       const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
-      requireCurrent(work && (work.revision === expectedRevision || await onlyActionsMovedSince(db, work, expectedRevision, sameBesideBookkeeping)), 'Task changed while GitHub was being observed; retry');
+      requireCurrent(work && (work.revision === expectedRevision || await onlyActionsMovedSince(db, work, expectedRevision, sameObservationInputs)), 'Task changed while GitHub was being observed; retry');
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
-      const queuedBefore = work.queue?.sequence ?? null;
-      const dissolvedBefore = work.queue?.batchDissolved ?? null;
       let authorizedSnapshot: Work | null = null; let authorizationRevision: number | null = null;
       // The instant the delivery was judged at: the last instant before the merge cutoff.
       let evidenceAsOf: string | null = null;
@@ -2784,8 +2513,7 @@ export class Engine {
         // approver. The decision does not decide delivery by itself — the record before the cutoff
         // must still show every gate passed for the merged head, apart from what the merge itself
         // wrote — and the delivery then cites that snapshot and the decision. A decision the history refuses
-        // is recorded on the item with the reasons, once, so the item says why it cannot be;
-        // that refusal is also the exit of a queue entry that can never publish (merge-queue.ts).
+        // is recorded on the item with the reasons, once, so the item says why it cannot be.
         // What the history refuses, an operator may still own (GY-94): a later decision with an
         // admin credential on one side, citing the refusal, delivers the merge as operator-
         // authorized — stating that no execution authorized it and what the record lacked.
@@ -2853,8 +2581,8 @@ export class Engine {
       // An approval GitHub withdrew for a merge-base change on this unchanged head binds again
       // before the gates read the record, so no review request is opened for it (GY-127).
       const restoredApproval = observation.merged ? null : this.restoreDismissedApproval(work, now);
-      // A newer approval of the head the tip was built from replaces the carried binding (GY-831),
-      // so the re-post before the merge names a review the pull request still holds.
+      // A newer approval of the head a base refresh was built from replaces the carried binding
+      // (GY-831), so the binding names a review the pull request still holds.
       const refreshed = observation.merged ? null : refreshedCarriedApproval(work);
       const carrying = refreshed ? currentCarry(work) : null;
       if (refreshed && carrying) {
@@ -2872,25 +2600,6 @@ export class Engine {
       this.evaluate(work, all, now);
       if (restoredApproval) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'review.restored',
         JSON.stringify({ details: { ...restoredApproval, baseSha: observation.candidate.baseSha, policyRevision: work.policyRevision } })]);
-      // A head found carrying another item's unlanded commits is named on the ledger once per head
-      // and per set of items, with what restores it; master status reads the same record.
-      const contamination = observation.merged ? null : branchContamination(work, all);
-      const previouslyNamed = previousObservation && previousObservation.candidate.sha === observation.candidate.sha
-        ? branchContamination({ ...work, observation: previousObservation }, all) : null;
-      if (contamination && JSON.stringify(previouslyNamed?.foreign ?? null) !== JSON.stringify(contamination.foreign)) {
-        await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'branch.contaminated',
-          JSON.stringify({ details: { ...contamination, ejected: work.queueEjection?.sha === contamination.head, at: now.toISOString() } })]);
-      }
-      // The base branch advanced to a commit whose tree is the bound base's tree — an earlier
-      // queue merge — so the published tip and every binding on it stand. The advance is written
-      // to the record and the ledger with both shas and the tree, and nothing is republished.
-      const speculation = work.queue?.speculation;
-      if (speculation && !observation.merged && observation.baseTip && observation.baseTree && speculation.tip === observation.candidate.sha && speculation.base === observation.candidate.baseSha
-        && speculation.base !== observation.baseTip && speculation.baseTree === observation.baseTree && speculation.carriedBase?.sha !== observation.baseTip) {
-        speculation.carriedBase = { sha: observation.baseTip, tree: observation.baseTree, at: now.toISOString() };
-        await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.base-carried',
-          JSON.stringify({ details: { tip: speculation.tip, boundBase: speculation.base, baseTree: speculation.baseTree, baseTip: observation.baseTip, at: now.toISOString() } })]);
-      }
       if (observation.merged) {
         const violation = unauthorizedMergeViolation;
         if (authorizedSnapshot && observation.mergeSha) {
@@ -2910,29 +2619,16 @@ export class Engine {
           if (operatorAuthorization) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, operatorAuthorization.operator, 'merge.operator-authorized',
             JSON.stringify({ details: { ...operatorAuthorization, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision, evidenceAsOf, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
           await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
-          // Delivered in this transaction: what it still owes is recomputed now, its leftover rows
-          // retired and its queue entry cleared, so nothing retries against the delivery (GY-185).
+          // Delivered in this transaction: what it still owes is recomputed now and its leftover rows
+          // retired, so nothing retries against the delivery (GY-185).
           settleDelivered(work, all, now);
           // The last child of a split parent delivers the parent in the same transaction (GY-1126).
           await deliverSplitParent(db, work, all, now);
-          // The queue shifted. The entries that can land next (the head and its batch) are woken now; the rest are observed on
-          // their own schedule and re-predict their base when they near the head.
-          for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize, this.parallelTips))) await wakeJob(db, behind.id);
         } else {
           if (!work.violations.includes(violation)) work.violations.push(violation);
           if (refusedReconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'merge.reconciliation.refused',
             JSON.stringify({ details: { ...refusedReconciliation, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, at: now.toISOString() } })]);
         }
-      }
-      // A queue entry the evaluation derived out is recorded as an ejection, and every entry behind
-      // it is woken to predict against the real base. For a merged entry that could never publish
-      // a speculative tip, the ejection is its refused reconciliation (GY-94): nothing is delivered,
-      // and the ledger keeps the refusal and the exit side by side.
-      await this.recordEjection(db, work, all, queuedBefore, now, refusedReconciliation ? { decision: refusedReconciliation.decision, mergeSha: observation.mergeSha } : {});
-      // A stuck batch the evaluation dissolved (GY-506) is recorded on the ledger once, when it happened.
-      const dissolved = work.queue?.batchDissolved ?? null;
-      if (dissolved && JSON.stringify(dissolved) !== JSON.stringify(dissolvedBefore)) {
-        await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'queue.batch-dissolved', JSON.stringify({ details: { ...dissolved } })]);
       }
       await this.recordDispatch(db, work, now);
       await save(db, work, 'github', 'github.observed', now);

@@ -54,13 +54,13 @@ function item(outcomes: Record<string, Outcome>, options: { producerProofs?: str
     candidate: { sha: head, baseSha: base, pr: 188, branch: 'graphyard/gy-188-1', author: 'implementer' }, submission: { epoch: 1, pr: 188 },
     evidence: proofs.flatMap((proof, index) => outcomes[proof] === 'none' ? [] : [evidence(proof, outcomes[proof] as 'pass' | 'fail', index)]),
     observation: observation({ ...(options.approved ? { reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }] } : {}), ...options.observation }),
-    gates: [], violations: [], blocker: null, queue: null, queueSequence: 0, queueHistory: [],
+    gates: [], violations: [], blocker: null,
   } as unknown as Work;
   return grade(work);
 }
 function grade(work: Work): Work {
   const result = evaluate(work, [work], now, [CI_APP]);
-  return { ...work, stage: result.stage, gates: result.gates, violations: result.violations, queue: result.queue, queueSequence: result.queueSequence, queueEjection: result.queueEjection, queueHistory: result.queueHistory };
+  return { ...work, stage: result.stage, gates: result.gates, violations: result.violations };
 }
 /** The item as the control plane holds it after a reading: the reconciler has run over it. */
 function reconciled(work: Work): Work {

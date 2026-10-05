@@ -150,9 +150,9 @@ function scopeDecision(work: Work, action: NextAction, now: Date): NextAction | 
 /** When a wait is due, or null when what it names is gone. A wait on another item is due when that item's own step is. */
 function waitDueAt(work: Work, wait: ActionWait, all: Work[], now: Date): string | null {
   if (wait.kind === 'session' && liveLease(work, now) && wait.on === work.lease!.owner) return work.lease!.expiresAt;
-  if (wait.kind === 'dependency' || wait.kind === 'queue') {
+  if (wait.kind === 'dependency') {
     const other = all.find(item => item.key === wait.on);
-    if (!other || other.stage === 'done' || (wait.kind === 'queue' && !other.queue)) return null;
+    if (!other || other.stage === 'done') return null;
     if (liveLease(other, now)) return other.lease!.expiresAt;
     const rows = (other.actionQueue?.actions ?? []).map(row => rowDueAt(row, now)).sort();
     return rows[0] ?? now.toISOString();
@@ -176,7 +176,7 @@ function sessionObligations(work: Work): { at: string; role: 'review' | 'proof' 
     .map(handle => ({ at: handle.startedAt, role: handle.kind as 'review' | 'proof' }));
   return [...requests, ...sessions].filter(entry => Number.isFinite(Date.parse(entry.at)));
 }
-const ownedWait = (wait: ActionWait) => wait.kind !== 'dependency' && wait.kind !== 'queue';
+const ownedWait = (wait: ActionWait) => wait.kind !== 'dependency';
 
 /**
  * The liveness rules applied to what the derivation computed (`actionAccount` calls this): a

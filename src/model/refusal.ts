@@ -15,7 +15,8 @@ export class RefusedResponse extends Error {
   constructor(message: string, public status: number, public body: unknown) { super(message); }
 }
 export class ReconciliationRetry extends Refusal {}
-export class SpeculativeConflict extends Refusal {}
+/** GitHub refused a merge Graphyard asked for because it conflicts (409). */
+export class MergeConflict extends Refusal {}
 export function requireCurrent(value: unknown, message: string): asserts value {
   if (!value) throw new ReconciliationRetry(message, 409);
 }

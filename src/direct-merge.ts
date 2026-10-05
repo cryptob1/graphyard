@@ -3,7 +3,7 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal, type Work } from './model.js';
 import type { Store } from './store.js';
-import { save, wakeJob } from './store.js';
+import { save } from './store.js';
 import { settleDelivered } from './model/actions.js';
 import { deliverSplitParent } from './decomposition.js';
 import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from './merge-queue.js';
@@ -112,7 +112,6 @@ export async function sweepDirectMerges(db: pg.PoolClient, all: Work[], windows:
     await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
     delivered.push(work);
   }
-  if (delivered.length) for (const behind of all) if (behind.queue && behind.stage !== 'done') await wakeJob(db, behind.id);
   return delivered;
 }
 

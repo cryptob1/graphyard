@@ -8,7 +8,7 @@ import { plainReason } from './plain-status.js';
  * action and, when it has none, which nothing it is. The dashboard cannot call it — that module
  * reaches `node:crypto` through the dispatch record, and nothing in the browser bundle may — so
  * this reads the answer the control plane already wrote onto the item (`work.nextAction`) and
- * classifies the remainder from the item's own record: a dependency or a queue turn is another
+ * classifies the remainder from the item's own record: a dependency is another
  * item's to move, a live lease is a session already moving it, and anything else is an item
  * holding a failing gate with nobody told, which is what the page is here to show.
  *
@@ -17,11 +17,7 @@ import { plainReason } from './plain-status.js';
  */
 
 /** A refusal that belongs to another item: that item's action is what moves this one. */
-export const deferredRefusal = (reason: string) =>
-  /^Dependency .+ is unfinished$/.test(reason)
-  || /^Merge queue position \d+ of \d+: \S+ is ahead$/.test(reason)
-  || /^Speculative tip on predicted base [0-9a-f]+ has not been published/.test(reason)
-  || /^Waiting for \S+ to publish its speculative tip$/.test(reason);
+export const deferredRefusal = (reason: string) => /^Dependency .+ is unfinished$/.test(reason);
 
 export interface ActionlessCard {
   item: Work;
@@ -35,7 +31,7 @@ export interface ActionlessCard {
 
 /**
  * Every open item with no computed action, newest wait last. `movedBy` separates the healthy
- * waits — a dependency, a turn in the merge queue, the session already building it — from the
+ * waits — a dependency, the session already building it — from the
  * items nothing is moving, which are the ones the page names.
  */
 export function actionlessCards(work: Work[], now: number): ActionlessCard[] {

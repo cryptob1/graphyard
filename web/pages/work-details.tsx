@@ -19,7 +19,7 @@ import { candidatePrUrl } from '../links';
 import { activityLabel, historyLabel, overlapLine, whatIsLeft, type LeftGroup } from '../item-page';
 import { plainStatus } from '../../src/model/plain-status';
 import { groupWithin, nextActor, timedGroups } from '../groups';
-import { checkStates, describeTip, prSteps, stepHeld } from '../../src/model/pr-steps';
+import { checkStates, prSteps, stepHeld } from '../../src/model/pr-steps';
 import { releaseView } from '../../src/model/release';
 import { blastRadius } from '../../src/model/blast-radius';
 import StatusBadge from '../components/status-badge';
@@ -51,7 +51,7 @@ const oneLine = (text: string) => { const first = text.split(/(?<=[.;:])\s/)[0];
  * collapsed "Technical details" section, in the control plane's own vocabulary, and policy
  * changes are in the admin Edit menu.
  */
-export default function WorkDetails({ item, work, status, token, observedAt, jobs, queue, events, busy, codexAvailable, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, setView, sessionEpoch, stepMoves, signOut }: Dashboard & { item: Work }) {
+export default function WorkDetails({ item, work, status, token, observedAt, jobs, events, busy, codexAvailable, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, setView, sessionEpoch, stepMoves, signOut }: Dashboard & { item: Work }) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const plain = plainStatus(item, now);
   // The same duration and the same threshold the card carries; this view is another view of it.
@@ -60,7 +60,6 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const owner = assignment(item, now);
   const admin = status?.actor?.role === 'admin';
   const proofs = proofPreview(item, work);
-  const entry = queue.find(e => e.id === item.id);
   const provider = item.policy.reviewProvider ?? 'github';
   const failedDelivery = deliveryState(item) === 'delivered-with-failure';
   const prUrl = item.candidate ? candidatePrUrl(status?.repository, item.candidate.pr) : undefined;
@@ -179,8 +178,6 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       <h3>Coordination</h3>{diagnose(item, work, observedAt, jobs).map((d, i) => <div className="criterion" key={i}><strong>{shortShas(d.message)}</strong><p>{shortShas(d.next)}</p></div>)}
       {!!item.exclusiveResources?.length && <p>Exclusive resources: {item.exclusiveResources.join(', ')}. Reserved only while an assignment lease is active.</p>}
       {overlap && <p className="overlap-line">{overlap}. Coordinate the changes; this warning does not establish a semantic conflict.</p>}
-      {entry && <><h3>Merge queue</h3><p>Position {entry.position + 1} of {entry.size} · waiting {age(entry.enqueuedAt)} · {entry.current ? 'validated on its predicted tip' : 'awaiting speculative validation'}</p><p className="muted">Predicted base <code>{entry.predictedBase ? entry.predictedBase.slice(0, 8) : 'pending'}</code> · predicted tip <code>{entry.tip ? entry.tip.slice(0, 8) : 'pending'}</code>{entry.predecessors.length ? ` · behind ${entry.predecessors.join(', ')}` : ''}</p>{entry.reasons.map(reason => <p className="muted" key={reason}>{shortShas(reason)}</p>)}{!!item.queue?.tips?.length && <ul className="queue-tips" aria-label="In-flight tips">{item.queue.tips.map(tip => <li key={tip.position} data-tip={tip.position} data-ci={tip.ci}>{describeTip(tip)}{tip.tip && <> · <code>{tip.tip.slice(0, 8)}</code></>}</li>)}</ul>}{item.queue?.speculation && <code>{shortShas(item.queue.speculation.ref)}</code>}</>}
-      {!entry && item.queueEjection && <><h3>Merge queue</h3><p className="amber">Ejected {new Date(item.queueEjection.at).toLocaleString()}: {shortShas(item.queueEjection.reason)}</p><p className="muted">A new candidate re-enters at the back of the queue. There is no bypass.</p></>}
       <h3>Code review</h3><p>Provider: {item.policy.reviewProvider === 'codex' ? 'Codex cloud' : item.policy.reviewProvider === 'agent' ? 'Identity-bound agent reviewers' : 'Formal GitHub approval'}</p>{item.policy.reviewProvider === 'agent' && <p className="muted">Reviewer profiles in failover order: {(item.policy.reviewerProfiles ?? []).map(p => `${p.name} (${p.runtime})`).join(' → ') || 'none configured'}</p>}{item.observation?.agentReview && <p>{shortShas(item.observation.agentReview.reason)}</p>}{(item.reviewFailovers ?? []).filter(f => f.sha === item.candidate?.sha && f.baseSha === item.candidate?.baseSha && f.policyRevision === item.policyRevision).map(f => <p className="amber" key={`${f.profile}-${f.at}`}>Failover: {f.profile} exhausted ({f.exhaustion}) · {f.nextProfile ? `dispatched to ${f.nextProfile}` : 'no reviewer profile remains'}</p>)}{admin && <p className="muted">Changing provider creates a policy revision and requires fresh acceptance evidence. Agent reviewer profiles are configured through the CLI or API because they name registered reviewer App identities.</p>}
       <h3>Next action and executors</h3>
       {item.nextAction && <p className="next-action"><strong>Next:</strong> <code>{item.nextAction.kind}</code>{(() => { const row = actions.find(entry => entry.kind === item.nextAction!.kind); return row?.claim ? ` — ${row.claim.executor} on ${row.claim.host} is running it` : row ? (unserved ? ` — nobody can claim it: no live executor serves ${row.kind} (waited ${age(unserved.since)}); ${unserved.start}` : ' — waiting for an executor to claim it') : ''; })()}</p>}

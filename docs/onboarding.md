@@ -92,7 +92,7 @@ node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # executors
 node "$GRAPHYARD_CLI" master start codex     # or claude
 ```
 
-Run as an OS user whose GitHub credentials workers cannot read. `--browser-profile`: Chrome signed in as GitHub admin (`master browser`); GitHub Mobile *Confirm access* stays human-only. Reviewer: `master reviewer setup`, `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)). Setup writes `mergeQueue.parallelTips` in `.graphyard/master.json` (default 4; needs parallelTips × pull-request jobs concurrent Actions jobs — declare `ciConcurrency`, `master protection` flags a lower one).
+Run as an OS user whose GitHub credentials workers cannot read. `--browser-profile`: Chrome signed in as GitHub admin (`master browser`); GitHub Mobile *Confirm access* stays human-only. Reviewer: `master reviewer setup`, `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)).
 
 ### The loop must be supervised
 
@@ -100,7 +100,7 @@ Run as an OS user whose GitHub credentials workers cannot read. `--browser-profi
 
 ### The pipeline doctor (on by default)
 
-Every `run.doctor.intervalMinutes` (default 10) the loop launches the **doctor**, a Pi session fixing stuck, overdue work by sanctioned commands (`master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`), never merging, dispatching or evidencing. Each run posts per-item findings and a summary (`doctor` in `master status`); the rest escalate or file deduplicated fault items. The loop itself settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (default 10) the loop launches the **doctor**, a Pi session fixing stuck, overdue work by sanctioned commands (`master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`), never merging, dispatching or evidencing. Each run posts per-item findings and a summary (`doctor` in `master status`); the rest escalate or file deduplicated fault items. A run with no report (its models died, or the loop stopped) or lost to a restart is recorded failed and posted, but files no `loop` fault: the next interval's run re-covers. The loop itself settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
 
 ## 4. Prove the first PR
 

@@ -192,30 +192,8 @@ const item = (key: string, pr: number, plannedFiles: string[], head: string, bas
   evidence: [], observation: null, blocker: null, gates: [], violations: [], ...overrides } as unknown as Work);
 const buildReasons = (work: Work, all: Work[]) => evaluate(work, all.map(entry => entry.id === work.id ? work : entry), new Date(), [CI]).gates.find(gate => gate.name === 'build')!.reasons;
 
-test('integration:deletion-by-stale-base — a deletion the merge would apply and the candidate\'s own diff does not show is refused: behind an unlanded entry, under a held base the branch moved past, and when the owner\'s pull request would be recorded merged with none of its content', async () => {
-  // 1. Queued behind GY-A. The pull request's diff is taken against main, which holds no src/a.ts
-  //    yet, so the file GY-B's tip deletes from its predicted base appears in that diff nowhere.
-  const queued = history();
-  queued.repo.open(1, 'graphyard/gy-a-1', queued.a2); queued.repo.open(2, 'graphyard/gy-b-1', queued.b1);
-  const github = queued.repo.github();
-  const ahead = item('GY-A', 1, ['src/a.ts', 'tests/', 'docs/'], queued.a2, queued.repo.main);
-  ahead.observation = await github.observe(ahead);
-  const tip = queued.repo.merge('Graphyard speculative tip for GY-B behind GY-A', queued.b1, queued.a2) as string;
-  assert.equal(queued.repo.tree(tip)['src/a.ts'], undefined, 'git merges the deletion in cleanly: GY-A left the file alone since the commit GY-B deleted it from');
-  queued.repo.pulls.get(2)!.head.sha = tip;
-  const behind = item('GY-B', 2, ['src/server/routes/b.ts'], tip, queued.a2, { queue: { sequence: 2, enqueuedAt: '2026-09-20T10:00:00Z', policyRevision: 1,
-    speculation: { ref: 'refs/graphyard/queue/gy-b', tip, base: queued.a2, baseTree: 'unused'.padEnd(40, '0'), predecessors: ['GY-A'], policyRevision: 1, publishedAt: '2026-09-20T10:01:00Z' } }, queueSequence: 2 } as Partial<Work>);
-  const observed = await github.observe(behind, [ahead, behind]);
-  assert.deepEqual(observed.files, ['docs/a.md', 'src/server/routes/b.ts'], 'the candidate\'s own diff never mentions the files it would delete');
-  assert.deepEqual(buildReasons({ ...behind, observation: { ...observed, landing: undefined } }, [ahead, behind]), [], 'so the comparison with its bound base, the only one there was, passes');
-  assert.equal(observed.landing!.base, queued.a2, 'a tip behind an unlanded entry lands on its predicted base');
-  assert.deepEqual(observed.landing!.files!.filter(file => file.status === 'removed').map(file => [file.path, file.baseSha]), [['src/a.ts', blob('a')], ['tests/a.test.ts', blob('a test')]]);
-  const refused = buildReasons({ ...behind, observation: observed }, [ahead, behind]);
-  assert.match(refused[0], new RegExp(`Landing the candidate on ${queued.a2.slice(0, 12)}, the commit it would merge onto, would revert 2 files outside its planned files`));
-  assert.match(refused[1], /^Landing regression: src\/a\.ts: deleted; that commit still holds it \(owned by GY-A, ahead of it and not yet landed\)$/);
-  assert.match(refused[2], /^Landing regression: tests\/a\.test\.ts: deleted; that commit still holds it \(owned by GY-A/);
-
-  // 2. Not queued, head unchanged. GY-A lands after GY-B was submitted; the bound base is held
+test('integration:deletion-by-stale-base — a deletion the merge would apply and the candidate\'s own diff does not show is refused: under a held base the branch moved past, and when the owner\'s pull request would be recorded merged with none of its content', async () => {
+  // 1. Head unchanged. GY-A lands after GY-B was submitted; the bound base is held
   //    while the head is unchanged, and at that commit the files are absent, so the comparison
   //    `complete` ran still passes. Where the merge would land, they are there to be deleted.
   const held = history();
@@ -236,7 +214,7 @@ test('integration:deletion-by-stale-base — a deletion the merge would apply an
   assert.equal(stale.length, 3);
   assert.match(stale[1], /^Landing regression: src\/a\.ts: deleted; that commit still holds it \(shipped by GY-A\)$/);
 
-  // 3. GY-93 and GY-84 as it happened. The head carries the owner's current head and none of its
+  // 2. GY-93 and GY-84 as it happened. The head carries the owner's current head and none of its
   //    content, and the base never held it either: no diff against any base shows a thing, and
   //    merging would make the provider record the owner's pull request merged.
   const carried = history();

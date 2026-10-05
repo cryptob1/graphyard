@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { BaseRefresh, BaseRefreshRequest, LandingCheck, MergeRefusal, QueueEjection, QueueEntry, QueueHistoryEntry, RevertedDelivery } from '../merge-queue.js';
+import type { BaseRefresh, BaseRefreshRequest, LandingCheck, MergeRefusal, RevertedDelivery } from '../merge-queue.js';
 import { criterionSchema, policySchema, resourcesSchema, type Criterion, type Lane } from './policy.js';
 import type { Evidence } from './evidence.js';
 import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
@@ -88,8 +88,7 @@ export interface Workspace { host: string; path: string; branch: string; epoch: 
 export interface Candidate { sha: string; baseSha: string; pr: number; branch: string; author: string; createdAt?: string }
 /**
  * One file the candidate changes, as the provider reports it against the merge base, together
- * with the blob the candidate's bound base (the base branch tip, or a speculative tip's predicted
- * base) holds at the same path. `baseSha` is null when that base has no such file and undefined
+ * with the blob the candidate's bound base holds at the same path. `baseSha` is null when that base has no such file and undefined
  * when the observation never compared it (a file inside the planned scope, or an observation
  * recorded before the regression guard existed).
  */
@@ -112,11 +111,10 @@ export interface Observation {
   // a conflicting head is withheld and sent back (GY-191). `disproved` keeps GitHub's raw reading a test merge disproved (GY-390).
   conflicting?: boolean; disproved?: { mergeable: boolean; conflicting: boolean; reading: string };
   // The real base-branch head and its tree, read from refs/heads/<base> (never from the pull
-  // request's cached base) and recorded separately from the candidate's bound base so a
-  // speculative binding never hides where the managed branch actually points.
+  // request's cached base) and recorded separately from the candidate's bound base so a held
+  // binding never hides where the managed branch actually points.
   baseTip?: string; baseTree?: string;
-  // The head contains that base tip: by ancestry, or as a published queue tip whose bound base
-  // is tree-identical to it. A review is only requested for a head that does.
+  // The head contains that base tip by ancestry. A review is only requested for a head that does.
   baseTipContained?: boolean;
   protected: boolean; files: string[]; at: string; requiredChecks?: { name: string; appId: number | null }[]; // base protection's and rulesets' required checks bar `Graphyard / merge` (GY-430); appId null = any source
   /** The candidate diff compared against its bound base; see regression-guard.ts. */
@@ -175,7 +173,6 @@ export interface Work extends Create {
   closure?: Closure | null; triage?: TriageRecord | null; pendingFollowUps?: PendingFollowUps | null; // triage: a machine-filed item's judgement (GY-402); pendingFollowUps: follow-ups held until it shipped (GY-845), stored before GY-1249 and never written now, model/machine-backlog.ts
   /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */
   capacity?: CapacityState | null;
-  queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];
   /**
    * The last time the control plane brought this candidate onto a base branch that had moved
    * under it, or refused to because the merge conflicts. Decided and written by Graphyard
