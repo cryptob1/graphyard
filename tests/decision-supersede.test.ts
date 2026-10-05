@@ -210,7 +210,7 @@ test('unit:approved-decision-applied-or-named — an approved decision whose sit
   const loop: DaemonEffects = {
     agents: () => closed.includes(pane.pane_id) ? [] : [pane], credentials: async () => ({}),
     snapshot: async () => ({ work: (await store.list()).filter(item => item.id === third.work.id), now: new Date(loopNow).toISOString() }),
-    closeSession: closing => { closed.push(closing); }, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({ result: 'merged', merged: false }),
+    closeSession: closing => { closed.push(closing); }, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
     approverLaunches: async () => [], approver: async () => { throw new Error('no approver is launched here'); },
     decisions: work => get(`work/${encodeURIComponent(work.id)}/decisions`),
