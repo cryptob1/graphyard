@@ -359,11 +359,9 @@ test('manual:review-followups-triaged GY-1050.6: processJob stops and requeues w
     mergeBatchSize: 1,
     parallelTips: 0,
     ciAppIds: [],
-    optimisticMerge: false,
     loadMergeBatchSize: async () => 1,
     loadParallelTips: async () => 0,
     loadRerunFailedChecks: async () => 0,
-    loadOptimisticExclude: async () => [],
     store: {
       list: async () => [work],
       takeJob: async () => ({ work_id: work.id, token: 'tok', claimed_generation: 1 }),
