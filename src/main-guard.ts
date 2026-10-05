@@ -215,9 +215,16 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 /**
  * The attention lines the loop raises, one per abandoned revert (cycle-delivery.ts records each
  * once under `key`): the merge, the failing checks, the revert PR and why it could not merge.
+ *
+ * `since` keeps "once" true after the loop's cursor retires the line's row (GY-1250 review): the
+ * cursor prunes its oldest resolved rows, so a missing row alone cannot tell "never raised" from
+ * "raised and pruned". A revert abandoned at or before `since` — the oldest row the cursor still
+ * holds, once it holds as many as it keeps — could have been raised and pruned (its row was recorded
+ * after it was abandoned), so it is not raised again; one abandoned later is newer than every
+ * retained row, so it cannot have been pruned, and is raised once.
  */
-export function mainGuardAttention(all: Pick<Work, 'key' | 'mainGuardReverts'>[]): { key: string; work: string; text: string }[] {
-  return all.flatMap(work => (work.mainGuardReverts ?? []).filter(revert => revert.state === 'abandoned').map(revert => ({
+export function mainGuardAttention(all: Pick<Work, 'key' | 'mainGuardReverts'>[], since = -Infinity): { key: string; work: string; text: string }[] {
+  return all.flatMap(work => (work.mainGuardReverts ?? []).filter(revert => revert.state === 'abandoned' && !(Date.parse(revert.settledAt ?? revert.at) <= since)).map(revert => ({
     key: `escalation:main-guard:${revert.mergeSha}`, work: work.key,
     text: `Main guard: ${work.key}'s merge ${revert.mergeSha.slice(0, 12)}${revert.pr ? ` (PR #${revert.pr})` : ''} broke main (${revert.failing.join(', ') || 'required checks failed'}) and could not be reverted automatically: ${revert.revert ? `revert PR #${revert.revert.pr}` : 'no revert PR'} — ${revert.reason ?? 'abandoned'}. The guard does not retry it and holds nothing; fix main forward with a new item.`,
   })));

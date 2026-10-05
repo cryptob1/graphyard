@@ -5,7 +5,7 @@ import { mergedWithoutAuthorization, unauthorizedMergeViolation, approvedMerge, 
 import { type Work } from '../model.js';
 import { queueSequencingReason } from '../merge-queue.js';
 import type { DaemonAction } from './state.js';
-import { boundDeployment, deploymentObservationSchema, maxProofAttempts, message } from './state.js';
+import { boundDeployment, deploymentObservationSchema, maxProofAttempts, message, retainedActions } from './state.js';
 import { candidateKey, decisionKey } from './reconcile.js';
 import { automatableProof } from '../model/mechanical-proofs.js';
 import { missingProofs } from './metrics.js';
@@ -271,9 +271,16 @@ export async function mergeStep(cycle: Cycle) {
     performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: `${item.key} was merged on GitHub (${item.observation!.mergeSha?.slice(0, 12) ?? 'merge commit unknown'} at ${item.observation!.mergedAt ?? 'an unrecorded time'}) without a valid merge execution: ${unauthorizedMergeViolation}. It stays at the merge stage until a two-party decision reconciles it: graphyard master decide ${item.key} merge REASON, then graphyard master approver ${item.key} DECISION; Graphyard re-checks the record at the merge cutoff and delivers on the approved decision`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   });
   //    A revert the main guard abandoned (GY-1250) is raised once, as one attention line naming the
-  //    merge, the failing check and the revert PR; nothing waits on it.
-  for (const line of mainGuardAttention(cycle.snapshot.work)) {
-    if (!state.actions[line.key]) performed.push(await record(state, line.key, { kind: 'escalation', work: line.work, principal: null, state: 'done', detail: line.text, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+  //    merge, the failing check and the revert PR; nothing waits on it. Once the cursor holds as
+  //    many resolved rows as pruneDaemonState keeps, a revert abandoned before the oldest of them
+  //    may have had its row retired, so it is not raised again (`mainGuardAttention`'s `since`).
+  const abandoned = (cycle.snapshot?.work ?? []).filter(item => item.mainGuardReverts?.some(revert => revert.state === 'abandoned'));
+  if (abandoned.length) {
+    const resolved = Object.entries(state.actions).filter(([key, action]) => (action.state === 'done' || action.state === 'failed') && !state.faults.failing[key]);
+    const since = resolved.length >= retainedActions ? Math.min(...resolved.map(([, action]) => Date.parse(action.at))) : -Infinity;
+    for (const line of mainGuardAttention(abandoned, since)) {
+      if (!state.actions[line.key]) performed.push(await record(state, line.key, { kind: 'escalation', work: line.work, principal: null, state: 'done', detail: line.text, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+    }
   }
   //    A candidate waiting its turn in the merge queue is not attempted: the refusal would only
   //    restate its position, and each one would push its first real attempt further out (GY-192).

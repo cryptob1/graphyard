@@ -2508,7 +2508,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * main is restored within one CI duration instead of after another queue round. Returns the
    * merge commit once GitHub reports the pull request merged, else null.
    */
-  async mergeRevert(work: Work, revert: Pick<OptimisticRevert, 'pr' | 'head' | 'failing'>): Promise<string | null> {
+  async mergeRevert(work: Work, revert: Pick<OptimisticRevert, 'pr' | 'head' | 'failing'>, source: 'optimistic-merge' | 'main-guard' = 'optimistic-merge'): Promise<string | null> {
     const pull = await this.request(`/pulls/${revert.pr}`);
     if (pull?.merged) return typeof pull.merge_commit_sha === 'string' ? pull.merge_commit_sha : null;
     const state = await this.mergeQueueState(revert.pr!);
@@ -2516,7 +2516,9 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     if (state.mode !== 'none') await this.dequeuePullRequest(state);
     const existing = (await this.pages(`/commits/${revert.head}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=latest`, 'check_runs')).find(c => c.app.id === this.config.appId);
     const body = { name: CHECK_NAME, head_sha: revert.head, status: 'completed', conclusion: 'success', external_id: work.id,
-      output: { title: 'Main guard: optimistic-merge revert', summary: `Revert of ${work.key}'s optimistic merge at ${revert.head}: ${revert.failing.join(', ') || 'required checks failed'} on main` } };
+      output: source === 'main-guard'
+        ? { title: 'Main guard: revert of a merge that broke main', summary: `Revert of ${work.key}'s merge at ${revert.head}: ${revert.failing.join(', ') || 'required checks failed'} on main` }
+        : { title: 'Main guard: optimistic-merge revert', summary: `Revert of ${work.key}'s optimistic merge at ${revert.head}: ${revert.failing.join(', ') || 'required checks failed'} on main` } };
     // A verdict already standing is not republished on every guard tick; the merge request below is.
     if (!(existing?.status === body.status && existing.conclusion === body.conclusion && existing.external_id === body.external_id
       && existing.output?.title === body.output.title && existing.output?.summary === body.output.summary)) {
@@ -2995,7 +2997,7 @@ export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' 
     checks: sha => github.commitChecks(sha),
     openRevert: (work, mergeSha, reason) => github.openMainRevert(work, mergeSha, reason),
     pull: pr => github.revertPull(pr),
-    mergeRevert: (work, revert) => github.mergeRevert(work, revert),
+    mergeRevert: (work, revert) => github.mergeRevert(work, revert, 'main-guard'),
     closeRevert: (pr, reason) => github.closeRevert(pr, reason),
     record: (snapshot, revert: MainGuardRevert) => engine.store.transaction(async (db, at) => {
       const work: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [snapshot.id])).rows[0]?.document;

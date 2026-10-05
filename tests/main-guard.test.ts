@@ -2,6 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Work } from '../src/model.js';
 import { applyMainGuardRevert, commitVerdict, mainGuardAttention, readMain, runMainGuard, type CheckRun, type MainCommit, type MainGuardPorts } from '../src/main-guard.js';
+import { mergeStep } from '../src/daemon/cycle-delivery.js';
+import { emptyDaemonState, pruneDaemonState, retainedActions } from '../src/daemon/state.js';
+import type { Cycle } from '../src/daemon/cycle.js';
+import type { MasterConfig } from '../src/master.js';
 
 // GY-1250: under GitHub delivery a merge that breaks main is reverted through a revert pull request
 // the App merges, and its item is reopened; a revert that cannot merge is given up after one attempt.
@@ -184,4 +188,34 @@ test('unit:main-guard-never-sticks a revert whose checks never conclude, or that
   await runMainGuard(other.ports, { required, ciAppIds: [ci], now: new Date(at) });
   assert.equal(itemC.mainGuardReverts![0].state, 'abandoned');
   assert.match(itemC.mainGuardReverts![0].reason!, /GitHub refused to merge revert PR #900: Repository rule violations found/);
+});
+
+test('unit:main-guard-never-sticks an abandoned revert raises its attention line once across a simulated day, even after the cursor prunes that line\'s row', async () => {
+  // The loop raises the line from the item's record every cycle it is missing from the cursor, and
+  // the cursor retires its oldest resolved rows past `retainedActions`; "once" must survive that.
+  const state = emptyDaemonState({ url: 'https://graphyard.example', repository: 'owner/project', autoMerge: true } as MasterConfig);
+  const start = Date.parse(at), cycleMs = 30_000, fillerPerCycle = 20;
+  const abandoned = (work: Work, mergeSha: string, settled: number) => {
+    work.mainGuardReverts = [{ mergeSha, pr: work.submission!.pr, failing: ['test'], revert: null, state: 'abandoned', at: new Date(settled).toISOString(), settledAt: new Date(settled).toISOString(), revertSha: null, reason: 'the revert conflicts with main' }];
+  };
+  const B = sha('b2'), E = sha('e5'), itemB = delivered('GY-2', B, 702), itemE = delivered('GY-5', E, 705), itemA = delivered('GY-1', sha('a1'), 701);
+  abandoned(itemB, B, start);
+  const work = [itemA, itemB, itemE], raised: string[] = [];
+  let pruned = false;
+  for (let index = 0, clock = start; clock < start + 24 * 60 * 60_000; index++, clock += cycleMs) {
+    // Halfway through the day a second revert is abandoned: it too is raised exactly once.
+    if (index === 1440) abandoned(itemE, E, clock);
+    const performed: { kind: string; work: string | null; detail: string }[] = [];
+    await mergeStep({ config: { autoMerge: true }, state, now: () => clock, clock, snapshot: { jobs: [], work }, performed, open: [],
+      effects: { persist: async () => undefined, snapshot: async () => ({ work }) },
+      isolate: async (_kind: unknown, _item: unknown, _name: unknown, body: () => Promise<unknown>) => body() } as unknown as Cycle);
+    raised.push(...performed.filter(action => action.kind === 'escalation' && action.detail.startsWith('Main guard:')).map(action => action.work!));
+    // The rest of the cycle's work: resolved rows the cursor must bound.
+    for (let row = 0; row < fillerPerCycle; row++) state.actions[`dispatch:filler:${index}:${row}`] = { kind: 'dispatch', work: null, principal: null, state: 'done', detail: 'filler', attempts: 1, epoch: null, cycle: index, at: new Date(clock).toISOString() } as never;
+    pruneDaemonState(state);
+    if (!state.actions[`escalation:main-guard:${B}`]) pruned = true;
+  }
+  assert.ok(pruned, `the day's ${fillerPerCycle} rows a cycle retire the line's row past the ${retainedActions}-row bound`);
+  assert.deepEqual(raised, ['GY-2', 'GY-5'], 'each abandoned revert is raised exactly once');
+  assert.equal(mainGuardAttention(work).length, 2, 'both reverts stay abandoned on their items');
 });
