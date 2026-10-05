@@ -27,11 +27,11 @@ A profile's `accounts` lists [agent environments](onboarding.md#agent-environmen
 
 A runtime failing to start fails over too, named in `master status` (`opencode-a failed to start: …; launched on claude-b`); three in a row raise an attention item until a start.
 
-On a runtime's limit notice (never agent text; for a working session, the master's too, only beside its runtime's retry marker such as `[retrying in 4s attempt #5]`) the loop commits work as unpushed `WIP:`, records `capacity.exhausted`, relaunches on another account or awaits reset.
+On a runtime's limit notice (never agent text; a working session's, master included, only beside its retry marker `[retrying in 4s attempt #5]`), the loop commits work as unpushed `WIP:`, records `capacity.exhausted`, relaunches on another account or awaits reset.
 
 ## The loop's own master session
 
-The loop launches the master session as a fleet role (`master registry role set master ACCOUNTS …`) pinned to one session, holding its registry slot until ended; unconfigured, nothing launches. Either path (`master start` too) adopts a live session named `masterAgentName`. Its first request is the master prompt plus a durable handover naming standing judgement work. It relaunches on exit (two missed readings; an unreadable inventory is none), a limit notice (account held), or past `run.masterSessionMinutes` (default 240), deferred at most 30 minutes for an open item's merge. A failed registry end is retried each cycle. Each cycle wakes it naming changed subjects; `run.masterHeartbeatMinutes` (default 30) of silence buys one heartbeat. `master status` shows `daemon.master`.
+The loop launches the master session as a fleet role (`master registry role set master ACCOUNTS …`) pinned to one session, holding its registry slot until ended; unconfigured, nothing launches. Either path (`master start` too) adopts a live session named `masterAgentName`. Its first request is the master prompt plus a durable handover naming standing judgement work. It relaunches on exit (two missed readings; an unreadable inventory is none), a limit notice (account held), or past `run.masterSessionMinutes` (default 240), deferred at most 30 minutes for an open item's merge. A failed registry end retries each cycle. Each cycle wakes it naming changed subjects; `run.masterHeartbeatMinutes` (default 30) of silence buys one heartbeat. `master status` shows `daemon.master`.
 
 ## How a session starts
 
@@ -47,7 +47,7 @@ The launcher writes `.graphyard/launch/NAME.request` (and Claude's `NAME.role`),
 GY=/path/to/checkout/.graphyard/launch/NAME; claude … --settings /path/to/repo/.graphyard/harness/producer-PROFILE.json --append-system-prompt-file "$GY.role" "$(cat "$GY.request")"
 ```
 
-The typed line is bounded at **512 bytes**.
+The typed line is bounded at **512 bytes** whatever the request is.
 
 #### The start bound reads the pane
 
@@ -57,7 +57,7 @@ OpenCode 1.18 is ready at `Ask anything…`/`tab agents` ([fixture](../tests/fix
 
 #### First-run consent prompts
 
-A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one granting hook execution or a sandbox escape; everything else, above all a **credential** or **payment** prompt, is escalated. Workspace-trust prompts fail the launch, unheld. A worker is held in `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** its supervisor stops renewing and stops it; the item is dispatchable.
+A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; everything else, above all a **credential** or **payment** prompt, is escalated. Workspace-trust prompts fail the launch, unheld. A worker is held in `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** its supervisor stops renewing and stops it; the item is dispatchable.
 
 ### Acknowledgement, the one re-prompt, and never started
 
@@ -67,18 +67,18 @@ A reviewer or producer is `awaiting acknowledgement` until 30 s active (`counts.
 
 When a live attempt's blocker or scope request resolves, its idle session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`); blocking again ends the attempt and a fresh session, preferably another runtime, takes over. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then after 30 more handed to a new attempt on its branch.
 
-Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts and are re-adopted; lost ones retry free (approvers thrice per decision). Only Pi is confined; triage and diagnosis runs end with the loop.
+Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts and are re-adopted; lost ones retry free (approvers thrice per decision). Only Pi is confined; research, triage and diagnosis runs end with the loop.
 
 Every paste goes to the **pane on the attempt's own session handle**, never the profile's reusable agent name another session may hold (GY-852); a gone pane hands the attempt on.
 
 ### Panes are closed and reclaimed
 
-Every launch records its pane on the item's session handle; ending that session closes the pane. Research and triage run headless. A per-cycle sweep closes panes Graphyard launched **on this host** whose session has ended or worktree is gone, once agentless past **120 s**, at most **6** a pass — never a pane Graphyard did not launch, with an agent, or whose worktree holds a live lease. Each pass records the pane count (`daemon.actions`), raising attention past **20** agentless panes (`daemon.escalations`).
+Every launch records its pane on the item's session handle; ending that session closes the pane. A per-cycle sweep closes panes Graphyard launched **on this host** whose session has ended or worktree is gone, once agentless past **120 s**, at most **6** a pass — never a pane Graphyard did not launch, with an agent, or whose worktree holds a live lease. Each pass records the pane count (`daemon.actions`), raising attention past **20** agentless panes (`daemon.escalations`).
 
 ### The dispatcher's own state
 
 - **The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis.
-- **A cursor that fails its schema is repaired, not fatal**, logged once with the failing path.
-- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item: no reviewer or producer session is launching. `graphyard master restart` repairs the cursor.
+- **A cursor that fails its schema is repaired, not fatal**, logged once with the path that failed.
+- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item: no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
 
-**A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for a runtime that exits **at launch**, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
+**A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for a runtime that exits **at launch**, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
