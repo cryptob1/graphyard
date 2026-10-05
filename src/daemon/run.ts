@@ -261,7 +261,10 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         const upgradeRefusal = await escalate(await checkoutOf());
         if (!upgradeRefusal) {
           try {
-            const upgraded = await effects.selfUpgrade(state);
+            // The executor restart can wait minutes on held claims and re-registration: the
+            // watchdog is fed on each poll so that wait is not mistaken for a hung loop (GY-916).
+            const keepAlive = watchdog.supervised ? async () => { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } } : undefined;
+            const upgraded = await effects.selfUpgrade(state, keepAlive);
             if (upgraded.outcome !== 'skipped') log(`[graphyard-master] upgrade ${describeSelfUpgrade(upgraded)}`);
           } catch (error) { log(`[graphyard-master] upgrade failed: ${message(error)}`); }
         }

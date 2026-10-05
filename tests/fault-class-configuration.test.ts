@@ -11,7 +11,8 @@ import type { Work } from '../src/model.js';
 import type { ActionRow } from '../src/model/actions.js';
 import { describeUnserved, ExecutorRegistry, executorReport, ledgerLoopMerger, LoopRegistry, loopPresenceInterval, loopPresenceLiveMs, reportedLoopMerger, startExecutorFor } from '../src/model/executor-presence.js';
 import { executorFleet } from '../src/cli/executor-report.js';
-import { deploymentObservationSchema, emptyDaemonState, noteWatchdog, watchdogPlan, writeDaemonState, type DaemonState } from '../src/master-daemon.js';
+import { deploymentObservationSchema, emptyDaemonState, noteWatchdog, runDaemon, watchdogPlan, writeDaemonState, type DaemonState } from '../src/master-daemon.js';
+import type { DaemonEffects } from '../src/daemon/effects.js';
 import { awaitSupervisorRestart, performSelfUpgrade, restartEndedBySupervisorStop } from '../src/daemon/upgrade.js';
 import { ChildProcessError } from '../src/child-runner.js';
 import { readRestartFence, restartExecutors, writeExecutorRegistration, type ExecutorRegistration } from '../src/executor-fleet.js';
@@ -262,14 +263,42 @@ test('unit:restart-executors-awaits-held-claims — restartExecutors waits insid
     assert.deepEqual(calls, [['systemctl', '--user', 'restart', 'graphyard-executor@exec-1.service']]);
     // A claim still held when the timeout ends refuses, naming it, having restarted nothing.
     calls.length = 0;
-    let waits = 0;
+    let waits = 0, keepAlives = 0;
     const started = Date.now();
-    const refused = await restartExecutors(master, { coordinatorCommit: current, run: supervisor, sleep: ms => { waits += 1; return delay(Math.min(ms, 5)).then(() => {}); }, timeoutMs: 100, actions: async () => busy });
+    const refused = await restartExecutors(master, { coordinatorCommit: current, run: supervisor, sleep: ms => { waits += 1; return delay(Math.min(ms, 5)).then(() => {}); }, timeoutMs: 100, actions: async () => busy,
+      onWait: () => { keepAlives += 1; } });
     assert.equal(refused.result, 'refused');
     assert.match(refused.reason!, /exec-1 holds resync for GY-515 since 2026-09-28T06:56:31.312Z/);
     assert.ok(waits > 1 && Date.now() - started >= 100, 'it waited out its timeout before refusing');
+    assert.equal(keepAlives, waits, 'every poll of the wait feeds the supervisor\'s watchdog, so a long wait is not a hung loop');
     assert.deepEqual(calls, [], 'nothing was restarted');
     assert.equal(await readRestartFence(master), null, 'the fence is lowered with the refusal');
+    // A keep-alive that fails does not decide the restart.
+    const unfed = await restartExecutors(master, { coordinatorCommit: current, run: supervisor, sleep: ms => delay(Math.min(ms, 5)).then(() => {}), timeoutMs: 50, actions: async () => busy,
+      onWait: () => { throw new Error('systemd-notify failed'); } });
+    assert.equal(unfed.result, 'refused');
+    assert.match(unfed.reason!, /holds resync for GY-515/);
+    // The loop wires that keep-alive to its supervisor between cycles: under a watchdog the
+    // upgrade's waits notify 'alive'; with no supervisor it is given none.
+    for (const [environment, expected] of [[{ NOTIFY_SOCKET: '/run/notify', WATCHDOG_USEC: String(180 * 1_000_000) }, ['ready', 'alive', 'alive', 'alive']], [{}, []]] as const) {
+      const notified: string[] = [];
+      const effects = {
+        snapshot: async () => ({ work: [], now: iso(0) }), agents: () => [], credentials: async () => ({}),
+        observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'none', deployed: [], pending: [] }),
+        requestSmoke: async () => {}, merge: async () => {}, recordDeployment: async () => {}, requestProof: async () => {},
+        dispatch: async () => {}, recordSession: async () => {}, closeSession: () => {}, persist: async () => {},
+        notify: (signal: string) => { notified.push(signal); },
+        selfUpgrade: async (_state: DaemonState, keepAlive?: () => Promise<void>) => {
+          assert.equal(!!keepAlive, !!environment.NOTIFY_SOCKET);
+          // Two polls of a held claim on a test clock, then the refusal: two keep-alives mid-wait.
+          let at = clock;
+          await restartExecutors(master, { coordinatorCommit: current, run: supervisor, now: () => at, sleep: async ms => { at += ms; }, pollMs: 1000, timeoutMs: 2000, actions: async () => busy, onWait: keepAlive });
+          return { outcome: 'skipped' as const, reason: 'nothing deployed yet' };
+        },
+      } as unknown as DaemonEffects;
+      await runDaemon(master, emptyDaemonState(master), effects, { once: true, intervalMs: 20_000, identity: { pid: process.pid, host: master.hostId }, log: () => {}, signals: [], environment });
+      assert.deepEqual(notified, expected);
+    }
   } finally { await dispose(); }
 });
 

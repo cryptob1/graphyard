@@ -333,6 +333,8 @@ export interface RestartExecutorsDeps {
   timeoutMs?: number; pollMs?: number;
   /** How long a claim already announced may take to be recorded or abandoned before the restart refuses. */
   claimWaitMs?: number;
+  /** Called on every poll of the three waits: the loop feeds its supervisor's watchdog here, so a long wait is not a hang (GY-916). */
+  onWait?: () => void | Promise<void>;
 }
 export interface RestartedExecutor { name: string; unit: string; pid: { before: number; after: number | null }; release: { before: ExecutorRelease; after: ExecutorRelease | null }; registered: boolean; waitedMs: number }
 export interface ExecutorRestartResult {
@@ -383,7 +385,9 @@ async function heldClaims(config: ExecutorFleetConfig, deps: RestartExecutorsDep
  */
 export async function restartExecutors(config: ExecutorFleetConfig, deps: RestartExecutorsDeps): Promise<ExecutorRestartResult> {
   const run = deps.run ?? ((command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 }));
-  const alive = deps.alive ?? processAlive, now = deps.now ?? Date.now, sleep = deps.sleep ?? (ms => delay(ms).then(() => {}));
+  const alive = deps.alive ?? processAlive, now = deps.now ?? Date.now, pause = deps.sleep ?? (ms => delay(ms).then(() => {}));
+  // A keep-alive that fails never decides the restart.
+  const sleep = async (ms: number) => { try { await deps.onWait?.(); } catch { /* the loop logs its own notifications */ } await pause(ms); };
   const coordinator = { commit: deps.coordinatorCommit };
   const empty = (result: ExecutorRestartResult['result'], reason: string | null): ExecutorRestartResult => ({ result, reason, coordinator, held: [], restarted: [], unsupervised: [], forgotten: [] });
   const timeoutMs = deps.timeoutMs ?? executorRestartTimeoutMs, claimWaitMs = Math.min(deps.claimWaitMs ?? executorClaimWaitMs, timeoutMs);

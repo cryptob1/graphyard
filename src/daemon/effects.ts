@@ -164,7 +164,8 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
    * loop through its own supervisor. A loop wired without it keeps cycling exactly as before, on
    * the release it loaded.
    */
-  selfUpgrade?: (state: DaemonState) => Promise<SelfUpgradeOutcome>;
+  /** `keepAlive` feeds the supervisor's watchdog while the upgrade waits on the executors. */
+  selfUpgrade?: (state: DaemonState, keepAlive?: () => Promise<void>) => Promise<SelfUpgradeOutcome>;
   /**
    * GY-437: the release this process loaded, read from its checkout when the effects are built at
    * startup, before anything can move the checkout. The loop records it on the cursor over whatever
@@ -778,9 +779,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // re-executes itself only through the supervisor unit it actually runs under, detected from
     // its own cgroup like an executor's.
     loadedRelease: readRelease(root),
-    selfUpgrade: state => performSelfUpgrade(current(), state, {
+    selfUpgrade: (state, keepAlive) => performSelfUpgrade(current(), state, {
       root, run,
-      restartExecutors: to => restartExecutors(current(), { actions: () => asCoordinator('actions'), coordinatorCommit: to }),
+      restartExecutors: to => restartExecutors(current(), { actions: () => asCoordinator('actions'), coordinatorCommit: to, onWait: keepAlive }),
       restartSelf: async () => {
         const unit = detectLoopSupervisorUnit();
         if (!unit) throw new Error('this loop runs under no graphyard-master supervisor unit, so it cannot re-execute itself; run it under the packaged unit (examples/master/graphyard-master.service), or restart it by hand with systemctl --user restart graphyard-master');
