@@ -3,7 +3,7 @@
 
 `POST /api/github/webhook` verifies GitHub's HMAC, deduplicates deliveries and wakes durable jobs for [observation](#reads-that-are-not-repeated); payloads never pass gates.
 
-`POST /api/work/:id/reviewpolicy` (`admin`; operator agent with `policy:review-provider`): `{"provider":"codex"|"github"|"agent", "expectedPolicyRevision":1, "reason":…}`, bumping the policy revision; `agent` needs ordered `reviewerProfiles` (`name`, `runtime`, `reviewerApp`; optional `mention`, `timeoutSeconds`).
+`POST /api/work/:id/reviewpolicy` (`admin`; operator agent with `policy:review-provider`): `{"provider":"codex"|"github"|"agent","expectedPolicyRevision":1,"reason":…}`, bumping the policy revision; `agent` needs ordered `reviewerProfiles` (`name`, `runtime`, `reviewerApp`; optional `mention`, `timeoutSeconds`).
 
 ## Reads that are not repeated
 
@@ -13,9 +13,9 @@ A base push wakes only open items whose files overlap it or whose last `mergeabl
 
 ## Prioritized wakes
 
-A merge refused only for a stale observation keeps its queue place: the loop sends `POST /api/work/:id/resync` with `prioritized: true` (at most every two minutes), claimed like a webhook wake. A rework decision waiting on a stale observation sends one such wake and decides from the observation it brought in, whatever its age, provided it reads the candidate head and no GitHub pause stands; a decision the candidate moved past is withdrawn. Loop bookkeeping saved meanwhile (sessions, next action, gates, escalations) does not refuse that observation. The loop's wakes add `wait: false`, so the route answers without waiting for a reconcile tick. A rework dispatch refused because its PR branch moved (`Submitted PR branch changed`) releases its claim with a prioritized wake, so the next dispatch starts from the new head.
+A merge refused only for a stale observation keeps its queue place: the loop sends `POST /api/work/:id/resync` with `prioritized:true` (at most every 2 min), claimed like a webhook wake. A rework decision on a stale observation sends one such wake and decides from what it brings in, whatever its age, if it reads the candidate head and no GitHub pause stands; one the candidate moved past is withdrawn. Loop bookkeeping saved meanwhile (sessions, next action, gates, escalations) does not refuse it. Loop wakes add `wait:false`, answering without awaiting a reconcile tick. A rework dispatch refused for a moved PR branch (`Submitted PR branch changed`) releases its claim with a prioritized wake; the next starts from the new head.
 
-The loop's decisions step has a budget: two fifths of `run.intervalSeconds`, at least 30 s. Items not reached keep their standing decisions but make no request that cycle; `decisions:deferred` names them (and is superseded once a cycle reaches every item). Both of the step's passes, rework and routine decisions then attestations, start the next cycle with what they put off and always reach their first item, so the oldest deferred item is requested even past the budget.
+The loop's decisions step is budgeted two fifths of `run.intervalSeconds`, at least 30 s. Items not reached keep standing decisions but request nothing that cycle; `decisions:deferred` names them until a cycle reaches every item. Both passes (rework and routine decisions, then attestations) resume next cycle with what they put off and always reach their first item, so the oldest deferred is requested even past budget.
 
 ## Automatic dispatch records
 

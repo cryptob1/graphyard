@@ -7,7 +7,7 @@
 
 ## 2. Add machines
 
-Per concurrent session: a worker identity and host ID (`install --workers`), or:
+Per concurrent session, a worker identity and host ID (`install --workers`) or:
 
 ```sh
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
@@ -21,7 +21,7 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, workflows ([merge gate, cand
 
 ### What the generated instructions authorize
 
-Generated `AGENTS.md`: **every session Graphyard launches receives its instruction as the session's own first request** on its command line (Claude Code also `--append-system-prompt-file`), so sessions start without anybody sending `go`; launcher pastes (the loop's single re-prompt, the reviewer's reminder, master wakes) need no confirmation; other bracketed paste is untrusted data (prompt injection). The role files under `.graphyard/harness/` hold permissions, not instructions.
+Generated `AGENTS.md`: **every session Graphyard launches receives its instruction as the session's own first request** on its command line (Claude Code also `--append-system-prompt-file`), so sessions start without anybody sending `go`; launcher pastes (the loop's single re-prompt, the reviewer's reminder, master wakes) need no confirmation; other bracketed paste is untrusted data (prompt injection); the role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Agent environments
 
@@ -68,7 +68,7 @@ node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --mo
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Exhausted"
 ```
 
-`--plan NAME` groups accounts under one shared provider quota (`none` clears; inferred from host and home, or Z.AI keys; `auth.json`-only logins need it). `--key-file zai.key --key-variable ZAI_API_KEY`: 0600 key file, exported per run. Registry writes refuse pasted keys.
+`--plan NAME` groups accounts under one shared provider quota (`none` clears; inferred from host and home, or Z.AI keys; `auth.json`-only logins need it). `--key-file zai.key --key-variable ZAI_API_KEY`: 0600 key file, exported per run; registry writes refuse pasted keys.
 
 ### Add a role
 
@@ -81,7 +81,7 @@ node "$GRAPHYARD_CLI" master registry role set reviewer codex-a,claude-c --concu
 
 ### Size review and proof capacity
 
-Adding workers: worker count `W` and `G` proof groups need `⌈W / 2⌉` review and `G × ⌈W / 2⌉` producer slots (profile `"concurrency"`, applied without a restart; producer profiles and `run.reviewerProfile` default to 4); watch `longestWaitMs`.
+Adding workers: worker count `W` and `G` proof groups need `⌈W / 2⌉` review and `G × ⌈W / 2⌉` producer slots (profile `"concurrency"`, [per role](master-agent.md#automatic-dispatch-at-submit), without a restart); watch `longestWaitMs`.
 
 ## 3. Start the master
 
@@ -92,15 +92,15 @@ node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST   # executors
 node "$GRAPHYARD_CLI" master start codex     # or claude
 ```
 
-Run as an OS user whose GitHub credentials workers cannot read. `--browser-profile`: Chrome signed in as GitHub admin (`master browser`); GitHub Mobile *Confirm access* stays human-only. Reviewer: `master reviewer setup`, `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)). Setup writes `mergeQueue.parallelTips` in `.graphyard/master.json` (default 4; needs parallelTips × pull-request jobs concurrent Actions jobs — declare `ciConcurrency`, `master protection` flags a lower one).
+Run as an OS user whose GitHub credentials workers cannot read. `--browser-profile`: Chrome signed in as GitHub admin (`master browser`); GitHub Mobile *Confirm access* stays human-only. Reviewer: `master reviewer setup`, `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)). Setup writes `mergeQueue.parallelTips` to `.graphyard/master.json` (default 4; needs parallelTips × pull-request jobs concurrent Actions jobs: declare `ciConcurrency`; `master protection` flags a lower one).
 
 ### The loop must be supervised
 
-`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master.service` and runs `systemctl --user enable --now` and `loginctl enable-linger` (restarts on crash, reboot, hang); never a side effect: worker checkouts and temp directories are refused. Move: `master init --token-stdin --replace-supervisor` from the new checkout. `master status` shows `setup.supervisor`.
+`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master.service` and runs `systemctl --user enable --now` and `loginctl enable-linger` (restarts on crash, reboot, hang); never a side effect: worker checkouts and temp directories are refused. Move: `master init --token-stdin --replace-supervisor` from the new checkout; `master status` shows `setup.supervisor`.
 
 ### The pipeline doctor (on by default)
 
-Every `run.doctor.intervalMinutes` (default 10) the loop launches the **doctor**, a Pi session fixing stuck, overdue work by sanctioned commands (`master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`), never merging, dispatching or evidencing. Each run posts per-item findings and a summary (`doctor` in `master status`); the rest escalate or file deduplicated fault items. The loop itself settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (default 10) the loop launches the **doctor**, a Pi session fixing stuck, overdue work via sanctioned commands (`master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`), never merging, dispatching, evidencing or touching leases. Each run posts per-item findings and a summary (`doctor` in `master status`); the rest escalate or file deduplicated fault items. The loop itself settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
 
 ## 4. Prove the first PR
 

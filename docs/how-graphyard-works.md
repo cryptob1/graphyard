@@ -14,7 +14,7 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions.
 
 ## Shared project memory
 
-Sessions start with a role-scoped digest (≤500 words) of decisions, recurring faults and recent merges, built from applied records (`.graphyard/project-memory.json`; `projectMemory` in `master status`).
+Sessions start with a role-scoped digest (≤500 words) of decisions, recurring faults and recent merges from applied records (`.graphyard/project-memory.json`; `projectMemory` in `master status`).
 
 ## Risk lanes
 
@@ -24,13 +24,13 @@ Sessions start with a role-scoped digest (≤500 words) of decisions, recurring 
 - **Medium** (60 min): remainder; adds producer-run `unit:`/`integration:`.
 - **Low** (30 min): test-only, docs-only, single-module. Required CI, one approval; no producer proofs or `manual:` attestations.
 
-All lanes require `e2e:` proofs; low/medium reworks need no approver (recorded as approved by `graphyard-risk-lane`).
+All lanes require `e2e:` proofs; low/medium reworks need no approver (recorded approved by `graphyard-risk-lane`).
 
 ## Who holds which authority
 
 ![Bootstrap: one supervised worker; normal operation: a fleet.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: in bootstrap the human operator supervises one worker; later the master dispatches many, each with own credential.
+Text equivalent: the operator supervises one bootstrap worker; later the master dispatches many, each credentialed.
 
 ![Authority of operator, Graphyard, Herdr sessions, reviewer, producer.](diagrams/roles-and-authority.svg)
 
@@ -40,6 +40,6 @@ Text equivalent: operator makes human-only decisions; Herdr hosts master (`coord
 
 ![Control plane: callers, engine, Postgres, reconciliation worker, GitHub.](diagrams/control-plane-components.svg)
 
-Text equivalent: callers use the API; the engine applies mutations with events in locked Postgres transactions; reconciliation syncs GitHub and merges; webhooks wake jobs.
+Text equivalent: the engine applies callers' API mutations, with events, in locked Postgres transactions; reconciliation syncs GitHub and merges; webhooks wake jobs.
 
 Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`; claims bump the epoch; latest trusted proof wins; merge is not [delivery](delivery.md).

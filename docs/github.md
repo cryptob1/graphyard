@@ -29,33 +29,33 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 ## Workflow base syncs
 
-Worker tokens carry `contents`, `pull_requests` and `workflows` write ([push credential](protocol/leases.md#push-credential)). If GitHub refuses a base sync, `sync GY-N --push-via-control-plane COMMIT` has the control plane push (`POST /api/work/:id/sync-push`) a COMMIT that fast-forwards the branch and merges `origin/BASE` (`sync.workflow-push`).
+Worker tokens carry `contents`, `pull_requests` and `workflows` write ([push credential](protocol/leases.md#push-credential)). If GitHub refuses a base sync, `sync GY-N --push-via-control-plane COMMIT` has the control plane push (`POST /api/work/:id/sync-push`) a COMMIT fast-forwarding the branch and merging `origin/BASE` (`sync.workflow-push`).
 
 ## Require the check
 
-Require `Graphyard / merge` and `graphyard/landable` ([landability](coordination.md)) from the control-plane App on base: `strict` **off**, admin-enforced, no force push or deletion (`master protection --apply`, `master browser protection` reconcile). Needs: green `GITHUB_CI_APP_IDS` and protection-required checks, current-head approval, trusted passing evidence, mergeable non-draft PR at the queue head. GitHub merges only heads it passed; restrict other merge identities (lease-less workers still push).
+Require `Graphyard / merge` and `graphyard/landable` ([landability](coordination.md)) from the control-plane App on base: `strict` **off**, admin-enforced, no force push or deletion (`master protection --apply`, `master browser protection` reconcile). Needs: green `GITHUB_CI_APP_IDS` and protection-required checks, current-head approval, trusted passing evidence, mergeable non-draft PR heading the queue. GitHub merges only heads it passed; restrict other merge identities (lease-less workers still push).
 
 ## Merge queue
 
-A failed required check failing only tests (`graphyard-failed-tests:`) its old base broke and the tip fixed refreshes onto the tip (`baseBreak`), not rework; a rework awaiting fresh observation wakes it first.
+A required check failing only tests (`graphyard-failed-tests:`) its old base broke and the tip fixed refreshes onto the tip (`baseBreak`), not rework; a rework awaiting fresh observation wakes first.
 
-Once gated, a speculative tip pushed onto the candidate branch once and `refs/graphyard/queue/KEY` binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects it; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. Authorized heads pass the check and merge through GitHub; without a queue they merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled`.
+Once gated, a speculative tip pushed onto the candidate branch once and `refs/graphyard/queue/KEY` binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects it; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. Authorized heads pass the check, merging through GitHub (without a queue at once, head-bound); `BLOCKED` auto-merge past ten minutes raises `merge-stalled`.
 
 ### Bindings and carry
 
-Reviews and proofs bind head, base and policy revision. On a moved base all carry if the clean merge kept the patch-id; else the approval carries if no reviewed file changed, and disjoint-`scopeFiles` proofs carry.
+Reviews and proofs bind head, base and policy revision. On a moved base all carry if the clean merge kept the patch-id; else the approval carries if no reviewed file changed, as do disjoint-`scopeFiles` proofs.
 
-A carried review missing from the PR is re-posted before merging (`review.carry-refreshed`), else `mergerefused` requests a fresh review (`mergeRefusal.action: rereview`). Refusals past 10 minutes raise attention, then the loop clears carried approvals or requests rework (`mergeRefusal.action: rework`), once per phase.
+A carried review missing from the PR is re-posted pre-merge (`review.carry-refreshed`), else `mergerefused` requests fresh review (`mergeRefusal.action: rereview`). Refusals past 10 minutes raise attention; the loop then clears carried approvals or requests rework (`mergeRefusal.action: rework`), once per phase.
 
 ### Parallel tips
 
-`mergeQueue.parallelTips` (master config, default 4; `POST /api/merge-queue`): stacked per-entry tips test concurrently (`parallelTips: 1` batches). Entries merge in order; a failing tip ejects its entry once those ahead pass, and later tips rebuild. Failing only `unit:docs-word-budget` ejects the first entry whose running total exceeds the budget, naming words over and pages grown; otherwise the budget only warns ([development](development.md#documentation)).
+`mergeQueue.parallelTips` (master config, default 4; `POST /api/merge-queue`): stacked per-entry tips test concurrently (`parallelTips: 1` batches). Entries merge in order; a failing tip ejects its entry once those ahead pass; later tips rebuild. Failing only `unit:docs-word-budget` ejects the first entry whose running total exceeds the budget, naming words over and pages grown; otherwise the budget only warns ([development](development.md#documentation)).
 
 ### Proofs in CI
 
 Protected `pull_request_target` workflow per `graphyard/*` push: **plan** finds the item's `unit:*`/`integration:*` proofs; **exercise** runs one secret-free job on the base-merged candidate; **publish** reports via the `ciRun`-bound [CI producer](deployment.md#ci-producer). Queue tips are cached. Manual proofs stay producer sessions.
 
-`"deploySmoke": true` dispatches the smoke install once the release serves the merge; failure marks it [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
+`"deploySmoke":true` dispatches the smoke install once the release serves the merge; failure marks it [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
 
 ## Identity-bound agent review
 

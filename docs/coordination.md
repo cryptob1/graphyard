@@ -11,11 +11,11 @@ Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit
 
 `plannedFiles` (paths, `/`-ending prefixes) is the scope contract, not a lock: the [merge queue](github.md#merge-queue), `sync` integrate overlaps. `master status` shows `overlap.concurrent`, `git merge-tree` failures. Root-level directories are `highConflict`, refused without `--allow-broad-scope`; only `exclusiveResources` (reserved at claim) hold dispatch.
 
-`worktree GY-N EPOCH` frees the branch first: an earlier attempt's worktree is recorded (`workspace.preserved`) and detached, abandoned ones removed (`reclaimed`). A workspace failure releases the claim without spending the epoch. After **3** single-cause dispatch failures, the loop records a `dispatchblock` blocker until `graphyard unblock GY-N REASON`.
+`worktree GY-N EPOCH` frees the branch first: an earlier attempt's worktree is recorded (`workspace.preserved`), detached; abandoned ones removed (`reclaimed`). A workspace failure releases the claim, epoch unspent. After **3** single-cause dispatch failures the loop records a `dispatchblock` blocker until `graphyard unblock GY-N REASON`.
 
 ## Review gate: verdicts, not threads
 
-Reviewer approval of the exact head plus required CI gates landing; threads are inputs. Approvals mark each listed thread resolved, follow-up (a nit, answered and resolved, never filed; anything worth fixing is `BLOCKING` and fixed on that PR) or overridden, by thread or comment ID; a missed thread withdraws the approval. After two rework rounds bot threads are advisory. Past the review-round cap (default 3) only a `BLOCKING:` finding holds a head, escalating rather than reworking; a capped request without one is withdrawn and re-reviewed. Required conversation resolution is drift: `master protection --apply`.
+Exact-head reviewer approval plus required CI gates landing; threads are inputs. Approvals mark each listed thread (by thread or comment ID) resolved, follow-up (a nit, answered and resolved, never filed; anything worth fixing is `BLOCKING`, fixed on that PR) or overridden; a missed thread withdraws approval. After two rework rounds bot threads are advisory. Past the review-round cap (default 3) only a `BLOCKING:` finding holds a head, escalating, not reworking; a capped request without one is withdrawn, re-reviewed. Required conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 
@@ -25,16 +25,16 @@ Reviewer approval of the exact head plus required CI gates landing; threads are 
 
 Out-of-scope files three-way merge onto the landing commit: extended or base-only changes pass; reverts, deletions, rewrites refuse.
 
-Pre-push, `graphyard sync GY-N` merges `origin/BASE` (no rebase), regenerates, commits; `graphyard sync GY-N --restore` restores out-of-scope files to base tip in one commit.
+Pre-push, `graphyard sync GY-N` merges `origin/BASE` (no rebase), regenerates, commits; `sync GY-N --restore` restores out-of-scope files to base tip in one commit.
 
 ### Submit when your own criteria pass
 
-The full suite is CI's gate: workers run build and `graphyard verify GY-N` (own proofs), submit on pass, and name any sandbox full-suite failure outside `plannedFiles` in the PR without a blocker. `verify` marks a proof `leftToCi`, exits 0 and `complete` reports `passing`, only when all cases passed but the run ended abnormally (hook, crash, signal); failed, skipped or unexecuted cases always block. A proof that still passes on the merge base carrying only the change's test-side files (`*.test.*`, `tests/`, `test/`, `__tests__/`, `fixtures/`) is `unexercised`: `verify` exits 1 and `complete` reports `failing` (tests-only changes are not judged). A base run not made is `indeterminate`; `--preserves PROOF` exempts a regression guard.
+The full suite is CI's gate: workers run build and `graphyard verify GY-N` (own proofs), submit on pass, noting any sandbox full-suite failure outside `plannedFiles` in the PR, no blocker. Only when all cases passed but the run ended abnormally (hook, crash, signal) does `verify` mark a proof `leftToCi`, exit 0, and `complete` report `passing`; failed, skipped or unexecuted cases always block. A proof still passing on the merge base plus only the change's test-side files (`*.test.*`, `tests/`, `test/`, `__tests__/`, `fixtures/`) is `unexercised`: `verify` exits 1, `complete` reports `failing` (tests-only changes are not judged). An unmade base run is `indeterminate`; `--preserves PROOF` exempts a regression guard.
 
 ### Generated files never conflict
 
-`docs/README.md`, `docs/protocol.md` are generated in full ([development](development.md)); `sync` regenerates them post-merge. `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md` paths are `generated`: only deletion refuses.
+[Generated](development.md#documentation) `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md` paths are `generated`, regenerated by `sync` post-merge; only deletion refuses.
 
 ## Ship in under thirty minutes
 
-[Speed](master-agent-reference.md#pipeline-speed): `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci), conflict avoidance. `graphyard diagnose GY-N` names holds; `base-behind`/`base-conflict` get rework or, docs-only, [docs-sync](development.md#documentation-that-rarely-conflicts), launched in its own managed checkout. Three unobserved observation jobs: `observation-starved` (master attention; `/api/status` `starvedJobs`).
+[Speed](master-agent-reference.md#pipeline-speed): `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci), conflict avoidance. `graphyard diagnose GY-N` names holds; `base-behind`/`base-conflict` get rework or, docs-only, [docs-sync](development.md#documentation-that-rarely-conflicts) in its own managed checkout. Three unobserved observation jobs: `observation-starved` (master attention; `/api/status` `starvedJobs`).

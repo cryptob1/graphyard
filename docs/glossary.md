@@ -67,13 +67,4 @@ The master applies non-weakening intent directly. Two-party decisions (`graphyar
 
 ## Diagram legend
 
-Shape and colour | Term
----|---
-Amber rounded box | Human operator
-Green rounded box | Agent session (one role, credential)
-Blue square box | Graphyard control plane
-Violet box | Herdr runtime
-Grey square box | GitHub, external facts
-Dashed chip | Credential, lease epoch or worktree
-Solid arrow | Authenticated command
-Dashed arrow | Observation, never authority
+Amber rounded box: human operator; green rounded box: agent session (one role, credential); blue square box: Graphyard control plane; violet box: Herdr runtime; grey square box: GitHub, external facts; dashed chip: credential, lease epoch or worktree; solid arrow: authenticated command; dashed arrow: observation, never authority.

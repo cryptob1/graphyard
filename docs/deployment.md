@@ -7,7 +7,7 @@ One stateless container plus Postgres: `node "$GRAPHYARD_CLI" install --provider
 
 ## Variables
 
-`DATABASE_URL`; `HOST`/`PORT` (`0.0.0.0`/`4310`); `GITHUB_REPOSITORY`/`GITHUB_BASE_BRANCH` (`owner/repo`/`main`); App `GITHUB_APP_ID`/`GITHUB_INSTALLATION_ID`/`GITHUB_PRIVATE_KEY` (or `_FILE`)/`GITHUB_WEBHOOK_SECRET`; trusted `GITHUB_CI_APP_IDS`; [reviewer](github.md#identity-bound-agent-review) `GRAPHYARD_REVIEWER_APPS`; [main guard revert approver](delivery.md#pre-merge-gate-and-release-candidate-validation) `GRAPHYARD_REVERT_APPROVER_APP_ID`/`_INSTALLATION_ID`/`_PRIVATE_KEY` (or `_FILE`); `GRAPHYARD_GENERATED_FILES`; `GRAPHYARD_BUILD_SHA` (image commit); optional `RAILWAY_API_TOKEN` (deployment incidents); `GRAPHYARD_ARTIFACT_BACKEND` (`postgres`/[`s3`](recovery.md#artifact-backends-capacity-and-migration)); `GRAPHYARD_SIGNIN_CLAIM` ([host](install.md#self-contained-host) single-use sign-in hash); and:
+`DATABASE_URL`; `HOST`/`PORT` (`0.0.0.0`/`4310`); `GITHUB_REPOSITORY`/`GITHUB_BASE_BRANCH` (`owner/repo`/`main`); App `GITHUB_APP_ID`/`GITHUB_INSTALLATION_ID`/`GITHUB_PRIVATE_KEY` (or `_FILE`)/`GITHUB_WEBHOOK_SECRET`; trusted `GITHUB_CI_APP_IDS`; [reviewer](github.md#identity-bound-agent-review) `GRAPHYARD_REVIEWER_APPS`; [revert approver](delivery.md#pre-merge-gate-and-release-candidate-validation) `GRAPHYARD_REVERT_APPROVER_APP_ID`/`_INSTALLATION_ID`/`_PRIVATE_KEY` (or `_FILE`); `GRAPHYARD_GENERATED_FILES`; `GRAPHYARD_BUILD_SHA` (image commit); optional `RAILWAY_API_TOKEN` (deployment incidents); `GRAPHYARD_ARTIFACT_BACKEND` (`postgres`/[`s3`](recovery.md#artifact-backends-capacity-and-migration)); `GRAPHYARD_SIGNIN_CLAIM` ([host](install.md#self-contained-host) single-use sign-in hash).
 
 | Variable | Purpose
 | --- | ---
@@ -31,7 +31,7 @@ Installers derive the limits; an unset one is `delegationLimits` drift.
 
 ### Production deployment observation
 
-A merge unserved five minutes after a new `GRAPHYARD_BUILD_SHA` is a `delivery.deployment-incident`; when `release/production` (or `GRAPHYARD_PRODUCTION_BRANCH`) exists, production is measured against it instead, and an unpromoted merge is pipeline lag, not an incident. Measured against main, the "main is N commits ahead of production" attention line waits out the same five minutes: while every unserved merge is younger (or a provider attempt past the serving commit is in flight), `production` still reports `aheadBy` with `rollingOut: true`, but raises no deployment attention. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
+A merge unserved five minutes after a new `GRAPHYARD_BUILD_SHA` is a `delivery.deployment-incident`; if `release/production` (or `GRAPHYARD_PRODUCTION_BRANCH`) exists, production is measured against it; an unpromoted merge is pipeline lag, not an incident. Against main, the "main is N commits ahead of production" line waits the same five minutes: while every unserved merge is younger (or a provider attempt past the serving commit is in flight), `production` reports `aheadBy` with `rollingOut: true` and raises no attention. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
 
 ## Backup, upgrade, rollback
 

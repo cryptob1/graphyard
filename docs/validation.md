@@ -9,7 +9,7 @@ An `e2e:` proof passes from a pinned candidate, bundle and separate [collector](
 
 ## Candidates, requests, reports
 
-`kind: bundle` pins `scenario`, `scenarioRevision`, `scenarioHash`, `digest`, `runnerImageDigest`, `reportFormat`. Operators create candidates from build attestations.
+`kind:bundle` pins `scenario`, `scenarioRevision`, `scenarioHash`, `digest`, `runnerImageDigest`, `reportFormat`. Operators create candidates from build attestations.
 
 Requests bind observed targets. Runners `ack` within 30 s and heartbeat every 20 s; a pass needs a `matched` target, verified artifacts and a settled run. Recover with `cancel`, `settle` or `retry`; `graphyard validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics) stalls.
 

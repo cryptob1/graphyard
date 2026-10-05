@@ -11,7 +11,7 @@ One group per open item (a tile counts and filters it): **Needs you** (yours alo
 
 `graphyard login` prints the operator's single-use sign-in link. Requests offer choices; **Provide now** seals credentials for `unseal GY-N`.
 
-An operator approval offers **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`), answered only from a human admin's sign-in session.
+Operator approvals offer **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`), only from a human admin's sign-in session.
 
 ## Workers
 
@@ -21,7 +21,7 @@ Running rows: **Copy local** (launching host) `herdr agent attach w1V:pJD`; **Co
 
 ## Settings › Agents
 
-**Can launch now?** per role; **Accounts** by provider plan, each with one state chip (Disabled, No role, Spent, Launch failing, Unavailable, Working, Idle).
+**Can launch now?** per role; **Accounts** by provider plan, one state chip each (Disabled, No role, Spent, Launch failing, Unavailable, Working, Idle).
 
 ## The status sentence
 

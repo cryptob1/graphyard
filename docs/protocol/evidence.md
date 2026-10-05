@@ -9,7 +9,7 @@
 
 Server sets identity, time, trust; ungranted proofs store untrusted; later failures supersede passes. Trust follows live [grants](../operations-reference.md#proof-authority-grants) (`POST /api/proof-grants/ID/grant`, `/revoke`); `proofGaps` lists required proofs nobody may produce.
 
-Only and always, the [CI producer](../deployment.md#ci-producer) (`runtime: github-actions`, granted only `unit:*`, `integration:*`) sends `{"ciRun":{"provider":"github-actions", "repository":"OWNER/REPO", "runId":"RUN", "runAttempt":1, "jobId":4242}}`; the server reads the job back from GitHub: same run, exactly `sha`, concluded `result` (else `403`; unreachable: `503`).
+Only and always, the [CI producer](../deployment.md#ci-producer) (`runtime:github-actions`, granted only `unit:*`, `integration:*`) sends `{"ciRun":{"provider":"github-actions","repository":"OWNER/REPO","runId":"RUN","runAttempt":1,"jobId":4242}}`; the server reads the job back from GitHub: same run, exactly `sha`, concluded `result` (else `403`; unreachable: `503`).
 
 ## Revocation
 

@@ -3,7 +3,7 @@
 
 ## Authority boundaries
 
-An AI `slice-lead` leads an optional slice (`product`, `infrastructure`, `docs-experience`): rules on plans, sends back, escalates; never implements, reviews, proves or merges (`lead.action.refused`). `reject-plan`/`send-back` hold the merge gate (**lead hold**) until that lead's `approve-plan` with `"supersedes": "RULING-ID"` / `rework`.
+An AI `slice-lead` leads an optional slice (`product`, `infrastructure`, `docs-experience`): rules on plans, sends back, escalates; never implements, reviews, proves or merges (`lead.action.refused`). `reject-plan`/`send-back` hold the merge gate (**lead hold**) until that lead's `approve-plan` with `"supersedes":"RULING-ID"` / `rework`.
 
 Producers ever assigned the item or in its slice: `evidence.producer.refused`. Limits: [deployment variables](deployment.md#variables).
 
@@ -20,8 +20,8 @@ Unresolved triggers drop merge authorization. Explained lapses are `lease.expire
 
 ### Who may settle what
 
-Resolutions record `escalation.resolved`.
+Resolving records `escalation.resolved`.
 
 - Explained `lease-loss`: reconciliation, or `admin` `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`.
 - `lease-loss` of a superseded/stopped epoch: loop's two-party decision (stale if the superseding lease lapses).
-- `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, or a lead-raised `lease-loss`: master-requested two-party decision, or a declared human session (`admin`, `sessionKind: "human"`; settles any).
+- `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, or a lead-raised `lease-loss`: master-requested two-party decision, or a declared human session (`admin`, `sessionKind:"human"`; settles any).

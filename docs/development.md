@@ -3,7 +3,7 @@
 
 ## Where a new feature goes
 
-CLI commands in `src/cli/`, routes in `src/server/routes/`, rules in `src/model/`, tables in `src/store/tables/`, views in `web/pages/`, `AGENTS.md` text in `src/repository-setup.ts`, protocol topics in `docs/protocol/`.
+CLI commands: `src/cli/`; routes: `src/server/routes/`; rules: `src/model/`; tables: `src/store/tables/`; views: `web/pages/`; `AGENTS.md` text: `src/repository-setup.ts`; protocol topics: `docs/protocol/`.
 
 `tests/hotspots.test.ts` holds each assembler to a size budget.
 
@@ -21,15 +21,15 @@ npm ci && npm run build && npm test
 
 ### Base failures
 
-A required check failure the base branch head fails too is a base failure: the loop requests no rework and launches no approver (waiting while a base log is unreadable). It raises one attention entry and one P0 repair item per distinct failing test and base head. Once the base check passes again, attention clears, failed jobs rerun, and each blocked candidate is refreshed onto the repaired base by a Graphyard-authored merge of the base into its branch (`refresh`), carrying its approval. A failure whose tests the base tip already passes is not held: the observation refreshes the candidate onto that tip at once (trigger `base breakage`).
+A required check failure the base head fails too is a base failure: no rework, no approver (waiting while a base log is unreadable); one attention entry and P0 repair item per distinct failing test and base head. Once the base passes, attention clears, failed jobs rerun, and each blocked candidate refreshes onto the repaired base via a Graphyard-authored merge (`refresh`), keeping its approval. A failure the base tip already passes is not held: the candidate refreshes onto that tip at once (trigger `base breakage`).
 
 ## Documentation
 
-`docs/README.md`, `docs/protocol.md`: generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; [`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files-never-conflict) exempts them from the regression guard. README.md and `docs/` keep `graphyard.json`'s `wordBudget` (12,000 words, 1,200 per page; `tests/docs-budget.test.ts`), one topic per page. A page over its cap fails CI; the total only warns, and at 97% the loop files one trim item.
+`docs/README.md`, `docs/protocol.md`: generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; [`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files-never-conflict) exempts them from the regression guard. README.md and `docs/` keep `graphyard.json`'s `wordBudget` (12,000 words, 1,200 per page; `tests/docs-budget.test.ts`), one topic per page. A page over its cap fails CI; the total only warns; at 97% the loop files one trim item.
 
 ### Documentation that rarely conflicts
 
-Candidates conflicting only in `docs/**/*.md` get docs-sync, not rework: base merges in keeping both sides, and approval stays if the non-docs diff is unchanged.
+Candidates conflicting only in `docs/**/*.md` get docs-sync, not rework: base merges in keeping both sides; approval stays if the non-docs diff is unchanged.
 
 ## Trusted contracts
 

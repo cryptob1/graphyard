@@ -14,9 +14,9 @@
   - Expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission); another attempt: [rework](operations-reference.md#submitted-implementation-needs-rework); fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
   - An owed `request-rework` head counts as an `owed-decision` fault only after 30 minutes (`reworkDecisionWaitBoundMs`).
   - A failed manual proof a producer may run returns to a worker, never to an operator escalation; one no producer may run needs an operator witness, an unexecuted one an attestation.
-- **Merge refused**: wait or repair; never bypass. Auto-merge `BLOCKED` 10m with every gate passing is retried as a head-bound merge; after 30m one `merge-blocked` attention item names GitHub's answer. **Merged outside Graphyard**: [bypass](operations-reference.md#merge-bypass). **Wrong accepted evidence**: [revoke](operations-reference.md#accepted-evidence-turns-out-to-be-wrong). **GitHub paused or webhook silent**: [budget](operations-reference.md#github-request-budget). **Smoke proof failed**: [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
-- **Main ahead of production**: a [deployment incident](operations-reference.md#merged-but-not-deployed). An up-to-date release starts without taking coordination locks; a migrating release fails fast within the health check: it touches only the tables whose DDL changed since it recorded a digest per table (unchanged tables are skipped without any lock), and retries a deadlock or expired lock wait with backoff inside one 30-second lock budget; each attempt waits at most 3 seconds for a lock, so live writes never queue behind it longer.
-- **Diagnosis `waiting`**: a provider quota hold, not a fault; see [diagnosis](master-agent.md#research-and-diagnosis). **Loop down**: [loop](operations-reference.md#master-coordination-loop). **A change must prove itself**: [bootstrap](operations-reference.md#bootstrap-mode-for-a-self-proving-change).
+- **Merge refused**: wait or repair; never bypass. Auto-merge `BLOCKED` 10m with all gates passing retries head-bound; at 30m one `merge-blocked` attention item names GitHub's answer. **Merged outside Graphyard**: [bypass](operations-reference.md#merge-bypass). **Wrong accepted evidence**: [revoke](operations-reference.md#accepted-evidence-turns-out-to-be-wrong). **GitHub paused or webhook silent**: [budget](operations-reference.md#github-request-budget). **Smoke proof failed**: [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
+- **Main ahead of production**: a [deployment incident](operations-reference.md#merged-but-not-deployed). An up-to-date release starts without taking coordination locks; a migrating release fails fast within the health check: it touches only the tables whose DDL changed since it recorded a digest per table (unchanged tables are skipped without any lock) and retries a deadlock or expired lock wait with backoff inside one 30-second lock budget; each attempt waits at most 3 seconds for a lock, so live writes never queue behind it longer.
+- **Diagnosis `waiting`**: a provider quota hold, not a fault ([diagnosis](master-agent.md#research-and-diagnosis)). **Loop down**: [loop](operations-reference.md#master-coordination-loop). **A change must prove itself**: [bootstrap](operations-reference.md#bootstrap-mode-for-a-self-proving-change).
 
 ## Recovery recipes
 
@@ -31,9 +31,9 @@ Never attest a stop you have not confirmed; merged work changes only via follow-
 
 ## Worker host keyring proxy
 
-A confined master, approver or proof producer reads its GitHub login (`gh auth git-credential`) through a keyring-only D-Bus proxy; workers and reviewers use their own credential. Install once per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service` and `graphyard-secrets-bus-filter.service` to `~/.config/systemd/user/`, then `systemctl --user daemon-reload && systemctl --user enable --now graphyard-secrets-bus.socket` (disable an earlier-enabled `graphyard-secrets-bus.service` first). It listens at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` unless `GRAPHYARD_SECRETS_BUS` names another; without it the bus is masked and sessions push with `GH_TOKEN`.
+Confined masters, approvers and proof producers read their GitHub login (`gh auth git-credential`) through a keyring-only D-Bus proxy; workers and reviewers use their own credential. Once per host, copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service` and `graphyard-secrets-bus-filter.service` to `~/.config/systemd/user/` and run `systemctl --user daemon-reload && systemctl --user enable --now graphyard-secrets-bus.socket` (first disable any enabled `graphyard-secrets-bus.service`). Socket: `$XDG_RUNTIME_DIR/graphyard-secrets-bus`, or `GRAPHYARD_SECRETS_BUS`; without the proxy the bus is masked and sessions push with `GH_TOKEN`.
 
-The filter cannot select keyring items: keep other secrets out of that keyring, or skip the proxy and use `GH_TOKEN`.
+The filter cannot select keyring items: keep other secrets out of that keyring, or use `GH_TOKEN`.
 
 ## Safety facts that never change
 
@@ -42,7 +42,7 @@ The filter cannot select keyring items: keep other secrets out of that keyring, 
 - Operator agents add requirements, never remove.
 - Only guarded merges: no bypass, no lifecycle-state endpoint.
 - Non-master sessions run in their own checkout, never the coordinator's.
-- Coordination-lock writes read whole only their item, overlaps and dependencies: under 500 ms at 1,000 items; a worker's heartbeat takes only its item's lock.
+- Coordination-lock writes read whole only their item, overlaps and dependencies (under 500 ms at 1,000 items); a heartbeat takes only its item's lock.
 - History is append-only; only routine rows past retention are [compacted](operations-reference.md#storage-retention), each batch audited.
 
 ## Deeper references
@@ -51,4 +51,4 @@ The filter cannot select keyring items: keep other secrets out of that keyring, 
 
 ## Resources and disk
 
-`resourceRegistry` declares bounded resources, reported in `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop removes finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed), stale test temp entries and idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen by two passes. `disk` attention below `run.diskThresholdGb`. Every non-master session's checkout lives under `run.worktreeRoot`. Each cycle a dirty coordinator checkout, or a HEAD other than the commit the loop runs, raises `escalation:dirty-checkout` naming the paths, HEAD and sessions pointing at it, and blocks self-upgrade until clean.
+`resourceRegistry` declares bounded resources, reported in `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop removes finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed), stale test temp entries and idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen by two passes; `disk` attention below `run.diskThresholdGb`. Non-master checkouts live under `run.worktreeRoot`. Each cycle a dirty coordinator checkout, or a HEAD other than the loop's commit, raises `escalation:dirty-checkout` (paths, HEAD, sessions pointing at it) and blocks self-upgrade until clean.

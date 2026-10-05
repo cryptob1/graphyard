@@ -15,12 +15,12 @@ Ask only: **Which provider**; **Provider login**; **the GitHub App confirmation 
 
 ## Preconditions
 
-Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`, `gh auth status` as repository admin (`repo,admin:repo_hook`). Worker and non-Actions unit-proof hosts pass Graphyard's probe `bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true`.
+Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`, `gh auth status` as repository admin (`repo,admin:repo_hook`). Worker and non-Actions unit-proof hosts must pass `bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true`.
 
 ### Providers
 
 - `railway`: `npm i -g @railway/cli`, `railway login`.
-- `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--ssh-key NAME`, optional `--domain` (else Caddy certifies `<ip>.sslip.io`). A coordinator producing `manual:host-install-live` or a Hetzner `manual:…install…-live` proof needs `HCLOUD_TOKEN` and `HETZNER_SPEND_CAP_USD_MONTHLY` in repo-root `.env` (`0600`, uncommitted), else launch is refused; optional `HETZNER_SSH_KEY` names a registered key (else a throwaway one).
+- `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--ssh-key NAME`, optional `--domain` (else Caddy certifies `<ip>.sslip.io`). A coordinator producing `manual:host-install-live` or a Hetzner `manual:…install…-live` proof is refused launch without `HCLOUD_TOKEN` and `HETZNER_SPEND_CAP_USD_MONTHLY` in repo-root `.env` (`0600`, uncommitted); optional `HETZNER_SSH_KEY` names a registered key (else a throwaway).
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; `--ssh-host`, `--domain`.
 - `compose`: `curl -fsSL https://get.docker.com | sh`; local evaluation only.
 
@@ -54,11 +54,11 @@ Dispatch a [small item](onboarding.md#4-prove-the-first-pr); once `Graphyard / m
 
 ## Self-contained host
 
-`--target host --ssh-host HOST` (or `--target hetzner`) runs server, Postgres, loop, executors, Herdr and the agent runtimes on one systemd machine, credentials `0600` in `~graphyard/.config/graphyard/<install>/`; without `--domain` a public IPv4 is served as `<ip>.sslip.io` (a private or `--local` address needs `--domain`); bootstrap installs gh and bubblewrap and checks its namespaces as `graphyard`. When the release image cannot be pulled, the host builds it from its Graphyard checkout at the installer's commit. Workers push and open pull requests as the App: git's credential helper and the `gh` wrapper mint one-hour tokens scoped to the repository from the App key in `<install>/github/`, so nobody logs into the host. Sign in with the printed link, then connect each runtime's account in Settings › Agents (Pi: **Pi (z.ai key)**). A re-apply that cannot read the host's credentials refuses rather than rotating them.
+`--target host --ssh-host HOST` (or `--target hetzner`) runs server, Postgres, loop, executors, Herdr and agent runtimes on one systemd machine, credentials `0600` in `~graphyard/.config/graphyard/<install>/`; without `--domain` a public IPv4 serves as `<ip>.sslip.io` (private or `--local` addresses need `--domain`); bootstrap installs gh and bubblewrap and checks namespaces as `graphyard`. An unpullable release image is built from the host's Graphyard checkout at the installer's commit. Workers push and open pull requests as the App: git's credential helper and the `gh` wrapper mint one-hour repository-scoped tokens from the App key in `<install>/github/`; nobody logs into the host. Sign in via the printed link, then connect each runtime's account in Settings › Agents (Pi: **Pi (z.ai key)**). A re-apply unable to read the host's credentials refuses rather than rotating them.
 
 **Sizing:** 3 GB per concurrent agent, 2 GB per verification slot, 2 GB base, max(10%, 4 GB) spare; confirmed with `--confirm-price` / `--max-monthly`.
 
-**GitHub App:** an App already saved for the repository (`--github-app FILE`, this install's, or the checkout's `.graphyard/github-app.json`) is reused once it mints a token, so one command reaches a running fleet; a webhook still serving another live installation stays there until `--migrate`. Only a first App registration is a human browser click.
+**GitHub App:** a saved App (`--github-app FILE`, this install's, or the checkout's `.graphyard/github-app.json`) that mints a token is reused, so one command reaches a running fleet; a webhook serving another live installation stays until `--migrate`. Only first registration is a human browser click.
 
 **Moving:** `--migrate` stops the old loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; a failure before cutover releases the fence. Local logins move, others reconnect.
 

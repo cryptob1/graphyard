@@ -7,7 +7,7 @@
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses releases *unobserved*, *stale* (rerun), not serving the merge, or already recorded. Without `--deployment-url` it reads `productionEnvironment` deployments (newest success counts).
+`master verify-deployment GY-N` refuses releases *unobserved*, *stale* (rerun), not serving the merge, or already recorded; without `--deployment-url` it reads `productionEnvironment` deployments (newest success counts).
 
 ## Lost worker before submission
 
@@ -15,19 +15,19 @@ Leases expire 120 s after last heartbeat (one further lease period after a recor
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker, `graphyard master settle-containment GY-N "reason"` verifies nothing survives. If refused, confirm the stop, then [`rework`, or `recover-containment` once delivered](operations.md#recovery-recipes). Autosettle's [clock bound](protocol/leases.md#watch).
+On the worker, `graphyard master settle-containment GY-N "reason"` verifies nothing survives; if refused, confirm the stop, then [`rework`, or `recover-containment` once delivered](operations.md#recovery-recipes). Autosettle's [clock bound](protocol/leases.md#watch).
 
 ## Submitted implementation needs rework
 
-Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next worker resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rounds by recorded reason (55% own-change, 33% conflicts; raw median 2); `master status` `speed.reworkRounds.ownChange` excludes out-of-item causes (median 0).
+Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next worker resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rounds by reason (55% own-change, 33% conflicts; raw median 2); `master status` `speed.reworkRounds.ownChange` excludes out-of-item causes (median 0).
 
 ## Retro synthesis
 
-`GRAPHYARD_INTERVENTION_PATTERNS=1` groups refusal and rework interventions by cause; at the threshold it drafts unapplied changes (`retro.drafted`: wording, check, producer method, fault-catalogue entry), each [approved](protocol/work-commands.md) or refused by a non-drafting AI operator agent with `decision:approve`. Approved requirements show as [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse a failing `complete` (`409`).
+`GRAPHYARD_INTERVENTION_PATTERNS=1` groups refusal and rework interventions by cause, drafting unapplied changes at the threshold (`retro.drafted`: wording, check, producer method, fault-catalogue entry), each [approved](protocol/work-commands.md) or refused by a non-drafting AI operator agent with `decision:approve`. Approved requirements show as [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse a failing `complete` (`409`).
 
 ## Flaky CI check
 
-A failing check is [rerun](github.md#merge-queue) once in place (`mergeQueue.rerunFailedChecks`, 0 disables); a second failure ejects, and a passing rerun on that tip lifts the ejection.
+A failing check is [rerun](github.md#merge-queue) once in place (`mergeQueue.rerunFailedChecks`, 0 disables); a second failure ejects; a passing rerun on that tip lifts the ejection.
 
 ## Accepted evidence turns out to be wrong
 
@@ -44,7 +44,7 @@ A failing check is [rerun](github.md#merge-queue) once in place (`mergeQueue.rer
 | Band | Cadence
 | --- | ---
 | `merge` | near queue head, gates passing: 20 s
-| `active` | awaiting check, review, base refresh, rework: 1 min
+| `active` | awaiting check, review, base refresh or rework: 1 min
 | `steady` | unchanged: 5 min, stretched by fleet bound; review requests ≤ 10 min
 | `idle` | awaiting dispatch/escalation: 5 min, stretched if unchanged
 
@@ -56,7 +56,7 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### What an observation costs
 
-About ten requests uncached; unchanged, none.
+About ten requests uncached; none unchanged.
 
 ### What a pause means for gates
 
@@ -72,7 +72,7 @@ A silent hour: `master status` points to `https://github.com/settings/apps/APP-S
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default 10 GiB); `tmp-inodes`: free `/tmp` inodes; `loaded-revision` counts code moves. Neither faults on a reclaim under way: `loaded-revision` while the self-upgrade's owed restart was retried within its bound, `agent-names` until the reclaim pass has seen the pane unowned 10 minutes.
+Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default 10 GiB); `tmp-inodes`, free `/tmp` inodes; `loaded-revision` counts code moves. Neither faults mid-reclaim: `loaded-revision` while the self-upgrade's owed restart is retried within its bound, `agent-names` until the reclaim pass has seen the pane unowned 10 minutes.
 
 ## Storage retention
 
@@ -88,7 +88,7 @@ A `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths"
 
 ## Delivered with a failed smoke proof
 
-Stays Done, **delivered with failure**; revert via a new item, never backfill evidence.
+Stays Done, **delivered with failure**; revert via a new item; never backfill evidence.
 
 ## Merged but not deployed
 
@@ -100,7 +100,7 @@ An ungated merge is a permanent violation: repair access, file a follow-up, neve
 
 ## Credentials
 
-Rotate [`GRAPHYARD_PRINCIPALS`](deployment.md#variables), redeploy. Operator agents hold only listed capabilities, `graphyard operator-agent setup|list|rotate|revoke`.
+Rotate [`GRAPHYARD_PRINCIPALS`](deployment.md#variables), redeploy. Operator agents hold only listed capabilities (`graphyard operator-agent setup|list|rotate|revoke`).
 
 ## Proof authority grants
 
@@ -117,7 +117,7 @@ Only `admin` grants or revokes, to `producer` principals: exact name, `kind:*` o
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace per token, merge path first (`observationThroughput`). Heartbeat, claim, `complete`, `blocked` own the lease pool (`leaseHealth` in `GET /api/status`). Reconcile evaluates moved rows (all every `GRAPHYARD_RECONCILE_FULL_MS`), skipping writer-held rows. Until startup validation finishes, `/healthz` reports `readiness: false` and `/healthz?ready` 503.
+`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace per token, merge path first (`observationThroughput`). Heartbeat, claim, `complete`, `blocked` own the lease pool (`leaseHealth` in `GET /api/status`). Reconcile evaluates moved rows (all every `GRAPHYARD_RECONCILE_FULL_MS`), skipping writer-held ones. Until startup validation finishes, `/healthz` reports `readiness: false`, `/healthz?ready` 503.
 
 ### Concurrent reconciliation
 

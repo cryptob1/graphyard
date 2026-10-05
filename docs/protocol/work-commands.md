@@ -1,19 +1,19 @@
 <!-- page: Agent protocol | 1 | every work mutation. -->
 # Work commands
 
-All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)); mutations an `Idempotency-Key`, reused only for identical retries. Errors: `{ "error": "reason" }`; a `409` refusal is read, not retried.
+All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)); mutations an `Idempotency-Key`, reused only for identical retries. Errors: `{"error":"reason"}`; a `409` refusal is read, not retried.
 
-`POST /api/work` ([example](../../examples/work.json)): `title`, `criteria`; optionally `dependencies`, `exclusiveResources`, `plannedFiles`, `split` ([decomposition](#splitting-an-item) opt-out/in), `producerProofs` (producer-runnable `manual:` proofs); `parent`/`children` are set only by a split. Others: `POST /api/work/KEY/COMMAND`:
+`POST /api/work` ([example](../../examples/work.json)): `title`, `criteria`; optionally `dependencies`, `exclusiveResources`, `plannedFiles`, `split` ([decomposition](#splitting-an-item) opt-out/in), `producerProofs` (producer-runnable `manual:` proofs); only a split sets `parent`/`children`. Others: `POST /api/work/KEY/COMMAND`:
 
 - `requirements`: document, `expectedPolicyRevision`, `reason`; `admin` (operator agents additively); `split` kept when omitted.
 - `decomposition` (coordinator): `{event:"started"|"decided"|"failed",…}`; `decided` with `payload.children` makes the [split](#splitting-an-item).
-- `ready`, `unblock`: `{"reason":…}` (operator agents add `expectedRevision`); `master unblock` retries a stale-revision refusal (≤3 writes) while the same blocker stands.
-- `resolve`: `{"trigger":…, "expectedRevision":…, "reason":…}`; human `admin`, or any `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` explaining a `lease-loss`.
-- `rework`, `recover` (delivered quarantine): `admin`, `{"reason":…, "previousWorkerStopped":true}`.
-- `repair` `{"reason":…}` (coordinator/admin) rebuilds a head carrying another item's unlanded commits; `refresh` `{"reason":…, "base":SHA}` (coordinator, admin or an operator agent with `intent:unblock`) merges the observed base tip into an open candidate's branch, keeping its approval under the carry rules.
+- `ready`, `unblock`: `{"reason":…}` (operator agents add `expectedRevision`); `master unblock` retries a stale-revision refusal (≤3 writes) while its blocker stands.
+- `resolve`: `{"trigger":…,"expectedRevision":…,"reason":…}`; human `admin`, or any `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` explaining a `lease-loss`.
+- `rework`, `recover` (delivered quarantine): `admin`, `{"reason":…,"previousWorkerStopped":true}`.
+- `repair` `{"reason":…}` (coordinator/admin) rebuilds a head carrying another item's unlanded commits; `refresh` `{"reason":…,"base":SHA}` (coordinator, admin, operator agent with `intent:unblock`) merges the observed base tip into an open candidate's branch, approval kept per carry rules.
 - `claim` `{}`; `heartbeat`, `release` `{"epoch":1}`; `release` may carry `"cause"` or `"failure":{"message":…}` (`workspace.failed`; an untouched claim keeps its epoch); `blocked` `{"epoch":1,"reason":…,"partialWork":…}` (a reason releases; null clears); `blocker-probe` (coordinator; a `pass` clears a routine [blocker](leases.md#blocked-work-unblocks-itself)); `workspace` `{"epoch":1,"host":…,"path":…,"branch":"graphyard/gy-1-1"}`, optional `preserved` (`workspace.preserved`).
 - `submit`: `{"epoch":1,"pr":123}`; `409` if a non-`plannedFiles` file [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope) or an applied retro check fails.
-- `deployment`: `{"sha":…, "mergeSha":…, "source":"endpoint", "observedAt":…}`; coordinator/admin, delivered work, once.
+- `deployment`: `{"sha":…,"mergeSha":…,"source":"endpoint","observedAt":…}`; coordinator/admin, delivered work, once.
 - `triage` `{judgement}` (coordinator): [backlog](../master-agent.md#machine-filed-backlog); review follow-ups are never filed.
 - `POST /api/retro/synthesize` (coordinator/admin) drafts [retro artefacts](../operations-reference.md#retro-synthesis) as caller; `POST /api/retro/ID/approve|refuse` `{reason}` by its rules (`403`; `409` once judged).
 
@@ -21,7 +21,7 @@ No endpoint sets lifecycle state.
 
 ## Splitting an item
 
-Before first dispatch the loop judges an item against `run.decomposition` bounds (defaults: 4 criteria, 2 root directories, 12 paths, ~1,500 lines). Over them, a read-only Pi session (`run.research` account; `concurrency` 4, `timeoutMinutes` 10) proposes 2–10 children; within bounds, `"split": false` or a failed run, the item is dispatched unchanged. `master status` shows `split` on rows and a `splits` list. Splitting lets the merge queue land small PRs instead of colliding large ones. A split is one transaction: every parent criterion goes to exactly one child (text and proofs copied), each child's `plannedFiles` sits strictly inside the parent's, and `after` orders children as dependencies. Children are ordinary `GY-N` items keeping the parent's release, dependencies, `exclusiveResources`, policy and documentation criterion. The parent is never claimed or dispatched; requirements revisions on it are refused in favour of the children's, which may add criteria but not rewrite or retire inherited ones; its last child's delivery delivers it (`decomposition.parent-delivered`). A keep-whole answer or refused split dispatches it unchanged; `"split": true` runs the session within the bounds too.
+Before first dispatch the loop checks an item against `run.decomposition` bounds (defaults: 4 criteria, 2 root directories, 12 paths, ~1,500 lines). Over them, or with `"split": true`, a read-only Pi session (`run.research` account; `concurrency` 4, `timeoutMinutes` 10) proposes 2–10 children so the queue lands small PRs; `"split": false`, a failed run, a keep-whole answer or a refused split dispatches it unchanged. `master status` shows `split` on rows and a `splits` list. A split is one transaction: each parent criterion goes to exactly one child (text and proofs copied), each child's `plannedFiles` sits strictly inside the parent's, and `after` orders children as dependencies. Children are ordinary `GY-N` items inheriting release, dependencies, `exclusiveResources`, policy and documentation criterion; they may add criteria, not rewrite or retire inherited ones. The parent is never claimed or dispatched, refuses requirements revisions, and is delivered with its last child (`decomposition.parent-delivered`).
 
 ## Other commands and routes
 
