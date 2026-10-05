@@ -154,11 +154,11 @@ export function detectRetryingExhaustion(output: string, now: number): Exhaustio
 }
 
 /**
- * A 429 the provider answered with: leading the error (`429: {…}`, `429 Too Many Requests`) or
+ * A 429 the provider answered with: leading the error (`429: {…}`, `429 Too Many Requests`, `API Error: 429 {…}`) or
  * named as its status (`HTTP 429`, `status 429`, `status code: 429`, `"code":429`). A 429 inside an
  * id or an echoed body is not the provider's answer, and a real failure must not become a wait (GY-1245).
  */
-const providerStatus429 = /^(?:error:?\s*)?429\b(?![\d.])|\b(?:http(?:\/[\d.]+)?|status(?:\s*code)?|code)["']?\s*[:=]?\s*["']?429\b(?![\d.])/i;
+const providerStatus429 = /^(?:(?:\w+\s+)?error:?\s*)?429\b(?![\d.])|\b(?:http(?:\/[\d.]+)?|status(?:\s*code)?|code)["']?\s*[:=]?\s*["']?429\b(?![\d.])/i;
 /**
  * Whether the error a headless run ended on is its provider refusing for quota or rate (GY-1092):
  * an HTTP 429, or any of the limit notices above. The text is the provider's own error — Pi's last

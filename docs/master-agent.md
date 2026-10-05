@@ -86,7 +86,7 @@ A passing producer records `"exercise"`: the proof rerun with the criterion's be
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
 ```
 
-A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as `unexercised` (`evidence.exercise.refused`), and for automated proofs the loop requests rework quoting it. When all remaining unit or integration proofs are such findings, the next action is `request-rework`, naming proof, criterion and surviving mutation; that wait is the rework decision's, not loop silence. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
+A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`), and automated proofs get rework quoting it. When only such unit or integration findings remain, the next action is `request-rework` (proof, criterion, surviving mutation), a wait the rework decision owns, not loop silence. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
 
 ## Guarded merges
 

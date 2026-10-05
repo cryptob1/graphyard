@@ -45,7 +45,7 @@ test('GY-1245 — a probe runs the waiting subject refused longest ago, not whic
 });
 
 test('GY-1245 — a 429 is a limit only as the provider\'s status, never inside an id or an echoed body', () => {
-  for (const text of ['429 Too Many Requests', 'Error: 429 rate limited', 'HTTP 429: slow down', 'HTTP/1.1 429', 'request failed with status code 429', '{"status": 429, "error": "quota"}', '{"code":429}', limitError])
+  for (const text of ['429 Too Many Requests', 'Error: 429 rate limited', 'HTTP 429: slow down', 'HTTP/1.1 429', 'request failed with status code 429', '{"status": 429, "error": "quota"}', '{"code":429}', 'API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}', limitError])
     assert.ok(providerLimit(text, refusedAt), text);
   for (const text of ['request 429 failed: model not found', 'invalid tool call in message 429 of the transcript', 'ENOENT /tmp/run-429/models.json', 'id req_429 failed: internal error'])
     assert.equal(providerLimit(text, refusedAt), null, text);
