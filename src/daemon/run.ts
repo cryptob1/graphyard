@@ -1,12 +1,13 @@
 // Concern: the long-running loop — cycle scheduling, config reload, the watchdog and its summary.
 import { setTimeout as delay } from 'node:timers/promises';
-import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 import type { ConfigReload, MasterConfig } from '../master.js';
 import type { HerdrAgent } from '../master/herdr.js';
 import { defaultChildRun } from '../child-runner.js';
-import { allocateManagedCheckout, settleCheckout } from '../master/worktrees.js';
-import { holdCheckout } from '../producer.js';
+import { allocateManagedCheckout } from '../master/worktrees.js';
+import { worktreeRoot } from '../install/worktree-root.js';
+import { loopScratchCheckout } from '../producer.js';
 import { checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutEscalation, dirtyCheckoutLeases, dirtyCheckoutPaths, readCoordinatorCheckout, type CoordinatorCheckout } from '../master/profiles.js';
 import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, message, storeAction, touchStanding } from './state.js';
 import { faultClassPolicyFromEnv, type FaultClassPolicy } from '../model/fault-classes.js';
@@ -160,18 +161,22 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   // A loop with neither has no scratch to place, so it needs no CLI launcher to place it from.
   const needsScratch = Boolean(raw.research) || 'diagnostician' in raw;
   const scratchRoot = needsScratch ? coordinatorCheckoutRoot(config.cliPath) : '';
-  let scratch: Awaited<ReturnType<typeof allocateManagedCheckout>> | null = null, scratchDirectory: string | null = null, releaseScratch = () => {};
+  let scratchDirectory: string | null = null;
   if (needsScratch) {
     try {
-      scratch = await allocateManagedCheckout(scratchRoot, config, 'approval', 'loop-scratch', raw.loadedRelease?.commit ?? '0'.repeat(40), randomUUID());
+      // The path is the repository's, not this process's: a restarted loop takes up the scratch
+      // the loop before it left, so the detached research runs registered there (GY-453) stay in a
+      // directory that exists and are adopted from the registry they were written to.
+      const stable = loopScratchCheckout(worktreeRoot(scratchRoot, config));
+      const scratch = existsSync(stable.directory) ? stable : await allocateManagedCheckout(scratchRoot, config, 'approval', 'loop-scratch', '0'.repeat(40), '0'.repeat(8));
       scratchDirectory = scratch.directory;
-      // No ledger record owns the scratch, so the loop holds it: a reclaim pass past the orphan
-      // grace would otherwise remove it under every later research, triage and diagnostician run.
-      releaseScratch = holdCheckout(scratch.directory);
       const release = raw.loadedRelease?.commit;
       if (release) {
         try {
-          await defaultChildRun('git', ['-C', scratchRoot, 'worktree', 'add', '--detach', '--quiet', scratch.worktree, release]);
+          // A worktree the loop before left is moved onto this loop's release; the run registry
+          // under its ignored .graphyard/ stays where it is.
+          if (existsSync(scratch.worktree)) await defaultChildRun('git', ['-C', scratch.worktree, 'checkout', '--detach', '--force', '--quiet', release]);
+          else await defaultChildRun('git', ['-C', scratchRoot, 'worktree', 'add', '--detach', '--quiet', scratch.worktree, release]);
           scratchDirectory = scratch.worktree;
         } catch (error) { log(`[graphyard-master] the research scratch checkout holds no worktree of ${release.slice(0, 12)}: ${message(error)}`); }
       }
@@ -283,9 +288,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     if (launcher.pending) log(`[graphyard-master] waiting for ${launcher.pending} launch(es) in flight before stopping`);
     await launcher.idle();
     for (const action of launcher.drain()) log(`[graphyard-master] launch ${action.kind} ${action.state}: ${action.detail}`);
-    // GY-866: the research scratch goes with the loop that allocated it; a loop that died with it
-    // is the orphan reclaim pass's business, as for every session checkout.
-    if (scratch) { releaseScratch(); await settleCheckout(scratchRoot, scratch.directory); }
+    // GY-866: the scratch checkout outlives the loop: research runs detached into it keep working
+    // and the next loop adopts them from it.
     for (const signal of signals) host.off(signal, stop);
     host.off('unhandledRejection', onRejection); host.off('uncaughtException', onException);
     // Headless runs are detached (GY-453): the loop stops watching them and sends none of them a

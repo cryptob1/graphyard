@@ -746,6 +746,14 @@ export function holdCheckout(directory: string) {
 }
 
 /**
+ * GY-866: the loop's scratch checkout, where research, triage and the diagnostician run. Its path is
+ * the same for every loop of one repository, so a restarted loop finds the detached research runs
+ * the loop before it registered there (GY-453) and adopts them, and it is never reclaimed: a run
+ * may still be working in it while no loop holds it.
+ */
+export const loopScratchCheckout = (base: string) => sessionCheckout(base, 'approval', 'loop-scratch', '0'.repeat(40), '0'.repeat(8));
+
+/**
  * The reclaim pass over the managed worktree root: every session directory no pending producer or
  * reviewer record owns is removed. Settlement removes a session's own checkout, so what this finds
  * was left by a session whose master died before it could settle.
@@ -755,9 +763,9 @@ export async function reclaimCheckouts(root: string, config: MasterConfig, optio
   const [producers, reviews, approvers, escalations] = await Promise.all([readProducerLedger(root), readReviewLedger(root), readApproverLaunches(root), readEscalationSessions(root)]);
   // A live headless approver's directory is owned by its run, not by a ledger record (GY-391).
   // GY-866: an interactive approver's or escalation handler's directory is owned by its launch
-  // record for as long as that record is kept, and the loop's scratch checkout by the loop holding it.
+  // record for as long as that record is kept; the loop's scratch checkout is kept always.
   const recorded = [...approvers, ...escalations].filter(record => record.checkout && now - Date.parse(record.launchedAt) < escalationSessionMs).map(record => record.checkout!);
-  const live = [...[...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!), ...liveRunCheckouts(), ...recorded, ...heldCheckouts];
+  const live = [...[...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!), ...liveRunCheckouts(), ...recorded, ...heldCheckouts, loopScratchCheckout(worktreeRoot(root, config)).directory];
   return reclaimSessionCheckouts(root, worktreeRoot(root, config), live, { ...options, failure: writeFailure });
 }
 
