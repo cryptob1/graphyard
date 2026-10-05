@@ -1,10 +1,12 @@
 // Concern: the decision histories the decisions step reads, kept across cycles (GY-1142).
 import type { Work } from '../model.js';
+import { approvalApplyGraceMs, situationLabel, stalledApproval, supersededSituation, type DecisionSituation } from '../model/approval.js';
+import { routableScopeRequest } from '../model/scope.js';
 import type { ApprovalWatch } from './state.js';
 import type { DaemonEffects } from './effects.js';
 
 /** Every kind the control plane folds an item's decision history from (server/decision-ledger.ts). */
-export const decisionEventKinds = ['requested', 'concurred', 'refused', 'declined', 'approved', 'applied', 'failed', 'stale', 'withdrawn'].map(kind => `decision.${kind}`);
+export const decisionEventKinds = ['requested', 'concurred', 'refused', 'declined', 'approved', 'applied', 'failed', 'stale', 'withdrawn', 'superseded'].map(kind => `decision.${kind}`);
 type DecisionHistory = Awaited<ReturnType<NonNullable<DaemonEffects['decisions']>>>['decisions'];
 /** The decision histories the loop keeps across cycles, by work id, and the ledger seq they are current to. */
 export interface HeldDecisions { seq: string | null; histories: Map<string, DecisionHistory>; refreshedAt: number | null }
@@ -13,6 +15,11 @@ export const emptyHeldDecisions = (): HeldDecisions => ({ seq: null, histories: 
 export const decisionReadConcurrency = 8;
 /** How long the decisions step's control-plane reads may take in all, from the step's start (GY-1241). */
 export const decisionReadDeadlineMs = 10_000;
+/**
+ * GY-1293. A request that failed only because its history read missed the step's deadline: its
+ * read was still started, so it is asked again on the next cycle, never on the widening backoff.
+ */
+export const lateDecisionRead = (detail: string) => / ms read deadline passed before .+ answered; it is read again next cycle/.test(detail);
 /** How long a kept history may go without being read afresh, whatever the ledger says (GY-1241). */
 export const decisionRefreshMs = 30 * 60_000;
 /**
@@ -39,6 +46,11 @@ export const decisionRefreshMs = 30 * 60_000;
  * named by `decisionChanges`, so every kept history is dropped and read afresh at least every
  * `decisionRefreshMs`. A kept history is handed out as a copy: no caller can change what later
  * cycles read.
+ *
+ * GY-1293. The read-ahead takes first the items whose refused scope request the step may put to
+ * an approver this cycle, then the open watches. A worker waits on that request, inside the scope
+ * budget: read only when the step reached it, its history missed the deadline behind every slower
+ * read ahead of it, cycle after cycle (GY-1287 on 5 October 2026, twice, until the budget passed).
  */
 export async function decisionReads(effects: DaemonEffects, held: HeldDecisions, open: readonly Work[], watched: readonly ApprovalWatch[], clock = Date.now(), deadlineMs = decisionReadDeadlineMs) {
   const until = performance.now() + deadlineMs;
@@ -80,10 +92,24 @@ export async function decisionReads(effects: DaemonEffects, held: HeldDecisions,
     if (property === 'decide' || property === 'withdraw') return writes(Reflect.get(target, property, receiver));
     return Reflect.get(target, property, receiver);
   } });
-  // The open watches' histories are read ahead, a bounded few at a time, while the step works.
+  // The waiting scope requests' and open watches' histories are read ahead, a bounded few at a time, while the step works.
   const keys = new Set(watched.filter(watch => !watch.settledAt).map(watch => watch.work));
-  const ahead = effects.decisions ? open.filter(item => keys.has(item.key) && !held.histories.has(item.id)) : [];
+  const scoped = open.filter(item => item.stage !== 'done' && !!routableScopeRequest(item, clock));
+  const ahead = effects.decisions ? [...scoped, ...open.filter(item => keys.has(item.key) && !scoped.includes(item))].filter(item => !held.histories.has(item.id)) : [];
   const next = async (): Promise<void> => { const item = ahead.shift(); if (item) { if (!held.histories.has(item.id)) await start(item).catch(() => undefined); return next(); } };
   void Promise.all(Array.from({ length: decisionReadConcurrency }, next));
   return reads;
+}
+
+/**
+ * Why an approved decision the loop reads must be settled rather than waited on, or null (GY-1297):
+ * the item moved past the situation it was bound to, or it has stood approved and unapplied past
+ * the grace its own approval had to apply it. Without the item's candidate (a watch read alone)
+ * only the stall is judged; the settlement the loop sends judges the situation on the server.
+ */
+export function unsettledApproval(work: Pick<Work, 'key'> & Partial<Pick<Work, 'candidate'>>, decision: { id: string; action: string; state: string; approvedBy?: string | null; approvedAt?: string | null; situation?: DecisionSituation | null }, now: number): string | null {
+  const moved = work.candidate === undefined ? null : supersededSituation(decision, { candidate: work.candidate });
+  if (moved) return `${decision.action} decision ${decision.id} on ${work.key} was approved for ${situationLabel(moved.bound)}, but the item is now at ${situationLabel(moved.current)}; it is superseded so the current candidate's request is judged`;
+  if (stalledApproval(decision, now)) return `${decision.action} decision ${decision.id} on ${work.key} was approved by ${decision.approvedBy ?? 'its approver'} at ${decision.approvedAt} and no outcome was recorded within ${Math.round(approvalApplyGraceMs / 1000)}s; its application is resumed so it settles applied or failed`;
+  return null;
 }

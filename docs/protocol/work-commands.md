@@ -5,7 +5,7 @@ All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#th
 
 `POST /api/work` ([example](../../examples/work.json)): `title`, `criteria`; optionally `dependencies`, `exclusiveResources`, `plannedFiles`, `split` ([decomposition](#splitting-an-item) opt-out/in), `producerProofs` (producer-runnable `manual:` proofs); `parent`/`children` are set only by a split. Others: `POST /api/work/KEY/COMMAND`:
 
-- `requirements`: document, `expectedPolicyRevision`, `reason`; `admin` (operator agents additively); `split` kept when omitted.
+- `requirements`: document, `expectedPolicyRevision`, `reason`; `admin` (operator agents additively); `split` kept when omitted. A stale `expectedPolicyRevision` is refused as stale (`Policy revision changed`) before any lease or quarantine check. While an approver judges the rest of a partly widened scope request, the loop does not re-read its review findings.
 - `decomposition` (coordinator): `{event:"started"|"decided"|"failed",…}`; `decided` with `payload.children` makes the [split](#splitting-an-item).
 - `ready`, `unblock`: `{"reason":…}` (operator agents add `expectedRevision`); `master unblock` retries a stale-revision refusal (≤3 writes) while the same blocker stands. A two-party `release`, `unblock` or revision-pinned `close` decision still applies when the item moved since its `expectedRevision` only in loop bookkeeping (sessions, gates, next action, action queue); any other move settles it `stale`.
 - `resolve`: `{"trigger":…, "expectedRevision":…, "reason":…}`; human `admin`, or any `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` explaining a `lease-loss`.
