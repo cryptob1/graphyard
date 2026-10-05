@@ -15,11 +15,11 @@
 
 ### The coordinator checkout is confined at the OS level
 
-Every launch but the master session's gets the checkout unwritable to shell commands: Codex by `--sandbox workspace-write` with grants confined to its worktree and admin directory; others by bubblewrap (checkout read-only, PIDs unshared, session bus a keyring-only proxy), re-exposing only the session worktree, worktree-admin directories and shared Git areas. Refused with reason: missing bubblewrap, non-Linux, refused namespaces, confinement off, underivable checkout. Loop and executors never start, self-upgrade or restart on dirty checkouts.
+Every launch but the master session's gets the checkout unwritable to shell commands: Codex by `--sandbox workspace-write` with grants confined to its worktree and admin directory; others by bubblewrap (checkout read-only, PIDs unshared, session bus a [keyring-only proxy](operations.md#worker-host-keyring-proxy)), re-exposing only the session worktree, worktree-admin directories and shared Git areas. Refused with reason: missing bubblewrap, non-Linux, refused namespaces, confinement off, underivable checkout. Loop and executors never start, self-upgrade or restart on dirty checkouts.
 
 ## Accounts and failover
 
-A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first logged-in account under `run.quotaCeilingPercent`, else **fail over** (`dispatch.accounts`); so does a runtime failing to start (three in a row raise attention). A limit notice commits work as unpushed `WIP:`, sets `capacity.exhausted`, and relaunches on the next account or after reset.
+A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first logged-in account under `run.quotaCeilingPercent`, else **fail over** (`dispatch.accounts`); so does a runtime failing to start (three in a row raise attention). A limit notice, even mid-retry, commits work as unpushed `WIP:`, sets `capacity.exhausted`, and relaunches on another account or after reset.
 
 ## The loop's own master session
 
@@ -49,7 +49,7 @@ On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-
 
 ### Acknowledgement, resume and idle sessions
 
-Reviewers and producers are `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once if quiet past `run.acknowledgementSeconds` (default 90); settling resultless is **`never started`**: relaunched free a minute later, three at most (`retry.neverStarted`).
+Reviewers and producers are `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once if quiet past `run.acknowledgementSeconds` (default 90); settling resultless is **`never started`**: relaunched free a minute later, three at most (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
 
 A resolved blocker or scope request re-prompts the inactive session once (item, epoch, change, `complete GY-N EPOCH PR`); re-blocking that epoch ends attempt and blocker for a fresh session. **Idle-with-lease** (30 quiet minutes, nothing open): re-prompted once, after 30 more handed to a new attempt on its branch.
 

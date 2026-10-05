@@ -113,8 +113,8 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (default 250): batch size. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace per token, merge path first. `observationThroughput` reports budget, pace and lag; heartbeat, claim, `complete`, `blocked` own the lease pool (`leaseHealth` in `GET /api/status`: heartbeat p50/p95). Reconcile row-locks only its batch, skipping writer-held rows; contended batches rerun, then defer.
+`GRAPHYARD_RECONCILE_BATCH_MS` (default 250): batch size. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace per token, merge path first. `observationThroughput` reports budget, pace and lag; heartbeat, claim, `complete`, `blocked` own the lease pool (`leaseHealth` in `GET /api/status`: heartbeat p50/p95). Reconcile row-locks only its batch, skipping writer-held rows; contended batches rerun, then defer. Until startup validation finishes, `/healthz` reports `readiness: false` and `/healthz?ready` 503.
 
 ### Concurrent reconciliation
 
-Each pass locks its batch rows; contended batches defer a tick.
+Each pass locks its batch rows; contended batches defer a tick; stale observation snapshots retry after 2 s.

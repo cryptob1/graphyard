@@ -1,17 +1,33 @@
 // Concern: `graphyard master` fleet subcommands — start, worker, producer, config, registry, reviewer, executors, review, protection, browser, harness.
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
-import { listHerdrAgents, masterHarness, masterSettingsFromArgs, producerCommand, registeredReview, saveMasterSettings, saveWorkerProfile, startMaster, workerProfileSchema } from '../../master.js';
+import { agentOwner, listHerdrAgents, masterHarness, masterSettingsFromArgs, producerCommand, registeredReview, saveMasterSettings, saveWorkerProfile, startMaster, workerProfileSchema } from '../../master.js';
 import { readReviewLedger, reviewCommand as launchReview } from '../../reviewer.js';
 import { readDispatchCursor } from '../../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection, readWorkflows } from '../../protection.js';
-import { writeHarnessPermissions } from '../../harness.js';
+import { harnessDrift, writeHarnessPermissions } from '../../harness.js';
 import { browserFlows, runBrowserFlow, type BrowserFlow } from '../../master-browser.js';
 import { reviewerCommand } from '../master-reviewer.js';
 import { registryCommand } from '../master-registry.js';
 import { executorsCommand } from '../master-executors.js';
 import { assertHandReview } from '../hand-actions.js';
 import { unhandled, type MasterSession } from './session.js';
+import type { AttentionItem, MasterConfig } from '../../master.js';
+
+/**
+ * The master's installed Claude harness judged against the current `masterHarness` plan (GY-1217):
+ * an attention item naming the stale and missing rules, repaired by `master harness claude --apply`,
+ * or null when it matches or nothing is installed. A settings file it cannot read is reported too.
+ */
+export async function masterHarnessDrift(root: string, master: MasterConfig): Promise<(AttentionItem & { drift: Awaited<ReturnType<typeof harnessDrift>> }) | null> {
+  const repair = 'graphyard master harness claude --apply';
+  try {
+    const drift = await harnessDrift(root, masterHarness(root, master, 'claude'));
+    return drift ? { subject: 'harness', text: drift.text, drift, ...agentOwner('master', repair) } : null;
+  } catch (error) {
+    return { subject: 'harness', text: `The master's harness settings cannot be compared with the current plan: ${error instanceof Error ? error.message : 'unknown reason'}`, drift: null, ...agentOwner('master', repair) };
+  }
+}
 
 /** Launch profiles, the master session, reviewer launches, and GitHub administration through the operator. */
 export async function fleetCommand(session: MasterSession): Promise<unknown> {

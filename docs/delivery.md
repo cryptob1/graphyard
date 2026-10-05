@@ -7,17 +7,21 @@ Records which release each environment should run, verified only by service-scop
 
 Graphyard's own deployment: main → candidate → uat → production. `.railway/railway.ts` deploys `release/uat` and `release/production`, which only `graphyard release` moves, always to a candidate's exact SHA.
 
-- `release cut [--trigger schedule|manual]` tags main's tip `rc/ID` with the items it carries; merges never pause. `.github/workflows/release-candidate.yml` cuts every six hours or on demand and runs the [long suites](#pre-merge-gate-and-release-candidate-validation).
+- `release cut [--trigger schedule|manual]` tags main's tip `rc/ID` with the items it carries; merges never pause. `.github/workflows/release-candidate.yml` cuts every two hours or on demand and runs the [long suites](#pre-merge-gate-and-release-candidate-validation).
 - `release uat ID` deploys to `uat` (own Postgres, no `GITHUB_*` credentials), refused while UAT serves an unjudged candidate cut within four hours; its push is leased on the observed tip.
-- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` waits for UAT's `/healthz` `commit` to match, runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser` (dashboard sign-in, Work view) and suite checks, and records `rc-uat/ID`. Suites get `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`.
+- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` waits for UAT's `/healthz` `commit` to match, runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser` (dashboard sign-in, Work view) and suite checks (container and chart jobs gate; soak and timing are advisory), and records `rc-uat/ID`. Suites get `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`.
 - `release promote ID` requires that passing record, deploys the SHA to production (leased on the last promoted SHA) and records `rc-production/ID`; `release verify --url URL` confirms production serves it.
 - A failed candidate files one follow-up item (`release follow-up ID` retries); fix forward.
+
+With `GRAPHYARD_DELIVERY=github` on the server, GitHub merges: an observation that sees build, review and required checks pass enables auto-merge on that head; no proof, queue or observation age gates it, and UAT validates before promotion.
 
 `release status` lists candidates; `release GY-N EPOCH` still gives up an item's lease. The workflow needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, `GRAPHYARD_UAT_TOKEN` and `GRAPHYARD_RELEASE_TOKEN`.
 
 ### Pre-merge gate and release-candidate validation
 
 Required: `typecheck`, `test` (`.github/workflows/ci.yml`), under ten minutes. Soak/timing files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container and Helm checks run in `.github/workflows/release-candidate.yml` on each [release candidate](#release-candidates).
+
+With `GRAPHYARD_DELIVERY=github` on the server, GitHub merges: once a candidate's build, review and required checks pass, the observation that saw it enables auto-merge on that head. No proof, queue or observation age gates the merge, the loop skips its guarded merge, and proofs are not requested; UAT validates before promotion.
 
 ## Managed repositories
 

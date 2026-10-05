@@ -29,7 +29,7 @@ Pre-push, `graphyard sync GY-N` merges `origin/BASE` (no rebase), regenerates, c
 
 ### Submit when your own criteria pass
 
-The full suite is CI's gate: workers run build and `graphyard verify GY-N` (own proofs), submit on pass, and name any sandbox full-suite failure outside `plannedFiles` in the PR without a blocker. `verify` marks a proof `leftToCi`, exits 0 and `complete` reports `passing` naming it, only when all cases passed but the run ended abnormally (hook, crash, signal); failed, skipped or unexecuted cases always block.
+The full suite is CI's gate: workers run build and `graphyard verify GY-N` (own proofs), submit on pass, and name any sandbox full-suite failure outside `plannedFiles` in the PR without a blocker. `verify` marks a proof `leftToCi`, exits 0 and `complete` reports `passing` naming it, only when all cases passed but the run ended abnormally (hook, crash, signal); failed, skipped or unexecuted cases always block. A proof that still passes on the merge base carrying only the change's test files (`tests/`, `*.test.*`) is `unexercised`: `verify` exits 1 and `complete` reports `failing` (tests-only changes are not judged).
 
 ### Generated files never conflict
 

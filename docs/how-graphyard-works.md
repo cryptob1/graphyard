@@ -24,7 +24,7 @@ Sessions start with a role-scoped digest (≤500 words) of decisions, recurring 
 - **Medium** (60 min): remainder; adds producer-run `unit:`/`integration:`.
 - **Low** (30 min): test-only, docs-only, single-module. Required CI, one approval; no producer proofs or `manual:` attestations.
 
-All lanes require `e2e:` proofs; low/medium reworks need no approver.
+All lanes require `e2e:` proofs; low/medium reworks need no approver (recorded as approved by `graphyard-risk-lane`; an interrupted application resumes on the item's next decision request).
 
 ## Who holds which authority
 

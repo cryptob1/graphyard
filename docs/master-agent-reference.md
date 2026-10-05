@@ -35,9 +35,13 @@ A worker restores its own: `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-
 | `installation-accept` | Accept pending requests
 | `protection` | Reconcile branch protection
 
-Flows read `GET /api/github/installation` (App credential, not gh), record `record.json` under `.graphyard/master-actions/` and append `ledger.json`. The master never stores the profile's cookies, uses a merge bypass, pushes code or reads a worker credential.
+Flows read `GET /api/github/installation` (App credential, not gh), record `record.json` under `.graphyard/master-actions/` and append `ledger.json`. Approving a *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, uses a merge bypass, pushes code or reads a worker credential.
 
 If a harness classifier refuses routine administration, `master harness claude --apply` (Codex: `master harness codex`) writes rules to `.claude/settings.local.json`.
+
+Denied, by endpoint: `gh pr merge`/`review`, `gh api` `pulls/N/merge`, `repos/R/merges`, `merge-upstream`, `pulls/N/reviews`, `access_tokens`, `PUT`/`POST`/`DELETE`; `gh api graphql` with `mutation` (merge, enqueue, auto-merge, approval) or `=@`/`--input`.
+
+Missing or retired rules (`gh api *merge*`, `gh api graphql*`) are drift, named by `master status` (`harness`); `master harness claude --apply` rewrites them.
 
 ## Typed actions and executors
 
@@ -47,15 +51,15 @@ A `resync` completes only on an observation newer than its claim (`POST /api/wor
 
 A `dispatch` or `request-review` finding a session already answering the head completes on it; standing verdicts block a second reviewer until dismissed; busy or reserved worker profiles wait 30 minutes before stalling. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle, in no count and no list), shown in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate it. Ticks requeue ownerless items (`liveness.violations`).
 
-## Resources and disk
-
-`resourceRegistry` declares bounded resources, reported in `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop removes finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed) and stale test temp entries; unowned idle profile panes close; `disk` attention below `run.diskThresholdGb`. Checkouts: `run.worktreeRoot`.
-
 ## Recovery
 
 A dead supervisor fences its item; `containment` lists survivors' pid, cmdline and cwd. With `settleable: true` run `master settle-containment GY-N REASON`; else stop the recorded scope unit (`containment.scope`), request `rework`.
 
 An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator`, `stopped-by-attestation` lapses are history); any admin settles an explained one: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns a handler answering `master decide GY-N resolve … --context FINGERPRINT REASON`.
+
+### Producer-runtime faults
+
+A producer request spent with no attempt acting (never started, launch refused, exited at launch) requests no rework; it relaunches on an independent profile none of them ran on.
 
 ## Fault classes
 
@@ -64,3 +68,5 @@ Faults carry `faultClass` (`master status` `faults`); recurring classes file one
 ## Pipeline speed
 
 Target (ten-plus deliveries): submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; `speed.submitToMerge` is the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
+
+The loop's decisions step stays within 10 s a cycle at about 90 open items: one `decision.*` ledger read names moved items, rereading only those. A history whose ledger has not moved is kept, not read.
