@@ -309,6 +309,9 @@ test('unit:reconcile-lock-hold-bounded — a full reconciliation pass over 1000 
   // A slow host spends each batch's budget before its rows are done (CI on 2026-10-01: 35 batches
   // read 1082 open documents whole for 407 open items). The next batch reads only as many rows as
   // that one finished, so the pass still reads each open document whole about once.
+  // A pass evaluates only what moved since the last (GY-1124), so the slow pass starts from a reset
+  // view: a full pass that reads every open document again, as a restarted server's first pass does.
+  engine.resetReconcileView();
   const budget = engine.reconcileBatchMs, slow = holds.length;
   engine.reconcileBatchMs = 1; label = 'reconcile';
   try { await engine.reconcile(); } finally { engine.reconcileBatchMs = budget; label = 'other'; }
