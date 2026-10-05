@@ -44,6 +44,8 @@ import { diagnosticianSettings, diagnosisSettled } from '../src/runner/payloads.
 import { stoppedStates } from '../src/daemon/effects.js';
 import type { RunOptions, RunRecord, RunResult, Runner } from '../src/runner/types.js';
 import { diagnosisLimitHoldMs, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
+import { staleDiagnosisKey } from '../src/daemon/cycle-decisions.js';
+import { terminalDecisions } from '../src/cli/decision-report.js';
 import { Launcher } from '../src/daemon/cycle.js';
 import { wakeOwnObservation } from '../src/master/base-break-refresh.js';
 import { branchReport, buildMasterStatus } from '../src/master/status.js';
@@ -517,6 +519,8 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
 let days = 0;
 async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; slowDecisions?: { from: number; to: number; ms: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
+  /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
+  staleDiagnosis?: boolean;
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
   failover?: Failover }) {
   const dayStart = clock.now();
@@ -1154,6 +1158,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // sessions all end without judging: the first vanishes or stops, each relaunch the loop makes
   // stops `done`, and one relaunch is refused by a registry timeout.
   const hand = new Map<string, { key: string; launches: number; refused: number }>();
+  // GY-1294: the diagnosis decisions a revision race staled before their approver read them.
+  const diagnosisRaces: { key: string; decision: string; action: string; outcome: string }[] = [];
   // The first attestation the loop requests is overtaken: its worker pushes a new head before the
   // approver judges, so the loop must withdraw it, close its approver and ask afresh for the new head.
   const attestations: { decision: string; sha: string; judged: 'overtaken' | 'approved' }[] = [];
@@ -1241,6 +1247,19 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       // applied and exits without judging: the judge itself refuses a second verdict, and the day
       // must not die on what a real session would simply see.
       if (!current || current.state !== 'requested') { herdr.status(pane, 'done'); return; }
+      // GY-1294, the 2026-10-04/05 shape: a write of the loop's own lands on the diagnosed item
+      // between the diagnosis decision's request and its approver's read, so the server settles the
+      // decision stale ("Task revision changed; reload and request again"). The loop's decisions
+      // step must ask again, and the decision it asks for is judged as any other.
+      if (options.staleDiagnosis && !diagnosisRaces.length && (current.action === 'close' || current.action === 'release')
+        && Object.values(state.diagnoses).some(entry => entry.decision?.id === decision)) {
+        await engine.execute(principals.coordinator, 'request', work.id, { type: 'note', reason: `Soak: the loop's own note on ${work.key}, landing before the approver reads ${decision}` }, id());
+        const outcome = await api(principals.approver, 'POST', `work/${work.id}/approve`, { decision, reason: `Approved: the loop's routine ${decision} decision for ${work.key} rests on what it verified` })
+          .then(() => 'applied', (error: Error) => error.message);
+        diagnosisRaces.push({ key: work.key, decision, action: current.action, outcome });
+        herdr.status(pane, 'done');
+        return;
+      }
       const refuseDue = !!options.refuseReworkOf?.includes(numberOf(work)) && !refused.some(entry => entry.key === work.key)
         && current.action === 'rework';
       if (refuseDue) {
@@ -2353,7 +2372,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, staleMerges, restartLog, guardDay, budgetDay, decompositionDay: decompositionHistory };
+    wakes, staleMerges, restartLog, guardDay, budgetDay, decompositionDay: decompositionHistory, diagnosisRaces };
 }
 
 /**
@@ -2389,9 +2408,9 @@ const memoryDay = { memoryDip: { from: 0, until: 15 * minute } };
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 360_000 }, async () => {
   const began = performance.now();
   const hours = Number(process.env.SOAK_HOURS ?? 24);
-  const day = await simulateDay({ hours, github806: true, remedies: true, plan: { blockedMerge: blockedMergeItem, ...memoryDay }, diagnosisLimit });
+  const day = await simulateDay({ hours, github806: true, remedies: true, plan: { blockedMerge: blockedMergeItem, ...memoryDay }, diagnosisLimit, staleDiagnosis: true });
   assertLaunchesConfined(day, coordinatorRoot!);
-  const { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, diagnosisRuns, decideCalls, baseBreak, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks } = day;
+  const { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, herdr, landingRefusals, foreignPane, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, diagnosisRuns, decideCalls, baseBreak, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks, diagnosisRaces } = day;
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   // GY-1060: every item merged under protection requiring `secrets` beside the policy's checks, so
@@ -2691,6 +2710,25 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const answered = primaries.find(run => !run.refused)!;
   assert.deepEqual([...new Set(primaries.filter(run => run.at < answered.at).map(run => run.subject))], [refusedRuns[0].subject], 'only the probe ran until the provider answered: every other subject was held');
   assert.ok(Object.values(state.diagnoses).every(entry => entry.state !== 'waiting'), 'no diagnosis is left waiting at the day\'s end');
+  // GY-1294: the first diagnosis decision went stale on a revision race — the loop's own note moved
+  // the item before its approver read it. The decisions step asked again once, bound to the item as
+  // it then stood; that request got exactly one approver, whose session was closed (above), it
+  // applied, and nothing about the race is left owed at the day's end.
+  assert.equal(diagnosisRaces.length, 1, `one diagnosis decision met the revision race: ${JSON.stringify(diagnosisRaces)}`);
+  const [race] = diagnosisRaces;
+  assert.match(race.outcome, /Task revision changed/, 'the approval found the item revision moved and was not applied');
+  const raced = (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent((await store.list()).find(item => item.key === race.key)!.id)}/decisions`)).decisions
+    .filter((entry: { action: string }) => entry.action === race.action) as { id: string; state: string; input: { expectedRevision?: number } }[];
+  assert.deepEqual(raced.map(entry => entry.state), ['stale', 'applied'], `${race.key}'s ${race.action} went stale once and its one re-request applied: ${JSON.stringify(raced)}`);
+  assert.equal(raced[0].id, race.decision);
+  assert.ok(raced[1].input.expectedRevision! > raced[0].input.expectedRevision!, 'the re-request binds the revision the item moved to');
+  assert.equal(state.actions[staleDiagnosisKey(race.key, race.action)]?.attempts, 1, 'the re-request was made once, inside its bound');
+  assert.equal(state.actions[`${staleDiagnosisKey(race.key, race.action)}:exhausted`], undefined, 'the bound was never reached');
+  const racedDiagnosis = Object.values(state.diagnoses).find(entry => entry.decision?.work === race.key && entry.decision.action === race.action)!;
+  assert.ok(racedDiagnosis && racedDiagnosis.decision!.id === raced[1].id && racedDiagnosis.decision!.approver, 'the diagnosis follows the re-requested decision, judged by an independent approver');
+  assert.equal(approverWorks.filter(key => key === race.key).length, 2, `${race.key} had one approver for the stale decision and one for its re-request: ${JSON.stringify(approverWorks)}`);
+  const owed = await terminalDecisions(path => api(principals.operatorAgent, 'GET', path), await store.list(), { approvals: [], runtime: { available: false, agents: [] }, now: clock.now() });
+  assert.deepEqual(owed.attentionItems.filter(entry => entry.subject === race.key || /went stale|is stale/.test(entry.text)).map(entry => entry.text), [], 'no stale decision is left owed at the day\'s end');
   assert.ok(approverPanes.length > 0, 'the day launched approver sessions for its decisions');
   assert.deepEqual(approverPanes.filter(pane => !herdrClosed.includes(pane)), [], `every approver session the day launched was closed once its decision settled: ${JSON.stringify(herdrClosed)}`);
   // GY-521: the loop asked for the unproduced manual proof itself, withdrew the request a new head overtook, and the approval of the fresh one delivered the item.
