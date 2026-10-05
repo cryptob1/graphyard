@@ -96,7 +96,7 @@ test('a 403 without rate-limit signals is a permission refusal that carries GitH
     return new Response(JSON.stringify({ number: 1 }));
   });
   await assert.rejects(github.request('/merges', 'POST', { base: 'x', head: 'y' }), (error: Error) => error instanceof GitHubPermissionRefusal && error.kind === 'permission'
-    && /POST \/repos\/fixture\/repo\/merges failed \(403\): GitHub said "Resource not accessible by integration"; no App permission preflight has run yet$/.test(error.message));
+    && /POST \/repos\/fixture\/repo\/merges failed \(403\) "Resource not accessible by integration": no App permission preflight has run yet$/.test(error.message));
   assert.equal((github as any).blockedUntil, 0, 'a permission refusal is not a rate limit');
   assert.equal((await github.request('/pulls/1')).number, 1, 'other requests continue immediately');
   assert.equal((github as any).preflightDueAt, 0, 'the refusal brings the permission preflight forward');

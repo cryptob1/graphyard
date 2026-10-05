@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Run, RunEvent, RunOptions, RunResult, Runner } from '../../src/runner/types.js';
-import { landingCheck, scopeLookupBudget, type GitHub, type LandingGitHub } from '../../src/github.js';
+import { RerunPending, landingCheck, scopeLookupBudget, type GitHub, type LandingGitHub } from '../../src/github.js';
 import type { HerdrAgent } from '../../src/master.js';
 import type { Observation, Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
@@ -473,7 +473,7 @@ export class SimulatedGitHub {
     const now = clock.now();
     if (this.runStatus(checkRunId, now) !== 'completed') {
       this.refusedReruns.push({ key: pr.key, checkRunId, at: now });
-      throw new Error(`GitHub POST /actions/runs/${900_000 + checkRunId}/rerun-failed-jobs failed (403): GitHub said "This workflow run is not completed"`);
+      throw new Error(`GitHub POST /actions/runs/${900_000 + checkRunId}/rerun-failed-jobs failed (403) "This workflow run is not completed": the App permission preflight found no missing permission`);
     }
     const base = failed.tests.length > 0;
     if (base) this.baseReruns.push({ jobId: checkRunId, by });
@@ -499,14 +499,14 @@ export class SimulatedGitHub {
     const unfinished = key ? this.unfinishedRunMs.get(key) : undefined;
     return run && unfinished !== undefined && run.attempt === 1 && now < run.at + unfinished ? 'in_progress' : 'completed';
   }
-  /** GitHub's "rerun failed jobs" as the adapter asks it: with `completedOnly`, an unfinished run is read and named instead (GY-1329). */
-  rerunFailedJobs(checkRunId: number, options: { completedOnly?: boolean } = {}) {
-    if (options.completedOnly) {
+  /** GitHub's "rerun failed jobs" as the adapter asks it: the run is read first, and an unfinished one is named instead (GY-1329); the probe paths' `runRead` skips the read. */
+  rerunFailedJobs(checkRunId: number, options: { runRead?: boolean } = {}) {
+    if (!options.runRead) {
       const now = clock.now(), status = this.runStatus(checkRunId, now);
       const head = [...this.runs].find(([, entries]) => entries.some(entry => entry.id === checkRunId))?.[0];
       const key = [...this.prs.values()].find(entry => entry.head === head)?.key ?? '';
       this.runReads.push({ key, checkRunId, status, at: now });
-      if (status !== 'completed') return { runId: 900_000 + checkRunId, attempt: 1, waiting: status };
+      if (status !== 'completed') throw new RerunPending(900_000 + checkRunId, status, 1);
     }
     return this.rerun(checkRunId);
   }
@@ -792,7 +792,7 @@ export class SimulatedGitHub {
       },
       async dequeuePullRequest(state: GitHubMergeQueueState) { const pr = world.prs.get(Number(state.pullRequestId.slice(3)))!; pr.autoMerge = false; },
       async publishGroupCheck() {},
-      async rerunFailedJobs(checkRunId: number, options?: { completedOnly?: boolean }) { return world.rerunFailedJobs(checkRunId, options); },
+      async rerunFailedJobs(checkRunId: number, options?: { runRead?: boolean }) { return world.rerunFailedJobs(checkRunId, options); },
       // GY-1250: the main guard's surface, each call one GitHub request the soak counts.
       ...(options.mainGuard ? {
         async mainHistory(limit = 100) { world.guardRequests.push({ kind: 'history', at: clock.now() }); return world.mainHistory(limit); },
