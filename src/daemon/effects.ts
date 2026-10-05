@@ -223,6 +223,12 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * for a later round on a reason that describes an older head.
    */
   withdraw?: (work: Work, decision: string, reason: string) => Promise<unknown>;
+  /**
+   * Asks the control plane to apply a decision an approver already approved whose application
+   * recorded no outcome (GY-1300). It approves nothing: the server replays what the recorded
+   * approval authorized, under the decision's own engine key, and answers the decision as it settled.
+   */
+  resume?: (work: Work, decision: string) => Promise<{ id: string; state?: string; outcome?: string | null; approvedBy?: string | null; approvedAt?: string | null; approvalReason?: string | null }>;
   /** Verifies on this host which quarantined supervisors are demonstrably gone. */
   containment?: (work: Work[], observed: ContainmentObservation) => Record<string, ContainmentAssessment> | Promise<Record<string, ContainmentAssessment>>;
   /** Bounds this host's clock against the control plane with a light timed read just before containment is assessed (GY-811). */
@@ -500,6 +506,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   };
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
+  const resume: DaemonEffects['resume'] = (work, decision) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'resume', decision });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
   // One coordinator read of the decision ledger's kinds after the last seq the loop saw (GY-1142).
   const decisionChanges: DaemonEffects['decisionChanges'] = async after => {
@@ -722,6 +729,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get approver() { return current().operatorAgent ? approver : undefined; },
     get docsSync() { return current().operatorAgent ? docsSyncing.docsSync : undefined; }, conflictPaths: docsSyncing.conflictPaths,
     get withdraw() { return current().operatorAgent ? withdraw : undefined; },
+    get resume() { return current().operatorAgent ? resume : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },
     get decisionChanges() { return current().operatorAgent ? decisionChanges : undefined; },
     // A recurring fault class is filed as intent, by the same operator-agent identity (GY-173);

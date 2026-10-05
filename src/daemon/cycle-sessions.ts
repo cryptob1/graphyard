@@ -338,14 +338,40 @@ export async function closeStep(cycle: Cycle) {
   //     A prompt the loop cannot classify is a failed attempt, not a wait: once it has stood for
   //     `blockedPromptFailMs` the session is closed as failed with the prompt's text as the reason,
   //     and the item is dispatched again (a reviewer's or producer's request is launched again).
-  const readPrompt = async (agent: HerdrAgent): Promise<RuntimePrompt> => {
-    let screen: string | null = null;
-    try { screen = effects.sessionOutput ? await effects.sessionOutput(agent) : null; } catch { screen = null; }
-    return classifyRuntimePrompt(screen) ?? { kind: 'unknown', text: 'its screen could not be read', keys: null, answer: null };
+  //     A screen that could not be read is a signal not collected, not a prompt (GY-1304): it may
+  //     already be answered, so nothing is recorded or timed until a read shows what is there.
+  //     A runtime's folder-trust dialog is never answered by the loop (consent-prompt.ts): the
+  //     session is closed at once and launched again, and its launch records the folder's trust
+  //     before the runtime starts; only a dialog that comes back after that relaunch is waited out.
+  const readScreen = async (agent: HerdrAgent) => {
+    try { return await effects.sessionOutput!(agent); } catch { return null; }
+  };
+  const readPrompt = async (agent: HerdrAgent): Promise<RuntimePrompt | null> => {
+    // A loop that reads no screens fails a blocked session on its blocked state alone.
+    if (!effects.sessionOutput) return { kind: 'unknown', text: 'this loop reads no session screens', keys: null, answer: null };
+    // The agent's name is its usual address; its pane is tried when the name reads nothing.
+    const screen = await readScreen(agent);
+    return classifyRuntimePrompt(screen) ?? (agent.name && agent.pane_id ? classifyRuntimePrompt(await readScreen({ ...agent, name: undefined })) : null);
   };
   const unblock = async (who: string, slot: string, agent: HerdrAgent, item: Work, principal: string | null, epoch: number | null, directory: string | null,
     handle: (outcome: string, finished: boolean) => Promise<unknown>, fail: (reason: string) => Promise<string>) => {
-    const prompt = await readPrompt(agent), digest = promptDigest(prompt.text);
+    const prompt = await readPrompt(agent);
+    if (!prompt) return;
+    const digest = promptDigest(prompt.text);
+    const trustKey = `session:trust:${slot}`, relaunched = state.actions[trustKey];
+    if (prompt.kind === 'folder-trust' && relaunched?.state !== 'done') {
+      if (relaunched && !readyToRetry(relaunched, state.cycle)) return;
+      const reason = `stopped at its runtime's folder-trust dialog "${prompt.text}", which the loop never answers; closed at once so that its launch records the folder's trust before the runtime starts again`;
+      const attempts = (relaunched?.attempts ?? 0) + 1;
+      await record(state, trustKey, { kind: 'session', work: item.key, principal, epoch, state: 'started', detail: `${who} on ${item.key} ${reason}`, attempts, cycle: state.cycle }, now(), effects.persist);
+      try {
+        const next = await fail(reason);
+        performed.push(await record(state, trustKey, { kind: 'session', work: item.key, principal, epoch, state: 'done', detail: `${who} on ${item.key} ${reason}; ${next}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      } catch (error) {
+        performed.push(await record(state, trustKey, { kind: 'session', work: item.key, principal, epoch, state: 'failed', detail: `${who} on ${item.key} ${reason}, but it could not be closed: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      }
+      return;
+    }
     const answeredKey = `session:answered:${slot}:${agent.pane_id}:${digest}`, answered = state.actions[answeredKey];
     if (prompt.kind === 'destructive-command' && prompt.keys && effects.answerSession && (answered?.attempts ?? 0) < blockedPromptAnswers) {
       // An answered dialog is given time to close before it is answered again.
@@ -363,25 +389,21 @@ export async function closeStep(cycle: Cycle) {
       }
       return;
     }
-    const why = prompt.kind === 'destructive-command' ? effects.answerSession ? `the loop declined it ${blockedPromptAnswers} times and it is still showing` : 'this loop cannot send it keys' : 'the loop cannot classify it';
+    const why = prompt.kind === 'destructive-command' ? effects.answerSession ? `the loop declined it ${blockedPromptAnswers} times and it is still showing` : 'this loop cannot send it keys'
+      : prompt.kind === 'folder-trust' ? 'the folder-trust dialog came back after the session was launched again' : 'the loop cannot classify it';
     const seenKey = `session:blocked:${slot}:${agent.pane_id}:${digest}`, seen = state.actions[seenKey];
     const minutes = Math.round(blockedPromptFailMs / 60_000);
-    // A runtime's folder-trust dialog is a launch that failed (GY-1306): the launcher records the
-    // folder trusted before the runtime starts, so nothing waiting will change it. It is closed at
-    // once naming the dialog, never held for the minutes an unclassifiable prompt is given.
-    const trustDialog = prompt.kind === 'folder-trust';
-    if (!seen && !trustDialog) {
+    if (!seen) {
       performed.push(await record(state, seenKey, { kind: 'session', work: item.key, principal, epoch, state: 'failed', detail: `${who} on ${item.key}${epoch !== null ? ` (epoch ${epoch})` : ''} is waiting on input (Herdr reports it blocked) instead of deciding on its own, at a runtime prompt (${why}): "${prompt.text}". Unless it moves on, the loop closes it as failed with that prompt as the reason in ${minutes} minutes and dispatches ${item.key} again. A session that needs something records a typed request and exits — POST /api/work/${item.key}/request with a type of scope-request, decision, blocker, note or escalation — which names its decider and frees the item, rather than holding its slot at a prompt`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
       // The session is blocked, not gone: it still holds its pane, and the one moment somebody
       // needs the attach command is this one. The handle stays running, carrying why it stalled.
       await handle(`waiting on input instead of recording a typed request, at a runtime prompt (${why}): "${prompt.text}"; closed as failed after ${minutes} minutes unless it moves on`, false);
       return;
     }
-    if (!trustDialog && now() - Date.parse(seen!.at) < blockedPromptFailMs) return;
+    if (now() - Date.parse(seen.at) < blockedPromptFailMs) return;
     const failKey = `session:unanswered:${slot}:${agent.pane_id}:${digest}`, previous = state.actions[failKey];
     if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;
-    const reason = trustDialog ? `a failed launch: its runtime stopped at its folder-trust dialog, which the launch records answered before the runtime starts and nobody answers after: "${prompt.text}"`
-      : `blocked for ${minutes} minutes on a runtime prompt (${why}): "${prompt.text}"`, attempts = (previous?.attempts ?? 0) + 1;
+    const reason = `blocked for ${minutes} minutes on a runtime prompt (${why}): "${prompt.text}"`, attempts = (previous?.attempts ?? 0) + 1;
     await record(state, failKey, { kind: 'session', work: item.key, principal, epoch, state: 'started', detail: `${who} on ${item.key} was ${reason}; closing it as a failed attempt`, attempts, cycle: state.cycle }, now(), effects.persist);
     try {
       const next = await fail(reason);

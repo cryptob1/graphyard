@@ -476,38 +476,149 @@ test('unit:claude-trust-verified-before-pane-start — a claude launch whose tru
     assert.equal(prompt.kind, 'folder-trust', screen);
     assert.equal(prompt.keys, null, 'never answered');
   }
-  assert.match(classifyRuntimePrompt(claudeTrustDialog)!.text, /Security guide \/ ❯ 1\. Yes, I trust this folder \/ 2\. No, exit/);
+  assert.match(classifyRuntimePrompt(claudeTrustDialog)!.text, /❯ 1\. Yes, I trust this folder \/ 2\. No, exit/);
   // The words printed above an unrelated prompt, or scrolled up, are not the dialog.
   assert.equal(classifyRuntimePrompt(`${claudeTrustDialog}\n● Trusted.\n● Reading src/harness.ts\n${'● working\n'.repeat(8)}${unknownPrompt}`)!.kind, 'unknown');
   assert.equal(classifyRuntimePrompt(menu('● The issue quotes "Yes, I trust this folder" from the dialog.', ' Apply the fix?'))!.kind, 'unknown');
 
   const { directory: root, master } = await setup();
   try {
-    const reviewer: NonNullable<Work['sessions']>[number] = { id: 'review-request-1', kind: 'review', principal: 'coordinator', epoch: null, runtime: 'claude', host: 'machine-a', agentName: 'review-claude-1-f7d467f9',
-      role: 'review', head: 'a'.repeat(40), workspace: 'w1', tab: null, pane: 'w1:p7', attach: 'herdr pane attach w1:p7', transcript: null, subject: 'GY-174: review aaaaaaaaaaaa (PR #7)',
-      startedAt: iso(-60_000), updatedAt: iso(-60_000), endedAt: null, state: 'running', outcome: null };
-    const item = { current: held({ lease: null, sessions: [reviewer] } as Partial<Work>) };
-    const { log, effects } = harness(claudeTrustDialog, item);
-    const order: string[] = [];
-    Object.assign(effects, {
-      agents: () => [{ name: 'review-claude-1-f7d467f9', pane_id: 'w1:p7', agent_status: 'blocked' }],
-      launchedSessions: async () => [{ role: 'reviewer', record: 'review-1', profile: 'claude-reviewer', agentName: 'review-claude-1-f7d467f9', pane: 'w1:p7', work: 'GY-174', requestId: 'review-request-1' }],
-      endSession: async (_session: unknown, reason: string) => { order.push(`ended:${reason}`); },
-      relaunch: async () => { order.push('relaunched'); return { profile: 'claude-reviewer' }; },
-      recordSession: async (_work: Work, handle: { id: string; state?: string; outcome?: string }) => { if (handle.id === 'review-request-1') log.sessions.push(handle); },
-    } satisfies Partial<DaemonEffects>);
-    const state = emptyDaemonState(master);
-    // The first cycle that sees it closes it: no five-minute hold.
-    await runCycle(master, state, effects, () => clock);
-    assert.deepEqual(log.keys, [], 'the dialog is never answered');
-    const closed = log.sessions.at(-1)!;
-    assert.equal(closed.state, 'finished');
-    assert.match(closed.outcome!, /closed as failed: a failed launch: its runtime stopped at its folder-trust dialog/);
-    assert.match(closed.outcome!, /Yes, I trust this folder/);
-    assert.ok(!/blocked for 5 minutes|cannot classify/.test(closed.outcome!), 'not held as an unclassifiable prompt');
-    assert.ok(order.some(entry => entry.startsWith('ended:') && /folder-trust dialog/.test(entry)), 'the session is ended naming the dialog');
-    assert.equal(order.at(-1), 'relaunched', 'and its request launched again');
-    const failed = Object.entries(state.actions).find(([key]) => key.startsWith('session:unanswered:'));
-    assert.equal(failed?.[1].state, 'done');
+    for (const screen of [claudeTrustDialog, codexTrustDialog]) {
+      const reviewer: NonNullable<Work['sessions']>[number] = { id: 'review-request-1', kind: 'review', principal: 'coordinator', epoch: null, runtime: 'claude', host: 'machine-a', agentName: 'review-claude-1-f7d467f9',
+        role: 'review', head: 'a'.repeat(40), workspace: 'w1', tab: null, pane: 'w1:p7', attach: 'herdr pane attach w1:p7', transcript: null, subject: 'GY-174: review aaaaaaaaaaaa (PR #7)',
+        startedAt: iso(-60_000), updatedAt: iso(-60_000), endedAt: null, state: 'running', outcome: null };
+      const item = { current: held({ lease: null, sessions: [reviewer] } as Partial<Work>) };
+      const { log, effects } = harness(screen, item);
+      const order: string[] = [];
+      Object.assign(effects, {
+        agents: () => [{ name: 'review-claude-1-f7d467f9', pane_id: 'w1:p7', agent_status: 'blocked' }],
+        launchedSessions: async () => [{ role: 'reviewer', record: 'review-1', profile: 'claude-reviewer', agentName: 'review-claude-1-f7d467f9', pane: 'w1:p7', work: 'GY-174', requestId: 'review-request-1' }],
+        endSession: async (_session: unknown, reason: string) => { order.push(`ended:${reason}`); },
+        relaunch: async () => { order.push('relaunched'); return { profile: 'claude-reviewer' }; },
+        recordSession: async (_work: Work, handle: { id: string; state?: string; outcome?: string }) => { if (handle.id === 'review-request-1') log.sessions.push(handle); },
+      } satisfies Partial<DaemonEffects>);
+      const state = emptyDaemonState(master);
+      // The first cycle that sees it closes it: no five-minute hold.
+      await runCycle(master, state, effects, () => clock);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(log.keys, [], 'the dialog is never answered');
+      const closed = log.sessions.at(-1)!;
+      assert.equal(closed.state, 'finished');
+      assert.match(closed.outcome!, /closed as failed: stopped at its runtime's folder-trust dialog/);
+      assert.ok(!/blocked for 5 minutes|cannot classify/.test(closed.outcome!), 'not held as an unclassifiable prompt');
+      assert.ok(order.some(entry => entry.startsWith('ended:') && /folder-trust dialog/.test(entry)), 'the session is ended naming the dialog');
+      assert.equal(order.at(-1), 'relaunched', 'and its request launched again');
+    }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+/** The screen GY-1294's reviewer sat at on 2026-10-05: Claude Code's folder-trust dialog, read off the pane unnumbered. */
+const folderTrust = [
+  ' Accessing workspace:',
+  '',
+  ' /srv/graphyard-review-claude-1-f7d467f9/checkout',
+  '',
+  ' Quick safety check: Is this a project you created or one you trust?',
+  " Claude Code'll be able to read, edit, and execute files here.",
+  '',
+  ' Security guide',
+  '',
+  ' ❯ No, exit',
+  '   Yes, I trust this folder',
+  '',
+  ' Enter to confirm · Esc to cancel',
+].join('\n');
+
+/** A reviewer session blocked in its pane, wired as the loop sees one its launcher started; `read` is the pane read. */
+async function blockedReviewer(master: MasterConfig, read: (agent: HerdrAgent) => string | null) {
+  const reviewer: NonNullable<Work['sessions']>[number] = { id: 'review-request-1', kind: 'review', principal: 'coordinator', epoch: null, runtime: 'claude', host: 'machine-a', agentName: 'review-claude-1',
+    role: 'review', head: 'a'.repeat(40), workspace: 'w1', tab: null, pane: 'w1:p7', attach: 'herdr pane attach w1:p7', transcript: null, subject: 'GY-174: review aaaaaaaaaaaa (PR #7)',
+    startedAt: iso(-60_000), updatedAt: iso(-60_000), endedAt: null, state: 'running', outcome: null };
+  const item = { current: held({ lease: null, sessions: [reviewer] } as Partial<Work>) };
+  const { log, effects } = harness('', item);
+  const order: string[] = [];
+  Object.assign(effects, {
+    agents: () => [{ name: 'review-claude-1', pane_id: 'w1:p7', agent_status: 'blocked' }],
+    sessionOutput: read,
+    launchedSessions: async () => [{ role: 'reviewer', record: 'review-1', profile: 'reviewer-a', agentName: 'review-claude-1', pane: 'w1:p7', work: 'GY-174', requestId: 'review-request-1' }],
+    endSession: async () => { order.push('ended'); },
+    relaunch: async () => { order.push('relaunched'); return { profile: 'reviewer-b' }; },
+  } satisfies Partial<DaemonEffects>);
+  return { log, effects, order, state: emptyDaemonState(master) };
+}
+/** The session-liveness fault instances a loop state carries: every failed session action (GY-173 counts each as one). */
+const sessionFaults = (state: ReturnType<typeof emptyDaemonState>) => Object.entries(state.actions).filter(([, action]) => action.kind === 'session' && action.state === 'failed');
+
+test('unit:folder-trust-relaunches — a session stopped at its runtime\'s folder-trust dialog is relaunched at once, not failed after five minutes (GY-1304, GY-1294)', async () => {
+  const { directory, master } = await setup();
+  try {
+    const prompt = classifyRuntimePrompt(folderTrust)!;
+    assert.equal(prompt.kind, 'folder-trust', 'the arrow-selected dialog is a known shape');
+    assert.equal(prompt.keys, null, 'which the loop never answers');
+    assert.match(prompt.text, /Security guide \/ ❯ No, exit \/ Yes, I trust this folder \/ Enter to confirm · Esc to cancel/);
+    assert.equal(classifyRuntimePrompt(' Do you trust the files in this folder?\n ❯ 1. Yes, I trust this folder\n   2. No, exit\n\n Enter to confirm · Esc to cancel')!.kind, 'folder-trust', 'and so is the numbered one');
+    assert.equal(classifyRuntimePrompt('> Yes, I trust this folder\n● Reading src/harness.ts\n  ⎿ 120 lines\n● Editing src/harness.ts\n  ⎿ done')!.kind, 'unknown', 'the words scrolled up above later output are no dialog');
+
+    // A reviewer: the session is closed and its request launched again in the same cycle, and nothing is a fault.
+    const reviewer = await blockedReviewer(master, () => folderTrust);
+    await runCycle(master, reviewer.state, reviewer.effects, () => clock);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(reviewer.order, ['ended', 'relaunched'], 'closed and launched again on sight');
+    assert.deepEqual(sessionFaults(reviewer.state), [], 'no session-liveness fault is recorded');
+    const relaunched = reviewer.state.actions['session:trust:reviewer:review-1'];
+    assert.equal(relaunched?.state, 'done');
+    assert.match(relaunched.detail, /folder-trust dialog .*which the loop never answers/);
+    assert.match((reviewer.log.sessions as { id?: string; outcome?: string }[]).findLast(handle => handle.id === 'review-request-1')!.outcome!, /closed as failed: stopped at its runtime's folder-trust dialog/);
+    // A dialog that comes back after the relaunch is not relaunched again: it is waited out as before.
+    await runCycle(master, reviewer.state, reviewer.effects, () => clock + 20_000);
+    assert.deepEqual(reviewer.order, ['ended', 'relaunched'], 'one relaunch per request');
+    assert.match(sessionFaults(reviewer.state)[0]?.[1].detail ?? '', /folder-trust dialog came back after the session was launched again/);
+
+    // A worker: its attempt ends at once, so the item is dispatched again into a launch that records the trust.
+    const item = { current: held() };
+    const worker = harness(folderTrust, item);
+    const state = emptyDaemonState(master);
+    await runCycle(master, state, worker.effects, () => clock);
+    assert.deepEqual(worker.log.keys, [], 'no key is sent into the dialog');
+    assert.deepEqual(worker.log.closed, ['w1:p9'], 'the session is closed on sight');
+    assert.equal(worker.log.capacity.length, 1, 'and its attempt ended');
+    assert.match(String(worker.log.capacity[0].reason), /folder-trust dialog/);
+    assert.deepEqual(sessionFaults(state), [], 'no session-liveness fault is recorded');
+    await runCycle(master, state, worker.effects, () => clock + 20_000);
+    assert.deepEqual(worker.log.dispatched, ['GY-174'], 'the item is dispatched again');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('unit:unread-screen-not-a-prompt — a blocked session whose screen could not be read is never failed on that read (GY-1304, GY-1290, GY-1303)', async () => {
+  const { directory, master } = await setup();
+  try {
+    for (const [name, read] of [
+      ['a read that fails', () => { throw new Error('herdr: agent_not_found'); }],
+      ['a read that returns nothing', () => null],
+      ['a blank screen', () => '\n  \n'],
+    ] as const) {
+      const reviewer = await blockedReviewer(master, read);
+      for (const at of [0, 20_000, blockedPromptFailMs, blockedPromptFailMs + 20_000, 2 * blockedPromptFailMs]) await runCycle(master, reviewer.state, reviewer.effects, () => clock + at);
+      assert.deepEqual(sessionFaults(reviewer.state), [], `${name}: no "its screen could not be read" fault`);
+      assert.deepEqual(reviewer.order, [], `${name}: the session is neither closed nor relaunched`);
+      assert.ok(!Object.keys(reviewer.state.actions).some(key => key.startsWith('session:blocked:')), `${name}: no prompt is timed`);
+    }
+
+    // The pane is read when the agent's name reads nothing, so a prompt on screen is still found.
+    const byPane = await blockedReviewer(master, agent => agent.name ? null : unknownPrompt);
+    await runCycle(master, byPane.state, byPane.effects, () => clock);
+    assert.match(sessionFaults(byPane.state)[0]?.[1].detail ?? '', /A new version of the runtime is available/);
+
+    // A prompt read after unread screens is timed from the read that showed it, not from the first unread one.
+    let screen: string | null = null;
+    const late = await blockedReviewer(master, () => screen);
+    await runCycle(master, late.state, late.effects, () => clock);
+    screen = unknownPrompt;
+    await runCycle(master, late.state, late.effects, () => clock + blockedPromptFailMs);
+    await runCycle(master, late.state, late.effects, () => clock + 2 * blockedPromptFailMs - 1000);
+    assert.deepEqual(late.order, [], 'not closed before five minutes of a prompt actually seen');
+    await runCycle(master, late.state, late.effects, () => clock + 2 * blockedPromptFailMs);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(late.order, ['ended', 'relaunched'], 'then closed as failed with the prompt as the reason');
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

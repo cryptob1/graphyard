@@ -45,13 +45,15 @@ OpenCode 1.18 is ready at `Ask anything…`/`tab agents` ([fixture](../tests/fix
 
 #### First-run consent prompts
 
-On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; anything else (e.g. **credential**, **payment**) escalates; workspace-trust prompts fail the launch. Trust records are read back just before the runtime starts (a dropped one refuses the launch naming the config); a session blocked later on a folder-trust dialog is closed as a failed launch at once, not after the five-minute unknown-prompt hold. Held workers: `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops it; the item is dispatchable.
+On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; anything else (e.g. **credential**, **payment**) escalates; workspace-trust prompts fail the launch. Trust records are read back just before the runtime starts; a dropped one refuses the launch naming the config. Held workers: `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops it; the item is dispatchable.
 
 ### Acknowledgement, resume and idle sessions
 
 Reviewers and producers are `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once if quiet past `run.acknowledgementSeconds` (default 90); settling resultless is **`never started`**: relaunched free a minute later, three at most (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
 
 **Idle-with-lease** (30 quiet minutes, nothing open): re-prompted once, after 30 more handed to a new attempt on its branch.
+
+**Blocked mid-session** (Herdr reports `blocked`): the loop reads the pane (by agent name, then pane id). A destructive-command prompt is declined; a folder-trust dialog is never answered: the session is closed and launched again at once, and the launch records the trust (a second dialog for the same request waits as unknown); any other prompt fails the session after **5 minutes**. A screen that cannot be read is no prompt: nothing is recorded or timed until a read shows one.
 
 Headless Pi runs (`.graphyard/runs/`) survive restarts.
 
