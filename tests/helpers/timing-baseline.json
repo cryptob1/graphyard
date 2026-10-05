@@ -520,6 +520,7 @@
     "tests/soak.test.ts": 52300,
     "tests/stable-json.test.ts": 281,
     "tests/stale-dismissal.test.ts": 1994,
+    "tests/stale-release-decision.test.ts": 486,
     "tests/stale-rework-requests.test.ts": 1177,
     "tests/stale-scope-request.test.ts": 2838,
     "tests/stalled-actions.test.ts": 3302,
