@@ -263,3 +263,35 @@ test('unit:launch-wait-reported — master status reports each waiting launch wi
     assert.ok(!kept.some(wait => wait.requestId === 'request-0' || wait.requestId === 'producer-1'), 'the newest waits drop past the bound');
   });
 });
+
+test('unit:launch-wait-fallback — an open request with no tick wait and no failure is reported by what its sessions show, and only requests the dispatcher launches are listed (GY-1185)', () => {
+  const cursor = emptyDispatchCursor(masterConfig('/nonexistent'));
+  const id = reviewRequest().id;
+  const handle = (overrides: Record<string, unknown>) => ({ id, kind: 'review', runtime: 'claude', host: 'host', subject: 'GY-42: review', agentName: 'graphyard-reviewer', state: 'running', outcome: null,
+    startedAt: iso(-10 * minute), updatedAt: iso(-10 * minute), endedAt: null, ...overrides });
+  const withSessions = (sessions: unknown[], review = reviewRequest()) => item(iso(0), { sessions, autoDispatch: { review, producers: [], history: [] } } as unknown as Partial<Work>);
+
+  // Never launched: aged from requestedAt, and saying no session has been launched.
+  const [never] = launchWaits([withSessions([])], cursor, clock);
+  assert.equal(never.waitedMs, 20 * minute);
+  assert.match(never.reason, /^waiting for dispatch: no session has been launched/);
+  assert.equal(launchWaitAttention([never]).length, 1, 'a review never launched for twenty minutes raises attention');
+
+  // A session observed live suppresses the wait.
+  assert.deepEqual(launchWaits([withSessions([handle({ observed: 'working', observedAt: iso(-minute) })])], cursor, clock), []);
+  // A handle still open but last observed ended, lost or stale suppresses nothing, and the reason says so.
+  for (const observed of [{ observed: 'ended', observedAt: iso(-minute) }, { observed: 'lost', observedAt: iso(-minute) }, { observed: 'working', observedAt: iso(-30 * minute) }]) {
+    const [row] = launchWaits([withSessions([handle(observed)])], cursor, clock);
+    assert.match(row.reason, new RegExp(`waiting for its session graphyard-reviewer to close: last seen ${observed.observed}`));
+  }
+  // A session that ended without the verdict read yet is not 'waiting for dispatch'.
+  const [answered] = launchWaits([withSessions([handle({ state: 'finished', outcome: 'posted APPROVED', endedAt: iso(-minute) })])], cursor, clock);
+  assert.match(answered.reason, /^waiting on a verdict or relaunch: its session graphyard-reviewer ended \(posted APPROVED\)/);
+
+  // A review for a provider the master never launches, and an abandoned request, are left out.
+  assert.deepEqual(launchWaits([withSessions([], reviewRequest({ provider: undefined }))], cursor, clock), []);
+  const abandoned = emptyDispatchCursor(masterConfig('/nonexistent'));
+  abandoned.abandoned[id] = { kind: 'review', work: 'GY-42', sha: head, at: iso(-minute), reason: 'every session ended unanswered', attempts: [] } as never;
+  assert.deepEqual(launchWaits([withSessions([])], abandoned, clock), []);
+  assert.deepEqual(dispatchSummary(abandoned, clock, 10_000, [], [withSessions([])]).waiting, [], 'master status reports it under abandoned only');
+});

@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { childRunner, type ChildRun } from './child-runner.js';
 import { Timings, timedCall, timedRun, serverCallName, describeTimings, timingsSchema, withTimings, type TimingReport } from './master/timings.js';
 import type { Work } from './model.js';
-import { observeSessions, registeredLaunch, reportedHandle, type SessionReportEntry } from './model/session-state.js';
+import { observeSessions, registeredLaunch, reportedHandle, sessionView, type SessionReportEntry } from './model/session-state.js';
 import { runtimeSessionOf, sessionClosureBoundMs, sessionLiveness, sessionRole, sessionVanishGraceMs, supersededSession, type LivenessOptions, type SessionHandle, type SessionHandleInput, type SessionKind, type RuntimeSession } from './model/sessions.js';
 import { runtimeEndedStates } from './harness.js';
 import type { DispatchRequest } from './model/dispatch.js';
@@ -1243,9 +1243,6 @@ export function tickWaits(waiting: DispatchWait[]) {
   return [...byRequest.values()].sort((a, b) => (a.kind === 'review' ? 0 : 1) - (b.kind === 'review' ? 0 : 1) || requested(a) - requested(b)).slice(0, launchWaitLimit)
     .map(({ kind, work, requestId, sha, reason, group }) => ({ kind, work: work.slice(0, 40), requestId: requestId.slice(0, 64), sha: sha.slice(0, 40), reason: bounded(reason, cursorTextLimit), ...(group ? { group: group.slice(0, 40) } : {}) }));
 }
-// GY-1067 follow-up 17: launchWaits reports review and producer requests managed by the
-// dispatcher; approver launches are managed separately by the daemon's cycle-decisions
-// loop (state.approvals) with their own escalation and tracking mechanisms.
 /** A review request waiting longer than this without a launch raises attention (GY-710). */
 export const reviewLaunchWaitAttentionMs = 15 * 60_000;
 export interface LaunchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; group: string | null; requestedAt: string; waitedMs: number; reason: string }
@@ -1253,29 +1250,48 @@ export interface LaunchWait { kind: 'review' | 'producer'; work: string; request
  * Every launch still waiting (GY-710, GY-1067), as `master status` reports it: each request the control
  * plane still holds open that has no live session, how long since the request was made, and why
  * it has not launched. A request whose last tick left it waiting reports that reason, one with a
- * standing failure reports the refusal and next attempt, and an unreached or skipped open request
- * falls back to 'waiting for dispatch' aged from requestedAt (GY-1067 follow-ups 11, 18, 21, 31, 33).
- * A request the snapshot no longer holds, or one already answered or currently running, waits for nothing
- * and is not listed.
+ * standing failure reports the refusal and next attempt. An unreached or skipped open request falls
+ * back to a reason aged from requestedAt (GY-1067 follow-ups 11, 18, 21, 31, 33) that tells apart a
+ * request never launched, one whose session ended and awaits its verdict being read or a relaunch
+ * (GY-1083), and one whose session is still open but no longer seen (GY-1185).
+ *
+ * Only requests the dispatcher launches are listed (GY-1067 follow-up 17): review and producer
+ * requests, never approver launches, which the daemon's cycle-decisions loop tracks and escalates
+ * itself (state.approvals). A review for a provider other than `github` is never launched by the
+ * master, so it waits on that provider, not on dispatch, and is left out; so is a request the loop
+ * has abandoned, which `dispatch.abandoned` and its own attention report. A request the snapshot no
+ * longer holds, or one already answered or with a session shown live, waits for nothing and is not listed.
  */
-export function launchWaits(work: Work[], cursor: Pick<DispatchCursor, 'lastTick' | 'failures'>, now: number): LaunchWait[] {
+export function launchWaits(work: Work[], cursor: Pick<DispatchCursor, 'lastTick' | 'failures'> & Partial<Pick<DispatchCursor, 'abandoned'>>, now: number): LaunchWait[] {
   const waits = new Map((cursor.lastTick?.waits ?? []).map(entry => [entry.requestId, entry]));
   const rows: LaunchWait[] = [];
   for (const item of work.filter(entry => entry.stage !== 'done' && entry.autoDispatch)) {
-    const requests = [item.autoDispatch!.review, ...item.autoDispatch!.producers].filter((request): request is DispatchRequest => request?.state === 'requested');
+    const review = item.autoDispatch!.review?.provider === 'github' ? item.autoDispatch!.review : null;
+    const requests = [review, ...item.autoDispatch!.producers].filter((request): request is DispatchRequest => request?.state === 'requested' && !cursor.abandoned?.[request.id]);
     for (const request of requests) {
       const wait = waits.get(request.id), failure = cursor.failures[request.id];
-      const hasLiveSession = (item.sessions ?? []).some(session => session.id === request.id && session.state === 'running');
-      if (hasLiveSession) continue;
+      // Liveness is the observed reading every reader shares (GY-172), not the record's open state:
+      // a handle still `running` whose latest observation is ended, lost or stale suppresses nothing.
+      const handles = (item.sessions ?? []).filter(session => session.id === request.id);
+      if (handles.some(session => sessionView(session, new Date(now)).live)) continue;
       // GY-1067 follow-up 25: aging from request.requestedAt tracks cumulative unfulfilled time
       // across any failed/expired sessions, maintaining a bounded clock to 15-minute attention.
       const requested = Date.parse(request.requestedAt);
       rows.push({ kind: request.kind === 'review' ? 'review' : 'producer', work: item.key, requestId: request.id, sha: request.sha, group: request.group ?? null, requestedAt: request.requestedAt,
         waitedMs: Number.isFinite(requested) ? Math.max(0, now - requested) : 0,
-        reason: wait?.reason ?? (failure ? `launch refused ${failure.attempts} time(s): ${failure.reason}; next attempt at ${failure.nextAt}` : 'waiting for dispatch') });
+        reason: wait?.reason ?? (failure ? `launch refused ${failure.attempts} time(s): ${failure.reason}; next attempt at ${failure.nextAt}` : fallbackWaitReason(handles.at(-1), now)) });
     }
   }
   return rows.sort((a, b) => b.waitedMs - a.waitedMs);
+}
+/** Why an open request with no tick wait and no failure is waiting, from its latest session handle (GY-1185). */
+function fallbackWaitReason(handle: SessionHandle | undefined, now: number) {
+  if (!handle) return 'waiting for dispatch: no session has been launched for it yet';
+  if (handle.state === 'running') {
+    const view = sessionView(handle, new Date(now));
+    return `waiting for its session ${handle.agentName ?? handle.id} to close: last seen ${view.observed ?? 'never'}${view.seenAt ? ` at ${view.seenAt}` : ''}; the session report closes it, then the request relaunches`;
+  }
+  return bounded(`waiting on a verdict or relaunch: its session ${handle.agentName ?? handle.id} ended${handle.outcome ? ` (${handle.outcome})` : ''}; the control plane settles the request once it reads an answer, or the next tick relaunches it`, cursorTextLimit);
 }
 const waitedFor = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)} h ${Math.floor(ms % 3_600_000 / 60_000)} min` : `${Math.floor(ms / 60_000)} min`;
 /**
