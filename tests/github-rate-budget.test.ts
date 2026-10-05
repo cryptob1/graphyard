@@ -425,7 +425,8 @@ test('integration:rate-limit-pause-single-incident — twenty jobs refused for r
   for (let index = 0; index < 20; index++) { let work = await submitted(api, `Paused ${index}`); work = await job(work, github); items.push(work); }
   assert.ok(items.every(work => work.observation), 'all twenty were observed while the budget lasted');
   await webhook();
-  const spent = api.charged();
+  // GraphQL spends its own point budget, not the REST core allowance the hour counts (GY-1052).
+  const spent = api.charged() - api.requests.filter(request => request.path === '/graphql' && request.status === 200).length;
   // GitHub refuses: every job that runs into it records the refusal, once.
   api.refuse = true; api.resetAt = Math.ceil(Date.now() / 1000) + 900;
   await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL,error=NULL');

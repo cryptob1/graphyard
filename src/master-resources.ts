@@ -8,6 +8,7 @@ import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './p
 import { describeTmpReclaim, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
 import { upgradeTouchesCode } from './daemon/upgrade.js';
 import type { Work } from './model.js';
+import { runChild } from './child-runner.js';
 
 /**
  * The control plane's own resources (GY-132).
@@ -115,6 +116,13 @@ export const finishedSessionGraceMs = 60_000;
  * pane once its lease ends — so the name is a fault; before it, the reclaim is under way (GY-1089).
  */
 export const nameReclaimBoundMs = stuckSessionMs;
+/**
+ * How long a pane holding a name must have been seen unowned before the reclaim closes it on
+ * Herdr's report alone — no settled record left on the name, or a status Herdr does not recognise
+ * as finished (GY-1166). It equals the launcher's `launchAppearanceMs` (src/daemon/effects.ts): a
+ * launch whose runtime has not yet appeared reads the same way, and is never taken for a leak.
+ */
+export const unownedPaneConfirmMs = 120_000;
 /** The plane's database bound when GRAPHYARD_DATABASE_MAX_BYTES is unset. */
 export const defaultDatabaseMaxBytes = 10 * 1024 ** 3;
 /** The default warning line: a tenth of the bound, and at least one unit. */
@@ -127,13 +135,14 @@ export const producerLedgerBound = sessionLedgerBound;
 
 const settledAt = (record: { closedAt?: string; idleSince?: string; requestedAt: string }) => Date.parse(record.closedAt ?? record.idleSince ?? record.requestedAt);
 const finished = ['idle', 'done', 'blocked'];
+/** A status Herdr reports for a running runtime: the one a reclaim on Herdr's report never closes. */
+const running = (agent: HerdrAgent) => agent.agent_status === 'working';
 /**
- * Whether the reclaim pass may close an unowned holder: any status but running. The namespace
- * reading counts every non-working unowned holder as stale (and overdue past its bound), so the
- * pass gives back exactly what the reading charges: a pane Herdr reports `unknown` once its
- * runtime stopped reporting is no less finished than an idle one (GY-1165).
+ * A worker launch under way: an implementation session of the principal not yet ended that started
+ * within `unownedPaneConfirmMs` — its pane can stand before the runtime reports or the lease lands.
  */
-const reclaimableStatus = (agent: HerdrAgent) => agent.agent_status !== 'working';
+const launchingWorker = (principal: string | undefined, work: Work[], now: number) => work.some(item => (item.sessions ?? []).some(handle =>
+  handle.kind === 'implementation' && handle.principal === principal && !handle.endedAt && now - Date.parse(handle.startedAt) < unownedPaneConfirmMs));
 type Role = 'worker' | 'reviewer' | 'producer';
 const roleProfiles = (input: Pick<ResourceInputs, 'profiles'>): { role: Role; name: string; agentName: string; concurrency?: number; principal?: string }[] => [
   ...input.profiles.workers.filter(profile => profile.mode === 'launch' && profile.agentName).map(profile => ({ role: 'worker' as const, name: profile.name, agentName: profile.agentName, principal: profile.principal })),
@@ -213,7 +222,7 @@ export const resourceRegistry: ResourceDefinition[] = [
     id: 'agent-names', title: 'Herdr agent-name namespace', unit: 'names',
     bound: "each launch profile's concurrency: its fixed agent name at concurrency 1, or that many derived <agentName>-<8hex> names above it",
     usage: 'Herdr agent list: every agent whose name is one of the profile\'s session names', owner: 'Herdr, through the worker, reviewer and producer launchers in src/master.ts',
-    reclaim: `the reclaim pass closes a finished pane on one of the names once its session has settled ${finishedSessionGraceMs / 1000}s and two passes that far apart saw it unowned`,
+    reclaim: `the reclaim pass closes a finished pane on one of the names once its session has settled ${finishedSessionGraceMs / 1000}s and two passes that far apart saw it unowned; a pane no settled record accounts for, or whose status Herdr does not report as finished, is closed on Herdr's report once two passes ${unownedPaneConfirmMs / 1000}s apart saw it unowned and not working`,
     remedy: 'close the finished panes holding the names (graphyard master run --once, or herdr pane close PANE after confirming the session posted its result)',
     // A name held by a live session is the slot pool working; only names nothing live owns, and no
     // reclaim gave back within its bound, warn (GY-1089). A running session is never reclaimable: it
@@ -232,7 +241,7 @@ export const resourceRegistry: ResourceDefinition[] = [
     id: 'session-slots', title: 'Session slots', unit: 'sessions',
     bound: 'the summed concurrency of the role\'s launch profiles in .graphyard/master.json',
     usage: 'pending reviewer and producer ledger records, and live worker leases held by launch-profile principals', owner: 'the master loop and its dispatcher (src/master-daemon.ts, src/auto-dispatch.ts)',
-    reclaim: `a session settles when its request is answered or superseded; the reclaim pass fails a pending session blocked on a prompt for ${stuckSessionMs / 60_000} minutes, or absent from Herdr on every pass for ${stuckSessionMs / 60_000} minutes, which releases its slot`,
+    reclaim: `a session settles when its request is answered or superseded; the reclaim pass fails a pending session finished or blocked on a prompt for ${stuckSessionMs / 60_000} minutes, or absent from Herdr on every pass for ${stuckSessionMs / 60_000} minutes, which releases its slot`,
     remedy: 'raise concurrency on a profile of the role, or add a profile on another account, in .graphyard/master.json',
     warnBelow: () => 1, symptoms: [/every (?:reviewer|independent producer) profile is busy/, /is at its concurrency limit/],
     read: input => (['worker', 'reviewer', 'producer'] as const).map(role => {
@@ -249,7 +258,7 @@ export const resourceRegistry: ResourceDefinition[] = [
       const answered = new Set(pending.map(record => record.requestId).filter(Boolean));
       const waiting = input.work.flatMap(item => role === 'reviewer' ? [item.autoDispatch?.review?.id] : (item.autoDispatch?.producers ?? []).map(entry => entry.id)).filter((id): id is string => !!id && live.has(id) && !answered.has(id)).length;
       const stuck = pending.filter(record => stuckSession(record, input.agents, input.now)).length;
-      return { id: role, used: pending.length, bound, waiting, reclaimable: stuck, detail: `${pending.length} ${role} session(s) pending across ${profiles.length} profile(s), ${waiting} request(s) waiting for a slot${stuck ? `, ${stuck} stuck on a prompt or never started` : ''}` };
+      return { id: role, used: pending.length, bound, waiting, reclaimable: stuck, detail: `${pending.length} ${role} session(s) pending across ${profiles.length} profile(s), ${waiting} request(s) waiting for a slot${stuck ? `, ${stuck} finished, stuck on a prompt or never started` : ''}` };
     }),
   },
   {
@@ -339,7 +348,9 @@ function stuckSession(record: { state: string; agentName: string; idleSince?: st
   if (record.state !== 'pending' || !agents) return false;
   const agent = agents.find(candidate => candidate.name === record.agentName);
   if (!agent) return now - Date.parse(record.requestedAt) >= stuckSessionMs;
-  return (agent.agent_status === 'blocked' || finished.includes(agent.agent_status ?? '')) && now - Date.parse(record.idleSince ?? record.requestedAt) >= stuckSessionMs;
+  if (agent.agent_status === 'blocked') return now - Date.parse(record.idleSince ?? record.requestedAt) >= stuckSessionMs;
+  if (finished.includes(agent.agent_status ?? '')) return !!record.idleSince && now - Date.parse(record.idleSince) >= stuckSessionMs;
+  return false;
 }
 
 const disk = new Set<ResourceId>(['worktree-disk', 'database-capacity']);
@@ -561,7 +572,7 @@ export async function readReclaimReports(root: string): Promise<ResourceReclaimR
  * answers no live request; a finished pane holding a profile's name whose record settled
  * `finishedSessionGraceMs` ago, with no pending record on the name, is closed and its name
  * released once an earlier pass at least that long before saw it the same way; a pending session
- * blocked on a prompt for `stuckSessionMs`, or absent from every pass for that long, is failed —
+ * finished or blocked on a prompt for `stuckSessionMs`, or absent from every pass for that long, is failed —
  * its slot released and the relaunch rule free to try again — and its pane closed. The ledger is
  * written from a fresh read once the panes are closed, so a launch recorded meanwhile survives.
  *
@@ -612,7 +623,7 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   /** Decides from one read what to fail, close and reap; the ledger is written from a fresh read afterwards. */
   const reclaimLedger = async (kind: 'review' | 'producer', records: Settleable[], profiles: { name: string; agentName: string; concurrency?: number }[]) => {
     const failed = new Map<string, { resolution: string }>();
-    // 1. Pending sessions stuck on a prompt, or absent from Herdr for the whole bound: failed, so their slot is released.
+    // 1. Pending sessions finished or stuck on a prompt, or absent from Herdr for the whole bound: failed, so their slot is released.
     for (const record of records) {
       if (!stuckSession(record, observed.agents, now)) continue;
       const agent = observed.agents?.find(candidate => candidate.name === record.agentName);
@@ -631,25 +642,35 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
       failed.set(identity(record), { resolution });
       report.released.push({ name: record.agentName, ledger: kind, reason });
     }
-    // 2. Panes on a profile's names whose session settled and nothing pending holds the name.
+    // 2. Panes on a profile's names that nothing pending holds. A pane whose record settled and
+    //    which Herdr reports finished waits out the grace; one whose record is gone (reaped, or never
+    //    written) or whose status Herdr does not recognise is closed on Herdr's own report once two
+    //    passes `unownedPaneConfirmMs` apart saw it unowned (GY-1166): a reaped record or an unknown
+    //    status otherwise pinned the name at its bound for good. A running session is never closed.
+    const closedNames = new Set<string>();
     for (const agent of observed.agents ?? []) {
       if (!agent.pane_id || !agent.name || !profiles.some(profile => isProfileSession(profile, agent.name))) continue;
       if (records.some(record => record.state === 'pending' && record.agentName === agent.name && !failed.has(identity(record)))) continue;
       const settled = records.filter(record => record.agentName === agent.name).at(-1);
-      // A session this pass just released is closed at once; any other waits out the grace, finished.
-      // A holder with no record (reaped at retention, or never written) has no settle time of its
-      // own: the two passes the grace apart are its clock, so its name is never pinned (GY-1165).
+      // A session this pass just released is closed at once; any other waits out the grace, not running.
       const released = report.released.some(entry => entry.name === agent.name);
-      if (!released && (!reclaimableStatus(agent) || (settled && now - settledAt(settled) < finishedSessionGraceMs))) continue;
+      if (!released && (running(agent) || (settled && now - settledAt(settled) < finishedSessionGraceMs))) continue;
+      const confirmMs = settled && finished.includes(agent.agent_status ?? '') ? finishedSessionGraceMs : unownedPaneConfirmMs;
       const first = file.seen[agent.pane_id] ?? report.at;
-      if (!released && now - Date.parse(first) < finishedSessionGraceMs) { seen[agent.pane_id] = first; continue; }
-      const state = !settled ? 'left no record' : failed.has(identity(settled)) ? 'failed' : settled.state, resolution = settled ? failed.get(identity(settled))?.resolution ?? settled.resolution : undefined;
-      try { await close(agent.pane_id); report.closed.push({ name: agent.name, pane: agent.pane_id, reason: `its ${kind} session ${state}${resolution ? `: ${resolution.slice(0, 160)}` : ''}` }); }
+      if (!released && now - Date.parse(first) < confirmMs) { seen[agent.pane_id] = first; continue; }
+      const state = settled ? (failed.has(identity(settled)) ? 'failed' : settled.state) : null, resolution = settled ? failed.get(identity(settled))?.resolution ?? settled.resolution : undefined;
+      const reason = state ? `its ${kind} session ${state}${resolution ? `: ${resolution.slice(0, 160)}` : ''}${finished.includes(agent.agent_status ?? '') ? '' : ` (Herdr reports ${agent.agent_status ?? 'no status'})`}`
+        : `no ${kind} record holds the name (its record was reaped or never written) and Herdr reports it ${agent.agent_status ?? 'with no status'}`;
+      try { await close(agent.pane_id); closedNames.add(agent.name); report.closed.push({ name: agent.name, pane: agent.pane_id, reason }); }
       catch (error) { report.errors.push(`Closing ${agent.name} (pane ${agent.pane_id}): ${error instanceof Error ? error.message : String(error)}`); }
     }
     // 3. Terminal records past retention that answer no live request.
     // A pinned record (GY-131) is never reaped: an open request or a pending review still reads it.
-    const reap = new Set(unpinnedTerminal(records).filter(record => !(record.requestId && live.has(record.requestId)) && now - settledAt(record) >= ledgerRetentionMs).map(identity));
+    // Nor is the newest record on a name a pane still holds and this pass did not close (GY-1166):
+    // it is the close decision's evidence, so retention never outruns the reclaim of its pane.
+    const evidence = new Set((observed.agents ?? []).filter(agent => agent.pane_id && agent.name && !closedNames.has(agent.name))
+      .map(agent => records.filter(record => record.agentName === agent.name).at(-1)).filter((record): record is Settleable => !!record).map(identity));
+    const reap = new Set(unpinnedTerminal(records).filter(record => !(record.requestId && live.has(record.requestId)) && !evidence.has(identity(record)) && now - settledAt(record) >= ledgerRetentionMs).map(identity));
     return { failed, reap };
   };
   /**
@@ -679,20 +700,24 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
       if (result.changed) await saveProducerLedger(root, { ...ledger, producers: result.records });
     }
   } catch (error) { report.errors.push(`Producer ledger: ${error instanceof Error ? error.message : String(error)}`); }
-  // 4. Worker panes on a profile's names whose session settled and no live lease holds the profile's principal.
+  // 4. Worker panes on a launch profile's names whose session settled and no live lease holds the profile's principal.
   for (const worker of config.workers ?? []) {
+    if (worker.mode !== 'launch') continue;
     const held = (observed.agents ?? []).filter(agent => agent.pane_id && agent.name && isProfileSession(worker, agent.name));
     for (const agent of held) {
       const profile = { role: 'worker' as const, name: worker.name, agentName: worker.agentName, principal: worker.principal };
       if (liveOwner(profile, agent.name!, { reviews: [], producers: [], work: observed.work, now })) continue;
-      if (!reclaimableStatus(agent)) continue;
+      // A holder Herdr reports 'unknown' or with no status is closed too, once confirmed unowned for
+      // `unownedPaneConfirmMs` and no launch of the principal is under way (GY-1166); only a running one is spared.
+      const recognised = finished.includes(agent.agent_status ?? '');
+      if (running(agent) || (!recognised && launchingWorker(worker.principal, observed.work, now))) continue;
       const settled = holderSettledAt(profile, agent.name!, { reviews: [], producers: [], work: observed.work });
       if (settled !== null && now - settled < finishedSessionGraceMs) continue;
       const first = file.seen[agent.pane_id!] ?? report.at;
-      if (now - Date.parse(first) < finishedSessionGraceMs) { seen[agent.pane_id!] = first; continue; }
+      if (now - Date.parse(first) < (recognised ? finishedSessionGraceMs : unownedPaneConfirmMs)) { seen[agent.pane_id!] = first; continue; }
       try {
         await close(agent.pane_id!);
-        report.closed.push({ name: agent.name!, pane: agent.pane_id!, reason: 'its worker session finished and holds no active assignment' });
+        report.closed.push({ name: agent.name!, pane: agent.pane_id!, reason: recognised ? 'its worker session finished and holds no active assignment' : `its worker session holds no active assignment and Herdr reports it ${agent.agent_status ?? 'with no status'}` });
       } catch (error) {
         report.errors.push(`Closing ${agent.name} (pane ${agent.pane_id}): ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -911,4 +936,90 @@ export async function dispatchRefusal(url: string, fetcher: typeof fetch = fetch
     if (response.ok && body.healthy !== false) return null;
     return `the control plane reports itself unhealthy (${(body.causes ?? [`HTTP ${response.status}`]).join('; ')}), so nothing is dispatched into a plane that cannot record the result`;
   } catch (error) { return `the control plane's /healthz could not be read (${error instanceof Error ? error.message : String(error)}), so nothing is dispatched into a plane that may not record the result`; }
+}
+
+/**
+ * Host memory (GY-612). The loop launched sessions whatever the host had left: on 26 September 2026
+ * a 62 GB host fell to one or two gigabytes available with nineteen verification runs live, and
+ * agent runtimes were reaped mid-session. Before any worker, reviewer or producer launch the loop
+ * reads the host's available memory; below the floor — 10% of total or 4 GB, whichever is larger —
+ * it defers new launches on that host with the reason recorded, raises one `resources` attention
+ * item naming the top memory consumers, and resumes launching once memory is back above the floor.
+ * Sessions already running are never stopped for it.
+ */
+export interface MemoryConsumer { command: string; processes: number; rssBytes: number }
+export interface HostMemoryReading { totalBytes: number; availableBytes: number; consumers?: MemoryConsumer[] }
+export interface HostMemoryState { host: string | null; at: string; totalBytes: number; availableBytes: number; floorBytes: number; low: boolean; since: string | null; consumers: MemoryConsumer[] }
+/** A deferral lifts only this far above the floor, so a host hovering at it does not flap launches. */
+export const memoryFloorShare = 0.1, memoryFloorMinimumBytes = 4 * 2 ** 30, memoryRecoveryMarginBytes = 2 ** 30;
+export const hostMemoryFloor = (totalBytes: number) => Math.max(totalBytes * memoryFloorShare, memoryFloorMinimumBytes);
+const gib = (bytes: number) => `${(bytes / 2 ** 30).toFixed(1)} GB`;
+
+/** The largest resident-memory users on the host, summed by command name. */
+export function memoryConsumers(listing: string, limit = 5): MemoryConsumer[] {
+  const byCommand = new Map<string, MemoryConsumer>();
+  for (const line of listing.split('\n')) {
+    const match = /^\s*(\d+)\s+(.+?)\s*$/.exec(line);
+    if (!match) continue;
+    const entry = byCommand.get(match[2]) ?? { command: match[2], processes: 0, rssBytes: 0 };
+    entry.processes++; entry.rssBytes += Number(match[1]) * 1024;
+    byCommand.set(match[2], entry);
+  }
+  return [...byCommand.values()].sort((a, b) => b.rssBytes - a.rssBytes).slice(0, limit);
+}
+
+/** The variable the suite's runner sets on the runs it starts (tests/helpers/run-tests.ts, value `unreadable`): a run so marked reads nothing, so a busy host's real memory cannot flip launch behaviour inside tests that stub no reading of their own. Production never sets it. */
+export const hostMemoryVariable = 'GRAPHYARD_HOST_MEMORY';
+
+/** This host's memory from /proc/meminfo, with its top consumers when it is below the floor; null where it cannot be read. */
+export async function readHostMemory(): Promise<HostMemoryReading | null> {
+  if (process.env[hostMemoryVariable] === 'unreadable') return null;
+  let meminfo: string;
+  try { meminfo = await readFile('/proc/meminfo', 'utf8'); } catch { return null; }
+  const field = (name: string) => { const match = new RegExp(`^${name}:\\s+(\\d+) kB`, 'm').exec(meminfo); return match ? Number(match[1]) * 1024 : null; };
+  const totalBytes = field('MemTotal'), availableBytes = field('MemAvailable');
+  if (totalBytes === null || availableBytes === null) return null;
+  if (availableBytes >= hostMemoryFloor(totalBytes)) return { totalBytes, availableBytes };
+  let listing = '';
+  try { listing = await runChild('ps', ['-eo', 'rss=,comm='], { timeoutMs: 5_000 }); } catch { /* the deferral stands without its consumers */ }
+  return { totalBytes, availableBytes, consumers: memoryConsumers(listing) };
+}
+
+const describeConsumers = (consumers: MemoryConsumer[]) => consumers.map(entry => `${entry.command}${entry.processes > 1 ? ` ×${entry.processes}` : ''} ${gib(entry.rssBytes)}`).join(', ');
+/** Why launches wait on this host, while its memory is below the floor. */
+export const memoryDeferral = (state: HostMemoryState) =>
+  `host ${state.host ?? 'this host'} has ${gib(state.availableBytes)} of ${gib(state.totalBytes)} memory available, below its ${gib(state.floorBytes)} floor, so new session launches on it are deferred until memory recovers${state.consumers.length ? `; top consumers: ${describeConsumers(state.consumers)}` : ''}`;
+
+/**
+ * Judge one reading against the last: the state the loop keeps, and the event to record when the
+ * host crossed its floor — `deferred` on the way down, `resumed` once back above it by the margin.
+ */
+export function judgeHostMemory(previous: HostMemoryState | null, reading: HostMemoryReading, now: number, host: string | null = null): { state: HostMemoryState; event: 'deferred' | 'resumed' | null; detail: string } {
+  const floorBytes = hostMemoryFloor(reading.totalBytes), at = new Date(now).toISOString();
+  const low = reading.availableBytes < floorBytes + (previous?.low ? memoryRecoveryMarginBytes : 0);
+  const state: HostMemoryState = { host, at, totalBytes: reading.totalBytes, availableBytes: reading.availableBytes, floorBytes, low,
+    since: low ? previous?.low ? previous.since : at : null, consumers: low ? reading.consumers ?? previous?.consumers ?? [] : [] };
+  if (low && !previous?.low) return { state, event: 'deferred', detail: `Launches deferred: ${memoryDeferral(state)}` };
+  if (!low && previous?.low) return { state, event: 'resumed', detail: `Launches resumed: host ${host ?? 'this host'} has ${gib(reading.availableBytes)} of ${gib(reading.totalBytes)} memory available again, above its ${gib(floorBytes)} floor (deferred since ${previous.since})` };
+  return { state, event: null, detail: low ? `Launches deferred: ${memoryDeferral(state)}` : '' };
+}
+
+/** The one `resources` attention item a host below its memory floor raises, naming its top consumers. */
+export function hostMemoryAttention(state: HostMemoryState | null | undefined): AttentionItem[] {
+  if (!state?.low) return [];
+  return [{ subject: 'memory', text: `${memoryDeferral(state)}. Deferred since ${state.since}`,
+    ...agentOwner('master', 'Let running verification finish or stop what holds the memory named here; master run resumes launches on its own once available memory is back above the floor, and GRAPHYARD_VERIFICATION_SLOTS on the host lowers how many full suites and type checks run at once') }];
+}
+
+/** Host memory rides the loop's cursor: `master status` judges it only while the loop runs. */
+export function loopMemoryAttention(cycling: { running: boolean; memory?: HostMemoryState | null } | null): AttentionItem[] {
+  return cycling?.running ? hostMemoryAttention(cycling.memory) : [];
+}
+
+/** Why no session may be launched on `host` now, or null: an executor's `launchHold` (GY-612). */
+export async function hostMemoryHold(host: string | null, read: () => Promise<HostMemoryReading | null> = readHostMemory, now: () => number = Date.now): Promise<string | null> {
+  const reading = await read();
+  if (!reading) return null;
+  const { state } = judgeHostMemory(null, reading, now(), host);
+  return state.low ? memoryDeferral(state) : null;
 }

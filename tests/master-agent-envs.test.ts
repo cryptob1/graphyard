@@ -6,6 +6,7 @@ import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountLaunch, agentLaunchPlan, buildMasterStatus, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, masterSettingsFromArgs, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, saveMasterSettings, selectAccount, sessionHarnessFile, setupAgentEnvironments, setupMaster, sharedGitDirectory, startMaster, type EnvironmentProbe } from '../src/master.js';
+import { sessionSlotsGrant } from '../src/master/harness.js';
 import { expandTypedCommand, roleOf, startedAtOnce } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, readReviewLedger, saveReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/producer.js';
@@ -295,7 +296,7 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     const produceStart = expandTypedCommand(produceCrossCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
     assert.equal(produceStart.kind, 'codex', 'the session runs the account\'s runtime, not the profile\'s');
     const produceTail = produceStart.args;
-    assert.deepEqual(produceTail.slice(0, -1), ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '--add-dir', producedCross.checkout, '--add-dir', await sharedGitDirectory(root)]);
+    assert.deepEqual(produceTail.slice(0, -1), ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '--add-dir', producedCross.checkout, '--add-dir', await sharedGitDirectory(root), ...sessionSlotsGrant(root, config).flatMap(path => ['--add-dir', path])]);
     assert.ok(produceTail.at(-1)!.startsWith(`${autonomyContract} You are an independent Graphyard proof producer`), 'the request is the positional prompt (GY-93), led by the autonomy contract since Codex loads no role file (GY-184)');
     assert.equal(produceTail.includes('--setting-sources'), false, 'no Claude harness flags ride a Codex command line');
 
