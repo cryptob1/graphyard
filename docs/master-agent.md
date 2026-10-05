@@ -40,6 +40,10 @@ another session's handle finished to free a slot.
 
 Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Fault thresholds: `invariants` in `.graphyard/master.json`; `tests/soak.test.ts` enforces.
 
+### The pipeline doctor
+
+Every `run.doctor.intervalMinutes` (default 10) the loop's [doctor](onboarding.md#the-pipeline-doctor-on-by-default) checks stuck work. Sanctioned: `scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`; never merge, dispatch, evidence or leases. Off: `run.doctor.enabled=false`.
+
 ## Research and diagnosis
 
 `Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); a provider quota refusal reads `waiting` in `daemon.diagnoses` until `retryAt`, then one probe. Branch restores or base conflicts under 30m and restart-resumed merges are not `merge` faults.
