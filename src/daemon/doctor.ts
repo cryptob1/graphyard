@@ -18,6 +18,7 @@ import type { Runner } from '../runner/types.js';
 import { readyToRetry } from './sessions.js';
 import { stoppedStates, record } from './effects.js';
 import { maxApproverLaunches } from './decisions.js';
+import { decisionReadConcurrency } from './decision-reads.js';
 import { message, type DaemonAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
@@ -511,18 +512,18 @@ export async function relaunchUnansweredApprovers(cycle: Cycle) {
   if (!decisions || !approver) return;
   const checked = state.doctor.decisionsCheckedAt, held = cycle.heldDecisions;
   for (const id of Object.keys(checked)) if (!snapshot.work.some(item => item.id === id && item.stage !== 'done')) delete checked[id];
+  let reads = decisionReadConcurrency;
   for (const item of snapshot.work.filter(item => item.stage !== 'done')) {
     // A history the decisions step holds is current to this cycle's ledger read (GY-1142) and costs
-    // nothing. Any other is read at most once per item per `decisionCheckMs`, and first only
-    // `decisionCheckMs` after the remedy first sees the item: a decision is relaunched only past
-    // ten minutes, so an earlier read finds nothing new and loads the control plane. What the remedy
-    // reads joins the held histories, kept until the ledger shows the item's decisions moved.
+    // nothing. Any other is read at most once per item per `decisionCheckMs`, at most
+    // `decisionReadConcurrency` a cycle, and first only `unansweredDecisionMs` after the remedy first
+    // sees the item (its check is dated forward so): no decision is relaunched before ten minutes,
+    // so an earlier read finds nothing to do and loads the control plane. What the remedy reads
+    // joins the held histories, kept until the ledger shows the item's decisions moved.
     const kept = held.histories.get(item.id), last = checked[item.id];
-    if (!kept && (!last || clock - Date.parse(last) < decisionCheckMs)) {
-      if (!last) checked[item.id] = new Date(clock).toISOString();
-      continue;
-    }
-    if (!kept) checked[item.id] = new Date(clock).toISOString();
+    if (!last) checked[item.id] = new Date(clock + unansweredDecisionMs - decisionCheckMs).toISOString();
+    if (!kept && (!last || clock - Date.parse(last) < decisionCheckMs || reads <= 0)) continue;
+    if (!kept) { checked[item.id] = new Date(clock).toISOString(); reads -= 1; }
     await isolate('decision', item, item.key, async () => {
       const history = kept ?? await decisions(item).then(result => { held.histories.set(item.id, result.decisions); return result.decisions; }, () => []);
       for (const decision of history.filter(entry => entry.state === 'requested')) {

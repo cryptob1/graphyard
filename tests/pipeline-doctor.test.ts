@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { emptyHeldDecisions } from '../src/daemon/decision-reads.js';
+import { decisionReadConcurrency, emptyHeldDecisions } from '../src/daemon/decision-reads.js';
 import { Launcher, type Cycle } from '../src/daemon/cycle.js';
 import { Timings } from '../src/master/timings.js';
 import { approverSessionName } from '../src/master/autonomy.js';
@@ -615,4 +615,11 @@ test('unit:loop-applies-routine-remedies — the loop settles a lapsed containme
   await relaunchUnansweredApprovers(unseen);
   assert.equal(unseenReads, 0, 'a held history is not read again');
   assert.deepEqual(launched.slice(-1), ['d-held'], 'and its unanswered decision is relaunched');
+  // However many items fall due at once, a cycle makes at most `decisionReadConcurrency` uncached reads.
+  let cappedReads = 0;
+  const many = Array.from({ length: decisionReadConcurrency + 4 }, (_, index) => item({ id: `id-GY-${200 + index}`, key: `GY-${200 + index}` }));
+  const capped = cycle(many, { agents: [], effects: { decisions: async () => { cappedReads++; return { decisions: [] }; }, approver: async () => ({ agentName: 'x', pane: null }) } });
+  for (const entry of many) capped.state.doctor.decisionsCheckedAt[entry.id] = new Date(capped.clock - decisionCheckMs).toISOString();
+  await relaunchUnansweredApprovers(capped);
+  assert.equal(cappedReads, decisionReadConcurrency, 'the cycle reads only up to its bound; the rest wait for the next cycle');
 });
