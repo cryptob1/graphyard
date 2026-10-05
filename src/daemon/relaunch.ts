@@ -4,6 +4,7 @@ import type { DispatchRequest } from '../model/dispatch.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { launchedSessionHandle } from '../auto-dispatch.js';
+import { withLaunchedRuntime } from '../master/launch.js';
 import { independentProducerProfiles } from '../producer.js';
 import type { HerdrAgent, MasterConfig } from '../master.js';
 import { message } from './state.js';
@@ -40,8 +41,9 @@ export async function relaunchSession(config: MasterConfig, session: LaunchedSes
   for (const profile of session.role === 'reviewer' ? order(config.reviewers) : order(independentProducerProfiles(work, config.producers))) {
     try {
       const principal = session.role === 'producer' ? (profile as MasterConfig['producers'][number]).principal : undefined;
-      await registeredLaunch(launch.record, launchedSessionHandle(kind, request, subject, config.hostId, undefined, profile.kind, config.herdrWorkspace, principal),
-        () => session.role === 'reviewer' ? launch.review(profile as MasterConfig['reviewers'][number], request, agents) : launch.producer(profile as MasterConfig['producers'][number], request, agents), undefined, attach);
+      const handle = launchedSessionHandle(kind, request, subject, config.hostId, undefined, profile.kind, config.herdrWorkspace, principal);
+      await registeredLaunch(launch.record, handle,
+        withLaunchedRuntime(handle, () => session.role === 'reviewer' ? launch.review(profile as MasterConfig['reviewers'][number], request, agents) : launch.producer(profile as MasterConfig['producers'][number], request, agents)), undefined, attach);
       return { profile: profile.name };
     } catch (error) { if (!(error as { accountsExhausted?: boolean })?.accountsExhausted) throw error; skipped.push(message(error)); capacity &&= !!(error as { capacityExhausted?: boolean }).capacityExhausted; }
   }
