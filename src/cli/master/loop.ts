@@ -5,6 +5,7 @@ import { daemonExecutor, liveMasterConfig, mergeExecutor } from '../../master.js
 import { daemonEffects, readDaemonState, retriedSnapshot, runDaemon } from '../../master-daemon.js';
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../../auto-dispatch.js';
 import { coordinationViewHeader } from '../../server/work-view.js';
+import { loopPresenceHeader } from '../../model/executor-presence.js';
 import { unhandled, type MasterSession } from './session.js';
 import { timedApi } from '../../master/timings.js';
 
@@ -23,7 +24,9 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     // The cycle and the dispatcher poll the bounded coordination view (by header, so an older
     // server answers with whole documents); the guarded merge re-reads the full documents.
     const live = liveMasterConfig(root, master), current = () => live.current, reload = () => live.reload();
-    const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination' });
+    // Each read also names the loop to the control plane (GY-916), which then knows the merger lives.
+    const loopInterval = () => values.interval ? intervalSeconds : current().run.intervalSeconds;
+    const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()) });
     const executor = daemonExecutor(coordinator.actor.id);
     const effects = daemonEffects(root, current, { snapshot: retriedSnapshot(() => coordinationSnapshot()), mutate: masterMutation, executor });
     // The guarded merge's reads and writes are timed against the cycle that made them (GY-377);

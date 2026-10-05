@@ -35,11 +35,13 @@ Never close a finished or dead session by hand (`graphyard master run --once` sw
 
 Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Fault thresholds: `invariants` in `.graphyard/master.json`; `tests/soak.test.ts` enforces.
 
+## Research and diagnosis
+
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); a provider quota refusal reads `waiting` in `daemon.diagnoses` until `retryAt`, then one probe. Branch restores or base conflicts under 30m and restart-resumed merges are not `merge` faults.
+
 ## Machine-filed backlog
 
-Follow-ups wait on their item (`pendingFollowUps`) until ship, joining its follow-up item; closing unshipped drops them ([follow-ups](followups.md)). Pi (`run.research`) triages follow-up and fault items (closure needs approval; `triageConcurrency` 2).
-
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`). Branch restores or base conflicts under 30m and restart-resumed merges are not `merge` faults.
+Review follow-ups are never filed: worth-fixing findings are fixed on the same pull request. Pi (`run.research`) triages follow-up and fault items (closure needs approval; `triageConcurrency` 2).
 
 ## Automatic dispatch at submit
 

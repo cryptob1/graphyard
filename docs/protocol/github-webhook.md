@@ -13,7 +13,7 @@ A base push wakes only open items whose files overlap it or whose last `mergeabl
 
 ## Prioritized wakes
 
-A merge refused only for a stale observation keeps its queue place: the loop sends `POST /api/work/:id/resync` with `prioritized: true` (at most every two minutes), claimed like a webhook wake.
+A merge refused only for a stale observation keeps its queue place: the loop sends `POST /api/work/:id/resync` with `prioritized: true` (at most every two minutes), claimed like a webhook wake. A rework decision waiting on a stale observation sends one such wake and decides from its observation while under 15 minutes old.
 
 ## Automatic dispatch records
 
