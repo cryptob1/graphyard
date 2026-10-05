@@ -4,7 +4,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
-import type { Principal } from '../src/model.js';
+import { Refusal, type Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import assert from 'node:assert/strict';
 import { determineLane, laneRequiresProof, laneSpeedTargets, laneRequirements, reworkNeedsApprover, type Lane } from '../src/model/policy.js';
@@ -196,12 +196,14 @@ test('unit:lane-sets-required-gates — an e2e proof and an inherited bootstrap 
 // applied at once, recorded as approved by the risk lane; a high-lane one waits for its approver.
 let teardown: (() => Promise<void>) | null = null;
 after(async () => { await teardown?.(); });
-test('unit:lane-sets-required-gates — a low- or medium-lane rework is applied as it is requested, and a high-lane one waits for its independent approver', { timeout: 120_000 }, async () => {
+let fixture: Promise<Awaited<ReturnType<typeof startLanes>>> | null = null;
+const lanes = () => fixture ??= startLanes();
+async function startLanes() {
   const repository = 'owner/lanes';
   const operator: Principal = { id: 'lane-operator', role: 'admin', sessionKind: 'human' };
   const implementer: Principal = { id: 'lane-implementer', role: 'worker', sessionKind: 'ai' };
   const credentials = [operator, implementer].map(principal => ({ ...principal, token: `lanes-${principal.id}-${'x'.repeat(32)}` }));
-  const master = { id: 'lane-master', token: `lane-master-${'m'.repeat(32)}`, capabilities: ['intent:create', 'intent:ready', 'decision:rework'] };
+  const master = { id: 'lane-master', token: `lane-master-${'m'.repeat(32)}`, capabilities: ['intent:create', 'intent:ready', 'decision:rework', 'intent:unblock'] };
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 883;
   const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('risk-lanes'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('lanes_test');
@@ -211,11 +213,18 @@ test('unit:lane-sets-required-gates — a low- or medium-lane rework is applied 
   teardown = async () => { http.close(); await store.close(); await database.stop(); };
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
-  const call = async (token: string, path: string, body: unknown) => {
-    const response = await fetch(`${url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify(body) });
-    const result = await response.json() as any;
-    assert.equal(response.status, 200, JSON.stringify(result));
-    return result;
+  const send = async (token: string, path: string, body: unknown, key: string = randomUUID()) => {
+    const response = await fetch(`${url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(body) });
+    return { status: response.status, body: await response.json() as any };
+  };
+  const call = async (token: string, path: string, body: unknown, key?: string) => {
+    const result = await send(token, path, body, key);
+    assert.equal(result.status, 200, JSON.stringify(result.body));
+    return result.body;
+  };
+  const decisions = async (key: string) => {
+    const response = await fetch(`${url}/api/work/${key}/decisions`, { headers: { Authorization: `Bearer ${master.token}` } });
+    return (await response.json() as { decisions: any[] }).decisions;
   };
   await call(credentials[0].token, 'operator-agents', { id: master.id, displayName: master.id, capabilities: master.capabilities, scope: { repositories: [repository], workItems: ['*'] }, token: master.token, reason: 'The master requests reworks' });
   let pr = 880;
@@ -227,6 +236,28 @@ test('unit:lane-sets-required-gates — a low- or medium-lane rework is applied 
     work = await engine.execute(implementer, 'submit', work.id, { epoch: work.epoch, pr: ++pr }, randomUUID());
     return engine.observe(work.id, work.revision, { ...observed(paths), candidate: { ...observed(paths).candidate, pr, branch: work.workspaces.at(-1)!.branch } });
   };
+  // GY-612's f39aada7: the lane's approval commits, then the application is interrupted before
+  // any outcome is recorded (a server fault on the engine call, as a killed request leaves it).
+  const interrupted = async (title: string) => {
+    const work = await submitted(title, ['src/model/lanes.ts']);
+    const execute = engine.execute;
+    engine.execute = (async (...args: Parameters<typeof execute>) => {
+      if (args[1] === 'rework') { engine.execute = execute; throw new Error('connection terminated while applying the rework'); }
+      return execute.apply(engine, args);
+    }) as typeof execute;
+    const failed = await send(master.token, `work/${work.key}/decide`, { action: 'rework', input: { previousWorkerStopped: true }, reason: 'The reviewer requested changes' });
+    engine.execute = execute;
+    assert.notEqual(failed.status, 200, 'the interrupted application answers no outcome');
+    const [stranded] = await decisions(work.key);
+    assert.equal(stranded.state, 'approved', 'the lane\u2019s approval committed');
+    assert.equal(stranded.approvedBy, 'graphyard-risk-lane');
+    assert.equal((await store.list()).find(item => item.id === work.id)!.reworkRequested, false, 'and nothing was applied');
+    return { work, stranded };
+  };
+  return { engine, store, master, send, call, decisions, submitted, interrupted };
+}
+test('unit:lane-sets-required-gates — a low- or medium-lane rework is applied as it is requested, and a high-lane one waits for its independent approver', { timeout: 120_000 }, async () => {
+  const { store, master, call, submitted } = await lanes();
   for (const [title, paths, lane] of [['low-rework', ['src/model/lanes.ts'], 'low'], ['medium-rework', ['src/model/lanes.ts', 'src/cli/lanes.ts'], 'medium']] as [string, string[], Lane][]) {
     const work = await submitted(title, paths);
     assert.equal(work.lane, lane);
@@ -240,6 +271,61 @@ test('unit:lane-sets-required-gates — a low- or medium-lane rework is applied 
   const pending = await call(master.token, `work/${high.key}/decide`, { action: 'rework', input: { previousWorkerStopped: true }, reason: 'The reviewer requested changes' });
   assert.equal(pending.state, 'requested', 'a high-lane rework waits for its independent approver');
   assert.equal((await store.list()).find(item => item.id === high.id)!.reworkRequested, false);
+});
+
+// GY-1110 AC-1: a lane-approved rework whose application recorded no outcome is resumed by the
+// server on the next request for the item, without the original idempotency key, and lands applied.
+test('unit:lane-rework-interrupted-resumes — the next request for the item resumes an interrupted lane rework', { timeout: 120_000 }, async () => {
+  const { store, master, send, decisions, interrupted } = await lanes();
+  const { work, stranded } = await interrupted('interrupted-rework');
+  // An unrelated request, under a fresh key: it is refused on its own merits, yet the server
+  // resumed the stranded rework before judging it.
+  const unrelated = await send(master.token, `work/${work.key}/decide`, { action: 'unblock', input: { expectedRevision: 1 }, reason: 'Nothing to unblock' });
+  assert.equal(unrelated.status, 409, JSON.stringify(unrelated.body));
+  const [resumed] = await decisions(work.key);
+  assert.equal(resumed.id, stranded.id);
+  assert.equal(resumed.state, 'applied', 'the stranded rework lands applied');
+  assert.equal(resumed.approvedBy, 'graphyard-risk-lane');
+  assert.equal((await store.list()).find(item => item.id === work.id)!.reworkRequested, true, 'and the item is sent back for rework');
+  // A later request finds nothing left to resume, and the outcome is recorded once.
+  await send(master.token, `work/${work.key}/decide`, { action: 'unblock', input: { expectedRevision: 1 }, reason: 'Nothing to unblock' });
+  const outcomes = (await decisions(work.key)).filter(entry => entry.id === stranded.id);
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0].state, 'applied');
+});
+
+// GY-1110 AC-2: a new rework request on an item whose standing lane-approved rework is unapplied is
+// never refused 'already approved': the standing decision is resumed and answers it, or, when its
+// application fails, the new request supersedes it — no human and no database edit.
+test('unit:lane-rework-unapplied-not-blocking — a new rework request resumes or supersedes the unapplied standing rework', { timeout: 120_000 }, async () => {
+  const { engine, store, master, send, decisions, interrupted } = await lanes();
+  const rework = { action: 'rework', input: { previousWorkerStopped: true }, reason: 'The loop requests the rework again' };
+  // Resumed: the standing decision applies and is the answer to the new request.
+  const { work, stranded } = await interrupted('unapplied-resumed');
+  const key = randomUUID();
+  const again = await send(master.token, `work/${work.key}/decide`, rework, key);
+  assert.equal(again.status, 200, `the new request is not refused: ${JSON.stringify(again.body)}`);
+  assert.equal(again.body.id, stranded.id, 'the standing decision answers it');
+  assert.equal(again.body.state, 'applied');
+  assert.equal((await store.list()).find(item => item.id === work.id)!.reworkRequested, true);
+  assert.deepEqual((await send(master.token, `work/${work.key}/decide`, rework, key)).body, again.body, 'its replay answers the same');
+  assert.equal((await decisions(work.key)).length, 1, 'no second rework was recorded');
+  // Superseded: the standing decision's application is refused now, so it settles failed and the
+  // new request is recorded and applied in its place.
+  const second = await interrupted('unapplied-superseded');
+  const execute = engine.execute;
+  engine.execute = (async (...args: Parameters<typeof execute>) => {
+    if (args[1] === 'rework') { engine.execute = execute; throw new Refusal('The item moved on before the rework was applied', 409); }
+    return execute.apply(engine, args);
+  }) as typeof execute;
+  const superseding = await send(master.token, `work/${second.work.key}/decide`, rework);
+  engine.execute = execute;
+  assert.equal(superseding.status, 200, `the new request is not refused: ${JSON.stringify(superseding.body)}`);
+  assert.notEqual(superseding.body.id, second.stranded.id, 'a new decision supersedes the standing one');
+  assert.equal(superseding.body.state, 'applied');
+  const ledger = await decisions(second.work.key);
+  assert.equal(ledger.find(entry => entry.id === second.stranded.id)!.state, 'failed', 'the standing decision settled failed');
+  assert.equal((await store.list()).find(item => item.id === second.work.id)!.reworkRequested, true);
 });
 
 // AC-3: lanes are inputs to the single landability verdict (GY-878), not separate required-check
