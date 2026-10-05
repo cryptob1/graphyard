@@ -35,6 +35,8 @@ Where a sandbox stats `/tmp`, `/home` as uid 65534, attestor tests assert their 
 
 Add a self-contained paragraph or section rather than rewording shared sentences. A candidate whose conflicts with the base are confined to docs/**/*.md is refreshed by docs-sync, not reworked: the base merges in, both sides kept in budget, and approval is kept when the non-docs diff is unchanged; five or more conflicts in 24 hours on one path raises an attention item.
 
+The launcher, which is not confined, creates the docs-sync worktree itself — a detached checkout of the reviewed head at `.graphyard/docs-sync/<KEY>-<head7>` under the coordinator checkout — and starts the session in it. The session's confinement binds the coordinator checkout read-only and then re-binds exactly that worktree and the shared Git directory writable; nothing else in the coordinator checkout is writable. A launch whose worktree is still not writable, on the host or under the confinement, is refused before the session starts, naming the path, and the loop sends the conflict to rework in the same cycle. Each docs-sync launch first removes the docs-sync worktrees no running session owns.
+
 ## Trusted contracts
 
 Trusted CI runs only protected source, refusing candidates whose base lacks the contract: land the harness and its `scripts/contracts.mjs` entry first, then require later work's proof.
