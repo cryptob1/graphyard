@@ -305,6 +305,26 @@ export function outputAfterCommand(screen: string | null, command: string) {
   return after.length ? after.slice(-exitedLineLimit).map(line => line.length > paneLineLimit ? `${line.slice(0, paneLineLimit)}…` : line) : null;
 }
 /**
+ * Whether a foreground process's argv is a `graphyard watch` supervisor (GY-1213): `watch`, after
+ * the CLI that runs it, then its operands and any flags, then the `--` that opens the runtime's
+ * command — however many words lie between — or a shell wrapper's single `-c` string spelling the
+ * same. Pinned against `launchCommand` with the supervisor prefix dispatch builds.
+ */
+export function supervisorArgv(argv: string[]) {
+  const at = argv.indexOf('watch');
+  if (at > 0 && argv.indexOf('--', at + 2) > 0) return true;
+  return argv.some(word => /\S\s+watch\s+\S.*\s--(\s|$)/.test(word));
+}
+/**
+ * Whether a foreground process's argv runs `program` (GY-1213): a word, or a word of a wrapper's
+ * `-c` string, whose basename is the program or an interpreter script named for it (`codex.js`).
+ * A runtime started as a script of another name (`node …/cli.js`) is not recognised; that is
+ * harmless while its supervisor stays in the launch's foreground group, which is classed first.
+ */
+export function runsProgram(argv: string[], program: string) {
+  return argv.flatMap(word => word.split(/\s+/)).some(word => { const base = word.split('/').at(-1) ?? ''; return base === program || base.replace(/\.[cm]?js$/, '') === program; });
+}
+/**
  * Who holds the pane's terminal foreground, as `herdr pane process-info` reports it: `shell` when
  * the pane's own shell does (nothing the launch typed is still running), `command` when another
  * process group does (the typed launch command — its supervisor, then the runtime — is executing),
@@ -322,9 +342,11 @@ export async function paneForeground(pane: string, run?: ChildRun, program?: str
     const processes: { argv?: unknown; name?: unknown }[] = Array.isArray(info.foreground_processes) ? info.foreground_processes : [];
     const argvs = processes.map(entry => Array.isArray(entry?.argv) ? entry.argv.filter((word): word is string => typeof word === 'string') : []);
     if (!program || !argvs.some(argv => argv.length)) return 'command';
-    if (argvs.some(argv => { const at = argv.indexOf('watch'); return at > 0 && argv[at + 3] === '--'; })) return 'supervisor';
-    if (argvs.some(argv => argv.some(word => word.split('/').at(-1) === program))) return 'runtime';
-    const first = processes[0], named = typeof first?.name === 'string' && first.name ? first.name : argvs[0]?.[0]?.split('/').at(-1);
+    if (argvs.some(supervisorArgv)) return 'supervisor';
+    if (argvs.some(argv => runsProgram(argv, program))) return 'runtime';
+    // The refusal names the process that was inspected: the first one listed with an argv.
+    const at = argvs.findIndex(argv => argv.length), inspected = processes[at];
+    const named = typeof inspected?.name === 'string' && inspected.name ? inspected.name : argvs[at][0].split('/').at(-1);
     return { other: named || 'an unnamed process' };
   } catch { return null; }
 }
