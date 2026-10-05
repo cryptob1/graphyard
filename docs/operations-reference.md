@@ -7,7 +7,7 @@ Restarting `graphyard master run` never double-dispatches. `master status` → `
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge, or *already recording deployment*. Without `--deployment-url` it reads `productionEnvironment` deployments; the newest success counts even inactive, or behind an in-flight (pending/queued/in_progress/waiting) one under an hour old.
+`master verify-deployment GY-N` refuses a release *unobserved*, *stale* (rerun), not serving the merge, or *already recording deployment*. Without `--deployment-url` it reads `productionEnvironment` deployments: newest success counts even inactive or behind sub-hour pending/queued/in_progress/waiting ones.
 
 ## Lost worker before submission
 
