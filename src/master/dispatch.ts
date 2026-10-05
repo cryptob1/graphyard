@@ -110,6 +110,7 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   if (!Number.isFinite(now)) throw new Error('Dispatch requires a valid Graphyard snapshot clock');
   if (parkedOnHuman(work)) throw new Error(`Dispatch waits on a human-only decision (${humanDecisionLabel[work.humanRequest!.kind]}); ${answerCommand(work.key, work.humanRequest!)} resumes it`);
   if (!work.ready || work.blocker) throw new Error('Dispatch requires released work without a blocker');
+  if (work.children?.length) throw new Error(`${work.key} was split into ${work.children.join(', ')} before dispatch; it is delivered when they are and is never dispatched itself`);
   const fenced = containmentHold(work, now);
   if (fenced) throw new Error(fenced);
   const unfinished = work.dependencies.map(id => allWork.find(item => item.id === id)).filter(dependency => !dependency || dependency.stage !== 'done');

@@ -11,7 +11,7 @@ import { autonomyContract } from '../../src/autonomy';
  * never run blindly. Nothing here asks a person anything: there is no UI call anywhere in this
  * file, and a refused call returns its reason to the agent so it retries safely.
  *
- * `GRAPHYARD_PI_ROLE` (approver | producer | research | diagnostician | doctor | triage) selects the role's tool; unset, the approver's
+ * `GRAPHYARD_PI_ROLE` (approver | producer | research | decomposition | diagnostician | doctor | triage) selects the role's tool; unset, the approver's
  * and the producer's are registered.
  * The tools submit nothing to the control plane themselves: the runner hands the validated payload
  * to the loop, which applies it through the same routes a terminal session uses, and the gates
@@ -73,6 +73,20 @@ export const researchParameters: JsonSchema = {
   },
 };
 
+/** The split of a broad item (GY-1126, src/runner/payloads.ts decompositionPayloadSchema): child items naming the parent's criteria by ID, or none to keep it whole. */
+export const decomposeParameters: JsonSchema = {
+  type: 'object', additionalProperties: false, required: ['reason', 'children'],
+  properties: {
+    reason: text(2000, 'Why this split (or why the item stays whole)'),
+    children: { type: 'array', maxItems: 10, description: 'Two to ten child items, or an empty list to keep the item whole',
+      items: { type: 'object', additionalProperties: false, required: ['title', 'criteria', 'plannedFiles'], properties: {
+        title: text(200, 'The child item title'), description: text(6000, 'What this child builds'),
+        criteria: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'string', pattern: '^[A-Z]+-\\d+$', description: 'A criterion ID of the parent, such as AC-2; each goes to exactly one child' } },
+        plannedFiles: { type: 'array', minItems: 1, maxItems: 100, items: text(500, 'A file or directory this child changes, inside the parent\'s planned files and narrower than them') },
+        after: { type: 'array', maxItems: 9, items: { type: 'integer', minimum: 0, maximum: 9, description: 'The 0-based position of an earlier child this one must land after' } },
+      } } },
+  },
+};
 /** The pipeline doctor's report (GY-711, src/runner/payloads.ts doctorReportPayloadSchema): what was stuck, what it did, what it filed. */
 export const doctorReportParameters: JsonSchema = {
   type: 'object', additionalProperties: false, required: ['findings', 'actions', 'filed'],
@@ -188,6 +202,7 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
   const evidence = tool('graphyard_submit_evidence', 'Graphyard evidence', 'Submit one proof\'s result on the exact head, base and policy revision you were given, with the exercise run against the tree with the criterion\'s behaviour removed. Call it once per proof, pass or fail.', evidenceParameters, params => `proof ${params.proof}`, false);
   // The research session's brief (GY-259), the diagnostician's diagnosis (GY-439) and the doctor's report (GY-711) are registered for their own roles only.
   if (role === 'diagnostician') return [tool('graphyard_diagnose', 'Graphyard diagnose', 'Record your diagnosis of the recurring fault or invariant violation you were asked to diagnose: its cause, the log lines and commands it rests on, its fault class, and either the existing open item that covers it or the fix item to file. Call it exactly once; it is your result.', diagnoseParameters, params => `diagnosis ${params.subject}`, true)];
+  if (role === 'decomposition') return [tool('graphyard_decompose', 'Graphyard decompose', 'Record how the broad item you were asked to split divides into small child items, each with the parent criterion IDs it takes, its planned files and the earlier children it lands after; or an empty children list to keep it whole. Call it exactly once; it is your result.', decomposeParameters, () => 'the split', true)];
   if (role === 'doctor') return [tool(doctorReportToolName, 'Graphyard doctor report', 'Record the report of your doctor run: one entry per finding (what was stuck, under which check bound, and whether you could act), one per sanctioned command you ran and what it changed, and one per fault item to file for a finding no open item covers. Call it exactly once; it is your result.', doctorReportParameters, () => 'the doctor report', true)];
   if (role === 'research') return [tool('graphyard_research_brief', 'Graphyard research brief', 'Record the research brief for the item you were asked to research: existing code to reuse, patterns and prior art with sources, risks, the approach you recommend, and the operator\'s product questions with your recommended answers. Call it exactly once; it is your result.', researchParameters, () => 'the brief', true)];
   // The triage session's judgement of a machine-filed backlog item (GY-402), likewise for its own role only.
