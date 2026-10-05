@@ -1569,8 +1569,8 @@ export class Engine {
    * Claim the next action for a stateless executor.
    *
    * The executor names itself and its host, and the kinds it can actually run; the control plane
-   * hands back the oldest open row it can take, leased for a bounded time. Two executors on two
-   * hosts calling this at the same instant are serialized by the coordination lock, so the first
+   * hands back the first open row it can take in claim order, leased for a bounded time. Two
+   * executors on two hosts calling this at the same instant are serialized by the coordination lock, so the first
    * gets the row and the second gets the next one. Neither is configured with the other, and
    * neither reports to a master: the queue is the whole of their coordination.
    */
@@ -1599,6 +1599,8 @@ export class Engine {
       // asking every few seconds must not write a row per question it asked.
       if (claimed) {
         await save(db, claimed.work, actor.id, 'action.claimed', now, { id: claimed.row.id, kind: claimed.row.kind, executor: claimed.row.claim!.executor, host: claimed.row.claim!.host, principal: actor.id, attempt: claimed.row.attempts });
+        // A row this executor last failed on stepped aside for this claim; its mark makes that once (GY-1132).
+        for (const work of claimed.yielded) await save(db, work, actor.id, 'action.claimed', now, { id: claimed.row.id, kind: claimed.row.kind, executor: claimed.row.claim!.executor, yielded: work.actionQueue!.actions.filter(row => row.yielded === claimed.row.claim!.executor).map(row => row.id) });
         await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       }
       return result;
