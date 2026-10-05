@@ -292,6 +292,7 @@
     "tests/deploy-smoke.test.ts": 246,
     "tests/deployment-observation-cost.test.ts": 6672,
     "tests/deployment-packaging.test.ts": 2696,
+    "tests/deployment-verification.test.ts": 300,
     "tests/diff-bound-carry.test.ts": 605,
     "tests/direct-merge-mode.test.ts": 2429,
     "tests/dismissed-review.test.ts": 2433,

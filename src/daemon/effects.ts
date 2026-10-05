@@ -2,6 +2,8 @@
 import { wakeOwnObservation } from '../master/base-break-refresh.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { productionEnvironmentFromEnv } from '../flow-analytics.js';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
@@ -39,7 +41,7 @@ import { withRoleDefaults } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
-import { observeDeployment } from './deployment.js';
+import { observeDeployment, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
@@ -136,6 +138,11 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * so the dashboard and flow report read releases under that same name; sent only on a change.
    */
   publishProductionEnvironment?: () => Promise<unknown>;
+  /**
+   * GY-1302: the promotion drive's reads and its dispatch of the release-candidate workflow; null
+   * when the repository has no such workflow, absent on a loop wired without it.
+   */
+  promotion?: PromotionReads | null;
   /**
    * Publishes `mergeQueue.batchSize` (GY-330), `mergeQueue.parallelTips` (GY-498),
    * and `mergeQueue.rerunFailedChecks` to the control plane, whose merge queue batches and
@@ -684,6 +691,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     observeCandidate: work => mutate(`work/${work.id}/resync`, { prioritized: true }),
     // `root` is this checkout: containment is derived from its object store, never from the forge.
     observeDeployment: (delivered, retained) => observeDeployment(current(), delivered, run, fetcher, () => Date.now(), { root, retained }),
+    get promotion() { return promotionReads(current(), root, run, existsSync(join(root, '.github', 'workflows', promotionWorkflow))); },
     publishProductionEnvironment: async () => {
       const environment = current().run.productionEnvironment ?? productionEnvironmentFromEnv();
       if (environment === publishedEnvironment) return;
