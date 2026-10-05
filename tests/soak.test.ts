@@ -1266,8 +1266,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   };
   // GY-711's routine remedies run from the real cycle: this host's containment probe (its
   // supervisor verified gone once the fence lapsed), the coordinator's autosettle — whose first
-  // call the control plane fails transiently, so the reclaim step's settle fails and the doctor's
-  // settle remedy is what lowers the fence — and the operator-agent unblock.
+  // call the control plane fails transiently, so the reclaim step's settle fails and a later settle
+  // (its own retry or the doctor's settle remedy) lowers the fence — and the operator-agent unblock.
   const remedies = { settles: [] as { key: string; ok: boolean }[], unblocks: [] as { key: string; revision: number }[] };
   const containment: DaemonEffects['containment'] = async (work, observed) => {
     const now = Date.parse(observed.now);
@@ -2350,12 +2350,14 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(state.doctor.runs.some(entry => entry.findings.some(finding => finding.subject === items[0].key && finding.check === 'worker')), 'the doctor report applied: its finding is on the run record');
   // GY-711, AC-3: the two per-item remedies the loop applies without an agent fired in the real
   // cycle across the day, each exactly once, and nothing repeated after. The fenced item's reclaim
-  // settle was failed by the control plane, so the doctor's settle remedy lowered the fence on its
-  // own key; the covered scope-refusal blocker was cleared once, at the revision the loop read.
+  // settle was failed by the control plane; whichever settles it next — the reclaim step's own retry
+  // (GY-1155) or the doctor's settle remedy — lowers the fence once and the other never repeats it.
+  // The covered scope-refusal blocker was cleared once, at the revision the loop read.
   const { remedies } = day, remedied = items[remedyItem - 1], remedyFinal = final.find(item => item.id === remedied.id)!;
   const remedyActions = (name: string) => Object.entries(state.actions).filter(([key]) => key.startsWith(`remedy:${name}:${remedied.id}:`)).map(([, action]) => action);
   assert.deepEqual(remedies.settles, [{ key: remedied.key, ok: false }, { key: remedied.key, ok: true }], 'the fence was settled twice in all: the reclaim step\'s refused call, then the remedy\'s one successful call');
-  assert.deepEqual(remedyActions('settle').map(action => `${action.state} x${action.attempts}`), ['done x1'], 'the settle remedy applied once, on its first attempt');
+  const settledBy = [...remedyActions('settle'), ...Object.entries(state.actions).filter(([key]) => key.startsWith(`settle:${remedied.id}:`)).map(([, action]) => action)];
+  assert.deepEqual(settledBy.filter(action => action.state === 'done').length, 1, `one settle action lowered the fence: ${JSON.stringify(settledBy)}`);
   assert.equal(remedyFinal.containmentQuarantine ?? null, null, 'the submitted attempt\'s lapsed fence is settled');
   assert.deepEqual(remedies.unblocks, [{ key: remedied.key, revision: remedies.unblocks[0]?.revision }], 'the covered scope-refusal blocker was cleared exactly once');
   assert.deepEqual(remedyActions('unblock').map(action => `${action.state} x${action.attempts}`), ['done x1'], 'the unblock remedy applied once, on its first attempt');
