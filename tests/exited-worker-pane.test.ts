@@ -37,7 +37,6 @@ function effects(work: Work[], agents: HerdrAgent[], closed: string[]): DaemonEf
     closeSession: pane => { closed.push(pane); },
     dispatch: async () => {},
     requestProof: () => {},
-    merge: async () => ({ result: 'merged', merged: true }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},

@@ -5,7 +5,7 @@ import { evaluate, type Work } from '../src/model.js';
 import { nextAction } from '../src/model/next-action.js';
 import { assumedObservationRequests, CHECK_NAME, defaultHourlyLimit, GitHub, mergePathReserve, observationCadence, steadyStateInterval } from '../src/github.js';
 import { observationThroughputStatus } from '../src/cli/master-status.js';
-import { observationClaim, observationClaimBatch, observationFreshnessBounds, reviewCadenceCapMs, reviewObservationFreshnessMs } from '../src/observation-priority.js';
+import { observationClaim, observationFreshnessBounds, reviewCadenceCapMs, reviewObservationFreshnessMs } from '../src/observation-priority.js';
 import { simulateObservationScheduler } from '../src/observation-simulation.js';
 import { defaultDatabasePoolSize, defaultObservationConcurrency, observationCapacity, observationConcurrency } from '../src/server/main.js';
 
@@ -31,14 +31,15 @@ const observed = (work: Work, at: string, approved: boolean) => ({
 }) as Work['observation'];
 
 /**
- * The 2026-10-02 fleet at 100 open items: `queuedCount` approved entries in the merge queue (the
- * head band is the merge band; the rest wait behind it) and `reviewCount` unapproved candidates
- * whose next action is the review request. Every reading is `ageMs` old.
+ * The 2026-10-02 fleet at 100 open items: `queuedCount` approved candidates and `reviewCount`
+ * unapproved candidates whose next action is the review request. GitHub delivery is the only
+ * delivery (GY-1235), so there is no Graphyard merge queue: the first two approved candidates pass
+ * every gate and are GitHub's to merge (the merge band); the rest were sent back for rework and
+ * wait on a worker (steady). Every reading is `ageMs` old.
  */
 function fleet(queuedCount: number, reviewCount: number, ageMs = 30_000) {
   const base = sha('main-capacity'), at = new Date(now - ageMs).toISOString();
-  const queued = Array.from({ length: queuedCount }, (_, index) => item(`GY-Q${index}`, 300 + index, sha(`q${index}`), base, {
-    queue: { sequence: index + 1, enqueuedAt: new Date(now - 3_600_000).toISOString(), policyRevision: 1, speculation: null } } as Partial<Work>));
+  const queued = Array.from({ length: queuedCount }, (_, index) => item(`GY-Q${index}`, 300 + index, sha(`q${index}`), base, { reworkRequested: index >= 2 } as Partial<Work>));
   const review = Array.from({ length: reviewCount }, (_, index) => item(`GY-R${index}`, 600 + index, sha(`r${index}`), base,
     { stage: 'review', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['manual:budget'] }] } as Partial<Work>));
   const raw = [...queued.map(work => ({ ...work, observation: observed(work, at, true) })), ...review.map(work => ({ ...work, observation: observed(work, at, false) }))] as Work[];
@@ -57,13 +58,13 @@ test('unit:observation-priority-keeps-merge-and-review-fresh — at 100 open ite
   const steadyMs = steadyStateInterval(100, null, null);
   assert.equal(steadyMs, 3_600_000);
   assert.equal(observationCadence(reviewItems[0], all, date, reviewItems[0].observation, steadyMs).ms, reviewCadenceCapMs);
-  assert.equal(observationCadence(all[30], all, date, all[30].observation, steadyMs).ms, steadyMs, 'a queued entry behind the head band keeps the fleet bound');
+  assert.equal(observationCadence(all[30], all, date, all[30].observation, steadyMs).ms, steadyMs, 'a candidate awaiting its rework keeps the fleet bound');
 
   // A review request past half its bound joins the protected prefix, ahead of starved backlog jobs.
   const aged = all.map(work => work.key === 'GY-R7' ? { ...work, observation: { ...work.observation!, at: new Date(now - 16 * 60_000).toISOString() } } : work);
   const plan = observationClaim(aged, 1, now);
   const byKey = new Map(aged.map(work => [work.id, work.key]));
-  assert.deepEqual(plan.order.slice(0, plan.headCount).map(id => byKey.get(id)), ['GY-Q0', 'GY-Q1', 'GY-R7'], 'the head band, then the aged review request');
+  assert.deepEqual(plan.order.slice(0, plan.headCount).map(id => byKey.get(id)), ['GY-Q0', 'GY-Q1', 'GY-R7'], 'the merge path, then the aged review request');
   assert.equal(observationClaim(all, 1, now).headCount, 2, 'fresh review requests stay behind the prefix');
 
   // The default configuration: a pool of 16 and eight workers, never more than half the pool.
@@ -105,23 +106,6 @@ test('unit:observation-priority-keeps-merge-and-review-fresh — at 100 open ite
 });
 
 // GY-1178: the follow-ups of GY-1114's review.
-
-test('the merge band master status reports spans the queue positions the workers claim with the merge path, parallel tips included', () => {
-  // Queue positions 2 and 3 are claimed with the merge path under four parallel tips (processJob's
-  // band); with no tips in flight their lag was reported as steady, understating the merge band.
-  const all = fleet(6, 0).map(work => work.key === 'GY-Q3' ? { ...work, observation: { ...work.observation!, at: new Date(now - 200_000).toISOString() } } : work) as Work[];
-  const claimed = observationClaim(all, observationClaimBatch(1, 4), now);
-  const byKey = new Map(all.map(work => [work.id, work.key]));
-  assert.deepEqual(claimed.order.slice(0, claimed.headCount).map(id => byKey.get(id)), ['GY-Q0', 'GY-Q1', 'GY-Q2', 'GY-Q3']);
-  const status = (mergeQueue: { batchSize: number; parallelTips: number } | null) => observationThroughputStatus(mergeQueue ? { mergeQueue } : null, { work: all, now: new Date(now).toISOString(), jobs: [] }, now);
-  const tips = status({ batchSize: 1, parallelTips: 4 });
-  assert.deepEqual(tips.bands.map(entry => [entry.band, entry.items, entry.pastBound]), [['merge', 4, 1], ['review', 0, 0], ['steady', 2, 0]]);
-  assert.match(tips.attention[0].text, /The merge band has 1 of 4 item\(s\).*oldest GY-Q3/);
-  assert.deepEqual(status({ batchSize: 3, parallelTips: 1 }).bands[0].items, 3, 'a batch wider than the tips sets the band');
-  // Unpublished settings keep the head band of two, as the workers' defaults do.
-  assert.deepEqual(status(null).bands.map(entry => [entry.band, entry.items, entry.pastBound]), [['merge', 2, 0], ['review', 0, 0], ['steady', 4, 0]]);
-  assert.equal(observationClaimBatch(), 1);
-});
 
 // GY-1195: the follow-ups of GY-1178's review. The hourly guard below priced a settled poll at a
 // fixed two charged requests; the soak here measures it from the real `observe` path instead.
@@ -279,17 +263,16 @@ test('a large review-requested fleet stays inside the review bound without spend
 });
 
 test('with advance the simulation moves items between bands as their readings change, and the bounds still hold', () => {
-  // A changed reading of a review request approves it into the back of the queue; one of the queue
-  // head merges it. Items leave the review band, queued entries move up into the merge band.
+  // A changed reading of a review request approves it: every gate passes and it joins the merge
+  // band. GitHub merges a candidate of the merge band once it is read again. Items leave the review
+  // band, and merged heads leave the open fleet.
   const all = fleet(10, 30);
-  let sequence = 100;
   const advance = (work: Work, fleet: Work[], at: number): Work | null => {
-    if (work.key.startsWith('GY-R') && !work.queue) {
-      const queued = { ...work, stage: 'merge', queue: { sequence: ++sequence, enqueuedAt: new Date(at).toISOString(), policyRevision: 1, speculation: null }, observation: observed(work, new Date(at).toISOString(), true) } as Work;
-      return { ...queued, ...evaluate(queued, fleet.map(entry => entry.id === work.id ? queued : entry), new Date(at), [CI]) } as Work;
+    if (work.key.startsWith('GY-R') && work.stage === 'review') {
+      const approved = { ...work, observation: observed(work, new Date(at).toISOString(), true) } as Work;
+      return { ...approved, ...evaluate(approved, fleet.map(entry => entry.id === work.id ? approved : entry), new Date(at), [CI]) } as Work;
     }
-    const head = fleet.filter(entry => entry.queue && entry.stage !== 'done').sort((a, b) => a.queue!.sequence - b.queue!.sequence)[0];
-    return head?.id === work.id ? { ...work, stage: 'done', queue: null } as Work : null;
+    return work.stage === 'merge' && !work.reworkRequested ? { ...work, stage: 'done' } as Work : null;
   };
   const options = { all, workers: 8, steadyMs: steadyStateInterval(all.length, null, null), jobMs: 13_000, durationMs: 3_600_000, changedShare: 0.3 };
   const fixed = simulateObservationScheduler(options);

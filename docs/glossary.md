@@ -55,7 +55,7 @@ Role | Held by | May | Never
 ---|---|---|---
 | `admin` | Human operator | Any decision | Share with AI
 | `operator-agent` | Master, approver | Add intent; request/approve decisions | Approve own request; merge
-| `coordinator` | Master loop | Dispatch, guarded merge | Implement, produce evidence
+| `coordinator` | Master loop | Dispatch, reconcile merges | Implement, produce evidence
 | `slice-lead` | Slice lead | Rule on slice, escalate | Implement, merge
 | `worker` | Worker | Claim, heartbeat, register, submit | Satisfy acceptance
 | `producer` | CI, runner, observer | Report granted proofs | Prove its own work

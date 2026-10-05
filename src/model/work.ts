@@ -186,6 +186,7 @@ export interface Work extends Create {
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
   reviewRequest?: ReviewRequest | null;
   reviewFailovers?: ReviewFailover[];
+  /** Recorded before GY-1235 and only cleared since: GitHub merges on every passing gate, with no separate authorization. */
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
   /** What the exact head still needs from a launched reviewer or producer; see model/dispatch.ts. */
   autoDispatch?: AutoDispatch | null;
@@ -200,6 +201,7 @@ export interface Work extends Create {
   agentRequests?: AgentRequest[];
   /** Durable handles for the sessions launched on this item; see model/sessions.ts. */
   sessions?: SessionHandle[];
+  /** Recorded before GY-258 and only cleared since: Graphyard issues no merge executions. */
   mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; committingAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null } | null;
   delivery?: Delivery;
   /** Retired repair lane (GY-406, removed by GY-1234): stored items keep loading; nothing reads these. */

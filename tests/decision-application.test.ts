@@ -304,7 +304,7 @@ test('unit:approved-decision-applies-on-cycle — GY-949\'s stranded session app
   const effects: DaemonEffects = {
     agents: () => [], herdr: async () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [await current(work)], now: new Date(clock).toISOString() }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({ result: 'merged', merged: true }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
     decisions: target => operatorAgent('GET', `work/${target.id}/decisions`),

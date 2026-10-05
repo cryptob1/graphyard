@@ -8,7 +8,6 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { bootstrapObligations, criterionSchema, deliveredProof, evaluate, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, type Observation, type Principal, type Work } from '../src/model.js';
-import { queueRef } from '../src/merge-queue.js';
 import { diagnose, obligationLedger, proofPreview } from '../src/coordination.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -51,7 +50,6 @@ async function submitted(input: Record<string, unknown>, observe: Partial<Observ
   work = await engine.execute(worker, 'submit', work.id, { epoch: work.epoch, pr: 1000 + n }, id());
   return engine.observe(work.id, work.revision, observation(work, observe));
 }
-const acceptance = (work: Work) => work.gates.find(gate => gate.name === 'acceptance')!;
 async function prove(work: Work, proof: string, overrides: Record<string, unknown> = {}) {
   const producer: Principal = { id: `producer-${proof}`, role: 'producer', proofs: [proof] };
   return engine.execute(producer, 'evidence', work.id, { proof, sha: head, baseSha: base, policyRevision: work.policyRevision, result: 'pass', executed: 4, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, ...overrides }, id());
@@ -83,14 +81,9 @@ const trusted = (proof: string, extra: Record<string, unknown> = {}) => ({ id: r
 test('unit:bootstrap-policy-model defers only the marked criterion and keeps every other gate', () => {
   const work = fixture();
   const deferred = evaluate(work, [work], new Date(), [15368]);
-  assert.deepEqual(acceptance({ ...work, gates: deferred.gates } as Work).reasons, ['AC-2: unit:supervisor-stop needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy'],
-    'the bootstrap criterion is deferred while every other criterion still demands proof');
-  assert.deepEqual(requiredProofs(work, [work]), ['unit:supervisor-stop']);
+  assert.deepEqual(requiredProofs(work, [work]), ['unit:supervisor-stop'], 'the bootstrap criterion is deferred while every other criterion still demands proof');
   assert.equal(deferred.gates.find(gate => gate.name === 'review')!.passed, true);
   assert.equal(deferred.gates.find(gate => gate.name === 'test')!.passed, true);
-
-  const proven = fixture({ evidence: [trusted('unit:supervisor-stop')] });
-  assert.deepEqual(evaluate(proven, [proven], new Date(), [15368]).gates.find(gate => gate.name === 'acceptance')!.reasons, []);
 
   // Review and CI are not weakened by the deferral.
   const unreviewed = fixture({ evidence: [trusted('unit:supervisor-stop')], observation: { ...fixture().observation!, reviews: [], checks: [{ name: 'test', result: 'failure', appId: 15368 }] } });
@@ -114,8 +107,7 @@ test('unit:bootstrap-policy-model records the deferred proof as an obligation on
   const renewing = fixture({ id: 'renewing', key: 'GY-11', plannedFiles: ['src/herdr/recovery.ts'],
     criteria: [{ id: 'AC-1', text: 'Recovery is proven later', proofs: [harnessProof], bootstrap: { ...declaration, declaredBy: 'operator-two' } }] });
   assert.deepEqual(inheritedObligations(renewing, [work, renewing]).map(obligation => obligation.proof), [harnessProof]);
-  assert.ok(evaluate(renewing, [work, renewing], new Date(), [15368]).gates.find(gate => gate.name === 'acceptance')!
-    .reasons.some(reason => reason.startsWith('Bootstrap obligation inherited from GY-2 AC-1')), 'a renewed deferral does not escape the inherited obligation');
+  assert.deepEqual(requiredProofs(renewing, [work, renewing]), [harnessProof], 'a renewed deferral does not escape the inherited obligation');
 });
 
 test('unit:bootstrap-policy-model discharges an obligation only from delivered, trusted, complete evidence', () => {
@@ -162,10 +154,11 @@ test('unit:bootstrap-policy-model schema accepts an operator declaration and ref
 });
 
 // ---------------------------------------------------------------------------
-// integration:bootstrap-policy-gate — the live acceptance gate over the store.
+// integration:bootstrap-policy-gate — the live gates over the store. Since GY-1235 proofs gate
+// nothing (CI runs the tests, UAT the e2e); what remains is which proofs an item requires.
 // ---------------------------------------------------------------------------
 
-test('integration:bootstrap-policy-gate lands a bootstrap candidate on review, CI and its remaining proofs', async () => {
+test('integration:bootstrap-policy-gate lands a bootstrap candidate on review and CI, requiring only its remaining proofs', async () => {
   const work = await submitted({ title: 'Introduce the recovery harness', plannedFiles: ['src/herdr/', 'tests/'],
     criteria: [{ id: 'AC-1', text: 'Recovery is proven', proofs: [harnessProof], bootstrap: { reason: 'This candidate introduces the harness the proof needs', contractPaths: [contract] } },
       { id: 'AC-2', text: 'The supervisor stops cleanly', proofs: ['unit:supervisor-stop'] }] });
@@ -176,12 +169,10 @@ test('integration:bootstrap-policy-gate lands a bootstrap candidate on review, C
   assert.ok(Date.parse(stamped.declaredAt) > 0, 'the declaration carries a server-stamped time');
   assert.deepEqual(stamped.contractPaths, [contract]);
 
-  assert.deepEqual(acceptance(work).reasons, ['AC-2: unit:supervisor-stop needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy'],
-    'the deferred proof is not demanded of this candidate; the remaining criterion still is');
+  assert.deepEqual(requiredProofs(work, await all()), ['unit:supervisor-stop'], 'the deferred proof is not demanded of this candidate; the remaining criterion still is');
+  assert.deepEqual(work.gates.filter(gate => !gate.passed).map(gate => gate.name), [], 'review and CI are enough for a bootstrap candidate');
 
   const proven = await prove(work, 'unit:supervisor-stop');
-  assert.deepEqual(acceptance(proven).reasons, [], 'review, CI and the remaining proofs are enough for a bootstrap candidate');
-  assert.notEqual(proven.stage, 'acceptance');
 
   assert.deepEqual(bootstrapObligations(await all()).filter(obligation => obligation.workId === work.id),
     [{ key: work.key, workId: work.id, criterionId: 'AC-1', proof: harnessProof, ...stamped }], 'the deferred proof is recorded as an obligation on the contract path');
@@ -198,7 +189,7 @@ test('integration:bootstrap-policy-gate still refuses a bootstrap candidate with
   const work = await submitted({ title: 'Bootstrap without review', plannedFiles: ['src/noreview/'],
     criteria: [{ id: 'AC-1', text: 'Recovery is proven', proofs: ['integration:noreview-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/noreview/engine.ts'] } }] },
   { reviews: [], checks: [{ name: 'test', result: 'failure', appId: 15368 }] });
-  assert.deepEqual(acceptance(work).reasons, [], 'the only criterion is deferred');
+  assert.deepEqual(requiredProofs(work, await all()), [], 'the only criterion is deferred');
   assert.equal(work.gates.find(gate => gate.name === 'review')!.passed, false);
   assert.equal(work.gates.find(gate => gate.name === 'test')!.passed, false);
   assert.equal(work.stage, 'review', 'a deferred proof never advances a candidate past review and CI');
@@ -246,24 +237,14 @@ test('integration:bootstrap-policy-gate lets an operator declare and withdraw th
 test('integration:bootstrap-policy-inheritance requires the deferred proof of the next change on that contract', async () => {
   const origin = await submitted({ title: 'Introduce the inherited harness', plannedFiles: ['src/inherit/'],
     criteria: [{ id: 'AC-1', text: 'Inheritance is proven', proofs: ['integration:inherit-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/inherit/engine.ts'] } }] });
-  assert.deepEqual(acceptance(origin).reasons, []);
+  assert.deepEqual(requiredProofs(origin, await all()), []);
 
   const heir = await submitted({ title: 'Change the same contract', plannedFiles: ['src/inherit/engine.ts'],
     criteria: [{ id: 'AC-1', text: 'The change behaves', proofs: ['unit:heir'] }] });
-  assert.deepEqual(acceptance(heir).reasons.slice().sort(), [
-    'AC-1: unit:heir needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
-    `Bootstrap obligation inherited from ${origin.key} AC-1: integration:inherit-harness needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy`,
-  ].sort(), 'the deferred proof is inherited as a required criterion');
+  assert.deepEqual(requiredProofs(heir, await all()).slice().sort(), ['integration:inherit-harness', 'unit:heir'], 'the deferred proof is inherited as a required criterion');
   assert.deepEqual(inheritedObligations(heir, await all()).map(obligation => obligation.proof), ['integration:inherit-harness']);
   assert.ok(diagnose(heir, await all(), Date.now()).some(entry => entry.kind === 'bootstrap-obligation'));
-
-  const partial = await prove(heir, 'unit:heir');
-  assert.deepEqual(acceptance(partial).reasons, [`Bootstrap obligation inherited from ${origin.key} AC-1: integration:inherit-harness needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy`],
-    'the inheriting change cannot pass acceptance on its own proofs alone');
-  const untrusted = await engine.execute(worker, 'evidence', heir.id, { proof: 'integration:inherit-harness', sha: head, baseSha: base, policyRevision: heir.policyRevision, result: 'pass', executed: 4, skipped: 0 }, id());
-  assert.equal(acceptance(untrusted).reasons.length, 1, 'a worker assertion does not satisfy an inherited obligation');
-  const complete = await prove(heir, 'integration:inherit-harness');
-  assert.deepEqual(acceptance(complete).reasons, []);
+  assert.equal(proofPreview(heir, await all()).some(row => row.proof === 'integration:inherit-harness'), true, 'the inherited proof is previewed beside the item’s own');
 
   const unrelated = await submitted({ title: 'Touch a different file', plannedFiles: ['src/unrelated.ts'],
     criteria: [{ id: 'AC-1', text: 'The change behaves', proofs: ['unit:unrelated'] }] });
@@ -292,8 +273,7 @@ test('integration:bootstrap-policy-inheritance clears the obligation once a deli
   const heir = await submitted({ title: 'Prove the dischargeable harness', plannedFiles: ['src/discharge/engine.ts'],
     criteria: [{ id: 'AC-1', text: 'The change behaves', proofs: ['unit:discharge-heir'] }] });
   await prove(heir, 'unit:discharge-heir');
-  const proven = await prove(heir, 'integration:discharge-harness');
-  assert.deepEqual(acceptance(proven).reasons, []);
+  await prove(heir, 'integration:discharge-harness');
   assert.equal(bootstrapObligations(await all()).filter(obligation => obligation.workId === origin.id).length, 1, 'an unmerged proof leaves the obligation standing');
 
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{stage}','\"done\"') WHERE id=$1", [heir.id]);
@@ -304,81 +284,33 @@ test('integration:bootstrap-policy-inheritance clears the obligation once a deli
 });
 
 // ---------------------------------------------------------------------------
-// Delivery reconciliation. When the in-flight merge execution is gone by the time
-// GitHub reports the merge, authorization is re-derived from the event history.
-// That fallback must demand exactly what the acceptance gate demanded: a deferred
-// proof is excluded, an inherited obligation is not.
+// Delivery. GitHub merges a candidate once its gates pass; the observed merge is delivered
+// iff the record before the merge cutoff passed every gate. A deferred proof has no evidence
+// by design and must not read as an unauthorized merge.
 // ---------------------------------------------------------------------------
 
-const coordinator: Principal = { id: 'merge-coordinator', role: 'coordinator' };
-
-/** Every candidate lands on one managed branch, so the queue is global: leave only this entry. */
-const soleQueueEntry = (workId: string) =>
-  store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [workId]);
-
-/** Publish the validated speculative tip the queue head needs before it may merge. */
-async function queueHead(work: Work) {
-  await soleQueueEntry(work.id);
-  const speculation = { ref: queueRef(work.key), tip: work.candidate!.sha, base: work.candidate!.baseSha, baseTree: 'c'.repeat(40),
-    predecessors: [], policyRevision: work.policyRevision, publishedAt: new Date().toISOString() };
-  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [work.id, JSON.stringify(speculation)]);
-  return engine.observe(work.id, (await current(work.id)).revision, observation(work));
-}
-
-/**
- * Deliver the queue head through a verified execution whose live record is then gone, so the
- * merge observation has to fall back to the authorized snapshot in the event history. `between`
- * runs after verification and before GitHub reports the merge.
- */
-async function deliverFromHistory(work: Work, between?: () => Promise<unknown>) {
-  const ready = await queueHead(work);
-  assert.deepEqual(ready.gates.filter(gate => !gate.passed).map(gate => gate.name), [], 'the candidate must be merge-ready before delivery');
-  const committed = await engine.requestEnqueue(coordinator, ready.id, { enqueue: true, expectedRevision: ready.revision, sha: head, baseSha: base, policyRevision: ready.policyRevision }, id());
+/** Report the merge of a gate-passing candidate, cut off after its current record. */
+async function deliver(work: Work) {
+  const ready = await current(work.id);
+  assert.deepEqual(ready.gates.filter(gate => !gate.passed).map(gate => gate.name), [], 'the candidate must pass every gate before delivery');
   await delay(5);
   const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString();
   await delay(5);
-  if (between) await between();
-  // The execution record is gone from the document; only the event history still carries it.
-  await store.pool.query("UPDATE work_items SET document=document-'mergeExecution' WHERE id=$1", [work.id]);
-  return engine.observe(work.id, committed.revision, { ...observation(ready), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
+  return engine.observe(work.id, ready.revision, { ...observation(ready), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
 }
 
-test('integration:bootstrap-policy-gate reconciles a delivered bootstrap candidate from event history', async () => {
+test('integration:bootstrap-policy-gate delivers a bootstrap candidate whose deferred proof has no evidence', async () => {
   const work = await submitted({ title: 'Deliver the deferring change', plannedFiles: ['src/deliver/'],
     criteria: [{ id: 'AC-1', text: 'The harness proves itself later', proofs: ['integration:deliver-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/deliver/engine.ts'] } },
       { id: 'AC-2', text: 'The change behaves', proofs: ['unit:deliver'] }] });
-  assert.deepEqual(acceptance(await prove(work, 'unit:deliver')).reasons, []);
+  await prove(work, 'unit:deliver');
 
-  const delivered = await deliverFromHistory(await current(work.id));
+  const delivered = await deliver(work);
   assert.equal(delivered.stage, 'done', 'a deferred proof has no evidence by design and must not read as an unauthorized merge');
   assert.deepEqual(delivered.violations, []);
   assert.ok(delivered.delivery?.authorizationRevision, 'the delivery records the revision that authorized it');
   assert.deepEqual(bootstrapObligations(await all()).filter(obligation => obligation.workId === work.id).map(obligation => obligation.proof),
     ['integration:deliver-harness'], 'delivering the deferral leaves the obligation standing for the next change on the contract');
-});
-
-test('integration:bootstrap-policy-inheritance re-checks an inherited obligation at the merge cutoff', async () => {
-  await submitted({ title: 'Introduce the delivered harness', plannedFiles: ['src/cutoff/'],
-    criteria: [{ id: 'AC-1', text: 'Cutoff is proven', proofs: ['integration:cutoff-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/cutoff/engine.ts'] } }] });
-  const heir = await submitted({ title: 'Prove the inherited harness', plannedFiles: ['src/cutoff/engine.ts'],
-    criteria: [{ id: 'AC-1', text: 'The change behaves', proofs: ['unit:cutoff-heir'] }] });
-  await prove(heir, 'unit:cutoff-heir');
-  assert.deepEqual(acceptance(await prove(heir, 'integration:cutoff-harness')).reasons, []);
-  const delivered = await deliverFromHistory(await current(heir.id));
-  assert.equal(delivered.stage, 'done', 'an heir that ran the inherited proof delivers through the same fallback');
-  assert.deepEqual(delivered.violations, []);
-
-  // An obligation declared while a candidate is mid-merge is still binding at reconciliation:
-  // the inherited proof is not in the heir's own criteria, so only requiredProofs sees it.
-  const late = await submitted({ title: 'Change the unproven contract', plannedFiles: ['src/late/engine.ts'],
-    criteria: [{ id: 'AC-1', text: 'The change behaves', proofs: ['unit:late-heir'] }] });
-  assert.deepEqual(acceptance(await prove(late, 'unit:late-heir')).reasons, []);
-  const refused = await deliverFromHistory(await current(late.id), () => engine.execute(operator, 'create', null,
-    { title: 'Introduce the late harness', plannedFiles: ['src/late/'],
-      criteria: [{ id: 'AC-1', text: 'Late is proven', proofs: ['integration:late-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/late/engine.ts'] } }] }, id()));
-  assert.notEqual(refused.stage, 'done', 'an unproven inherited obligation is not an authorized merge');
-  assert.ok(refused.violations.includes('Merge observed without a prior authorization for this candidate'));
-  assert.deepEqual(requiredProofs(refused, await all()).slice().sort(), ['integration:late-harness', 'unit:late-heir']);
 });
 
 // ---------------------------------------------------------------------------
@@ -398,9 +330,7 @@ test('integration:bootstrap-policy-authority keeps bootstrap mode away from work
   await assert.rejects(engine.execute(worker, 'requirements', work.id, { expectedPolicyRevision: work.policyRevision, reason: 'Defer my own proof', dependencies: [], plannedFiles: ['src/worker-authority/'], exclusiveResources: [], criteria: bootstrapCriteria('worker-authority') }, id()),
     /Operator permission required/, 'a worker cannot revise its own criteria into bootstrap mode');
   assert.equal((await current(work.id)).criteria[0].bootstrap, undefined);
-  assert.deepEqual(acceptance(await current(work.id)).reasons,
-    ['AC-1: integration:worker-authority-harness needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy'],
-    'the worker’s own proof requirement stands');
+  assert.deepEqual(requiredProofs(await current(work.id), await all()), ['integration:worker-authority-harness'], 'the worker’s own proof requirement stands');
 });
 
 test('integration:bootstrap-policy-authority requires the explicit policy:bootstrap capability of an operator agent', async () => {

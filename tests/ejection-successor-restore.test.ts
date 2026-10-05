@@ -1,23 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { routineDecision } from '../src/master-daemon.js';
 import { neededDecision } from '../src/daemon/decisions.js';
-import { ejectedTipRestore, restoringAfterEjection, restoringAfterEjectionPrefix } from '../src/merge-queue.js';
 import { evaluate, type Work } from '../src/model.js';
 import { nextAction } from '../src/model/next-action.js';
-import { classifyScope, regressionRefusals } from '../src/regression-guard.js';
+import { regressionRefusals } from '../src/regression-guard.js';
 
 // GY-568, 2026-09-26 09:00-09:30Z: the queue head GY-371 was ejected. Its successors' candidates were
 // still speculative tips built on GY-371's tip, so their landing check on main listed GY-371's files
 // as reverts ("would revert N files outside its planned files", N = 44…75) and each was sent back to a
 // worker, although the ejection restore rebuilt every branch from the item's own head moments later.
 
-const at = '2026-09-26T09:10:00.000Z', now = new Date(at), clock = Date.parse(at);
+const at = '2026-09-26T09:10:00.000Z', now = new Date(at);
 const sha = (digit: string) => digit.repeat(40);
 const main = sha('b');
 const own = { 'GY-A': sha('1'), 'GY-B': sha('2'), 'GY-C': sha('3') } as Record<string, string>;
 const tip = { 'GY-B': sha('4'), 'GY-C': sha('5') } as Record<string, string>;
-const restored = { 'GY-B': sha('6'), 'GY-C': sha('7') } as Record<string, string>;
 const fileOf = (key: string) => `src/${key.toLowerCase()}.ts`;
 
 /** A file on a head as GitHub lists it against `main`: this head changed it, `main` holds another version. */
@@ -53,75 +50,6 @@ function settle(work: Work, all: Work[]): Work {
   return next;
 }
 const build = (work: Work) => work.gates.find(gate => gate.name === 'build')!;
-
-test('unit:successors-restored-before-gates — ejecting the head of a 3-entry queue restores both successors before any tree gate judges them, asks for no rework, and the revert check then sees only their own files', () => {
-  const head = { ...item('GY-A', own['GY-A'], main, null, [fileOf('GY-A')]),
-    queueEjection: { at, sequence: 1, reason: 'Required CI check test did not pass on speculative tip 111111111111', sha: own['GY-A'], policyRevision: 1 } } as Work;
-  let b = successor('GY-B', 2, ['GY-A']), c = successor('GY-C', 3, ['GY-A', 'GY-B']);
-  let all = [head, b, c];
-
-  for (const key of ['GY-B', 'GY-C']) {
-    const before = all.find(entry => entry.key === key)!;
-    // Without the restore rule this observation reads as the item reverting the head's files.
-    const stale = regressionRefusals({ ...before, queueHistory: [] }, before.observation!, all);
-    assert.match(stale.join('\n'), /^Landing the candidate on /m, `${key}: the stale tip's own observation lists the head's files as reverts`);
-
-    const judged = settle(before, all);
-    const reasons = build(judged).reasons;
-    assert.equal(reasons.length, 1, `${key}: the build gate waits under one reason, not a list of reverts: ${reasons.join(' | ')}`);
-    assert.ok(reasons[0].startsWith(restoringAfterEjectionPrefix), `${key}: the item waits with 'restoring after predecessor ejection'`);
-    assert.match(reasons[0], /built behind GY-A(, GY-B)?, which left the merge queue without landing/);
-    assert.doesNotMatch(reasons.join('\n'), /Landing|Out-of-scope|Candidate changes|conflict/, `${key}: no tree-dependent refusal is read from the stale tip`);
-    // The entry leaves the queue so the restore can run, and the ejection names why.
-    assert.equal(judged.queue, null);
-    assert.match(judged.queueEjection!.reason, /built behind GY-A(, GY-B)?, which left the merge queue without landing/);
-    assert.doesNotMatch(judged.queueEjection!.reason, /would revert work outside its planned files/);
-    all = all.map(entry => entry.id === judged.id ? judged : entry);
-  }
-  b = all.find(entry => entry.key === 'GY-B')!; c = all.find(entry => entry.key === 'GY-C')!;
-
-  for (const judged of [b, c]) {
-    // No rework decision is requested, and the next action is the fresh reading that runs the restore.
-    assert.equal(neededDecision(judged, { autoMerge: true }), null, `${judged.key}: no rework decision`);
-    assert.equal(routineDecision(judged, { autoMerge: true }, clock), null);
-    assert.equal(nextAction(judged, all, now)?.kind, 'resync', `${judged.key}: the fresh reading runs the restore; no worker round is owed`);
-    // The restore the ejection owes resets the branch to the item's own reviewed head.
-    const owed = ejectedTipRestore(judged, all);
-    assert.ok(owed, `${judged.key}: the control plane owes the branch restore`);
-    assert.equal(owed!.own, own[judged.key]);
-    assert.ok(owed!.foreign.includes('GY-A'));
-  }
-
-  // The restore ran and published a head, but GitHub has not been observed at it yet: still waiting.
-  const performed = (work: Work): Work => ({ ...work, baseRefresh: {
-    from: { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha }, base: main, baseTree: sha('e'), policyRevision: 1, at, head: restored[work.key], conflict: null, merge: null, carry: null, trigger: 'ejection restore',
-    restore: { contaminated: work.candidate!.sha, foreign: ['GY-A'], own: own[work.key], cause: 'ejection', requested: null, reason: 'ejected from the merge queue', performedAt: at, outcome: 'restored' } } } as Work);
-  b = settle(performed(b), all); c = settle(performed(c), all);
-  all = [head, b, c];
-  for (const judged of [b, c]) {
-    const reasons = build(judged).reasons;
-    assert.equal(reasons.length, 1);
-    assert.match(reasons[0], new RegExp(`^${restoringAfterEjectionPrefix}.*restored the branch to ${restored[judged.key].slice(0, 12)}.*judged once GitHub is observed at that head`));
-    assert.equal(neededDecision(judged, { autoMerge: true }), null);
-  }
-
-  // GitHub observed at the restored head: the tree gates judge it, and see only the item's own file.
-  const observed = (work: Work): Work => {
-    const candidate = { ...work.candidate!, sha: restored[work.key], baseSha: main };
-    return { ...work, candidate, observation: { ...work.observation!, candidate, files: [fileOf(work.key)], scopeFiles: [changed(fileOf(work.key))],
-      landing: { base: main, files: [changed(fileOf(work.key))] }, reviews: [], at } } as Work;
-  };
-  b = settle(observed(b), all); c = settle(observed(c), all);
-  all = [head, b, c];
-  for (const judged of [b, c]) {
-    assert.equal(restoringAfterEjection(judged, all), null, `${judged.key}: the restored head is judged`);
-    assert.deepEqual(build(judged).reasons, [], `${judged.key}: nothing on the restored head is out of scope`);
-    assert.deepEqual(regressionRefusals(judged, judged.observation!, all), []);
-    const seen = [...classifyScope(judged.plannedFiles, judged.observation!.scopeFiles!), ...classifyScope(judged.plannedFiles, judged.observation!.landing!.files!)].map(finding => finding.path);
-    assert.deepEqual([...new Set(seen)], [fileOf(judged.key)], `${judged.key}: the revert check sees only its own file`);
-    assert.equal(neededDecision(judged, { autoMerge: true }), null, `${judged.key}: still no rework decision`);
-  }
-});
 
 test('unit:foreign-tip-files-not-reverts — files that came from another item\'s tip or an ejected predecessor are attributed to it by name and send the candidate to no worker', () => {
   const head = { ...item('GY-A', own['GY-A'], main, null, [fileOf('GY-A')]),

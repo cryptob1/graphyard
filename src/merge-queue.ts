@@ -1,4 +1,3 @@
-import { deliveredByGitHub } from './model/delivery-mode.js';
 import type { Evidence, Observation, ScopeFile, Work } from './model.js';
 import { CHECK_NAME, LANDABLE_CHECK } from './model/work.js';
 import { isClosed } from './model/closure.js';
@@ -1107,6 +1106,14 @@ export function requiredCheck(work: Pick<Work, 'candidate' | 'observation' | 'ga
  * that refusal is the one exit a merged queue entry has (GY-94), and by master status.
  */
 export const reconciliationRefusalPrefix = 'Reconciliation by decision ';
+/**
+ * The violation an observed merge records when the record before the merge cutoff did not show
+ * every gate passing for the merged head (GY-1235). The wording predates GitHub delivery and is
+ * kept so violations already on the ledger still match.
+ */
+export const unauthorizedMergeViolation = 'Merge observed without a prior authorization for this candidate';
+/** True for an item held at the merge stage by an observed merge its gates did not pass (GY-92). */
+export const mergedWithoutAuthorization = (work: Work) => work.stage !== 'done' && !!work.observation?.merged && work.violations.includes(unauthorizedMergeViolation);
 export function refusedReconciliation(work: Pick<Work, 'violations'>): { decision: string; violation: string } | null {
   const violation = work.violations.find(entry => entry.startsWith(reconciliationRefusalPrefix));
   return violation ? { decision: violation.slice(reconciliationRefusalPrefix.length).split(' ')[0], violation } : null;
@@ -1216,7 +1223,7 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   // A refused reconciliation is a reported adverse conclusion about the entry itself (GY-94).
   if (work.observation?.merged) {
     const refusal = refusedReconciliation(work);
-    return refusal ? `Pull request was merged without a valid merge execution and can never publish a speculative tip; reconciliation by decision ${refusal.decision} was refused, so the entry leaves the queue undelivered` : null;
+    return refusal ? `Pull request was merged though its gates had not passed and can never publish a speculative tip; reconciliation by decision ${refusal.decision} was refused, so the entry leaves the queue undelivered` : null;
   }
   if (!work.submission || work.reworkRequested) return 'Implementation returned to the worker for a new attempt';
   if (work.policyRevision !== work.queue.policyRevision) return `Policy revision changed from ${work.queue.policyRevision} to ${work.policyRevision} after this entry was queued`;
@@ -1516,21 +1523,17 @@ export interface GitHubMergeQueueState {
 }
 declare module './model/work.js' { interface Observation { githubQueue?: GitHubMergeQueueState | null } }
 
-/** The coordinator's request that GitHub merge exactly this candidate: what `merge-acquire` with `enqueue` records. */
+/** A coordinator's request that GitHub merge exactly this candidate, as `merge-acquire` recorded it before GY-1235. */
 export interface MergeEnqueueRequest { sha: string; baseSha: string; policyRevision: number; requestedBy: string; at: string }
 
 /**
- * Whether the item is authorized to merge right now: every gate passes, nothing stands against it,
- * and the recorded all-gates authorization binds exactly the current candidate at the current policy.
- * The same judgement the check publication makes, read from the record as it stands.
+ * Whether GitHub may merge the item right now: every gate passes for its current candidate and
+ * nothing stands against it. Every passing gate is the authorization — GitHub's branch protection
+ * decides the merge, and no separate authorization, execution or observation age is consulted.
  */
 export function mergeAuthorized(work: Work): boolean {
-  const authorization = work.mergeAuthorization, candidate = work.candidate;
-  // Under GitHub delivery every passing gate is the authorization: GitHub's branch protection decides the merge.
-  const github = deliveredByGitHub(work);
-  return work.stage === 'merge' && !!candidate && (github || !!authorization) && !work.observation?.merged
-    && work.gates.every(gate => gate.passed) && !work.violations.length && !work.leadHold
-    && (github || (authorization!.sha === candidate.sha && authorization!.baseSha === candidate.baseSha && authorization!.policyRevision === work.policyRevision));
+  return work.stage === 'merge' && !!work.candidate && !work.observation?.merged
+    && work.gates.every(gate => gate.passed) && !work.violations.length && !work.leadHold;
 }
 /** Whether the coordinator's enqueue request binds the current candidate and policy. */
 export function enqueueRequestCurrent(work: Work, request: Pick<MergeEnqueueRequest, 'sha' | 'baseSha' | 'policyRevision'> | null | undefined): boolean {
@@ -1641,9 +1644,8 @@ export function mergeQueueAction(work: Work, state: GitHubMergeQueueState, reque
   const held = state.mode !== 'none';
   const sha = work.candidate?.sha;
   const withdrawn = !mergeAuthorized(work) ? `${work.key} is no longer authorized to merge: ${[...work.gates.flatMap(gate => gate.reasons), ...work.violations].join('; ') || 'no all-gates authorization binds the current candidate'}`
-    : !deliveredByGitHub(work) && !enqueueRequestCurrent(work, request) ? `${work.key}: no merge was requested for candidate ${sha?.slice(0, 12)} at policy revision ${work.policyRevision}`
-      : state.head !== sha ? `${work.key}: GitHub holds head ${state.head.slice(0, 12)}, not the authorized candidate ${sha?.slice(0, 12)}`
-        : null;
+    : state.head !== sha ? `${work.key}: GitHub holds head ${state.head.slice(0, 12)}, not the authorized candidate ${sha?.slice(0, 12)}`
+      : null;
   if (withdrawn) return held ? { kind: 'dequeue', reason: withdrawn } : { kind: 'hold', reason: withdrawn };
   const waitedMs = request ? now - Date.parse(request.at) : 0;
   if (state.mode === 'auto-merge' && state.mergeStateStatus === 'BLOCKED' && waitedMs > blockedAutoMergeProbeMs)

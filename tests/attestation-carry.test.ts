@@ -48,18 +48,20 @@ function refreshed(work: Work, to: string, tip: TipMerge): Work {
   return { ...work, candidate, observation: observation(candidate, []), baseRefresh: { from: { sha: A, baseSha: M }, base: M2, baseTree: sha('7f'), policyRevision: work.policyRevision, at, head: to, conflict: null, merge: tip, carry } } as Work;
 }
 const gates = (work: Work) => Object.fromEntries(evaluate(work, [work], now, ciAppIds).gates.map(gate => [gate.name, gate]));
+/** Whether the attested proof stands on the head. Proofs gate no merge since GY-1235, so its current evidence is read directly. */
+const proven = (work: Work) => currentEvidence(work, PROOF, now)?.result === 'pass';
 
 test('unit:attestation-carried-on-refresh — an attested manual proof carries to a Graphyard-authored refresh of the same patch, and never over a changed patch or head', () => {
   const onA = item();
   onA.evidence = [attested(onA)];
-  assert.equal(gates(onA).acceptance.passed, true, JSON.stringify(gates(onA).acceptance.reasons));
+  assert.equal(proven(onA), true);
 
   // B: Graphyard merged the moved base into A; the item's own diff kept its patch-id.
   const onB = refreshed(onA, B, merge(B, { reviewed: PATCH, tip: PATCH }));
   const carried = onB.baseRefresh!.carry!.evidence.find(entry => entry.proof === PROOF)!;
   assert.equal(carried.carried, true, carried.reason);
   assert.match(carried.reason, /attest decision d-4994f0b0, approved by approver\) carried to [0-9a-f]{12}: diff unchanged \(patch-id [0-9a-f]{12}\)/);
-  assert.equal(gates(onB).acceptance.passed, true, JSON.stringify(gates(onB).acceptance.reasons));
+  assert.equal(proven(onB), true);
   assert.equal(gates(onB).review.passed, true, 'the approval carries by the same rule');
   // The record carried is the attested one itself, exercise record and decision included.
   const bound = currentEvidence(onB, PROOF, now)!;
@@ -74,21 +76,18 @@ test('unit:attestation-carried-on-refresh — an attested manual proof carries t
     assert.equal(refused.carried, false, `base changed ${baseChanges.length} files`);
     assert.match(refused.reason, /carries only across an unchanged patch-id of the item's own diff, which changed; a fresh attestation for [0-9a-f]{12} is required/);
     assert.match(refused.reason, /patch-id [0-9a-f]{12} became [0-9a-f]{12}/);
-    const acceptance = gates(onC).acceptance;
-    assert.equal(acceptance.passed, false);
-    assert.match(acceptance.reasons.join('\n'), new RegExp(`AC-1: ${PROOF} needs trusted passing evidence`));
+    assert.equal(proven(onC), false);
   }
   // Without a comparable diff the patch is not shown unchanged, so nothing attested carries either.
   const unread = refreshed(onA, C, merge(C, { reviewed: PATCH, tip: null }, []));
   assert.match(unread.baseRefresh!.carry!.evidence[0].reason, /which could not be compared/);
-  assert.equal(gates(unread).acceptance.passed, false);
+  assert.equal(proven(unread), false);
 
   // D: the author pushed a new head. No Graphyard-authored decision covers it, so nothing carries.
   const onD = { ...onB, candidate: { ...onB.candidate!, sha: D }, observation: observation({ ...onB.candidate!, sha: D }, []) } as Work;
   assert.equal(currentEvidence(onD, PROOF, now), undefined);
-  assert.equal(gates(onD).acceptance.passed, false);
   // And a policy revision moved since the carry was decided: neither the record nor the carry applies.
-  assert.equal(gates({ ...onB, policyRevision: 3 } as Work).acceptance.passed, false);
+  assert.equal(proven({ ...onB, policyRevision: 3 } as Work), false);
 });
 
 test('unit:attestation-carried-on-refresh — an approved attest decision names itself on the evidence it records', async () => {

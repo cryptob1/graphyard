@@ -57,7 +57,6 @@ function effects(overrides: Partial<DaemonEffects> = {}, log: string[] = []): Da
     closeSession: pane => { log.push(`close:${pane}`); },
     dispatch: async item => { log.push(`dispatch:${item.key}`); },
     requestProof: item => { log.push(`proof:${item.key}`); },
-    merge: async item => { log.push(`merge:${item.key}`); return { result: 'merged', merged: true }; },
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async (item, observation) => { log.push(`record:${item.key}:${observation.sha.slice(0, 4)}`); },
     requestSmoke: item => { log.push(`smoke:${item.key}`); },
@@ -217,7 +216,7 @@ test('a dispatch of operator-authorized rework interrupted by a kill is dispatch
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('one cycle closes finished sessions, dispatches, requests proof, merges only through the guard, and measures', async () => {
+test('one cycle closes finished sessions, dispatches, leaves proofs to CI and the green candidate to GitHub, and measures', async () => {
   const { directory, token } = await privateDirectory();
   const workerCredential = join(directory, 'worker.token');
   await writeFile(workerCredential, workerToken, { mode: 0o600 });
@@ -239,10 +238,11 @@ test('one cycle closes finished sessions, dispatches, requests proof, merges onl
     }, log);
     const state = emptyDaemonState(master);
     const result = await runCycle(master, state, deps, () => clock);
-    assert.deepEqual(log, ['close:pane-1', 'dispatch:GY-42', 'proof:GY-44', 'merge:GY-45']);
+    // GY-1235: no proof is requested (CI runs the unit tests, UAT the end-to-end ones) and GitHub merges the green candidate.
+    assert.deepEqual(log, ['close:pane-1', 'dispatch:GY-42']);
     const kinds = result.actions.map(action => `${action.kind}:${action.state}`);
-    for (const expected of ['close:done', 'dispatch:done', 'review:done', 'proof:done', 'escalation:done', 'merge:done', 'deployment:done']) assert.ok(kinds.includes(expected), `cycle should record ${expected}, recorded ${kinds.join(', ')}`);
-    assert.ok(result.actions.some(action => action.kind === 'escalation' && /manual:witness/.test(action.detail)), 'an operator-witnessed proof must escalate, never be produced by the coordinator');
+    for (const expected of ['close:done', 'dispatch:done', 'review:done', 'deployment:done']) assert.ok(kinds.includes(expected), `cycle should record ${expected}, recorded ${kinds.join(', ')}`);
+    assert.ok(!kinds.some(kind => kind.startsWith('proof:') || kind.startsWith('merge:')), kinds.join(', '));
     assert.equal(result.deployment!.deployed.length, 1);
     // Every cycle measures, whether or not it acted.
     assert.equal(result.metrics.cycle, 0);
@@ -259,29 +259,7 @@ test('one cycle closes finished sessions, dispatches, requests proof, merges onl
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('unit:proof-dispatch-waits-for-push-run — a fresh candidate is left to its push-triggered acceptance run, and the loop dispatches the proof workflow only once the grace period passes', async () => {
-  const { directory, token } = await privateDirectory();
-  try {
-    const master = config(token, { run: { proofWorkflow: 'acceptance.yml', proofDispatchGraceMinutes: 180 } });
-    const proofDispatchGraceMs = 180 * 60_000;
-    const acceptance = submitted({ id: 'acceptance', key: 'GY-44', stage: 'acceptance',
-      criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['integration:loop'] }],
-      gates: [{ name: 'acceptance', passed: false, reasons: ['needs evidence'] }] });
-    const log: string[] = [];
-    let elapsed = 0;
-    const deps = effects({ snapshot: async () => ({ work: [acceptance], now: iso(elapsed) }) }, log);
-    const state = emptyDaemonState(master);
-    await runCycle(master, state, deps, () => clock);
-    elapsed = proofDispatchGraceMs - 60_000;
-    await runCycle(master, state, deps, () => clock + elapsed);
-    assert.deepEqual(log.filter(entry => entry.startsWith('proof:')), [], 'no duplicate run is queued while the push-triggered run has its chance');
-    elapsed = proofDispatchGraceMs;
-    await runCycle(master, state, deps, () => clock + elapsed);
-    assert.deepEqual(log.filter(entry => entry.startsWith('proof:')), ['proof:GY-44'], 'the fallback dispatch runs once the grace period passes');
-  } finally { await rm(directory, { recursive: true, force: true }); }
-});
-
-test('a disabled automatic merge keeps the loop cycling and never invokes the merge', async () => {
+test('a disabled automatic merge keeps the loop cycling, never merges, and asks no operator for a merge GitHub makes', async () => {
   const { directory, token } = await privateDirectory();
   try {
     const master = config(token, { autoMerge: false });
@@ -290,24 +268,8 @@ test('a disabled automatic merge keeps the loop cycling and never invokes the me
     const state = emptyDaemonState(master);
     const result = await runCycle(master, state, effects({ snapshot: async () => ({ work: [mergeable], now: iso(0) }) }, log), () => clock);
     assert.deepEqual(log.filter(entry => entry.startsWith('merge')), []);
-    assert.ok(result.actions.some(action => action.kind === 'escalation' && /explicit operator approval/.test(action.detail)));
-  } finally { await rm(directory, { recursive: true, force: true }); }
-});
-
-test('a refused merge is recorded as the gate working and does not stop the loop', async () => {
-  const { directory, token } = await privateDirectory();
-  try {
-    const master = config(token);
-    const mergeable = submitted({ id: 'mergeable', key: 'GY-45', stage: 'merge', gates: [{ name: 'merge', passed: true, reasons: [] }] });
-    const state = emptyDaemonState(master);
-    const result = await runCycle(master, state, effects({
-      snapshot: async () => ({ work: [mergeable], now: iso(0) }),
-      merge: async () => { throw new Error('GY-45 does not have a current all-gates-passing merge authorization'); },
-    }), () => clock);
-    const merge = result.actions.find(action => action.kind === 'merge')!;
-    assert.equal(merge.state, 'failed');
-    assert.match(merge.detail, /all-gates-passing merge authorization/);
-    assert.equal(result.metrics.cycle, 0, 'the cycle still completes and measures after a refusal');
+    assert.deepEqual(result.actions.filter(action => action.kind === 'merge' || action.kind === 'escalation'), [], 'GY-1235: GitHub merges on its branch protection');
+    assert.equal(result.metrics.cycle, 0);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -631,23 +593,6 @@ test('a stable detail over the bound is recorded once, not re-recorded every cyc
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('a persistently refused merge backs off instead of calling the provider every cycle', async () => {
-  const { directory, token } = await privateDirectory();
-  try {
-    const master = config(token);
-    const mergeable = submitted({ id: 'mergeable', key: 'GY-81', stage: 'merge', gates: [{ name: 'merge', passed: true, reasons: [] }] });
-    let attempts = 0;
-    const deps = effects({ snapshot: async () => ({ work: [mergeable], now: iso(0) }), merge: async () => { attempts++; throw new Error('base branch advanced outside the merge queue'); } });
-    const state = emptyDaemonState(master);
-    for (let cycle = 0; cycle < 8; cycle++) await runCycle(master, state, deps, () => clock + cycle * 20_000);
-    assert.deepEqual([attempts < 8, attempts >= 3], [true, true], `a refusal should retry on a widening interval, not 8 times (saw ${attempts})`);
-    // A new commit is a new candidate and retries immediately.
-    const fresh = { ...mergeable, candidate: { ...mergeable.candidate!, sha: 'f'.repeat(40) } } as Work;
-    await runCycle(master, state, effects({ snapshot: async () => ({ work: [fresh], now: iso(0) }), merge: async () => { attempts++; return { result: 'merged', merged: true }; } }), () => clock + 8 * 20_000);
-    assert.equal(state.actions[candidateKey('merge', fresh)].state, 'done');
-  } finally { await rm(directory, { recursive: true, force: true }); }
-});
-
 test('unit:state-bounded-at-persist — no value over a schema bound can fail the cursor write or the cycle', async () => {
   const { directory, token } = await privateDirectory();
   const credential = join(directory, 'worker.token');
@@ -658,7 +603,6 @@ test('unit:state-bounded-at-persist — no value over a schema bound can fail th
     const delivered = Array.from({ length: 250 }, (_, index) => work({ id: `delivered-${index}`, key: `GY-${1000 + index}`, stage: 'done',
       delivery: { mergedAt: iso(-hour + index), mergeSha: index.toString(16).padStart(40, 'c'), authorizationRevision: 5 } } as Partial<Work>));
     const ready = work({ id: 'ready', key: 'GY-7' });
-    const refusal = `base branch advanced outside the merge queue: ${'r'.repeat(3000)}`;
     const mergeable = submitted({ id: 'mergeable', key: 'GY-8', stage: 'merge', gates: [{ name: 'merge', passed: true, reasons: [] }] });
     // A proof list long enough that the silence subject quoting it runs past its 500-character bound.
     const proving = submitted({ id: 'proving', key: 'GY-9', stage: 'acceptance', criteria: [{ id: 'AC-1', text: 'Proven', proofs: Array.from({ length: 30 }, (_, index) => `unit:${'p'.repeat(90)}-${index}`) }],
@@ -669,7 +613,7 @@ test('unit:state-bounded-at-persist — no value over a schema bound can fail th
     // Every write is judged by the schema exactly as the cursor file is.
     const persist = async (next: DaemonState) => { written.push(daemonStateSchema.parse(JSON.parse(JSON.stringify(next)))); };
     const deps = effects({ snapshot: async () => ({ work: [...delivered, ready, mergeable, proving], now: iso(0) }), persist,
-      merge: async () => { throw new Error(refusal); }, observeDeployment: async () => observe() });
+      observeDeployment: async () => observe() });
     const state = emptyDaemonState(master);
     // An attempt counter one short of its bound, due for a retry: the retry is attempt 1001.
     state.cycle = 40;
@@ -682,10 +626,7 @@ test('unit:state-bounded-at-persist — no value over a schema bound can fail th
     assert.equal(state.deployment!.pending.length, 200, 'the newest 200 deliveries are kept');
     assert.equal(state.deployment!.pending.at(-1), 'GY-1249');
     assert.ok(state.deployment!.reason!.length <= 500 && state.deployment!.reason!.endsWith('…'));
-    assert.ok(state.actions[candidateKey('merge', mergeable)].detail.length <= actionDetailMax, 'the 3,000-character refusal is recorded within the bound');
-    assert.equal(state.actions[candidateKey('merge', mergeable)].state, 'failed');
     assert.ok(Object.values(state.silence.subjects).every(subject => subject.detail.length <= 500), 'every silence subject fits its bound');
-    assert.ok(Object.values(state.silence.subjects).some(subject => subject.kind === 'proof' && subject.detail.endsWith('…')));
     // The failed observation keeps every delivery pending: the catch path is bounded too.
     observe = async () => { throw new Error(reason); };
     const again = await runCycle(master, state, deps, () => clock + 20_000);
@@ -733,11 +674,11 @@ test('unit:item-failure-isolated — one item whose handling throws fails only i
     assert.match(isolated.detail, /reading 'pane'/);
     // Every other item was still handled, in the same step and in every step after it.
     // The ready item's session is registered before its launch dispatches (GY-172: every launch registers first).
-    assert.deepEqual(log, ['session:GY-2', 'session:GY-3', 'dispatch:GY-3', 'merge:GY-4']);
+    // The green candidate is GitHub's to merge (GY-1235): the loop acts on it no further.
+    assert.deepEqual(log, ['session:GY-2', 'session:GY-3', 'dispatch:GY-3']);
     assert.ok(Object.keys(state.actions).some(key => key.startsWith('session:blocked:beta:')), 'the other blocked worker is still recorded');
     assert.equal(state.actions[dispatchKey(ready)].state, 'done');
-    assert.equal(state.actions[candidateKey('merge', mergeable)].state, 'done');
-    assert.ok(result.cycles[0].actions >= 4, 'the isolated failure is one of the cycle\'s actions, beside every other item\'s');
+    assert.ok(result.cycles[0].actions >= 3, 'the isolated failure is one of the cycle\'s actions, beside every other item\'s');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

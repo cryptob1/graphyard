@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import { determineLane, laneRequiresProof, laneSpeedTargets, laneRequirements, reworkNeedsApprover, type Lane } from '../src/model/policy.js';
 import { requiredProofs } from '../src/model/bootstrap.js';
 import { evaluate } from '../src/model/gates.js';
+import { evaluateLandability, landabilityRefusals } from '../src/model/landability.js';
 import { reviewNeed } from '../src/model/dispatch.js';
 import { producerGroupDecisions } from '../src/model/mechanical-proofs.js';
 import type { Observation, Work } from '../src/model/work.js';
@@ -45,7 +46,11 @@ const item = (paths: string[], proofs: string[] = ['unit:core-flow', 'manual:saf
 } as unknown as Work);
 
 const verdict = (work: Work) => evaluate(work, [work], new Date(), [15368]);
-const acceptance = (work: Work) => verdict(work).gates.find(gate => gate.name === 'acceptance')!;
+/**
+ * The landability verdict's acceptance family: the proofs the lane requires. Since GY-1235 it is no
+ * merge gate of its own (proofs gate nothing), but the verdict still decides it from the lane.
+ */
+const acceptance = (work: Work, all: Work[] = [work]) => { const reasons = landabilityRefusals(evaluateLandability(work, all, new Date()), 'acceptance'); return { passed: reasons.length === 0, reasons }; };
 
 // AC-1: the shipped path policy assigns every item a lane: high for migrations/schema,
 // auth/credentials, the repository's real schema and authentication surfaces (src/store/,
@@ -139,7 +144,8 @@ test('unit:lane-sets-required-gates — a low-lane item is landable on its requi
   const result = verdict(work);
   assert.equal(result.lane, 'low');
   assert.deepEqual(requiredProofs(work, [work]), [], 'no producer-run proof or manual attestation is required of a low item');
-  for (const gate of ['review', 'test', 'acceptance']) assert.equal(result.gates.find(entry => entry.name === gate)!.passed, true, `${gate} passes: ${result.gates.find(entry => entry.name === gate)!.reasons.join('; ')}`);
+  assert.equal(acceptance(work).passed, true, acceptance(work).reasons.join('; '));
+  for (const gate of ['review', 'test']) assert.equal(result.gates.find(entry => entry.name === gate)!.passed, true, `${gate} passes: ${result.gates.find(entry => entry.name === gate)!.reasons.join('; ')}`);
   // The CI checks and the one approving review still gate it.
   const red = item(['src/model/policy.ts']);
   red.observation = { ...observed(['src/model/policy.ts']), checks: [{ name: 'test', result: 'failure', appId: 15368 }] } as Observation;
@@ -185,7 +191,7 @@ test('unit:lane-sets-required-gates — an e2e proof and an inherited bootstrap 
   } as unknown as Work;
   const work = item(['src/model/gates.ts'], ['unit:core-flow'], ['src/model/policy.ts']);
   const result = evaluate(work, [work, source], new Date(), [15368]);
-  const gate = result.gates.find(gate => gate.name === 'acceptance')!;
+  const gate = acceptance(work, [work, source]);
   assert.equal(result.lane, 'low');
   assert.equal(gate.reasons.some(reason => reason.includes('Bootstrap obligation inherited') && reason.includes('unit:deferred-contract')), true,
     `the inherited obligation stands in the low lane: ${gate.reasons.join('; ')}`);
@@ -392,7 +398,7 @@ test('unit:lanes-feed-verdict — the lane changes the verdict’s required fact
     const result = verdict(work);
     assert.equal(result.lane, lane);
     assert.equal(result.speedTarget, laneSpeedTargets[lane], `${lane} reports its own speed target beside the lane`);
-    const gate = result.gates.find(gate => gate.name === 'acceptance')!;
+    const gate = acceptance(work);
     required[lane] = gate.reasons.map(reason => reason.split(' ')[1]);
     assert.deepEqual(required[lane], facts, `${lane}: the verdict requires exactly ${facts.join(', ') || 'no proof'}`);
     assert.equal(gate.passed, facts.length === 0, `${lane}: ${facts.length ? 'refused until its facts are proven' : 'landable on CI and review alone'}`);
@@ -401,16 +407,17 @@ test('unit:lanes-feed-verdict — the lane changes the verdict’s required fact
   assert.notDeepEqual(required.medium, required.high);
 });
 
-test('unit:lanes-feed-verdict — the review hold and the producer dispatch follow the lane’s required facts', () => {
+test('unit:lanes-feed-verdict — the producer decision follows the lane’s required facts, and no lane holds the review for proofs', () => {
   const pending = (paths: string[], proofs: string[]) => {
     const work = item(paths, proofs);
     work.observation = { ...observed(paths), reviews: [], prState: 'open' as const, draft: false, baseTip: base, baseTipContained: true };
     return work;
   };
-  // Medium and high require the producer-run proof: the review waits for it and a producer is asked.
+  // Medium and high require the producer-run proof: its group decision asks for it. Since GY-1235
+  // CI runs it and the review is never held for it.
   for (const paths of [['src/model/a.ts', 'src/cli/b.ts'], ['auth/credentials/a.ts']]) {
     const work = pending(paths, ['unit:core-flow']);
-    assert.equal(reviewNeed(work, [work], new Date()).state, 'proofs-pending');
+    assert.notEqual(reviewNeed(work, [work], new Date()).state, 'proofs-pending');
     assert.equal(producerGroupDecisions(work, [work], new Date()).some(group => group.state === 'request'), true);
   }
   // Low does not: no producer session is asked for, and the review is not held for it.

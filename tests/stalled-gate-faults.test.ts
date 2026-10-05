@@ -147,30 +147,20 @@ async function executorHost() {
 /** The executor's handlers over one item, wired exactly as `scripts/graphyard-executor.mjs` wires them. */
 function executorHandlers(host: Awaited<ReturnType<typeof executorHost>>, item: Work) {
   const snapshot = async () => ({ work: [item], now: new Date().toISOString() });
-  const effects = controlPlaneEffects(host.modules, { root: host.root, current: () => host.config, run: herdr, snapshot, mutate: async () => ({}), mergeExecutor: {} });
+  const effects = controlPlaneEffects(host.modules, { root: host.root, current: () => host.config, run: herdr, snapshot, mutate: async () => ({}) });
   return host.modules.executor.controlPlaneHandlers(() => host.config, { ...effects, agents: async () => [], recordSession: undefined,
     producerCredentials: async (profiles: { name: string }[]) => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])) });
 }
 const executor = { id: 'graphyard-master@vishrog/1', host: 'vishrog' };
 
+// The proof-dispatch instances cannot recur at all since GY-1235: proofs gate nothing (unit tests run
+// in CI, e2e in UAT), so dispatch opens no producer request for the executor to claim on any head.
 for (const instance of instances.filter(entry => entry.action === 'dispatch')) {
-  test(`manual:fault-class-stalled-gate — ${instance.id}: the executor's proof dispatch settles on the producer session the loop launched on ${instance.sha!.slice(0, 7)}`, async () => {
+  test(`manual:fault-class-stalled-gate — ${instance.id}: no producer request is opened on ${instance.sha!.slice(0, 7)}, so no proof dispatch can stall`, () => {
     assert.match(instance.reason!, new RegExp(`^A producer session for ${instance.subject} ${instance.group} proofs is already pending on ${instance.sha!.slice(0, 7)};`));
-    const host = await executorHost();
-    try {
-      const item = submitted(instance);
-      reconcileAutoDispatch(item, [item], new Date());
-      const request = item.autoDispatch!.producers.find(entry => entry.group === instance.group)!;
-      assert.equal(request.sha, instance.sha);
-      // The loop's tick launches the session first, from its own process.
-      await host.modules.producer.launchProducer(host.root, item, request, host.config.producers[0], [], new Date().toISOString(), { run: herdr });
-      const handlers = executorHandlers(host, item);
-      const action = { id: `row-${instance.id}`, key: item.key, work: item.id, kind: 'dispatch', gate: 'test', state: 'claimed', attempts: 1, history: [],
-        inputs: { kind: 'dispatch', target: 'proof', group: request.group, proofs: request.proofs, requestId: request.id, pr: request.pr, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } } as unknown as ActionRow;
-      // Every claim the instance recorded as a failure settles on that session instead.
-      for (const _failure of instance.failures!) assert.match(String(await handlers.dispatch!(action, executor)), new RegExp(`${instance.subject}'s ${instance.group} proofs on ${instance.sha!.slice(0, 12)} are left to producer session \\S+ already pending on that head`));
-      assert.equal((await host.modules.producer.readProducerLedger(host.root)).producers.length, 1, 'no second session was launched');
-    } finally { await host.cleanup(); }
+    const item = submitted(instance);
+    reconcileAutoDispatch(item, [item], new Date());
+    assert.deepEqual(item.autoDispatch?.producers ?? [], []);
   });
 }
 
@@ -194,22 +184,6 @@ for (const instance of instances.filter(entry => entry.action === 'request-revie
     } finally { await host.cleanup(); }
   });
 }
-
-test('manual:fault-class-stalled-gate — a session pending on a superseded head is still a refusal, not an answer', async () => {
-  const host = await executorHost();
-  try {
-    const old = { id: 'superseded', at: new Date().toISOString(), kind: 'stalled-action', subject: 'GY-9', sha: 'a'.repeat(40) } as Instance;
-    const stale = submitted(old);
-    reconcileAutoDispatch(stale, [stale], new Date());
-    await host.modules.producer.launchProducer(host.root, stale, stale.autoDispatch!.producers[0], host.config.producers[0], [], new Date().toISOString(), { run: herdr });
-    const item = submitted({ ...old, sha: 'b'.repeat(40) });
-    reconcileAutoDispatch(item, [item], new Date());
-    const request = item.autoDispatch!.producers[0];
-    const action = { id: 'row-superseded', key: item.key, work: item.id, kind: 'dispatch', gate: 'test', state: 'claimed', attempts: 1, history: [],
-      inputs: { kind: 'dispatch', target: 'proof', group: 'unit', proofs: request.proofs, requestId: request.id, pr: request.pr, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } } as unknown as ActionRow;
-    await assert.rejects(Promise.resolve(executorHandlers(host, item).dispatch!(action, executor)), /already pending on aaaaaaa; reconcile it with master status/);
-  } finally { await host.cleanup(); }
-});
 
 // ---- actorless: a step the control plane already named --------------------------------------------
 
