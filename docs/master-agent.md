@@ -66,8 +66,4 @@ A passing producer records `"exercise"`: rerun without the criterion's behaviour
 
 `master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only when currently authorized for exact head, base and policy; protocol skew refuses (`… deploy main first`).
 
-### Repair lane
-
-Head-bound exception via the App's ruleset bypass: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15m, checks passed, with an approver's `master decide GY-N repair-merge REASON`; audited (`repair.merged`), flagged until a normal merge.
-
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); approvals list each under `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
