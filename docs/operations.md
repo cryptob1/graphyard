@@ -50,4 +50,4 @@ The filter cannot select keyring items: keep other secrets out of that keyring, 
 
 ## Resources and disk
 
-`resourceRegistry` declares bounded resources, reported in `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop removes finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed), stale test temp entries and idle [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed); `disk` attention below `run.diskThresholdGb`. Checkouts: `run.worktreeRoot`.
+`resourceRegistry` declares bounded resources, reported in `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop removes finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed), stale test temp entries and idle [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed): an unowned (no pending record, no live lease), non-`working` pane closes once two passes saw it, 60 s apart when finished, 120 s when `unknown`, 10 min for a recordless blocked or unknown one. `disk` attention below `run.diskThresholdGb`. Checkouts: `run.worktreeRoot`.
