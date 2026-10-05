@@ -21,7 +21,7 @@ Running rows: **Copy local** (launching host) `herdr agent attach w1V:pJD`; **Co
 
 ## Settings › Agents
 
-**Can launch now?** per role; **Accounts** by provider plan, each with one state chip (Disabled, No role, Spent, Launch failing, Unavailable, Working, Idle).
+**Can launch now?**: one line of role chips (next account in the title), plus a line per role that cannot launch. **Accounts**: one row per account (working, idle, then out), one state chip (Disabled, No role, Spent, Launch failing, Unavailable, Working, Idle); a plan's usage sits in its row, or one header for a shared plan. Spent accounts back the same day collapse into one row.
 
 ## The status sentence
 
