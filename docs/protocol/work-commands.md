@@ -1,24 +1,31 @@
 <!-- page: Agent protocol | 1 | every work mutation. -->
 # Work commands
 
-Every endpoint except `/healthz` requires `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)). Every mutation requires an `Idempotency-Key`, reused only to retry the identical request (replaying the original result). Errors are `{ "error": "reason" }`; a `409` is a coordination refusal: read it, don't retry blindly.
+All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)); mutations an `Idempotency-Key`, reused only for identical retries. Errors: `{ "error": "reason" }`; a `409` refusal is read, not retried.
 
-Create with `POST /api/work` ([example](../../examples/work.json)): `title` and `criteria` are required; `dependencies`, `exclusiveResources`, `plannedFiles`, `split` ([decomposition](#splitting-an-item) opt-out/in) and `producerProofs` (`manual:` proofs a producer may run) optional; `parent` and `children` are set only by the split. Other commands are `POST /api/work/KEY/COMMAND`:
+`POST /api/work` ([example](../../examples/work.json)): `title`, `criteria`; optionally `dependencies`, `exclusiveResources`, `plannedFiles`, `split` ([decomposition](#splitting-an-item) opt-out/in), `producerProofs` (producer-runnable `manual:` proofs); `parent`/`children` are set only by a split. Others: `POST /api/work/KEY/COMMAND`:
 
-- `requirements`: the whole document with `expectedPolicyRevision` and `reason` (`split` optional, kept when omitted); `admin`, or additively an operator agent.
-- `decomposition` (coordinator): `{event:"started"|"decided"|"failed",…}`; `decided` with `payload.children` makes the split ([below](#splitting-an-item)).
-- `ready`, `unblock`: `{"reason":…}` (operator agents add `expectedRevision`). `graphyard master unblock` rereads and retries a stale-revision refusal, at most three writes, while the same blocker stands; a cleared or changed blocker is reported instead.
-- `resolve`: `{"trigger":…, "expectedRevision":…, "reason":…}`; a human `admin`, or any `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` for an explained `lease-loss`.
-- `rework`, `recover`: `{"reason":…, "previousWorkerStopped":true}`; `admin` (`recover` for a delivered quarantine).
-- `claim` `{}`; `heartbeat`, `release` `{"epoch":1}` (`release` may carry `"cause"`, kept on its event: a watch supervisor whose session is gone releases this way, leaving no blocker; `"failure":{"message":…}` records `workspace.failed`, and an untouched claim keeps its epoch); `blocked` `{"epoch":1,"reason":…,"partialWork":…}`: a reason ends the attempt and releases the lease; null clears while leased.
-- `blocker-probe` `{blocker,class,probe,result,detail,nextAt}`: coordinator; a `pass` clears a routine blocker ([classes](leases.md#blocked-work-unblocks-itself)).
-- `workspace`: `{"epoch":1,"host":…,"path":…,"branch":"graphyard/gy-1-1"}`; optional `preserved` (`path`, `head`, `branchTip`, `op`, `refs`, `diff`, `at`) records a detached earlier holder as `workspace.preserved`.
-- `submit`: `{"epoch":1,"pr":123}`, refused (`409`) when a file outside `plannedFiles` [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope).
-- `deployment`: `{"sha":…, "mergeSha":…, "source":"endpoint", "observedAt":…}`; coordinator or admin, delivered work, once.
-- `triage` `{judgement}` (coordinator): [backlog](../master-agent.md#machine-filed-backlog). Review follow-ups are never recorded, filed or promoted: findings worth fixing are fixed on the same pull request.
-- `POST /api/retro/synthesize` (coordinator/admin) drafts [retro artefacts](../operations-reference.md#retro-synthesis) under the caller; `POST /api/retro/ID/approve|refuse` `{reason}`: an AI admin or operator agent holding `decision:approve`, never a human session, the drafter or an identity that recorded the instances (`403`; `409` once judged). `submit` is also refused while the candidate fails an applied retro check.
+- `requirements`: document, `expectedPolicyRevision`, `reason`; `admin` (operator agents additively); `split` kept when omitted.
+- `decomposition` (coordinator): `{event:"started"|"decided"|"failed",…}`; `decided` with `payload.children` makes the [split](#splitting-an-item).
+- `ready`, `unblock`: `{"reason":…}` (operator agents add `expectedRevision`); `master unblock` retries a stale-revision refusal (≤3 writes) while the same blocker stands.
+- `resolve`: `{"trigger":…, "expectedRevision":…, "reason":…}`; human `admin`, or any `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` explaining a `lease-loss`.
+- `rework`, `recover` (delivered quarantine): `admin`, `{"reason":…, "previousWorkerStopped":true}`.
+- `claim` `{}`; `heartbeat`, `release` `{"epoch":1}`; `release` may carry `"cause"` or `"failure":{"message":…}` (`workspace.failed`; an untouched claim keeps its epoch); `blocked` `{"epoch":1,"reason":…,"partialWork":…}` (a reason releases; null clears); `blocker-probe` (coordinator; a `pass` clears a routine [blocker](leases.md#blocked-work-unblocks-itself)); `workspace` `{"epoch":1,"host":…,"path":…,"branch":"graphyard/gy-1-1"}`, optional `preserved` (`workspace.preserved`).
+- `submit`: `{"epoch":1,"pr":123}`; `409` if a non-`plannedFiles` file [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope) or an applied retro check fails.
+- `deployment`: `{"sha":…, "mergeSha":…, "source":"endpoint", "observedAt":…}`; coordinator/admin, delivered work, once.
+- `triage` `{judgement}` (coordinator): [backlog](../master-agent.md#machine-filed-backlog); review follow-ups are never filed.
+- `POST /api/retro/synthesize` (coordinator/admin) drafts [retro artefacts](../operations-reference.md#retro-synthesis) as caller; `POST /api/retro/ID/approve|refuse` `{reason}` by its rules (`403`; `409` once judged).
+
 No endpoint sets lifecycle state.
 
 ## Splitting an item
 
 Before first dispatch the loop judges an item against `run.decomposition` bounds (defaults: 4 criteria, 2 root directories, 12 paths, ~1,500 lines). Over them, a read-only Pi session (`run.research` account; `concurrency` 4, `timeoutMinutes` 10) proposes 2–10 children; within bounds, `"split": false` or a failed run, the item is dispatched unchanged. `master status` shows `split` on rows and a `splits` list. Splitting lets the merge queue land small PRs instead of colliding large ones. A split is one transaction: every parent criterion goes to exactly one child (text and proofs copied), each child's `plannedFiles` sits strictly inside the parent's, and `after` orders children as dependencies. Children are ordinary `GY-N` items keeping the parent's release, dependencies, `exclusiveResources`, policy and documentation criterion. The parent is never claimed or dispatched; requirements revisions on it are refused in favour of the children's; its last child's delivery delivers it (`decomposition.parent-delivered`). A keep-whole answer or refused split dispatches it unchanged; `"split": true` runs the session within the bounds too.
+
+## Other commands and routes
+
+`graphyard help` describes every command; also: `handoff GY-N`, `human-requests`, `rereview GY-N [EPOCH]`, `scenarios`, `scenario file.json`, `master guide|autonomy|decisions|withdraw|close|context|refuse|principals`, `db status|backup|verify|restore`, `grants history`, `delivery observations`, `operator-agent list|setup|configure|rotate|revoke`, `runner account-digest|adapters`.
+
+Further routes: executor `/api/actions`, `/api/actions/claim`; worker pull `/api/assignments/claim`; fleet `/api/agent-registry`, `/api/agent-registry/apply|select|document|history|connect|connect/host-key|connect/hosts|connect/providers|connect/requests`; validation `/api/validation/analytics|capacity|definitions|artifacts|artifacts/migrate|replay|replays|reuse|collection-authority|collection-heartbeat|cancel|settle|retry`; delivery `/api/delivery/observations|select|sweep`; direct merges `/api/direct-merges`, `/api/direct-merges/on|off`; and `/api/events/stats`, `/api/human-requests`, `/api/intake`, `/api/interventions/patterns`, `/api/judgements`, `/api/operator-agents`, `/api/principals`, `/api/production-environment`, `/api/scenarios`.
+
+Pattern routes: `GET /api/attribution/work/ID`, `/api/attribution/manifest/ID/N`, `/api/validation/attempt/ID`, `/api/validation/candidate/ID`, `/api/work/ID/context`, `/api/work/ID/decisions`; `POST /api/work/ID/close|closed-question|lead-ruling|merge-acquire`, `/api/agent-registry/runtimes|models|accounts|roles[/NAME/remove|quota]`, `/api/agent-registry/sessions/ID/end`, `/api/agent-registry/connect/ID/claim|progress|result|cancel|answer`, `/api/operator-agents/NAME/configure|rotate|revoke`.
