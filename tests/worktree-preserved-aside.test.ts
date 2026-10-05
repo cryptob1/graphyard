@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { runChild } from '../src/child-runner.js';
+import { runChild, type ChildRun } from '../src/child-runner.js';
 import { releaseHeldBranch } from '../src/master/worktrees.js';
 
 // GY-1215: the follow-up of GY-1059's review. A reused same-epoch path is cleaned, and the clean
@@ -74,7 +74,7 @@ test('unit:worktree-preserved-aside — untracked files are kept when the tracke
     await writeFile(join(clean.path, 'leftover.txt'), 'from a failed hook\n');
     const recorded = await releaseHeldBranch(root, clean.branch, clean.path, runChild);
     assert.equal(keptUnder(recorded!.preserved.diff), undefined, 'a record that holds everything names no directory');
-    assert.equal(existsSync(join(git(clean.path, 'rev-parse', '--absolute-git-dir'), 'graphyard-preserved')), false);
+    assert.equal(existsSync(join(git(clean.path, 'rev-parse', '--path-format=absolute', '--git-common-dir'), 'graphyard-preserved', 'GY-892-1')), false);
     assert.equal(git(clean.path, 'status', '--porcelain'), '');
 
     // A holder at another path is detached, never cleaned: its files stay where they are.
@@ -84,5 +84,42 @@ test('unit:worktree-preserved-aside — untracked files are kept when the tracke
     assert.equal(detached?.reused, false);
     assert.equal(keptUnder(detached!.preserved.diff), undefined);
     assert.equal(existsSync(join(old.path, 'image.png')), true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+// GY-1274: the follow-ups of GY-1215's review.
+test('unit:worktree-preserved-aside — kept files outlive the worktree, a file ending at the budget line is never cut and deleted, and an unresolvable git dir rejects before anything changes', async () => {
+  const root = await host();
+  try {
+    // A file recorded "in full" whose end falls in the window the truncation suffix takes, followed by
+    // a named-only binary file that pushes the record past its limit.
+    const own = attemptWorktree(root, 'GY-894', 1);
+    const common = git(own.path, 'rev-parse', '--path-format=absolute', '--git-common-dir');
+    // Sized from a timestamp taken here, not in the release: an ISO timestamp has a fixed length, so the note's length matches.
+    const keptNote = `\n-- untracked files not recorded in full are kept under ${join(common, 'graphyard-preserved', 'GY-894-1', new Date().toISOString().replace(/[:.]/g, '-'))} --`;
+    const heading = '-- untracked files --\n', header = '-- untracked file a-edge.txt --\n';
+    const edge = 'e'.repeat(100_000 - keptNote.length - 10 - heading.length - header.length);
+    await writeFile(join(own.path, 'a-edge.txt'), edge);
+    await writeFile(join(own.path, 'b-image.png'), Buffer.from([0, 1, 2]));
+    const released = await releaseHeldBranch(root, own.branch, own.path, runChild);
+    const diff = released!.preserved.diff, aside = keptUnder(diff)!;
+    assert.ok(diff.length <= 100_000);
+    assert.ok(aside.startsWith(join(common, 'graphyard-preserved', 'GY-894-1')), 'kept under the common git dir');
+    const kept = existsSync(join(aside, 'a-edge.txt')) ? await readFile(join(aside, 'a-edge.txt'), 'utf8') : null;
+    assert.ok(kept === edge || diff.includes(`${header}${edge}\n`), 'the edge file is either recorded whole or kept whole');
+    assert.equal(kept, edge, 'a file the suffix would cut is not counted as recorded in full');
+    // Reclaiming the attempt worktree deletes its own git dir; the kept files survive it.
+    git(root, 'worktree', 'remove', '--force', own.path);
+    git(root, 'worktree', 'prune');
+    assert.deepEqual(await readFile(join(aside, 'b-image.png')), Buffer.from([0, 1, 2]), 'the named directory outlives the worktree');
+
+    // A git that cannot name the git dir rejects the release: nothing is registered, moved or cleaned.
+    const stuck = attemptWorktree(root, 'GY-895', 1);
+    await writeFile(join(stuck.path, 'image.png'), Buffer.from([0, 1, 2]));
+    const refusing: ChildRun = (command, args, options) => args.includes('--git-common-dir') ? Promise.reject(new Error('git refused')) : runChild(command, args, options);
+    let registered = false;
+    await assert.rejects(releaseHeldBranch(root, stuck.branch, stuck.path, refusing, async () => { registered = true; }), /git refused/);
+    assert.equal(registered, false);
+    assert.deepEqual(await readFile(join(stuck.path, 'image.png')), Buffer.from([0, 1, 2]), 'the untracked file stays where it was');
   } finally { await rm(root, { recursive: true, force: true }); }
 });

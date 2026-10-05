@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-Restarting `graphyard master run` never double-dispatches. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95), `metrics.timings` (steps over 1 s); a cycle over 60 s raises `loop`, naming three slowest. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3); failed requests log route, SQL.
+Restarting `graphyard master run` never double-dispatches. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95), `metrics.timings` (steps over 1 s); a cycle over 60 s raises `loop`, naming three slowest. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3); failed requests log route, SQL. Executor claim order: priority, merge-stage `resync`/`merge`, age; failed rows await `retryAt`, yield once.
 
 ### Perpetual master loop
 
@@ -23,7 +23,7 @@ Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`
 
 ## Retro synthesis
 
-With `GRAPHYARD_INTERVENTION_PATTERNS=1`, a per-minute scan groups refusal and rework interventions by cause: a declared refusal shape (`build/out-of-scope-count`), a loop refusal trigger, or a normalised rework reason. A cause at the window's threshold gets drafts (`retro.drafted`), never applied or filed: a standards or criteria wording update, a mechanical check, a producer-method correction, a fault-catalogue entry. An AI admin or operator agent holding `decision:approve` (not a human, the drafter, or an instance's recorder) approves one, applied at its registry's next revision (`requirements`, `checks`, `catalogue`) and recording the cause, fingerprint and instances it closes, or refuses it. In force: requirements show as `retroStanding` (`graphyard status GY-N`); a check (`planned-files`, `merges-onto-base`, `checks-passed`) runs on every submission's observed candidate, refusing `complete` (`409`); a catalogue entry files later instances under its fault class (`catalogue` on interventions, `retroCatalogued` on gate refusals) counting recurrences. Instances in any draft never count again; a recurrence after application is redrafted naming it (`recurredAfter`). Routes: [work commands](protocol/work-commands.md).
+With `GRAPHYARD_INTERVENTION_PATTERNS=1`, a minutely scan groups refusal/rework interventions by cause: a declared refusal shape (`build/out-of-scope-count`), loop refusal trigger, or normalised rework reason. A cause at the window's threshold gets drafts (`retro.drafted`), never applied or filed: a standards/criteria wording update, a mechanical check, a producer-method correction, a fault-catalogue entry. An agent holding `decision:approve` (not a human, the drafter, or an instance's recorder) approves one, applied at its registry's next revision (`requirements`, `checks`, `catalogue`) recording the cause, fingerprint and instances it closes, or refuses it. In force: requirements show `retroStanding` (`graphyard status GY-N`); a check (`planned-files`, `merges-onto-base`, `checks-passed`) runs on every submission's observed candidate, refusing `complete` (`409`); a catalogue entry files later instances under its fault class (`catalogue` on interventions, `retroCatalogued` on gate refusals) counting recurrences. Instances in any draft never count again; a recurrence after application is redrafted naming it (`recurredAfter`). Routes: [work commands](protocol/work-commands.md).
 
 ## Flaky CI check
 
