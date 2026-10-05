@@ -69,4 +69,4 @@ Faults carry `faultClass` (`master status` `faults`); recurring classes file one
 
 Target (ten-plus deliveries): submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; `speed.submitToMerge` is the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
 
-The loop's decisions step stays within 10 s a cycle at about 90 open items: one `decision.*` ledger read names moved items, rereading only those. A history whose ledger has not moved is kept, not read.
+The loop's decisions step stays within 10 s a cycle at about 90 open items: one `decision.*` ledger read names moved items, rereading only those. A history whose ledger has not moved is kept, not read. Histories of items whose refused scope request awaits an approver are read ahead first, then open watches'. A request that fails only because its history read missed the 10 s deadline is retried next cycle, not on the backoff, and counts as an `action:decision` fault only on a second miss in a row.

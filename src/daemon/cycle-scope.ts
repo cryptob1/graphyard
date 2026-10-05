@@ -7,6 +7,7 @@ import { barrelSuccessorGround, criterionSymbolGround, criterionSymbols, criteri
 import { type Successor, successorGround, successorsOf } from '../model/successors.js';
 import { findingScope, type ReviewFinding } from '../review-scope.js';
 import { guardBroadScope } from '../master.js';
+import { RefusedResponse } from '../model/refusal.js';
 import { message, scopeMeasurementSchema } from './state.js';
 import { scopeKey } from './reconcile.js';
 import { scopeBudget } from './metrics.js';
@@ -320,19 +321,22 @@ const transientScopeRetry = 'so it is retried next cycle on a fresh read';
 /**
  * GY-1293. Why the control plane refused one of the loop's own additive scope revisions without
  * judging its scope, or null: the plane answered 5xx (GY-1290 on 5 October 2026: an internal error
- * under reconciliation contention, widened on the next cycle), or the item moved past the policy
- * revision the loop read (a concurrent revision; the next cycle reads the new one).
+ * under reconciliation contention, widened on the next cycle), read from the response's own status,
+ * or the item moved past the policy revision the loop read (a concurrent revision; the next cycle
+ * reads the new one).
  */
 export function transientScopeRefusal(error: unknown): string | null {
-  const text = message(error);
-  if (/Application failed to respond/.test(text) || /\(5\d\d\):/.test(text)) return 'the control plane answered 5xx';
-  if (/Policy revision changed; reload before revising/.test(text)) return 'the item moved past the revision the loop read';
+  if (error instanceof RefusedResponse && error.status >= 500) return 'the control plane answered 5xx';
+  if (/Policy revision changed; reload before revising/.test(message(error))) return 'the item moved past the revision the loop read';
   return null;
 }
 /**
  * The fault kind a refused scope action is noted under: a transient refusal judged nothing about the
  * item's scope, so one alone is no scope fault (null: stored for retry, never an instance); the
  * second in a row is, and so is every other refusal (undefined: the action's own kind, action:scope).
+ * "In a row" is per action key, and the key names the policy revision: a stale-revision refusal's
+ * retry runs under the new revision's key, so it starts a run of its own. That is intended — the
+ * item moved on, and the retry is a new revision's first attempt, not the stale one again.
  */
 export function scopeRefusalFault(transient: string | null, previous: { state: string; detail: string } | undefined): null | undefined {
   return transient && !(previous?.state === 'failed' && previous.detail.includes(transientScopeRetry)) ? null : undefined;

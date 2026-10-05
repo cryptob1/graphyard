@@ -76,6 +76,7 @@ import { itemLane, lanes, laneSpeedTargets } from '../src/model/policy.js';
 import { doctorRunEvent } from '../src/server/routes/status.js';
 import { containmentSettlementRefusals, containmentVerificationSchema } from '../src/quarantine.js';
 import { scopeRefusalBlocker } from '../src/model/scope.js';
+import { RefusedResponse } from '../src/model/refusal.js';
 import type { DoctorEffects } from '../src/daemon/doctor.js';
 
 /**
@@ -389,9 +390,16 @@ function diagnosisRunner(seen: DiagnosisRun[], attempt: 'primary' | 'fallback', 
  * asks a wide ask only a review finding grounds: the loop widens by posting the folded revision.
  * Item `unrepresentable` asks the one path no fold can represent under the plannedFiles cap: the
  * rule refuses it, nothing routes or retries it, and the item stays blocked with the escalation.
+ *
+ * GY-1293: item `partial` asks a documentation page the item implies and a file nothing grounds:
+ * the loop widens by the page and puts the rest to the approver against the widened revision.
+ * The control plane answers the loop's first widening of `wideFinding` with a 5xx and its first of
+ * `partial` with a stale-revision refusal, and `partial`'s first decision-history read outlasts the
+ * decisions step's deadline: each is retried on the next cycle and none is a fault.
  */
 const scopePlan = {
-  wideRule: 16, wideFinding: 17, unrepresentable: 18,
+  wideRule: 16, wideFinding: 17, unrepresentable: 18, partial: 19,
+  partialPage: 'docs/soak-partial-19.md', partialFile: 'src/soak/ungrounded-19.ts',
   wideRuleDir: 'tests/soak-wide/', wideFindingDir: 'src/soak/extra-17/', unrepresentablePath: 'newtop-18/next.ts',
   wideRulePlanned: 20, wideRuleAsked: 90, wideFindingAsked: 100, unrepresentablePlanned: plannedFilesMax - 1,
 };
@@ -691,7 +699,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
 
   // ---- The fifteen items, created in the backlog and released one every fifteen minutes. ----
   const releaseEveryMs = options.queued?.releaseEveryMs ?? plan.releaseEveryMs;
-  for (let n = 1; n <= plan.items + (options.scope ? 3 : 0); n++) {
+  for (let n = 1; n <= plan.items + (options.scope ? 4 : 0); n++) {
     // The scope scenarios carry their own intake: item wideRule plans twenty files under the
     // directory its criterion names; item unrepresentable plans plannedFilesMax entries outside
     // every directory of the one path its criterion implies.
@@ -781,7 +789,11 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     scopeAsks.set(items[scopePlan.wideFinding - 1].key, findingPaths);
     findings.set(items[scopePlan.wideFinding - 1].key, new Set(findingPaths));
     scopeAsks.set(items[scopePlan.unrepresentable - 1].key, [scopePlan.unrepresentablePath]);
+    scopeAsks.set(items[scopePlan.partial - 1].key, [scopePlan.partialPage, scopePlan.partialFile]);
   }
+  // GY-1293: the refusals that judge nothing about scope, each answered once, and the slow read.
+  const transientWidenings = new Map<number, number>([[scopePlan.wideFinding, 500], [scopePlan.partial, 409]]);
+  const transientRefused: { n: number; status: number; elapsed: number }[] = [], lateReads: { n: number; elapsed: number }[] = [];
   // The unrepresentable ask's worker never pushes or submits: its item stays blocked on scope.
   const hold = new Set(options.scope ? [items[scopePlan.unrepresentable - 1].key] : []);
 
@@ -1448,8 +1460,23 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         return named ? [{ ground: 'review thread 1', text: `Please also update ${[...named].join(', ')} in this round.` }] : [];
       },
       basePaths: async (paths: readonly string[]) => new Set<string>(paths),
-      widenScope: (work: Work, request: ScopeRequestState, paths: string[], reason: string) =>
-        api(principals.operatorAgent, 'POST', `work/${work.id}/requirements`, answeringWidening(work, request, paths, reason)),
+      widenScope: async (work: Work, request: ScopeRequestState, paths: string[], reason: string) => {
+        const status = transientWidenings.get(numberOf(work));
+        if (status) {
+          transientWidenings.delete(numberOf(work)); transientRefused.push({ n: numberOf(work), status, elapsed });
+          const error = status === 409 ? 'Policy revision changed; reload before revising' : 'Internal error; consult server logs';
+          throw new RefusedResponse(`Graphyard refused work/${work.id}/requirements (${status}): ${error}`, status, { error });
+        }
+        return api(principals.operatorAgent, 'POST', `work/${work.id}/requirements`, answeringWidening(work, request, paths, reason));
+      },
+      // The first read of the partial item's history once its request is refused answers past the step's deadline.
+      decisions: async (work: Work) => {
+        if (numberOf(work) === scopePlan.partial && !lateReads.length && work.scopeRequest?.decision?.state === 'refused') {
+          lateReads.push({ n: numberOf(work), elapsed });
+          await new Promise(resolve => setTimeout(resolve, decisionReadDeadlineMs + 500));
+        }
+        return api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`);
+      },
     } : {}),
     controlPlane: async () => ({ build: { commit: production.build }, ...(heldJobs ? { heldJobs: 1 } : {}) }),
     observeDeployment: async delivered => {
@@ -1869,7 +1896,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     while (released < plan.items && elapsed >= released * releaseEveryMs) await engine.execute(principals.operator, 'ready', items[released++].id, {}, id());
     // The scope scenarios release beside the fifteen: the wide asks early enough to decide well
     // before their workers push, the unrepresentable one so its refusal stands for hours.
-    for (const [slot, n] of [[30, scopePlan.wideRule], [35, scopePlan.wideFinding], [40, scopePlan.unrepresentable]] as const)
+    for (const [slot, n] of [[30, scopePlan.wideRule], [35, scopePlan.wideFinding], [40, scopePlan.unrepresentable], [45, scopePlan.partial]] as const)
       if (options.scope && !releasedScope.has(n) && elapsed >= slot * minute) { await engine.execute(principals.operator, 'ready', items[n - 1].id, {}, id()); releasedScope.add(n); }
     const splitAt = options.queued ? options.hours * hour + hour : plan.split.at;
     if (!split && elapsed >= splitAt) {
@@ -2334,7 +2361,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, staleMerges, restartLog, guardDay, decompositionDay: decompositionHistory };
+    wakes, staleMerges, restartLog, guardDay, decompositionDay: decompositionHistory, transientRefused, lateReads };
 }
 
 /**
@@ -3276,10 +3303,10 @@ test('unit:soak-invariants-hold — after a restart the first request for a refu
   assert.ok(![...herdr.agents.values()].some(agent => /approver/i.test(agent.name ?? '')), 'no approver session is left open at the end of the day');
 });
 
-test('unit:soak-invariants-hold — direct wide scope requests: a rule-approved ask folds and answers once, a finding-grounded ask widens once, and an unrepresentable ask is refused with nothing retrying it', { timeout: 600_000 }, async () => {
+test('unit:soak-invariants-hold — direct wide scope requests: a rule-approved ask folds and answers once, a finding-grounded ask widens once, an unrepresentable ask is refused with nothing retrying it, and a partly grounded ask reaches its approver through transient refusals and a late history read with no scope fault', { timeout: 600_000 }, async () => {
   const day = await simulateDay({ hours: 4, scope: true });
   assertLaunchesConfined(day, coordinatorRoot!);
-  const { items, final, violations, failures, state, escalations } = day;
+  const { items, final, violations, failures, state, escalations, transientRefused, lateReads, decideCalls } = day;
   assert.deepEqual(violations, [], 'every system invariant holds with the scope scenarios in the day');
   assert.deepEqual(failures, [], 'no cycle failed');
 
@@ -3316,6 +3343,27 @@ test('unit:soak-invariants-hold — direct wide scope requests: a rule-approved 
   assert.ok(judging && judging[1].state === 'done' && /no unresolved review finding/.test(judging[1].detail), `the finding rule judged the refusal and left it standing: ${judging?.[1].detail}`);
   assert.equal((await api(principals.operatorAgent, 'GET', `work/${blocked.id}/decisions`)).decisions.filter((decision: any) => decision.action === 'requirements').length, 0, 'an unrepresentable fold is never routed to a decision the schema would refuse');
   assert.equal(escalations.filter(detail => detail.includes(blocked.key) && /blocked on scope/.test(detail)).length, 1, 'exactly one escalation stands for the blocked item');
+
+  // GY-1293. The partly grounded ask: the page is granted on the rule, the rest goes to the approver
+  // against the widened revision, once, and is applied. The control plane refused the first widening
+  // of it (stale revision) and of the finding item (5xx), and the first read of its decision history
+  // missed the step's deadline: each was asked again on the next cycle, and none is a fault.
+  assert.deepEqual(transientRefused.map(entry => [entry.n, entry.status]).sort(), [[scopePlan.wideFinding, 500], [scopePlan.partial, 409]], 'each transient refusal was served once');
+  assert.equal(lateReads.length, 1, 'the partial item\'s history read once past the deadline');
+  const partial = final.find(item => item.key === items[scopePlan.partial - 1].key)!;
+  assert.equal(partial.stage, 'done', 'the partial item was delivered');
+  assert.ok(partial.plannedFiles.includes(scopePlan.partialPage) && partial.plannedFiles.includes(scopePlan.partialFile), `both paths were granted: ${partial.plannedFiles.join(', ')}`);
+  const partialRows = Object.entries(state.actions).filter(([key]) => key.startsWith(`scope:${partial.id}:`));
+  assert.equal(partialRows.filter(([, action]) => /^Partly widened /.test(action.detail)).length, 2, `the partial widening is recorded for the revision it judged and the one it made, and made once: ${partialRows.map(([key, action]) => `${key} ${action.state} ${action.detail.slice(0, 80)}`).join(' | ')}`);
+  assert.ok(partialRows.length <= 3, `the request's rows stay bounded (its decision and one judgement per revision): ${partialRows.map(([key]) => key).join(', ')}`);
+  const asked = decideCalls.filter(call => call.key === partial.key && call.action === 'requirements');
+  assert.equal(asked.length, 1, 'the rest was put to the approver exactly once');
+  assert.ok((asked[0].input as { plannedFiles: string[] }).plannedFiles.includes(scopePlan.partialPage), 'against the widened plannedFiles');
+  const requirements = (await api(principals.operatorAgent, 'GET', `work/${partial.id}/decisions`)).decisions.filter((decision: any) => decision.action === 'requirements');
+  assert.deepEqual(requirements.map((decision: any) => decision.state), ['applied'], 'and its approval applied');
+  const scoped = [items[scopePlan.wideFinding - 1].key, partial.key];
+  const instances = state.faults.instances.filter(instance => scoped.includes(instance.subject) && (instance.faultClass === 'scope' || instance.faultClass === 'decision'));
+  assert.deepEqual(instances.map(instance => [instance.subject, instance.kind]), [], 'no transient refusal or late read is counted as a scope or decision fault');
 });
 
 test('unit:soak-invariants-hold — a loop change that breaks an invariant fails the soak: approver and docs-sync sessions the loop no longer closes are named within the hour', { timeout: 600_000 }, async () => {

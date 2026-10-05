@@ -3,18 +3,23 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { approverSessionName, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { liveScopeWidening } from '../src/model/scope.js';
 import { successorWidening } from '../src/model/successors.js';
 import { scopeRefusalFault, transientScopeRefusal } from '../src/daemon/cycle-scope.js';
+import { lateDecisionRead } from '../src/daemon/decision-reads.js';
+import { RefusedResponse } from '../src/model/refusal.js';
 import type { Work } from '../src/model.js';
 
-// GY-1293: three scope faults in one day. Two were the loop's own additive scope revisions refused
-// for reasons that judged nothing about scope: GY-1235's successor re-plan was posted from the
-// snapshot the same cycle's partial widening had just outdated (409), and GY-1290's widening met a
-// control-plane internal error the next cycle did not (500). The partial widening that outdated
-// GY-1235's snapshot also kept its request from the approver, one companion hop per cycle, for 14
-// minutes. Each test reproduces one instance as the ledger recorded it.
+// GY-1293: three scope faults in one day, each the loop failing to carry one of its own scope steps
+// to its end for a reason that judged nothing about scope. GY-1235's successor re-plan was posted
+// from the snapshot the same cycle's partial widening had just outdated (409), and GY-1290's
+// widening met a control-plane internal error the next cycle did not (500). The partial widening
+// that outdated GY-1235's snapshot also kept its request from the approver, one companion hop per
+// cycle, for 14 minutes. GY-1287's refused request never reached its approver at all: the loop's
+// cursor holds its requirements decision failed at 10:07:18 and 10:13:55 because its decision
+// history was read only when the decisions step reached it, past the step's read deadline, and the
+// scope budget ran out at 10:17:19. Each test reproduces one instance as the ledger recorded it.
 
 const clock = Date.parse('2030-01-03T12:00:00Z');
 const iso = (offset = 0) => new Date(clock + offset).toISOString();
@@ -38,6 +43,9 @@ function item(extra: Partial<Work> = {}): Work {
   } as unknown as Work;
 }
 
+/** The refusal the loop's control-plane client throws: the status rides on the error, as `asOperatorAgent` sets it. */
+const refused = (id: string, status: number, error: string) => new RefusedResponse(`Graphyard refused work/${id}/requirements (${status}): ${error}`, status, { error });
+
 /**
  * The control plane's requirements command as far as these instances need it: a revision of the
  * current policy revision that only widens is applied under the live lease and quarantine; a stale
@@ -50,9 +58,9 @@ function plane(initial: Work) {
   const requirements = (via: string, revision: { expectedPolicyRevision: number; criteria: unknown[]; dependencies: readonly string[]; plannedFiles: readonly string[]; exclusiveResources?: readonly string[]; producerProofs?: readonly string[] }) => {
     posted.push({ via, expectedPolicyRevision: revision.expectedPolicyRevision, plannedFiles: [...revision.plannedFiles] });
     if (fail.length) throw fail.shift();
-    if (revision.expectedPolicyRevision !== current.policyRevision) throw new Error(`Graphyard refused work/${current.id}/requirements (409): Policy revision changed; reload before revising`);
+    if (revision.expectedPolicyRevision !== current.policyRevision) throw refused(current.id, 409, 'Policy revision changed; reload before revising');
     if (!liveScopeWidening({ criteria: current.criteria, dependencies: current.dependencies, plannedFiles: current.plannedFiles ?? [], exclusiveResources: current.exclusiveResources, producerProofs: current.producerProofs }, revision as never))
-      throw new Error(`Graphyard refused work/${current.id}/requirements (409): Task is quarantined by unverified containment from epoch 3; requirements remain immutable until settlement or stopped-worker recovery`);
+      throw refused(current.id, 409, 'Task is quarantined by unverified containment from epoch 3; requirements remain immutable until settlement or stopped-worker recovery');
     current = { ...current, plannedFiles: [...revision.plannedFiles], policyRevision: current.policyRevision + 1, revision: current.revision + 1 };
     return structuredClone(current);
   };
@@ -124,7 +132,7 @@ test('manual:fault-class-scope — GY-1235: the rest of a partly widened request
 
 test('manual:fault-class-scope — GY-1290: a widening the control plane answers with an internal error is retried next cycle and noted as no scope fault; a second in a row is one', async () => {
   const control = plane(item({ key: 'GY-1290', scopeRequest: refusedRequest(['docs/delivery.md']) } as Partial<Work>));
-  control.fail.push(new Error(`Graphyard refused work/${control.read().id}/requirements (500): Internal error; consult server logs`));
+  control.fail.push(refused(control.read().id, 500, 'Internal error; consult server logs'));
   const state = emptyDaemonState(config());
   const effect = effects(control, { baseSuccessions: undefined, replan: undefined, reviewFindings: async () => [], baseText: async () => null });
   await cycle(state, effect);
@@ -138,7 +146,7 @@ test('manual:fault-class-scope — GY-1290: a widening the control plane answers
 
   // The plane failing the retry too is a fault the loop cannot clear on its own: it is counted.
   const again = plane(item({ key: 'GY-1290', scopeRequest: refusedRequest(['docs/delivery.md']) } as Partial<Work>));
-  for (let n = 0; n < 2; n++) again.fail.push(new Error(`Graphyard refused work/${again.read().id}/requirements (500): Internal error; consult server logs`));
+  for (let n = 0; n < 2; n++) again.fail.push(refused(again.read().id, 500, 'Internal error; consult server logs'));
   const twice = emptyDaemonState(config());
   const failing = effects(again, { baseSuccessions: undefined, replan: undefined });
   await cycle(twice, failing);
@@ -146,12 +154,73 @@ test('manual:fault-class-scope — GY-1290: a widening the control plane answers
   assert.deepEqual(scopeFaults(twice).map(instance => [instance.kind, instance.subject]), [['action:scope', 'GY-1290']]);
 });
 
-test('unit:transient-scope-refusal — only a 5xx or a stale revision is transient; a refusal that judged the scope always counts', () => {
-  assert.equal(transientScopeRefusal(new Error('Graphyard refused work/x/requirements (500): Internal error; consult server logs')), 'the control plane answered 5xx');
-  assert.equal(transientScopeRefusal(new Error('Graphyard refused work/x/requirements (502): Application failed to respond')), 'the control plane answered 5xx');
-  assert.equal(transientScopeRefusal(new Error('Graphyard refused work/x/requirements (409): Policy revision changed; reload before revising')), 'the item moved past the revision the loop read');
-  assert.equal(transientScopeRefusal(new Error('Graphyard refused work/x/requirements (409): Task is quarantined by unverified containment from epoch 3; requirements remain immutable until settlement or stopped-worker recovery')), null);
-  assert.equal(transientScopeRefusal(new Error('Graphyard refused work/x/requirements (409): Operator agents cannot remove planned-file containment')), null);
+test('manual:fault-class-scope — GY-1287: a refused scope request reaches its approver in the cycle it is judged, though slower history reads hold the decisions step past its deadline', async () => {
+  // GY-1287 as the loop's cursor recorded it: plannedFiles empty, six paths the rule refused, no
+  // finding grounding any. Another item's decision history answers slower than the step's read
+  // deadline, and the loop keeps no history between cycles (no decision-ledger read answered), so
+  // nothing read late is there for the next cycle. Cycles run five minutes apart, as they did.
+  const paths = ['src/master/dispatch.ts', 'src/master.ts', 'src/model/session-state.ts', 'src/master/status.ts', 'src/daemon/state.ts', 'tests/session-liveness-launch-window.test.ts'];
+  const asked1287 = iso(-150_000);
+  const request = (epoch: number, at: string) => ({ epoch, paths, reason: 'AC-1 needs the launch window fixed', requestedBy: 'worker', at,
+    decision: { state: 'refused', reason: 'outside what the criteria imply', at: iso(-10_000), decidedBy: 'graphyard', waitedMs: 140_000, paths, requestedBy: 'worker', requestedAt: at, epoch } });
+  // The workers' supervisors renew their leases throughout, so each stays live past the scope budget.
+  const criteria = [{ id: 'AC-1', text: 'The shared cause of the recurring faults is removed', proofs: ['manual:fault-class-session-liveness'] }];
+  const renewed = (epoch: number) => ({ epoch, owner: 'worker', expiresAt: iso(3_600_000) });
+  const slow = item({ id: '00000000-0000-4000-8000-000000001286', key: 'GY-1286', plannedFiles: [], policyRevision: 1, epoch: 2, lease: renewed(2), containmentQuarantine: null, scopeRequest: request(2, iso(-60_000)), criteria } as Partial<Work>);
+  let target = item({ id: '00000000-0000-4000-8000-000000001287', key: 'GY-1287', plannedFiles: [], policyRevision: 1, epoch: 1, lease: renewed(1), containmentQuarantine: null, scopeRequest: request(1, asked1287), criteria } as Partial<Work>);
+  const deadlineMs = 200;
+  const decided: string[] = [], approvers: { name: string; pane_id: string; agent_status: string }[] = [];
+  let at = clock;
+  const effect = {
+    agents: () => approvers, credentials: async () => ({}), snapshot: async () => ({ work: [structuredClone(slow), structuredClone(target)], now: new Date(at).toISOString() }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(), reason: 'no deployment in this test', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    reviewFindings: async () => [], basePaths: async (asked: string[]) => new Set(asked.filter(path => !path.startsWith('tests/'))), baseText: async () => 'export const unrelated = 1;\n', baseMentions: async () => 0,
+    widenScope: async () => { throw new Error('no rule grounds any of these paths'); },
+    decisionReadDeadlineMs: deadlineMs,
+    // GY-1286's request stays with its approver; GY-1287's approver applies the widening at once.
+    decisions: async (work: Work) => {
+      await new Promise(resolve => setTimeout(resolve, work.key === 'GY-1286' ? 3 * deadlineMs : 5));
+      return { decisions: decided.filter(key => key === work.key).map(key => ({ id: `decision-${key}`, action: 'requirements', state: key === 'GY-1287' ? 'applied' : 'requested', approvedAt: iso(), input: { answers: { epoch: work.epoch, at: key === 'GY-1287' ? asked1287 : work.scopeRequest?.at } }, approvedBy: key === 'GY-1287' ? 'approver' : null })) };
+    },
+    decide: async (work: Work, action: string) => {
+      assert.equal(action, 'requirements');
+      decided.push(work.key);
+      if (work.key === 'GY-1287') target = { ...target, plannedFiles: [...paths], policyRevision: 2, scopeRequest: null, blocker: null,
+        scopeDecision: { state: 'approved', reason: 'the approver granted it', at: new Date(at).toISOString(), decidedBy: 'approver', waitedMs: 0, paths, requestedBy: 'worker', requestedAt: asked1287, epoch: 1 } } as unknown as Work;
+      return { id: `decision-${work.key}` };
+    },
+    approver: async (work: Work, decision: string) => { const name = approverSessionName(work, decision); approvers.push({ name, pane_id: `pane-${work.key}`, agent_status: 'working' }); return { agentName: name, pane: `pane-${work.key}` }; },
+  } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config());
+  // Every read a cycle started has answered before the next begins, as five minutes apart they had.
+  for (const minutes of [0, 5, 10, 15]) { at = clock + minutes * 60_000; await cycle(state, effect, at); await new Promise(resolve => setTimeout(resolve, 4 * deadlineMs)); }
+
+  // On the base the step read GY-1287's history only when it reached it, behind GY-1286's: it
+  // missed the deadline every cycle, the request backed off, and at fifteen minutes the request
+  // stood unanswered — the scope-request fault.
+  assert.ok(decided.includes('GY-1287'), `GY-1287's request is put to its approver: ${JSON.stringify(Object.entries(state.actions).filter(([, action]) => action.work === 'GY-1287').map(([key, action]) => [key, action.state, action.detail.slice(0, 160)]))}`);
+  assert.equal(decided.filter(key => key === 'GY-1287').length, 1, 'once');
+  const owed = (key: string) => state.faults.instances.filter(instance => instance.subject === key && (instance.faultClass === 'scope' || instance.faultClass === 'decision')).map(instance => instance.kind);
+  assert.deepEqual(owed('GY-1287'), [], 'neither a scope-request nor a decision fault opens for it');
+
+  // GY-1286's history never answers in time: its request is asked again every cycle, not on the
+  // widening backoff, and only the second late read in a row is a decision fault.
+  const slowRow = Object.entries(state.actions).find(([key, action]) => action.work === 'GY-1286' && key.startsWith('decision:'))?.[1];
+  assert.ok(slowRow && lateDecisionRead(slowRow.detail), slowRow?.detail);
+  assert.equal(slowRow.attempts, 4, 'asked on each of the four cycles');
+  assert.deepEqual(owed('GY-1286'), ['action:decision', 'scope-request'], 'and once its request stands past the scope budget, that is a scope fault');
+});
+
+test('unit:transient-scope-refusal — only a 5xx response or a stale revision is transient; a refusal that judged the scope always counts', () => {
+  assert.equal(transientScopeRefusal(refused('x', 500, 'Internal error; consult server logs')), 'the control plane answered 5xx');
+  assert.equal(transientScopeRefusal(refused('x', 502, 'Application failed to respond')), 'the control plane answered 5xx');
+  // The status is read from the response, not the text: a message merely quoting a 5xx is no 5xx.
+  assert.equal(transientScopeRefusal(new Error('Graphyard refused work/x/requirements (500): Internal error; consult server logs')), null);
+  assert.equal(transientScopeRefusal(refused('x', 409, 'Policy revision changed; reload before revising')), 'the item moved past the revision the loop read');
+  assert.equal(transientScopeRefusal(refused('x', 409, 'Task is quarantined by unverified containment from epoch 3; requirements remain immutable until settlement or stopped-worker recovery')), null);
+  assert.equal(transientScopeRefusal(refused('x', 409, 'Operator agents cannot remove planned-file containment')), null);
   assert.equal(scopeRefusalFault('the control plane answered 5xx', undefined), null);
   assert.equal(scopeRefusalFault('the control plane answered 5xx', { state: 'failed', detail: 'Could not widen GY-1 (the control plane answered 5xx, so it is retried next cycle on a fresh read): …' }), undefined);
   assert.equal(scopeRefusalFault(null, undefined), undefined);
