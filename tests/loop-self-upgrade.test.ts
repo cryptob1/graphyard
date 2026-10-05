@@ -207,8 +207,8 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     fake.diffPaths = ['src/daemon/run.ts'];
     const refusedFleet = recording(fake, checkout, 'refuse');
     const blocked = await performSelfUpgrade(master, busy, refusedFleet.deps());
-    assert.equal(blocked.outcome, 'failed');
-    assert.match(blocked.outcome === 'failed' ? blocked.reason : '', /the executors were not restarted: .*exec-1 holds merge for GY-7/);
+    assert.equal(blocked.outcome, 'pending', 'a refused fleet restart is owed, not failed (GY-916)');
+    assert.match(blocked.outcome === 'pending' ? blocked.reason : '', /the executors were not restarted: .*exec-1 holds merge for GY-7/);
     assert.equal(fake.checkoutTo, busyTip, 'the checkout moved before the refused restart');
     assert.deepEqual(busy.upgrade.pending, { from: newer, to: busyTip, code: true }, 'the restarts stay owed on the cursor');
     assert.equal(busy.upgrade.alignedRelease, null, 'and the release is not marked aligned');
@@ -228,7 +228,7 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
     fake.nextTip = owedTip;
     owing.deployment = verified(owedTip);
     fake.diffPaths = ['src/daemon/run.ts'];
-    assert.equal((await performSelfUpgrade(master, owing, recording(fake, checkout, 'refuse').deps())).outcome, 'failed');
+    assert.equal((await performSelfUpgrade(master, owing, recording(fake, checkout, 'refuse').deps())).outcome, 'pending');
     assert.equal(owing.upgrade.pending?.code, true);
     fake.nextTip = owedDocsTip;
     owing.deployment = verified(owedDocsTip);
@@ -478,9 +478,13 @@ async function loadFleet(master: MasterConfig, fake: FakeGit, root: string, name
     booting = booting.then(() => delay(5)).then(() => boot(member.name, member.pid + 1000));
     return '';
   };
+  // The restart's clock advances by each wait it sleeps, so its held-claim wait (GY-916) runs out at
+  // once in real time: a claim the test settles only between checks is still held at the deadline.
+  let skew = 0;
   const restart = (to: string) => restartExecutors(master, {
     actions: async () => ({ queue: { executors: [...claims.keys()].map(executor => ({ executor, host: master.hostId, actions: 1 })) }, actions: [...claims.values()] }),
-    coordinatorCommit: to, run: supervisor, alive: () => true, sleep: ms => delay(Math.min(ms, 5)).then(() => {}), timeoutMs: 5_000,
+    coordinatorCommit: to, run: supervisor, alive: () => true, now: () => Date.now() + skew,
+    sleep: ms => { skew += ms; return delay(Math.min(ms, 5)).then(() => {}); }, timeoutMs: 5_000,
   });
   const member = (name: string) => members.get(name)!;
   const claim = (name: string) => member(name).effects.claim({ host: master.hostId, executor: name, kinds: ['dispatch'] });
@@ -521,11 +525,12 @@ test('unit:self-upgrade-under-load — with executors holding claimed actions at
       const { deps, calls } = upgradeDeps(fake, checkout, fleet.restart);
       const state = upgradeState(master);
 
-      // Cycle 1 moves the checkout; the real restart refuses on the control plane's live claims.
+      // Cycle 1 moves the checkout; the real restart refuses on the control plane's live claims, and the
+      // owed restart is recorded pending.
       const cycle1 = await performSelfUpgrade(master, state, deps);
-      assert.equal(cycle1.outcome, 'failed');
-      assert.match(cycle1.outcome === 'failed' ? cycle1.reason : '', /exec-1 holds dispatch for GY-2003/);
-      assert.match(cycle1.outcome === 'failed' ? cycle1.reason : '', /exec-2 holds dispatch for GY-2002/);
+      assert.equal(cycle1.outcome, 'pending', 'an owed restart stays pending on the cursor, not failed');
+      assert.match(cycle1.outcome === 'pending' ? cycle1.reason : '', /exec-1 holds dispatch for GY-2003/);
+      assert.match(cycle1.outcome === 'pending' ? cycle1.reason : '', /exec-2 holds dispatch for GY-2002/);
       assert.equal(fake.checkoutTo, tip, 'checkout moved to base tip');
       assert.deepEqual(state.upgrade.pending, { from: loaded, to: tip, code: true });
       assert.deepEqual(fleet.restartedUnits, [], 'no unit was restarted while an action was held');
@@ -542,9 +547,9 @@ test('unit:self-upgrade-under-load — with executors holding claimed actions at
 
       // Cycle 2: only exec-2's action holds the restart now.
       const cycle2 = await performSelfUpgrade(master, state, deps);
-      assert.equal(cycle2.outcome, 'failed');
-      assert.match(cycle2.outcome === 'failed' ? cycle2.reason : '', /exec-2 holds dispatch for GY-2002/);
-      assert.doesNotMatch(cycle2.outcome === 'failed' ? cycle2.reason : '', /exec-1 holds/);
+      assert.equal(cycle2.outcome, 'pending', 'an owed restart stays pending on the cursor, not failed');
+      assert.match(cycle2.outcome === 'pending' ? cycle2.reason : '', /exec-2 holds dispatch for GY-2002/);
+      assert.doesNotMatch(cycle2.outcome === 'pending' ? cycle2.reason : '', /exec-1 holds/);
       assert.deepEqual(state.upgrade.pending, { from: loaded, to: tip, code: true });
       assert.deepEqual(fleet.restartedUnits, []);
 
@@ -555,7 +560,7 @@ test('unit:self-upgrade-under-load — with executors holding claimed actions at
       // Cycle 3: nothing is held, so the real restart restarts both units, waits for each to
       // register on the tip, and the loop re-executes itself.
       const cycle3 = await performSelfUpgrade(master, state, deps);
-      assert.equal(cycle3.outcome, 'upgraded', cycle3.outcome === 'failed' ? cycle3.reason : '');
+      assert.equal(cycle3.outcome, 'upgraded', cycle3.outcome === 'failed' || cycle3.outcome === 'pending' ? cycle3.reason : '');
       assert.deepEqual({ to: cycle3.outcome === 'upgraded' && cycle3.to, code: cycle3.outcome === 'upgraded' && cycle3.code, self: cycle3.outcome === 'upgraded' && cycle3.self }, { to: tip, code: true, self: true });
       assert.equal(state.upgrade.pending, null);
       assert.equal(state.upgrade.alignedRelease, tip);
@@ -585,7 +590,7 @@ test('unit:self-upgrade-under-load — with executors holding claimed actions at
         outcome = await performSelfUpgrade(master, state, deps);
         if (outcome.outcome === 'upgraded') break;
         const busy = ['fleet-1', 'fleet-2', 'fleet-3'].find(name => fleet.member(name).inFlight);
-        assert.ok(busy, `refused with nothing held: ${outcome.outcome === 'failed' ? outcome.reason : outcome.outcome}`);
+        assert.ok(busy, `refused with nothing held: ${outcome.outcome === 'failed' || outcome.outcome === 'pending' ? outcome.reason : outcome.outcome}`);
         assert.equal((await fleet.settleAndClaim(busy)).action, null, 'stale executor claims nothing on moved checkout');
         assert.ok(fleet.member(busy).effects.standingDown(), 'executor stands down on moved checkout');
       }
@@ -609,7 +614,7 @@ test('unit:self-upgrade-under-load — with executors holding claimed actions at
       const state = upgradeState(master);
       for (let cycle = 1; cycle <= 8; cycle++) {
         const outcome = await performSelfUpgrade(master, state, deps);
-        assert.equal(outcome.outcome, 'failed', `cycle ${cycle} upgraded under unbounded load`);
+        assert.equal(outcome.outcome, 'pending', `cycle ${cycle} upgraded under unbounded load`);
         const name = `ctl-${(cycle % 3) + 1}`;
         assert.ok((await fleet.settleAndClaim(name)).action, 'without the guard, an executor on the moved checkout claims again');
       }
