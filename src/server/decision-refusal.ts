@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { demand, type Principal, type Work } from '../model.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionRefusalSchema, decisionRequestSchema, type DecisionSituation } from '../model/approval.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
-import { save } from '../store.js';
+import { eventWorkSql, save } from '../store.js';
 import { authenticated, digest, findWork, readDecisions, receipt, record } from './decisions.js';
 import type { Services } from './routes.js';
 import { refuseTriageClosure } from './followups.js';
@@ -53,8 +53,12 @@ export async function refuseDecision(services: Services, caller: Principal, id: 
  * lifts nothing. A refusal under an older policy revision already holds nothing
  * (`standingMergeRefusal`), so it is not "lifted" either (GY-1073). Nor does a rework requested
  * under an older revision judge a refusal recorded under the current one, though both name the
- * same head, base and binding: the lift also demands that no requirements revision was recorded
- * since the decision was requested (`requirementsRevisedSince`, GY-1146).
+ * same head, base and binding: the lift also demands that the item stood at the refusal's policy
+ * revision when the decision was requested (`policyRevisionAtRequest`, GY-1146, GY-1243). Every
+ * path that advances the revision — a requirements revision, a review-policy change, an approved
+ * scope widening — is covered at once, because the revision is read from the item as saved, not
+ * from the kinds of event that moved it. A decision with no recorded request, or no saved item
+ * before it, names no revision and lifts nothing.
  */
 type JudgedRework = { action: string; input?: { binding?: string } | undefined; situation?: DecisionSituation | null };
 export const refusedReworkLiftsMergeRefusal = (work: Pick<Work, 'mergeRefusal' | 'candidate' | 'policyRevision'>, decision: JudgedRework) => {
@@ -68,21 +72,24 @@ export const refusedReworkLiftsMergeRefusal = (work: Pick<Work, 'mergeRefusal' |
 };
 async function liftRefusedReworkMergeRefusal(db: Parameters<typeof save>[0], work: Work, decision: JudgedRework & { id: string }, actor: Principal, reason: string, now: Date) {
   if (!refusedReworkLiftsMergeRefusal(work, decision)) return;
-  if (await requirementsRevisedSince(db, work.id, decision.id) !== 0) return;
   const refusal = work.mergeRefusal!;
+  if (await policyRevisionAtRequest(db, work.id, decision.id) !== refusal.policyRevision) return;
   work.mergeRefusal = null;
   await save(db, work, actor.id, 'merge.refusal.lifted', now, { decision: decision.id, sha: refusal.sha, baseSha: refusal.baseSha, approver: actor.id, reason: reason.slice(0, 2000) });
 }
 
 /**
- * How many requirements revisions the item recorded after decision `id` was requested — each one
- * advances the policy revision — or null when no request of it is recorded. Zero means the
- * decision was requested under the item's current policy revision (GY-1146).
+ * The policy revision item `workId` stood at when decision `id` was requested: the revision of the
+ * newest save recorded before the request, resolved from a delta when the row is one — or null
+ * when no request of it, or no save before it, is recorded (such a decision never lifts a
+ * refusal). Read from the saved item, so it moves with every command that advances the revision
+ * (GY-1146, GY-1243).
  */
-export async function requirementsRevisedSince(db: { query: (sql: string, values: unknown[]) => Promise<{ rows: unknown[] }> }, workId: string, id: string): Promise<number | null> {
-  const row = (await db.query(`SELECT requested.seq AS requested, (SELECT count(*)::int FROM events revised WHERE revised.work_id=$1 AND revised.kind='requirements' AND revised.seq > requested.seq) AS revisions
-    FROM (SELECT min(seq) AS seq FROM events WHERE work_id=$1 AND kind='decision.requested' AND payload->>'id'=$2) requested`, [workId, id])).rows[0] as { requested: string | number | null; revisions: number | null } | undefined;
-  return row?.requested == null ? null : Number(row.revisions ?? 0);
+export async function policyRevisionAtRequest(db: { query: (sql: string, values: unknown[]) => Promise<{ rows: unknown[] }> }, workId: string, id: string): Promise<number | null> {
+  const row = (await db.query(`SELECT requested.seq AS requested, (SELECT (${eventWorkSql('saved')}->>'policyRevision')::int FROM events saved
+      WHERE saved.work_id=$1 AND saved.seq < requested.seq AND (saved.payload ? 'work' OR saved.payload ? 'delta') ORDER BY saved.seq DESC LIMIT 1) AS revision
+    FROM (SELECT min(seq) AS seq FROM events WHERE work_id=$1 AND kind='decision.requested' AND payload->>'id'=$2) requested`, [workId, id])).rows[0] as { requested: string | number | null; revision: number | null } | undefined;
+  return row?.requested == null || row.revision == null ? null : Number(row.revision);
 }
 
 const withdrawalSchema = z.object({ decision: z.string().uuid(), reason: decisionRequestSchema.shape.reason }).strict();
