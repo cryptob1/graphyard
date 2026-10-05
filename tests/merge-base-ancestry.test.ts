@@ -1,6 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { CHECK_NAME, GitHub } from '../src/github.js';
 import type { Observation, Work } from '../src/model.js';
 import { predictQueue, queueRef, queueSequencingReason } from '../src/merge-queue.js';
@@ -57,7 +56,7 @@ function provider(ancestor: boolean) {
   return { github, writes };
 }
 
-test('unit:tree-identical-base-still-refreshed — a queue head bound to a base tree-identical to, but not an ancestor of, the base branch tip is republished onto that tip and its merge is refused until then', async () => {
+test('unit:tree-identical-base-still-refreshed — a queue head bound to a base tree-identical to, but not an ancestor of, the base branch tip is republished onto that tip', async () => {
   const now = Date.parse(at);
   // The head does not contain M: the tip is not carried, it is published onto M.
   const item = queued();
@@ -73,9 +72,6 @@ test('unit:tree-identical-base-still-refreshed — a queue head bound to a base 
   // The branch goes back to the reviewed head, M is merged onto it, and the tip is published.
   assert.deepEqual(refresh.writes, ['PATCH /git/refs/heads/graphyard-merge-check/gy-100', 'POST /merges', 'DELETE /git/refs/heads/graphyard-merge-check/gy-100', 'PATCH /git/refs/heads/graphyard/gy-100-1', `PATCH /git/${queueRef('GY-100')}`]);
   assert.deepEqual(speculation.merge?.parents, [H, M], 'the new tip has the base tip commit itself as a parent');
-  // The merge broker refuses the head, before any approval is re-posted, naming the missing ancestry.
-  const master = await readFile(new URL('../src/master/merge.ts', import.meta.url), 'utf8');
-  assert.match(master, /const unancestored = missingBaseAncestry\(current\);\n\s*if \(unancestored\) throw new Error\(`\$\{work\.key\} merge refused: \$\{missingAncestryReason\(unancestored\)\}`\);\n[^]*?const carried = carriedApproval\(current\);\n\s*const reposted = carried && repost/);
   // A base tip that IS an ancestor of the head keeps the carry: nothing is republished.
   const ancestor = queued({ baseTipAncestor: true });
   const [kept] = predictQueue([ancestor], now);

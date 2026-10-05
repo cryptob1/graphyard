@@ -90,7 +90,8 @@ test('unit:board-api-matches-dashboard — GET /api/board gives each open item i
   expect('GY-173', 'blocked', 'master', 'graphyard master requirements GY-173 FILE REASON');
   expect('GY-174', 'blocked', 'master', 'graphyard master decide GY-174 resolve REASON');
   expect('GY-175', 'up-next', 'held', null);
-  expect('GY-21', 'moving', 'executor', 'graphyard master merge GY-21');
+  // GitHub merges a candidate every gate passes (GY-1235): there is no command to run for it.
+  expect('GY-21', 'moving', 'executor', null);
   const request = work.find(item => item.key === 'GY-20')!.humanRequest!;
   expect('GY-20', 'needs-you', 'human-only', `graphyard answer GY-20 ${request.id} ANSWER`);
   expect('GY-17', 'blocked', 'master', 'graphyard master unblock GY-17 REASON');

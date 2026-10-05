@@ -3,15 +3,13 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { MERGE_PROTOCOL } from '../src/protocol-version.js';
-import { actionClaimMs, actionId, claimAction, producerLaunchStop, producerLaunchStops, reconcileActions, type ActionRow } from '../src/model/actions.js';
+import { actionClaimMs, actionId, claimAction, reconcileActions, type ActionRow } from '../src/model/actions.js';
 import { nextAction } from '../src/model/next-action.js';
-import { evaluate } from '../src/model.js';
 import { createSchema, systemDrivenDefault, type Work } from '../src/model/work.js';
 import { controlPlaneHandlers } from '../src/executor.js';
 import { dispatchWork, masterConfigSchema, managedMasterInstructions, prepareWorkerLaunch, runAutonomyCommand, unauthorizedMergeViolation, workAttentionOwner, type WorkerProfile } from '../src/master.js';
@@ -141,21 +139,6 @@ const durablyStopped = (make: (overrides?: Partial<ActionRow>) => ActionRow) => 
   resolution: `Request ${producerRequestId} for GY-7 already had 4 sessions fail or expire; no further automatic attempt`,
   history: [...make().history, { at: iso(-2_000), event: 'claimed', requester: 'graphyard', executor: 'executor-host-1', result: null, reason: 'attempt 1 claimed by executor-host-1 on host-1' },
     { at: iso(-1_000), event: 'failed', requester: 'graphyard', executor: 'executor-host-1', result: 'failed', reason: `Request ${producerRequestId} for GY-7 already had 4 sessions fail or expire; no further automatic attempt` }] as any });
-const producerSource = readFileSync(fileURLToPath(new URL('../src/producer.ts', import.meta.url)), 'utf8');
-/** `underProof` as the real evaluator grades it: a candidate observed with its checks green and approved, so the acceptance gate waits on the produced proof. */
-function gradedUnderProof(work: Work): Work {
-  const graded = { ...work, stage: 'build', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['manual:produced-review'] }], policy: { checks: ['test'], review: true },
-    workspaces: [{ host: 'host-1', path: '/tmp/gy-7', branch: 'graphyard/gy-7-1', epoch: 1, owner: 'agent-a' }], implementers: ['agent-a'], lastAssignment: { owner: 'agent-a', epoch: 1 }, epoch: 1,
-    submission: { epoch: 1, pr: 12 }, candidate: { sha: headSha, baseSha, pr: 12, branch: 'graphyard/gy-7-1', author: 'implementer' },
-    observation: { clockOffset: { min: 0, max: 0 }, candidate: { sha: headSha, baseSha, pr: 12, branch: 'graphyard/gy-7-1', author: 'implementer' }, checks: [{ name: 'test', result: 'success', appId: 1234 }],
-      reviews: [{ reviewer: 'reviewer', sha: headSha, state: 'APPROVED' }], protected: true, mergeable: true, merged: false, mergeSha: null,
-      // GY-883: a public API path keeps the item in the high lane, which still demands the manual proof the escalation presupposes.
-      files: ['src/server/routes/x.ts'], scopeFiles: [{ path: 'src/server/routes/x.ts', status: 'added' as const, sha: 'f'.repeat(40), baseSha: null, additions: 1, deletions: 0, binary: false }], at: iso(-60_000),
-      prState: 'open', draft: false, baseTip: baseSha, baseTipContained: true },
-    queue: null, queueSequence: 0, queueHistory: [] } as unknown as Work;
-  const result = evaluate(graded, [graded], new Date(), [1234]);
-  return { ...graded, stage: result.stage, gates: result.gates, violations: result.violations, queue: result.queue, queueSequence: result.queueSequence, queueEjection: result.queueEjection, queueHistory: result.queueHistory } as Work;
-}
 
 // ---- AC-1: no hand dispatch while the executor's dispatch is pending, claimed or just released ----
 
@@ -271,14 +254,13 @@ test('unit:system-driven-items new items are system-driven by the shipped defaul
   assert.equal(systemDrivenRefusal(item({ systemDriven: false }), 'merge'), null);
 });
 
-test('unit:system-driven-items the master CLI refuses dispatch, merge, review launch and evidence on a system-driven item, naming the loop step', async () => {
+test('unit:system-driven-items the master CLI refuses dispatch, review launch and evidence on a system-driven item, naming the loop step, and master merge runs nothing', async () => {
   const state = { work: [item({ systemDriven: true })] };
   // With an operator-agent identity the loop requests merge decisions itself, so a hand one is refused too.
   const master = await masterHarness(state, { operatorAgent: true });
   try {
     const refused: [string[], keyof typeof loopOwned, RegExp][] = [
       [['dispatch', 'GY-7', 'claude-worker'], 'dispatch', /the loop's dispatch step: master run's dispatcher claims the item's dispatch action/],
-      [['merge', 'GY-7'], 'merge', /the loop's merge step: master run performs the guarded merge/],
       [['review', 'GY-7'], 'review', /the loop's dispatch step: master run launches the bound reviewer/],
       [['decide', 'GY-7', 'attest', '{"proof":"unit:guard"}', 'hand', 'evidence'], 'evidence', /the loop's dispatch step: master run launches an independent proof producer/],
       [['decide', 'GY-7', 'merge', 'hand', 'merge'], 'merge-decision', /the loop's decisions step: master run requests the merge decision/],
@@ -290,6 +272,9 @@ test('unit:system-driven-items the master CLI refuses dispatch, merge, review la
     }
     // The system-driven refusal comes before any release read: nothing about the race is consulted.
     assert.ok(!master.reads.some(url => url.startsWith('/api/events')));
+    // GitHub merges (GY-1235): master merge has nothing to refuse, because it runs no merge at all.
+    const merge = JSON.parse((await master.run(['merge', 'GY-7'])).stdout);
+    assert.equal(merge.merged, false); assert.match(merge.result, /^GitHub merges: .*There is no Graphyard merge to run\.$/);
   } finally { await master.close(); }
 });
 
@@ -440,34 +425,6 @@ test('unit:system-driven-items master decide attest reopens for a produced manua
   } finally { await stoppedElsewhere.close(); }
 });
 
-test('unit:system-driven-items a producer launch stopped for good on one host is offered to no executor on any host, and names the attestation', () => {
-  const now = new Date();
-  const work = underProof();
-  const candidateItem = structuredClone(work);
-  const executor = (host: string) => ({ id: `executor-${host}`, host, principal: 'master' });
-  // The row as the control plane holds it: an executor on host-1 claimed it and launchProducer refused it for good from host-1's ledger.
-  const row = durablyStopped(producerRow);
-  candidateItem.actionQueue = { actions: [{ ...row, retryAt: iso(-1_000) }], history: [] };
-  assert.ok(producerLaunchStop(candidateItem, producerRequestId), 'the stop is on the durable row');
-  assert.equal(producerLaunchStop(candidateItem, 'e'.repeat(32)), null, "another request's stop is not this one's");
-  // Every refusal launchProducer gives for good carries one of the stops, and a transient one none.
-  assert.ok(producerLaunchStops.every(stop => producerSource.includes(stop.slice(2))), 'the stops are the launcher\'s own refusals');
-  // The planner no longer names the dispatch: the proof step escalates, naming the stop and the attestation.
-  const graded = gradedUnderProof(candidateItem);
-  const next = nextAction(graded, [graded], now);
-  assert.equal(next?.kind, 'escalate');
-  assert.match(next!.reason, /manual proofs manual:produced-review on a{12} get no further producer launch from any executor — Request d+ .*no further automatic attempt; only a two-party attestation \(master decide GY-7 attest\) satisfies them now/);
-  // Reconciling retires the row, so an executor on another host — whose ledger never saw the sessions — has nothing to claim.
-  reconcileActions(graded, [graded], now, { next });
-  assert.equal(graded.actionQueue!.actions.some(entry => entry.id === row.id), false, 'the stopped dispatch row is retired');
-  assert.equal(claimAction([graded], executor('host-2'), now, { kinds: ['dispatch'] }), null, 'host-2 claims no producer dispatch');
-  // Without the stop the same item still dispatches the producer: only the durable stop ends it.
-  const open = gradedUnderProof({ ...structuredClone(work), actionQueue: { actions: [], history: [] } });
-  const dispatch = nextAction(open, [open], now);
-  assert.equal(dispatch?.kind, 'dispatch');
-  assert.equal(dispatch!.inputs.kind === 'dispatch' && dispatch!.inputs.target === 'proof' && dispatch!.inputs.requestId, producerRequestId);
-});
-
 test('unit:dispatch-race-guard a hand launch through a long backoff claims nothing once the backoff is about to end', async () => {
   const now = iso(), retryAt = Date.parse(now) + handDispatchFenceMs + 60_000;
   const backedOff = item({ systemDriven: false, actionQueue: { actions: [dispatchRow({ attempts: 2, retryAt: new Date(retryAt).toISOString() })], history: [] } });
@@ -528,7 +485,7 @@ test('unit:system-driven-items master decide merge stays open where the loop sen
   const loop = (requestsDecisions?: boolean) => ({ sessions: [], failures: {}, now: Date.now(), requestsDecisions });
   assert.equal(handDecision(item({ systemDriven: true }), 'merge', null, loop(true)), 'merge-decision');
   assert.equal(handDecision(merged, 'merge', null, loop(true)), null);
-  assert.match(mergeDecisionRecovery(merged, loop(true))!, /merged on GitHub without a valid merge execution/);
+  assert.match(mergeDecisionRecovery(merged, loop(true))!, /merged on GitHub though its gates had not passed on that head; only a two-party merge decision reconciles it/);
   assert.equal(handDecision(item({ systemDriven: true }), 'merge', null, loop(false)), null);
   assert.match(mergeDecisionRecovery(item({ systemDriven: true }), loop(false))!, /no master operator-agent identity/);
   const master = await masterHarness({ work: [merged] }, { operatorAgent: true });
@@ -542,19 +499,21 @@ test('unit:system-driven-items master decide merge stays open where the loop sen
 });
 
 test('unit:system-driven-items the master\'s own next steps name the loop step for a system-driven item, never a hand command it refuses', () => {
-  const atMerge = (systemDriven: boolean) => item({ systemDriven, stage: 'merge', gates: [{ name: 'merge', passed: false, reasons: ['Merge authorization is not current'] }] as any });
-  assert.match(workAttentionOwner(atMerge(true), 'gate').next, /the loop's merge step performs the guarded merge of GY-7/);
-  assert.doesNotMatch(workAttentionOwner(atMerge(true), 'gate').next, /master merge/);
-  assert.equal(workAttentionOwner(atMerge(false), 'gate').next, 'graphyard master merge GY-7');
+  // GitHub merges (GY-1235): an item held at the merge gate names no hand merge, driven or not.
+  const atMerge = (systemDriven: boolean) => item({ systemDriven, stage: 'merge', gates: [{ name: 'merge', passed: false, reasons: ['Pull request is not mergeable against the current base'] }] as any });
+  for (const driven of [true, false]) {
+    assert.equal(workAttentionOwner(atMerge(driven), 'gate').next, 'Nothing to run by hand: GitHub merges GY-7 once its merge gate passes');
+    assert.doesNotMatch(workAttentionOwner(atMerge(driven), 'gate').next, /master merge/);
+  }
   assert.match(workAttentionOwner(item({ systemDriven: true }), 'session').next, /the loop's dispatcher launches GY-7 again/);
   const produced = item({ systemDriven: true, producerProofs: ['manual:produced-review'], gates: [{ name: 'acceptance', passed: false, reasons: ['AC-1: manual:produced-review needs trusted passing evidence'] }] as any });
   assert.match(workAttentionOwner(produced, 'gate').next, /The loop's producer session produces manual:produced-review/);
-  // The AGENTS.md master block routes merges of system-driven items to the loop and keeps the hand commands for the opt-out.
+  // The AGENTS.md master block routes system-driven items to the loop, keeps the hand commands for the opt-out and leaves merging to GitHub.
   const block = managedMasterInstructions('').replace(/\s+/g, ' ');
-  assert.match(block, /Items are system-driven unless created with `"systemDriven": false`: for them `graphyard master run` dispatches, launches review and proof producers, requests merge decisions and performs the guarded merge/);
+  assert.match(block, /Items are system-driven unless created with `"systemDriven": false`: for them `graphyard master run` dispatches and launches review, and the master CLI refuses those hand actions, naming the loop step/);
   // An opted-out item is still driven by the loop: the instructions allow the hand commands in addition, never instead.
   assert.match(block, /The loop drives an item created `"systemDriven": false` the same way; opting out only also allows the hand actions/);
-  assert.match(block, /a hand `graphyard master decide GY-N merge` is only for an opted-out item the loop has not requested it for/);
+  assert.match(block, /There is no Graphyard merge to run\. A merge of a head whose gates had not passed is held as a violation until a two-party `graphyard master decide GY-N merge` reconciles it/);
   assert.doesNotMatch(workAttentionOwner(item({ systemDriven: true }), 'launch-review').next, /then graphyard master review GY-7$/);
   assert.equal(workAttentionOwner(item({ systemDriven: false }), 'launch-review').next, 'Fix the refusal reason, then graphyard master review GY-7');
   // An ordinary pending review names the loop's relaunch too, not a `master review` the CLI refuses.

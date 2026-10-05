@@ -167,18 +167,20 @@ test('unit:generated-session-names-valid — every session name Graphyard genera
   }
 });
 
-/** A candidate every gate passes, on a loop whose automatic merging is off: one routine merge decision. */
-function mergeable(): Work {
-  const candidate = { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 101, branch: 'graphyard/gy-101-1', author: 'worker' };
+/**
+ * A machine-filed backlog item the triage agent proposed closing: one routine close decision for
+ * the approver. (GitHub merges since GY-1235, so a mergeable candidate no longer asks for one.)
+ */
+function triaged(): Work {
   return {
     id: 'work-101', key: 'GY-101', title: 'Approver names fit the runtime', description: '', type: 'bug', priority: 0,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Bounded', proofs: ['unit:approver-name-bounded-and-unique'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'merge', revision: 9, policyRevision: 1,
-    createdAt: iso(-4 * hour), updatedAt: iso(), stageEnteredAt: iso(-hour), ready: true, epoch: 1,
-    lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 101 }, reworkRequested: false,
+    policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'ready', revision: 9, policyRevision: 1,
+    createdAt: iso(-4 * hour), updatedAt: iso(), stageEnteredAt: iso(-hour), ready: false, epoch: 0,
+    lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null,
-    gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: true, reasons: [] },
-      { name: 'test', passed: true, reasons: [] }, { name: 'acceptance', passed: true, reasons: [] }, { name: 'merge', passed: true, reasons: [] }],
+    triage: { judgement: { outcome: 'close', reason: 'noise' }, state: 'proposed', by: 'master', at: iso(-hour) },
+    gates: [{ name: 'ready', passed: true, reasons: [] }],
     violations: [],
   } as unknown as Work;
 }
@@ -194,7 +196,7 @@ test('integration:approver-launch-refusal-visible — a launch a runtime refuses
       operatorAgent: { id: 'graphyard-master-project-operator', credentialFile }, approver: { id: 'graphyard-approver-project', credentialFile },
       run: { intervalSeconds: 20 } as Partial<MasterRun> }) as MasterConfig;
 
-    const item = mergeable();
+    const item = triaged();
     const decision = uuid('4cb51514');
 
     // The launcher against a runtime that refuses the name it is given: `master approver` builds
@@ -231,7 +233,6 @@ test('integration:approver-launch-refusal-visible — a launch a runtime refuses
     assert.match(refusal.message, new RegExp(approverSessionName(item, decision)), 'the refusal names the name attempted');
     assert.match(refusal.message, /graphyard master approver GY-101 4cb51514/, 'the refusal names the command to retry');
 
-    const merged: string[] = [];
     const effects: DaemonEffects = {
       agents: () => [],
       credentials: async () => ({}),
@@ -244,13 +245,12 @@ test('integration:approver-launch-refusal-visible — a launch a runtime refuses
       requestSmoke: () => {},
       persist: async () => {},
       decide: async () => ({ id: decision }),
-      decisions: async () => ({ decisions: [{ id: decision, action: 'merge', state: 'requested', input: { sha: item.candidate!.sha, baseSha: item.candidate!.baseSha, policyRevision: item.policyRevision }, approvedBy: null }] }),
+      decisions: async () => ({ decisions: [{ id: decision, action: 'close', state: 'requested', input: { kind: 'obsolete', ref: null, reason: 'Not worth doing: noise', triageAt: item.triage!.at }, approvedBy: null }] }),
       approver: async () => { throw refusal; },
     };
 
     const state = emptyDaemonState(config);
     await runCycle(config, state, effects, () => clock);
-    assert.deepEqual(merged, [], 'nothing merges on a decision no approver judged');
 
     const watch = Object.values(state.approvals)[0];
     assert.ok(watch, 'the requested decision is watched even though its approver never started');
@@ -260,7 +260,7 @@ test('integration:approver-launch-refusal-visible — a launch a runtime refuses
     const summary = daemonSummary(state, clock, config.run.intervalSeconds * 1000, config.hostId);
     const attention = approverLaunchAttention(summary);
     assert.equal(attention.length, 1, 'the decision is on the attention list, once');
-    assert.match(attention[0].text, /GY-101 is awaiting an approver for merge decision 4cb51514-4cb5-4f21-9b0e-0f2a6c8d4e15 that could not start/);
+    assert.match(attention[0].text, /GY-101 is awaiting an approver for close decision 4cb51514-4cb5-4f21-9b0e-0f2a6c8d4e15 that could not start/);
     assert.match(attention[0].text, /1-32 characters/, 'status carries the runtime\'s limit, not a generic failure');
     assert.match(attention[0].text, new RegExp(approverSessionName(item, decision)), 'status names the session that could not start');
     assert.equal(attention[0].role, 'master');

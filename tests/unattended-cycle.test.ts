@@ -21,8 +21,8 @@ import { observedReviewBody } from '../src/review-cap.js';
  *
  * These proofs run the real cycle against a simulated control plane and a simulated outside world:
  * the launcher claims, the worker pushes and submits, CI and the reviewer land verdicts on the exact
- * head, a producer publishes trusted evidence, and the approver session the loop launches judges the
- * decisions the loop requests. Nothing in the harness makes a decision for the loop, and no step
+ * head, GitHub merges the candidate whose gates are green, and the approver session the loop launches
+ * judges the decisions the loop requests. Nothing in the harness makes a decision for the loop, and no step
  * waits for a human: what the loop does not do itself does not happen.
  *
  * The approver is not a stub. The loop's own effects launch it — `daemonEffects(...).approver`, which
@@ -123,12 +123,14 @@ function herdr() {
 /**
  * The simulated control plane. It holds work documents, recomputes gates and stage from them
  * exactly as the engine's order does, and applies the mutations the loop's effects ask for —
- * a claim, a settled quarantine, an additive requirements revision, a decision, a merge. Between
- * cycles `advance` runs everyone else: the launched worker, CI, the reviewer, the producer, and
- * the approver session the loop launched for its own request.
+ * a claim, a settled quarantine, an additive requirements revision, a decision. Between cycles
+ * `advance` runs everyone else: the launched worker, CI, the reviewer, GitHub merging what is green
+ * (GY-1235: the loop never merges), and the approver session the loop launched for its own request.
  */
 function plane(scripts: Script[], options: { hostId?: string; host?: { root: string; master: MasterConfig }; judgements?: Judgement[]; delivered?: number } = {}) {
   const hostId = options.hostId ?? 'machine-a';
+  /** GitHub's side: whether it merges a green candidate on the next tick, or holds it (a queue that does not move). */
+  const github = { merging: true };
   const sessions = herdr();
   sessions.judgements.push(...options.judgements ?? []);
   let now = clockStart;
@@ -171,24 +173,27 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
     const approved = reviews.some(review => review.sha === candidate!.sha && review.state === 'APPROVED');
     const changes = reviews.some(review => review.sha === candidate!.sha && review.state === 'CHANGES_REQUESTED');
     const checks = item.policy.checks.filter(name => !(current ? observation!.checks : []).some(check => check.name === name && check.result === 'success'));
-    const proofs = [...new Set(item.criteria.flatMap(criterion => criterion.proofs))];
-    const unproven = proofs.filter(proof => !item.evidence.some(entry => entry.proof === proof && entry.trusted && !entry.revocation
-      && entry.sha === candidate?.sha && entry.baseSha === candidate?.baseSha && entry.policyRevision === item.policyRevision && entry.result === 'pass' && entry.executed > 0 && entry.skipped === 0));
-    const stale = !observation || now - Date.parse(observation.at) >= 120_000;
     const gates = [
       { name: 'ready', reasons: [...(item.ready ? [] : ['Not released from backlog']), ...(item.blocker ? [item.blocker] : [])] },
       { name: 'build', reasons: [...(submitted ? [] : ['Worker has not submitted implementation for this attempt']), ...(conflict ? [conflict] : [])] },
       { name: 'review', reasons: [...(approved ? [] : ['Independent approval of the current commit is required']), ...(changes ? ['Outstanding change requests must be resolved through a new review'] : [])] },
       { name: 'test', reasons: checks.map(name => `Required CI check ${name} has not passed on the current candidate`) },
-      { name: 'acceptance', reasons: unproven.map(proof => `AC-1: ${proof} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy`) },
-      { name: 'merge', reasons: [...(stale ? ['GitHub observation missing or older than two minutes'] : []), ...(observation?.mergeable === false ? ['Pull request is not mergeable against the current base'] : [])] },
+      // No acceptance gate and no freshness bound (GY-1235): proofs gate nothing, and GitHub merges.
+      { name: 'merge', reasons: [...(current ? [] : ['GitHub has not been observed at the current candidate']), ...(observation?.mergeable === false ? ['Pull request is not mergeable against the current base'] : [])] },
     ].map(gate => ({ name: gate.name, passed: !gate.reasons.length, reasons: gate.reasons }));
     if (item.stage === 'done') { item.gates = gates.map(gate => ({ ...gate, passed: true, reasons: [] })); return; }
     const failing = gates.find(gate => !gate.passed);
     const stage = (failing?.name ?? 'merge') as Work['stage'];
     if (stage !== item.stage) { item.stage = stage; item.stageEnteredAt = iso(); }
     item.gates = gates;
-    item.mergeAuthorization = gates.every(gate => gate.passed) && candidate ? { sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: item.policyRevision, at: iso() } : null;
+  };
+  /** GitHub merges a candidate on CI and review, and the engine records the delivery it observes. */
+  const githubMerge = (item: Work) => {
+    const mergedAt = iso(), mergeSha = hex(`merge-${item.key}-${item.epoch}`);
+    item.observation = { ...item.observation!, merged: true, mergeSha, mergedAt, prState: 'closed', at: mergedAt } as Work['observation'];
+    item.delivery = { mergedAt, mergedAtRepository: mergedAt, mergeSha, authorizationRevision: item.revision } as Work['delivery'];
+    item.stage = 'done'; item.stageEnteredAt = mergedAt;
+    recompute(item);
   };
   for (const item of work) recompute(item);
 
@@ -215,12 +220,9 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
       item.baseRefresh = { from: { sha: candidate.sha, baseSha: candidate.baseSha }, base: item.observation!.baseTip!, baseTree: hex(`tree-${item.key}`),
         policyRevision: item.policyRevision, at: iso(), head: null, conflict: `src/${item.key.toLowerCase()}.ts: merge conflict with the base branch`, carry: null } as Work['baseRefresh'];
     } else if (step === 1) {
-      // The reviewer approves and CI reports first; the producer's trusted evidence lands after it.
+      // The reviewer approves and CI reports: every gate is green.
       verdict('APPROVED');
       item.observation!.checks = item.policy.checks.map(name => ({ name, result: 'success', appId: 1234 }));
-    } else {
-      item.evidence = [...item.evidence, { id: `evidence-${item.key}-${item.epoch}`, proof: 'integration:loop', sha: candidate.sha, baseSha: candidate.baseSha,
-        policyRevision: item.policyRevision, producer: 'ci-producer', trusted: true, result: 'pass', executed: 4, skipped: 0, at: iso() }];
     }
     recompute(item);
   };
@@ -257,6 +259,8 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
   const advance = (ms: number) => {
     now += ms;
     judgeDecisions();
+    // GitHub merges what was green when the loop last looked, so the loop sees each candidate mergeable once.
+    if (github.merging) for (const item of work) if (item.stage === 'merge' && !item.observation?.merged && item.gates.every(gate => gate.passed) && !item.violations.length) githubMerge(item);
     for (const item of work) {
       if (item.stage === 'done') continue;
       const live = !!item.lease && Date.parse(item.lease.expiresAt) > now;
@@ -346,7 +350,7 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
     ...overrides,
   });
 
-  return { work, decisions, sessions, effects, recompute, advance, approve, find, now: () => now, iso, hostId,
+  return { work, decisions, sessions, effects, recompute, advance, approve, find, github, now: () => now, iso, hostId,
     set: (at: number) => { now = at; } };
 }
 
@@ -358,7 +362,7 @@ async function cycle(state: DaemonState, master: MasterConfig, simulation: Retur
 }
 const steps = (actions: DaemonAction[]) => actions.filter(action => action.kind !== 'deployment').map(action => `${action.kind}:${action.work ?? '-'}:${action.state}`);
 
-test('integration:unattended-full-cycle — with no master session and no human input the loop drives one item from ready to delivered: it dispatches, reclaims a dead session, has an additive scope request decided, requests and dispatches rework after a verdict and after a base conflict through approver sessions that die and decline, and merges the candidate whose gates are green', async t => {
+test('integration:unattended-full-cycle — with no master session and no human input the loop drives one item from ready to delivered: it dispatches, reclaims a dead session, has an additive scope request decided, requests and dispatches rework after a verdict and after a base conflict through approver sessions that die and decline, and leaves the candidate whose gates are green to GitHub to merge', async t => {
   // Attempt 1's session dies under its fence; attempt 2 is told to change the work; attempt 3
   // hits a base branch Graphyard cannot merge in; attempt 4 asks for one more planned file and
   // then delivers. Every step between them is the loop's to take.
@@ -422,9 +426,9 @@ test('integration:unattended-full-cycle — with no master session and no human 
   assert.equal(kinds.filter(entry => entry === 'dispatch:GY-84:done').length, 4, 'every attempt was dispatched by the loop');
   assert.equal(performed.filter(action => action.kind === 'decision' && /^Requested decision /.test(action.detail)).length, 2, 'one request per round, however many sessions it took to judge it');
   assert.equal(kinds.filter(entry => entry === 'scope:GY-84:done').length, 1);
-  assert.equal(kinds.filter(entry => entry === 'merge:GY-84:done').length, 1);
+  assert.deepEqual(kinds.filter(entry => entry.startsWith('merge:')), [], 'GitHub merged the green candidate; the loop merges nothing (GY-1235)');
+  assert.equal(item.delivery?.mergeSha, hex('merge-GY-84-4'), 'the delivery is the fourth attempt\'s, after the rework rounds it needed');
   assert.ok(order('settle:GY-84:done') < order('decision:GY-84:done'), 'the reclaim came before the rework rounds');
-  assert.ok(order('decision:GY-84:done') < order('merge:GY-84:done'), 'the merge came after the rework rounds it needed');
   // Nothing in the drive was left to a person: every recorded action is the loop's own, and no
   // escalation was raised for a decision it is able to request.
   const escalations = performed.filter(action => action.kind === 'escalation');
@@ -448,7 +452,7 @@ test('integration:unattended-full-cycle — with no master session and no human 
   assert.deepEqual(budget.mergeDwell.breaches, []);
 });
 
-test('integration:mergeable-dwell-budget — a candidate whose gates are green merges within five minutes of becoming mergeable and a standing verdict reaches a rework request in the same window, with p90 approval→merge inside ten minutes over more than ten deliveries; a loop that leaves one green reports the breach', async () => {
+test('integration:mergeable-dwell-budget — a candidate whose gates are green merges within five minutes of becoming mergeable and a standing verdict reaches a rework request in the same window, with p90 approval→merge inside ten minutes over more than ten deliveries; a candidate left green reports the breach', async () => {
   const scripts = Array.from({ length: 11 }, (_, index) => ({ key: `GY-${200 + index}`, rounds: ['pass' as const] }));
   // The loop starts beside a ledger that already holds deliveries, as every real installation does,
   // and keeps cycling long after its own: the budget is of the passages this loop watched, and a
@@ -479,21 +483,17 @@ test('integration:mergeable-dwell-budget — a candidate whose gates are green m
   assert.equal(budget.met, true, `budget reasons: ${budget.reasons.join('; ')}`);
   assert.deepEqual(loopAttention({ liveness: loopLiveness(state, simulation.now(), 20_000, master.hostId), budget }).filter(attention => /budget/.test(attention.text)), []);
 
-  // The same measurement over a loop that cannot merge what is green: the dwell is the breach, it
-  // names the candidate, and it reaches the attention list rather than a chart nobody reads.
+  // The same measurement over a candidate GitHub leaves green (GY-1235: GitHub merges, not the
+  // loop): the dwell is the breach, it names the candidate, and it reaches the attention list
+  // rather than a chart nobody reads.
   const stalled = plane([{ key: 'GY-300', rounds: ['pass'] }], { delivered: history });
   const stalledState = emptyDaemonState(master);
-  let refuse = true;
   const stalledEffects = stalled.effects();
-  const merge = stalledEffects.merge;
-  stalledEffects.merge = async item => {
-    if (refuse) throw new Error('Guarded merge refused: the base branch moved under the candidate');
-    return merge(item);
-  };
+  stalled.github.merging = false;
   for (let pass = 0; pass < 4; pass++) await cycle(stalledState, master, stalled, stalledEffects, 2 * minute);
-  assert.ok(mergeableCandidate(stalled.work[0]), 'the candidate is green and the loop is the only thing not merging it');
+  assert.ok(mergeableCandidate(stalled.work[0]), 'the candidate is green and GitHub is not merging it');
   stalled.advance(30 * minute);
-  refuse = false;
+  stalled.github.merging = true;
   await cycle(stalledState, master, stalled, stalledEffects);
   // The breach is still what the budget reports many cycles later: nothing evicts it, and nothing
   // outvotes it with deliveries that were never measured.
@@ -549,11 +549,14 @@ test('integration:no-actionable-silence — every cycle records what it could ac
 
   // The inventory follows the work rather than a fixed list: a claimed, submitted attempt asks
   // nothing of the dispatcher, what it is still missing is named, and a delivery asks nothing.
+  // Since GY-1235 no head owes the loop a proof and a green candidate is GitHub's to merge.
   const underway = actionableSubjects(master, simulation.work, simulation.now());
-  assert.deepEqual(underway.map(subject => subject.kind), ['proof'], `${underway.map(subject => subject.detail).join('; ')}`);
+  assert.deepEqual(underway.map(subject => subject.kind), [], `${underway.map(subject => subject.detail).join('; ')}`);
+  simulation.github.merging = false;
   simulation.advance(minute); // the reviewer approves and CI reports
-  simulation.advance(minute); // the producer publishes its trusted evidence
-  assert.deepEqual(actionableSubjects(master, simulation.work, simulation.now()).map(subject => subject.kind), ['merge'], 'with every gate green the candidate is the loop\'s to merge');
+  assert.ok(mergeableCandidate(simulation.work[0]));
+  assert.deepEqual(actionableSubjects(master, simulation.work, simulation.now()), [], 'with every gate green the candidate is GitHub\'s to merge, not the loop\'s');
+  simulation.github.merging = true;
   await cycle(state, master, simulation, healthy, minute);
   assert.equal(simulation.work[0].stage, 'done');
   assert.deepEqual(actionableSubjects(master, simulation.work, simulation.now()), [], 'a delivered item asks nothing of the loop');
@@ -753,7 +756,7 @@ test('integration:loop-liveness — an absent or stalled loop is the top attenti
   assert.equal(watchdogPlan({ NOTIFY_SOCKET: '/run/notify', WATCHDOG_USEC: String(window * 1000) }, intervalMs).refusal, null, 'the packaged unit and the default interval agree');
 });
 
-test('routine decisions rest on what the loop verified and are supervised to the end: a fence nobody verified withholds rework and recovery, a merge decision bound to an earlier candidate is withdrawn, a decision the server fails is requested again, and the merge wait is raised again as its approver changes', async t => {
+test('routine decisions rest on what the loop verified and are supervised to the end: a fence nobody verified withholds rework and recovery, a decision the server fails is requested again, and automatic merging off asks for no merge decision', async t => {
   const host = await approverHost({ workers: [profile('claude-a')], autoMerge: false });
   t.after(host.cleanup);
   const master = host.master;
@@ -810,25 +813,13 @@ test('routine decisions rest on what the loop verified and are supervised to the
   assert.ok(performed.some(action => action.kind === 'decision' && action.state === 'failed' && /ended failed \(Worker startup remains fenced.*still needs it, so it is requested again/.test(action.detail)), performed.map(action => action.detail).join('\n'));
   assert.deepEqual(simulation.sessions.log.filter(entry => entry.startsWith('launch:')).map(entry => entry.slice(7)), [reworks[0].id, reworks[1].id, reworks[1].id].map(id => approverSessionName(item, id)));
 
-  // Automatic merging off. The second attempt goes green while a merge decision for an earlier
-  // head still stands `requested`; the server would refuse a second request, so the loop — its
-  // requester — withdraws the one that can never apply and asks for the candidate that is mergeable.
-  simulation.sessions.judgements.push('die', 'approve');
-  while (!mergeableCandidate(simulation.work[0])) await cycle(state, master, simulation, effects);
-  const earlier = { id: uuid('earlier-merge'), action: 'merge', state: 'requested', input: { sha: hex('an-earlier-head'), baseSha: item.candidate!.baseSha, policyRevision: 1 }, approvedBy: null, reason: 'requested for the head before the rework', outcome: null };
-  simulation.decisions.set(item.id, [...reworks, earlier]);
+  // Automatic merging off asks for no merge decision since GY-1235: GitHub merges the green
+  // candidate of the second attempt on its own branch protection.
   const merging: DaemonAction[] = [];
   for (let pass = 0; pass < 8 && item.stage !== 'done'; pass++) merging.push(...(await cycle(state, master, simulation, effects)).actions);
   assert.equal(item.stage, 'done', steps(merging).join(', '));
-  const merges = simulation.decisions.get(item.id)!.filter(decision => decision.action === 'merge');
-  assert.deepEqual(merges.map(decision => [decision.state, decision.input.sha]), [['withdrawn', hex('an-earlier-head')], ['applied', item.candidate!.sha]]);
-  // The wait names the decision and the session it is with, so it is raised again when the first
-  // approver dies and a second takes over — not recorded once and never looked at again.
-  const waits = merging.filter(action => action.kind === 'escalation').map(action => action.detail);
-  assert.equal(waits.length, 2, waits.join('\n'));
-  assert.match(waits[0], new RegExp(`\\(launch 1 of 3\\) applies merge decision ${merges[1].id}`));
-  assert.match(waits[1], new RegExp(`\\(launch 2 of 3\\) applies merge decision ${merges[1].id}`));
-  assert.equal(merging.filter(action => action.kind === 'merge' && action.state === 'done').length, 1);
+  assert.deepEqual(simulation.decisions.get(item.id)!.filter(decision => decision.action === 'merge'), [], 'no merge decision is requested');
+  assert.deepEqual(merging.filter(action => action.kind === 'merge'), []);
   assert.deepEqual([...simulation.sessions.sessions.keys()], [], 'every approver tab was closed');
 
   // An item with no review gate was never approved, so it starts no approval→merge passage.
@@ -933,7 +924,7 @@ test('a requested round is requested once, a request the item moved past is take
   assert.deepEqual([bare.decide, bare.approver, bare.withdraw, bare.decisions].map(effect => typeof effect), ['function', 'function', 'function', 'function']);
 });
 
-test('an agent or Codex review that has not approved is not a verdict: a head not yet dispatched, one a reviewer is still working on, and one whose profiles are exhausted are asked for nothing and keep their proofs, and only a changes-requested verdict for the exact head and request sends it back', async t => {
+test('an agent or Codex review that has not approved is not a verdict: a head not yet dispatched, one a reviewer is still working on, and one whose profiles are exhausted are asked for nothing, and only a changes-requested verdict for the exact head and request sends it back', async t => {
   const host = await approverHost({ workers: [profile('claude-a')] });
   t.after(host.cleanup);
   const master = host.master;
@@ -954,12 +945,8 @@ test('an agent or Codex review that has not approved is not a verdict: a head no
     item.observation = { ...item.observation!, at: simulation.iso(), agentReview };
     simulation.recompute(item);
   };
-  /** One cycle of the real loop from a loop that has seen nothing, with the proof requests it made. */
-  const run = async () => {
-    const proofs: string[] = [];
-    const result = await runCycle(master, emptyDaemonState(master), simulation.effects({ requestProof: work => { proofs.push(work.key); } }), simulation.now);
-    return { proofs, actions: result.actions };
-  };
+  /** One cycle of the real loop from a loop that has seen nothing. */
+  const run = async () => ({ actions: (await runCycle(master, emptyDaemonState(master), simulation.effects(), simulation.now)).actions });
   const at = simulation.now() + minute;
 
   // Every state the observers report short of approval, as they report it (src/agent-review.ts,
@@ -974,11 +961,9 @@ test('an agent or Codex review that has not approved is not a verdict: a head no
     arrange();
     assert.equal(standingVerdict(item), null, `${name}: no verdict stands`);
     assert.equal(routineDecision(item, master, at), null, `${name}: no decision is needed`);
-    assert.ok(actionableSubjects(master, simulation.work, simulation.now()).some(subject => subject.kind === 'proof'), `${name}: the head's proofs are still the loop's to request`);
-    const { proofs, actions } = await run();
+    const { actions } = await run();
     assert.deepEqual(actions.filter(action => action.kind === 'decision').map(action => action.detail), [], `${name}: the loop asks for no rework`);
     assert.equal((simulation.decisions.get(item.id) ?? []).length, 0, `${name}: and none reached the control plane`);
-    assert.deepEqual(proofs, ['GY-730'], `${name}: the proof step still runs for the head`);
   }
   assert.deepEqual(simulation.sessions.log.filter(entry => entry.startsWith('launch:')), [], 'no approver session was spent on a head nobody has reviewed');
 
@@ -988,7 +973,6 @@ test('an agent or Codex review that has not approved is not a verdict: a head no
   observe(verdict, { reviewRequest: request });
   assert.deepEqual(standingVerdict(item), { reviewer: reviewer.name, at: '2031-03-01T09:20:00.000Z', reason: `${reviewer.name} requested changes on ${head.slice(0, 12)}: ${verdict.reason}` });
   assert.equal(routineDecision(item, master, at)?.action, 'rework');
-  assert.ok(!actionableSubjects(master, simulation.work, simulation.now()).some(subject => subject.kind === 'proof'), 'a head going back to a worker is waiting on no proof');
   // It is the head's verdict only while it answers the head's request, on the head, unapproved,
   // under the provider the policy names: the same binding an approval must carry.
   observe(verdict, { reviewRequest: { ...request, commentId: 777 } });
@@ -1004,7 +988,6 @@ test('an agent or Codex review that has not approved is not a verdict: a head no
 
   observe(verdict, { reviewRequest: request });
   const reworked = await run();
-  assert.deepEqual(reworked.proofs, [], 'the loop requests no proof for a head that is going back');
   assert.deepEqual((simulation.decisions.get(item.id) ?? []).map(decision => [decision.action, decision.state]), [['rework', 'requested']], steps(reworked.actions).join(', '));
   assert.match(simulation.decisions.get(item.id)![0].reason, new RegExp(`${reviewer.name} requested changes on ${head.slice(0, 12)}`));
 
@@ -1065,7 +1048,7 @@ test('unit:review-rounds-capped — the real loop past an item\'s third review r
   assert.deepEqual(followUps.withdrawn.map(entry => [entry.work, entry.reviewId]), [['GY-1201', 9001]]);
   assert.match(followUps.withdrawn[0].message, /review round 4 is past the cap of 3, and it names no BLOCKING: finding\. Its findings are nits and are not filed/);
   assert.ok(delivered.performed.some(action => action.kind === 'review' && action.state === 'done' && /2 findings left as nits, nothing filed, and the change request withdrawn/.test(action.detail)));
-  assert.equal(delivered.performed.filter(action => action.kind === 'merge' && action.state === 'done').length, 1);
+  assert.ok(followUps.item.delivery, 'GitHub merged it once it was approved: no merge action is the loop\'s (GY-1235)');
 
   // A blocking finding still open in round 4: escalated once for an approver, never reworked or withdrawn.
   const blocking = third('GY-1202', 'BLOCKING: AC-1 is not met — the widget skips the last frob.\n\nThe naming could be clearer.');

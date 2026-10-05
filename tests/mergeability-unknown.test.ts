@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CHECK_NAME, GitHub, mergeabilityRetries } from '../src/github.js';
-import { predictQueue, queueRef } from '../src/merge-queue.js';
 import { evaluate, type Observation, type Work } from '../src/model.js';
 import { mergeabilityComputingRefusal } from '../src/model/gates.js';
 import { refusalRuleFor } from '../src/model/refusal-mapping.js';
@@ -40,17 +39,13 @@ function provider(answers: (boolean | null)[]) {
   return { github, reads };
 }
 
-/**
- * A submitted item carrying `observation`. Unqueued, it awaits review, so it stays out of the merge
- * queue and the merge gate words its own mergeability; queued, every gate but merge passes.
- */
-function item(observation: Observation, queued = false): Work {
+/** A submitted item carrying `observation`, awaiting review, whose merge gate words its own mergeability. */
+function item(observation: Observation): Work {
   const candidate = observation.candidate;
   return { id: 'id-GY-548', key: 'GY-548', title: 'GY-548', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/feature.ts'], criteria: [],
-    policy: { checks: ['test'], review: queued ? false : true }, stage: 'merge', revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null,
+    policy: { checks: ['test'], review: true }, stage: 'merge', revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null,
     workspaces: [{ host: 'machine', path: '/tmp/GY-548', branch: candidate.branch, epoch: 1, owner: 'agent' }], candidate, submission: { epoch: 1, pr: PR }, reworkRequested: false,
-    scenarioRequirements: [], evidence: [], blocker: null, violations: [], gates: [], observation: { ...observation, at: now.toISOString() },
-    ...(queued ? { queue: { sequence: 7, enqueuedAt: at, policyRevision: 1, speculation: null }, queueSequence: 7 } : {}) } as unknown as Work;
+    scenarioRequirements: [], evidence: [], blocker: null, violations: [], gates: [], observation: { ...observation, at: now.toISOString() } } as unknown as Work;
 }
 const mergeReasons = (work: Work) => evaluate(work, [work], now, [15368]).gates.find(gate => gate.name === 'merge')!.reasons;
 
@@ -82,29 +77,4 @@ test('unit:mergeability-unknown-not-refused — GitHub\'s not-yet-computed merge
   assert.deepEqual([conflicting.mergeable, conflicting.conflicting, conflicting.mergeabilityUnknown], [false, true, undefined]);
   const refused = mergeReasons(item(conflicting));
   assert.ok(refused.includes(notMergeable) && !refused.includes(mergeabilityComputingRefusal), refused.join('; '));
-});
-
-test('unit:queued-unknown-mergeability — a queued entry whose own pull request reports unknown mergeability keeps its place and is published a speculative tip', () => {
-  const candidate = { sha: HEAD, baseSha: BASE, pr: PR, branch: 'graphyard/gy-548-1', author: 'implementer' };
-  const observation = { clockOffset: { min: 0, max: 0 }, candidate, baseTip: BASE, baseTree: sha40('e1'), baseTipContained: true, checks: [{ name: 'test', result: 'success', appId: 15368 }], reviews: [],
-    protected: true, merged: false, mergeable: false, conflicting: false, mergeabilityUnknown: true, mergeSha: null, prState: 'open', draft: false, files: [], scopeFiles: [], at: now.toISOString() } as unknown as Observation;
-  const work = item(observation, true);
-  const evaluated = evaluate(work, [work], now, [15368]);
-  assert.equal(evaluated.queue?.sequence, 7, 'the entry keeps its position');
-  assert.equal(evaluated.queueEjection, null);
-  const merge = evaluated.gates.find(gate => gate.name === 'merge')!.reasons;
-  assert.ok(!merge.includes(notMergeable) && !merge.includes(mergeabilityComputingRefusal), `the entry is not held on its own mergeability: ${merge.join('; ')}`);
-
-  // The queue publishes it a tip: the speculative tip, not the pull request's own reading, decides.
-  const queued = { ...work, ...evaluated } as Work;
-  const placement = predictQueue([queued], now.getTime()).find(entry => entry.id === work.id)!;
-  assert.equal(placement.publishable, true, 'the entry is published a speculative tip');
-  const tip = sha40('c1');
-  const published = { ...queued, candidate: { ...candidate, sha: tip, baseSha: placement.predictedBase! },
-    queue: { ...queued.queue!, speculation: { ref: queueRef(work.key), tip, base: placement.predictedBase!, baseTree: sha40('e1'), tipTree: sha40('e2'), predecessors: placement.predecessors, policyRevision: 1, publishedAt: at, reviewedHead: HEAD } } } as Work;
-  published.observation = { ...observation, candidate: published.candidate!, at: now.toISOString() };
-  const onTip = evaluate(published, [published], now, [15368]);
-  assert.equal(onTip.queue?.sequence, 7, 'the published entry still holds its position');
-  const tipMerge = onTip.gates.find(gate => gate.name === 'merge')!.reasons;
-  assert.ok(!tipMerge.includes(notMergeable) && !tipMerge.includes(mergeabilityComputingRefusal), tipMerge.join('; '));
 });

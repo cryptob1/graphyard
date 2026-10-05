@@ -21,7 +21,7 @@ import { classified } from '../model/fault-classes.js';
 import { mechanicalProof, unexercisedDetail, unexercisedFindings } from '../model/mechanical-proofs.js';
 import { requestRemedy } from '../model/dispatch.js';
 import { unrunnableRemedies } from './harness.js';
-import { mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
+import { mergeAuthorized, mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
 import type { ProjectMemory } from '../model/project-memory.js';
 
 // Reviewer failover is a capacity decision the operator must see, not a silent retry.
@@ -170,11 +170,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const recorded = handle ? sessionView(handle, new Date(now)) : null;
     const sessionState = handle && recorded ? recorded.live ? recorded.observed! : handle.state === 'running' ? `not seen since ${recorded.seenAt ?? handle.updatedAt}` : recorded.observed ?? 'finished' : session?.state ?? 'offline';
     const first = work.gates.find(gate => !gate.passed);
-    const freshObservation = !!work.observation && now - Date.parse(work.observation.at) >= 0 && now - Date.parse(work.observation.at) < 120_000;
-    const mergeable = freshObservation && work.stage === 'merge' && !!work.candidate && !!work.mergeAuthorization
-      && work.mergeAuthorization.sha === work.candidate.sha && work.mergeAuthorization.baseSha === work.candidate.baseSha
-      && work.mergeAuthorization.policyRevision === work.policyRevision
-      && work.gates.every(gate => gate.passed) && !work.violations.length;
+    // GitHub's to merge: every gate passes on the candidate (GY-1235); the observation's age is not read.
+    const mergeable = mergeAuthorized(work);
     const dwellMs = now - Date.parse(work.stageEnteredAt);
     const review = reviewState(work);
     const assessed = containment[work.id];

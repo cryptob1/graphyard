@@ -1490,7 +1490,7 @@ export interface GitHubMergeQueueState {
 }
 declare module './model/work.js' { interface Observation { githubQueue?: GitHubMergeQueueState | null } }
 
-/** The coordinator's request that GitHub merge exactly this candidate: what `merge-acquire` with `enqueue` records. */
+/** A coordinator's request that GitHub merge exactly this candidate, as `merge-acquire` recorded it before GY-1235. */
 export interface MergeEnqueueRequest { sha: string; baseSha: string; policyRevision: number; requestedBy: string; at: string }
 
 /**

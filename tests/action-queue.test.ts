@@ -11,7 +11,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { evaluate, standingEscalations, type Observation, type Principal, type Work } from '../src/model.js';
 import { actionClaimMs, actionId, actionRenewIntervalMs, claimable, claimAction, idleActionable, openActions, queueSnapshot, reconcileActions, renewClaim, settleAction, type ActionRow } from '../src/model/actions.js';
-import { actionJudgment, executorRunnableKinds, llmRoles, mechanicalActionKinds, nextAction, nextActionKinds, nextActionLlmRoles, refusalAction, type NextActionKind } from '../src/model/next-action.js';
+import { actionAccount, actionJudgment, executorRunnableKinds, llmRoles, mechanicalActionKinds, nextAction, nextActionKinds, nextActionLlmRoles, refusalAction, type NextActionKind } from '../src/model/next-action.js';
 import { agentRequestLimit, agentRequestTypes, deciderFor, humanDecisions, leaseHeldRequestTypes, openAgentRequests, requestResolutionRefusal } from '../src/model/agent-requests.js';
 import { reconcileAutoDispatch, reviewNeed } from '../src/model/dispatch.js';
 import { reviewProviders } from '../src/model/review.js';
@@ -25,7 +25,6 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free worker entry point.
 import { pullOnce, transportRetries } from '../scripts/graphyard-pull.mjs';
 import { agentRequestAttention, agentRequestReport, actionReport, sessionReport } from '../src/cli/master-status.js';
-import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { pipelineBackfillState, resetPipelineBackfillState } from '../src/pipeline-backfill.js';
 import { coordinationViewHeader } from '../src/server/work-view.js';
 import WorkDetails from '../web/pages/work-details.js';
@@ -106,24 +105,6 @@ function observation(item: Work, overrides: Partial<Observation> = {}): Observat
     prState: 'open', draft: false, baseTip: base, baseTree: sha40('7e'), baseTipContained: true, ...overrides,
   };
 }
-/** Trusted evidence for the item's one mechanical proof on the head: since GY-115 its review follows it. */
-const proveHead = (item: Work) => engine.execute(producer, 'evidence', item.id, { proof: PROOF, sha: head, baseSha: base, policyRevision: item.policyRevision, result: 'pass', executed: 1, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
-/** Publish the queue tip the merge authorization requires; the queue's own behaviour has its own tests. */
-async function publishTip(item: Work) {
-  const current = await reload(item);
-  if (!current.queue || current.queue.speculation) return current;
-  const speculation: QueueSpeculation = { ref: queueRef(current.key), tip: current.candidate!.sha, base: current.candidate!.baseSha, baseTree: sha40('7e'), predecessors: [], policyRevision: current.policyRevision, publishedAt: new Date().toISOString() };
-  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [current.id, JSON.stringify(speculation)]);
-  return reload(current);
-}
-/** Drive one item from its passing candidate through GitHub's merge to a delivered snapshot. */
-async function mergeItem(_actor: Principal, item: Work) {
-  let current = await publishTip(item);
-  current = await engine.observe(current.id, current.revision, observation(current));
-  const mergedAt = new Date(Math.ceil((Date.now() + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
-  return engine.observe(current.id, current.revision, { ...observation(current), merged: true, mergeSha, mergedAt });
-}
-
 // ---- AC-1: the control plane computes a typed next action ------------------------------------
 
 test('integration:typed-next-action — the control plane names one typed action per open item, with the inputs it needs, and every gate refusal maps to exactly one action or to escalate', async () => {
@@ -151,19 +132,12 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.equal(item.nextAction!.kind, 'resync');
   assert.equal(inputs(item).pr, item.submission!.pr);
 
-  // Observed, but its mechanical proof has not run (GY-115): the producer is what the head needs
-  // next, and no reviewer is asked about it yet.
+  // Observed and without an approval: the review request, bound to the exact head, base and policy.
+  // No proof holds it (GY-1235): unit tests run in CI and e2e in UAT, so the reviewer is asked at once.
   item = await engine.observe(item.id, item.revision, observation(item, { reviews: [] }));
-  assert.equal(item.nextAction!.kind, 'dispatch');
-  assert.deepEqual(inputs(item), { kind: 'dispatch', target: 'proof', group: 'integration', proofs: [PROOF], requestId: item.autoDispatch!.producers[0].id, pr: item.submission!.pr, sha: head, baseSha: base, policyRevision: 1 });
-  assert.equal(item.nextAction!.llmRole, 'produce-evidence');
-  assert.equal(item.nextAction!.gate, 'review'); assert.equal(item.autoDispatch!.review, null);
-  assert.equal(refusalAction(item, 'review', item.nextAction!.refusal!), 'dispatch');
-
-  // Proven and without an approval: the review request, bound to the exact head, base and policy.
-  item = await proveHead(item);
   assert.equal(item.nextAction!.kind, 'request-review');
   assert.deepEqual(inputs(item), { kind: 'request-review', provider: 'github', requestId: item.autoDispatch!.review!.id, pr: item.submission!.pr, sha: head, baseSha: base, policyRevision: 1 });
+  assert.equal(item.autoDispatch!.producers.length, 0, 'and no producer is asked for a proof');
   assert.equal(item.nextAction!.llmRole, 'review');
 
   // A reviewer that requested changes on this exact head: no review can be asked for it again, so
@@ -260,14 +234,13 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.equal(answeredAction.llmRole, 'approve-decision', 'a new head is a judgment owed, not a step an executor runs');
   assert.match((answeredAction.inputs as any).detail, /codex requested changes on [0-9a-f]{12}; the next head is reviewed afresh/);
 
-  // Approved, green and already proven — the proof dispatch the acceptance gate once named here now
-  // precedes the review (above): the merge, with the queue position it will land in.
+  // Approved and green: GitHub merges it on its branch protection (GY-1235), so nothing is named —
+  // the item waits on GitHub, and the merged observation records the delivery.
   item = await engine.observe(item.id, item.revision, observation(item, { baseTipContained: true, baseTip: base }));
-  item = await publishTip(item);
-  item = await engine.observe(item.id, item.revision, observation(item));
-  assert.equal(item.nextAction!.kind, 'merge');
-  assert.equal(inputs(item).sha, head);
-  assert.equal(item.nextAction!.llmRole, null, 'merging is mechanical: the gates already decided');
+  assert.equal(item.nextAction, null, 'no executor step merges');
+  const merging = actionAccount(item, [item], new Date());
+  assert.equal(merging.wait?.kind, 'session'); assert.equal(merging.wait?.on, 'github');
+  assert.match(merging.wait!.detail, new RegExp(`passed every gate on ${head.slice(0, 12)}; GitHub merges it`));
 
   // A live scope request outranks the gates: the worker holding the item is idle until it is answered.
   const blocked = await submitted();
@@ -283,7 +256,7 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.equal(response.status, 200);
   assert.deepEqual(body.kinds, [...nextActionKinds]);
   assert.deepEqual(body.mechanical, [...mechanicalActionKinds]);
-  assert.ok(body.nextActions.some((entry: any) => entry.key === item.key && entry.kind === 'merge'));
+  assert.equal(body.nextActions.some((entry: any) => entry.key === item.key), false, 'a candidate GitHub merges names no action');
   assert.ok(body.actions.some((entry: ActionRow) => entry.key === scoped.key && entry.kind === 'approve-scope'));
   const snapshot = await (await fetch(`${url}/api/work-snapshot`, { headers: { Authorization: `Bearer ${'x'.repeat(32)}` } })).json();
   assert.ok((snapshot.work as Work[]).every(entry => 'nextAction' in entry), 'every item carries its computed action');
@@ -399,7 +372,9 @@ test('integration:typed-next-action — an unsettled containment fence escalates
 
 test('integration:action-queue-leases — actions are durable leased rows: a dead executor loses its claim, another retries without double-executing, and history names requester, executor, result and reason', async () => {
   const pending = await submitted();
-  let item = await proveHead(await engine.observe(pending.id, pending.revision, observation(pending, { reviews: [] })));
+  // Review is asked for at once (GY-1235), so earlier tests' items hold request-review rows of their
+  // own: every claim here names this item.
+  let item = await engine.observe(pending.id, pending.revision, observation(pending, { reviews: [] }));
   const open = rows(item);
   assert.equal(open.length, 1);
   assert.equal(open[0].kind, 'request-review');
@@ -413,13 +388,13 @@ test('integration:action-queue-leases — actions are durable leased rows: a dea
 
   // Executor A claims it under a bounded lease.
   const claimKey = randomUUID();
-  const claimed = await engine.claimNextAction(executorA, { host: 'host-1', kinds: ['request-review'] }, claimKey);
+  const claimed = await engine.claimNextAction(executorA, { host: 'host-1', kinds: ['request-review'], work: item.key }, claimKey);
   assert.equal(claimed.action!.kind, 'request-review');
   assert.equal(claimed.action!.claim!.executor, executorA.id);
   assert.equal(claimed.action!.claim!.host, 'host-1');
   assert.equal(claimed.action!.attempts, 1);
   assert.equal(Date.parse(claimed.action!.claim!.expiresAt) - Date.parse(claimed.action!.claim!.claimedAt), actionClaimMs);
-  assert.deepEqual(await engine.claimNextAction(executorA, { host: 'host-1', kinds: ['request-review'] }, claimKey), claimed, 'a replayed claim returns its receipt rather than taking a second row');
+  assert.deepEqual(await engine.claimNextAction(executorA, { host: 'host-1', kinds: ['request-review'], work: item.key }, claimKey), claimed, 'a replayed claim returns its receipt rather than taking a second row');
 
   // Executor B finds nothing to take and cannot settle a row it does not hold.
   const empty = await engine.claimNextAction(executorB, { host: 'host-2', kinds: ['request-review'], work: item.key }, randomUUID());
@@ -428,7 +403,7 @@ test('integration:action-queue-leases — actions are durable leased rows: a dea
 
   // Executor A dies mid-action: it renews nothing, so the claim expires and B takes attempt two.
   await store.pool.query(`UPDATE work_items SET document=jsonb_set(document,'{actionQueue,actions,0,claim,expiresAt}',to_jsonb($2::text)) WHERE id=$1`, [item.id, new Date(Date.now() - 1000).toISOString()]);
-  const retried = await engine.claimNextAction(executorB, { host: 'host-2', kinds: ['request-review'] }, randomUUID());
+  const retried = await engine.claimNextAction(executorB, { host: 'host-2', kinds: ['request-review'], work: item.key }, randomUUID());
   assert.equal(retried.action!.id, claimed.action!.id, 'the same action, not a second one');
   assert.equal(retried.action!.attempts, 2);
   assert.equal(retried.action!.claim!.executor, executorB.id);
@@ -446,7 +421,7 @@ test('integration:action-queue-leases — actions are durable leased rows: a dea
 
   // And then completes it. The completed row holds its situation while the verdict lands.
   await store.pool.query(`UPDATE work_items SET document=(document #- '{actionQueue,actions,0,retryAt}') WHERE id=$1`, [item.id]);
-  const third = await engine.claimNextAction(executorA, { host: 'host-1', kinds: ['request-review'] }, randomUUID());
+  const third = await engine.claimNextAction(executorA, { host: 'host-1', kinds: ['request-review'], work: item.key }, randomUUID());
   const done = await engine.settleClaimedAction(executorA, third.action!.id, { result: 'done', reason: 'reviewer session launched on head aaaaaaaaaaaa' }, randomUUID());
   assert.equal(done.action.state, 'done');
   assert.equal(done.action.attempts, 3);
@@ -469,7 +444,7 @@ test('integration:action-queue-leases — actions are durable leased rows: a dea
     'the document the event carries holds the whole transition history of the row');
 
   // The situation changes: the approval lands, so the row that no longer applies is retired
-  // with the reason. The head was proven before its review (GY-115), so nothing else is owed yet.
+  // with the reason. GitHub merges the approved head (GY-1235), so nothing else is owed.
   item = await engine.observe(item.id, item.revision, observation(item));
   assert.equal(rows(item).length, 0);
   const retired = item.actionQueue!.history.at(-1)!;
@@ -869,17 +844,17 @@ test('integration:no-llm-in-critical-path — a full ready-to-delivered cycle ru
   assert.match(judgmentInExecutorLoop({ 'request-rework': async () => 'reworked' })!, /^request-rework is a judgment made in the step itself/);
 
   await drain([effects], log, mine);
-  const delivered = await reload(item);
-  assert.equal(delivered.stage, 'done');
+  // The fleet carries the item to a candidate whose every gate passed; GitHub merges it on its
+  // branch protection (GY-1235), so no executor step merges and the merged observation delivers.
+  const passing = await reload(item);
+  assert.equal(passing.stage, 'merge'); assert.ok(passing.gates.every(gate => gate.passed), passing.gates.flatMap(gate => gate.reasons).join('; '));
+  assert.equal(passing.nextAction, null, 'nothing is left for an executor once every gate passed');
+  const mergedAt = new Date(Math.ceil((Date.now() + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+  const delivered = await engine.observe(passing.id, passing.revision, { ...observation(passing), merged: true, mergeSha, mergedAt });
+  assert.equal(delivered.stage, 'done', delivered.violations.join('; '));
   assert.ok(delivered.delivery?.mergeSha);
   assert.ok(!log.executed.some(entry => entry.kind === 'escalate'), 'no escalation was needed to deliver');
-  assert.ok(log.executed.some(entry => entry.key === item.key && entry.kind === 'merge'));
-  // What the merge row records is the broker's own account of what it did. The executor declares
-  // no merge of its own: the broker throws when it does not reach the provider, and only the
-  // observation that follows turns a requested merge into a delivery.
-  const mergeSettlement = [...(delivered.actionQueue?.history ?? []), ...(delivered.actionQueue?.actions ?? [])]
-    .flatMap(entry => entry.kind === 'merge' ? entry.history : []).find(entry => entry.event === 'completed');
-  assert.match(mergeSettlement!.reason, /merge requested; Graphyard will mark Done only after observing the merge/);
+  assert.ok(!log.executed.some(entry => entry.kind === 'merge'), 'no executor ran a merge');
 
   // An item that does raise an escalation stalls at that row rather than being resolved by the
   // loop: the escalation handler is outside the critical path, not quietly automated inside it.
@@ -1197,23 +1172,20 @@ test('integration:session-handles-visible — every launched session records a d
   await engine.execute(worker, 'release', current.id, { epoch: current.epoch }, randomUUID());
 });
 
-test('integration:session-handles-visible — the reviewer and producer launchers record a handle for every session they start, and a session blocked at a prompt keeps the attach command somebody needs', async () => {
-  // A launched reviewer or producer session used to exist only in this host's own ledger, which
+test('integration:session-handles-visible — the reviewer launcher records a handle for every session it starts, and a session blocked at a prompt keeps the attach command somebody needs', async () => {
+  // A launched reviewer session used to exist only in this host's own ledger, which
   // is the relaying the handle exists to end. The dispatcher records one for each launch, from
   // the coordinates the launcher itself returns.
   const item = await submitted();
   await engine.observe(item.id, item.revision, observation(item, { reviews: [] }));
-  const withRequests = await reload(item);
-  assert.equal(withRequests.autoDispatch?.review, null, 'no reviewer is asked about a head whose proof has not run (GY-115)');
-  assert.ok(withRequests.autoDispatch!.producers.length, 'the control plane asked for the proofs this head still owes');
+  const reviewable = await reload(item);
+  // No proof holds the review (GY-1235): the reviewer is asked at once, and no producer is.
+  assert.ok(reviewable.autoDispatch?.review, 'the control plane asked for a review of this head');
+  assert.deepEqual(reviewable.autoDispatch!.producers, [], 'and for no proof');
 
-  // A session the control plane itself asked for may record its own handle without holding a
-  // lease: the live dispatch request is the item naming that session, and the handle is keyed on
-  // it. Any other id from the same credential is refused, so handle creation stays the launch
-  // authority it is — a producer token cannot mint handles on an item it merely reaches.
-  const proofRequest = withRequests.autoDispatch!.producers[0];
-  await engine.execute(producer, 'session', item.id, { id: proofRequest.id, kind: 'proof' as const, runtime: 'claude', host: 'vishrog', transcript: '/home/producer/.claude/proofs.jsonl', subject: `${item.key}: ${PROOF}`, state: 'running' as const }, randomUUID());
-  await assert.rejects(engine.execute(producer, 'session', item.id, { id: `${proofRequest.id}-mine`, kind: 'proof' as const, runtime: 'claude', host: 'vishrog', subject: `${item.key}: a handle nothing asked for`, state: 'running' as const }, randomUUID()),
+  // Handle creation stays the launch authority it is: an id no live dispatch request names is
+  // refused, so a producer token cannot mint handles on an item it merely reaches.
+  await assert.rejects(engine.execute(producer, 'session', item.id, { id: `${reviewable.autoDispatch!.review!.id}-mine`, kind: 'proof' as const, runtime: 'claude', host: 'vishrog', subject: `${item.key}: a handle nothing asked for`, state: 'running' as const }, randomUUID()),
     /recorded by its launcher or by the session of a live dispatch request/);
 
   // The dispatcher `master run` builds, not one assembled here: the handle recording under test
@@ -1249,32 +1221,22 @@ test('integration:session-handles-visible — the reviewer and producer launcher
   };
   const cursor = emptyDispatchCursor(fleetConfig);
   const tick = await runDispatchTick(fleetConfig, cursor, effects);
-  assert.deepEqual(tick.launched.map(entry => entry.kind), ['producer'], `the tick launched ${JSON.stringify(tick.waiting)}`);
-  // The proof passes: the control plane asks for the review, and the next tick launches the reviewer.
-  const reviewable = await proveHead(await reload(item));
-  assert.ok(reviewable.autoDispatch?.review, 'the control plane asked for a review of this head once its proof passed');
-  const next = await runDispatchTick(fleetConfig, cursor, effects);
-  assert.deepEqual(next.launched.map(entry => entry.kind), ['review'], `the tick launched ${JSON.stringify(next.waiting)}`);
-  assert.ok([...tick.launched, ...next.launched].every(entry => entry.work === item.key));
-  // Each launch registers its session before the runtime starts and then writes the pane the
-  // launcher returned (GY-172 AC-2): two writes to one handle per launch.
-  assert.equal(new Set(handles.map(entry => entry.handle.id)).size, 2, 'a handle was recorded for each launch');
-  assert.deepEqual(handles.map(entry => [entry.handle.kind, entry.handle.pane ?? null]), [['proof', null], ['proof', 'pane-13'], ['review', null], ['review', 'pane-12']],
-    'each registered before its runtime started, then given the pane it runs in');
-  assert.deepEqual(mutations.map(mutation => mutation.path.split('/').at(-1)), ['session', 'session', 'session', 'session'], 'each one went to the control plane through the shipped mutation');
+  assert.deepEqual(tick.launched.map(entry => entry.kind), ['review'], `the tick launched ${JSON.stringify(tick.waiting)}`);
+  assert.ok(tick.launched.every(entry => entry.work === item.key));
+  // The launch registers its session before the runtime starts and then writes the pane the
+  // launcher returned (GY-172 AC-2): two writes to one handle.
+  assert.equal(new Set(handles.map(entry => entry.handle.id)).size, 1, 'a handle was recorded for the launch');
+  assert.deepEqual(handles.map(entry => [entry.handle.kind, entry.handle.pane ?? null]), [['review', null], ['review', 'pane-12']],
+    'registered before its runtime started, then given the pane it runs in');
+  assert.deepEqual(mutations.map(mutation => mutation.path.split('/').at(-1)), ['session', 'session'], 'each write went to the control plane through the shipped mutation');
   // And a dispatcher built with nothing but a snapshot records them too: the mutation is derived
   // from the configuration the loop already runs on, so no caller can leave the handles out.
   assert.ok(dispatchEffects('/outside', () => fleetConfig, { snapshot: effects.snapshot }).recordSession, 'the handle recording is not a caller\'s option');
   const recorded = (await reload(item)).sessions ?? [];
-  const review = recorded.find(handle => handle.kind === 'review')!, proof = recorded.find(handle => handle.kind === 'proof')!;
+  const review = recorded.find(handle => handle.kind === 'review')!;
   assert.deepEqual([review.runtime, review.workspace, review.pane], ['claude', 'wF', 'pane-12']);
   assert.equal(attachCommand(review), 'herdr pane attach pane-12 --workspace wF');
   assert.match(review.subject, /^GY-\d+: review [0-9a-f]{12} \(PR #\d+\)$/);
-  assert.deepEqual([proof.runtime, proof.workspace, proof.pane], ['claude', 'wF', 'pane-13']);
-  assert.equal(proof.principal, producer.id, 'the launcher names whose session it is, so that session can add its tab and transcript');
-  assert.equal(proof.transcript, '/home/producer/.claude/proofs.jsonl', 'and what that session recorded for itself is on the same handle');
-  assert.equal(attachCommand(proof), 'herdr pane attach pane-13 --workspace wF');
-  assert.match(proof.subject, new RegExp(`${PROOF}`));
   // The handle is keyed on the dispatch request, so a relaunch for the same request updates it
   // rather than leaving two handles for one session.
   assert.equal(review.id, reviewable.autoDispatch!.review!.id);

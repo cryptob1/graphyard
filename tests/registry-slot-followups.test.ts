@@ -80,11 +80,10 @@ function requested(): Work {
     createdAt: iso(0), updatedAt: iso(0), stageEnteredAt: iso(0), ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 64 }, reworkRequested: false,
     scenarioRequirements: [], evidence, observation: observation(candidate), blocker: null, violations: [],
     gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }] }) as unknown as Work;
+  // Review is not held for proofs since GY-1235, so reconciling raises the review request at once.
   const item = make([]); reconcileAutoDispatch(item, [item], new Date(clock));
-  // The review request is the one a proven twin of the head raises (GY-115).
-  const twin = make([{ id: 'twin', proof: 'unit:slots', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 1, producer: 'independent-runner', trusted: true, result: 'pass', executed: 1, skipped: 0, at: iso(0) }]);
-  reconcileAutoDispatch(twin, [twin], new Date(clock));
-  item.autoDispatch!.review = twin.autoDispatch!.review;
+  // Dispatch opens no producer request any more; a standing one (built by hand) is still launched.
+  item.autoDispatch!.producers.push({ id: 'producer-unit', kind: 'producer', group: 'unit', proofs: ['unit:slots'], sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 1, pr: 64, requestedAt: iso(0), reason: 'unproven', state: 'requested' });
   return item;
 }
 

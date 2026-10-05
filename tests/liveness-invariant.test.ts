@@ -68,10 +68,8 @@ const released = async () => {
 };
 const claimed = async () => engine.execute(worker, 'claim', (await released()).id, {}, id());
 /** A submitted, observed candidate; `evidence` decides what its proof says. */
-async function candidate(evidence: 'pass' | 'fail' | null, extra: Partial<Observation> = {}, alone = false) {
+async function candidate(evidence: 'pass' | 'fail' | null, extra: Partial<Observation> = {}) {
   let w = await claimed();
-  // Alone in the merge queue, so a proven candidate is first rather than waiting behind another.
-  if (alone) await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [w.id]);
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/liveness-${w.key}`, branch: `graphyard/${w.key.toLowerCase()}-1` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 900 + serial }, id());
   w = await engine.observe(w.id, w.revision, observation(w, extra));
@@ -96,7 +94,7 @@ async function staleWait() {
 }
 // ---- AC-1 ---------------------------------------------------------------------------------------
 
-test('unit:liveness-violations-detected — every open item holds exactly one obligation (a live leased session, an open action row, or a named wait with a dueAt) and an item holding none is a violation, classified by its state: a stranded merge with no execution and an open PR, a retained merge execution past its authority, a failed proof with no rework, a refused scope request, and a wait past its dueAt', async () => {
+test('unit:liveness-violations-detected — every open item holds exactly one obligation (a live leased session, an open action row, or a named wait with a dueAt) and an item holding none is a violation, classified by its state: a failed proof with no rework, a refused scope request, and a wait past its dueAt', async () => {
   const now = () => new Date();
   // Healthy items each hold one obligation, with a due time.
   const ready = await released();
@@ -111,17 +109,24 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
   const backlog = await engine.execute(operator, 'create', null, { title: 'Backlog', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: [PROOF] }] }, id());
   assert.deepEqual(await judge(backlog), { work: backlog.id, key: backlog.key, obligation: null, violation: null }, 'backlog is not open work');
 
+  // A candidate passing every gate owes nobody a step since GY-1235: GitHub merges it, so it is a
+  // named wait on GitHub with a due time, even with no row left on its record.
+  const merging = await candidate('pass');
+  assert.deepEqual(merging.gates.filter(gate => !gate.passed).map(gate => gate.name), [], 'every gate passes');
+  assert.equal(nextAction(merging, await store.list(), now()), null, 'no merge is owed by anybody here');
+  await strand(merging);
+  const awaited = await judge(merging);
+  assert.equal(awaited.violation, null);
+  assert.deepEqual([awaited.obligation!.kind, awaited.obligation!.owner], ['wait', 'github'], JSON.stringify(awaited.obligation));
+  assert.ok(Date.parse(awaited.obligation!.dueAt) > Date.now(), 'the wait on GitHub is due by its bound');
+
   // The stranded states, each as the incident left the record.
-  const merge = await candidate('pass', {}, true);
-  assert.equal(nextAction(merge, await store.list(), now())?.kind, 'merge', `the proven candidate is owed its merge: ${merge.gates.flatMap(gate => gate.reasons).join('; ')}`);
-  assert.equal(merge.mergeExecution ?? null, null);
-  assert.equal(merge.observation!.merged, false, 'its pull request is open');
   const failed = await candidate('fail');
   const scope = await refusedScope();
   const stale = await staleWait();
-  for (const item of [merge, failed, scope]) await strand(item);
+  for (const item of [failed, scope]) await strand(item);
 
-  const expected: [Work, ViolationClass, string][] = [[merge, 'stranded-merge', 'merge'], [failed, 'failed-proof', 'request-rework'],
+  const expected: [Work, ViolationClass, string][] = [[failed, 'failed-proof', 'request-rework'],
     [scope, 'refused-scope', 'escalate'], [stale, 'stale-wait', 'escalate']];
   const found = livenessViolations(await store.list(), now());
   for (const [item, kind, successor] of expected) {
@@ -169,11 +174,10 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
 
 // ---- AC-2 ---------------------------------------------------------------------------------------
 
-test('unit:violations-get-successor-actions — one reconciliation tick opens exactly one successor for each violation (merge, reconcile-merge, request-rework, scope decision, escalate), deduplicated by reason across ticks, and an action failing N times for one unchanged reason is converted to escalate instead of retried', async () => {
-  const merge = await candidate('pass', {}, true), failed = await candidate('fail'), scope = await refusedScope(), stale = await staleWait();
-  for (const item of [merge, failed, scope]) await strand(item);
-  const cases: [Work, ViolationClass, string, string | null][] = [[merge, 'stranded-merge', 'merge', null],
-    [failed, 'failed-proof', 'request-rework', null], [scope, 'refused-scope', 'escalate', 'scope'], [stale, 'stale-wait', 'escalate', 'stale-wait']];
+test('unit:violations-get-successor-actions — one reconciliation tick opens exactly one successor for each violation (request-rework, scope decision, escalate), deduplicated by reason across ticks, and an action failing N times for one unchanged reason is converted to escalate instead of retried', async () => {
+  const failed = await candidate('fail'), scope = await refusedScope(), stale = await staleWait();
+  for (const item of [failed, scope]) await strand(item);
+  const cases: [Work, ViolationClass, string, string | null][] = [[failed, 'failed-proof', 'request-rework', null], [scope, 'refused-scope', 'escalate', 'scope'], [stale, 'stale-wait', 'escalate', 'stale-wait']];
   for (const [item, kind] of cases) assert.equal((await judge(item)).violation?.class, kind, `${item.key} starts in violation`);
 
   await engine.reconcile();
@@ -348,11 +352,8 @@ test('unit:liveness-violations-detected — a pending producer request or a runn
 });
 
 test('unit:unknown-merge-reconciled-from-github — a merge GitHub made of a passing head is delivered even when a lagging read still showed the pull request open before the merged observation arrived', async () => {
-  let w = await candidate('pass', {}, true);
-  // Published at the head of the merge queue, as the queue leaves a candidate it is about to merge.
-  await setDocument(w, 'queue,speculation', { ref: `refs/graphyard/queue/${w.key.toLowerCase()}`, tip: head(w), base, baseTree: '7e'.repeat(20), predecessors: [], policyRevision: w.policyRevision, publishedAt: new Date().toISOString() });
-  w = await engine.observe(w.id, (await reload(w)).revision, observation(w));
-  assert.ok(w.gates.every(gate => gate.passed), `authorized to merge: ${w.gates.flatMap(gate => gate.reasons).join('; ')}`);
+  const w = await candidate('pass');
+  assert.ok(w.gates.every(gate => gate.passed), `every gate passes: ${w.gates.flatMap(gate => gate.reasons).join('; ')}`);
   // GitHub merges; its replica still answers open.
   await new Promise(resolve => setTimeout(resolve, 5));
   const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString();

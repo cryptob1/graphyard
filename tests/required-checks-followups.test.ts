@@ -61,10 +61,6 @@ test('unit:required-checks-followups — a published tip failing only a protecti
   assert.match(ejectionReason(failing, ciAppIds) ?? '', /Required CI check secrets did not pass/);
   // Not yet reported: no verdict, not a pass.
   assert.equal(tipVerdict(published(passing), ciAppIds), undefined);
-  // The merge gate names the check the tip still waits on, so the wait is never anonymous (findings 12, 15).
-  const waiting = published(passing);
-  assert.deepEqual(evaluate(waiting, [waiting], now, ciAppIds).gates.find(gate => gate.name === 'merge')!.reasons,
-    [`Merge queue is validating speculative tip ${head.slice(0, 12)}: Required CI check secrets has not passed on the current candidate`]);
   assert.deepEqual(tipVerdict(published([...passing, { name: 'secrets', result: 'skipped' }]), ciAppIds), { result: 'pass' }, 'GitHub accepts a skipped protection-only check');
 });
 

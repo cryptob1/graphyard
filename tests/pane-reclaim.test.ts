@@ -161,7 +161,10 @@ test('unit:session-end-closes-pane — one session of every pane-opening role is
       item('GY-1', { stage: 'ready', epoch: 0, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }] }),
       // The reviewer and the producer: candidate shapes whose requests the loop's ledger holds.
       reviewCandidate('GY-2'),
-      (() => { const producer = reviewCandidate('GY-3'); producer.criteria = [{ id: 'AC-1', text: 'Proven', proofs: ['unit:producer-launch'] }]; reconcileAutoDispatch(producer, [producer], new Date(clockStart)); return producer; })(),
+      // Dispatch opens no producer request since GY-1235; the producer launcher still binds one, built by hand.
+      (() => { const producer = reviewCandidate('GY-3'); producer.criteria = [{ id: 'AC-1', text: 'Proven', proofs: ['unit:producer-launch'] }]; reconcileAutoDispatch(producer, [producer], new Date(clockStart));
+        producer.autoDispatch!.producers.push({ id: 'producer-unit', kind: 'producer', group: 'unit', proofs: ['unit:producer-launch'], sha: producer.candidate!.sha, baseSha: producer.candidate!.baseSha, policyRevision: producer.policyRevision, pr: producer.candidate!.pr, requestedAt: new Date(clockStart).toISOString(), reason: 'unproven', state: 'requested' });
+        return producer; })(),
       // The escalation handler's item: open, with the standing escalation its context carries.
       item('GY-4', { stage: 'review', ready: false, escalation: { trigger: 'review-unavailable', reason: 'no reviewer could be launched', at: iso(), actor: 'graphyard' } as never }),
       // The approver's item: delivered, so the loop closes the approver still judging it.

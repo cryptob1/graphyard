@@ -54,15 +54,12 @@ function item(overrides: Partial<Work> = {}): Work {
 const evidence = (proof: string, id: string): Evidence => ({ id, proof, sha: H, baseSha: B, policyRevision: 1, producer: 'proof-runner', trusted: true, result: 'pass', executed: 3, skipped: 0, at: iso(-60_000) });
 const proven = () => [evidence('unit:behind-base-still-reviewed', 'e1'), evidence('integration:behind-base', 'e2')];
 
-test('unit:behind-base-still-reviewed — a mergeable candidate one commit behind base gets producer requests and then a review request for its head', () => {
-  // Unproven: one producer request per proof group, bound to the head as it stands.
-  const unproven = item();
-  reconcileAutoDispatch(unproven, [unproven], new Date(clock));
-  assert.deepEqual(unproven.autoDispatch!.producers.map(request => [request.group, request.sha, request.baseSha, request.state]), [['unit', H, B, 'requested'], ['integration', H, B, 'requested']]);
-
-  // Proven: the review request is raised for the same head, bound to head, base and policy.
-  const work = item({ evidence: proven() });
+test('unit:behind-base-still-reviewed — a mergeable candidate one commit behind base gets a review request for its head', () => {
+  // Since GY-1235 proofs gate nothing: no producer request is opened, and review is not held for
+  // them, so the review request is raised for the head as it stands, bound to head, base and policy.
+  const work = item();
   const transitions = reconcileAutoDispatch(work, [work], new Date(clock));
+  assert.deepEqual(work.autoDispatch!.producers, [], 'no producer is requested');
   assert.deepEqual(transitions.map(entry => entry.event), ['dispatch.requested']);
   const review = work.autoDispatch!.review!;
   assert.deepEqual([review.kind, review.sha, review.baseSha, review.policyRevision, review.state], ['review', H, B, 1, 'requested']);

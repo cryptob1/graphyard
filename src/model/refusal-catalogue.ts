@@ -91,7 +91,7 @@ export const gateRefusalCatalogue: RefusalShape[] = [
   { gate: 'acceptance', id: 'evidence-not-independent', match: /is no longer independent:/, kinds: ['escalate'],
     example: 'Trusted integration:example evidence from agent-a is no longer independent: agent-a has since held an assignment on GY-1' },
   // merge
-  { gate: 'merge', id: 'stale-observation', match: /^GitHub observation missing or older than two minutes$/, example: 'GitHub observation missing or older than two minutes', kinds: ['resync'] },
+  { gate: 'merge', id: 'github-unobserved', match: /^GitHub has not been observed at the current candidate$/, example: 'GitHub has not been observed at the current candidate', kinds: ['resync'] },
   { gate: 'merge', id: 'unprotected', match: /branch protection have not been verified$/, kinds: ['escalate'],
     example: 'Required Graphyard check and merge-queue branch protection have not been verified' },
   // The same shape covers GitHub's not-yet-computed mergeability (GY-548), worded apart from a refusal.

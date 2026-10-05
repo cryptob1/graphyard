@@ -12,7 +12,6 @@ import type { Observation, Principal, Work } from '../src/model.js';
 import { actionId, claimAction, openActions, reconcileActions, settleAction, type ActionRow } from '../src/model/actions.js';
 import { actionIdleMs, actionRetryDelay, actionRetryMaxMs, actionRetryMinMs, actionStall, actionStallDelay, actionStallLatencyMs, actionStallMaxMs, actionStallRecheckMs, actionStallThreshold, claimable, queueSnapshot, stalledActions } from '../src/model/action-progress.js';
 import { sweepDirectMerges, type DirectMergeWindow } from '../src/direct-merge.js';
-import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { assertDispatchable } from '../src/master.js';
 import { actionReport, stalledActionAttention } from '../src/cli/master-status.js';
 import { plainStatus, stalledStep } from '../src/model/plain-status.js';
@@ -347,23 +346,18 @@ async function seed(item: Work, rows: ActionRow[], extra: Record<string, unknown
 const pendingRows = (item: Work) => (item.actionQueue?.actions ?? []).filter(row => row.state === 'pending');
 const queueEntry = (sequence: number) => ({ sequence, enqueuedAt: new Date().toISOString(), policyRevision: 1, speculation: null });
 
-/** A submitted item with a passing CI, an approval and trusted evidence: queued for the merge it is about to get. */
+/** A submitted item with a passing CI, an approval and trusted evidence: every gate passes, so GitHub merges it (GY-1235). */
 async function queuedCandidate() {
   const n = ++deliveries;
   let w = await engine.execute(operator, 'create', null, { title: `Delivered ${n}`, plannedFiles: [`src/delivered-${n}.ts`], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID()); w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/stalled-delivery-${n}`, branch: `graphyard/stalled-delivery-${n}` }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 900 + n }, randomUUID());
-  // Only this candidate is in the queue, so it is at its head.
-  await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [w.id]);
   const observation = (): Observation => ({ clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: 900 + n, branch: `graphyard/stalled-delivery-${n}`, author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }], reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }],
     protected: true, mergeable: true, merged: false, mergeSha: null, files: [], scopeFiles: [], at: new Date().toISOString() });
   w = await engine.observe(w.id, w.revision, observation());
   w = await engine.execute(ci, 'evidence', w.id, { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
-  const speculation: QueueSpeculation = { ref: queueRef(w.key), tip: head, base, baseTree: '7e'.repeat(20), predecessors: [], policyRevision: w.policyRevision, publishedAt: new Date().toISOString() };
-  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [w.id, JSON.stringify(speculation)]);
-  w = await engine.observe(w.id, (await reload(w)).revision, observation());
   return { work: w, observation };
 }
 
@@ -377,11 +371,12 @@ function assertSettled(item: Work, path: string) {
 }
 
 test('integration:done-retires-actions — an item delivered by the gated merge observation or by the direct-merge sweep has its next action recomputed, its pending rows retired and its queue entry cleared in the same transaction', async () => {
-  // The gated path: an authorized, verified, committed merge, observed.
+  // The gated path: a merge GitHub made of a candidate passing every gate, observed. A queue entry
+  // left from before GY-1235 is seeded so its clearing is still checked.
   const { work: queued, observation } = await queuedCandidate();
-  assert.ok(queued.queue, 'the candidate holds a merge-queue entry');
-  assert.equal(queued.nextAction?.kind, 'merge', 'and its next action is the merge');
-  await seed(queued, [leftover(queued, 'dispatch', 'dispatch:0')]);
+  assert.deepEqual(queued.gates.filter(gate => !gate.passed).map(gate => gate.name), [], 'the candidate passes every gate');
+  assert.equal(queued.nextAction ?? null, null, 'and nobody owes its merge: GitHub makes it');
+  await seed(queued, [leftover(queued, 'dispatch', 'dispatch:0')], { queue: queueEntry(8999) });
   const committed = await reload(queued);
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   const merged = await engine.observe(queued.id, committed.revision, { ...observation(), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });

@@ -1,23 +1,19 @@
-import { after, before, test } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setTimeout as delay } from 'node:timers/promises';
-import EmbeddedPostgres from 'embedded-postgres';
-import { Store } from '../src/store.js';
-import { Engine } from '../src/engine.js';
-import { CHECK_NAME, GitHub, processJob } from '../src/github.js';
-import { evaluate, Refusal, type Observation, type Principal, type Work } from '../src/model.js';
+import { CHECK_NAME, GitHub } from '../src/github.js';
+import { evaluate, Refusal, type Observation, type Work } from '../src/model.js';
 import { buildMasterStatus } from '../src/master.js';
-import { ejectionReason } from '../src/merge-queue.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-97. Each test is named for the proof it produces, so acceptance evidence maps to one
-// executed case per required proof: integration:revert-recheck-on-base-advance,
-// integration:deletion-by-stale-base, manual:gy-84-content-restored, unit:reverted-delivery-visible.
+// executed case per required proof: integration:deletion-by-stale-base,
+// manual:gy-84-content-restored, unit:reverted-delivery-visible. The queue re-check on base
+// advance (integration:revert-recheck-on-base-advance) went with the merge queue's reach
+// through the engine (GY-1235): GitHub merges, so nothing is re-checked on a speculative tip.
 
 // ---- A repository: commits with trees and parents, behind the request surface the adapter uses ----
 
@@ -188,22 +184,6 @@ function history(a = 'a') {
   return { repo, a1, a2, b0, b1 };
 }
 
-/**
- * Three entries, two of which change one file. GY-A and GY-C each add a section to docs/<name>.md,
- * a file outside GY-B's planned files that GY-B never touches; git merges the two sections. With
- * `drops`, GY-B's branch also carries GY-A's added file from an older speculative tip and deletes
- * it, as history() does — the one real revert among the three.
- */
-function trio(name: string, drops: boolean) {
-  const repo = new Repository();
-  repo.main = repo.commit('main', { 'src/base.ts': blob('base'), [`docs/${name}.md`]: blob('shared') }, []);
-  const a1 = repo.change('GY-A: add a', repo.main, { [`src/${name}-a.ts`]: 'a', [`docs/${name}.md`]: 'shared\na section' });
-  const c1 = repo.change('GY-C: add c', repo.main, { [`src/${name}-c.ts`]: 'c', [`docs/${name}.md`]: 'shared\nc section' });
-  const b0 = repo.change('GY-B: add b', repo.main, { [`src/${name}-b.ts`]: 'b' });
-  const b1 = drops ? repo.change('GY-B: carry only this item\'s changes', repo.merge('Graphyard speculative tip for GY-B behind GY-A', b0, a1) as string, { [`src/${name}-a.ts`]: null }) : b0;
-  return { repo, a1, c1, b1 };
-}
-
 const item = (key: string, pr: number, plannedFiles: string[], head: string, baseSha: string, overrides: Partial<Work> = {}): Work => ({
   id: key.toLowerCase(), key, title: key, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:landing'] }],
   policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles, stage: 'merge', revision: 3, policyRevision: 1, createdAt: '2026-09-20T09:00:00Z', updatedAt: '2026-09-20T09:00:00Z',
@@ -282,158 +262,6 @@ test('integration:deletion-by-stale-base — a deletion the merge would apply an
   intactOwner.observation = await whole.repo.github().observe(intactOwner);
   const intact = await whole.repo.github().observe(item('GY-B', 2, ['src/server/routes/b.ts'], whole.repo.pulls.get(2)!.head.sha, whole.repo.main), [intactOwner]);
   assert.deepEqual(intact.landing!.carried, [], 'a head that carries another candidate and holds its files as it shipped them reverts nothing');
-});
-
-// ---- The control plane: the real engine on a real database, the real adapter on the repository ----
-
-const operator: Principal = { id: 'operator', role: 'admin' };
-const worker: Principal = { id: 'agent-a', role: 'worker' };
-const coordinator: Principal = { id: 'master', role: 'coordinator' };
-const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['unit:landing'] };
-let database: EmbeddedPostgres, store: Store, engine: Engine;
-before(async () => {
-  const port = Number(process.env.GRAPHYARD_REVERT_RECHECK_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 31);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('revert-recheck'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
-  engine = new Engine(store, [CI], 120, 'owner/project'); engine.controlPlaneAppId = APP;
-  engine.principals = [operator, worker, coordinator, producer];
-  engine.submissionObserver = null;
-});
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
-
-const reload = async (work: Work) => (await store.list()).find(entry => entry.id === work.id)!;
-async function submitted(title: string, plannedFiles: string[], pr: number) {
-  let work = await engine.execute(operator, 'create', null, { title, plannedFiles, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:landing'] }] }, randomUUID());
-  work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
-  work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
-  work = await engine.execute(worker, 'workspace', work.id, { epoch: 1, host: 'machine-a', path: `/tmp/recheck/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-1` }, randomUUID());
-  return engine.execute(worker, 'submit', work.id, { epoch: 1, pr }, randomUUID());
-}
-/** One reconciliation job for exactly this item, as the control plane runs it. */
-async function job(work: Work, github: GitHub) {
-  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour'");
-  await store.pool.query(`INSERT INTO jobs(work_id) VALUES($1) ON CONFLICT (work_id) DO NOTHING`, [work.id]);
-  await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL,attempts=0 WHERE work_id=$1', [work.id]);
-  await processJob(engine, github);
-  assert.equal((await store.pool.query('SELECT error FROM jobs WHERE work_id=$1', [work.id])).rows[0]?.error ?? null, null, 'the reconciliation job ran clean');
-  return reload(work);
-}
-const prove = async (work: Work) => engine.execute(producer, 'evidence', work.id, { proof: 'unit:landing', sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
-
-/** The guarded merge as the control plane requests it, through to GitHub's landing and the item's own reconciliation. */
-async function landed(work: Work, pr: number, sha: string, github: GitHub, repo: Repository) {
-  const current = await reload(work);
-  await engine.requestEnqueue(coordinator, current.id, { enqueue: true, expectedRevision: current.revision, sha, baseSha: current.candidate!.baseSha, policyRevision: 1 }, randomUUID());
-  await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
-  repo.land(pr, mergedAt);
-  return job(current, github);
-}
-
-test('integration:revert-recheck-on-base-advance — two overlapping candidates queue, the first lands, and the second is re-checked against the base it would now land on: it is ejected naming the files and the item that owns them, and its merge is refused rather than deleting them', async () => {
-  const { repo, a2, b1 } = history();
-  const github = repo.github();
-  github.publish = async () => {};
-  let first = await submitted('Adds a', ['src/a.ts', 'tests/', 'docs/'], 1), second = await submitted('Adds b', ['src/server/routes/b.ts'], 2);
-  repo.open(1, first.workspaces[0].branch, a2); repo.open(2, second.workspaces[0].branch, b1);
-
-  // Both are clean against the base they were submitted on, proved and approved, so both queue;
-  // the control plane publishes the first's tip, then the second's on top of it.
-  first = await job(first, github); first = await prove(first); first = await job(first, github); first = await job(first, github);
-  assert.deepEqual([first.stage, first.queue?.speculation?.tip, first.gates.every(gate => gate.passed)], ['merge', a2, true]);
-  second = await job(second, github);
-  assert.deepEqual(second.gates.find(gate => gate.name === 'build')!.reasons, [], 'right when it was submitted: main holds none of the first item\'s files');
-  second = await prove(second); second = await job(second, github);
-  const tip = repo.pulls.get(2)!.head.sha;
-  assert.notEqual(tip, b1); assert.deepEqual(repo.commits.get(tip)!.parents, [b1, a2], 'the second entry\'s tip is its head merged with the tip ahead of it');
-  assert.deepEqual([second.queue?.speculation?.tip, second.queue?.speculation?.base, second.queue?.speculation?.predecessors], [tip, a2, [first.key]]);
-
-  // The first lands through the guarded merge. Main now holds src/a.ts, and the second entry's
-  // unchanged tip — never re-submitted, no new head — would delete it.
-  const current = await reload(first);
-  await engine.requestEnqueue(coordinator, current.id, { enqueue: true, expectedRevision: current.revision, sha: a2, baseSha: current.candidate!.baseSha, policyRevision: 1 }, randomUUID());
-  await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
-  const main = repo.land(1, mergedAt);
-  first = await job(first, github);
-  assert.deepEqual([first.stage, first.delivery?.mergeSha], ['done', main]);
-  assert.equal(repo.tree(main)['src/a.ts'], blob('a'));
-
-  // The base advanced under the queued entry: it is re-checked before it can merge.
-  second = await job(second, github);
-  assert.equal(second.candidate!.sha, tip, 'the head never changed');
-  assert.equal(second.queue, null, 'the entry left the queue');
-  assert.match(second.queueEjection!.reason, new RegExp(`^Landing speculative tip ${tip.slice(0, 12)} on [a-f0-9]{12} would revert work outside its planned files: src/a\\.ts: deleted; the base branch still holds it \\(shipped by ${first.key}\\); tests/a\\.test\\.ts: deleted; the base branch still holds it \\(shipped by ${first.key}\\)$`));
-  const ejected = (await store.events(second.id)).filter(event => event.kind === 'queue.ejected');
-  assert.equal(ejected.length, 1); assert.equal(ejected[0].payload.details.reason, second.queueEjection!.reason);
-  assert.equal(second.stage, 'build'); assert.equal(second.mergeAuthorization, null);
-  assert.match(second.gates.find(gate => gate.name === 'build')!.reasons.join('\n'), new RegExp(`Out-of-scope regression: src/a\\.ts: deleted; the base branch still holds it \\(shipped by ${first.key}\\)`));
-  await assert.rejects(engine.requestEnqueue(coordinator, second.id, { enqueue: true, expectedRevision: second.revision, sha: tip, baseSha: second.candidate!.baseSha, policyRevision: 1 }, randomUUID()), /Merge authorization is no longer current/, 'no merge is requested for it');
-  assert.deepEqual([repo.main, repo.tree(repo.main)['src/a.ts'], repo.tree(repo.main)['tests/a.test.ts']], [main, blob('a'), blob('a test')], 'the first item\'s files are still on the base branch');
-  assert.equal((await job(second, github)).queue, null, 'the same head does not re-enter; a new candidate re-enters at the back');
-
-  // The same verdict is reached while the first entry is still ahead, from the predicted base
-  // alone: nothing has to land for the entry to be refused.
-  const early = history('early'), provider = early.repo.github(); provider.publish = async () => {};
-  let ahead = await submitted('Adds a again', ['src/early.ts', 'tests/', 'docs/'], 3), behind = await submitted('Adds b again', ['src/server/routes/b.ts'], 4);
-  early.repo.open(3, ahead.workspaces[0].branch, early.a2); early.repo.open(4, behind.workspaces[0].branch, early.b1);
-  ahead = await job(ahead, provider); ahead = await prove(ahead); ahead = await job(ahead, provider); ahead = await job(ahead, provider);
-  behind = await job(behind, provider); behind = await prove(behind); behind = await job(behind, provider);
-  assert.equal(behind.queue?.speculation?.base, early.a2);
-  behind = await job(behind, provider);
-  assert.equal(behind.queue, null);
-  assert.match(behind.queueEjection!.reason, new RegExp(`on ${early.a2.slice(0, 12)} would revert work outside its planned files: src/early\\.ts: deleted; that commit still holds it \\(owned by ${ahead.key}, ahead of it and not yet landed\\)`));
-  assert.equal((await reload(ahead)).queue?.sequence, ahead.queue!.sequence, 'the entry ahead keeps its place');
-  ahead = await landed(ahead, 3, early.a2, provider, early.repo);
-  assert.equal(ahead.stage, 'done', 'and lands, leaving the queue to the entries behind it');
-
-  // Three entries, the last of them behind two that both change one file. That file is outside the
-  // last entry's planned files and it never touches it, so its tip holds the two changes merged —
-  // which on a predicted base is how every predecessor's file stands, and is not a revert.
-  const kept = trio('kept', false), adapter = kept.repo.github();
-  adapter.publish = async () => {};
-  let one = await submitted('Adds kept a', ['src/kept-a.ts', 'docs/'], 5);
-  let two = await submitted('Adds kept c', ['src/kept-c.ts', 'docs/'], 6);
-  let three = await submitted('Adds kept b', ['src/kept-b.ts'], 7);
-  kept.repo.open(5, one.workspaces[0].branch, kept.a1);
-  kept.repo.open(6, two.workspaces[0].branch, kept.c1);
-  kept.repo.open(7, three.workspaces[0].branch, kept.b1);
-  one = await job(one, adapter); one = await prove(one); one = await job(one, adapter); one = await job(one, adapter);
-  two = await job(two, adapter); two = await prove(two); two = await job(two, adapter); two = await job(two, adapter);
-  assert.deepEqual([one.queue?.speculation?.tip, two.queue?.speculation?.predecessors], [kept.a1, [one.key]], 'the second entry is published behind the first');
-  three = await job(three, adapter); three = await prove(three); three = await job(three, adapter);
-  const behindBoth = three.queue!.speculation!.tip, secondTip = two.queue!.speculation!.tip;
-  assert.deepEqual(three.queue!.speculation!.predecessors, [one.key, two.key], 'the third entry is published behind both');
-  assert.equal(kept.repo.tree(behindBoth)['docs/kept.md'], kept.repo.tree(secondTip)['docs/kept.md'], 'its tip holds the file both entries ahead changed, merged, exactly as the commit it would land on holds it');
-  assert.notEqual(kept.repo.tree(behindBoth)['docs/kept.md'], kept.repo.tree(kept.repo.main)['docs/kept.md'], 'and not as the base branch holds it');
-
-  // The re-check, with both entries ahead still open and unlanded.
-  const place = three.queue!.sequence;
-  three = await job(three, adapter);
-  assert.deepEqual(three.observation!.landing!.carried, [], 'the entries ahead are in the base it lands on, so neither is reported carried without its content');
-  assert.deepEqual([three.queue?.sequence, three.queueEjection], [place, null], 'the entry keeps its place: it reverts nothing');
-  assert.deepEqual(three.gates.find(gate => gate.name === 'build')!.reasons, [], 'a file two entries ahead both changed is not a file this one dropped');
-  assert.match(three.gates.find(gate => gate.name === 'merge')!.reasons.join('; '), new RegExp(`^Merge queue position 3 of 3: ${two.key} is ahead`), 'it waits its turn behind them, and for fresh proof of the authored tip; it is not refused');
-  assert.equal((await reload(one)).queue?.sequence, one.queue!.sequence, 'the entries ahead keep their places');
-  assert.equal((await reload(two)).queue?.sequence, two.queue!.sequence);
-
-  // The same three entries where the last one really does delete a file the first added: ejected,
-  // naming that file and its owner, and not the file the two entries ahead share.
-  const dropped = trio('dropped', true), provider2 = dropped.repo.github();
-  const firstTip = dropped.a1, middleTip = dropped.repo.merge('Graphyard speculative tip for GY-C behind GY-A', dropped.c1, firstTip) as string;
-  const lastTip = dropped.repo.merge('Graphyard speculative tip for GY-B behind GY-A, GY-C', dropped.b1, middleTip) as string;
-  dropped.repo.open(8, 'graphyard/gy-a-1', firstTip); dropped.repo.open(9, 'graphyard/gy-c-1', middleTip); dropped.repo.open(10, 'graphyard/gy-b-1', lastTip);
-  const owner = item('GY-A', 8, ['src/dropped-a.ts', 'docs/'], firstTip, dropped.repo.main);
-  const middle = item('GY-C', 9, ['src/dropped-c.ts', 'docs/'], middleTip, firstTip);
-  owner.observation = await provider2.observe(owner); middle.observation = await provider2.observe(middle);
-  const last = item('GY-B', 10, ['src/dropped-b.ts'], lastTip, middleTip, { queue: { sequence: 3, enqueuedAt: '2026-09-20T10:00:00Z', policyRevision: 1,
-    speculation: { ref: 'refs/graphyard/queue/gy-b', tip: lastTip, base: middleTip, baseTree: 'unused'.padEnd(40, '0'), predecessors: ['GY-A', 'GY-C'], policyRevision: 1, publishedAt: '2026-09-20T10:01:00Z' } }, queueSequence: 3 } as Partial<Work>);
-  assert.equal(dropped.repo.tree(lastTip)['docs/dropped.md'], dropped.repo.tree(middleTip)['docs/dropped.md'], 'the shared file stands in this tip as it stands in the commit it would land on');
-  assert.equal(dropped.repo.tree(lastTip)['src/dropped-a.ts'], undefined, 'and the file the first entry added is gone from it');
-  last.observation = await provider2.observe(last, [owner, middle, last]);
-  assert.deepEqual(last.observation.landing!.carried, [], 'the entries ahead are judged where the tip lands, not as candidates it carries without their content');
-  const refusal = ejectionReason(last, [CI], [owner, middle, last]);
-  assert.match(refusal!, new RegExp(`^Landing speculative tip ${lastTip.slice(0, 12)} on ${middleTip.slice(0, 12)} would revert work outside its planned files: src/dropped-a\\.ts: deleted; that commit still holds it \\(owned by GY-A, GY-C, ahead of it and not yet landed\\)$`), 'both entries ahead hold the file, so both are named as owners');
-  assert.equal(ejectionReason({ ...last, observation: { ...last.observation, landing: undefined } } as Work, [CI], [owner, middle, last]), null, 'which only the landing check sees: the candidate\'s own diff against its base shows none of it');
 });
 
 // ---- A reverted delivery is visible as one ----

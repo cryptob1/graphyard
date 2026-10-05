@@ -7,9 +7,9 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { daemonEffects } from '../src/master-daemon.js';
-import { batchStep, defaultMergeBatchSize, describeMergeBatches, predictQueue, queueBatch, queueRef, runMergeBatches, tipValidationPrefix, tipVerdict, type TipVerdict } from '../src/merge-queue.js';
+import { batchStep, defaultMergeBatchSize, describeMergeBatches, predictQueue, queueBatch, queueRef, runMergeBatches, tipVerdict, type TipVerdict } from '../src/merge-queue.js';
 import { buildMasterStatus, masterConfigSchema, mergeBatchSize } from '../src/master.js';
-import { decideCarry, evaluate, type Evidence, type Work } from '../src/model.js';
+import { decideCarry, type Evidence, type Work } from '../src/model.js';
 import { prSteps } from '../src/model/pr-steps.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -17,116 +17,6 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Each test is named for the proof it produces.
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
 const keys = ['GY-1', 'GY-2', 'GY-3', 'GY-4', 'GY-5'];
-
-/**
- * The live queue (GY-330): five entries driven through the control plane's own gate evaluation
- * (`evaluate`, as the engine runs it on every observation). Each round publishes the tips the
- * queue asks for, evaluates every entry, lets GitHub merge the queue head when every gate passes,
- * and runs CI only on the tips the merge gates name as under validation — a CI that runs what the
- * queue requires and nothing else. A tip's tree is named by the entries it holds, so a republished
- * tip holding the same entries binds the entries behind it unchanged, as GY-100 binds them.
- */
-function driveQueue(batchSize: number, failing: string, everyTip = false) {
-  const now = new Date('2026-09-25T09:00:00.000Z'), at = '2026-09-25T08:00:00.000Z';
-  const trees = new Map<string, string>(), holds = new Map<string, string[]>();
-  let published = 0, base = { sha: sha40('b0'), tree: sha40('e0') };
-  trees.set(base.sha, base.tree); holds.set(base.sha, []);
-  const items: Work[] = keys.map((key, index) => {
-    const own = sha40(`a${index + 1}`), candidate = { sha: own, baseSha: base.sha, pr: 100 + index, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' };
-    return { id: `id-${key}`, key, title: key, description: '', type: 'feature', priority: 0, dependencies: [], plannedFiles: [`src/${key}/`], criteria: [],
-      policy: { checks: ['test'], review: false }, stage: 'merge', revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null,
-      workspaces: [{ host: 'machine', path: `/tmp/${key}`, branch: candidate.branch, epoch: 1, owner: 'agent' }], candidate, submission: { epoch: 1, pr: 100 + index }, reworkRequested: false,
-      scenarioRequirements: [], evidence: [], blocker: null, violations: [], gates: [],
-      observation: { clockOffset: { min: 0, max: 0 }, candidate, baseTip: base.sha, baseTree: base.tree, checks: [{ name: 'test', result: 'success', appId: 15368 }], reviews: [], protected: true, mergeable: true, merged: false, mergeSha: null, files: [], scopeFiles: [], at: now.toISOString() },
-      queue: { sequence: index + 1, enqueuedAt: at, policyRevision: 1, speculation: null }, queueSequence: index + 1 } as unknown as Work;
-  });
-  const queued = () => items.filter(item => !!item.queue && item.stage !== 'done').sort((a, b) => a.queue!.sequence - b.queue!.sequence);
-  const observe = (item: Work, checks: Work['observation'] extends infer O ? O extends { checks: infer C } ? C : never : never = []) => {
-    item.observation = { ...item.observation!, candidate: item.candidate!, baseTip: base.sha, baseTree: base.tree, checks, at: now.toISOString() };
-  };
-  // The control plane publishing each tip the queue asks for: the entry's own head merged onto its predicted base.
-  const publish = () => {
-    for (let moved = true; moved;) {
-      moved = false;
-      for (const placement of predictQueue(items, now.getTime())) {
-        if (placement.current || !placement.publishable) continue;
-        const item = items.find(entry => entry.id === placement.id)!, predicted = placement.predictedBase!;
-        const holding = [...holds.get(predicted)!, item.key], tip = sha40(`c${++published}`), tree = sha40(`e${holding.map(key => key.slice(3)).join('')}`);
-        trees.set(tip, tree); holds.set(tip, holding);
-        item.candidate = { ...item.candidate!, sha: tip, baseSha: predicted };
-        item.queue = { ...item.queue!, speculation: { ref: queueRef(item.key), tip, base: predicted, baseTree: trees.get(predicted)!, tipTree: tree, predecessors: placement.predecessors, policyRevision: 1, publishedAt: at, reviewedHead: sha40(`a${keys.indexOf(item.key) + 1}`) } };
-        observe(item);
-        moved = true;
-        break;
-      }
-    }
-  };
-  const runs: string[][] = [], merged: { key: string; afterRuns: number }[] = [], ejected: { key: string; reason: string; afterRuns: number }[] = [];
-  for (let round = 0; queued().length && round < 50; round++) {
-    publish();
-    // The engine evaluates each entry on its own observation, in no set order; `everyTip` takes the
-    // back of the queue first, so an entry behind the failure is judged before the failure is isolated.
-    for (const item of everyTip ? queued().reverse() : queued()) {
-      Object.assign(item, evaluate(item, items, now, [15368], batchSize));
-      if (!item.queue) ejected.push({ key: item.key, reason: item.queueEjection!.reason, afterRuns: runs.length });
-    }
-    // GitHub merges the queue head once every gate passes, which moves the base branch to its tip.
-    const head = queued()[0];
-    if (head && head.gates.every(gate => gate.passed)) {
-      merged.push({ key: head.key, afterRuns: runs.length });
-      base = { sha: head.candidate!.sha, tree: trees.get(head.candidate!.sha)! };
-      head.stage = 'done'; head.queue = null;
-      for (const item of queued()) observe(item, item.observation!.checks);
-      continue;
-    }
-    // CI runs on exactly the tips the merge gates say the queue is validating.
-    const named = new Set(queued().flatMap(item => item.gates.find(gate => gate.name === 'merge')!.reasons)
-      .filter(reason => reason.startsWith(tipValidationPrefix)).map(reason => reason.slice(tipValidationPrefix.length, tipValidationPrefix.length + 12)));
-    // With `everyTip`, CI runs on every published tip instead, as this repository's workflows do on
-    // each push to a candidate branch: a tip the queue never asked about is still judged.
-    const judged = everyTip ? queued().filter(item => item.queue!.speculation?.tip === item.candidate!.sha).map(item => item.candidate!.sha.slice(0, 12)) : named;
-    for (const prefix of judged) {
-      const item = queued().find(entry => entry.candidate!.sha.startsWith(prefix))!;
-      if (item.observation!.checks.length) continue;
-      const holding = holds.get(item.candidate!.sha)!;
-      runs.push(holding);
-      observe(item, [{ name: 'test', result: holding.includes(failing) ? 'failure' : 'success', appId: 15368 }]);
-    }
-  }
-  return { runs, merged, ejected, items };
-}
-
-test('unit:queue-batching-bisects — five entries, batch size 4, a failure in the third: one run merges nothing, bisection ejects exactly the third, the rest merge in order, at most 4 runs', () => {
-  const live = driveQueue(4, 'GY-3');
-  assert.deepEqual(live.runs[0], ['GY-1', 'GY-2', 'GY-3', 'GY-4'], 'the first run is one combined tip of the first four entries');
-  assert.ok(live.merged.every(entry => entry.afterRuns >= 2), `the failing combined run merged nothing: ${JSON.stringify(live.merged)}`);
-  assert.deepEqual(live.ejected.map(entry => entry.key), ['GY-3'], 'the bisection ejects exactly the third entry');
-  assert.match(live.ejected[0].reason, /^Required CI check test did not pass on speculative tip [0-9a-f]{12}, isolated by bisecting batch 1 \(GY-3, GY-4, GY-5\)$/, 'naming the failing check');
-  assert.deepEqual(live.merged.map(entry => entry.key), ['GY-1', 'GY-2', 'GY-4', 'GY-5'], 'the others merge, in queue order');
-  assert.ok(live.runs.length <= 4, `combined-tip runs: ${live.runs.map(run => run.join('+')).join(' | ')}`);
-  assert.deepEqual(live.runs, [['GY-1', 'GY-2', 'GY-3', 'GY-4'], ['GY-1', 'GY-2'], ['GY-1', 'GY-2', 'GY-3'], ['GY-1', 'GY-2', 'GY-4', 'GY-5']]);
-  // GY-4's own tip failed too — it held GY-3 — and it was never ejected for that: only the isolated entry is.
-  assert.equal(live.items.find(item => item.key === 'GY-4')!.queueEjection ?? null, null);
-  // The live queue ran exactly the combinations the reference plan runs.
-  assert.deepEqual(live.runs, runMergeBatches(keys, 4, (landed, prefix) => [...landed, ...prefix].includes('GY-3') ? { result: 'fail', check: 'test' } : { result: 'pass' }).runs);
-
-  // Batch size 1 restores today's behaviour: every entry is validated on its own tip, one run each.
-  const single = driveQueue(1, 'GY-3');
-  assert.deepEqual(single.runs, [['GY-1'], ['GY-1', 'GY-2'], ['GY-1', 'GY-2', 'GY-3'], ['GY-1', 'GY-2', 'GY-4'], ['GY-1', 'GY-2', 'GY-4', 'GY-5']]);
-  assert.deepEqual([single.merged.map(entry => entry.key), single.ejected.map(entry => entry.key)], [['GY-1', 'GY-2', 'GY-4', 'GY-5'], ['GY-3']]);
-  assert.match(single.ejected[0].reason, /^Required CI check test did not pass on speculative tip [0-9a-f]{12}$/);
-  // A clean queue of five costs two runs at batch size 4.
-  assert.equal(driveQueue(4, 'none').runs.length, 2);
-
-  // CI on every published tip: GY-5 heads batch 2, and its tip, which holds GY-3, fails before GY-3
-  // is isolated. That failure is inherited from the batch ahead, whose combined tip has not passed,
-  // so GY-5 waits instead of being ejected; only GY-3 leaves the queue.
-  const eager = driveQueue(4, 'GY-3', true);
-  assert.ok(eager.runs.some(run => run.join() === keys.join()), 'GY-5\'s tip holding GY-3 was run and failed');
-  assert.deepEqual(eager.ejected.map(entry => entry.key), ['GY-3']);
-  assert.equal(eager.items.find(item => item.key === 'GY-5')!.queueEjection ?? null, null);
-  assert.deepEqual(eager.merged.map(entry => entry.key), ['GY-1', 'GY-2', 'GY-4', 'GY-5']);
-});
 
 test('the batch plan the live queue follows: halves a failing batch, isolates the failing entry, merges passing prefixes, never re-runs a judged combination', () => {
   const mergedWhenRun: number[] = [];

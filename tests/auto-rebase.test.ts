@@ -7,9 +7,10 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { CHECK_NAME, GitHub, processJob } from '../src/github.js';
-import { baseRefreshConflict, baseRefreshNeeded, heldBase, pendingBaseRefresh, queueRef, type BaseRefresh, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
+import { baseRefreshConflict, baseRefreshNeeded, heldBase, pendingBaseRefresh, type BaseRefresh, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
 import { Refusal, type Observation, type Principal, type Work } from '../src/model.js';
 import { diagnose } from '../src/coordination.js';
+import { evaluateLandability, landabilityRefusals } from '../src/model/landability.js';
 import { buildMasterStatus } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { MasterConfig } from '../src/master.js';
@@ -173,6 +174,8 @@ const definition = { plannedFiles: ['src/queue.ts'], criteria: [{ id: 'AC-1', te
 const reload = async (work: Work) => (await store.list()).find(item => item.id === work.id)!;
 const events = async (work: Work, kind: string) => (await store.events(work.id)).filter(event => event.kind === kind).reverse();
 const gate = (work: Work, name: string) => work.gates.find(entry => entry.name === name)!;
+/** Proofs gate nothing since GY-1235, but the landability verdict still says which required proof a candidate lacks: what "kept every proof" is checked against. */
+const proofs = async (work: Work) => { const reasons = landabilityRefusals(evaluateLandability(work, await store.list(), new Date()), 'acceptance'); return { passed: reasons.length === 0, reasons }; };
 
 async function submitted(title: string) {
   let work = await engine.execute(operator, 'create', null, { ...definition, title }, randomUUID());
@@ -217,15 +220,12 @@ function adapter(observation: (work: Work) => Observation, refresh: ((work: Work
     publish: async () => {},
   } as unknown as GitHub };
 }
-/** The queue's own tip for a head that already contains its predicted base. */
-const ownTip = (work: Work, placement: QueuePlacement): QueueSpeculation => ({ ref: queueRef(work.key), tip: work.candidate!.sha, base: placement.predictedBase!,
-  baseTree: treeOf(placement.predictedBase!), predecessors: placement.predecessors, policyRevision: work.policyRevision, publishedAt: new Date().toISOString(), merge: null });
 const refreshRecord = (work: Work, to: { head: string | null; base: string }, overrides: Partial<BaseRefresh> = {}): BaseRefresh => ({
   from: { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha }, base: to.base, baseTree: treeOf(to.base),
   policyRevision: work.policyRevision, at: new Date().toISOString(), head: to.head, conflict: null,
   merge: to.head ? { from: work.candidate!.sha, parents: [work.candidate!.sha, to.base], author: 'graphyard[bot]', authoredByApp: true, conflicts: false, baseChanges: ['src/head.ts'] } : null,
   carry: null, ...overrides });
-/** The head lands through the broker exactly as the master does it, and Graphyard observes the merge. */
+/** GitHub merges the head once its gates pass, and Graphyard observes the merge. */
 async function mergeHead(work: Work, candidate: { sha: string; baseSha: string }, mergeSha: string) {
   const current = await reload(work);
   const committed = { revision: (await engine.store.workItem(current.id))!.revision };
@@ -242,14 +242,14 @@ test('integration:auto-rebase-clean-candidate — the reconciliation job leaves 
   const main = sha40('11'), moved = sha40('12'), head = sha40('13'), refreshedHead = sha40('14');
   let work = await submitted('Clean refresh');
   work = await validated(work, { sha: head, baseSha: main }, inFlight());
-  assert.equal(work.stage, 'test'); assert.equal(gate(work, 'review').passed, true); assert.equal(gate(work, 'acceptance').passed, true);
+  assert.equal(work.stage, 'test'); assert.equal(gate(work, 'review').passed, true); assert.equal((await proofs(work)).passed, true);
   const before = { evidence: work.evidence.map(entry => entry.id), stage: work.stage };
 
   // The base branch moves and the candidate still merges cleanly with it: nothing is rebuilt. It
   // keeps its head, its bound base, its approval and its proofs, and its stage (GY-292).
   const clean = (item: Work) => seen(item, { sha: head, baseSha: main }, inFlight({ baseTip: moved, baseTree: treeOf(moved), baseTipContained: false }));
   work = await engine.observe(work.id, work.revision, clean(work));
-  assert.deepEqual([work.stage, gate(work, 'review').passed, gate(work, 'acceptance').passed], [before.stage, true, true]);
+  assert.deepEqual([work.stage, gate(work, 'review').passed, (await proofs(work)).passed], [before.stage, true, true]);
   assert.equal(pendingBaseRefresh(work), null);
   await onlyJob(work);
   const untouched = adapter(clean, null);
@@ -263,7 +263,7 @@ test('integration:auto-rebase-clean-candidate — the reconciliation job leaves 
   // report to anybody about it.
   const stale = (item: Work) => seen(item, { sha: head, baseSha: main }, inFlight({ baseTip: moved, baseTree: treeOf(moved), baseTipContained: false, ...conflicts }));
   work = await engine.observe(work.id, work.revision, stale(work));
-  assert.deepEqual([work.stage, gate(work, 'review').passed, gate(work, 'acceptance').passed], [before.stage, true, true]);
+  assert.deepEqual([work.stage, gate(work, 'review').passed, (await proofs(work)).passed], [before.stage, true, true]);
   assert.deepEqual(pendingBaseRefresh(work), { baseTip: moved, boundBase: main });
 
   await onlyJob(work);
@@ -281,7 +281,7 @@ test('integration:auto-rebase-clean-candidate — the reconciliation job leaves 
   // The republished head is what everything binds to now, with no fresh round for any of it.
   work = await engine.observe(work.id, work.revision, seen(work, { sha: refreshedHead, baseSha: moved }, inFlight({ reviews: [] })));
   assert.deepEqual([work.candidate!.sha, work.candidate!.baseSha], [refreshedHead, moved]);
-  assert.deepEqual([work.stage, gate(work, 'review').passed, gate(work, 'acceptance').passed, gate(work, 'build').passed], [before.stage, true, true, true]);
+  assert.deepEqual([work.stage, gate(work, 'review').passed, (await proofs(work)).passed, gate(work, 'build').passed], [before.stage, true, true, true]);
   assert.deepEqual(work.evidence.map(entry => entry.id), before.evidence, 'no proof was requested or produced for the move');
   const ledger = await events(work, 'base.refreshed');
   assert.equal(ledger.length, 1);
@@ -333,9 +333,9 @@ test('integration:auto-rebase-conflict-guard — a conflicting base returns the 
   assert.match(carry.evidence[0].reason, /changed tests\/queue\.test\.ts inside the scope of evidence/);
   assert.match(carry.evidence[1].reason, /changed docs\/queue\.md inside the scope of evidence/);
   partial = await engine.observe(partial.id, partial.revision, seen(partial, { sha: refreshedHead, baseSha: moved2 }, inFlight({ reviews: [] })));
-  assert.deepEqual([gate(partial, 'review').passed, gate(partial, 'acceptance').passed], [false, false]);
+  assert.deepEqual([gate(partial, 'review').passed, (await proofs(partial)).passed], [false, false]);
   assert.equal(partial.stage, 'review');
-  assert.deepEqual(gate(partial, 'acceptance').reasons, [
+  assert.deepEqual((await proofs(partial)).reasons, [
     'AC-1: unit:rebase needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
     'AC-1: integration:rebase needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy']);
   assert.equal(diagnose(partial, await store.list(), Date.now()).filter(entry => entry.kind === 'base-refresh-required').length, 3);
@@ -398,9 +398,9 @@ test('integration:parallel-candidates-survive-merge — merging one of five in-f
   assert.deepEqual(items.map(item => item.stage), ['merge', 'test', 'test', 'test', 'test']);
   const before = items.map(item => ({ key: item.key, stage: item.stage, evidence: item.evidence.map(entry => entry.id), reviewRequests: item.evidence.length }));
 
-  // The first lands: it publishes the tip it will merge as, then goes through the broker.
+  // The first lands: GitHub merges it and Graphyard observes the merge.
   await onlyJob(items[0]);
-  await processJob(engine, adapter(item => seen(item, { sha: heads[0], baseSha: main }), null, ownTip).github);
+  await processJob(engine, adapter(item => seen(item, { sha: heads[0], baseSha: main }), null).github);
   const landed = await mergeHead(items[0], { sha: heads[0], baseSha: main }, mergedSha);
   assert.equal(landed.stage, 'done');
 
@@ -410,7 +410,7 @@ test('integration:parallel-candidates-survive-merge — merging one of five in-f
     let current = await engine.observe(item.id, (await reload(item)).revision, stale(await reload(item)));
     // Nothing moved for this candidate: the tree it was reviewed and proved on is unchanged.
     assert.deepEqual([current.stage, current.candidate!.baseSha], [before[index].stage, main], `${item.key} stayed put`);
-    assert.deepEqual([gate(current, 'review').passed, gate(current, 'acceptance').passed], [true, true], `${item.key} kept its approval and proofs`);
+    assert.deepEqual([gate(current, 'review').passed, (await proofs(current)).passed], [true, true], `${item.key} kept its approval and proofs`);
     assert.equal(pendingBaseRefresh(current), null, `${item.key} merges cleanly, so nothing waits to rebuild it`);
 
     // Its reconciliation neither refreshes it nor asks for a review: CI does not run again (GY-292).
@@ -420,7 +420,7 @@ test('integration:parallel-candidates-survive-merge — merging one of five in-f
     assert.deepEqual([run.refreshed, run.requested, run.published], [[], [], []], `${item.key} was neither rebuilt nor re-reviewed`);
     current = await reload(current);
     assert.deepEqual([current.candidate!.sha, current.candidate!.baseSha, current.baseRefresh ?? null], [heads[index], main, null], `${item.key} kept its head`);
-    assert.deepEqual([current.stage, gate(current, 'review').passed, gate(current, 'acceptance').passed], [before[index].stage, true, true], `${item.key} is still in its stage`);
+    assert.deepEqual([current.stage, gate(current, 'review').passed, (await proofs(current)).passed], [before[index].stage, true, true], `${item.key} is still in its stage`);
     assert.deepEqual(current.evidence.map(entry => entry.id), before[index].evidence, `${item.key} produced no new evidence`);
   }
 
