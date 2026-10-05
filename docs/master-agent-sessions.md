@@ -27,7 +27,7 @@ A profile's `accounts` lists [agent environments](onboarding.md#agent-environmen
 
 A runtime failing to start fails over too, named in `master status` (`opencode-a failed to start: …; launched on claude-b`); three in a row raise an attention item until a start.
 
-On a runtime's own limit notice (never agent text) the loop commits work as unpushed `WIP:`, records `capacity.exhausted`, relaunches on the next account or awaits reset.
+On a runtime's limit notice (never agent text), even mid-retry, the loop commits work as unpushed `WIP:`, records `capacity.exhausted`, relaunches on another account or awaits reset.
 
 ## The loop's own master session
 
@@ -57,15 +57,15 @@ OpenCode 1.18 is ready at `Ask anything…`/`tab agents` ([fixture](../tests/fix
 
 #### First-run consent prompts
 
-A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; everything else, above all a **credential** or **payment** prompt, is escalated. Workspace-trust prompts fail the launch, unheld. A worker is held in `.graphyard/launch/NAME.consent` (attach: `herdr pane attach`); after **15 minutes** its supervisor stops renewing and stops it; the item is dispatchable again.
+A runtime stopped on a first-run prompt is **`awaiting consent`**. The launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; everything else, above all a **credential** or **payment** prompt, is escalated. Workspace-trust prompts fail the launch, unheld. A worker is held in `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** its supervisor stops renewing and stops it; the item is dispatchable again.
 
 ### Acknowledgement, the one re-prompt, and never started
 
-A reviewer or producer is `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`); quiet past `run.acknowledgementSeconds` (default 90) it is re-prompted once; settling resultless makes it **`never started`**, relaunched free a minute later, three at most (`retry.neverStarted`).
+A reviewer or producer is `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`); quiet past `run.acknowledgementSeconds` (default 90) it is re-prompted once; settling resultless makes it **`never started`**, relaunched free a minute later, three at most (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
 
 ### Resume, idle-with-lease and exited sessions
 
-When a live attempt's blocker or scope request resolves, its inactive session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`); blocking again ends the attempt and a fresh session, preferably another runtime, takes over. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then after 30 more handed to a new attempt on its branch.
+When a live attempt's blocker or scope request resolves, its idle session is re-prompted once (item, epoch, change, `complete GY-N EPOCH PR`); blocking again ends the attempt and a fresh session, preferably another runtime, takes over. **Idle-with-lease** (30 quiet minutes, nothing open) is re-prompted once, then after 30 more handed to a new attempt on its branch.
 
 Headless Pi runs (`.graphyard/runs/`, systemd-scoped) survive restarts and are re-adopted; lost ones retry free (approvers thrice per decision). Only Pi is confined; triage and diagnosis runs end with the loop.
 
