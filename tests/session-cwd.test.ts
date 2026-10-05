@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
-import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
@@ -19,7 +19,7 @@ import type { Work } from '../src/model.js';
 import type { ActionRow } from '../src/model/actions.js';
 import { bwrapOnPath, coordinatorCheckoutRefusal, readCoordinatorCheckout, readOnlyMountWrapper } from '../src/master/profiles.js';
 import { readApproverLaunches } from '../src/master/autonomy.js';
-import { orphanGraceMs, worktreeRoot } from '../src/install/worktree-root.js';
+import { dataDirectory, orphanGraceMs, worktreeRoot } from '../src/install/worktree-root.js';
 import { atomicPrivateWrite, dispatchWork, launchApprover, launchEscalationHandler, loadMasterConfig, readEscalationSessions, masterConfigSchema, saveProducerProfile, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { launchProducer, loopScratchCheckout, readProducerLedger, reclaimCheckouts } from '../src/producer.js';
 import { applyResearchEvent, clearResearchRuns, type ResearchEvent } from '../src/research.js';
@@ -87,14 +87,18 @@ async function installed(options: { research?: boolean } = {}) {
   await bindReviewer(directory, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentials, 'reviewers') }, async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
   const token = async (name: string) => { const file = join(credentials, `${name}.token`); await writeFile(file, `${name}-token-`.padEnd(40, 'x'), { mode: 0o600 }); return file; };
   const config = await loadMasterConfig(directory);
-  await atomicPrivateWrite(join(directory, '.graphyard/master.json'), { ...config, approver: { id: 'graphyard-approver-project', credentialFile: await token('approver') }, operatorAgent: { id: 'graphyard-operator-project', credentialFile: await token('operator') }, ...(options.research ? { run: { ...config.run, research: { command: 'pi' } } } : {}) });
+  // Session checkouts go to a durable root of the fixture's own, outside the data directory's shared
+  // worktrees/, so a reclaim pass never sweeps the neighbouring roots every other run left there.
+  await mkdir(join(dataDirectory(), 'session-cwd'), { recursive: true });
+  const managed = await mkdtemp(join(dataDirectory(), 'session-cwd', 'root-'));
+  await atomicPrivateWrite(join(directory, '.graphyard/master.json'), { ...config, approver: { id: 'graphyard-approver-project', credentialFile: await token('approver') }, operatorAgent: { id: 'graphyard-operator-project', credentialFile: await token('operator') }, run: { ...config.run, worktreeRoot: managed, ...(options.research ? { research: { command: 'pi' } } : {}) } });
   git('add', '.');
   git('commit', '-q', '-m', 'base');
   const head = execFileSync('git', ['-C', directory, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const fullConfig = await loadMasterConfig(directory);
   return { root: directory, head, token, config: fullConfig, cleanup: async () => {
-    // The loop's scratch checkout outlives the loop, so the fixture takes it back with the repository.
-    await rm(loopScratchCheckout(worktreeRoot(directory, fullConfig)).directory, { recursive: true, force: true });
+    // The loop's scratch checkout outlives the loop, so the fixture takes it back with its managed root.
+    await rm(managed, { recursive: true, force: true });
     await rm(directory, { recursive: true, force: true });
     await rm(credentials, { recursive: true, force: true });
   } };

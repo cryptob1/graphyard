@@ -19,7 +19,7 @@ Keep cycling: status, dispatch, review, merge, deployment verification. Stop onl
 
 Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
-`master run` is `graphyard-master.service` ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty or moved checkout ([sessions](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level)).
+`master run` is `graphyard-master.service` ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty or moved checkout ([sessions](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level)). Each cycle a dirty coordinator checkout, or a HEAD other than the commit the loop runs, raises `escalation:dirty-checkout` naming the paths, HEAD and sessions pointing at it, and blocks self-upgrade until clean. Approver, handler and docs-sync tabs set `GRAPHYARD_REPOSITORY_ROOT` for `master` commands (GY-866).
 
 The loop launches, wakes and rotates its [master session](master-agent-sessions.md#the-loops-own-master-session).
 
