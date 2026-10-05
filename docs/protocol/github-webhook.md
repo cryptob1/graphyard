@@ -8,8 +8,8 @@
 ## Reads that are not repeated
 
 - **Immutable:** commits by SHA and exact-SHA compares, fetched once into `github_cache`; least recently read rows age out past 20,000 rows or 128 MB (memory: 64 MB of text; over 1 MB memory-only, over 8 MB uncached).
-- **Per cycle:** base ref once per 15 s (restarted by a base push or own ref write); protection and branch rules (required checks) every 5 min or on a protection, ruleset or `repository` event.
-- **Webhooks:** `pull_request`, `pull_request_review`, `check_run`, `check_suite` and `push` (branch pushes too) claim items first on any replica; a poll within a webhook-driven observation's interval is skipped (`poll skipped: a webhook refreshed this item`).
+- **Per cycle:** base ref once per 15 s per replica (restarted by a base push it receives or its own ref write or GraphQL merge; guards read fresh); protection and branch rules (required checks) every 5 min or on a protection, ruleset or `repository` event.
+- **Webhooks:** `pull_request`, `pull_request_review`, `check_run`, `check_suite` and `push` (branch pushes too) claim items first on any replica; a poll made due early within a webhook-driven observation's interval is skipped (`poll skipped: a webhook refreshed this item`) unless the item has since entered the merge band; wakes are claimed oldest delivery first.
 
 ## Base moves
 
@@ -19,7 +19,7 @@ The request budget per merge is those wakes: a woken item's next reading pays fo
 
 ## Prioritized wakes
 
-A guarded merge refused for ten minutes is reworked or re-reviewed (GY-831), except a refusal standing only on a missing or stale observation, every other gate passing. That candidate keeps its queue position: the loop sends `POST /api/work/:id/resync` with `prioritized: true`, recorded as a `refresh` action and repeated at most once per two-minute window while the refusal stands. A prioritized wake, and the wake of a merge request's enqueue, is claimed like a webhook's, oldest first.
+A guarded merge refused for ten minutes is reworked or re-reviewed (GY-831), except a refusal standing only on a missing or stale observation, every other gate passing. That candidate keeps its queue position: the loop sends `POST /api/work/:id/resync` with `prioritized: true`, recorded as a `refresh` action and repeated at most once per two-minute window while the refusal stands. A prioritized wake, and the wake of a merge request's enqueue, is claimed like a webhook's, oldest first. A rework decision waiting on a stale observation sends the same prioritized wake, once, and is decided from the observation it brings in while that still shows the submitted head and is under 15 minutes old: a two-minute bound alone expired before any interval over two minutes could read it.
 
 ## Automatic dispatch records
 
