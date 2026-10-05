@@ -339,7 +339,9 @@ export const masterConfigSchema = z.object({
   // The loop publishes these to the control plane on every change.
   // `optimistic` and `optimisticExclude` are retired (GY-1233): GitHub delivery merges every
   // passing candidate, so optimistic merge and its main guard are gone. Both keys are still
-  // accepted so an existing master.json loads, and neither is read.
+  // accepted so an existing master.json loads, but parsing drops them (GY-1264): nothing reads
+  // them, and every writer re-parses before it saves, so the next master init or profile change
+  // removes them from the file instead of leaving inert settings an operator would trust.
   // `ciConcurrency` (GY-501): the repository's concurrent Actions job limit as the operator declares
   // it (GitHub does not report it); master protection compares it with parallelTips × jobs per run.
   mergeQueue: z.object({
@@ -349,7 +351,7 @@ export const masterConfigSchema = z.object({
     ciConcurrency: z.number().int().min(1).max(10000).optional(),
     rerunFailedChecks: z.number().int().min(0).max(maxRerunFailedChecks).optional(),
     optimisticExclude: z.unknown().optional(),
-  }).strict().optional(),
+  }).strict().transform(({ optimistic: _optimistic, optimisticExclude: _optimisticExclude, ...kept }) => kept).optional(),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
   // The master's operator-agent identity and the approver identity for its two-party decisions. Paths only, never tokens.
