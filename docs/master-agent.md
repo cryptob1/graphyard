@@ -70,7 +70,7 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Launches bind heads**; stale refusals wake observation, then retry. 15m+ `dispatch.waiting` reviews raise attention.
 
-**Requests always settle.** A gone pane (`pane_not_found`) is closed. A settled reviewer's pane closes next dispatch tick; after 3 refused closes, attention names the pane. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); unposted reviewers are reminded first. Killed or vanished producer runs spend no attempt; spent ones raise `escalation:proof-exhausted`, then quoting rework.
+**Requests always settle.** A gone pane (`pane_not_found`) is closed. A settled reviewer's open pane closes next dispatch tick, freeing its name; after 3 refused closes, attention names the pane. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. Killed or vanished runs spend no attempt; spent ones raise `escalation:proof-exhausted`, then a rework unless [none acted](master-agent-reference.md#producer-runtime-faults).
 
 **Every role fails over on spent quota** or waits as a `capacity` line, uncounted, relaunching oldest-first.
 
