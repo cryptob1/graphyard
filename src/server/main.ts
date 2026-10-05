@@ -141,31 +141,49 @@ export async function main(options: MainOptions = {}) {
     observing = github ? startObservationWorkers(engine, github, capacity.concurrency) : null;
     console.log(`Observation workers: ${observing?.concurrency ?? 0} (database pool ${capacity.poolMax})`);
   };
-  const [handle] = http.listeners('request') as ((req: IncomingMessage, res: ServerResponse) => void)[];
+  // The gate sits in front of every request listener server() registered, not only the first
+  // (GY-1238): a refused request reaches none of them, and an admitted one reaches each in order.
+  const handlers = http.listeners('request') as ((req: IncomingMessage, res: ServerResponse) => void)[];
+  demand(handlers.length > 0, 'The HTTP server registered no request listener for the startup readiness gate to wrap');
   http.removeAllListeners('request');
   http.on('request', (req: IncomingMessage, res: ServerResponse) => {
-    if (!ready && refusedBeforeReady(req.method, req.url)) {
-      res.writeHead(503, { 'content-type': 'application/json', 'retry-after': '5' });
-      res.end(JSON.stringify({ error: 'Startup validation has not completed; retry shortly', retryable: true }));
-      return;
+    if (!ready) {
+      if (refusedBeforeReady(req.method, req.url)) {
+        res.writeHead(503, { 'content-type': 'application/json', 'retry-after': '5' });
+        res.end(JSON.stringify({ error: 'Startup validation has not completed; retry shortly', retryable: true }));
+        return;
+      }
+      // A read answered before startup validation completes may show state it has not revalidated yet.
+      res.setHeader(readinessHeader, 'startup-validation-pending');
     }
-    handle(req, res);
+    for (const handle of handlers) handle(req, res);
   });
 
   // A recurring intervention becomes work on its own (GY-98): the detection reads the ledger, so
   // it runs once a minute rather than every tick.
   let patternsAt = 0, receiptsPrunedAt = 0, ledgerCompactedAt = 0;
+  // Upkeep that reads no validation state runs while startup validation is still pending too (GY-1238).
+  const upkeep = async (step: ReconciliationStep) => {
+    // Bounded, on the pool, never under the coordination lock: receipts past the replay window go.
+    if (Date.now() - receiptsPrunedAt >= receiptPruneIntervalMs) { receiptsPrunedAt = Date.now(); await step('pruneReceipts', () => pruneReceipts(store.pool).catch(error => { console.error('receipt pruning failed', error instanceof Error ? error.message : 'unknown'); return 0; })); }
+    // Routine ledger rows past the retention window go in bounded, audited batches (store/compaction.ts).
+    if (Date.now() - ledgerCompactedAt >= ledgerCompactionIntervalMs) { ledgerCompactedAt = Date.now(); await step('compactLedger', () => compactLedger(store.pool, { retentionMs: configuredLedgerRetentionMs() }).catch(error => { console.error('ledger compaction failed', error instanceof Error ? error.message : 'unknown'); return null; })); }
+    if (github) {
+      const preflight = await step('github.preflight', () => github.preflightIfDue());
+      if (preflight) await announcePreflight(preflight);
+    }
+  };
   const reconciliation = startReconciliation(async step => {
-    if (!ready) { await step('validation.startup', () => runStartupValidation()); if (!ready) return; }
+    // A pending startup validation runs beside the tick, never in it: the tick keeps its upkeep
+    // while it does, and each tick restarts an attempt that failed. engine.reconcile evaluates gates
+    // and delivers direct merges against validation state, so it waits for readiness; leases do not
+    // lapse meanwhile, since their heartbeats are admitted (refusedBeforeReady).
+    if (!ready) { void runStartupValidation(); await upkeep(step); return; }
     // The delivery sweep is bounded per tick and resumes from its persisted cursor, so a
     // backlog of observations drains across ticks without ever skipping one.
     await step('validation.expireArtifacts', () => validation.expireArtifacts()); await step('validation.reconcile', () => validation.reconcile());
     await step('engine.reconcile', () => engine.reconcile()); await step('delivery.sweep', () => delivery.sweep());
     await step('projectFlow', () => projectFlow(engine.store, { batches: 4 }));
-    // Bounded, on the pool, never under the coordination lock: receipts past the replay window go.
-    if (Date.now() - receiptsPrunedAt >= receiptPruneIntervalMs) { receiptsPrunedAt = Date.now(); await step('pruneReceipts', () => pruneReceipts(store.pool).catch(error => { console.error('receipt pruning failed', error instanceof Error ? error.message : 'unknown'); return 0; })); }
-    // Routine ledger rows past the retention window go in bounded, audited batches (store/compaction.ts).
-    if (Date.now() - ledgerCompactedAt >= ledgerCompactionIntervalMs) { ledgerCompactedAt = Date.now(); await step('compactLedger', () => compactLedger(store.pool, { retentionMs: configuredLedgerRetentionMs() }).catch(error => { console.error('ledger compaction failed', error instanceof Error ? error.message : 'unknown'); return null; })); }
     // The pattern scan's ledger query is quadratic in the events table and held the whole tick for
     // good once the table grew (2026-09-23): it runs only where an operator opts in until it is bounded.
     if (process.env.GRAPHYARD_INTERVENTION_PATTERNS === '1' && Date.now() - patternsAt >= 60_000) {
@@ -174,10 +192,7 @@ export async function main(options: MainOptions = {}) {
       // The same window read by cause (GY-970): drafts for independent approval, never work items.
       for (const artefact of (await step('synthesizeRetro', () => synthesizeRetro(engine.store, http.services.interventionPolicy))).drafted) console.log(`Drafted retro artefact ${artefact.id} (${artefact.kind}) for ${artefact.pattern.label}`);
     }
-    if (github) {
-      const preflight = await step('github.preflight', () => github.preflightIfDue());
-      if (preflight) await announcePreflight(preflight);
-    }
+    await upkeep(step);
   }, 2000);
   http.listen(options.port ?? Number(process.env.PORT ?? 4310), options.host ?? process.env.HOST ?? '127.0.0.1', () => console.log(`Graphyard listening on port ${(http.address() as AddressInfo).port}; GitHub ${github ? 'connected' : 'not configured'}`));
   await once(http, 'listening');
@@ -185,27 +200,38 @@ export async function main(options: MainOptions = {}) {
 
   const close = async () => {
     closing = true;
-    reconciliation.stop(); watching?.stop(); watching = null; await observing?.stop(); observing = null; retroIndex.stop();
+    // Intake closes first (GY-1238): an observation worker inside a job may take seconds to stop,
+    // and the server must stop accepting requests before the shutdown's exit timer can fire.
+    const closed = new Promise<void>(resolve => http.close(() => resolve()));
+    reconciliation.stop(); watching?.stop(); watching = null; retroIndex.stop();
     process.off('SIGTERM', shutdown); process.off('SIGINT', shutdown);
-    await new Promise<void>(resolve => http.close(() => resolve()));
+    await observing?.stop(); observing = null;
+    await closed;
     await Promise.resolve(githubCache?.close());
     await store.close();
   };
   const shutdown = () => { void close().then(() => process.exit(0)); setTimeout(() => process.exit(1), 10_000).unref(); };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
-  return { http, store, validation, runStartupValidation, isReady: () => ready, close };
+  return { http, store, validation, runStartupValidation, isReady: () => ready, background: () => ({ watching: watching !== null, observing: observing !== null }), close };
 }
+
+/** The response header naming a read answered before startup validation completed (GY-1238). */
+export const readinessHeader = 'x-graphyard-readiness';
+
+/** Lease renewals admitted during startup validation: they read no validation state, and refusing them lapses leases. */
+const startupLeaseRenewals = [/^\/api\/work\/[^/]+\/heartbeat$/, /^\/api\/validation\/heartbeat$/, /^\/api\/validation\/collection-heartbeat$/];
 
 /**
  * Whether a request is refused while startup validation runs (GY-1127): every mutation under /api
- * except a GitHub webhook delivery, which only wakes durable jobs, and a work lease heartbeat,
- * which reads no validation state and would otherwise lapse leases for the whole startup window.
- * Reads stay open, and /healthz answers liveness throughout.
+ * except a GitHub webhook delivery, which only wakes durable jobs, and the lease renewals — the work
+ * lease heartbeat and the validation attempt and collection heartbeats (GY-1238) — which would
+ * otherwise lapse their leases for the whole startup window. Reads stay open, marked with
+ * `readinessHeader`, and /healthz answers liveness throughout.
  */
 export function refusedBeforeReady(method = 'GET', url = '/'): boolean {
   if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return false;
   const path = new URL(url, 'http://localhost').pathname;
-  return path.startsWith('/api/') && path !== '/api/github/webhook' && !/^\/api\/work\/[^/]+\/heartbeat$/.test(path);
+  return path.startsWith('/api/') && path !== '/api/github/webhook' && !startupLeaseRenewals.some(renewal => renewal.test(path));
 }
 
 export type ReconciliationStep = <T>(name: string, run: () => Promise<T>) => Promise<T>;

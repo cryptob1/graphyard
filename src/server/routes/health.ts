@@ -23,6 +23,9 @@ import { humanSignIn } from '../auth.js';
  * through. It fails (500) when the process cannot reach its database at all, including when a
  * connection hangs past the bound without the pool being full. `/healthz?strict`
  * answers 503 whenever the verdict is unhealthy, for a monitor that alerts on the status alone.
+ *
+ * While the process's startup validation runs (GY-1127) the verdict is unhealthy too, naming it, with
+ * `readiness: false`, and `/healthz?ready` answers 503 until it completes (GY-1238).
  */
 /** How long the health probe waits for its resource checks before answering alive without them. */
 export const healthCheckWaitMs = 3000;
@@ -82,24 +85,32 @@ export const healthRoutes = defineRoutes('health', [
     const cause = reachable ? null : unanswered(probe, Date.now());
     if (cause) throw new Error(`database probe did not finish within ${healthCheckWaitMs} ms and ${cause}; the database is unreachable`);
     // Startup readiness (GY-1127): false until the process's startup validation completes; a server
-    // not started through main() has none to wait for. `?ready` answers 503 until then, for a
-    // readiness probe that must keep traffic off a replica refusing mutations.
+    // not started through main() has none to wait for. Until then every mutation is refused, so the
+    // plane cannot record what it is asked to (GY-1238): the verdict is unhealthy, naming startup
+    // validation, and the installers' `ok` check and the loop's dispatch gate both wait for it. The
+    // plain endpoint still answers 200, as for any other verdict, so liveness never restarts a
+    // replica for validating; `?ready` answers 503, for a readiness probe that must keep traffic off it.
     const readiness = (services as Services & { readiness?: boolean }).readiness ?? true;
-    if (!readiness && url.searchParams.has('ready')) return send(503, { ok: true, healthy: true, readiness, causes: ['startup validation has not completed'], ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol });
-    if (!reachable) return { ok: true, healthy: true, readiness, writable: null, causes: [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`], resources: null,
-      ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
+    const startup = readiness ? [] : ['startup validation has not completed; mutations are refused until it does'];
+    const identity = { ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
+    const answer = (healthy: boolean, body: Record<string, unknown> & { causes: string[] }) => {
+      const verdict = { ok: healthy && readiness, healthy: healthy && readiness, readiness, ...body, causes: [...startup, ...body.causes], ...identity };
+      if (!readiness && url.searchParams.has('ready')) return send(503, verdict);
+      return verdict.healthy || !url.searchParams.has('strict') ? verdict : send(503, verdict);
+    };
+    // A readiness probe on a replica still validating needs no resource checks to be kept off it.
+    if (!readiness && url.searchParams.has('ready')) return answer(true, { writable: null, causes: [], resources: null });
+    // A busy pool or unfinished resource checks answer alive (healthy) without the checks: they never fail strict.
+    if (!reachable) return answer(true, { writable: null, causes: [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`], resources: null });
     // Liveness must not wait on a pool the reconciliation jobs have filled: a probe that queued
     // behind them failed every deployment's health check (2026-09-23). The resource checks get a
     // bounded wait; past it the plane answers alive and names the checks it could not finish.
     const checks = Promise.all([probeWrites(pool), readDatabaseCapacity(pool), readGitHubBudget(services.github)]);
     const settled = await Promise.race([checks, new Promise<null>(resolve => setTimeout(() => resolve(null), healthCheckWaitMs).unref())]);
-    if (!settled) return { ok: true, healthy: true, readiness, writable: null, causes: [`resource checks did not finish within ${healthCheckWaitMs} ms; the database pool is busy`], resources: null,
-      ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
+    if (!settled) return answer(true, { writable: null, causes: [`resource checks did not finish within ${healthCheckWaitMs} ms; the database pool is busy`], resources: null });
     const [writeError, database, github] = settled;
     const verdict = planeVerdict(writeError, { database, github });
-    const body = { ok: verdict.healthy, healthy: verdict.healthy, readiness, writable: verdict.writable, causes: verdict.causes, resources: { database, github },
-      ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
-    return verdict.healthy || !url.searchParams.has('strict') ? body : send(503, body);
+    return answer(verdict.healthy, { writable: verdict.writable, causes: verdict.causes, resources: { database, github } });
   } },
   // Opening a sign-in link (GY-738) is the other route answered without a token: the link is the credential.
   {
