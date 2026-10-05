@@ -562,7 +562,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * (`rejected`).
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
   staleDiagnosis?: boolean;
@@ -1292,6 +1292,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // GY-1297: approvals a fault left with no outcome — the ledger holds the approval and nothing
   // after it — and every withdrawal the loop sent for each.
   const stranded = new Map<string, { key: string; workId: string; kind: 'moved' | 'holds'; watched: boolean; pane: string | null }>(), withdrawals = new Map<string, number>();
+  // GY-1300: with `stranded: 'resume'` the loop has production's resume effect; each resume it sent,
+  // with the state the control plane answered, and each approver launch for a stranded decision.
+  const resumes = new Map<string, string[]>(), strandedLaunches = new Map<string, number>();
   // The first attestation the loop requests is overtaken: its worker pushes a new head before the
   // approver judges, so the loop must withdraw it, close its approver and ask afresh for the new head.
   const attestations: { decision: string; sha: string; judged: 'overtaken' | 'approved' }[] = [];
@@ -1307,6 +1310,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     // A stopped session's pane lingers until the sweep closes it; its relaunch opens a fresh pane,
     // as the sweep-then-relaunch pair does.
     const name = approverSessionName(work, decision);
+    if (stranded.has(decision)) strandedLaunches.set(decision, (strandedLaunches.get(decision) ?? 0) + 1);
     if (herdr.list().some(agent => agent.name === name && !stoppedStates.includes(agent.agent_status ?? '')))
       throw new Error(`Approver session ${name} is already live in Herdr; let it finish or close it first`);
     // The window is read on the day's own schedule too, as the waiters at its close and the launches
@@ -1597,6 +1601,11 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     },
     decisions: work => api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`),
     withdraw: (work, decision, reason) => { withdrawals.set(decision, (withdrawals.get(decision) ?? 0) + 1); return api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason }); },
+    ...(options.stranded === 'resume' ? { resume: async (work: Work, decision: string) => {
+      const settled = await api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action: 'resume', decision });
+      resumes.set(decision, [...resumes.get(decision) ?? [], settled.state]);
+      return settled;
+    } } : {}),
     faultClassPolicy: { threshold: 3, windowHours: 24 },
     fileFaultClass: (input, key) => {
       // The documentation trim item is what the once-only filing assertion reads (GY-574).
@@ -2596,7 +2605,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { promotion, reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane,
+  return { promotion, reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane,
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
@@ -3315,6 +3324,38 @@ test('unit:soak-invariants-hold — approvals a fault left with no outcome, on a
     if (watched) assert.equal(withdrawals.get(decision), 1, `${key}: the hand watch sent the one withdrawal that settled it`);
     assert.ok(![...herdr.agents.values()].some(agent => agent.name === approverSessionName(final.find(item => item.key === key)!, decision)), `${key}: no approver session for ${decision} is left open`);
     assert.ok(!Object.values(state.approvals).some(watch => watch.decision === decision), `${key}: no watch for ${decision} is left`);
+  }
+});
+
+test('unit:soak-invariants-hold — with production\'s resume, approvals a fault left with no outcome are applied or settled within a cycle of their session ending, never resumed once settled, never put to an approver again, and every invariant holds', { timeout: 300_000 }, async () => {
+  // GY-1300: production's loop has the resume effect, so the apply step and the request path's
+  // resume of an approved standing decision are what settle each stranded approval — not the
+  // withdrawal the day above falls back to.
+  const day = await simulateDay({ hours: 4, stranded: 'resume' });
+  const { final, violations, failures, herdr, stranded, withdrawals, resumes, strandedLaunches, state } = day;
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'every item is delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.equal(stranded.size, 3, 'all three approvals were stranded');
+  for (const [decision, { key, workId, kind, watched }] of stranded) {
+    const settled = (await store.pool.query("SELECT kind, payload, created_at AS at FROM events WHERE work_id=$1 AND payload->>'id'=$2 AND kind = ANY($3::text[])", [workId, decision, ['decision.superseded', 'decision.applied', 'decision.failed', 'decision.stale', 'decision.withdrawn']])).rows;
+    assert.equal(settled.length, 1, `${key}: decision ${decision} settled once (${settled.map(row => row.kind).join(', ')})`);
+    assert.notEqual(settled[0].kind, 'decision.withdrawn', `${key}: settled by the resume, not withdrawn`);
+    assert.equal(withdrawals.get(decision) ?? 0, 0, `${key}: no withdrawal was sent for ${decision}`);
+    if (kind === 'holds') assert.match(settled[0].kind, /^decision\.(applied|failed|stale)$/, `${key}: a decision whose situation holds is applied, or fails or settles stale`);
+    if (watched) {
+      // The session ends a minute after the loop first lists it; the apply step runs on the cycle after.
+      const [approved] = (await store.pool.query("SELECT created_at AS at FROM events WHERE work_id=$1 AND payload->>'id'=$2 AND kind='decision.approved'", [workId, decision])).rows;
+      assert.ok(new Date(settled[0].at).getTime() - new Date(approved.at).getTime() <= approvedDecisionBoundMs, `${key}: settled within the decision bound`);
+      assert.ok((resumes.get(decision) ?? []).length >= 1, `${key}: the hand watch's apply step resumed ${decision}`);
+    }
+    // Bounded: every resume but the last found it still approved, and none is sent once it settled.
+    const answers = resumes.get(decision) ?? [];
+    assert.ok(answers.slice(0, -1).every(answer => answer === 'approved'), `${key}: no resume after ${decision} settled (${answers.join(', ')})`);
+    assert.ok(answers.length <= 3, `${key}: resumes of ${decision} are bounded (${answers.length})`);
+    assert.equal(strandedLaunches.get(decision) ?? 0, 0, `${key}: no approver was launched for the judged decision ${decision}`);
+    assert.ok(![...herdr.agents.values()].some(agent => agent.name === approverSessionName(final.find(item => item.key === key)!, decision)), `${key}: no approver session for ${decision} is left open`);
+    assert.ok(!Object.values(state.approvals).some(watch => watch.decision === decision && !watch.settledAt), `${key}: no open watch for ${decision} is left`);
   }
 });
 
