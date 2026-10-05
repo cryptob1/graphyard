@@ -74,7 +74,7 @@ A silent hour: `master status` points to `https://github.com/settings/apps/APP-S
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (warns under 25%) and loop-removed 2h-idle files. Database bound: `GRAPHYARD_DATABASE_MAX_BYTES`, else the `data_directory` volume, else silent 10 GiB. `agent-names` flags holders 10m past settling, reclaimed each tick; `loaded-revision` counts code moves after 30m self-upgrade.
+Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (warns under 25%) and loop-removed 2h-idle files. Database bound: `GRAPHYARD_DATABASE_MAX_BYTES`, else `data_directory`'s volume, else silent 10 GiB. `agent-names` flags holders 10m past settling, reclaimed each tick; `loaded-revision` counts code moves after 30m self-upgrade.
 
 ## Storage retention
 
