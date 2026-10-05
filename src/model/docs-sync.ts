@@ -20,16 +20,14 @@ import type { Evidence } from './evidence.js';
  *
  * When the synced head is observed, the control plane records it as a base refresh of the reviewed
  * head and decides the carry itself (`docsSyncCarry`): the approval is kept when the change's own
- * diff outside `docs/` has the same patch-id on both sides of the merge, so the code the reviewer
- * judged is exactly the code that lands. Proofs run again on the synced head.
+ * diff outside docs pages (`isDocsPage`) has the same patch-id on both sides of the merge, so the
+ * code the reviewer judged is exactly the code that lands. Proofs run again on the synced head.
  */
 
 /** A page the docs-sync may resolve: Markdown under docs/, at any depth. */
 export const isDocsPage = (path: string) => /^docs\/(?:[^/]+\/)*[^/]+\.md$/.test(path);
 /** Whether a conflict is the docs-sync's: a known, non-empty set of paths, every one a docs page. */
 export const docsOnlyConflict = (paths: readonly string[] | null | undefined): paths is string[] => !!paths?.length && paths.every(isDocsPage);
-/** Outside `docs/`: what the approval kept across a docs-sync was given on. */
-export const outsideDocs = (path: string) => !path.startsWith('docs/');
 
 export type ConflictRoute = 'docs-sync' | 'rework';
 /** Where a confirmed conflict goes: a docs-sync session when every conflicted path is a docs page, otherwise a worker. */
