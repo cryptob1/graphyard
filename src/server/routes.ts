@@ -33,6 +33,8 @@ export interface Services {
   agentRegistry: AgentRegistry;
   /** The closed-question responder (GY-109), or null when none is configured and every such proof takes its ordinary path. */
   responder: Responder | null;
+  /** The single-use admin sign-in a self-contained install deployed (GY-717): the claim's SHA-256 and the credential it yields. */
+  signinClaim?: { hash: string; principal: string; token: string } | null;
 }
 
 /** The response was written by the handler itself (raw bytes, or a status other than 200). */
