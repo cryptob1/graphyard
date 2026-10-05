@@ -417,6 +417,28 @@ test('unit:sudo-passkey-page-reaches-mobile — a GitHub Mobile control that can
   await assert.rejects(passSudo(page, { flow: 'protection', record: 'r', onCode: () => assert.fail('no code expected'), sleep: noSleep }), /"Use GitHub Mobile" could not be activated \(agent-browser click failed: Element is not visible: #hidden\).*master browser protection/);
 });
 
+test('sudo step falls back to the same-label link when a visible "Use GitHub Mobile" button cannot be clicked', async () => {
+  for (const linkClickFails of [false, true]) {
+    const mobileHref = 'https://github.com/sessions/sudo?type=github_mobile';
+    const state = { mobile: false, polls: 0, clicked: [] as string[], opened: [] as string[] };
+    const page: BrowserPage = {
+      open(url) { state.opened.push(url); if (url === mobileHref) state.mobile = true; },
+      url: () => state.mobile && ++state.polls > 2 ? 'https://github.com/settings/apps/x/permissions' : 'https://github.com/sessions/sudo',
+      text: () => state.polls > 2 ? 'Permissions & events' : state.mobile ? 'Confirm access\n\nApprove on GitHub Mobile\n\n63\n' : 'Confirm access\nUse GitHub Mobile\nUse your password',
+      meta: () => null,
+      locate: (kind, text) => state.mobile || text !== 'Use GitHub Mobile' ? null
+        : kind === 'button' ? { selector: '#button', tag: 'button', checked: null, value: '', text: 'use github mobile', href: null, visible: true }
+        : kind === 'link' ? { selector: '#link', tag: 'a', checked: null, value: null, text: 'use github mobile', href: mobileHref, visible: true } : null,
+      click: selector => { state.clicked.push(selector); if (selector === '#button' || linkClickFails) throw new Error(`agent-browser click failed: ${selector}`); state.mobile = true; },
+      setChecked() {}, select() {}, screenshot() {}, wait() {}, close() {},
+    };
+    const result = await passSudo(page, { flow: 'protection', record: 'r', onCode: () => {}, sleep: noSleep, pollMs: 10, timeoutMs: 10_000 });
+    assert.deepEqual(result, { passed: true, attempts: 1, code: '63' });
+    assert.deepEqual(state.clicked, ['#button', '#link'], 'the visible button is tried first, then the link of the same label');
+    assert.deepEqual(state.opened, linkClickFails ? [mobileHref] : [], 'a failed link click is followed through its href');
+  }
+});
+
 test('the agent-browser page drives one headless session on the operator profile and never touches its cookies', () => {
   const calls: string[][] = [];
   const responses: Record<string, unknown> = { open: {}, get: { url: 'https://github.com/sessions/sudo', text: 'Confirm access' }, eval: { result: JSON.stringify({ selector: '[data-graphyard-target="gy-1"]', tag: 'button', checked: null, value: null, text: 'save changes' }) }, click: {}, check: {}, uncheck: {}, select: {}, screenshot: {}, wait: {} };
@@ -468,14 +490,14 @@ test('master harness writes the allow rules the browser flows need, each with a 
     assert.match(plan.note, /classifier otherwise refuses/);
     assert.ok(plan.allow.filter(entry => entry.rule.includes('gh api')).every(entry => /classifier|verify|audit|before and after/.test(entry.why)), 'each gh api rule states why the classifier would otherwise refuse it or what it verifies');
     for (const rule of allow) assert.doesNotMatch(rule, /merge|access_tokens|reviews|graphql|\.pem|\.token|credential|cookies/i, `allow rule ${rule} must not reach a merge, a verdict, or a credential`);
-    for (const rule of ['Bash(gh pr merge:*)', 'Bash(gh pr review:*)', 'Bash(gh api *merge*)', 'Bash(gh api *pulls/*/reviews*)', 'Bash(gh api *access_tokens*)', 'Bash(gh api graphql*)', 'Bash(gh api *DELETE*)', 'Bash(gh api *PUT*)', 'Bash(gh api *POST*)', 'Bash(agent-browser *)', 'Bash(git push:*)', 'Read(**/*.pem)', 'Read(**/*.token)']) assert.ok(deny.includes(rule), `${rule} must be denied`);
+    for (const rule of ['Bash(gh pr merge:*)', 'Bash(gh pr review:*)', 'Bash(gh api *pulls/*/merge*)', 'Bash(gh api *repos/*/merges*)', 'Bash(gh api *pulls/*/reviews*)', 'Bash(gh api *access_tokens*)', 'Bash(gh api graphql*mutation*)', 'Bash(gh api *DELETE*)', 'Bash(gh api *PUT*)', 'Bash(gh api *POST*)', 'Bash(agent-browser *)', 'Bash(git push:*)', 'Read(**/*.pem)', 'Read(**/*.token)']) assert.ok(deny.includes(rule), `${rule} must be denied`);
     assert.ok(!deny.includes('Bash(gh api:*)'), 'the blanket gh api deny would override every allow above');
     const plain = masterHarnessPlan({ harness: 'claude', root, cliPath: config.cliPath, repository: 'org/repo', baseBranch: 'release/2026', credentialHome: '/home/x/.config/graphyard' });
     assert.ok(plain.allow.some(entry => entry.rule === 'Bash(gh api repos/org/repo/branches/release%2F2026/protection*)'), 'the base branch is encoded exactly as the CLI requests it');
     const written = await writeHarnessPermissions(root, plan, true);
     assert.equal(written.applied, true);
     const settings = JSON.parse(await readFile(join(root, '.claude/settings.local.json'), 'utf8'));
-    assert.ok(settings.permissions.deny.includes('Bash(agent-browser *)')); assert.ok(settings.permissions.deny.includes('Bash(gh api *merge*)'));
+    assert.ok(settings.permissions.deny.includes('Bash(agent-browser *)')); assert.ok(settings.permissions.deny.includes('Bash(gh api *pulls/*/merge*)'));
     assert.deepEqual((await writeHarnessPermissions(root, plan, true)).added, []);
   } finally { await cleanup(); }
 });
