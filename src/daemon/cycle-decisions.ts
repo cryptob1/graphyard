@@ -12,8 +12,6 @@ import { approvalStep, approverLaunchKey, attestDecisions, boundDetail, exhauste
 import { decisionReads } from './decision-reads.js';
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
-import type { DaemonEffects } from './effects.js';
-import type { DiagnosisRecord } from '../runner/payloads.js';
 import { baseRefreshConflict } from '../merge-queue.js';
 import { docsSyncRoute } from './docs-sync-route.js';
 import { wakeObservationJob } from './cycle-delivery.js';
@@ -434,56 +432,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // role's slot, so the watch stays, past any bound, until the registry is told.
     if ((closed && withdrawn) || (watch.closeAttempts >= maxApproverCloses && !watch.session)) delete state.approvals[key];
   });
-  await staleDiagnosisDecisions(cycle, effects, (key, item, outcome, detail) => note(key, item, 'decision', outcome, detail));
   await settleDeferred(cycle, budget);
   await approvers.superviseHandApprovers();
   await approvers.reconcileRegistrySessions();
-}
-
-/** The action that counts one diagnosis decision's requests after a revision race (GY-1294). */
-export const staleDiagnosisKey = (work: string, action: string) => `diagnosis-stale:${work}:${action}`;
-/**
- * GY-1294. The diagnostician's release (and closure) binds the item revision it read when it was
- * requested, and the loop's own writes — the fix item's filing, its attention lines — move that
- * revision before the approver reads it, so the server settles the decision `stale`. The diagnosis
- * step follows only the decision it holds and acts on `applied`, `refused` or `failed`: a stale one
- * left the diagnosis `releasing` and the filed fix in backlog for hours, five times in a day. Here a
- * stale one is requested again against the item as this cycle read it, as its outcome prescribes,
- * up to `maxDecisionRequests` times; the diagnosis step launches the new request's approver later
- * in the same cycle. Past the bound the diagnosis fails with the race named, and the stale release
- * stands as owed attention in `master status` (staleReleaseAttention).
- */
-export async function staleDiagnosisDecisions(cycle: Cycle, effects: DaemonEffects, note: (key: string, item: Work, outcome: 'done' | 'failed', detail: string) => Promise<unknown>) {
-  const { state, snapshot, isolate, now } = cycle;
-  const diagnostician = cycle.effects.diagnostician;
-  if (!diagnostician?.settings.enabled || !effects.decisions) return;
-  for (const entry of Object.values(state.diagnoses) as DiagnosisRecord[]) {
-    const held = entry.decision;
-    if ((entry.state !== 'releasing' && entry.state !== 'closing') || !held) continue;
-    const target = snapshot.work.find(item => item.key === held.work);
-    if (!target || target.stage === 'done') continue;
-    await isolate('decision', target, target.key, async () => {
-      const current = (await effects.decisions!(target)).decisions.find(candidate => candidate.id === held.id);
-      if (current?.state !== 'stale') return;
-      const key = staleDiagnosisKey(held.work, held.action), requests = state.actions[key]?.attempts ?? 0;
-      const race = `${held.action} decision ${held.id} on ${held.work} went stale: ${current.outcome ?? 'the item revision moved before its approver read it'}`;
-      if (requests >= maxDecisionRequests) {
-        entry.state = 'failed'; entry.updatedAt = new Date(now()).toISOString();
-        entry.detail = `${race}; requested ${requests} time(s) after a revision race already, so the diagnosis stands for the master to request it`.slice(0, 1000);
-        await note(`${key}:exhausted`, target, 'failed', entry.detail);
-        return;
-      }
-      const covering = entry.fix ?? entry.diagnosis?.covering ?? null;
-      if (held.action === 'close' && !covering) return;
-      const input = held.action === 'close' ? { kind: 'duplicate', ref: covering } : {};
-      const cause = entry.diagnosis?.cause ?? 'see the diagnosis';
-      const reason = (held.action === 'release'
-        ? `Release ${held.work}, the root-cause fix the diagnostician found for ${entry.subject}, requested again after ${race}. Cause: ${cause}`
-        : `${held.work} is closed as a duplicate of ${covering}, requested again after ${race}. Cause: ${cause}`).slice(0, 2000);
-      const made = await diagnostician.decide(target, held.action, reason, input);
-      entry.decision = { ...held, id: made.id, approver: null };
-      entry.updatedAt = new Date(now()).toISOString();
-      await note(key, target, 'done', `Requested ${held.action} decision ${made.id} on ${held.work} again for the diagnosis of ${entry.subject} (${requests + 1} of ${maxDecisionRequests}): ${race}`);
-    });
-  }
 }

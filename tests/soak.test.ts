@@ -44,7 +44,6 @@ import { diagnosticianSettings, diagnosisSettled } from '../src/runner/payloads.
 import { stoppedStates } from '../src/daemon/effects.js';
 import type { RunOptions, RunRecord, RunResult, Runner } from '../src/runner/types.js';
 import { diagnosisLimitHoldMs, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
-import { staleDiagnosisKey } from '../src/daemon/cycle-decisions.js';
 import { terminalDecisions } from '../src/cli/decision-report.js';
 import { Launcher } from '../src/daemon/cycle.js';
 import { wakeOwnObservation } from '../src/master/base-break-refresh.js';
@@ -2790,7 +2789,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.deepEqual([...new Set(primaries.filter(run => run.at < answered.at).map(run => run.subject))], [refusedRuns[0].subject], 'only the probe ran until the provider answered: every other subject was held');
   assert.ok(Object.values(state.diagnoses).every(entry => entry.state !== 'waiting'), 'no diagnosis is left waiting at the day\'s end');
   // GY-1294: the first diagnosis decision went stale on a revision race — the loop's own note moved
-  // the item before its approver read it. The decisions step asked again once, bound to the item as
+  // the item before its approver read it. The loop asked again once, bound to the item as
   // it then stood; that request got exactly one approver, whose session was closed (above), it
   // applied, and nothing about the race is left owed at the day's end.
   assert.equal(diagnosisRaces.length, 1, `one diagnosis decision met the revision race: ${JSON.stringify(diagnosisRaces)}`);
@@ -2801,8 +2800,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.deepEqual(raced.map(entry => entry.state), ['stale', 'applied'], `${race.key}'s ${race.action} went stale once and its one re-request applied: ${JSON.stringify(raced)}`);
   assert.equal(raced[0].id, race.decision);
   assert.ok(raced[1].input.expectedRevision! > raced[0].input.expectedRevision!, 'the re-request binds the revision the item moved to');
-  assert.equal(state.actions[staleDiagnosisKey(race.key, race.action)]?.attempts, 1, 'the re-request was made once, inside its bound');
-  assert.equal(state.actions[`${staleDiagnosisKey(race.key, race.action)}:exhausted`], undefined, 'the bound was never reached');
+  assert.equal(state.actions[`escalation:diagnosis-stale:${race.decision}`], undefined, 'the re-request stayed inside its bound: nothing was escalated');
   const racedDiagnosis = Object.values(state.diagnoses).find(entry => entry.decision?.work === race.key && entry.decision.action === race.action)!;
   assert.ok(racedDiagnosis && racedDiagnosis.decision!.id === raced[1].id && racedDiagnosis.decision!.approver, 'the diagnosis follows the re-requested decision, judged by an independent approver');
   assert.equal(approverWorks.filter(key => key === race.key).length, 2, `${race.key} had one approver for the stale decision and one for its re-request: ${JSON.stringify(approverWorks)}`);

@@ -7,7 +7,6 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { clearDiagnoses, diagnosesSettled, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
 // Namespace imports: on a tree without these exports each case still runs, and fails as a case.
-import * as cycleDecisions from '../src/daemon/cycle-decisions.js';
 import { maxDecisionRequests } from '../src/daemon/decisions.js';
 import * as owedReport from '../src/cli/owed-report.js';
 import { terminalDecisions } from '../src/cli/decision-report.js';
@@ -18,8 +17,9 @@ import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
 // fix and requested its release, bound to the item revision it read; the loop's own writes moved that
 // revision before the approver read it, the server settled the release `stale` ("Task revision
 // changed; reload and request again; the decision was not applied"), and nothing ever asked again.
-// The loop's decisions step now requests a stale diagnosis decision again within the cycle, and a
-// stale release still standing is named as owed decision attention. Each test is named for its proof.
+// The loop now requests a stale diagnosis decision again within the cycle (the diagnosis step's
+// re-request, GY-1296, is the one path that does), and a stale release still standing is named as
+// owed decision attention. Each test is named for its proof.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const clock = Date.parse('2030-01-01T12:00:00Z');
@@ -123,7 +123,6 @@ async function filedAndRequested(w: ReturnType<typeof world>) {
   return release;
 }
 const staleReleaseAttention: typeof owedReport.staleReleaseAttention = (...args) => owedReport.staleReleaseAttention(...args);
-const staleDiagnosisKey: typeof cycleDecisions.staleDiagnosisKey = (...args) => cycleDecisions.staleDiagnosisKey(...args);
 const releases = (w: ReturnType<typeof world>) => w.ledger.filter(entry => entry.action === 'release' && entry.work === 'GY-201');
 
 afterEach(() => clearDiagnoses());
@@ -136,7 +135,7 @@ test('unit:stale-release-decision-re-requested-within-a-cycle — a release that
   w.approve(first.id);
   assert.equal(first.state, 'stale');
 
-  // Within one cycle the decisions step asks again, bound to the revision the item now has, and the approver is launched for it.
+  // Within one cycle the loop asks again, bound to the revision the item now has, and the approver is launched for it.
   w.at(2 * minute); await w.cycle();
   const asked = releases(w);
   assert.equal(asked.length, 2, `the stale release is requested again within the cycle: ${JSON.stringify(w.ledger)}`);
@@ -144,7 +143,7 @@ test('unit:stale-release-decision-re-requested-within-a-cycle — a release that
   assert.equal(again.input.expectedRevision, w.find('GY-201').revision, 'bound to the current revision, not the one that went stale');
   assert.equal(w.state.diagnoses['GY-101'].decision?.id, again.id, 'the diagnosis follows the new request');
   assert.ok(w.approvers.some(entry => entry.decision === again.id), `an approver is launched for the new request: ${JSON.stringify(w.approvers)}`);
-  assert.equal(w.state.actions[staleDiagnosisKey('GY-201', 'release')]?.attempts, 1);
+  assert.equal(asked.filter(entry => entry.state === 'requested').length, 1, 'asked once, not by two paths');
 
   // This time no write races it: the release applies, and the diagnosis goes on to close the recurring item.
   w.approve(again.id);
@@ -156,16 +155,16 @@ test('unit:stale-release-decision-re-requested-within-a-cycle — a release that
 test('unit:stale-release-decision-re-requested-within-a-cycle — the re-request is bounded: past the bound the diagnosis fails with the race named, and nothing more is asked', async () => {
   const w = world();
   await filedAndRequested(w);
-  for (let round = 0; round <= maxDecisionRequests; round += 1) {
+  for (let round = 0; round < maxDecisionRequests; round += 1) {
     const latest = releases(w).at(-1)!;
     w.touch('GY-201'); w.approve(latest.id);
     w.at((2 + round) * minute); await w.cycle();
   }
-  assert.equal(releases(w).length, 1 + maxDecisionRequests, 'the first request and maxDecisionRequests more');
+  assert.equal(releases(w).length, maxDecisionRequests, 'maxDecisionRequests requests in all, each settled stale');
   assert.equal(w.state.diagnoses['GY-101'].state, 'failed');
-  assert.match(w.state.diagnoses['GY-101'].detail, /went stale: Task revision changed/);
+  assert.match(w.state.diagnoses['GY-101'].detail, /settled stale: Task revision changed/);
   w.at(20 * minute); await w.cycle();
-  assert.equal(releases(w).length, 1 + maxDecisionRequests, 'nothing more is requested once the bound is spent');
+  assert.equal(releases(w).length, maxDecisionRequests, 'nothing more is requested once the bound is spent');
   // The stale release still stands as owed attention, so the fix does not sit silent.
   const owed = staleReleaseAttention(w.find('GY-201'), w.ledger.filter(entry => entry.work === 'GY-201'), clock + 20 * minute);
   assert.ok(owed, 'the stale release is owed attention');
@@ -231,7 +230,7 @@ test('unit:stale-release-decision-recurrence-reproduced — diagnosis files a P1
     const first = await filedAndRequested(w);
     assert.equal(w.find('GY-201').priority, 1, `${recurrence.key}: a P1 fix`);
     w.touch('GY-201'); w.approve(first.id);
-    // The shape that recurred: an hour of cycles. On the base nothing asks again and the fix stays in backlog.
+    // The shape that recurred: an hour of cycles. Before the re-request nothing asked again and the fix stayed in backlog.
     for (let cycle = 1; cycle <= 6; cycle += 1) {
       w.at(minute + cycle * 10 * minute); await w.cycle();
       const latest = releases(w).at(-1)!;
