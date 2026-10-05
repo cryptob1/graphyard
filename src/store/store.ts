@@ -118,7 +118,9 @@ export class Store {
       const { rows } = await db.query('SELECT clock_timestamp() AS now');
       // Job wakes are taken last, in work-id order (GY-1115): see `wakeJob`.
       pendingWakes.set(db, new Map());
-      const result = await fn(db, rows[0].now);
+      const query = db.query; db.query = guardDeferredWakes(db, query);
+      let result: T;
+      try { result = await fn(db, rows[0].now); } finally { db.query = query; }
       const wakes = pendingWakes.get(db)!; pendingWakes.delete(db);
       await wakeJobs(db, [...wakes.keys()], [...wakes].filter(([, prioritized]) => prioritized).map(([id]) => id));
       await db.query('COMMIT');
@@ -273,6 +275,20 @@ export class Store {
   }
 }
 
+const jobsStatement = /\b(?:from|into|update|join)\s+jobs\b/i;
+/**
+ * A transaction's `query`, refusing any statement on `jobs` once a wake is deferred (GY-1212). A
+ * `Store.transaction` takes its wakes just before COMMIT (see `wakeJob`), so its own statements on
+ * `jobs` (an observation's own job, a delivered item's) must come before its first wake: a later
+ * read would miss the wake and a later delete would see its row put back.
+ */
+function guardDeferredWakes(db: pg.PoolClient, query: pg.PoolClient['query']): pg.PoolClient['query'] {
+  return ((text: unknown, ...rest: unknown[]) => {
+    const sql = typeof text === 'string' ? text : (text as { text?: unknown } | null)?.text, wakes = pendingWakes.get(db);
+    if (wakes?.size && typeof sql === 'string' && jobsStatement.test(sql)) return Promise.reject(new Error(`A jobs statement ran after this transaction deferred a job wake (${[...wakes.keys()].join(', ')}) (GY-1212)`));
+    return (query as (...args: unknown[]) => unknown).call(db, text, ...rest);
+  }) as pg.PoolClient['query'];
+}
 export { webhookWakeTtlMs, observationStarvedAfterMs, wakeFromWebhook, wakeJob, wakeJobs } from './wake.js';
 
 export async function save(db: pg.PoolClient, work: Work, actor: string, kind: string, now: Date, details?: unknown) {

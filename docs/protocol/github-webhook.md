@@ -19,7 +19,7 @@ The request budget per merge is those wakes: a woken item's next reading pays fo
 
 ## Prioritized wakes
 
-A guarded merge refused for ten minutes is reworked or re-reviewed (GY-831), except a refusal standing only on a missing or stale observation, every other gate passing. That candidate keeps its queue position: the loop sends `POST /api/work/:id/resync` with `prioritized: true`, recorded as a `refresh` action and repeated at most once per two-minute window while the refusal stands. A prioritized wake, and the wake of a merge request's enqueue, is claimed like a webhook's, oldest first.
+A guarded merge refused for ten minutes is reworked or re-reviewed (GY-831), except a refusal standing only on a missing or stale observation, every other gate passing. That candidate keeps its queue position: the loop sends `POST /api/work/:id/resync` with `prioritized: true`, recorded as a `refresh` action and repeated at most once per two-minute window while the refusal stands. A prioritized wake, and the wake of a merge request's enqueue, is claimed like a webhook's, oldest first. A rework decision waiting on a stale observation sends the same prioritized wake, once, and is decided from the observation it brings in while that still shows the submitted head and is under 15 minutes old: a two-minute bound alone expired before any interval over two minutes could read it.
 
 ## Automatic dispatch records
 

@@ -100,6 +100,8 @@ export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'rev
  * moved past. The loop waits for a fresh observation and decides from that.
  */
 export const reworkObservationMaxAgeMs = 120_000;
+/** GY-1266. The age bound on the observation the loop's own wake brought in: the longest interval (900s), so it survives one cycle gap. */
+export const reworkWokenObservationMaxAgeMs = 15 * 60_000;
 export interface GitHubPause { until: string }
 /**
  * Whether the control plane's GitHub client is paused, read from the observation jobs it refused:
@@ -119,26 +121,26 @@ export const observedFrom = (work: Work) => work.observation
   ? `[Decided from the GitHub observation taken at ${work.observation.at} of candidate ${work.observation.candidate.sha}; if the item has moved since, this request no longer describes it.]`
   : '[Decided with no GitHub observation of the item.]';
 /**
- * Why a rework request must wait for a fresh observation, or null when the one on the item may be
- * decided from. The reason names the stale observation — its time and head — and never its age,
- * so it reads the same on every cycle it stands.
+ * Why a rework request must wait for a fresh observation, or null when the one on the item may be decided
+ * from. The reason names the stale observation — its time and head — never its age, so it reads the same each cycle.
  */
-export function reworkObservationWait(work: Work, now: number, pause: GitHubPause | null): string | null {
+export function reworkObservationWait(work: Work, now: number, pause: GitHubPause | null, wokenAt?: string | null): string | null {
   const observation = work.observation;
   if (!observation) return `${work.key}: rework waits for a GitHub observation of the item; there is none to decide from`;
   const seen = `the last GitHub observation (taken at ${observation.at} of head ${observation.candidate.sha.slice(0, 12)})`;
   if (pause) return `${work.key}: rework waits for a fresh GitHub observation — GitHub requests are paused until ${pause.until}, so ${seen} is a stale observation that may describe a head the branch has moved past`;
   const age = now - Date.parse(observation.at);
+  // GY-1266. The loop's own woken observation of the submitted head is the reading it waited for: the next cycle reads it an interval
+  // later, past two minutes, so on that bound alone every landed wake was stale again, re-sent, and no rework was ever requested.
+  if (wokenAt && Date.parse(observation.at) > Date.parse(wokenAt) && observation.candidate.sha === work.candidate?.sha && age < reworkWokenObservationMaxAgeMs) return null;
   if (!(Number.isFinite(age) && age < reworkObservationMaxAgeMs)) return `${work.key}: rework waits for a fresh GitHub observation — ${seen} is a stale observation, older than two minutes, and the branch may have moved past that head`;
   return null;
 }
 
 /**
- * GY-710. A step refused for want of a fresh observation wakes the item's observation job at once
- * and waits for that observation to land, rather than for whatever the job's cadence brings round.
- * One wake stands until an observation newer than it lands; a wake that brought none within this
- * bound (the job failed, or the server lost it) is sent again. During a GitHub pause the job can
- * observe nothing, so no wake is sent.
+ * GY-710. A step refused for want of a fresh observation wakes the item's observation job at once and waits for that
+ * observation to land, not the job's cadence. One wake stands until a newer observation lands; a wake that brought none
+ * within this bound (the job failed, or the server lost it) is sent again. During a GitHub pause no wake is sent.
  */
 export const observationWakeRetryMs = 5 * 60_000;
 export function observationWakeDue(work: Work, wokenAt: string | null | undefined, now: number, pause: GitHubPause | null): boolean {
@@ -171,9 +173,8 @@ export function awaitingObservation(previous: { state: string; detail: string } 
   return previous?.state === 'failed' && staleMergeRefusal.test(previous.detail) && wake?.state === 'done';
 }
 /**
- * GY-710. Whether the observation a stale merge refusal woke has landed — an observation newer than
- * the wake — with every gate passing: the merge is asked again at once, the attempt following the
- * observation rather than the retry backoff (`mergeRetryDue`).
+ * GY-710. Whether the observation a stale merge refusal woke has landed (newer than the wake) with every
+ * gate passing: the merge is asked again at once, following the observation, not the backoff (`mergeRetryDue`).
  */
 export function mergeObservationLanded(wake: { state: string; at: string } | undefined, work: Work): boolean {
   if (wake?.state !== 'done' || work.violations.length || !work.gates.every(gate => gate.passed)) return false;
@@ -184,8 +185,7 @@ export function mergeObservationLanded(wake: { state: string; at: string } | und
 export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements', 'close', 'attest'] as const;
 export type RoutineDecisionAction = typeof routineDecisionActions[number];
 /** `input` is what the decision names beyond what `decisionInput` derives from the item: a resolve's trigger, and the grounds binding a situated request judges (GY-407). */
-/** `escalation` is the one standing escalation a resolve settles: a standing request for any other is not this decision. */
-/** `scope` is the worker request a `requirements` decision answers; `input.answers` binds the decision to it. */
+/** `escalation` is the one standing escalation a resolve settles: a standing request for any other is not this decision. `scope` is the worker request a `requirements` decision answers; `input.answers` binds the decision to it. */
 export interface RoutineDecision { action: RoutineDecisionAction; reason: string; binding: string; input?: Record<string, unknown>; escalation?: { trigger: string; at: string }; scope?: NonNullable<ApprovalWatch['scope']> }
 /**
  * Whether two decisions answer the same scope request. Compared field by field: the ledger keeps
@@ -779,8 +779,6 @@ export function repeatedMergeRefusal(work: Pick<Work, 'mergeRefusal' | 'candidat
   const refusal = work.mergeRefusal, candidate = work.candidate;
   return refusal && refusal.action === 'rework' && candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha && refusal.policyRevision === work.policyRevision ? refusal : null;
 }
-
-
 
 /** The launcher key of the approver launch for a decision (GY-616). */
 export const approverLaunchKey = (decision: string) => `launch:approver:${decision}`;

@@ -25,7 +25,7 @@ export { handWatchPrefix };
 /** Step 4c: request and supervise the routine decisions. */
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
   const { config, state, now, snapshot, clock, performed, isolate, agents, open } = cycle;
-  const effects = await decisionReads(cycle.effects, cycle.heldDecisions, snapshot.work, Object.values(state.approvals));
+  const effects = await decisionReads(cycle.effects, cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock);
   // 4c. The routine decisions. A standing verdict, a base the control plane could not merge in, and
   //     a delivered item still fenced by a dead supervisor each have one correct answer, and each
   //     used to wait for a master session to notice. The loop requests the decision with the
@@ -293,7 +293,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const attempts = (state.actions[key]?.attempts ?? 0) + 1;
     await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'started', detail: `Requesting the ${decision.action} decision for ${item.key}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist);
     try {
-      const history = effects.decisions ? (await effects.decisions(item).catch(() => ({ decisions: [] }))).decisions : [];
+      // An unreadable history is unknown, not empty (GY-1241): the request fails until a read answers,
+      // except rework/recover, whose refusal the server names and the loop cites (GY-229).
+      const unread = decision.action === 'rework' || decision.action === 'recover';
+      const history = effects.decisions ? (await effects.decisions(item).catch(error => { if (unread) return { decisions: [] }; throw error; })).decisions : [];
       const applied = decision.action === 'merge' ? approvedMerge(item, history) : null;
       if (applied) {
         state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: applied.id, requestedAt: stamp, settledAt: stamp });
@@ -596,7 +599,9 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (decision.action === 'rework' && !state.approvals[key] && baseRefreshConflict(item) && decision.binding === `${item.candidate!.sha}:conflict` && await docsSync.holds(item)) return;
     needed.add(key);
     // Rework waits for an observation that still describes the item (GY-144); the step wakes it unless paused (GY-793) and re-decides.
-    let wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause) : null;
+    // The loop's own landed wake of the submitted head counts as that observation (GY-1266).
+    const woken = state.actions[`wake:observation:${item.id}`];
+    let wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause, woken?.state === 'done' ? woken.at : null) : null;
     const fresh = wait && !pause && wake && !state.approvals[key] ? await wake(item, clock) : null;
     const again = fresh && routineDecision(fresh, config, now(), assessment);
     if (fresh && again?.action !== 'rework') return noteWait(item, `${item.key}: woke its observation for a rework decision; the reading at ${fresh.observation?.at ?? 'unknown'} no longer calls for one`);
