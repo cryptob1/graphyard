@@ -176,16 +176,10 @@ export interface PendingFollowUps {
   filed?: { item: string; at: string } | null;
   dropped?: { reason: string; at: string } | null;
 }
-export type Parent = Pick<Work, 'key' | 'stage'> & Partial<Pick<Work, 'delivery' | 'optimisticMerges'>> & { closure?: Closure | null; pendingFollowUps?: PendingFollowUps | null };
-/**
- * Whether a parent has shipped: delivered, and, when that delivery is an optimistic merge (GY-500),
- * with main's required suite passed on it — until then a failing suite reverts the merge and
- * reopens the parent.
- */
+export type Parent = Pick<Work, 'key' | 'stage'> & Partial<Pick<Work, 'delivery'>> & { closure?: Closure | null; pendingFollowUps?: PendingFollowUps | null };
+/** Whether a parent has shipped: delivered. */
 export function hasShipped(parent: Parent) {
-  if (!isDelivered(parent)) return false;
-  const merge = parent.optimisticMerges?.find(entry => entry.mergeSha === parent.delivery?.mergeSha);
-  return !merge || merge.postMerge?.verdict === 'pass';
+  return isDelivered(parent);
 }
 /** Whether a follow-up item's parent has not shipped yet: triage never judges it until it does. */
 export function awaitsParent(item: Filed, all: readonly Parent[]) {

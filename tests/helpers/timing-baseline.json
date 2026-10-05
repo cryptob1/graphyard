@@ -314,10 +314,12 @@
     "tests/executor-kinds.test.ts": 1529,
     "tests/executor-release.test.ts": 6090,
     "tests/executor-supervision.test.ts": 26432,
+    "tests/exhausted-proof-runtime.test.ts": 350,
     "tests/exited-worker-pane.test.ts": 1768,
     "tests/failed-launch-pane.test.ts": 1877,
     "tests/failed-manual-proof-rework.test.ts": 1485,
     "tests/unproduced-manual-attestation.test.ts": 900,
+    "tests/fault-class-decision.test.ts": 1200,
     "tests/fault-class-scope.test.ts": 1200,
     "tests/fault-classes.test.ts": 2268,
     "tests/proof-attempts.test.ts": 340,
@@ -411,7 +413,6 @@
     "tests/observation-throughput.test.ts": 11730,
     "tests/onboarding.test.ts": 1390,
     "tests/one-reviewer-per-request.test.ts": 2730,
-    "tests/optimistic-exclude.test.ts": 966,
     "tests/optimistic-merge.test.ts": 993,
     "tests/orphan-supervisor.test.ts": 2076,
     "tests/overlap-scheduler.test.ts": 1647,
@@ -429,6 +430,7 @@
     "tests/producer-already-pending.test.ts": 1082,
     "tests/producer-environment.test.ts": 1800,
     "tests/production-watch.test.ts": 1712,
+    "tests/project-memory-followups.test.ts": 400,
     "tests/proof-exercises-criterion.test.ts": 2724,
     "tests/proof-faults.test.ts": 1000,
     "tests/proof-grants.test.ts": 3266,
@@ -577,7 +579,6 @@
     "tests/test-case-repository-ui.test.ts": 744,
     "tests/test-case-repository.test.ts": 4051,
     "tests/tmp-cleanup.test.ts": 13603,
-    "tests/unblock-stale-revision.test.ts": 4873,
-    "tests/exhausted-proof-runtime.test.ts": 350
+    "tests/unblock-stale-revision.test.ts": 4873
   }
 }

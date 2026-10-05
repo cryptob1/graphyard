@@ -1,5 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdir, rm, stat, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { daemonEffects, emptyDaemonState } from '../src/master-daemon.js';
+import { checkAgentEnvironment, masterConfigSchema, type AgentEnvironment } from '../src/master.js';
+import { clearPlanUsageCache } from '../src/provider-usage.js';
 import { docsWords } from '../src/model/documentation.js';
 import {
   emptyProjectMemory,
@@ -16,6 +21,7 @@ import {
   type ProjectMemory,
 } from '../src/model/project-memory.js';
 import {
+  projectMemoryPath,
   readProjectMemory,
   syncProjectMemory,
   writeProjectMemory,
@@ -138,6 +144,8 @@ test('unit:review-followups-triaged — oversized memory decision is abbreviated
   assert.ok(digest.includes('… [approved by operator]'));
   // Must strictly respect the word budget
   assert.ok(docsWords(digest) <= 500, `Expected <= 500 words, got ${docsWords(digest)}`);
+  // The one computed slice fills the budget exactly rather than leaving words unused (GY-1180).
+  assert.equal(docsWords(digest), 500);
 });
 
 test('unit:review-followups-triaged — loop continues on oversized entry instead of breaking, preserving subsequent shorter entries (Finding 5)', () => {
@@ -257,28 +265,31 @@ test('unit:review-followups-triaged — syncProjectMemory caps retention and cha
   assert.equal(fromDisk.pitfalls.length, retainedMemoryPitfalls);
   assert.equal(fromDisk.changes.length, retainedMemoryChanges);
 
-  // Test change-only persistence mirroring:
-  // When memory is unchanged across cycles, persist does not rewrite the file
-  let writes = 0;
-  let writtenMemory: string | null = null;
-  const mockPersist = async (currentMemory: ProjectMemory) => {
-    const serialized = JSON.stringify(currentMemory);
-    if (serialized !== writtenMemory) {
-      await writeProjectMemory(root, currentMemory);
-      writtenMemory = serialized;
-      writes++;
-    }
-  };
-
-  // First cycle: writes once
-  await mockPersist(fromDisk);
-  assert.equal(writes, 1);
-
-  // 10 subsequent identical cycles: no additional disk writes
-  for (let c = 0; c < 10; c++) {
-    await mockPersist(fromDisk);
+  // Change-only persistence, driven through the loop's real persist (GY-1180): the mirror file is
+  // removed after the first write, so a cycle that rewrote unchanged memory would bring it back.
+  const secrets = await temporaryDirectory('project-memory-persist');
+  const credentialFile = join(secrets, 'coordinator.token');
+  const master = masterConfigSchema.parse({ version: 1, url: 'http://127.0.0.1:9', credentialFile, cliPath: 'bin/graphyard.mjs',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project',
+    autoMerge: true, mergeMethod: 'merge', workers: [], run: { worktreeRoot: join(secrets, 'checkouts') } });
+  const effects = daemonEffects(root, master, {
+    snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate: async () => ({}),
+    executor: { principal: 'coordinator-1', instance: 'persist' }, run: async () => '',
+  });
+  const state = { ...emptyDaemonState(master), projectMemory: fromDisk };
+  try {
+    await effects.persist(state);
+    assert.deepEqual(await readProjectMemory(root), fromDisk);
+    await rm(projectMemoryPath(root));
+    for (let c = 0; c < 10; c++) await effects.persist(state);
+    await assert.rejects(stat(projectMemoryPath(root)), 'File must not be rewritten when project memory is unchanged');
+    // A changed memory is written on the next cycle.
+    recordChangeInMemory(fromDisk, { key: 'GY-M-new', sha: 'f'.repeat(40), files: ['new.ts'], mergedAt: new Date(Date.now() + 60_000).toISOString() });
+    await effects.persist(state);
+    assert.equal((await readProjectMemory(root)).changes[0]?.key, 'GY-M-new');
+  } finally {
+    await rm(secrets, { recursive: true, force: true });
   }
-  assert.equal(writes, 1, 'File must not be rewritten when project memory is unchanged');
 });
 
 test('unit:review-followups-triaged — settled summary items preserve existing project memory decisions without backfill (Finding 1 & 4)', () => {
@@ -318,4 +329,26 @@ test('unit:review-followups-triaged — settled summary items preserve existing 
   // Settled item with delivery is recorded in changes
   assert.equal(memory.changes.length, 1);
   assert.equal(memory.changes[0].key, 'GY-400');
+});
+
+test('unit:review-followups-triaged — accounts on one shared provider plan read its quota endpoint once, not once per account (GY-1180)', async () => {
+  clearPlanUsageCache();
+  const homes = await temporaryDirectory('shared-plan-accounts');
+  try {
+    let calls = 0;
+    const fetcher = (async () => { calls++; return new Response(JSON.stringify({ windows: [{ window: '5h', percent: 12, resetsAt: null }] }), { status: 200 }); }) as typeof fetch;
+    const accounts = ['opencode-a', 'opencode-b', 'opencode-c'].map(name => ({ name, kind: 'opencode' as const, home: join(homes, name), plan: 'zai-shared' }));
+    for (const account of accounts) { await mkdir(account.home, { recursive: true }); await writeFile(join(account.home, 'zai.key'), `key-${account.name}`); }
+    const now = Date.parse('2026-10-03T00:00:00.000Z');
+    const health = [];
+    for (const account of accounts) health.push(await checkAgentEnvironment(account as AgentEnvironment, { fetch: fetcher, now: () => now }));
+    assert.equal(calls, 1, 'the second and third accounts reuse the plan reading');
+    assert.deepEqual(health.map(entry => [entry.quota, entry.usage[0]?.percent]), [['available', 12], ['available', 12], ['available', 12]]);
+    // A reading from the cache does not re-stamp it: once the window passes, the endpoint is read again.
+    await checkAgentEnvironment({ ...accounts[0], name: 'opencode-d' } as AgentEnvironment, { fetch: fetcher, now: () => now + 31_000 });
+    assert.equal(calls, 2);
+  } finally {
+    clearPlanUsageCache();
+    await rm(homes, { recursive: true, force: true });
+  }
 });
