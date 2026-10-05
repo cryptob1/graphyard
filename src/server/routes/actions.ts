@@ -1,6 +1,7 @@
 import { demand } from '../../model.js';
+import { executorPresenceSchema } from '../../engine.js';
 import { idleActionable, queueSnapshot, type ActionRow } from '../../model/actions.js';
-import { executorRegistry, executorReport } from '../../model/executor-presence.js';
+import { durablePresence, executorRegistry, executorReport, loopRegistry, presenceQuery, recordPresence, reportedLoopMerger } from '../../model/executor-presence.js';
 import { mechanicalActionKinds, nextActionKinds } from '../../model/next-action.js';
 import { openAgentRequests } from '../../model/agent-requests.js';
 import { runningSessions } from '../../model/sessions.js';
@@ -35,8 +36,9 @@ export const actionRoutes = defineRoutes('actions', [
         nextActions: work.filter(item => item.nextAction).map(item => item.nextAction),
         idle: idleActionable(work, now),
         // Who is alive to claim, and every pending row whose kind none of them serves (GY-105):
-        // an action nobody can run, reported apart from one waiting its turn.
-        executors: executorReport(work, executorRegistry(services.engine), now),
+        // an action nobody can run, reported apart from one waiting its turn. Presence any process
+        // recorded durably counts, so a replaced control plane reads the fleet live (GY-1289).
+        executors: executorReport(work, executorRegistry(services.engine), now, undefined, await reportedLoopMerger(loopRegistry(services.engine), (text, values) => services.engine.store.pool.query(text, values), now), await durablePresence(presenceQuery(services.engine))),
         requests: work.flatMap(item => openAgentRequests(item, now).map(request => ({ ...request, key: item.key, work: item.id }))),
         sessions: runningSessions(work, now),
       };
@@ -48,16 +50,44 @@ export const actionRoutes = defineRoutes('actions', [
       const body = await parseJson(context, undefined, '{}') as { executor?: string; host?: string; kinds?: string[] };
       const result = await context.services.engine.claimNextAction(context.actor, body, context.idempotencyKey()) as { action: ActionRow | null; at?: string };
       // The poll itself is the presence signal, whether or not it claimed: the engine validated
-      // the body, so what is recorded here is exactly what an executor can run.
-      executorRegistry(context.services.engine).observe({ executor: body.executor ?? context.actor.id, host: body.host!, principal: context.actor.id, kinds: (body.kinds ?? nextActionKinds) as typeof nextActionKinds[number][] }, new Date(result.at ?? Date.now()), !!result.action);
+      // the body, so what is recorded here is exactly what an executor can run. It is recorded in
+      // memory and as the executor's one durable presence row — never an event row (GY-1289).
+      const poll = { executor: body.executor ?? context.actor.id, host: body.host!, principal: context.actor.id, kinds: (body.kinds ?? nextActionKinds) as typeof nextActionKinds[number][] };
+      const at = new Date(result.at ?? Date.now());
+      executorRegistry(context.services.engine).observe(poll, at, !!result.action);
+      await recordPresence(presenceQuery(context.services.engine), poll, at, { claimed: !!result.action });
       return result;
     },
   },
   {
+    // A poll that asks for nothing (GY-1288): an executor behind a fleet restart's fence may not
+    // claim, yet it is alive and claims again the moment the fence is lowered, so it says so here.
+    // It claims nothing and writes nothing; it is the presence half of a claim poll alone.
+    method: 'POST', path: '/api/actions/presence',
+    async handle(context) {
+      demand(context.actor.role === 'coordinator' || context.actor.role === 'admin', 'Coordinator permission required', 403);
+      const body = executorPresenceSchema.parse(await parseJson(context, undefined, '{}'));
+      const at = new Date();
+      const poll = { executor: body.executor ?? context.actor.id, host: body.host, principal: context.actor.id, kinds: body.kinds ?? [...nextActionKinds] };
+      executorRegistry(context.services.engine).observe(poll, at);
+      await recordPresence(presenceQuery(context.services.engine), poll, at);
+      return { observed: true, at: at.toISOString() };
+    },
+  },
+  {
     // An executor still inside a handler holds its claim by saying so; see Engine.renewClaimedAction.
+    // The renewal is also its presence: a long handler polls nothing until it ends (GY-1288).
     method: 'POST', path: /^\/api\/actions\/([0-9a-f]{32})\/renew$/,
     async handle(context, [id]) {
-      return context.services.engine.renewClaimedAction(context.actor, id, await parseJson(context, undefined, '{}'));
+      const result = await context.services.engine.renewClaimedAction(context.actor, id, await parseJson(context, undefined, '{}'));
+      const claim = result.action?.claim;
+      if (claim) {
+        const at = new Date();
+        const presence = executorRegistry(context.services.engine).renewed({ executor: claim.executor, host: claim.host, principal: context.actor.id, kind: result.action!.kind }, at);
+        // Durably too, keeping the kinds the executor last polled with wherever that poll landed.
+        await recordPresence(presenceQuery(context.services.engine), presence, at, { renewal: true });
+      }
+      return result;
     },
   },
   {

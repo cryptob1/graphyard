@@ -61,7 +61,6 @@ function harness(item: { current: Work[] }, agent: HerdrAgent) {
     closeSession: pane => { log.closed.push(pane); },
     dispatch: async () => {},
     requestProof: () => {},
-    merge: async () => ({ result: 'merge requested' }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},
@@ -180,8 +179,13 @@ async function blockedAttempt(title: string) {
   let work = (await call(master.token, 'work', { title, plannedFiles: ['src/a.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Operator goal: reblocked attempts end' })).body as Work;
   work = (await call(master.token, `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Ready' })).body as Work;
   work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
-  work = await engine.execute(implementer, 'blocked', work.id, { epoch: work.lease!.epoch, reason: 'sandbox /tmp owned by uid 65534' }, randomUUID());
-  return work;
+  const lease = work.lease!;
+  work = await engine.execute(implementer, 'blocked', work.id, { epoch: lease.epoch, reason: 'sandbox /tmp owned by uid 65534' }, randomUUID());
+  // Since GY-1008 a blocker ends its attempt at once; an attempt blocked before that still holds
+  // its lease, which is the record the loop's reblocked end (GY-867) was made for.
+  assert.equal(work.lease, null);
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{lease}',$2::jsonb) WHERE id=$1", [work.id, JSON.stringify(lease)]);
+  return reload(work.id);
 }
 
 before(async () => {

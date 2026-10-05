@@ -189,7 +189,9 @@ test('integration:environment-failure-attributed — a sync that fails on a read
     // The item presents as the environment, with the launcher's fix, not as a bare gate refusal.
     const owner = workAttentionOwner({ ...item, blocker: blocked[0].reason, gates: [{ name: 'ready', passed: false, reasons: ['Work is blocked'] }] } as unknown as Work, 'gate');
     assert.ok(environmentBlocked(blocked[0].reason));
-    assert.match(owner.next, new RegExp(`Grant ${fixture.gitDir.replaceAll('/', '\\/')}\\/FETCH_HEAD to the worker's sandbox`));
+    // The loop re-checks the path (GY-1008), and while its probe fails the fix is the launcher's grant.
+    assert.equal(owner.role, 'control plane');
+    assert.match(owner.next, new RegExp(`grant ${fixture.gitDir.replaceAll('/', '\\/')}\\/FETCH_HEAD to the worker's sandbox`));
     assert.doesNotMatch(owner.next, /^Clear the cause/);
 
     // A real permission refusal on the admin directory, without the shim, is attributed the same way.

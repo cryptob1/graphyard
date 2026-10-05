@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { writeWorkerCredential, type MintedPushCredential } from '../worker-credential.js';
@@ -6,6 +7,37 @@ import { spawnSync } from 'node:child_process';
 import { defineCommands, workMutation, type CliCommand } from './registry.js';
 import { verifyCommand } from './verify.js';
 import { completeCommand } from './complete.js';
+
+/**
+ * Keeps what a blocked attempt had not committed (GY-1008), run from its own worktree: when the
+ * checkout is the worktree registered for `epoch` and on its branch, uncommitted changes become one
+ * WIP commit on it. Null when this checkout is not that attempt's — another checkout that happens
+ * to have the same branch checked out included — so a blocker recorded from elsewhere touches nothing.
+ * The commit is made unsigned and without hooks, as the attempt's own scratch record. When it still
+ * cannot be made (the Git directory read-only, say) the changes stay in the worktree and the record
+ * names its head, branch and path, so the next attempt's request still points at them.
+ */
+export function keepBlockedWork(work: { key: string; workspaces?: { epoch: number; branch: string; path: string }[] }, epoch: number, cwd = process.cwd()) {
+  const git = (...args: string[]) => spawnSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const workspace = work.workspaces?.find(entry => entry.epoch === epoch);
+  const branch = git('symbolic-ref', '--short', 'HEAD').stdout?.trim();
+  if (!workspace || !branch || branch !== workspace.branch || !sameDirectory(git('rev-parse', '--show-toplevel').stdout?.trim(), workspace.path)) return null;
+  const described = { branch, path: workspace.path };
+  const head = () => git('rev-parse', 'HEAD').stdout.trim();
+  if (!git('status', '--porcelain').stdout?.trim()) return { state: 'clean' as const, commit: head(), ...described, detail: 'the worktree held no uncommitted change; every commit of the attempt is on its branch' };
+  const added = git('add', '-A');
+  const committed = added.status === 0 ? git('-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@localhost', '-c', 'commit.gpgsign=false', 'commit', '--no-verify', '-m', `WIP: ${work.key} attempt ${epoch} blocked`) : added;
+  if (committed.status === 0) return { state: 'committed' as const, commit: head(), ...described, detail: 'uncommitted changes were committed on the attempt branch, unpushed' };
+  const tip = head();
+  return { state: 'not-applicable' as const, ...(/^[0-9a-f]{40}$/.test(tip) ? { commit: tip } : {}), ...described,
+    detail: `uncommitted changes could not be committed and were left in the worktree on top of its head: ${(committed.stderr || committed.stdout || '').trim()}`.slice(0, 500) };
+}
+
+/** Whether two paths name the same directory, links resolved; false when either is missing. */
+function sameDirectory(a: string | undefined, b: string) {
+  if (!a) return false;
+  try { return realpathSync(a) === realpathSync(b); } catch { return false; }
+}
 
 /** The candidate a run actually tested: the producer request the session was launched for, or else the checkout's own HEAD. */
 export type TestedBinding = { source: string; sha: string; baseSha?: string; policyRevision?: number };
@@ -87,8 +119,14 @@ export const leaseCommands = defineCommands([
   {
     name: 'blocked',
     scope: 'work',
-    help: ["  blocked GY-N EPOCH REASON     Set blocker; use '-' to clear"],
-    run: async (context, work) => context.print(await workMutation(context, work)('blocked', { epoch: Number(context.args[0]), reason: context.args[1] === '-' ? null : context.args.slice(1).join(' ') })),
+    help: ["  blocked GY-N EPOCH REASON     Set blocker and end this attempt, keeping uncommitted work", "                                as a WIP commit; the loop clears routine causes itself; '-' clears"],
+    // A blocker ends the attempt (GY-1008): what it had not committed is kept first, as a WIP commit
+    // on its own branch, so the next attempt's request can name it.
+    run: async (context, work) => {
+      const epoch = Number(context.args[0]), reason = context.args[1] === '-' ? null : context.args.slice(1).join(' ');
+      const partialWork = reason ? keepBlockedWork(work, epoch) : null;
+      return context.print(await workMutation(context, work)('blocked', { epoch, reason, ...(partialWork ? { partialWork } : {}) }));
+    },
   },
   verifyCommand,
   completeCommand,

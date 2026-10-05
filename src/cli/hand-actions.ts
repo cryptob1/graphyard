@@ -5,6 +5,8 @@ import type { Work } from '../model/work.js';
 import { sessionRetry } from '../producer.js';
 import { dispatchFailureLimit } from '../auto-dispatch.js';
 import { mergedWithoutAuthorization } from '../master.js';
+import { attestDecisions } from '../daemon/decisions.js';
+import { decisionKey } from '../daemon/reconcile.js';
 
 /**
  * The master-side rules the loop depends on, enforced where the master acts rather than
@@ -32,9 +34,9 @@ export type HandAction = typeof handActions[number];
 /** The command a master types for each hand action, and the loop step that performs it instead. */
 export const loopOwned: Record<HandAction, { command: string; step: string }> = {
   dispatch: { command: 'master dispatch', step: "the loop's dispatch step: master run's dispatcher claims the item's dispatch action and launches a worker" },
-  merge: { command: 'master merge', step: "the loop's merge step: master run performs the guarded merge of the authorized candidate" },
+  merge: { command: 'master merge', step: "GitHub's merge: GitHub merges a candidate whose gates passed, and the loop records the delivery" },
   review: { command: 'master review', step: "the loop's dispatch step: master run launches the bound reviewer on every submitted head; master review is open only as the recovery of a review request the loop has stopped relaunching" },
-  evidence: { command: 'master decide attest', step: "the loop's dispatch step: master run launches an independent proof producer on the exact head; only a manual proof no producer runs, or whose producer request the loop stopped relaunching, is attested" },
+  evidence: { command: 'master decide attest', step: "the loop's dispatch step: master run launches an independent proof producer on the exact head; a manual proof no producer runs is attested through the attest decision the loop's decisions step requests itself, and a hand attestation stays open only to answer a refusal or a producer request the loop stopped relaunching" },
   'merge-decision': { command: 'master decide merge', step: "the loop's decisions step: master run requests the merge decision when automatic merging is off" },
 };
 
@@ -58,13 +60,13 @@ export function handDecision(work: Work, action: string | undefined, input: unkn
 }
 /**
  * Why a hand merge decision is the one the loop sends the master to, or null while the loop
- * requests it itself. Two cases: a merge GitHub already made without a valid execution, which
+ * requests it itself. Two cases: a merge GitHub already made though its gates had not passed, which
  * only a two-party decision reconciles and the loop names rather than requests; and a loop with
  * no operator-agent identity (`requestsDecisions: false`), whose merge step says the master puts
  * the decision to the approver by hand.
  */
 export function mergeDecisionRecovery(work: Work, loop: Pick<LoopSessions, 'requestsDecisions'>): string | null {
-  if (mergedWithoutAuthorization(work)) return `${work.key} was merged on GitHub without a valid merge execution; only a two-party merge decision reconciles it`;
+  if (mergedWithoutAuthorization(work)) return `${work.key} was merged on GitHub though its gates had not passed on that head; only a two-party merge decision reconciles it`;
   if (loop.requestsDecisions === false) return 'no master operator-agent identity is provisioned, so the loop cannot request the merge decision itself';
   return null;
 }
@@ -278,4 +280,26 @@ export async function assertHandDispatch(work: Work, now: string, intervalSecond
   const retryAt = dispatchRetryAt(work, judgedAt);
   // The row's backoff is on the control plane's clock; the deadline is carried onto this host's from before the snapshot was read.
   return retryAt === null ? {} : { claimBy: requestedAt + (retryAt - snapshotAt) - handDispatchClaimMarginMs };
+}
+
+/** One `manual:` attestation the loop's decisions step requests itself (GY-521), as `master status` lists it. */
+export interface LoopAttestation { key: string; proof: string; sha: string; decision: string | null; approver: string | null; state: 'to-request' | 'judging' | 'settled'; detail: string }
+type AttestWatch = { key?: string; work: string; action: string; decision: string; agentName?: string | null; settledAt?: string | null };
+/**
+ * The loop's pending decisions on unproduced `manual:` proofs: every item waiting on nothing but
+ * such a proof, with the attest decision the loop requested for it and the approver judging it.
+ * These are the loop's own steps, not a person's: `master status` names them here and never under
+ * needs-human, as `next-action.ts` names their wait on the loop.
+ */
+export function loopAttestations(snapshot: { work: Work[]; now: string }, approvals: readonly AttestWatch[] = []): LoopAttestation[] {
+  const now = Date.parse(snapshot.now);
+  return snapshot.work.flatMap(work => attestDecisions(work, snapshot.work, now).map(decision => {
+    const key = decisionKey(work, decision), watch = approvals.find(entry => entry.key === key);
+    const proof = String(decision.input?.proof), sha = work.candidate!.sha;
+    const state = !watch ? 'to-request' : watch.settledAt ? 'settled' : 'judging';
+    const detail = !watch ? `the loop requests the attest decision for ${proof} on ${sha.slice(0, 12)} on its next decisions step and launches an independent approver for it`
+      : watch.settledAt ? `attest decision ${watch.decision} for ${proof} is judged; a refusal is answered with graphyard master decisions ${work.key}`
+        : `attest decision ${watch.decision} for ${proof} is with approver session ${watch.agentName ?? '(not launched yet)'}`;
+    return { key: work.key, proof, sha, decision: watch?.decision ?? null, approver: watch?.agentName ?? null, state, detail };
+  }));
 }

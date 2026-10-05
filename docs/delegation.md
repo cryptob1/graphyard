@@ -1,31 +1,27 @@
 <!-- page: Operate Graphyard | 11 | leads and escalations. -->
 # Slice-lead delegation
 
-Optional slices (`product`, `infrastructure`, `docs-experience`), each led by an AI `slice-lead` session.
-
 ## Authority boundaries
 
-A lead coordinates its slice's workers, approves or rejects plans, sends work back and escalates; it cannot implement, claim, submit evidence, review its own slice, change requirements or merge (`lead.action.refused`). `reject-plan` and `send-back` record a **lead hold** that refuses the merge gate: a `reject-plan` clears only through a later `approve-plan` from that lead with `"supersedes": "RULING-ID"`, a `send-back` only through `rework`.
+An AI `slice-lead` leads an optional slice (`product`, `infrastructure`, `docs-experience`): rules on plans, sends back, escalates; never implements, reviews, proves or merges (`lead.action.refused`). `reject-plan`/`send-back` hold the merge gate (**lead hold**) until that lead's `approve-plan` with `"supersedes": "RULING-ID"` / `rework`.
 
-A producer that ever held an assignment on the item, or belongs to its slice, is refused (`evidence.producer.refused`). Capacity limits are [deployment variables](deployment.md#variables).
+Producers ever assigned the item or in its slice: `evidence.producer.refused`. Limits: [deployment variables](deployment.md#variables).
 
 ## Escalation
 
 | Trigger | Raised when |
 | --- | --- |
-| `lease-loss` | A worker lease lapses with no submission, no carried `blocked` report, no stopped-worker attestation and no provider-exhaustion record. |
-| `evidence-policy-conflict` | Trusted evidence arrives for another policy revision. |
-| `security-concern` | A lead files an `escalate` ruling naming it. |
-| `requirement-weakening` | A revision retires a criterion or narrows its proofs. |
+| `lease-loss` | A lapse with no submission, no carried `blocked` report, no stopped-worker attestation, no provider-exhaustion record |
+| `evidence-policy-conflict` | Trusted evidence for another policy revision |
+| `security-concern` | A lead's `escalate` ruling |
+| `requirement-weakening` | A revision retires a criterion or narrows proofs |
 
-An unresolved trigger drops merge authorization and refuses the merge gate; raising one dequeues the head. A lapse the ledger explains is instead a `lease.expired` entry with its [cause](protocol/leases.md#how-a-lease-ends): `submitted`, `blocked-awaiting-operator`, `stopped-by-attestation` or `exhausted-capacity`. Reconciliation auto-settles a later-explained `lease-loss`, recording `escalation.auto-settled` with a note such as `auto-settled: blocked report for epoch N explains the lapse` or `auto-settled: stopped-worker attestation for epoch N explains the lapse`. A replacement worker may claim meanwhile; delivery waits.
+Unresolved triggers refuse the merge gate. Explained lapses are `lease.expired` with a [cause](protocol/leases.md#how-a-lease-ends) (`submitted`, `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`); later-explained `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`). Meanwhile a replacement may claim; delivery waits.
 
 ### Who may settle what
 
-Each resolution records `escalation.resolved`: resolver, session kind, reason, attestation.
+Resolutions record `escalation.resolved`.
 
-- `lease-loss` for a lapse the ledger explains: reconciliation, or any `admin` with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`.
-- Control-plane `lease-loss` of a superseded or stopped epoch: the loop's two-party decision, stale if the superseding lease lapses.
-- `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, and any `lease-loss` a lead raised: a two-party decision the master requests, or a declared human session.
-
-A declared human session (`admin`, `sessionKind: "human"`) settles any; nobody else resolves alone.
+- Explained `lease-loss`: reconciliation, or `admin` `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`.
+- `lease-loss` of a superseded/stopped epoch: loop's two-party decision (stale if the superseding lease lapses).
+- `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, or a lead-raised `lease-loss`: master-requested two-party decision, or a declared human session (`admin`, `sessionKind: "human"`; settles any).

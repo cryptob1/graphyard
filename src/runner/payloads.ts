@@ -63,7 +63,39 @@ export const diagnosisPayloadSchema = z.object({
 }).strict().refine(payload => !!payload.covering !== !!payload.fix, 'A diagnosis names exactly one answer: the covering item, or the fix item to file');
 export type DiagnosisPayload = z.infer<typeof diagnosisPayloadSchema>;
 
-export const graphyardTools = { decide: 'graphyard_decide', evidence: 'graphyard_submit_evidence', diagnose: 'graphyard_diagnose' } as const;
+/**
+ * What `graphyard_decompose` submits (GY-1126, src/decomposition.ts): the child items a broad item
+ * is split into, or none to keep it whole. A child names the parent's criteria by ID only — the
+ * control plane copies their text and proofs, so a split can drop or reword nothing — with the
+ * planned files it changes and the earlier children (by position) it must land after.
+ */
+export const decomposedChildSchema = z.object({
+  title: line(200), description: line(6000).optional(),
+  criteria: z.array(z.string().trim().regex(/^[A-Z]+-\d+$/)).min(1).max(20),
+  plannedFiles: z.array(line(500)).min(1).max(100),
+  after: z.array(z.number().int().min(0).max(9)).max(9).default([]),
+}).strict();
+export const decompositionPayloadSchema = z.object({ reason: line(2000), children: z.array(decomposedChildSchema).max(10) }).strict()
+  .refine(payload => payload.children.length !== 1, 'A split names at least two children; an empty list keeps the item whole');
+export type DecompositionPayload = z.infer<typeof decompositionPayloadSchema>;
+
+/**
+ * `run.decomposition` in .graphyard/master.json (GY-1126): the size bounds an item is judged
+ * against before its first dispatch, and the bound on one decomposition run. The run uses the
+ * research account and model (`run.research`); a loop without one splits nothing.
+ */
+export const decompositionSettingsSchema = z.object({
+  enabled: z.boolean().default(true),
+  maxCriteria: z.number().int().min(1).max(50).default(4),
+  maxBroadScopes: z.number().int().min(0).max(20).default(2),
+  maxPlannedFiles: z.number().int().min(1).max(200).default(12),
+  maxEstimatedLines: z.number().int().min(100).max(100_000).default(1_500),
+  timeoutMinutes: z.number().int().min(1).max(60).default(10),
+  concurrency: z.number().int().min(1).max(16).default(4),
+}).strict();
+export type DecompositionSettings = z.infer<typeof decompositionSettingsSchema>;
+
+export const graphyardTools = { decide: 'graphyard_decide', evidence: 'graphyard_submit_evidence', diagnose: 'graphyard_diagnose', decompose: 'graphyard_decompose' } as const;
 
 /**
  * `run.diagnostician` in .graphyard/master.json (GY-439): the diagnostician runs headless on Pi
@@ -95,7 +127,12 @@ export function diagnosticianSettings(run: { diagnostician?: unknown; pi?: { com
  * the diagnosis, and how it was answered — the fix item filed and released, or the covering item —
  * with the two-party decision in flight. `answeredBy` is the item that answers the subject.
  */
-export const diagnosisStates = ['running', 'diagnosed', 'releasing', 'closing', 'answered', 'refused', 'failed'] as const;
+/**
+ * `waiting`: every run ended on its provider's quota or rate limit (GY-1092). That is the provider's
+ * capacity, not a failed diagnosis: the subject is diagnosed again at `retryAt`, and no failure is
+ * recorded against the loop.
+ */
+export const diagnosisStates = ['running', 'waiting', 'diagnosed', 'releasing', 'closing', 'answered', 'refused', 'failed'] as const;
 export const diagnosisRecordSchema = z.object({
   subject: z.string().max(400), kind: z.enum(['recurring', 'invariant']), faultClass: z.enum(faultClasses),
   /** The recurring-fault item's key; null for an invariant violation. */
@@ -108,10 +145,14 @@ export const diagnosisRecordSchema = z.object({
   fix: z.string().max(50).nullable().default(null),
   decision: z.object({ id: z.string().max(100), action: z.enum(['release', 'close']), work: z.string().max(50), approver: z.string().max(200).nullable().default(null) }).strict().nullable().default(null),
   answeredBy: z.string().max(50).nullable().default(null),
+  /** When a `waiting` diagnosis was refused by its provider. */
+  refusedAt: z.string().max(40).nullable().default(null),
+  /** When a `waiting` diagnosis is run again: the provider's reset, else an hour after the refusal. */
+  retryAt: z.string().max(40).nullable().default(null),
   detail: z.string().max(1000).default(''),
 }).strict();
 export type DiagnosisRecord = z.infer<typeof diagnosisRecordSchema>;
-export const diagnosisSettled = (record: Pick<DiagnosisRecord, 'state'>) => record.state === 'answered' || record.state === 'refused' || record.state === 'failed';
+export const diagnosisSettled = (record: Pick<DiagnosisRecord, 'state'>) => record.state === 'answered' || record.state === 'refused' || record.state === 'failed' || record.state === 'waiting';
 export const retainedDiagnoses = 200;
 
 /**

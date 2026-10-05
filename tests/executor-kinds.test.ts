@@ -58,7 +58,7 @@ test('unit:single-merger-default the executor install leaves merge to a merging 
     const alone = await installExecutorSupervision(host.checkout, { run: args => { restarted.push(args); return systemctl(args); }, unitDirectory: host.withoutLoop, template, node: process.execPath });
     assert.equal(alone.declaration.kinds, null, 'without a loop the executors serve every kind, merge included');
     assert.equal(await declared(), null);
-    assert.match(alone.merger, /no master loop merges on this host, so the executors run the guarded merge/);
+    assert.match(alone.merger, /no master loop merges on this host, so the executors reconcile what GitHub merges/);
     assert.ok(restarted.some(args => args[0] === 'restart' && args.includes(executorUnit(1))), 'a changed kind list restarts the slots that read it at start');
     assert.deepEqual((await install(host.withoutLoop, ['resync', 'merge'])).declaration.kinds, ['resync', 'merge']);
 
@@ -93,7 +93,7 @@ test('unit:dual-merger-surfaced master status names the merger and raises an att
   const loopOn = { configured: true, running: true, autoMerge: true }, loopOff = { configured: false, running: false, autoMerge: true };
   const beside = installationMerger({ loop: loopOn, declaration: { count: 2, kinds: loopMergerExecutorKinds }, served: loopMergerExecutorKinds });
   assert.equal(beside.merger, 'loop');
-  assert.match(beside.detail, /the master loop runs the guarded merge; the executors do not/);
+  assert.match(beside.detail, /the master loop reconciles what GitHub merges; the executors do not/);
   assert.deepEqual(beside.attention, []);
   const alone = installationMerger({ loop: loopOff, declaration: { count: 1, kinds: null }, served: [] });
   assert.equal(alone.merger, 'executors');

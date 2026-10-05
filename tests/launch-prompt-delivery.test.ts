@@ -49,7 +49,14 @@ function work(overrides: Partial<Work> = {}): Work {
     lease: null, workspaces: [{ host: 'h', path: '/w/gy-93', branch: 'graphyard/gy-93-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 93 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation: observation(candidate), blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [], ...overrides } as Work;
 }
-const requested = (overrides: Partial<Work> = {}) => { const item = work(overrides); reconcileAutoDispatch(item, [item], new Date(clock)); return item; };
+// Dispatch no longer opens producer requests (GY-1235: proofs gate nothing), but the producer
+// launcher and its ledger still stand: the request the launches below bind is built by hand.
+const requested = (overrides: Partial<Work> = {}) => {
+  const item = work(overrides);
+  reconcileAutoDispatch(item, [item], new Date(clock));
+  item.autoDispatch!.producers.push({ id: 'producer-integration', kind: 'producer', group: 'integration', proofs: ['integration:launch-prompt-is-a-request'], sha: H, baseSha: B, policyRevision: 1, pr: 93, requestedAt: at, reason: 'unproven', state: 'requested' });
+  return item;
+};
 const ready = () => work({ stage: 'ready', lease: null, submission: null, candidate: null, observation: null, gates: [{ name: 'ready', passed: true, reasons: [] }] });
 
 async function repository() {
@@ -144,7 +151,7 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer, an appr
 
     // Producer on Codex: the request comes after the sandbox flags and their values.
     const producerCredential = await token('producer');
-    await saveProducerProfile(root, { name: 'producer-codex', principal: 'proof-runner', agentName: 'produce-codex', kind: 'codex', credentialFile: producerCredential }, producerVerify('proof-runner'));
+    await saveProducerProfile(root, { name: 'producer-codex', principal: 'proof-runner', agentName: 'produce-codex', kind: 'codex', credentialFile: producerCredential, concurrency: 1 }, producerVerify('proof-runner'));
     const config = await loadMasterConfig(root);
     const item = requested();
     const request = item.autoDispatch!.producers[0];
@@ -204,7 +211,7 @@ test('integration:never-started-vs-failed — a session that ends without doing 
 
   const { root, token, cleanup } = await installed();
   try {
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: await token('producer') }, producerVerify('proof-runner'));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: await token('producer'), concurrency: 1 }, producerVerify('proof-runner'));
     const config = await loadMasterConfig(root);
     const ackMs = acknowledgementMs(config);
     assert.equal(ackMs, defaultAcknowledgementSeconds * 1000);
@@ -417,7 +424,7 @@ test('integration:unacknowledged-session-recovery — the loop detects a launche
 
   const { root, token, cleanup } = await installed();
   try {
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: await token('producer') }, producerVerify('proof-runner'));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: await token('producer'), concurrency: 1 }, producerVerify('proof-runner'));
     // The interval is the master's own setting, adopted like every other owned run field.
     assert.ok((masterOwnedRunFields as readonly string[]).includes('acknowledgementSeconds'));
     await saveMasterSettings(root, { acknowledgementSeconds: 120 });

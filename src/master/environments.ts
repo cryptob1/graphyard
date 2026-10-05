@@ -15,7 +15,10 @@ import { failureText } from './worktrees.js';
 import { shellQuote } from './dispatch.js';
 import { timedCall } from './timings.js';
 import { exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLines, parseResetTime, type ExhaustionSignal } from '../model/capacity.js';
-import { getCachedPlanUsage, setCachedPlanUsage, parseZaiUsage } from '../provider-usage.js';
+import { getCachedPlanUsage, setCachedPlanUsage, parseZaiUsage, type ProviderUsageResult } from '../provider-usage.js';
+
+/** One reading of a shared plan's quota, with the limit flag its provider reported (GY-1260). */
+type PlanReading = ProviderUsageResult & { reached?: boolean };
 export { hostKeyPair, unsealToHost, writeProviderAuthFile, runSmokePrompt, processConnectAccounts, type ConnectWorkerReport, type ConnectAccountOptions } from './connect-accounts.js';
 
 // ---------------------------------------------------------------------------
@@ -45,8 +48,9 @@ const providerUsageErrors: readonly RegExp[] = [
 export const providerLimitNotices: Readonly<Record<string, readonly RegExp[]>> = {
   claude: [...providerUsageErrors, /\bClaude AI usage limit reached\b/],
   codex: [...providerUsageErrors],
-  opencode: [...providerUsageErrors],
+  opencode: [...providerUsageErrors, /\b(?:weekly|monthly|daily|hourly|usage)(?:\/(?:weekly|monthly|daily|hourly))? limit exhausted\b/i], // OpenCode 1.18's `Weekly/Monthly Limit Exhausted` (GY-973)
   cursor: [...providerUsageErrors],
+  agy: [...providerUsageErrors, /\bIndividual quota reached\b(?=.*\b(?:upgrade your subscription|resets? in)\b)/i], // GY-1135
 };
 /** The notices a session on `runtime` is judged against; an unnamed runtime gets the shared provider errors. */
 export const runtimeLimitNotices = (runtime: string | null | undefined): readonly RegExp[] => providerLimitNotices[runtime ?? ''] ?? providerUsageErrors;
@@ -59,19 +63,19 @@ const severityLabel = /^(?:\[[^\]]*\]\s*)?(?:api\s+)?error(?:\s+code)?\s*[:#]?\s
  * spent. The same tail, lead-of-line and reset-time rules as `detectExhaustion`, matched against
  * the runtime's own provider-authored notices instead of generic quota wording, so a worker's own
  * prose about a quota — a disk's, not the account's — is never a failover. A leading severity
- * label is stripped before the label words are counted: it is the runtime's rendering of the
- * provider's answer, not words the session wrote.
+ * label (the runtime's rendering of the provider's answer) is not counted as label words, and a
+ * compact wait (agy's `Resets in 1h31m31s`) is spaced into units the reset parser reads.
  */
 export function detectRuntimeExhaustion(output: string, runtime: string | null | undefined, now: number): ExhaustionSignal | null {
   const notices = runtimeLimitNotices(runtime);
-  const lines = output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n').map(line => line.replace(/[│┃|]\s*$/, '').trim()).filter(Boolean).slice(-exhaustionTailLines);
+  const lines = output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n').map(line => line.replace(/[│┃|]\s*$/, '').trim().replace(/\s{2,}/g, ' ')).filter(Boolean).slice(-exhaustionTailLines);
   for (let index = lines.length - 1; index >= 0; index--) {
-    // The banner itself, with whatever the terminal drew in front of it removed.
+    // The banner, with what the terminal drew before it removed and its padding collapsed (as in findExhaustion).
     const line = lines[index].replace(/^[^A-Za-z0-9]+/, '').replace(severityLabel, '');
     if (line.length > exhaustionNoticeMaxLength) continue;
     const at = notices.map(notice => notice.exec(line)?.index ?? -1).filter(offset => offset >= 0);
     if (!at.length || (line.slice(0, Math.min(...at)).match(/\S+/g) ?? []).length > exhaustionNoticeLabelWords) continue;
-    const context = [line, ...lines.slice(index + 1, index + 3)].join(' ');
+    const context = [line, ...lines.slice(index + 1, index + 3)].join(' ').replace(/(\d+[dhms])(?=\d)/gi, '$1 ');
     return { reason: line.slice(0, 300), resetsAt: parseResetTime(context, now) };
   }
   return null;
@@ -214,19 +218,60 @@ async function codexAccount(environment: AgentEnvironment, probe: EnvironmentPro
   return { loggedIn, usage, note: null, reached: !!limits.rate_limit_reached_type };
 }
 
-async function zaiAccount(environment: AgentEnvironment, probe: EnvironmentProbe) {
+/**
+ * An environment as the fleet probes a registry account: the plan id derived for it, the plan the operator declared
+ * (null when none), and the account's named key file and variable. Typed here rather than smuggled through `as any`,
+ * so a caller that drops one of them fails to compile instead of silently probing the wrong key (GY-1210).
+ */
+export type ProbedEnvironment = AgentEnvironment & { plan?: string | null; declaredPlan?: string | null; keyFile?: string; keyVariable?: string };
+
+async function zaiAccount(environment: ProbedEnvironment, probe: EnvironmentProbe, plan: { id: string | null; now: number }): Promise<{ loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean; shared?: boolean; plan?: PlanReading }> {
   const opencodeAuth = await readJsonFile(resolve(environment.home, 'opencode/auth.json'));
   const zaiKey = opencodeAuth?.['zai-coding-plan']?.key ?? opencodeAuth?.['z.ai']?.key ?? opencodeAuth?.zai?.key;
-  const keyFileName = (environment as any).keyFile ?? 'zai.key';
+  // A named key file is read as Z.AI's only when it is Z.AI's by its variable or name: an OpenCode account whose
+  // key is Anthropic's is never probed against Z.AI, so its 401 cannot mark the account logged out (GY-1158).
+  const named = environment.keyFile, variable = environment.keyVariable;
+  const keyFileName = named && (variable === 'ZAI_API_KEY' || /zai/i.test(named)) ? named : 'zai.key';
   const fileKey = await readFile(resolve(environment.home, keyFileName), 'utf8').catch(() => null);
   const fallbackKey = keyFileName !== 'zai.key' ? await readFile(resolve(environment.home, 'zai.key'), 'utf8').catch(() => null) : null;
   const auth = await readJsonFile(resolve(environment.home, 'auth.json'));
-  const authFileExists = await access(resolve(environment.home, 'auth.json')).then(() => true, () => false);
-  const opencodeAuthExists = await access(resolve(environment.home, 'opencode/auth.json')).then(() => true, () => false);
-  const key = zaiKey ?? fileKey?.trim() ?? fallbackKey?.trim() ?? auth?.ZAI_API_KEY ?? auth?.key ?? process.env.ZAI_API_KEY;
-  const loggedIn = !!key || authFileExists || opencodeAuthExists || (!!opencodeAuth && Object.keys(opencodeAuth).length > 0) || (!!auth && Object.keys(auth).length > 0);
-  if (!loggedIn || probe.quota === false) return { loggedIn, usage: [], note: loggedIn ? 'quota not read' : null };
-  if (!key) return { loggedIn, usage: [], note: 'OpenCode exposes no provider quota Graphyard can read; its providers report their own limits in the session' };
+  const piKey = auth?.zai?.key ?? auth?.['z.ai']?.key ?? auth?.['zai-coding-plan']?.key ?? auth?.ZAI_API_KEY;
+  const key = zaiKey ?? piKey ?? (fileKey?.trim() || undefined) ?? (fallbackKey?.trim() || undefined);
+
+  const hasZaiKey = !!key;
+  // Z.AI-specific only on Z.AI evidence: the Pi runtime, a declared zai plan, or a key named Z.AI's. A plan id derived
+  // from the runtime is no evidence (every OpenCode account defaults to the 'zai' kind), nor is the account's name (GY-1158).
+  // The key's presence decides, not its value: a caller that passes an optional plan as `declaredPlan: undefined` has
+  // declared none, and must not fall back to the derived plan's default 'zai' kind (GY-1239).
+  const declared = 'declaredPlan' in environment ? environment.declaredPlan : environment.plan;
+  const isZaiSpecific = (environment.kind as string) === 'pi'
+    || /^zai/i.test(declared ?? '')
+    || keyFileName !== 'zai.key';
+
+  if (isZaiSpecific) {
+    if (!hasZaiKey || probe.quota === false) {
+      return { loggedIn: hasZaiKey, usage: [], note: hasZaiKey ? 'quota not read' : null };
+    }
+  } else {
+    // Any provider entry carrying credential material is an OpenCode login: an API key (`type: 'api'`), a well-known
+    // token, or the access/refresh pair `opencode auth login` stores for OAuth providers (Anthropic, OpenAI, Copilot).
+    const credentialField = (value: unknown) => typeof value === 'string' && value.length > 0;
+    const hasOpencodeAuth = !!opencodeAuth && Object.values(opencodeAuth).some((v: any) => credentialField(v)
+      || !!v && typeof v === 'object' && ['key', 'apiKey', 'token', 'access', 'refresh'].some(field => credentialField(v[field])));
+    const loggedIn = hasZaiKey || hasOpencodeAuth;
+    if (!loggedIn || probe.quota === false) {
+      return { loggedIn, usage: [], note: loggedIn ? 'quota not read' : null };
+    }
+    if (!hasZaiKey) {
+      return { loggedIn, usage: [], note: 'OpenCode exposes no provider quota Graphyard can read; its providers report their own limits in the session' };
+    }
+  }
+  // Accounts on one shared plan read one quota: a fresh plan reading answers without another call
+  // to the provider's endpoint, so selecting among N such accounts costs one probe, not N (GY-1180).
+  // Any reading the endpoint answered is shared, a zero-window one too, and it carries the plan's own
+  // reason and limit flag rather than a note another account wrote (GY-1260).
+  const shared: PlanReading | null = plan.id ? getCachedPlanUsage(plan.id, plan.now, probe.cacheMs ?? 30_000) : null;
+  if (shared) return { loggedIn: true, usage: shared.windows, note: shared.reason, reached: shared.reached, shared: true };
   try {
     const response = await (probe.fetch ?? fetch)('https://api.z.ai/api/monitor/usage/quota/limit', {
       headers: { Authorization: `Bearer ${key}` },
@@ -237,23 +282,23 @@ async function zaiAccount(environment: AgentEnvironment, probe: EnvironmentProbe
         const text = await response.text();
         const parsed = parseZaiUsage(text);
         if (parsed.reported && parsed.windows.length > 0) {
-          return { loggedIn: true, usage: parsed.windows, note: parsed.reason };
+          return { loggedIn: true, usage: parsed.windows, note: parsed.reason, plan: parsed };
         }
       }
       return { loggedIn: true, usage: [], note: `provider returned ${response.status}` };
     }
     const body = await response.json();
     const parsed = parseZaiUsage(body);
-    return { loggedIn: true, usage: parsed.windows, note: null };
+    return { loggedIn: true, usage: parsed.windows, note: parsed.reason, plan: parsed };
   } catch (error) {
     return { loggedIn: true, usage: [], note: `the provider usage endpoint is unreachable: ${error instanceof Error ? error.message : 'unknown reason'}` };
   }
 }
 
-export async function checkAgentEnvironment(environment: AgentEnvironment, probe: EnvironmentProbe = {}): Promise<EnvironmentHealth> {
+export async function checkAgentEnvironment(environment: ProbedEnvironment, probe: EnvironmentProbe = {}): Promise<EnvironmentHealth> {
   const now = probe.now?.() ?? Date.now(), ceiling = probe.ceilingPercent ?? defaultQuotaCeilingPercent;
-  const planId = (environment as any).plan ?? (
-    environment.kind === 'opencode' || /zai|glm/i.test(environment.name)
+  const planId = environment.plan ?? (
+    environment.kind === 'opencode' || (environment.kind as string) === 'pi' || /zai|glm/i.test(environment.name)
       ? (/^(?:pi|opencode)[-_]([a-zA-Z0-9]+)$/i.exec(environment.name)?.[1]
         ? `zai-${/^(?:pi|opencode)[-_]([a-zA-Z0-9]+)$/i.exec(environment.name)![1].toLowerCase()}`
         : 'zai')
@@ -262,21 +307,26 @@ export async function checkAgentEnvironment(environment: AgentEnvironment, probe
   const cacheKey = `${environment.name}\0${environment.home}\0${ceiling}\0${probe.quota !== false}`, cached = healthCache.get(cacheKey);
   if (cached && now - cached.at >= 0 && now - cached.at < (probe.cacheMs ?? 30_000)) return cached.health;
 
-  const account: { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean } =
+  const account: { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean; shared?: boolean; plan?: PlanReading } =
     environment.kind === 'claude' ? await timedCall('account', `quota ${environment.name}`, () => claudeAccount(environment, probe, now))
     : environment.kind === 'codex' ? await timedCall('account', `quota ${environment.name}`, () => codexAccount(environment, probe))
-    : environment.kind === 'opencode' ? await timedCall('account', `quota ${environment.name}`, () => zaiAccount(environment, probe))
+    : environment.kind === 'opencode' || (environment.kind as string) === 'pi' ? await timedCall('account', `quota ${environment.name}`, () => zaiAccount(environment, probe, { id: planId, now }))
     : { loggedIn: (candidate => !!candidate && !!(candidate.userId || candidate.email))((await readJsonFile(resolve(environment.home, 'cli-config.json')))?.authInfo), usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit' };
 
-  if (account.loggedIn && planId) {
-    if (account.usage.length === 0) {
-      const cachedPlan = getCachedPlanUsage(planId, now, probe.cacheMs ?? 30_000);
+  if (account.loggedIn && planId && !account.shared) {
+    // A reading taken from the plan cache is not re-stamped, so the cache still expires. A provider
+    // call that answered caches its own plan reading; only an account without one stamps its windows.
+    const reading: PlanReading | null = account.plan ?? (account.usage.length > 0
+      ? { reported: true, status: 'reported', windows: account.usage, resetsAt: account.usage.map(u => u.resetsAt).filter(Boolean).sort().at(-1) ?? null, reason: account.note, reached: account.reached }
+      : null);
+    if (reading) setCachedPlanUsage(planId, reading, now);
+    else {
+      const cachedPlan: PlanReading | null = getCachedPlanUsage(planId, now, probe.cacheMs ?? 30_000);
       if (cachedPlan && cachedPlan.reported && cachedPlan.windows.length > 0) {
         account.usage = cachedPlan.windows;
         if (cachedPlan.reason) account.note = cachedPlan.reason;
+        if (cachedPlan.reached !== undefined) account.reached = cachedPlan.reached;
       }
-    } else {
-      setCachedPlanUsage(planId, { reported: true, status: 'reported', windows: account.usage, resetsAt: account.usage.map(u => u.resetsAt).filter(Boolean).sort().at(-1) ?? null, reason: account.note }, now);
     }
   }
   const future = (usage: AccountUsage) => !usage.resetsAt || Date.parse(usage.resetsAt) > now;

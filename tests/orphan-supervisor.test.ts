@@ -63,7 +63,7 @@ test('integration:supervisor-exits-with-session a supervisor whose agent has lef
   assert.ok(renewals >= 4, 'the supervisor kept renewing until the lease itself was refused');
 });
 
-test('integration:supervisor-exits-with-session the surrender a supervisor performs by default records the cause, withdraws the report and releases its own assignment', async () => {
+test('integration:supervisor-exits-with-session the surrender a supervisor performs by default releases its own assignment with the cause', async () => {
   const calls: { path: string; body: any }[] = [];
   const surrender = assignmentSurrender(3, [process.execPath, launcher, 'watch', 'GY-83', '3', '--', 'opencode'],
     { GRAPHYARD_URL: 'https://graphyard.example/', GRAPHYARD_TOKEN: 'worker-token' },
@@ -72,10 +72,9 @@ test('integration:supervisor-exits-with-session the surrender a supervisor perfo
       calls.push({ path, body });
     });
   await surrender!('Herdr no longer reports this agent session');
-  assert.deepEqual(calls.map(call => call.path), ['work/GY-83/blocked', 'work/GY-83/blocked', 'work/GY-83/release']);
-  assert.match(calls[0].body.reason, /^Watch supervisor ended attempt 3: Herdr no longer reports this agent session$/);
-  assert.deepEqual(calls[1].body, { epoch: 3, reason: null }, 'the report is withdrawn so the freed item waits on nobody');
-  assert.deepEqual(calls[2].body, { epoch: 3 });
+  // One lease-authorised release carrying the cause: no blocked report, so the freed item waits on nobody.
+  assert.deepEqual(calls.map(call => call.path), ['work/GY-83/release']);
+  assert.deepEqual(calls[0].body, { epoch: 3, cause: 'Watch supervisor ended attempt 3: Herdr no longer reports this agent session' });
 
   // Another attempt's command line, a missing credential, and a missing assignment each surrender
   // nothing rather than guessing which lease to end.
@@ -133,7 +132,6 @@ async function daemon(work: (cycle: number) => Work[], overrides: Partial<Daemon
     closeSession: () => {},
     dispatch: async () => {},
     requestProof: () => {},
-    merge: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: observedAt, reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},

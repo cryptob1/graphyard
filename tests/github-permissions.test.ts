@@ -7,7 +7,7 @@ import { appManifest, reviewerAppManifest } from '../src/github-setup.js';
 // unit:app-permissions-declaration
 test('the control-plane declaration carries the merge queue\'s Contents: write and nothing beyond what a feature names', () => {
   const required = requiredPermissions(controlPlanePermissions);
-  assert.deepEqual(required, { actions: 'write', administration: 'read', checks: 'write', contents: 'write', issues: 'read', metadata: 'read', pull_requests: 'write' });
+  assert.deepEqual(required, { actions: 'write', administration: 'read', checks: 'write', contents: 'write', issues: 'read', metadata: 'read', pull_requests: 'write', workflows: 'write' });
   const queue = controlPlanePermissions.filter(requirement => requirement.feature === 'merge-queue');
   assert.deepEqual(queue.map(requirement => [requirement.permission, requirement.level]), [['contents', 'write']], 'the queue is the only reason for Contents: write');
   for (const requirement of controlPlanePermissions) assert.ok(requirement.reason.length > 10, `${requirement.permission} ${requirement.level} states why it is needed`);
@@ -20,19 +20,19 @@ test('the reviewer declaration never gains Contents: write, Checks, or Administr
 });
 
 test('shortfalls compare granted levels with the declaration, name the blocked features, and point at the installation page', () => {
-  const legacy = { actions: 'write', administration: 'read', checks: 'write', contents: 'read', issues: 'read', metadata: 'read', pull_requests: 'write' };
+  const legacy = { actions: 'write', administration: 'read', checks: 'write', contents: 'read', issues: 'read', metadata: 'read', pull_requests: 'write', workflows: 'write' };
   const missing = permissionShortfalls(legacy, controlPlanePermissions);
   assert.deepEqual(missing.map(shortfall => ({ permission: shortfall.permission, required: shortfall.required, granted: shortfall.granted, features: shortfall.features })),
     [{ permission: 'contents', required: 'write', granted: 'read', features: ['merge-queue'] }]);
   assert.deepEqual(blockedFeatures(missing), ['merge-queue']);
   const sentence = describeShortfall(missing[0], 'graphyard-owner-repo', 'https://github.com/settings/installations/42');
-  assert.match(sentence, /^App graphyard-owner-repo lacks Contents: write \(installed with read\), which the merge queue needs to publish speculative merge-queue tips/);
+  assert.match(sentence, /^App graphyard-owner-repo lacks Contents: write \(installed with read\), which branch refresh needs to push base refreshes/);
   assert.match(sentence, /accept the pending permission request at https:\/\/github\.com\/settings\/installations\/42$/);
   // A permission that is absent altogether blocks every feature that names it, at the highest level asked.
   const bare = permissionShortfalls({ metadata: 'read' }, controlPlanePermissions);
   const contents = bare.find(shortfall => shortfall.permission === 'contents')!;
   assert.equal(contents.granted, null); assert.equal(contents.required, 'write'); assert.deepEqual(contents.features, ['observation', 'merge-queue']);
-  assert.deepEqual(blockedFeatures(bare).sort(), ['check', 'check-rerun', 'comment-events', 'merge-queue', 'observation', 'review-dispatch']);
+  assert.deepEqual(blockedFeatures(bare).sort(), ['check', 'check-rerun', 'comment-events', 'merge-queue', 'observation', 'review-dispatch', 'workflow-sync']);
   // Write satisfies read; admin satisfies write; unknown or missing values satisfy nothing.
   assert.deepEqual(permissionShortfalls({ ...legacy, contents: 'admin' }, controlPlanePermissions), []);
   assert.equal(permissionShortfalls({ ...legacy, contents: 'write', checks: 'yes' }, controlPlanePermissions)[0].permission, 'checks');

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { isClosed } from './closure.js';
 import { standingCapacity } from './capacity.js';
 import { routableScopeRequest, scopeBlockedBudgetMs, scopeRefusalBlocker } from './scope.js';
+import { containmentPhase } from './containment.js';
 // Types only from work.ts: work.ts reaches this module through the origin schema (interventions.ts),
 // so a value import back would read work.ts before it has evaluated.
 import type { EscalationTrigger, Work } from './work.js';
@@ -27,7 +28,7 @@ export type FaultClass = typeof faultClasses[number];
 export const faultClassMeaning: Record<FaultClass, string> = {
   'session-liveness': 'a session that did not start, stopped, went quiet, ran past its bound or lost its lease',
   'review-convergence': 'a review that does not settle: conflicting or dismissed verdicts, a review nobody obtains, a security concern',
-  'decision': 'a two-party decision refused, stale, unanswered or without an approver, or an escalation that outgrew its context',
+  'decision': 'a two-party decision refused, stale, unanswered or without an approver, a request awaiting the decision its evidence calls for, or an escalation that outgrew its context',
   'scope': 'work that needs files outside its plannedFiles, rewrites files outside them, or weakens its requirements',
   'overlap-hold': 'work held behind overlapping work past the hold bound',
   'observation': 'a read of GitHub or of a check that is paused, stale or silent',
@@ -37,7 +38,7 @@ export const faultClassMeaning: Record<FaultClass, string> = {
   'merge': 'a candidate that cannot land cleanly: a base conflict, a contaminated branch, an unauthorized or reverted merge',
   'proof': 'a proof nobody may produce, a producer that cannot run, an evidence conflict or a timing-dependent check',
   'capacity': 'a provider account out of quota or a role starved of slots',
-  'resources': 'a host resource at its bound: disk, a session ledger, a registered resource',
+  'resources': 'a host resource at its bound: disk, memory, a session ledger, a registered resource',
   'loop': 'the master loop or the dispatcher not cycling, failing cycles, or missing its budget',
   'human-decision': 'a wait on one of the three decisions only a human may make',
   'stalled-gate': 'an item holding a failing gate with nothing moving it',
@@ -51,8 +52,8 @@ export const faultClassMeaning: Record<FaultClass, string> = {
 export const faultCatalogue = {
   'session-liveness': ['session', 'launch-review', 'launch-producer', 'consent-hold', 'overlong-session', 'unanswered-request', 'stuck-request', 'escalation:lease-loss',
     'action:close', 'action:dispatch', 'action:session', 'action:preserve', 'action:wake'],
-  'review-convergence': ['merge-base-dismissed', 'unobtainable-review', 'review-conflict', 'escalation:security-concern', 'action:review'],
-  'decision': ['approver-launch', 'decision-refused', 'decision-stale', 'decision-unanswered', 'owed-decision', 'agent-request', 'context-overflow', 'intervention-pattern',
+  'review-convergence': ['merge-base-dismissed', 'unobtainable-review', 'review-conflict', 'review-settlement', 'escalation:security-concern', 'action:review'],
+  'decision': ['approver-launch', 'request-remedy', 'decision-refused', 'decision-stale', 'decision-unanswered', 'owed-decision', 'agent-request', 'context-overflow', 'intervention-pattern',
     'action:decision', 'action:escalation'],
   'scope': ['scope-request', 'scope-violation', 'escalation:requirement-weakening', 'action:scope'],
   'overlap-hold': ['hold-overdue'],
@@ -60,13 +61,13 @@ export const faultCatalogue = {
   'deployment': ['production', 'throughput', 'action:deployment', 'action:smoke'],
   'configuration': ['app-permissions', 'held-jobs', 'delegation-limits', 'unrunnable-remedy', 'fleet', 'setup', 'executor', 'generated-files', 'installation', 'sandbox-blocker', 'workflow-permission', 'action:config'],
   'containment': ['containment-settleable', 'containment-grace', 'containment', 'action:settle'],
-  'merge': ['base-conflict', 'merged-unauthorized', 'merged-reverted', 'contaminated', 'merge-refused', 'action:merge'],
+  'merge': ['base-conflict', 'base-failure', 'merged-unauthorized', 'merged-reverted', 'contaminated', 'merge-refused', 'action:merge'],
   'proof': ['proof-gap', 'timing-failure', 'nonexercising-proof', 'escalation:evidence-policy-conflict', 'action:proof'],
   'capacity': ['reviewer-exhausted', 'role-capacity', 'concurrency-starved', 'fleet-capacity', 'action:failover', 'action:capacity'],
-  'resources': ['disk-pressure', 'resource-bound', 'ledger-refusal', 'action:reclaim'],
+  'resources': ['disk-pressure', 'memory-pressure', 'resource-bound', 'ledger-refusal', 'action:reclaim'],
   'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'retry-stopped', 'action:fault', 'action:diagnosis'],
   'human-decision': ['human-request', 'sudo', 'action:human'],
-  'stalled-gate': ['gate', 'blocker', 'stalled-item', 'stalled-action', 'actorless'],
+  'stalled-gate': ['gate', 'blocker', 'stalled-item', 'stalled-action', 'actorless', 'action:blocker'],
   'unclassified': ['unclassified'],
 } as const satisfies Record<FaultClass, readonly string[]>;
 export type FaultKind = typeof faultCatalogue[FaultClass][number];
@@ -83,15 +84,29 @@ export const escalationFaultKind = (trigger: EscalationTrigger) => `escalation:$
 export interface Classified { kind: FaultKind; faultClass: FaultClass }
 export const classified = (kind: FaultKind): Classified => ({ kind, faultClass: faultClassOf(kind) });
 
+/** The fixed wording of review launch-wait reasons (GY-1175); src/auto-dispatch.ts builds them from it, so neither drifts from the other. */
+export const launchWaitWording = { busy: 'every reviewer profile is busy', settles: 'the control plane settles the request once it reads that verdict' } as const;
+/**
+ * A review launch wait's kind, by its reason (GY-1175): no reviewer profile with a slot is starved capacity, a
+ * request a reviewer session already answered waits to settle its verdict, and any other reason is a launch that did not start.
+ */
+export const launchWaitKind = (reason: string): FaultKind =>
+  reason.includes(launchWaitWording.busy) ? 'concurrency-starved' : reason.includes(launchWaitWording.settles) ? 'review-settlement' : 'launch-review';
+const launchWaitLine = /'s review request \S+ on \S+ has waited .+? without a reviewer launch: /s;
+const launchWaitSignature = (kind: FaultKind) => (_: string, text: string) => { const match = launchWaitLine.exec(text); return !!match && launchWaitKind(text.slice(match.index + match[0].length)) === kind; };
 /**
  * Attention lines built where no kind is set are recognised by what they say: the subject a
  * builder always uses, or the fixed wording of its sentence. The order matters only where two
  * could both match; the first wins.
  */
 const signatures: [FaultKind, (subject: string, text: string) => boolean][] = [
+  // The review launch-wait line (GY-710) names a reason another builder may word; it is matched first.
+  ['concurrency-starved', launchWaitSignature('concurrency-starved')],
+  ['review-settlement', launchWaitSignature('review-settlement')],
+  ['launch-review', launchWaitSignature('launch-review')],
   ['resource-bound', (subject, text) => subject.startsWith('resource:') || /is held by a registered resource at its bound/.test(text)],
   ['ledger-refusal', (_, text) => /cannot be requested because the .+ refused the write/.test(text)],
-  ['disk-pressure', subject => subject === 'disk'],
+  ['disk-pressure', subject => subject === 'disk'], ['memory-pressure', subject => subject === 'memory'],
   ['scope-request', (_, text) => /needs files outside plannedFiles/.test(text)],
   ['consent-hold', (_, text) => /is awaiting consent/.test(text)],
   ['review-conflict', (_, text) => /^Review of \S+ head \S+ \(PR #\d+\) is conflicted/.test(text)],
@@ -99,7 +114,7 @@ const signatures: [FaultKind, (subject: string, text: string) => boolean][] = [
   ['decision-refused', (_, text) => /^Decision \S+ \(\S+\) was refused/.test(text)],
   ['decision-stale', (_, text) => /^Decision \S+ \(\S+\) is stale/.test(text)],
   ['decision-unanswered', (_, text) => /^Decision \S+ \(\S+\) is unanswered/.test(text)],
-  ['approver-launch', (_, text) => /is awaiting an approver for/.test(text)],
+  ['approver-launch', (_, text) => /is awaiting an approver for/.test(text)], ['request-remedy', (_, text) => /request for .+ awaits the \S+ decision its evidence calls for/.test(text)],
   ['stalled-action', (_, text) => /\S+ action is stalled\b/.test(text)],
   ['stalled-item', (_, text) => /has held its \S+ gate for .+ with no action named/.test(text)],
   ['actorless', (_, text) => /no rework request and no named wait/.test(text)], ['unanswered-request', (_, text) => /has stood unanswered for/.test(text)],
@@ -176,7 +191,7 @@ export function workFaults(work: Work, now: number, routes = true): FaultObserva
   const found: FaultObservation[] = [];
   const escalations = work.escalations ?? (work.escalation ? [work.escalation] : []);
   for (const escalation of escalations) found.push(observe(escalationFaultKind(escalation.trigger), work.key, `${escalation.trigger} escalation: ${escalation.reason}`));
-  if (work.containmentQuarantine && !(work.lease && Date.parse(work.lease.expiresAt) > now)) found.push(observe('containment', work.key, `Containment quarantine from epoch ${work.containmentQuarantine.epoch} holds ${work.key}`));
+  if (work.containmentQuarantine && containmentPhase(work, now)?.state === 'lapsed') found.push(observe('containment', work.key, `Containment quarantine from epoch ${work.containmentQuarantine.epoch} holds ${work.key}`));
   if (work.humanRequest && !work.humanRequest.answer) found.push(observe('human-request', work.key, `${work.key} is parked on a human-only decision: ${work.humanRequest.needed}`));
   if (work.scopeRequest && standingScopeRequest(work, now, routes)) found.push(observe('scope-request', work.key, `${work.key} needs files outside plannedFiles: ${work.scopeRequest.paths.join(', ')}`));
   if (work.proofGaps?.length) found.push(observe('proof-gap', work.key, `No principal is authorized to produce ${work.proofGaps.join(', ')}`));

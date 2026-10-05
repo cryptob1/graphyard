@@ -5,13 +5,14 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
-import { defaultOptimisticExclude } from './optimistic-merge.js';
 import { onboardingParallelTips } from './master/profiles.js';
 import { generatedFilesAssignment } from './install/generated-files.js';
 import { ensureMergeMode, type ProtectionRun } from './protection.js';
 import { autonomyContract } from './autonomy.js';
-import { documentationAssignment, documentationPolicySchema, parseRepositoryConfig, repositoryConfigFile, type DocumentationPolicy } from './model/documentation.js';
+import { documentationAssignment, documentationPolicySchema, parseRepositoryConfig, repositoryConfigFile, type DocumentationPolicy, type RepositoryConfig } from './model/documentation.js';
 import { executorRunnableKinds, type NextActionKind } from './model/action-kinds.js';
+import { deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy } from './model/delivery-policy.js';
+import { renderReleasePipeline } from './install/release-pipeline.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
 
 export const hostIdSchema = z.string().trim().min(1).max(200);
@@ -111,7 +112,7 @@ Herdr runs sessions; Graphyard remains the source of ownership truth.
 ${launchAuthorization}
 
 A dedicated master coordinator must keep cycling: status, dispatch ready work,
-shepherd review and proof collection, guarded merge, then deployment verification.
+shepherd review, reconcile what GitHub merged, then deployment verification.
 Repeat until both conditions hold: (1) every in-scope item is Done or has a genuinely
 external blocker recorded in Graphyard; and (2) every merged change is deployed and
 live-verified against the exact deployed release, or a genuinely external deployment
@@ -201,9 +202,9 @@ export function handoff(work: any, status: any, hostId: string, cliPath: string)
 export const proposalFileName = 'setup-proposal.json', appliedFileName = 'repository-setup.json';
 
 /** Read-only scan plus the proposal it produces. Nothing is written here. */
-export async function scanProposal(root: string, options: { url?: string | null; runtimes?: string[] } = {}) {
+export async function scanProposal(root: string, options: { url?: string | null; runtimes?: string[]; delivery?: { mode?: DeliveryMode; candidateSchedule?: string | null } } = {}) {
   const [input, detected] = await Promise.all([collectScanInput(root), discover(root)]);
-  return buildProposal(input, { repository: detected.repository, server: options.url ?? null, runtimes: options.runtimes });
+  return buildProposal(input, { repository: detected.repository, server: options.url ?? null, runtimes: options.runtimes, delivery: options.delivery });
 }
 
 export async function saveProposal(root: string, proposal: SetupProposal) {
@@ -335,6 +336,11 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   const documentation = await writeDocumentationConfig(root, proposeDocumentation(await collectScanInput(root)));
   (documentation.state === 'written' ? applied : documentation.state === 'unchanged' ? unchanged : drift).push(documentation.state === 'drift' ? `${repositoryConfigFile} documentation differs from the scan; the committed file was kept` : `${repositoryConfigFile} documentation policy`);
 
+  // The merge gate and release pipeline (GY-1102): the reviewed split is the repository's
+  // committed delivery policy, and the candidate and promotion workflows are rendered from it.
+  const delivery = proposal.delivery ? await applyDelivery(root, proposal.delivery, proposal.stack.name) : null;
+  if (delivery) { applied.push(...delivery.applied); unchanged.push(...delivery.unchanged); drift.push(...delivery.drift); }
+
   const randomToken = dependencies.token ?? (() => randomBytes(32).toString('base64url'));
   const grants = proposal.proofs.filter(proof => proof.command).map(proof => proof.name);
   // Only principals the operator reviewed in the proposal are registered; apply
@@ -411,13 +417,55 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
     : 'no agent runtime was detected on this machine, so the proposal declared no worker profile and no worker principal was registered; install an agent CLI and rerun init --scan --apply to add one';
   const documentationLine = documentationAssignment(documentation.policy).line;
   return { server, applied, unchanged, drift, githubApp, generatedFiles: generatedFiles?.line ?? null, documentation: { file: repositoryConfigFile, policy: documentation.policy, line: documentationLine },
+    delivery: delivery ? { file: repositoryConfigFile, mode: delivery.policy.mode, requiredChecks: delivery.requiredChecks, workflows: delivery.workflows } : null,
     githubPending: !githubApp,
     workerPrincipals,
     principalsFile: resolve(directory, 'principals.json'),
     next: githubApp
       ? `Install the principals array as GRAPHYARD_PRINCIPALS on the Graphyard deployment${generatedFiles ? `, with ${generatedFiles.line} beside it` : ''}, ${workerStep}`
       : 'Run graphyard github-setup SERVER_URL to register the GitHub App, then rerun init --scan --apply to finish idempotently',
-    documentationNext: `Commit ${repositoryConfigFile} with AGENTS.md, and set ${documentationLine} on the Graphyard deployment so every item names these documentation paths` };
+    documentationNext: `Commit ${repositoryConfigFile} with AGENTS.md${delivery?.workflows.length ? ` and ${delivery.workflows.join(', ')}` : ''}, and set ${documentationLine} on the Graphyard deployment so every item names these documentation paths` };
+}
+
+// --- Delivery: the merge-gate policy and the release-candidate pipeline (GY-1102) ------------------
+
+/**
+ * Writes the reviewed delivery policy as `delivery` in graphyard.json, keeping every other key the
+ * file holds, and renders the candidate and promotion workflows from it. The proposal was built from
+ * the committed policy plus the operator's explicit choices, so writing it is how a confirmed split
+ * or opt-out lands. Under per-PR no workflow is written, and generated ones left from the candidate
+ * model are named for removal rather than deleted.
+ */
+export async function applyDelivery(root: string, policyInput: DeliveryPolicy, stack: SetupProposal['stack']['name'], options: { base?: string; cli?: string } = {}) {
+  const policy = deliveryPolicySchema.parse(policyInput);
+  const applied: string[] = [], unchanged: string[] = [], drift: string[] = [];
+  const configFile = resolve(root, repositoryConfigFile);
+  await regularOrMissing(configFile);
+  let text: string | null = null;
+  try { text = await readFile(configFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+  const config: Partial<RepositoryConfig> = text === null ? {} : parseRepositoryConfig(text);
+  if (config.delivery && canonicalJson(config.delivery) === canonicalJson(policy)) unchanged.push(`${repositoryConfigFile} delivery policy`);
+  else {
+    await atomicWrite(configFile, `${JSON.stringify({ ...config, delivery: policy }, null, 2)}\n`, 0o644);
+    applied.push(`${repositoryConfigFile} delivery policy (${policy.mode}: pre-merge ${policy.mergeGate.preMerge.map(entry => entry.check).join(', ') || 'none'})`);
+  }
+  let files: { path: string; content: string }[] = [];
+  try { files = renderReleasePipeline(policy, { stack, ...options }); }
+  catch (error: any) { drift.push(`release workflows were not generated: ${error.message}`); }
+  for (const file of files) {
+    const target = resolve(root, file.path);
+    let current: string | null = null;
+    try { current = await readFile(target, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+    if (current === file.content) { unchanged.push(file.path); continue; }
+    await mkdir(dirname(target), { recursive: true });
+    await atomicWrite(target, file.content, 0o644);
+    applied.push(file.path);
+  }
+  if (policy.mode === 'per-pr') for (const path of generatedWorkflowFiles) {
+    try { await stat(resolve(root, path)); drift.push(`${path} is left from the release-candidate model; delete it to finish opting out to per-PR delivery`); }
+    catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+  }
+  return { policy, requiredChecks: requiredPullRequestChecks(policy), workflows: files.map(file => file.path), applied, unchanged, drift };
 }
 
 // --- Documentation policy: what the repository documents, proposed from the checkout (GY-215) ----
@@ -482,14 +530,12 @@ export async function readDocumentationConfig(root: string): Promise<Documentati
 
 /**
  * The `mergeQueue` configuration onboarding writes when a repository's master config names none:
- * the product's recommended parallel-tips value (`onboardingParallelTips`, master/profiles.ts) and
- * shared-infrastructure globs (`defaultOptimisticExclude`, optimistic-merge.ts) under the keys
- * `mergeQueue.parallelTips` and `mergeQueue.optimisticExclude`, where the operator tunes them for
- * this repository. A later `master init` keeps what is written, exactly as it keeps an operator-tuned
- * profile, so the defaults are named once per repository and the product hardcodes nobody's file
- * list or concurrency settings.
+ * the product's recommended parallel-tips value (`onboardingParallelTips`, master/profiles.ts) under
+ * `mergeQueue.parallelTips`, where the operator tunes it for this repository. A later `master init`
+ * keeps what is written, exactly as it keeps an operator-tuned profile, so the default is named once
+ * per repository and the product hardcodes nobody's concurrency settings.
  */
-export const onboardingMergeQueue = (): { parallelTips: number; optimisticExclude: string[] } => ({ parallelTips: onboardingParallelTips, optimisticExclude: [...defaultOptimisticExclude] });
+export const onboardingMergeQueue = (): { parallelTips: number } => ({ parallelTips: onboardingParallelTips });
 
 // --- Executor supervision: what a host runs, and the unit that keeps it running (GY-105) -----------
 
@@ -559,7 +605,7 @@ export interface ExecutorSupervision {
   units: { slot: number; unit: string; active: string }[];
   /** Instances above the declared count that were disabled. */
   disabled: string[];
-  /** Which component runs the guarded merge on this host, and why the kinds are what they are. */
+  /** Which component reconciles what GitHub merges on this host, and why the kinds are what they are. */
   merger: string;
   next: string;
 }
@@ -598,7 +644,7 @@ export async function installExecutorSupervision(root: string, options: { count?
   const loop = options.loop !== undefined ? options.loop : await (await import('./executor.js')).detectLoopMerger(primary, { unitDirectory: options.unitDirectory });
   const kinds = executorMergeKinds(options.kinds !== undefined ? options.kinds : existing?.kinds ?? null, loop, options.kinds !== undefined);
   const declaration = executorDeclarationSchema.parse({ ...(existing ?? defaultExecutorDeclaration), ...(options.count !== undefined ? { count: options.count } : {}), kinds, ...(options.intervalSeconds !== undefined ? { intervalSeconds: options.intervalSeconds } : {}) });
-  const merger = loop ? `${loop.name} merges, so the executors serve ${declaration.kinds!.join(', ')} and never merge` : 'no master loop merges on this host, so the executors run the guarded merge';
+  const merger = loop ? `${loop.name} merges, so the executors serve ${declaration.kinds!.join(', ')} and never merge` : 'no master loop merges on this host, so the executors reconcile what GitHub merges';
   const written = await writeExecutorDeclaration(primary, declaration);
   const run = options.run ?? systemctl;
   const manager = systemdUserManager(run);

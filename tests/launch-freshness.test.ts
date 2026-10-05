@@ -6,10 +6,9 @@ import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import type { DispatchRequest } from '../src/model/dispatch.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { assertMergeCandidate } from '../src/master/merge.js';
 import { assertReviewCandidate } from '../src/reviewer.js';
 import { dispatchFailureAttention, dispatchSummary, emptyDispatchCursor, launchWaitAttention, launchWaitLimit, launchWaits, reviewLaunchWaitAttentionMs, tickWaits, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { emptyDaemonState, observationWakeRetryMs, runCycle, staleObservationMergeReason, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState, observationWakeRetryMs, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -65,7 +64,7 @@ async function withToken<T>(run: (token: string) => Promise<T>) {
   const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 }); return await run(token);
 }
 
-test('unit:launch-binds-head-not-age — a 20-minute-old observation of the requested head launches the review; a moved head does not; merges keep the two-minute bound', async () => {
+test('unit:launch-binds-head-not-age — a 20-minute-old observation of the requested head launches the review; a moved head does not', async () => {
   await withToken(async token => {
     const config = masterConfig(token);
     // The observation is twenty minutes old and of the exact head and base the request binds.
@@ -89,11 +88,8 @@ test('unit:launch-binds-head-not-age — a 20-minute-old observation of the requ
     // The observation must still be of the candidate itself.
     assert.throws(() => assertReviewCandidate(item(iso(-20 * minute), { observation: observation(moved, iso(-20 * minute)) }), iso(0), reviewRequest()), /does not match the current candidate/);
 
-    // The merge keeps its two-minute bound: the same age refuses a merge that a fresh observation allows.
-    const mergeReady = (observedAt: string) => item(observedAt, { stage: 'merge', mergeAuthorization: { sha: head, baseSha: base, policyRevision: 1, at: iso(-minute) },
-      gates: ['ready', 'build', 'review', 'test', 'acceptance', 'merge'].map(name => ({ name, passed: true, reasons: [] })) } as Partial<Work>);
-    assert.equal(assertMergeCandidate(mergeReady(iso(-30_000)), iso(0)).sha, head);
-    assert.throws(() => assertMergeCandidate(mergeReady(iso(-20 * minute)), iso(0)), /current all-gates-passing merge authorization/);
+    // GitHub merges (GY-1235): no merge is held on the observation's age either; the gates bind
+    // the head, as tests/github-delivery.test.ts asserts for a ten-minute-old observation.
   });
 });
 
@@ -105,7 +101,7 @@ function daemonEffects(snapshot: () => Awaited<ReturnType<DaemonEffects['snapsho
   return {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => snapshot(),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: snapshot().now, reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {},
     wakeObservation: async work => { log.push(`wake:${work.key}`); },
@@ -116,7 +112,7 @@ function daemonEffects(snapshot: () => Awaited<ReturnType<DaemonEffects['snapsho
   };
 }
 
-test('unit:stale-refusal-wakes-observation — a rework or a guarded merge refused for a stale observation wakes the item\'s observation job at once, and the next attempt follows that observation', async () => {
+test('unit:stale-refusal-wakes-observation — a rework refused for a stale observation wakes the item\'s observation job at once, and the next attempt follows that observation', async () => {
   const config = masterConfig('/outside/coordinator.token');
   const state = emptyDaemonState(config);
   const log: string[] = [];
@@ -166,58 +162,7 @@ test('unit:stale-refusal-wakes-observation — a rework or a guarded merge refus
   refusedNow = clock + 60_000;
   await runCycle(config, refusedState, refusedEffects, () => refusedNow);
   assert.deepEqual(refusedWakes, ['wake:GY-42', 'wake:GY-42'], 'the delivered wake then stands');
-
-  // The merge keeps its two-minute bound, and a merge refused on it wakes the observation the same way.
-  await staleMergeWakesObservation(config);
 });
-
-/** A merge-stage item: every gate passes on a fresh observation; the merge gate refuses a stale one, as model/gates.ts does. */
-function mergeItem(observedAt: string, now: number): Work {
-  const fresh = now - Date.parse(observedAt) < 2 * minute;
-  return item(observedAt, { stage: 'merge', autoDispatch: undefined, mergeAuthorization: fresh ? { sha: head, baseSha: base, policyRevision: 1, at: observedAt } : undefined,
-    observation: observation(head, observedAt, { checks: [{ name: 'test', result: 'success', appId: 15368 }], reviews: [{ reviewer: 'independent-reviewer', sha: head, state: 'APPROVED' }] } as Partial<Observation>),
-    gates: [...['ready', 'build', 'review', 'test', 'acceptance'].map(name => ({ name, passed: true, reasons: [] as string[] })),
-      { name: 'merge', passed: fresh, reasons: fresh ? [] : [staleObservationMergeReason] }] } as Partial<Work>);
-}
-
-/** The guarded merge refused for a stale observation wakes the item's observation job, and is asked again as soon as that observation lands, not on the retry backoff. */
-async function staleMergeWakesObservation(config: MasterConfig) {
-  const log: string[] = [];
-  let now = clock, observedAt = iso(-3 * minute), refuse = false;
-  const effects: DaemonEffects = { ...daemonEffects(() => ({ work: [mergeItem(observedAt, now)], now: new Date(now).toISOString(), jobs: [] }), log),
-    merge: async work => { log.push(`merge:${work.key}`); if (refuse) throw new Error('Merge authorization is no longer current'); return { pending: true }; } };
-
-  // The merge gate refuses the three-minute-old observation: the merge is not asked, the observation job is woken.
-  const state = emptyDaemonState(config);
-  const first = await runCycle(config, state, effects, () => now);
-  assert.deepEqual(log, ['wake:GY-42'], 'the stale merge wakes the observation job immediately, and asks no merge');
-  assert.match(first.actions.find(action => action.work === 'GY-42' && action.kind === 'merge')!.detail, /guarded merge waits for a fresh GitHub observation/);
-  // Before the woken observation lands: no second wake, and no merge on a timer.
-  now = clock + 30_000;
-  await runCycle(config, state, effects, () => now);
-  assert.deepEqual(log, ['wake:GY-42'], 'one wake stands until its observation lands');
-  // It lands: the very next cycle asks the guarded merge.
-  observedAt = iso(40_000); now = clock + 45_000;
-  await runCycle(config, state, effects, () => now);
-  assert.deepEqual(log, ['wake:GY-42', 'merge:GY-42'], 'the merge attempt follows the observation');
-
-  // The server refuses a merge whose observation passed its bound after the snapshot: the refusal
-  // wakes the observation job at once, and the merge is asked again as soon as the observation lands —
-  // five seconds on, inside the fifteen-second retry backoff that would otherwise hold it.
-  const raced: string[] = [];
-  const racedState = emptyDaemonState(config);
-  now = clock; observedAt = iso(-110_000); refuse = true;
-  const racedEffects: DaemonEffects = { ...effects, wakeObservation: async work => { raced.push(`wake:${work.key}`); },
-    merge: async work => { raced.push(`merge:${work.key}`); if (refuse) throw new Error('Merge authorization is no longer current'); return { pending: true }; } };
-  await runCycle(config, racedState, racedEffects, () => now);
-  assert.deepEqual(raced, ['merge:GY-42', 'wake:GY-42'], 'the refusal wakes the observation job');
-  now = clock + 3_000;
-  await runCycle(config, racedState, racedEffects, () => now);
-  assert.deepEqual(raced, ['merge:GY-42', 'wake:GY-42'], 'no retry before the observation lands');
-  refuse = false; observedAt = iso(4_000); now = clock + 5_000;
-  await runCycle(config, racedState, racedEffects, () => now);
-  assert.deepEqual(raced, ['merge:GY-42', 'wake:GY-42', 'merge:GY-42'], 'the retry follows the landed observation, not the backoff');
-}
 
 test('unit:launch-wait-reported — master status reports each waiting launch with how long it has waited and why, and a review waiting over 15 minutes raises attention', async () => {
   await withToken(async token => {
@@ -240,6 +185,13 @@ test('unit:launch-wait-reported — master status reports each waiting launch wi
     assert.equal(attention[0].subject, 'GY-42');
     assert.match(attention[0].text, /has waited 20 min/);
     assert.match(attention[0].text, /no reviewer profile/);
+    // GY-1175: the builder sets the kind from the wait's reason, so the line never files unclassified.
+    assert.deepEqual(attention.map(entry => [entry.kind, entry.faultClass]), [['launch-review', 'session-liveness']]);
+    const reasoned = launchWaitAttention([
+      { ...rows[0], reason: 'every reviewer profile is busy: claude-reviewer: at its concurrency limit (6 running, limit 6)' },
+      { ...rows[0], reason: 'reviewer session review-opencode-1 already answered with APPROVED (review 5402739662); the control plane settles the request once it reads that verdict' },
+    ]);
+    assert.deepEqual(reasoned.map(entry => [entry.kind, entry.faultClass]), [['concurrency-starved', 'capacity'], ['review-settlement', 'review-convergence']]);
     assert.ok(20 * minute > reviewLaunchWaitAttentionMs && 5 * minute < reviewLaunchWaitAttentionMs);
 
     // What `master status` reports: the dispatcher summary carries the waits, and its attention raises the long one.

@@ -16,7 +16,7 @@ function work(minutes: number, overrides: Partial<GitHubMergeQueueState> = {}, i
   const candidate = { sha: head, baseSha: base, pr: 198, branch: 'graphyard/gy-245-1', author: 'worker' };
   const githubQueue: GitHubMergeQueueState = { pullRequestId: 'PR_kw', head, queue: false, mergeStateStatus: 'UNSTABLE', mode: 'auto-merge', entryState: null, position: null, groupHead: null,
     at: new Date(now).toISOString(), refused: null, requestedAt: new Date(now - minutes * 60_000).toISOString(), ...overrides };
-  return { id: 'work-245', key: 'GY-245', title: 'Pending merge', stage: 'merge', candidate,
+  return { id: 'work-245', key: 'GY-245', title: 'Pending merge', stage: 'merge', candidate, gates: [], violations: [],
     observation: { at: new Date(now).toISOString(), candidate, merged: false, githubQueue } as unknown as Observation, ...item } as Work;
 }
 const attention = (items: Work[]) => mergeStallAttention({ work: items, now: new Date(now).toISOString() });
@@ -35,7 +35,8 @@ test('unit:merge-stall-surfaced — a merge pending six minutes on an UNSTABLE h
   // Not mergeable, refused, queued, another head, no current request, or merged: not a stall.
   // BLOCKED under auto-merge is named with GitHub's blocking reason instead (GY-430, merge-queue.ts blockedMergeStall).
   for (const mergeStateStatus of ['BEHIND', 'DIRTY', 'UNKNOWN', null]) assert.deepEqual(attention([work(60, { mergeStateStatus })]), [], String(mergeStateStatus));
-  assert.deepEqual(attention([work(60, { mergeStateStatus: 'BLOCKED', mode: 'none' })]), []);
+  // BLOCKED with a gate still failing is GitHub enforcing that gate; with every gate passing it is merge-blocked (GY-1112, blockedPastProbe).
+  assert.deepEqual(attention([work(60, { mergeStateStatus: 'BLOCKED', mode: 'none' }, { gates: [{ name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }] } as Partial<Work>)]), []);
   assert.deepEqual(attention([work(60, { refused: { reason: 'GitHub refused to enqueue GY-245: no', head, mode: 'none', at: new Date(now).toISOString() } })]), []);
   assert.deepEqual(attention([work(60, { queue: true })]), []);
   assert.deepEqual(attention([work(60, { head: 'c'.repeat(40) })]), []);

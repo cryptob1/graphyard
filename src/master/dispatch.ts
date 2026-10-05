@@ -2,8 +2,9 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
-import { type ChildRun, defaultChildRun } from '../child-runner.js';
+import { type ChildRun, ChildProcessError, defaultChildRun } from '../child-runner.js';
 import { researchWorkerSection } from '../research.js';
+import { appliedMechanicalRework, mechanicalWorkerSection, readMechanicalFixRequests, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { discover, assertRepository } from '../onboarding.js';
 import { concurrentOverlap, resourceConflicts } from '../coordination.js';
 import { type SandboxExec, verifyWorkerSandbox, workerPaths, writablePaths, grantWorkerPaths } from '../worker-sandbox.js';
@@ -21,7 +22,8 @@ import { createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
 import { agentOwner, type AttentionItem } from './attention.js';
 import { containmentHold, stopLaunchSupervisor } from './containment.js';
 import { dependencyDirectories, failureText, type SharedDependencies, shareDependencies } from './worktrees.js';
-import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, submissionPolicyRule } from './harness.js';
+import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessionSlotsGrant, submissionPolicyRule } from './harness.js';
+import { withVerificationPath } from './verification-slots.js';
 import { currentAgents, dispatchedFile, DispatchReservedError, profileLaunchedFile, reserveDispatch, watchSupervisorRunning } from './dispatch-reservation.js';
 import { projectMemoryDigest, type ProjectMemory } from '../model/project-memory.js';
 import { readProjectMemory } from '../project-memory.js';
@@ -59,6 +61,42 @@ export interface DispatchOptions {
    * preparer supplies gets one only when a minter is given.
    */
   credential?: CredentialMinter;
+  /** The coordinator checkout the worker's session is confined against, for a launcher embedded outside the CLI (startAgentSession's `coordinatorRoot`). */
+  coordinatorRoot?: string;
+  /**
+   * Renews the claimed lease while the launch prepares (GY-1287). The worktree
+   * prepareWorkerLaunch creates is always kept alive (renewWorkerLaunch); a worktree an injected
+   * preparer supplies is kept alive only when a renewer is given.
+   */
+  renew?: LeaseRenewer;
+  /** How often the launch renews the lease until its supervisor takes over (launchRenewalMs). */
+  renewIntervalMs?: number;
+}
+/** Renews `key` epoch `epoch` under `profileName`'s credential, as the worker's own heartbeat does. */
+export type LeaseRenewer = (root: string, key: string, epoch: number, profileName: string) => Promise<unknown>;
+/**
+ * How often a launch renews the lease it claimed while it prepares the session (GY-1287): a
+ * quarter of the production 120 s lease, so two renewals may fail before it is at risk.
+ */
+export const launchRenewalMs = 30_000;
+/**
+ * The launch's own heartbeat (GY-1287). Between the claim and the watch supervisor's first
+ * heartbeat the launch writes the worker's rules, mints its credential, opens its pane and waits
+ * for its runtime; on a busy host that took longer than the 120 s lease, which lapsed under a
+ * launch nothing had gone wrong with: the supervisor then met "Lease missing, expired, or
+ * superseded", the launch failed, and the lapse stood as a lease-loss escalation. The launch
+ * renews the lease from its claim until the supervisor owns the session or the launch releases
+ * it. A failed renewal is not fatal here: the supervisor's own first heartbeat is the authority.
+ */
+export function launchLeaseKeepAlive(renew: (() => Promise<unknown>) | null, intervalMs = launchRenewalMs) {
+  if (!renew) return { stop: async () => {} };
+  let pending: Promise<unknown> | null = null, stopped = false;
+  const beat = () => { if (!pending && !stopped) pending = renew().catch(() => {}).finally(() => { pending = null; }); };
+  beat();
+  const timer = setInterval(beat, intervalMs);
+  timer.unref?.();
+  // Stopping waits out a renewal in flight, so none lands after the release that follows.
+  return { stop: async () => { stopped = true; clearInterval(timer); await pending; } };
 }
 /** Mints the push credential of `key` epoch `epoch` for `profile` into `directory`. */
 export type CredentialMinter = (root: string, input: { key: string; epoch: number; profile: WorkerProfile; directory: string }) => Promise<unknown>;
@@ -73,6 +111,7 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   if (!Number.isFinite(now)) throw new Error('Dispatch requires a valid Graphyard snapshot clock');
   if (parkedOnHuman(work)) throw new Error(`Dispatch waits on a human-only decision (${humanDecisionLabel[work.humanRequest!.kind]}); ${answerCommand(work.key, work.humanRequest!)} resumes it`);
   if (!work.ready || work.blocker) throw new Error('Dispatch requires released work without a blocker');
+  if (work.children?.length) throw new Error(`${work.key} was split into ${work.children.join(', ')} before dispatch; it is delivered when they are and is never dispatched itself`);
   const fenced = containmentHold(work, now);
   if (fenced) throw new Error(fenced);
   const unfinished = work.dependencies.map(id => allWork.find(item => item.id === id)).filter(dependency => !dependency || dependency.stage !== 'done');
@@ -145,7 +184,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
             try {
               assertClaimDeadline(work.key, options.claimBy);
               let epoch: number;
-              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor, options.stopSupervisor, options.credential ?? (prepare === prepareWorkerLaunch ? mintWorkerCredential : null)));
+              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.supervisor, options.stopSupervisor, options.credential ?? (prepare === prepareWorkerLaunch ? mintWorkerCredential : null), options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs));
               // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
               const at = new Date().toISOString();
               await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at }), { mode: 0o600 }).catch(() => {});
@@ -191,6 +230,23 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // Planned-file overlap is recorded with the dispatch, never held on: the item runs beside the
     // in-flight items that touch the same files and whichever lands second is re-integrated.
     overlap: concurrent.length ? { concurrent, note: `Dispatched beside ${describeOverlap(concurrent)}; the merge queue orders them and whichever lands second is re-integrated by base refresh, or sent back for a sync on a real conflict` } : null };
+}
+
+/**
+ * GY-971. Whether this attempt is a mechanical-fix round: only a rework of a submitted candidate can
+ * be, and only when the item's most recently applied rework decision was that round's; the review
+ * ledger's plans are read only then. The decisions are read with the master's credential; one that
+ * cannot be read makes the attempt an ordinary rework, whose head the fresh read then refuses as a
+ * bot commit and whose findings it hands back to the reviewer.
+ */
+async function mechanicalRound(root: string, config: MasterConfig, work: Work, fetcher: typeof fetch = fetch) {
+  if (!work.submission || !work.candidate) return null;
+  try {
+    const response = await fetcher(`${config.url}/api/work/${encodeURIComponent(work.id)}/decisions`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(5_000) });
+    if (!response.ok) return null;
+    const reviewId = appliedMechanicalRework(work, ((await response.json()) as { decisions?: Parameters<typeof appliedMechanicalRework>[1] }).decisions ?? []);
+    return reviewId === null ? null : { requests: await readMechanicalFixRequests(root), reviewId };
+  } catch { return null; }
 }
 
 export const herdrAttach = (pane: string, workspace?: string | null) => `herdr pane attach ${pane}${workspace ? ` --workspace ${workspace}` : ''}`;
@@ -282,76 +338,91 @@ export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: s
   return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, supervisor: NonNullable<DispatchOptions['supervisor']> = watchSupervisorRunning, stopSupervisor: NonNullable<DispatchOptions['stopSupervisor']> = stopLaunchSupervisor, credentialMint: CredentialMinter | null = null) {
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, supervisor: NonNullable<DispatchOptions['supervisor']> = watchSupervisorRunning, stopSupervisor: NonNullable<DispatchOptions['stopSupervisor']> = stopLaunchSupervisor, credentialMint: CredentialMinter | null = null, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number) {
   const prepared = await prepare(root, work.key, profile.name, undefined, claimBy);
-  // The session pushes with its own short-lived credential, never the host's login (GY-999).
-  const credential = credentialMint && profile.credentialFile ? workerCredentialDirectory(profile.credentialFile, work.key, prepared.epoch) : null;
-  // The worker writes its worktree, the worktree's own Git admin directory and the shared one;
-  // each is granted to the runtime's sandbox, and the grant is proved below before anything starts.
-  const paths = workerPaths(prepared.path);
-  const writable = writablePaths({ ...paths, commonDir: paths.commonDir ?? await sharedGitDirectory(root) });
-  const args = grantWorkerPaths(launch.kind, launch.args, writable, prepared.path);
-  // The worker's own rules go into its worktree before the session starts, so pushing its
-  // branch and opening its pull request never wait on a keypress. A failure is reported, not fatal.
-  const harness = await installWorkerHarness(config, { ...profile, kind: launch.kind as WorkerProfile['kind'] }, work.key, prepared).catch(error => ({ applied: false, reason: error instanceof Error ? error.message : 'Worker rules could not be written' }));
-  const memory = await readProjectMemory(root).catch(() => null);
-  const prompt = workerPrompt(config, work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base);
-  // The worker loads its own role rules, never the master's: it may push its assigned branch.
-  const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, credentialFiles: [profile.credentialFile!] });
-  let pane: string | undefined, tabId: string | undefined, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null, ran = false;
-  try {
-    // Minted before anything starts: a launch that cannot get one is refused and its claim
-    // released below, so the item is launched again once a credential can be minted.
-    if (credential) await credentialMint!(root, { key: work.key, epoch: prepared.epoch, profile, directory: credential });
-    const credentialEnvironment = credential ? workerCredentialEnvironment(credential) : {};
-    // A sandbox that cannot write them is a launch failure naming the path, not a worker that
-    // fails at its first sync; the claim is released below like any other failed launch.
-    if (sandboxProbe) sandbox = verifyWorkerSandbox({ ...launch, args }, prepared.path, writable, sandboxProbe === 'host' ? undefined : sandboxProbe);
-    const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, '--env', `GRAPHYARD_HERDR_AGENT_KIND=${launch.kind}`, ...Object.entries({ ...launch.environment, ...credentialEnvironment }).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
-    const created = createdHerdrTab(await herdrJson(tabArgs, run)); pane = created.pane; tabId = created.tab;
-    // The instruction is the session's own first request, on the runtime's command line under
-    // the supervisor, read from the request file in the worktree (GY-121); only a runtime without
-    // that contract is prompted after.
-    const started = await startAgentSession(profile.agentName, launch.kind!, pane, [...args, ...sessionHarness.args], prompt, run,
-      { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs ?? launchStartMs(config), directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment, onRun: () => { ran = true; } });
-    // A worker stopped on a prompt the launcher does not answer is held for a human rather than
-    // closed: its record beside the launch files is what master status raises and what the watch
-    // supervisor bounds, releasing the slot once `consentHoldMs` passes with the prompt unanswered.
-    const hold = started.awaiting ? consentHold(config, work.key, prepared.epoch, profile.agentName, pane, started.awaiting) : null;
-    if (hold) writeConsentHold(started.files.stem, hold);
-    return { target: { name: profile.agentName, pane_id: pane, agent_status: hold ? 'blocked' : 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: started.delivery, sandbox,
-      started: started.started.state, consent: { answered: started.consent, awaiting: hold }, epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [] };
-  } catch (error) {
-    const malformedTab = (error as any)?.herdrTab as string | undefined;
-    const failed = error instanceof Error ? error.message : 'Worker launch failed';
-    // Once the command line is in the pane, the watch supervisor may be running there with the
-    // runtime under it. Closing that pane kills both by SIGHUP and leaves an unverified containment
-    // fence (GY-273), so it is left alone: the claim is released below, and the supervisor stops
-    // its own worker on the lost lease and settles the containment itself.
-    const target = { key: work.key, epoch: prepared.epoch, pane };
-    let supervised = ran && await Promise.resolve(supervisor(target)).catch(() => true);
-    // A runtime that never started (GY-413) leaves nothing under its supervisor worth keeping, and
-    // the pane it leaves idles in the worktree holding the containment fence. Its supervisor is
-    // stopped first — its own shutdown settles its quarantine — and only once it is gone is the
-    // pane closed, before the claim is released. A supervisor that will not stop keeps its pane.
-    let stop = '';
-    if (supervised && error instanceof SessionStartError) {
-      supervised = !await Promise.resolve(stopSupervisor(target)).catch(() => false);
-      stop = supervised ? '' : `its watch supervisor for epoch ${prepared.epoch} was stopped and `;
+  // The lease is the launch's to keep alive until the supervisor's first heartbeat (GY-1287).
+  const keepAlive = launchLeaseKeepAlive(renew ? () => renew(root, work.key, prepared.epoch, profile.name) : null, renewIntervalMs);
+  try { return await launchPrepared(); } finally { await keepAlive.stop(); }
+  async function launchPrepared() {
+    // The session pushes with its own short-lived credential, never the host's login (GY-999).
+    const credential = credentialMint && profile.credentialFile ? workerCredentialDirectory(profile.credentialFile, work.key, prepared.epoch) : null;
+    // The worker writes its worktree, the worktree's own Git admin directory and the shared one;
+    // each is granted to the runtime's sandbox, and the grant is proved below before anything starts.
+    const paths = workerPaths(prepared.path);
+    // So is the host's verification lock directory, or a sandboxed worker's heavy runs go unbounded (GY-612).
+    const writable = [...writablePaths({ ...paths, commonDir: paths.commonDir ?? await sharedGitDirectory(root) }), ...sessionSlotsGrant(root, config)];
+    const args = grantWorkerPaths(launch.kind, launch.args, writable, prepared.path);
+    // The worker's own rules go into its worktree before the session starts, so pushing its
+    // branch and opening its pull request never wait on a keypress. A failure is reported, not fatal.
+    const harness = await installWorkerHarness(config, { ...profile, kind: launch.kind as WorkerProfile['kind'] }, work.key, prepared).catch(error => ({ applied: false, reason: error instanceof Error ? error.message : 'Worker rules could not be written' }));
+    const memory = await readProjectMemory(root).catch(() => null);
+    // A mechanical-fix round (GY-971) is told exactly which findings its one commit fixes.
+    const mechanical = await mechanicalRound(root, config, work);
+    const prompt = workerPrompt(config, work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, mechanical);
+    // The worker loads its own role rules, never the master's: it may push its assigned branch.
+    const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, credentialFiles: [profile.credentialFile!] });
+    let pane: string | undefined, tabId: string | undefined, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null, ran = false;
+    try {
+      // Minted before anything starts: a launch that cannot get one is refused and its claim
+      // released below, so the item is launched again once a credential can be minted.
+      if (credential) await credentialMint!(root, { key: work.key, epoch: prepared.epoch, profile, directory: credential });
+      const credentialEnvironment = credential ? workerCredentialEnvironment(credential) : {};
+      // A sandbox that cannot write them is a launch failure naming the path, not a worker that
+      // fails at its first sync; the claim is released below like any other failed launch.
+      if (sandboxProbe) sandbox = verifyWorkerSandbox({ ...launch, args }, prepared.path, writable, sandboxProbe === 'host' ? undefined : sandboxProbe);
+      const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, '--env', `GRAPHYARD_HERDR_AGENT_KIND=${launch.kind}`, ...Object.entries(withVerificationPath(sessionHarness.environment, { ...launch.environment, ...credentialEnvironment })).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
+      const created = createdHerdrTab(await herdrJson(tabArgs, run)); pane = created.pane; tabId = created.tab;
+      // The instruction is the session's own first request, on the runtime's command line under
+      // the supervisor, read from the request file in the worktree (GY-121); only a runtime without
+      // that contract is prompted after.
+      // A worker never reaches the operator's keyring, minted credential or not (GY-999, GY-1039): one
+      // launched without a minter has no GitHub credential at all, never the host's login.
+      const started = await startAgentSession(profile.agentName, launch.kind!, pane, [...args, ...sessionHarness.args], prompt, run,
+        { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs ?? launchStartMs(config), directory: prepared.path, cwd: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment, ownGitHubCredential: true, ...(coordinatorRoot ? { coordinatorRoot } : {}), onRun: () => { ran = true; } });
+      // A worker stopped on a prompt the launcher does not answer is held for a human rather than
+      // closed: its record beside the launch files is what master status raises and what the watch
+      // supervisor bounds, releasing the slot once `consentHoldMs` passes with the prompt unanswered.
+      const hold = started.awaiting ? consentHold(config, work.key, prepared.epoch, profile.agentName, pane, started.awaiting) : null;
+      if (hold) writeConsentHold(started.files.stem, hold);
+      return { target: { name: profile.agentName, pane_id: pane, agent_status: hold ? 'blocked' : 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: started.delivery, sandbox,
+        started: started.started.state, consent: { answered: started.consent, awaiting: hold }, epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [] };
+    } catch (error) {
+      const malformedTab = (error as any)?.herdrTab as string | undefined;
+      const failed = error instanceof Error ? error.message : 'Worker launch failed';
+      // Once the command line is in the pane, the watch supervisor may be running there with the
+      // runtime under it. Closing that pane kills both by SIGHUP and leaves an unverified containment
+      // fence (GY-273), so it is left alone: the claim is released below, and the supervisor stops
+      // its own worker on the lost lease and settles the containment itself.
+      const target = { key: work.key, epoch: prepared.epoch, pane };
+      let supervised = ran && await Promise.resolve(supervisor(target)).catch(() => true);
+      // A runtime that never started (GY-413) leaves nothing under its supervisor worth keeping, and
+      // the pane it leaves idles in the worktree holding the containment fence. Its supervisor is
+      // stopped first — its own shutdown settles its quarantine — and only once it is gone is the
+      // pane closed, before the claim is released. A supervisor that will not stop keeps its pane.
+      let stop = '';
+      if (supervised && error instanceof SessionStartError) {
+        supervised = !await Promise.resolve(stopSupervisor(target)).catch(() => false);
+        stop = supervised ? '' : `its watch supervisor for epoch ${prepared.epoch} was stopped and `;
+      }
+      if (!supervised && (pane || tabId || malformedTab)) {
+        let note: string;
+        try { note = await closeFailedLaunch(pane, tabId ?? malformedTab, run); }
+        catch { throw new Error(`${failed}; Herdr could not confirm pane shutdown, so Graphyard retained epoch ${prepared.epoch}`); }
+        withLaunchClose(error, `${stop}${note} before epoch ${prepared.epoch} was released`);
+      }
+      // A running supervisor withdraws its session's credential itself when it stops.
+      if (credential && !supervised) await withdrawWorkerCredential(credential).catch(() => {});
+      await keepAlive.stop();
+      try { await release(root, work.key, prepared.epoch, profile.name); }
+      catch (releaseError) {
+        // A lease that is already gone has handed its epoch back: nothing is stranded, so the
+        // launch's own failure is reported as it is, as the worktree path does (GY-860, GY-1287).
+        if (!(releaseError instanceof Error && /Lease missing, expired, or superseded/.test(releaseError.message))) throw new Error(supervised ? `${failed}; pane ${pane} was left to its running supervisor, but Graphyard could not release epoch ${prepared.epoch}` : `${failed}; the pane was stopped but Graphyard could not release epoch ${prepared.epoch}`);
+      }
+      // A supervised pane is never relaunched over: the failure is reported as it is, not as a retryable prompt.
+      if (supervised) throw Object.assign(new Error(`${failed}; pane ${pane} was left to its running supervisor, which stops the worker on the released epoch ${prepared.epoch}`), { cause: error });
+      throw error;
     }
-    if (!supervised && (pane || tabId || malformedTab)) {
-      let note: string;
-      try { note = await closeFailedLaunch(pane, tabId ?? malformedTab, run); }
-      catch { throw new Error(`${failed}; Herdr could not confirm pane shutdown, so Graphyard retained epoch ${prepared.epoch}`); }
-      withLaunchClose(error, `${stop}${note} before epoch ${prepared.epoch} was released`);
-    }
-    // A running supervisor withdraws its session's credential itself when it stops.
-    if (credential && !supervised) await withdrawWorkerCredential(credential).catch(() => {});
-    try { await release(root, work.key, prepared.epoch, profile.name); }
-    catch { throw new Error(supervised ? `${failed}; pane ${pane} was left to its running supervisor, but Graphyard could not release epoch ${prepared.epoch}` : `${failed}; the pane was stopped but Graphyard could not release epoch ${prepared.epoch}`); }
-    // A supervised pane is never relaunched over: the failure is reported as it is, not as a retryable prompt.
-    if (supervised) throw Object.assign(new Error(`${failed}; pane ${pane} was left to its running supervisor, which stops the worker on the released epoch ${prepared.epoch}`), { cause: error });
-    throw error;
   }
 }
 /**
@@ -369,7 +440,35 @@ export function autonomousSession(outcome: string, blocker: string) {
  * on one waits for a person (GY-197). Worker and producer requests say how to never trigger it.
  */
 export const destructivePromptGuidance = 'Avoid any command that triggers your runtime\'s destructive-operation prompt, which waits for a person and no person will answer it: never give rm or mv a glob or a variable as its target (such as DIR/* or "$DIR") outside a directory you created yourself with mktemp -d. Name explicit paths inside your worktree instead, and for scratch files create a directory with mktemp -d and remove only that directory by its exact path. ';
-export function workerPrompt(config: Pick<MasterConfig, 'cliPath'>, work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief'>>, profile: Pick<WorkerProfile, 'principal'>, epoch: number, dependencies?: Pick<SharedDependencies, 'shared'> | null, memory?: ProjectMemory | null, baseSha?: string) {
+export function workerPrompt(
+  config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository'>>,
+  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief' | 'candidate'>>,
+  profile: Pick<WorkerProfile, 'principal'>,
+  epoch: number,
+  dependencies?: Pick<SharedDependencies, 'shared'> | null,
+  memoryOrMechanical?: ProjectMemory | { requests: readonly MechanicalFixRequest[]; reviewId: number } | null,
+  baseShaOrMechanical?: string | { requests: readonly MechanicalFixRequest[]; reviewId: number } | null,
+  mechanicalOpt?: { requests: readonly MechanicalFixRequest[]; reviewId: number } | null,
+) {
+  let memory: ProjectMemory | null = null;
+  let baseSha: string | undefined = undefined;
+  let mechanical: { requests: readonly MechanicalFixRequest[]; reviewId: number } | null = null;
+
+  if (memoryOrMechanical && 'requests' in memoryOrMechanical) {
+    mechanical = memoryOrMechanical;
+  } else {
+    memory = (memoryOrMechanical as ProjectMemory | null) ?? null;
+  }
+
+  if (baseShaOrMechanical && typeof baseShaOrMechanical === 'object' && 'requests' in baseShaOrMechanical) {
+    mechanical = baseShaOrMechanical;
+  } else if (typeof baseShaOrMechanical === 'string') {
+    baseSha = baseShaOrMechanical;
+  }
+
+  if (mechanicalOpt) {
+    mechanical = mechanicalOpt;
+  }
   // A session that reinstalls dependencies it already has costs the host a gigabyte per attempt,
   // so the launcher says which trees are already there rather than leaving it to be guessed.
   const installed = dependencies?.shared.length ? `The assigned worktree needs no dependency install: ${dependencies.shared.map(entry => `${entry.name} ${entry.how === 'reachable' ? 'already resolves to' : 'is shared with'} the install at ${entry.source}`).join(', ')}, for this exact lockfile. Do not install dependencies again unless you change the lockfile. ` : '';
@@ -383,6 +482,7 @@ export function workerPrompt(config: Pick<MasterConfig, 'cliPath'>, work: Pick<W
     + (work.documentation ? documentationWorkerSection(work.documentation, work.key, epoch, config.cliPath) : '')
     + submissionPolicyRule
     + destructivePromptGuidance
+    + (config.repository && mechanical ? mechanicalWorkerSection(config.repository, config.cliPath, { key: work.key, candidate: work.candidate ?? null }, epoch, mechanical.requests, mechanical.reviewId) : '')
     + resumedAttempt(work)
     + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — do not wait and do not write it as a blocker: record it with node ${config.cliPath} park ${work.key} ${epoch} KIND NEEDED -- REASON (KIND is goals-and-priorities, money-or-accounts or credentials-for-people; NEEDED is the exact thing the human must provide), which ends your lease and parks the item for the human, then stop. `
     + autonomousSession('implement the item, open the pull request and submit it with complete', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`);
@@ -410,7 +510,12 @@ function workerEnvironment(config: MasterConfig, profile: WorkerProfile) {
 // large repository is the slowest thing the dispatcher waits on; it is bounded well above the
 // runtime bound, so a slow checkout is never mistaken for a hung one (GY-114).
 export const workerLaunchTimeoutMs = 600_000;
-const workerCommand: WorkerCommand = (command, args, options = {}) => defaultChildRun(command, args, { cwd: options.cwd, env: options.env, timeoutMs: workerLaunchTimeoutMs, stdout: options.stdio?.[1] === 'inherit' ? 'inherit' : 'capture', stderr: options.stdio?.[2] === 'inherit' ? 'inherit' : 'capture' });
+// A `pipe` stderr is captured so a failed child's is in its error's message, where the dispatch
+// classifier reads the worktree command's git text (GY-860); it is still shown, echoed on failure.
+export const workerCommand: WorkerCommand = async (command, args, options = {}) => {
+  try { return await defaultChildRun(command, args, { cwd: options.cwd, env: options.env, timeoutMs: workerLaunchTimeoutMs, stdout: options.stdio?.[1] === 'inherit' ? 'inherit' : 'capture', stderr: options.stdio?.[2] === 'inherit' ? 'inherit' : 'capture' }); }
+  catch (error) { if (options.stdio?.[2] === 'pipe' && error instanceof ChildProcessError && error.stderr) process.stderr.write(error.stderr); throw error; }
+};
 
 /**
  * The default minter (GY-999): the CLI, as the worker's own principal, asks the control plane for
@@ -434,12 +539,27 @@ export function worktreeFailure(key: string, epoch: number, error: unknown) {
   return `Worker launch failed: the worktree for ${key} epoch ${epoch} could not be created: ${stderr || failureText(error)}`;
 }
 
+/** The launch's renewal of its claim (GY-1287): the worker's own `heartbeat`, under the profile's credential. */
+export async function renewWorkerLaunch(root: string, key: string, epoch: number, profileName: string, run: WorkerCommand = workerCommand) {
+  const config = await loadMasterConfig(root); const profile = config.workers.find(worker => worker.name === profileName);
+  if (!profile || profile.mode !== 'launch' || !profile.kind || !profile.credentialFile) throw new Error('A complete launch profile is required');
+  await run(process.execPath, [config.cliPath, 'heartbeat', key, String(epoch)], { cwd: root, env: workerEnvironment(config, profile) });
+}
 export async function releaseWorkerLaunch(root: string, key: string, epoch: number, profileName: string, run: WorkerCommand = workerCommand) {
   const config = await loadMasterConfig(root); const profile = config.workers.find(worker => worker.name === profileName);
   if (!profile || profile.mode !== 'launch' || !profile.kind || !profile.credentialFile) throw new Error('A complete launch profile is required');
   await readWorkerCredential(root, profile.credentialFile);
   await run(process.execPath, [config.cliPath, 'release', key, String(epoch)], { cwd: root, env: workerEnvironment(config, profile) });
 }
+
+/**
+ * GY-860 AC-2: whether a dispatch failure names the item's own workspace — the host's git state a
+ * repair or a redispatch can clear — rather than the profile. Such a failure cools off no profile:
+ * the worktree command itself releases the claim with its git message, which hands the epoch back,
+ * so the failure costs no attempt, and the item's dispatch record keeps the message.
+ */
+export const workspaceDispatchFailure = (reason: string) =>
+  /Git worktree creation failed|already has a workspace|Branch or host\/path is already reserved|already linked PR branch|Submitted PR branch changed/.test(reason);
 
 /**
  * `claimBy` is a hand dispatch's deadline on this host's clock (GY-175): it is checked again
@@ -475,8 +595,16 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
     const reclaimed = Array.isArray(workspace.reclaimed) ? (workspace.reclaimed as { path?: unknown; action?: unknown }[]).map(entry => `${String(entry.path)}: ${String(entry.action)}`) : [];
     return { epoch: claimedEpoch, path: workspace.path, base, dependencies, ...(typeof workspace.branch === 'string' && workspace.branch ? { branch: workspace.branch } : {}), ...(reclaimed.length ? { reclaimed } : {}) };
   } catch (error) {
-    if (claimedEpoch !== null) try { await run(process.execPath, [config.cliPath, 'release', key, String(claimedEpoch)], { cwd: root, env }); }
-    catch { throw new Error(`${error instanceof Error ? error.message : 'Workspace preparation failed'}; Graphyard could not release epoch ${claimedEpoch}`); }
+    if (claimedEpoch !== null) {
+      try { await run(process.execPath, [config.cliPath, 'release', key, String(claimedEpoch)], { cwd: root, env }); }
+      catch (releaseError) {
+        // GY-860: the worktree command releases its own claim as a workspace failure when git
+        // could not build the workspace, which hands the epoch back; a release refused because
+        // that already happened changes nothing, and only one that could not reach the server wraps.
+        if (releaseError instanceof Error && /Lease missing, expired, or superseded/.test(releaseError.message)) throw error;
+        throw new Error(`${error instanceof Error ? error.message : 'Workspace preparation failed'}; Graphyard could not release epoch ${claimedEpoch}`);
+      }
+    }
     throw error;
   }
 }

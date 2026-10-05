@@ -10,6 +10,7 @@ import { prSteps, stepSince } from './pr-steps.js';
 import { leftFlowAt, noRelease, releaseView, servedFor, type ReleaseView } from './release.js';
 import { stalledCards } from './actionless.js';
 import { resourceConflicts } from '../coordination.js';
+import { blockerCounts, blockerView, routineBlocker, type BlockerView } from './blocker-class.js';
 
 /**
  * The board (GY-200): every open item in its one group, with who acts next, the command that
@@ -141,6 +142,7 @@ export function nextActor(work: Work, group: Group | null, now: number, release:
   }
   // Blocked means the step's own actor cannot clear it (a recorded blocker, a stall, a violation,
   // a refusal no retry fixes, a failed check after deploying): the master agent acts next.
+  const routine = group === 'blocked' ? routineBlocker(work) : null; if (routine) return routine; // GY-1008: the loop's to clear
   if (group === 'blocked') return { who: 'Master agent', does: release.failed.has(work.key) && work.stage === 'done' ? 'Find out why production has not deployed it, and record the cause' : 'Clear what blocks it, or hand the decision to an approver agent' };
   if (group === 'up-next') {
     const held = upNextHold(work, all, now);
@@ -213,8 +215,7 @@ const refusalsOf = (work: Work, gate: string) => work.gates.find(entry => entry.
  * `master scope` — or `master requirements` where no fold represents the ask under the cap, which
  * the plain union `master scope` posts cannot carry (GY-936) — a recorded blocker `master unblock`,
  * an escalation `master decide … resolve`, a merged item production does not serve
- * `master verify-deployment`, a candidate every other gate passed (merging, or stranded there)
- * `master merge`, a review `master review`, backlog `master release`, and a human-only decision the
+ * `master verify-deployment`, a review `master review`, backlog `master release`, and a human-only decision the
  * answer its row names. Null where the next step is a session already running or a turn nobody can
  * take early.
  */
@@ -226,11 +227,9 @@ export function nextCommand(work: Work, group: Group | null, actor: ActorRole, h
   if (group === 'backlog') return actor === 'master' ? `graphyard master release ${key}` : null;
   if (work.scopeRequest && work.blocker?.startsWith(scopeRefusalBlocker))
     return terminalScopeRefusal(work) ? `graphyard master requirements ${key} FILE REASON` : `graphyard master scope ${key}`;
-  if (work.blocker) return `graphyard master unblock ${key} REASON`;
+  if (work.blocker) return blockerView(work)?.needsSomeone === false ? null : `graphyard master unblock ${key} REASON`;
   if (work.stage === 'done') return actor === 'master' ? `graphyard master verify-deployment ${key}` : null;
   if (refusalsOf(work, 'merge').some(reason => escalation.test(reason))) return `graphyard master decide ${key} resolve REASON`;
-  const mergeable = !!work.submission && work.gates.every(gate => gate.passed || gate.name === 'merge');
-  if (mergeable && (actor === 'master' || actor === 'executor') && (work.nextAction?.kind ?? 'merge') === 'merge') return `graphyard master merge ${key}`;
   return null;
 }
 
@@ -247,7 +246,7 @@ export interface BoardItem {
   /** When the item entered the state its group reports: the step for timed groups, the request for Needs you. */
   since: string;
   /** Past the fault bound (`overdueAfterMs`) in a group that carries a clock. */
-  overdue: boolean;
+  overdue: boolean; /** The standing blocker's class, whether it needs someone, and its last and next probe (GY-1008). */ blocker?: BlockerView;
 }
 export interface Board {
   now: string;
@@ -255,7 +254,7 @@ export interface Board {
   overdueAfterMs: number;
   groups: Record<OpenGroup, BoardItem[]>;
   counts: Record<OpenGroup, number>;
-  open: number;
+  open: number; /** Blocked items, and of them those needing someone: only a genuine or human-only class (GY-1008). */ blockers?: { total: number; needingSomeone: number };
 }
 
 /** Every open item into its group with its next actor, command, since and overdue. */
@@ -270,12 +269,12 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
     const since = group === 'needs-you' ? entry.humanRequest?.at ?? rows.get(entry.id)?.request.at ?? statusSince(entry, now)
       : group === 'blocked' && stalls.has(entry.id) ? stalls.get(entry.id)!.heldSince
         : timed ? stepSince(entry, now, null, release) : statusSince(entry, now);
-    return { id: entry.id, key: entry.key, title: entry.title, priority: entry.priority, group, stage: entry.stage, owner: entry.lease?.owner ?? entry.lastAssignment?.owner ?? null,
-      actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id)), since, overdue: timed && statusDuration(since, now).overdue };
+    const blocker = blockerView(entry); return { id: entry.id, key: entry.key, title: entry.title, priority: entry.priority, group, stage: entry.stage, owner: entry.lease?.owner ?? entry.lastAssignment?.owner ?? null,
+      actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id)), since, overdue: timed && statusDuration(since, now).overdue, ...(blocker ? { blocker } : {}) };
   };
   const board = Object.fromEntries(groups.map(group => [group, byGroup[group].map(entry => item(entry, group))])) as Record<OpenGroup, BoardItem[]>;
   return { now: new Date(now).toISOString(), overdueAfterMs: OVERDUE_MINUTES * 60_000, groups: board,
-    counts: Object.fromEntries(groups.map(group => [group, board[group].length])) as Record<OpenGroup, number>, open };
+    counts: Object.fromEntries(groups.map(group => [group, board[group].length])) as Record<OpenGroup, number>, open, blockers: blockerCounts(groups.flatMap(group => board[group])) };
 }
 
 /**
@@ -313,6 +312,5 @@ export async function masterBoard(api: (path: string) => Promise<any>, snapshot:
     const decision = unanswered.find(row => row.work === entry.key);
     return decision ? { ...entry, actor: 'master' as const, command: `graphyard master approver ${entry.key} ${decision.id}` } : entry;
   });
-  return { counts: board.counts, open: board.open, overdueAfterMs: board.overdueAfterMs,
-    owed: items.filter(entry => entry.actor === 'master'), others: items.filter(entry => entry.actor !== 'master') };
+  return { counts: board.counts, open: board.open, overdueAfterMs: board.overdueAfterMs, blockers: board.blockers ?? blockerCounts(items), owed: items.filter(entry => entry.actor === 'master'), others: items.filter(entry => entry.actor !== 'master') };
 }

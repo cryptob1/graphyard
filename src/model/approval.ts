@@ -18,16 +18,11 @@ import { createSchema, escalationTriggers, operatorCapability, type OperatorCapa
  */
 // `close` is a triage closure (GY-402): a machine-filed item the triage agent judged already fixed,
 // not worth doing, or to be merged into another, which is applied only once an approver agrees.
-export const decisionActions = ['release', 'unblock', 'requirements', 'resolve', 'attest', 'merge', 'rework', 'recover', 'grant', 'repair-merge', 'close'] as const;
+export const decisionActions = ['release', 'unblock', 'requirements', 'resolve', 'attest', 'merge', 'rework', 'recover', 'grant', 'close'] as const;
 export type DecisionAction = typeof decisionActions[number];
 export const decisionCapabilities: Record<DecisionAction, OperatorCapability> = {
   release: 'intent:ready', unblock: 'intent:unblock', requirements: 'policy:requirements', resolve: 'decision:resolve',
   attest: 'decision:attest', merge: 'decision:merge', rework: 'decision:rework', recover: 'decision:rework', grant: 'decision:grant', close: 'intent:create',
-  // The repair lane (GY-406): the App merges a merge-path fix past the stalled merge path.
-  // Not narrowed to the master's own identity (GY-428, declined): the server records no binding
-  // from an operator agent to a master loop, and the master requests this decision by hand, so it
-  // is no loop-owned hand action. A second, independent approver agent still has to apply it.
-  'repair-merge': 'decision:merge',
 };
 export const approveCapability: OperatorCapability = 'decision:approve';
 
@@ -64,8 +59,6 @@ export const decisionInputs = {
   close: z.union([ z.object({ kind: z.enum(['superseded', 'obsolete', 'duplicate']), ref: z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/).nullable(), reason: z.string().trim().min(1).max(2000), triageAt: z.iso.datetime() }).strict(),
     z.object({ kind: z.enum(closureKinds), ref: z.string().trim().min(1).max(200).nullable().optional(), expectedRevision: revision }).strict()]),
   grant: z.object({ principal: principalId, patterns: z.array(z.string().min(1).max(200)).min(1).max(50), expectedRevision: z.number().int().min(0).optional() }).strict(),
-  // Head-bound: the repair lane merges exactly this head (expectedHeadOid) and nothing else.
-  'repair-merge': z.object({ sha }).strict(),
 } satisfies Record<DecisionAction, z.ZodType>;
 const reason = z.string().trim().min(1).max(2000);
 /**
@@ -86,7 +79,7 @@ export const decisionRefusalSchema = z.object({ action: z.literal('refuse'), dec
  * refused, why and when. It is distinct from `refusals`, the conflicted approvals the server
  * turned away, and from a decision still `requested` because no session ever judged it.
  */
-export type DecisionState = 'requested' | 'approved' | 'applied' | 'failed' | 'refused';
+export type DecisionState = 'requested' | 'approved' | 'applied' | 'failed' | 'refused' | 'superseded';
 export interface Decision {
   id: string; workId: string; action: DecisionAction; input: any; reason: string;
   requestedBy: string; requestedAt: string; state: DecisionState;
@@ -102,6 +95,7 @@ export interface Decision {
   concurrences: { requester: string; reason: string; precedent: string[]; context: string | null; at: string }[];
   /** For a rework or recover request, the candidate it was requested against (GY-229); null otherwise and for requests recorded before it was kept. */
   situation?: DecisionSituation | null;
+  superseded?: { bound: DecisionSituation; current: DecisionSituation } | null; // GY-1297: the situation it was bound to, and the item's
 }
 /**
  * What a rework or recover request judged: the item's candidate head and the base it was built
@@ -127,6 +121,15 @@ const sameSituation = (recorded: DecisionSituation | null | undefined, current: 
  */
 const judgedSame = (action: DecisionAction, decision: { situation?: DecisionSituation | null }, situation: DecisionSituation | null | undefined) =>
   !situatedDecisionActions.includes(action) || sameSituation(decision.situation, situation);
+// GY-1297. An approved decision left without an outcome refused its action forever (GY-949): one bound to a head
+// and base the item has left is `superseded`, naming both; one whose situation holds is resumed past the grace.
+export const approvalApplyGraceMs = 60_000, approvedDecisionBoundMs = 300_000;
+export function supersededSituation(decision: { action: string; state: string; situation?: DecisionSituation | null }, work: Pick<Work, 'candidate'>): { bound: DecisionSituation; current: DecisionSituation } | null {
+  const bound = decision.state === 'approved' ? decision.situation : null, current = bound ? decisionSituation(decision.action, work) : null;
+  return !bound || !current || sameSituation(bound, current) ? null : { bound: { sha: bound.sha ?? null, baseSha: bound.baseSha ?? null }, current };
+}
+export const stalledApproval = (decision: { state: string; approvedAt?: string | null }, now: number) => decision.state === 'approved' && !!decision.approvedAt && now - Date.parse(decision.approvedAt) >= approvalApplyGraceMs;
+export const situationLabel = (situation: DecisionSituation) => situation.sha ? `head ${situation.sha.slice(0, 12)} on base ${String(situation.baseSha).slice(0, 12)}` : 'no candidate';
 export interface DecisionEvent { kind: string; actor: string; at: string; payload: any }
 
 /** Rebuild every decision on an item from its append-only ledger entries, oldest first. */
@@ -149,6 +152,7 @@ export function foldDecisions(workId: string, events: DecisionEvent[]): Decision
     if (event.kind === 'decision.approved') Object.assign(decision, { state: 'approved', approvedBy: event.actor, approvedAt: event.at, approvalReason: details.reason });
     if (event.kind === 'decision.applied') Object.assign(decision, { state: 'applied', outcome: details.outcome ?? null });
     if (event.kind === 'decision.failed') Object.assign(decision, { state: 'failed', outcome: details.error ?? null });
+    if (event.kind === 'decision.superseded') Object.assign(decision, { state: 'superseded', outcome: details.reason ?? null, superseded: { bound: details.bound ?? null, current: details.current ?? null } });
   }
   return [...decisions.values()];
 }
@@ -174,7 +178,7 @@ export function approvalConflict(decision: Pick<Decision, 'id' | 'action' | 'inp
     return `Self-approval refused: ${approver.id} requested decision ${decision.id}; a second, independent agent identity must approve it`;
   if (implementerIdentities(work).includes(approver.id))
     return `Conflicted approval refused: ${approver.id} has held an assignment on ${work.key}, so it cannot approve decisions about it`;
-  if (decision.action === 'attest' || decision.action === 'merge' || decision.action === 'repair-merge') {
+  if (decision.action === 'attest' || decision.action === 'merge') {
     const own = work.evidence.filter(item => item.producer === approver.id && (decision.action !== 'attest' || item.proof === decision.input.proof));
     if (own.length) return `Conflicted approval refused: ${approver.id} produced evidence ${[...new Set(own.map(item => item.proof))].join(', ')} on ${work.key} and may not approve its own evidence`;
   }
@@ -267,10 +271,6 @@ export function decisionPrecondition(action: DecisionAction, input: any, work: W
   }
   if (action === 'rework' && !work.submission) return 'Rework applies to submitted work';
   if (action === 'close' && input.triageAt !== undefined && (work.triage?.state !== 'proposed' || work.triage.at !== input.triageAt)) return `${work.key} has no proposed triage closure from ${input.triageAt}; its triage is ${work.triage ? `${work.triage.state} from ${work.triage.at}` : 'not recorded'}`;
-  if (action === 'repair-merge') {
-    if (work.repair !== 'merge-path') return `${work.key} does not carry "repair": "merge-path"; only a merge-path repair item may use the repair lane`;
-    if (!work.candidate || work.candidate.sha !== input.sha) return `The decision names ${String(input.sha).slice(0, 12)} but the current candidate is ${work.candidate?.sha.slice(0, 12) ?? 'none'}`;
-  }
   return null;
 }
 

@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { CONTAINED_EVENT, PENDING_EVENT, ProductionWatch, startProductionWatch } from '../src/production-watch.js';
+import { CONTAINED_EVENT, DEPLOYMENT_GRACE_MS, PENDING_EVENT, ProductionWatch, attentionLines, startProductionWatch, type ProductionReport } from '../src/production-watch.js';
+import { controlPlaneAttention, productionSummary, type ControlPlaneStatus } from '../src/master/attention.js';
+import { classifyAttention, statusFaults, trackFaults, type FaultRecord } from '../src/model/fault-classes.js';
 import { startReconciliation } from '../src/server/main.js';
-import { GitHub } from '../src/github.js';
+import { GitHub, comparePage } from '../src/github.js';
 import { events as eventsTable } from '../src/store/tables/work.js';
 import { buildIdentity } from '../src/protocol-version.js';
 import type { Store } from '../src/store.js';
@@ -147,9 +149,9 @@ test('unit:ahead-by-minimal — the ahead-by read asks GitHub for the count only
   const parameters = new URL(ahead[0], 'https://api.github.com').searchParams;
   assert.deepEqual([...parameters.entries()], [['per_page', '1'], ['page', '2']], 'one commit per page, and never the first page, which carries the file list');
   assert.equal(ahead[0], `/compare/${sha(40)}...main?per_page=1&page=2`);
-  assert.deepEqual(report.ahead, { by: 7, head: null, commits: [] }, 'only the count is read from the answer');
-  // The containment compare the adapter makes is the one-commit form too.
-  assert.ok(requests.filter(path => path.startsWith('/compare/')).every(path => new URL(path, 'https://api.github.com').searchParams.get('per_page') === '1'), requests.join(', '));
+  assert.deepEqual(report.ahead, { by: 7, head: null, commits: [], unservedSince: null, rollingOut: false }, 'only the count is read from the answer; every delivery is served, so no rollout is in flight');
+  // The containment compare of two exact SHAs is the shared first page (GY-1272), asked once and kept: no other compare is read.
+  assert.deepEqual(requests.filter(path => path.startsWith('/compare/') && path !== ahead[0]), [`/compare/${sha(1)}...${sha(40)}${comparePage}`]);
 });
 
 test('unit:production-watch-off-tick — a GitHub fake that never answers holds only the production watch; engine.reconcile keeps running every tick', async () => {
@@ -174,4 +176,165 @@ test('unit:production-watch-off-tick — a GitHub fake that never answers holds 
   const main = await readFile(new URL('../src/server/main.ts', import.meta.url), 'utf8');
   assert.ok(!/production\.tick\(/.test(main), 'src/server/main.ts does not call production.tick inside the reconciliation tick');
   assert.match(main, /startProductionWatch\(production/);
+});
+
+// GY-1209: the lag line "main is N commits ahead of production" fired for any ahead-by > 0, so the
+// healthy 84–92 s between a merge landing on main and its deployment concluding counted as
+// deployment-class attention. These are the three GY-1207 instance states: the serving commit,
+// how far main was ahead, and when the merge that put it there landed.
+const rollouts = [
+  { serving: 'a7f6da24bba0ff8212e17c100c211513fbfc3de7', ahead: 17, mergedAt: '2026-10-04T15:15:54Z', deployedAt: '2026-10-04T15:17:18Z' },
+  { serving: '8a0afd8247efeca3993da36ccdeb8acdec2ad6e5', ahead: 6, mergedAt: '2026-10-04T16:21:33Z', deployedAt: '2026-10-04T16:23:05Z' },
+  { serving: '7e121476c4839bca4599d150383e0d41fe3b396a', ahead: 3, mergedAt: '2026-10-04T17:59:48Z', deployedAt: '2026-10-04T18:01:14Z' },
+];
+/** A linear main from `serving`: commits 1..ahead follow it, and the tip is a delivered merge. Every request GitHub answers is counted. */
+function rolloutRepository(serving: string, ahead: number) {
+  const commits = [serving, ...Array.from({ length: ahead }, (_, index) => (index + 1).toString(16).padStart(40, 'e'))];
+  const state = { tip: ahead }, requests: string[] = [];
+  const index = (ref: string) => { if (ref === 'main') return state.tip; const found = commits.indexOf(ref); if (found < 0) throw new Error(`unknown commit ${ref}`); return found; };
+  const request = async (path: string) => {
+    requests.push(path);
+    const [, from, to] = path.match(/^\/compare\/([^.]+)\.\.\.([^?]+)/)!;
+    const a = index(from), b = index(to);
+    return { status: b > a ? 'ahead' : b === a ? 'identical' : 'behind', ahead_by: Math.max(0, b - a) };
+  };
+  return { commits, state, requests, github: { request,
+    contains: async (base: string, head: string) => { const answer = await request(`/compare/${base}...${head}?per_page=1`); return answer.status === 'ahead' || answer.status === 'identical'; },
+    aheadBy: async (base: string, head: string) => (await request(`/compare/${base}...${head}?per_page=1`)).ahead_by } };
+}
+/** A watch serving from its build identity, as this installation runs (provider null). */
+function rolloutWatch(rollout: typeof rollouts[number], provider: ConstructorParameters<typeof ProductionWatch>[1]['provider'] = null) {
+  const repo = rolloutRepository(rollout.serving, rollout.ahead), mergedAt = Date.parse(rollout.mergedAt);
+  const work = [{ id: 'work-tip', key: 'GY-9000', stage: 'done', delivery: { mergedAt: new Date(mergedAt).toISOString(), mergeSha: repo.commits[rollout.ahead], authorizationRevision: 1 } }] as unknown as Work[];
+  const { store, events } = memoryStore(work);
+  let clock = mergedAt;
+  const watch = new ProductionWatch(store, { provider, github: repo.github, build: buildIdentity({ GRAPHYARD_BUILD_SHA: rollout.serving }), baseBranch: 'main', now: () => clock });
+  return { watch, repo, events, at: (ms: number) => { clock = mergedAt + ms; } };
+}
+/** The base's lag line: the same report, read by an attentionLines that knows nothing of a rollout in flight. */
+const baseLines = (report: ProductionReport) => attentionLines({ ...report, ahead: report.ahead && { by: report.ahead.by, head: report.ahead.head, commits: report.ahead.commits } });
+const lagLine = (rollout: typeof rollouts[number]) => `main is ${rollout.ahead} commits ahead of production (serving ${rollout.serving.slice(0, 12)})`;
+
+for (const [number, rollout] of rollouts.entries()) {
+  test(`unit:production-lag-grace-in-flight — GY-1207 instance ${number + 1}: ${rollout.ahead} ahead of ${rollout.serving.slice(0, 12)} inside the merge→deploy window raises the line on the base and not on the candidate`, async () => {
+    const { watch, at } = rolloutWatch(rollout);
+    // Every pass inside the observed window (the deploy concluded within it) and up to the grace.
+    for (const elapsed of [0, 30_000, Date.parse(rollout.deployedAt) - Date.parse(rollout.mergedAt), DEPLOYMENT_GRACE_MS - 1_000]) {
+      at(elapsed);
+      const report = await watch.tick(true);
+      assert.deepEqual(baseLines(report), [lagLine(rollout)], `the base raises the instance line ${elapsed / 1000}s after the merge`);
+      assert.deepEqual(report.attention, [], `no lag attention ${elapsed / 1000}s after the merge`);
+      assert.equal(report.ahead?.by, rollout.ahead, 'ahead.by is still reported for the operator');
+      assert.equal(report.ahead?.rollingOut, true);
+      assert.equal(report.ahead?.unservedSince, new Date(Date.parse(rollout.mergedAt)).toISOString());
+      const summary = productionSummary(report);
+      assert.deepEqual(summary.attention, [], 'master status and the dashboard agree with the watch');
+      assert.equal(summary.aheadBy, rollout.ahead);
+      assert.equal(summary.rollingOut, true);
+      assert.match(summary.summary, new RegExp(`^main is ${rollout.ahead} commits ahead of production; rollout in flight since `));
+      assert.deepEqual(report.incidents, []);
+    }
+  });
+}
+
+test('unit:production-lag-grace-in-flight — the grace is the oldest unserved merge\'s: one past it keeps the line even when a newer merge is fresh', async () => {
+  const rollout = rollouts[0];
+  const repo = rolloutRepository(rollout.serving, rollout.ahead), mergedAt = Date.parse(rollout.mergedAt);
+  const work = [8, rollout.ahead].map((index, n) => ({ id: `work-${n}`, key: `GY-${9000 + n}`, stage: 'done', delivery: { mergedAt: new Date(mergedAt - (n ? 0 : 10 * 60_000)).toISOString(), mergeSha: repo.commits[index], authorizationRevision: 1 } })) as unknown as Work[];
+  const watch = new ProductionWatch(memoryStore(work).store, { provider: null, github: repo.github, build: buildIdentity({ GRAPHYARD_BUILD_SHA: rollout.serving }), baseBranch: 'main', now: () => mergedAt + 30_000 });
+  const report = await watch.tick(true);
+  assert.equal(report.ahead?.rollingOut, false);
+  assert.match(report.attention[0] ?? '', new RegExp(`^${lagLine(rollout).replace(/[()]/g, '\\$&')}: no deployment of `));
+});
+
+test('unit:production-lag-past-grace — a merge unserved past DEPLOYMENT_GRACE_MS still raises the lag line and its failing-deployment reason exactly as today', async () => {
+  for (const rollout of rollouts) {
+    const { watch, at } = rolloutWatch(rollout);
+    at(DEPLOYMENT_GRACE_MS + 60_000);
+    const report = await watch.tick(true);
+    assert.equal(report.ahead?.rollingOut, false);
+    assert.deepEqual(report.attention, baseLines(report), 'the line stands exactly as the base raises it');
+    assert.equal(report.attention[0], `${lagLine(rollout)}: ${report.incidents[0].reason}`);
+    assert.match(report.incidents[0].reason, /^no deployment of [0-9a-f]{12} was observed within 5 minutes of the merge/);
+    assert.deepEqual(statusFaults({ github: {}, production: productionSummary(report) }).filter(fault => fault.faultClass === 'deployment').map(fault => fault.text)[0], report.attention[0]);
+  }
+  // A failed rollout is a fault at once, grace or not: the provider's failed attempt is the line's reason.
+  const rollout = rollouts[1];
+  const tip = rolloutRepository(rollout.serving, rollout.ahead).commits[rollout.ahead];
+  const provider = { name: 'railway', description: 'stub', list: async () => [
+    { id: 'd-failed', status: 'failed' as const, providerStatus: 'FAILED', commit: tip, branch: 'main', createdAt: rollout.mergedAt, updatedAt: null, url: null },
+    { id: 'd-serving', status: 'success' as const, providerStatus: 'SUCCESS', commit: rollout.serving, branch: 'main', createdAt: '2026-10-04T15:00:00Z', updatedAt: null, url: null }] };
+  const failed = rolloutWatch(rollout, provider);
+  failed.at(60_000);
+  const report = await failed.watch.tick(true);
+  assert.deepEqual(report.attention, baseLines(report));
+  assert.match(report.attention[0], new RegExp(`^main is ${rollout.ahead} commits ahead of production \\(serving ${rollout.serving.slice(0, 12)}\\): railway deployment d-failed`));
+  // A provider attempt in flight extends the grace only to the incidents' bound; a stall past it stands.
+  const stalled = rolloutWatch(rollout, { name: 'railway', description: 'stub', list: async () => [
+    { id: 'd-building', status: 'building' as const, providerStatus: 'BUILDING', commit: tip, branch: 'main', createdAt: rollout.mergedAt, updatedAt: null, url: null },
+    { id: 'd-serving', status: 'success' as const, providerStatus: 'SUCCESS', commit: rollout.serving, branch: 'main', createdAt: '2026-10-04T15:00:00Z', updatedAt: null, url: null }] });
+  stalled.at(DEPLOYMENT_GRACE_MS + 60_000);
+  assert.equal((await stalled.watch.tick(true)).ahead?.rollingOut, true, 'a newer attempt still in flight is a rollout');
+  stalled.at(3 * DEPLOYMENT_GRACE_MS + 60_000);
+  const stall = await stalled.watch.tick(true);
+  assert.equal(stall.ahead?.rollingOut, false);
+  assert.deepEqual(stall.attention, baseLines(stall));
+  assert.match(stall.attention[0], /^main is 6 commits ahead of production/);
+});
+
+test('unit:production-lag-grace-without-provider — with provider null the grace is decided from the deliveries\' mergedAt, adding no GitHub request beyond the single aheadBy compare per pass', async () => {
+  const rollout = rollouts[2];
+  const { watch, repo, at } = rolloutWatch(rollout);
+  let report = await watch.tick(true);
+  assert.equal(report.provider, null);
+  assert.equal(report.servingSource, 'build');
+  assert.equal(report.ahead?.rollingOut, true);
+  const aheadBy = (path: string) => path.includes('...main');
+  assert.equal(repo.requests.filter(aheadBy).length, 1, 'one aheadBy compare');
+  assert.equal(repo.requests.length, 2, 'the aheadBy compare and the delivery\'s own containment compare, as the base makes');
+  // The steady passes that decide the grace through to its end: one aheadBy compare each, nothing more.
+  for (const elapsed of [60_000, 120_000, DEPLOYMENT_GRACE_MS + 1_000]) {
+    repo.requests.length = 0; at(elapsed);
+    report = await watch.tick(true);
+    assert.deepEqual(repo.requests, [`/compare/${rollout.serving}...main?per_page=1`], `${elapsed / 1000}s: only the aheadBy compare`);
+  }
+  assert.equal(report.ahead?.rollingOut, false, 'past the grace the same reads decide it');
+});
+
+test('unit:fault-class-deployment-rollout-grace — the deployment class opens no instance for a rollout inside the grace; a cadence of merges deployed within it opens zero where the base opens one per merge', async () => {
+  // classifyAttention over a control-plane status whose production report is inside the grace.
+  const { watch, at } = rolloutWatch(rollouts[0]);
+  at(60_000);
+  const report = await watch.tick(true);
+  const status = { production: report } as unknown as ControlPlaneStatus;
+  const classified = classifyAttention(controlPlaneAttention(status).attentionItems);
+  assert.deepEqual(classified.filter(item => item.kind === 'production' && item.subject === 'installation'), []);
+  assert.deepEqual(statusFaults({ github: {}, production: productionSummary(report) }).filter(fault => fault.faultClass === 'deployment'), []);
+  const base = classifyAttention(controlPlaneAttention({ production: { ...report, attention: [], ahead: { by: report.ahead!.by, head: null, commits: [] } } } as unknown as ControlPlaneStatus).attentionItems);
+  assert.deepEqual(base.filter(item => item.kind === 'production').map(item => [item.subject, item.faultClass, item.text]), [['installation', 'deployment', lagLine(rollouts[0])]], 'the base records the instance');
+
+  // Steady merge traffic: a merge every five minutes, each deployed 90 s later, the watch passing every minute.
+  const merges = 12, start = Date.parse('2026-10-04T15:00:00Z');
+  const repo = rolloutRepository(sha(0), merges);
+  const mergeAt = (index: number) => start + index * 300_000 + 10_000;
+  let clock = start;
+  const build = { commit: sha(0) as string | null, protocol: buildIdentity({}).protocol, source: 'GRAPHYARD_BUILD_SHA' as const };
+  const work = Array.from({ length: merges }, (_, index) => ({ id: `work-${index + 1}`, key: `GY-${9100 + index}`, stage: 'done', delivery: { mergedAt: new Date(mergeAt(index)).toISOString(), mergeSha: repo.commits[index + 1], authorizationRevision: 1 } })) as unknown as Work[];
+  const { store } = memoryStore(work);
+  (store as any).list = async () => work.filter(item => Date.parse(item.delivery!.mergedAt) <= clock);
+  const cadence = new ProductionWatch(store, { provider: null, github: repo.github, build, baseBranch: 'main', now: () => clock });
+  const candidateRecord: FaultRecord = { instances: [], open: {}, failing: {} }, baseRecord: FaultRecord = { instances: [], open: {}, failing: {} };
+  const deployment = (production: ReturnType<typeof productionSummary>) => statusFaults({ github: {}, production }).filter(fault => fault.faultClass === 'deployment');
+  for (clock = start; clock <= start + merges * 300_000; clock += 60_000) {
+    const landed = work.filter(item => Date.parse(item.delivery!.mergedAt) <= clock).length;
+    repo.state.tip = landed;
+    const deployed = work.filter(item => Date.parse(item.delivery!.mergedAt) + 90_000 <= clock).length;
+    build.commit = repo.commits[deployed];
+    const pass = await cadence.tick(true), at = new Date(clock).toISOString();
+    trackFaults(candidateRecord, deployment(productionSummary(pass)), at);
+    trackFaults(baseRecord, deployment(productionSummary({ ...pass, ahead: pass.ahead && { by: pass.ahead.by, head: pass.ahead.head, commits: pass.ahead.commits } })), at);
+    assert.deepEqual(pass.incidents, []);
+  }
+  assert.equal(baseRecord.instances.filter(instance => instance.faultClass === 'deployment').length, merges, 'the base opens one deployment instance per merge');
+  assert.equal(candidateRecord.instances.filter(instance => instance.faultClass === 'deployment').length, 0, 'the candidate opens none');
 });

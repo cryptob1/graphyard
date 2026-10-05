@@ -1,16 +1,22 @@
 <!-- page: Agent protocol | 5 | webhook and dispatch records. -->
 # GitHub webhook and review providers
 
-`POST /api/github/webhook` verifies GitHub's HMAC (no bearer token), deduplicates deliveries and wakes durable jobs, driving [observation and the shared reads](#reads-that-are-not-repeated); a payload never marks a gate passed.
+`POST /api/github/webhook` verifies GitHub's HMAC, deduplicates deliveries and wakes durable jobs for [observation](#reads-that-are-not-repeated); payloads never pass gates.
 
-`POST /api/work/:id/reviewpolicy` (`admin`, or operator agent with `policy:review-provider`) takes `{"provider":"codex"|"github"|"agent", "expectedPolicyRevision":1, "reason":…}` and bumps the policy revision; `agent` needs ordered `reviewerProfiles` (`name`, `runtime`, `reviewerApp`, optional `mention`, `timeoutSeconds`).
+`POST /api/work/:id/reviewpolicy` (`admin`; operator agent with `policy:review-provider`): `{"provider":"codex"|"github"|"agent", "expectedPolicyRevision":1, "reason":…}`, bumping the policy revision; `agent` needs ordered `reviewerProfiles` (`name`, `runtime`, `reviewerApp`; optional `mention`, `timeoutSeconds`).
 
 ## Reads that are not repeated
 
-- **Immutable:** commits by SHA and exact-SHA compares, fetched once into `github_cache`; least recently read rows age out past 20,000 rows or 128 MB (memory: 64 MB of text; over 1 MB memory-only, over 8 MB uncached).
-- **Per cycle:** base ref once per 15 s (restarted by a base push or own ref write); protection and branch rules (required checks) every 5 min or on a protection, ruleset or `repository` event.
-- **Webhooks:** `pull_request`, `pull_request_review`, `check_run`, `check_suite` and `push` (branch pushes too) claim items first on any replica; a poll within a webhook-driven observation's interval is skipped (`poll skipped: a webhook refreshed this item`).
+Commits and exact-SHA compares are cached once (`github_cache`), and every question about one SHA pair (ancestry, commit list, landing diff, changed files) reads its one first page (`?per_page=100&page=1`), so a base move costs each open candidate one compare; the base ref is read once per 15 s per replica, protection and rulesets every 5 min or on their events. `pull_request`, `pull_request_review`, `check_run`, `check_suite` and `push` webhooks claim items first; a poll they cover is skipped (`poll skipped: a webhook refreshed this item`).
+
+A base push wakes only open items whose files overlap it or whose last `mergeable_state` was not `CLEAN`/`UNSTABLE` (all when the payload names no files; `unit:merge-burst-request-budget`).
+
+## Prioritized wakes
+
+`POST /api/work/:id/resync` with `prioritized: true` is claimed like a webhook wake. A rework decision waiting on a stale observation sends one such wake and decides from the observation it brought in, whatever its age, provided it reads the candidate head and no GitHub pause stands; a decision the candidate moved past is withdrawn. Loop bookkeeping saved meanwhile (sessions, next action, gates, escalations) does not refuse that observation. The loop's wakes add `wait: false`, so the route answers without waiting for a reconcile tick. A rework dispatch refused because its PR branch moved (`Submitted PR branch changed`) releases its claim with a prioritized wake, so the next dispatch starts from the new head.
+
+The loop's decisions step has a budget: two fifths of `run.intervalSeconds`, at least 30 s. Items not reached keep their standing decisions but make no request that cycle; `decisions:deferred` names them (and is superseded once a cycle reaches every item). Both of the step's passes, rework and routine decisions then attestations, start the next cycle with what they put off and always reach their first item, so the oldest deferred item is requested even past the budget.
 
 ## Automatic dispatch records
 
-`autoDispatch` records each [automatic dispatch](../master-agent.md#automatic-dispatch-at-submit) as a `producers` or `review` request with `id`, `kind`, `sha`, `baseSha`, `policyRevision`, `pr`, `requestedAt`, `reason` and `state`. An approval or trusted evidence makes it `satisfied`; a head, base or policy change, rework or a closed PR makes it `cancelled`. Transitions append `dispatch.requested`, `dispatch.satisfied` or `dispatch.cancelled`; resolved requests move to `autoDispatch.history`. Nothing here moves a gate.
+`autoDispatch` holds each [automatic dispatch](../master-agent.md#automatic-dispatch-at-submit) request bound to its candidate; transitions append `dispatch.requested`, `dispatch.satisfied` (approval or trusted evidence) or `dispatch.cancelled` (candidate changed); no gate moves.

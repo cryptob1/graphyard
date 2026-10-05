@@ -1,26 +1,32 @@
 // Concern: `graphyard master` operations subcommands — status, settle-containment, dispatch, merge, verify-deployment.
-import { randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../../coordination.js';
-import { approvedMerges, continueMergeBatch, currentMergeCandidates, dispatchWork, listHerdrAgents, mergeExecutor, readWorkerCredential, snapshotWithClock, verifyContainmentDeath, withReviewerDefaults } from '../../master.js';
+import { dispatchWork, listHerdrAgents, readWorkerCredential, snapshotWithClock, verifyContainmentDeath, withReviewerDefaults, withRoleDefaults } from '../../master.js';
 import { readDaemonState } from '../../master-daemon.js';
 import { verificationEffects, verifyDeployment } from '../../master-verification.js';
 import { cycleBudget, masterStatusReport } from '../master-status.js';
 import { masterHeartbeatMinutes, masterSessionMinutes } from '../../master/master-session.js';
-import { assertHandAction, assertHandDispatch, systemDriven } from '../hand-actions.js';
+import { assertHandDispatch } from '../hand-actions.js';
 import { unhandled, type MasterSession } from './session.js';
+import { masterHarnessDrift } from './fleet.js';
+
+/** What `graphyard master merge` answers: Graphyard runs no merge of its own. */
+export const githubMergesAnswer = 'GitHub merges: a pull request whose build, review and required checks pass on its head is merged by GitHub on its branch protection, and Graphyard records the delivery from the merged observation. There is no Graphyard merge to run.';
 
 /** Reading status and acting on one item: settle a quarantine, dispatch, merge, verify a deployment. */
 export async function operationsCommand(session: MasterSession): Promise<unknown> {
-  const { id, args, print, root, master, masterApi, masterMutation, coordinator, cli, assertProtocol } = session;
+  const { id, args, print, root, master, masterApi, masterMutation, coordinator, cli } = session;
   if (id === 'status') {
-    // Sessions are counted as the reviewer launchers count them: the automatic profile's default concurrency included (GY-1072).
-    const report = await masterStatusReport(root, withReviewerDefaults(master), masterApi, coordinator, cli);
+    // Sessions are counted as the reviewer and producer launchers count them: automatic profile defaults included (GY-1072, GY-1113).
+    const report = await masterStatusReport(root, withRoleDefaults(master), masterApi, coordinator, cli);
     const state = await readDaemonState(root, master).catch(() => null);
     // The master session's budgets (GY-898) come from this installation's config, not the cursor.
     const summary = report.daemon as typeof report.daemon & { master?: Record<string, unknown> | null };
     const master2 = summary.master ? { ...summary.master, budgetMinutes: masterSessionMinutes(master), heartbeatMinutes: masterHeartbeatMinutes(master) } : null;
-    return print({ ...report, daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
+    // An installed harness that differs from the current plan is drift the master repairs (GY-1217).
+    const harness = await masterHarnessDrift(root, master);
+    const attention = harness ? { attentionItems: [...report.attentionItems, harness], counts: { ...report.counts, attention: report.counts.attention + 1 } } : {};
+    return print({ ...report, ...attention, harnessDrift: harness?.drift ?? null, daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
   }
   if (id === 'settle-containment') {
     if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');
@@ -57,23 +63,8 @@ export async function operationsCommand(session: MasterSession): Promise<unknown
     }
     return print(await dispatchWork(root, work, profile, await listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now, { claimBy }));
   }
-  if (id === 'merge') {
-    if (!args[0]) throw new Error('Use master merge GY-N or master merge --all');
-    // Skew is refused before any candidate is read: an undeployed server is protocol skew, not a failed gate.
-    assertProtocol(coordinator);
-    const snapshot = await masterApi('work-snapshot');
-    const selected = args[0] === '--all' ? currentMergeCandidates(snapshot.work, snapshot.now) : snapshot.work.filter((item: any) => item.id === args[0] || item.key === args[0]);
-    if (!selected.length) throw new Error(args[0] === '--all' ? 'No work has a current all-gates-passing merge authorization' : `Unknown work item ${args[0]}`);
-    // `--all` merges the candidates that are not system-driven and leaves the rest to the loop; a named item is refused (GY-175).
-    if (args[0] === '--all') { const hand = selected.filter((item: any) => !systemDriven(item)); if (!hand.length) assertHandAction(selected[0], 'merge'); selected.splice(0, selected.length, ...hand); }
-    else for (const item of selected) assertHandAction(item, 'merge');
-    if (!master.autoMerge) selected.splice(0, selected.length, ...await approvedMerges(selected, item => masterApi(`work/${item.id}/decisions`), args[0] !== '--all'));
-    // One executor instance per request id (see MergeExecutor in master.ts).
-    const outerRequest = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
-    const mergeOne = mergeExecutor(master, () => masterApi('work-snapshot'), masterMutation, { principal: coordinator.actor.id, instance: outerRequest }, outerRequest);
-    const results = args[0] === '--all' ? await continueMergeBatch(selected, mergeOne) : [await mergeOne(selected[0])];
-    return print({ requestId: outerRequest, results });
-  }
+  // GitHub merges (docs/delivery.md): there is no Graphyard merge to run, by hand or by the loop.
+  if (id === 'merge') return print({ merged: false, result: githubMergesAnswer });
   if (id === 'verify-deployment') {
     if (!args[0]) throw new Error('Use master verify-deployment GY-N');
     const snapshot = await masterApi('work-snapshot');

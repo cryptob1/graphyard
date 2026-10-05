@@ -96,7 +96,7 @@ class SlotUndeclared extends Error { constructor(message, exitCode) { super(mess
  */
 export function controlPlaneEffects(modules, context) {
   const { master: m, daemon: d, reviewer: r, producer: pr } = modules;
-  const { root, current, run, snapshot, mutate, mergeExecutor } = context;
+  const { root, current, run, snapshot, mutate } = context;
   return {
     snapshot, mutate,
     agents: async () => { const runtime = await m.observeHerdrAgents(run); return runtime.available ? runtime.agents : null; },
@@ -105,12 +105,6 @@ export function controlPlaneEffects(modules, context) {
     dispatchWorker: (work, profile, agents, snap) => m.dispatchWork(root, work, profile, agents, run, snap.work, undefined, undefined, undefined, snap.now, { agents: () => m.listHerdrAgents(run) }),
     launchReview: (work, review, agents, observedAt) => r.launchReview(root, work, current().run.reviewerProfile, agents, observedAt, { run, requestId: review.id }),
     launchProducer: (work, producerRequest, profile, agents, observedAt) => pr.launchProducer(root, work, producerRequest, profile, agents, observedAt, { run }),
-    // Every merge this process brokers is owned by this executor instance (GY-92), never by the
-    // coordinator principal alone: a `master run` loop, an interactive `master merge` and every
-    // other executor sharing this credential each hold their own. A foreign in-flight execution
-    // is then refused rather than resumed, so two brokers never drive one merge — see
-    // docs/master-agent.md, "Running executors beside the daemon".
-    merge: work => m.mergeExecutor(current(), snapshot, mutate, mergeExecutor, randomUUID(), run)(work),
     observeDeployment: delivered => d.observeDeployment(current(), delivered, run, fetch, () => Date.now(), { root }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
   };
@@ -158,17 +152,15 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const status = await request('status');
   m.assertMasterBinding(config, status);
   // An executor's entire authority is a coordinator credential: it launches sessions, asks the
-  // control plane to re-read, and brokers the guarded merge. Anything broader could satisfy a gate
+  // control plane to re-read; GitHub merges. Anything broader could satisfy a gate
   // the queue exists to wait on, and a credential that may also produce evidence could prove its
   // own work.
   if (status.actor?.role !== 'coordinator') throw new Error('An executor requires a coordinator credential; operator, producer and worker credentials are refused');
   if (status.actor?.proofs?.length) throw new Error('An executor refuses a credential that is also allowed to produce evidence');
 
   const live = m.liveMasterConfig(root, config), current = () => live.current;
-  // Minted once per process, exactly as the daemon mints its own (src/executor.ts).
-  const mergeExecutor = x.executorMergeExecutor(status.actor.id);
   const snapshot = () => request('work-snapshot', {}, { [v.coordinationViewHeader]: 'coordination' });
-  const handlers = x.controlPlaneHandlers(current, controlPlaneEffects(modules, { root, current, run, snapshot, mutate, mergeExecutor }));
+  const handlers = x.controlPlaneHandlers(current, controlPlaneEffects(modules, { root, current, run, snapshot, mutate }));
   // The rule, not the prose: a kind whose judgment happens in the step itself may never have a
   // handler here, so no way of configuring this process puts one inside the loop.
   const judgment = x.judgmentInExecutorLoop(handlers);
@@ -188,7 +180,11 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     // chains provider calls — so while one runs this says the claim is still held. Without it a
     // slow handler loses its row mid-flight and another executor runs the action beside it.
     renew: action => mutate(`actions/${action.id}/renew`, { ...(action.claim?.executor ? { executor: action.claim.executor } : {}) }),
+    // Behind a fleet restart's fence the executor claims nothing but still says it is alive (GY-1288).
+    present: body => mutate('actions/presence', body),
     handlers: options.kinds ? Object.fromEntries(options.kinds.filter(kind => handlers[kind]).map(kind => [kind, handlers[kind]])) : handlers,
+    // A host below its memory floor launches no session (GY-612): dispatch and review rows wait in the queue until it recovers.
+    launchHold: () => a.hostMemoryHold(config.hostId),
   };
   // A supervised slot claims under a stable name, so a restart is the same executor coming back
   // rather than a new one appearing beside a ghost; the pid says which incarnation is speaking.

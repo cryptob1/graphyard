@@ -5,17 +5,14 @@ import type { Work } from './work.js';
 // ---------------------------------------------------------------------------
 // Machine-filed backlog (GY-402).
 //
-// The loop files two kinds of backlog item on its own: the follow-ups an approved review names
-// beyond the item's criteria (src/review-threads.ts) and the recurring fault classes (GY-173,
-// model/fault-classes.ts). On 2026-09-25 the backlog held 170 follow-up items for 40 parents —
-// one per approved head, every rework round, base refresh and re-review filing another — and
-// nothing ever released, closed or merged them.
-//
-// Follow-ups are now one item per parent: a later approval appends its new findings to the
-// parent's open follow-up item, deduplicated by path and finding text. A one-time migration folds
-// the existing duplicates into each parent's oldest open item. And every machine-filed item is
-// triaged: a triage run judges it within `triageDeadlineMs` and releases it with a priority,
-// closes it with a reason, or merges it into another; a closure needs an independent approver.
+// The loop files recurring fault classes (GY-173, model/fault-classes.ts) as backlog items on its
+// own. Until GY-1249 it also filed the follow-ups an approved review named beyond the item's
+// criteria: on 2026-10-05 they made 48 of 90 open items and about a third of merges. Review
+// findings worth fixing are now fixed on the same pull request and nits are not filed, so no code
+// path creates a follow-up item; the ones already filed are still recognised here and triaged.
+// Every machine-filed item is triaged: a triage run judges it within `triageDeadlineMs` and
+// releases it with a priority, closes it with a reason, or merges it into another; a closure
+// needs an independent approver.
 // ---------------------------------------------------------------------------
 
 /**
@@ -28,54 +25,12 @@ export const followUpEntriesMax = 500;
 const entry = z.object({ path: z.string().min(1).max(1000).nullable(), text: z.string().min(1).max(2000), ref: z.string().min(1).max(1000).optional() }).strict();
 /**
  * `origin.reviewFollowUps`: the parent a follow-up item collects findings for, and the union of the
- * findings every approval of that parent named. Unlike the other origins it grows: an approval of a
- * later head appends to it rather than filing a second item.
+ * findings every approval of that parent named, as filed before GY-1249. Unlike the other origins it
+ * grows: a triage merge of another follow-up item into it appends that item's findings.
  */
 export const reviewFollowUpsOriginSchema = z.object({ parent: z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/), findings: z.array(entry).max(followUpEntriesMax) }).strict();
 export type ReviewFollowUpsOrigin = z.infer<typeof reviewFollowUpsOriginSchema>;
-/**
- * What `POST /api/work/ID/followups` appends: the findings of one approval of the parent. With
- * `parent`, ID names the approved item itself and the control plane places them (GY-845): on its
- * open follow-up item, else held on the parent until it ships.
- */
-export const followUpAppendSchema = z.object({ findings: z.array(entry).min(1).max(200), reason: z.string().trim().min(1).max(2000), parent: z.literal(true).optional() }).strict();
-/** What `POST /api/work/ID/followups` takes to file a delivered parent's held findings as its one follow-up item (GY-845). */
-export const followUpShipSchema = z.object({ ship: z.literal(true), reason: z.string().trim().min(1).max(2000) }).strict();
-
-/** What `POST /api/work/ID/promote` takes: the 1-based index of the batch finding to promote (GY-896). */
-export const followUpPromoteSchema = z.object({ index: z.number().int().min(1).max(followUpEntriesMax) }).strict();
-/**
- * One finding of an item's follow-up batch as it is read back (GY-896): its 1-based index, the pull
- * request and head the approval that recorded it named, when, and the item it was promoted to.
- */
-export interface FollowUpBatchFinding extends FollowUpEntry { index: number; pr: number | null; sha: string | null; recordedAt: string | null; promoted: string | null }
-/** An item's follow-up batch: every finding the approvals of the item recorded on its own record. */
-export interface FollowUpBatch { key: string; title: string; stage: Work['stage']; pr: number | null; findings: FollowUpBatchFinding[] }
-/** The ledger rows a batch is folded from, oldest first (`followups.recorded` and `followups.promoted`). */
-export interface FollowUpBatchRow { kind: string; details: { pr?: number | null; sha?: string | null; findings?: FollowUpEntry[]; index?: number; key?: string } | null; at: string }
-export const followUpRecordedEvent = 'followups.recorded', followUpPromotedEvent = 'followups.promoted';
-/**
- * Fold an item's follow-up batch from its ledger (GY-896). A legacy follow-up item (GY-402) starts
- * from the findings its origin holds; any other item from none. Each recorded approval adds the
- * findings the batch does not hold yet, by path and finding text, and each promotion marks its finding.
- */
-export function foldFollowUpBatch(work: Pick<Work, 'key' | 'title' | 'stage' | 'description'> & { origin?: Work['origin']; candidate?: { pr: number } | null }, rows: readonly FollowUpBatchRow[]): FollowUpBatch {
-  const findings: FollowUpBatchFinding[] = (followUpParent(work) ? followUpEntries(work) : [])
-    .map((finding, index) => ({ ...finding, index: index + 1, pr: null, sha: null, recordedAt: null, promoted: null }));
-  for (const row of rows) {
-    if (row.kind === followUpRecordedEvent) {
-      const { added } = mergeFollowUpEntries(findings, row.details?.findings ?? []);
-      for (const finding of added.slice(0, Math.max(0, followUpEntriesMax - findings.length)))
-        findings.push({ ...finding, index: findings.length + 1, pr: row.details?.pr ?? null, sha: row.details?.sha ?? null, recordedAt: row.at, promoted: null });
-    } else if (row.kind === followUpPromotedEvent) {
-      const target = findings[(row.details?.index ?? 0) - 1];
-      if (target && !target.promoted && row.details?.key) target.promoted = row.details.key;
-    }
-  }
-  return { key: work.key, title: work.title, stage: work.stage, pr: findings.find(finding => finding.pr !== null)?.pr ?? work.candidate?.pr ?? null, findings };
-}
-
-/** The title every review follow-up item carries (src/review-threads.ts followUpItem). */
+/** The title every review follow-up item carried while they were filed (before GY-1249). */
 const followUpTitle = /^Follow-ups from the approved review of ([A-Z][A-Z0-9]*-\d+)\b/;
 const faultTitle = /^Recurring \S+ faults:/;
 export type MachineKind = 'review-follow-up' | 'recurring-fault';
@@ -148,49 +103,6 @@ export function appendedDescription(description: string, added: readonly FollowU
   return text;
 }
 
-/** Whether an item is still open: not delivered, not closed. */
-const open = (work: Pick<Work, 'stage'>) => work.stage !== 'done';
-const oldestFirst = (a: Pick<Work, 'createdAt' | 'key'>, b: Pick<Work, 'createdAt' | 'key'>) =>
-  a.createdAt.localeCompare(b.createdAt) || Number(a.key.split('-')[1]) - Number(b.key.split('-')[1]);
-/** The parent's open follow-up item findings are appended to: its oldest open one. */
-export function openFollowUpItem<T extends Pick<Work, 'title' | 'stage' | 'createdAt' | 'key'> & { origin?: Work['origin'] }>(all: readonly T[], parent: string): T | null {
-  return all.filter(item => open(item) && followUpParent(item) === parent).sort(oldestFirst)[0] ?? null;
-}
-
-/**
- * The one-time migration (GY-402): each parent's open follow-up items fold into its oldest open
- * one, which takes the union of their findings, and the others are closed as superseded by it,
- * naming it. Nothing is deleted. Items are changed in place; the result names each survivor with
- * the findings it gained and each item closed, for the caller to save and record.
- */
-export function mergeDuplicateFollowUps(all: Work[], actor: string, now: Date) {
-  const groups = new Map<string, Work[]>();
-  for (const item of all) {
-    const parent = open(item) ? followUpParent(item) : null;
-    if (parent && !item.lease) groups.set(parent, [...groups.get(parent) ?? [], item]);
-  }
-  const survivors: { work: Work; added: number; absorbed: string[] }[] = [], closed: Work[] = [];
-  for (const [parent, items] of groups) {
-    if (items.length < 2) continue;
-    const [survivor, ...duplicates] = items.sort(oldestFirst);
-    let findings = followUpEntries(survivor!);
-    const before = findings.length;
-    const addedAll: FollowUpEntry[] = [];
-    for (const duplicate of duplicates) {
-      const merged = mergeFollowUpEntries(findings, followUpEntries(duplicate));
-      findings = merged.findings; addedAll.push(...merged.added);
-      const closure: Closure = { kind: 'duplicate', ref: survivor!.key, by: actor, at: now.toISOString(), from: duplicate.stage,
-        reason: `Superseded by ${survivor!.key}, ${parent}'s one follow-up item, which now holds every finding of this one (GY-402 follow-up migration)` };
-      Object.assign(duplicate, { closure, stage: 'done', stageEnteredAt: now.toISOString(), ready: false, queue: null, mergeAuthorization: null, reviewRequest: null, scopeRequest: null, blocker: null });
-      closed.push(duplicate);
-    }
-    survivor!.origin = { ...survivor!.origin, reviewFollowUps: { parent, findings } };
-    survivor!.description = appendedDescription(survivor!.description ?? '', addedAll, `Merged from ${duplicates.map(item => item.key).join(', ')} (the same parent's later follow-up items):`);
-    survivors.push({ work: survivor!, added: findings.length - before, absorbed: duplicates.map(item => item.key) });
-  }
-  return { merged: closed.length, survivors, closed };
-}
-
 // ---- Triage --------------------------------------------------------------------------------------
 
 /** How long a machine-filed item may wait untriaged before the loop raises it as attention. */
@@ -215,6 +127,8 @@ export type TriageJudgement = z.infer<typeof triageJudgementSchema>;
 export interface TriageRecord { judgement: TriageJudgement; state: 'applied' | 'proposed' | 'refused'; by: string; at: string; runtime?: string; decision?: string | null; refusal?: string | null }
 export const triageRecordSchema = z.object({ judgement: triageJudgementSchema, runtime: z.string().trim().min(1).max(200).optional() }).strict();
 
+const oldestFirst = (a: Pick<Work, 'createdAt' | 'key'>, b: Pick<Work, 'createdAt' | 'key'>) =>
+  a.createdAt.localeCompare(b.createdAt) || Number(a.key.split('-')[1]) - Number(b.key.split('-')[1]);
 type Triageable = Pick<Work, 'title' | 'stage' | 'ready' | 'createdAt' | 'key'> & { origin?: Work['origin']; triage?: TriageRecord | null; closure?: Closure | null };
 /** Whether a machine-filed item still waits for triage: unreleased in the backlog, with no judgement standing (a refused closure is judged again). */
 export const untriaged = (work: Triageable) => !!machineKind(work) && work.stage === 'backlog' && !work.ready && (!work.triage || work.triage.state === 'refused');
@@ -249,37 +163,23 @@ export function triageClosure(judgement: TriageJudgement): { kind: 'superseded' 
   return judgement.ref ? { kind: 'superseded', ref: judgement.ref, reason: `Already fixed by ${judgement.ref}: ${judgement.reason}`.slice(0, 2000) } : { kind: 'obsolete', ref: null, reason: `Not worth doing: ${judgement.reason}`.slice(0, 2000) };
 }
 
-// ---- Follow-ups held on their parent until it ships (GY-845) --------------------------------------
+// ---- Follow-ups held on their parent (GY-845, retired by GY-1249) ----------------------------------
 //
-// A follow-up item filed while its parent was still in review depended on the parent, so it could
-// not be worked; triage judged it anyway, and each re-approval during rework risked another item
-// (on 2026-09-26, 48 duplicates across 29 parents). An approval's findings on an unshipped parent
-// are now held on the parent (`pendingFollowUps`), and become one follow-up item, depending on
-// nothing, only once the parent is delivered. A parent closed without shipping drops them, saying why.
-// The hold, the filing and the migration: followups-held.ts.
+// From GY-845 to GY-1249 an approval's findings on an unshipped parent were held on it
+// (`pendingFollowUps`) and filed as one follow-up item once it shipped. Nothing holds or files them
+// any more; stored items carrying the field still load, and it is never read for a decision.
 
-/**
- * `pendingFollowUps` on a parent: the findings its approvals named beyond its criteria while it had
- * not shipped. `filing` freezes the findings being filed and the create key once the parent is
- * delivered, so a retried create repeats the same body; `filed` names the item they became;
- * `dropped` says why a parent closed without shipping never files them.
- */
+/** `pendingFollowUps` as items stored before GY-1249 carry it: read so they still load, never written. */
 export interface PendingFollowUps {
   findings: FollowUpEntry[]; at: string;
   filing?: { key: string; count: number; at: string } | null;
   filed?: { item: string; at: string } | null;
   dropped?: { reason: string; at: string } | null;
 }
-export type Parent = Pick<Work, 'key' | 'stage'> & Partial<Pick<Work, 'delivery' | 'optimisticMerges'>> & { closure?: Closure | null; pendingFollowUps?: PendingFollowUps | null };
-/**
- * Whether a parent has shipped: delivered, and, when that delivery is an optimistic merge (GY-500),
- * with main's required suite passed on it — until then a failing suite reverts the merge and
- * reopens the parent, so its follow-ups stay held on it.
- */
+export type Parent = Pick<Work, 'key' | 'stage'> & Partial<Pick<Work, 'delivery'>> & { closure?: Closure | null; pendingFollowUps?: PendingFollowUps | null };
+/** Whether a parent has shipped: delivered. */
 export function hasShipped(parent: Parent) {
-  if (!isDelivered(parent)) return false;
-  const merge = parent.optimisticMerges?.find(entry => entry.mergeSha === parent.delivery?.mergeSha);
-  return !merge || merge.postMerge?.verdict === 'pass';
+  return isDelivered(parent);
 }
 /** Whether a follow-up item's parent has not shipped yet: triage never judges it until it does. */
 export function awaitsParent(item: Filed, all: readonly Parent[]) {

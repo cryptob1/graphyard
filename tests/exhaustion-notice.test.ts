@@ -10,7 +10,7 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { emptyDaemonState, failoverKey, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, recordObservedExhaustion, readEnvironmentLog, selectAccount, type MasterConfig } from '../src/master.js';
-import { detectRuntimeExhaustion } from '../src/master/environments.js';
+import { detectRuntimeExhaustion, providerLimitNotices } from '../src/master/environments.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -66,7 +66,6 @@ function loop(config: MasterConfig, herdr: Herdr, clock: { skewMs: number }) {
       calls.dispatch.push({ work: work.key, profile: profile.name, account: selected.account?.name ?? null });
     },
     requestProof: () => {},
-    merge: async () => { throw new Error('no candidate reaches the merge step here'); },
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},
@@ -138,6 +137,37 @@ test('unit:exhaustion-only-provider-notice: only the runtime\'s own provider lim
   // behind the severity label every runtime draws in front of them.
   assert.ok(detectRuntimeExhaustion('Error code: 429 - You exceeded your current quota, please check your plan and billing details.', 'gemini', now), 'the provider API\'s usage error is a notice on any runtime');
   assert.equal(detectRuntimeExhaustion(gy402Transcript, 'gemini', now), null, 'the shared provider errors never match the agent\'s own prose either');
+});
+
+// GY-1135: the tail every agy session ended on when the account ran out of quota on 2026-10-03,
+// with the Error ID line and the prompt chrome agy draws beneath it.
+const agyQuotaTail = `● Read(src/master/environments.ts)
+  ⎿ Read 693 lines
+
+⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h31m31s.
+Error ID: d4cc65e4-8b0a-404d-9aca-a0fbf11c691c-5
+
+╭──────────────────────────────────────────────────────────────╮
+│ >                                                            │
+╰──────────────────────────────────────────────────────────────╯
+  ? for shortcuts                                  agy · gemini
+`;
+
+test('unit:agy-quota-notice-detected — agy\'s "Individual quota reached" notice is its provider saying the account is spent, with the reset it names', () => {
+  const now = Date.parse('2026-10-03T04:45:00Z');
+  const signal = detectRuntimeExhaustion(agyQuotaTail, 'agy', now);
+  assert.ok(signal, 'the agy quota notice is an exhaustion');
+  assert.equal(signal.reason, 'Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h31m31s.');
+  assert.equal(signal.resetsAt, new Date(now + (3600 + 31 * 60 + 31) * 1000).toISOString(), 'the reset is 1h31m31s after the observation');
+  assert.equal(signal.resetsAt, '2026-10-03T06:16:31.000Z');
+  assert.ok(providerLimitNotices.agy, 'agy has its own entry in the catalogs');
+  // An agent's prose about a quota, on agy, is still work, not a failover.
+  for (const prose of [
+    gy402Transcript,
+    'I added detection for the Individual quota reached notice; resets in 1h are parsed now.',
+    'Done: when the individual quota reached banner appears, the loop holds the account. Please upgrade your subscription tests pass.',
+    'Individual quota reached handling is covered by tests',
+  ]) assert.equal(detectRuntimeExhaustion(prose, 'agy', now), null, prose);
 });
 
 test('integration:exhaustion-only-provider-notice — a stopped session narrating a disk quota is left working; a real Claude limit notice fails it over with the parsed reset time', async () => {

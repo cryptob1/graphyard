@@ -68,7 +68,6 @@ function harness() {
     closeSession: pane => { sessions.splice(0, sessions.length, ...sessions.filter(agent => agent.pane_id !== pane)); },
     dispatch: async () => {},
     requestProof: () => {},
-    merge: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},

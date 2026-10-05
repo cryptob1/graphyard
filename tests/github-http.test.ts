@@ -134,7 +134,7 @@ test('the permission preflight compares the installation with the declaration, h
   const {generateKeyPairSync} = await import('node:crypto');
   const {privateKey} = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const github = new GitHub({ repository: 'fixture/repo', base: 'main', appId: 77, installationId: 4242, privateKey: privateKey.export({type:'pkcs8',format:'pem'}).toString() });
-  let permissions: Record<string, string> = { actions: 'write', administration: 'read', checks: 'write', contents: 'read', issues: 'read', metadata: 'read', pull_requests: 'write' };
+  let permissions: Record<string, string> = { actions: 'write', administration: 'read', checks: 'write', contents: 'read', issues: 'read', metadata: 'read', pull_requests: 'write', workflows: 'write' };
   let failing = false; const seen: string[] = [];
   t.mock.method(globalThis, 'fetch', async (url: unknown, options: any) => {
     seen.push(String(url));
@@ -149,7 +149,7 @@ test('the permission preflight compares the installation with the declaration, h
   assert.equal(first.error, null); assert.equal(first.app, 'graphyard-fixture-repo'); assert.equal(first.account, 'fixture');
   assert.deepEqual(first.missing.map(shortfall => shortfall.permission), ['contents']);
   assert.deepEqual(first.blockedFeatures, ['merge-queue']);
-  assert.deepEqual(first.attention, ['App graphyard-fixture-repo lacks Contents: write (installed with read), which the merge queue needs to publish speculative merge-queue tips: the merge commit on the candidate branch and the `refs/graphyard/queue/*` ref that binds it; accept the pending permission request at https://github.com/settings/installations/4242']);
+  assert.deepEqual(first.attention, ['App graphyard-fixture-repo lacks Contents: write (installed with read), which branch refresh needs to push base refreshes, branch restores and main-guard revert branches onto the managed repository; accept the pending permission request at https://github.com/settings/installations/4242']);
   assert.equal(github.permissionShortfall('merge-queue'), first.attention[0]);
   assert.equal(github.permissionShortfall('observation'), null); assert.equal(github.permissionShortfall('check'), null); assert.equal(github.permissionShortfall('review-dispatch'), null);
   assert.equal(await github.preflightIfDue(1_000 + github.preflightIntervalMs - 1), null, 'the periodic preflight waits for its interval');
@@ -175,7 +175,7 @@ test('a suspended installation holds every feature and a permission refusal repo
   const github = new GitHub({ repository: 'fixture/repo', base: 'main', appId: 1, installationId: 2, privateKey: privateKey.export({type:'pkcs8',format:'pem'}).toString() });
   Object.assign(github, { token: 'fixture-token', expires: Date.now() + 3600000 });
   t.mock.method(globalThis, 'fetch', async (url: unknown) => String(url).includes('/app/installations/')
-    ? new Response(JSON.stringify({ id: 2, app_slug: 'graphyard-fixture', html_url: 'https://github.com/settings/installations/2', permissions: { actions: 'write', administration: 'read', checks: 'write', contents: 'write', issues: 'read', metadata: 'read', pull_requests: 'write' }, suspended_at: '2026-09-18T00:00:00Z' }))
+    ? new Response(JSON.stringify({ id: 2, app_slug: 'graphyard-fixture', html_url: 'https://github.com/settings/installations/2', permissions: { actions: 'write', administration: 'read', checks: 'write', contents: 'write', issues: 'read', metadata: 'read', pull_requests: 'write', workflows: 'write' }, suspended_at: '2026-09-18T00:00:00Z' }))
     : new Response('{}', { status: 403 }));
   const report = await github.preflight();
   assert.equal(report.suspended, true); assert.deepEqual(report.missing, []);

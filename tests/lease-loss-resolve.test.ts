@@ -144,7 +144,7 @@ test('unit:lease-loss-resolve-requested — a request refused on a moved revisio
       if (body.input.expectedRevision !== current.revision) return new Response(JSON.stringify({ error: `Task revision changed (now ${current.revision}); reload and request again` }), { status: 409 });
       return new Response(JSON.stringify({ id: 'decision-1' }), { status: 200 });
     }) as typeof fetch;
-    const effects = daemonEffects(root, master, { snapshot: async () => ({ work: [current], now: iso(0) }), mutate: async () => { throw new Error('not used'); }, executor: { principal: 'coordinator', instance: 'lease-loss' }, fetcher });
+    const effects = daemonEffects(root, master, { snapshot: async () => ({ work: [current], now: iso(0) }), mutate: async () => { throw new Error('not used'); }, fetcher });
     const stale = item();
     const needed = decide(stale)!;
 

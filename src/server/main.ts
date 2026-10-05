@@ -1,3 +1,6 @@
+import { once } from 'node:events';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { Store } from '../store.js';
 import { Engine } from '../engine.js';
 import { demand, parseReviewerApps } from '../model.js';
@@ -8,10 +11,11 @@ import { ProofGrants } from '../proof-grants.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
 import { projectFlow } from '../flow-analytics.js';
 import { openPatternItems } from '../interventions.js';
-import { synthesizeRetro } from '../retro-synthesis.js';
+import { startRetroIndexWatch, synthesizeRetro } from '../retro-synthesis.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
 import { ProductionWatch, railwayProvider, startProductionWatch } from '../production-watch.js';
+import { productionBranch } from '../release-candidate.js';
 import { configuredGeneratedFiles } from '../generated-files.js';
 import { generatedFilesVariable } from '../install/generated-files.js';
 import { startDirectMerge } from '../direct-merge.js';
@@ -19,17 +23,28 @@ import { GitHubCacheStore } from '../github-cache.js';
 import { pruneReceipts, receiptPruneIntervalMs } from '../store/receipts.js';
 import { compactLedger, configuredLedgerRetentionMs, ledgerCompactionIntervalMs } from '../store/compaction.js';
 
+/** Overrides for tests that start the process entry in-process; the deployment reads PORT and HOST. */
+export interface MainOptions { port?: number; host?: string }
+
 /** Process entry: configuration, migration, the HTTP server and the reconciliation tick. */
-export async function main() {
+export async function main(options: MainOptions = {}) {
   try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   // An unparseable generated-files declaration refuses start-up with a clear message instead of
   // silently exempting nothing; the regression guard runs with exactly this parsed set.
   const generatedFiles = configuredGeneratedFiles();
   const credentials = principalSchema.parse(JSON.parse(process.env.GRAPHYARD_PRINCIPALS ?? '[]'));
   demand(new Set(credentials.map(p => p.id)).size === credentials.length && new Set(credentials.map(p => p.token)).size === credentials.length, 'Principal IDs and tokens must be unique');
-  const store = new Store(process.env.DATABASE_URL ?? 'postgres://graphyard:graphyard@localhost:5438/graphyard');
+  // The pool and the observation workers are sized together (GY-1114): workers at most half the pool.
+  const capacity = observationCapacity();
+  const store = new Store(process.env.DATABASE_URL ?? 'postgres://graphyard:graphyard@localhost:5438/graphyard', { max: capacity.poolMax });
   const startedAt = Date.now(); const mark = (step: string) => console.log(`startup ${step} at ${Date.now() - startedAt} ms`);
   mark('store.init'); await store.init(); mark('store.init done');
+  // Built CONCURRENTLY beside startup, never awaited: a plain build in the migration would hold the ledger's writes (GY-1048).
+  // When another replica is building it re-checks periodically, and on error backs off, until present (follow-up 26, GY-1189).
+  const retroIndex = startRetroIndexWatch(store.pool, {
+    announce: outcome => console.log(`Retro index events_retro_id: ${outcome}`),
+    failed: error => console.error('Retro index events_retro_id was not built; will retry:', error instanceof Error ? error.message : 'unknown'),
+  });
   const engine = new Engine(store, (process.env.GITHUB_CI_APP_IDS ?? '15368').split(',').map(Number));
   engine.reconcileBatchMs = reconcileBatchMs(process.env.GRAPHYARD_RECONCILE_BATCH_MS);
   engine.reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
@@ -53,7 +68,8 @@ export async function main() {
   const knownPrincipals = (await store.pool.query('SELECT principal_id FROM proof_grants')).rows.map(row => String(row.principal_id));
   const build = buildIdentity();
   const provider = railwayProvider();
-  const production = new ProductionWatch(store, { provider, github, build, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main' });
+  // Production deploys the release branch when the release pipeline owns it (GY-1207); GRAPHYARD_PRODUCTION_BRANCH names another.
+  const production = new ProductionWatch(store, { provider, github, build, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', releaseBranch: process.env.GRAPHYARD_PRODUCTION_BRANCH?.trim() || productionBranch });
   const http = server(engine, credentials, github, artifacts, { knownPrincipals, production });
   // The deployed-variables record the status route reports gains the generated-files variable the
   // installers set beside GRAPHYARD_PRINCIPALS, so master status can compare what the deployment
@@ -62,33 +78,87 @@ export async function main() {
   for (const line of http.services.delegationLimits.attention) console.error(`Delegation limits: ${line}`);
   console.log(`Generated files: ${generatedFiles.length ? generatedFiles.join(', ') : 'none declared; the regression guard exempts nothing'}`);
   console.log(`Build ${build.commit ?? 'commit unknown'} (merge protocol ${build.protocol}); production observation ${provider ? `via ${provider.description}` : build.commit ? 'from the build identity only; set RAILWAY_API_TOKEN or RAILWAY_TOKEN to read the deployment list' : 'unavailable: set GRAPHYARD_BUILD_SHA or RAILWAY_GIT_COMMIT_SHA'}`);
-  mark('production.load'); await production.load().catch(error => console.error('production incidents could not be loaded', error instanceof Error ? error.message : 'unknown'));
-  // One-time materialization of the deployment allowlist. Operators manage proof authority
-  // inside Graphyard from here on; a later environment edit no longer changes authority.
-  mark('proofGrants.seed'); const seeded = await new ProofGrants(store, credentials.map(({ token, ...actor }) => actor)).seed();
-  if (seeded.length) console.log(`Seeded proof grants for ${seeded.map(grant => grant.principalId).join(', ')}`);
+
   const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
   validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
   const delivery = new Delivery(validation);
   console.log(`Artifact storage: ${artifacts.backend?.label ?? 'postgres'}; capacity ${artifacts.capacityBytes} bytes`);
-  mark('directMerge'); await startDirectMerge(store, engine.directMergeEnvironment);
-  mark('validation.expireArtifacts'); await validation.expireArtifacts();
-  mark('validation.reconcile'); await validation.reconcile(true); mark('startup done');
-  // The production watch runs beside the tick, never in it: a deploy used to hold the tick for
-  // minutes while it re-compared every delivery (GY-186), and observations and merges stalled behind it.
-  // Incidents it raises land in the ledger and in /api/status, and are announced here once each.
-  const watching = startProductionWatch(production, {
-    announce: incident => console.error(`Deployment incident ${incident.key} (${incident.status}): ${incident.reason}`),
-    failed: error => console.error('production watch failed', error instanceof Error ? error.message : 'unknown'),
+
+  // Startup validation (GY-1127): artifact expiry and the full validation reconcile took minutes
+  // against a busy database and held http.listen past the deploy's 120 s healthcheck. The port now
+  // opens first; until startup validation completes, /healthz reports `readiness: false`, every
+  // mutation that could act on unvalidated state is refused with a retryable 503, and the
+  // observation workers and production watch are not started. A failed attempt is logged and the
+  // reconciliation tick retries it.
+  let ready = false, validating = false, prepared = false, closing = false;
+  let watching: ReturnType<typeof startProductionWatch> | null = null;
+  let observing: ReturnType<typeof startObservationWorkers> | null = null;
+  let validationTask: Promise<void> | null = null;
+  const services: typeof http.services & { readiness?: boolean } = http.services;
+  services.readiness = false;
+  const runStartupValidation = async () => {
+    if (ready || validating || closing) return;
+    validating = true;
+    const task = (async () => {
+      try {
+        if (!prepared) {
+          mark('production.load'); await production.load().catch(error => { if (!closing) console.error('production incidents could not be loaded', error instanceof Error ? error.message : 'unknown'); });
+          if (closing) return;
+          // One-time materialization of the deployment allowlist. Operators manage proof authority
+          // inside Graphyard from here on; a later environment edit no longer changes authority.
+          mark('proofGrants.seed'); const seeded = await new ProofGrants(store, credentials.map(({ token, ...actor }) => actor)).seed();
+          if (seeded.length) console.log(`Seeded proof grants for ${seeded.map(grant => grant.principalId).join(', ')}`);
+          if (closing) return;
+          mark('directMerge'); await startDirectMerge(store, engine.directMergeEnvironment);
+          prepared = true;
+        }
+        if (closing) return;
+        mark('validation.expireArtifacts'); await validation.expireArtifacts();
+        if (closing) return;
+        mark('validation.reconcile'); await validation.reconcile(true); mark('startup done');
+        if (closing) return;
+        ready = true; services.readiness = true;
+        startBackground();
+      } catch (error) {
+        if (!closing) console.error('startup validation failed; the reconciliation tick retries it', error instanceof Error ? error.message : 'unknown');
+      } finally {
+        validating = false;
+        validationTask = null;
+      }
+    })();
+    validationTask = task;
+    await task;
+  };
+  const startBackground = () => {
+    if (closing) return;
+    // The production watch runs beside the tick, never in it: a deploy used to hold the tick for
+    // minutes while it re-compared every delivery (GY-186), and observations and merges stalled behind it.
+    // Incidents it raises land in the ledger and in /api/status, and are announced here once each.
+    watching = startProductionWatch(production, {
+      announce: incident => console.error(`Deployment incident ${incident.key} (${incident.status}): ${incident.reason}`),
+      failed: error => console.error('production watch failed', error instanceof Error ? error.message : 'unknown'),
+    });
+    // The observation workers run beside the tick, never in it: a queue of due jobs is drained at
+    // the concurrency the installation sets, whatever the rest of the tick is doing (GY-492).
+    observing = github ? startObservationWorkers(engine, github, capacity.concurrency) : null;
+    console.log(`Observation workers: ${observing?.concurrency ?? 0} (database pool ${capacity.poolMax})`);
+  };
+  const [handle] = http.listeners('request') as ((req: IncomingMessage, res: ServerResponse) => void)[];
+  http.removeAllListeners('request');
+  http.on('request', (req: IncomingMessage, res: ServerResponse) => {
+    if (!ready && refusedBeforeReady(req.method, req.url)) {
+      res.writeHead(503, { 'content-type': 'application/json', 'retry-after': '5' });
+      res.end(JSON.stringify({ error: 'Startup validation has not completed; retry shortly', retryable: true }));
+      return;
+    }
+    handle(req, res);
   });
+
   // A recurring intervention becomes work on its own (GY-98): the detection reads the ledger, so
   // it runs once a minute rather than every tick.
   let patternsAt = 0, receiptsPrunedAt = 0, ledgerCompactedAt = 0;
-  // The observation workers run beside the tick, never in it: a queue of due jobs is drained at
-  // the concurrency the installation sets, whatever the rest of the tick is doing (GY-492).
-  const observing = github ? startObservationWorkers(engine, github) : null;
-  console.log(`Observation workers: ${observing?.concurrency ?? 0}`);
   const reconciliation = startReconciliation(async step => {
+    if (!ready) { await step('validation.startup', () => runStartupValidation()); if (!ready) return; }
     // The delivery sweep is bounded per tick and resumes from its persisted cursor, so a
     // backlog of observations drains across ticks without ever skipping one.
     await step('validation.expireArtifacts', () => validation.expireArtifacts()); await step('validation.reconcile', () => validation.reconcile());
@@ -111,24 +181,56 @@ export async function main() {
       if (preflight) await announcePreflight(preflight);
     }
   }, 2000);
-  http.listen(Number(process.env.PORT ?? 4310), process.env.HOST ?? '127.0.0.1', () => console.log(`Graphyard listening on port ${process.env.PORT ?? 4310}; GitHub ${github ? 'connected' : 'not configured'}`));
-  const shutdown = () => { reconciliation.stop(); watching.stop(); observing?.stop(); http.close(() => { void Promise.resolve(githubCache?.close()).then(() => store.close()).then(() => process.exit(0)); }); setTimeout(() => process.exit(1), 10_000).unref(); };
+  http.listen(options.port ?? Number(process.env.PORT ?? 4310), options.host ?? process.env.HOST ?? '127.0.0.1', () => console.log(`Graphyard listening on port ${(http.address() as AddressInfo).port}; GitHub ${github ? 'connected' : 'not configured'}`));
+  await once(http, 'listening');
+  void runStartupValidation();
+
+  const close = async () => {
+    closing = true;
+    reconciliation.stop(); watching?.stop(); watching = null; await observing?.stop(); observing = null; retroIndex.stop();
+    process.off('SIGTERM', shutdown); process.off('SIGINT', shutdown);
+    await new Promise<void>(resolve => http.close(() => resolve()));
+    await Promise.resolve(githubCache?.close());
+    await store.close();
+  };
+  const shutdown = () => { void close().then(() => process.exit(0)); setTimeout(() => process.exit(1), 10_000).unref(); };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
+  return { http, store, validation, runStartupValidation, isReady: () => ready, close };
+}
+
+/**
+ * Whether a request is refused while startup validation runs (GY-1127): every mutation under /api
+ * except a GitHub webhook delivery, which only wakes durable jobs, and a work lease heartbeat,
+ * which reads no validation state and would otherwise lapse leases for the whole startup window.
+ * Reads stay open, and /healthz answers liveness throughout.
+ */
+export function refusedBeforeReady(method = 'GET', url = '/'): boolean {
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return false;
+  const path = new URL(url, 'http://localhost').pathname;
+  return path.startsWith('/api/') && path !== '/api/github/webhook' && !/^\/api\/work\/[^/]+\/heartbeat$/.test(path);
 }
 
 export type ReconciliationStep = <T>(name: string, run: () => Promise<T>) => Promise<T>;
 
 /**
- * The observation concurrency (GY-492): `GRAPHYARD_OBSERVATION_CONCURRENCY`, four jobs at once
- * by default, bounded by the database pool's background share — a worker beyond it only queues on
- * a connection the API and the tick need. Every worker waits for the one shared pace before it
- * claims (GY-567), so extra workers raise throughput only as far as the budget to the reset allows.
+ * The database pool and the observation workers, configured together (GY-492, GY-1114):
+ * `GRAPHYARD_DATABASE_POOL_SIZE` connections (default 16) and `GRAPHYARD_OBSERVATION_CONCURRENCY`
+ * workers (default 8), never more than half the pool — the background share; a worker beyond it
+ * only queues on a connection the API and the tick need. Naming only the workers grows the pool to
+ * fit them; naming the pool caps the workers at half of it. The default keeps the merge and review
+ * bands inside their freshness bounds at 100 open items (tests/observation-capacity.test.ts), and
+ * every worker waits for the one shared pace before it claims (GY-567), so extra workers raise
+ * throughput only as far as GitHub's budget to the reset allows.
  */
-export const observationConcurrency = (poolMax = 12) => {
-  const bound = Math.max(1, Math.floor(poolMax / 2));
-  const configured = Number(process.env.GRAPHYARD_OBSERVATION_CONCURRENCY);
-  return Number.isFinite(configured) && configured >= 1 ? Math.min(Math.floor(configured), bound) : Math.min(4, bound);
-};
+export const defaultDatabasePoolSize = 16, defaultObservationConcurrency = 8;
+export function observationCapacity(env: Record<string, string | undefined> = process.env) {
+  const count = (value: string | undefined) => { const parsed = Number(value); return value && Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : null; };
+  const workers = count(env.GRAPHYARD_OBSERVATION_CONCURRENCY), pool = count(env.GRAPHYARD_DATABASE_POOL_SIZE);
+  const poolMax = Math.max(2, pool ?? Math.max(defaultDatabasePoolSize, 2 * (workers ?? 0)));
+  return { poolMax, concurrency: Math.max(1, Math.min(workers ?? defaultObservationConcurrency, Math.floor(poolMax / 2))) };
+}
+/** The worker count for a pool of `poolMax` connections, from the environment's configured workers. */
+export const observationConcurrency = (poolMax = defaultDatabasePoolSize) => observationCapacity({ GRAPHYARD_OBSERVATION_CONCURRENCY: process.env.GRAPHYARD_OBSERVATION_CONCURRENCY, GRAPHYARD_DATABASE_POOL_SIZE: String(poolMax) }).concurrency;
 
 /**
  * The observation workers (GY-492): `concurrency` long-lived loops beside the reconciliation tick,

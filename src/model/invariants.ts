@@ -87,15 +87,15 @@ export interface InvariantInput {
   metrics?: readonly { at: string; durationMs: number }[];
   /** The decisions the loop put to approvers: which session judged each and when it settled. */
   approvals?: Readonly<Record<string, { work: string; agentName: string | null; pane: string | null; settledAt: string | null }>>;
+  /** The docs-sync sessions the loop launched for docs-only conflicts (GY-566), and when each settled. */
+  docsSyncs?: Readonly<Record<string, { work: string; agentName: string | null; pane: string | null; settledAt: string | null }>>;
   /** The session runtime's listing this cycle; null when it could not be read. */
   agents?: readonly { name?: string; pane_id?: string }[] | null;
   /** The build the control plane reports it runs; null when it could not be read. */
   build?: string | null;
-  /** Items whose current candidate's guarded merge was refused, with the refusal recorded (the loop's merge action failed). */
-  refusedMerges?: ReadonlySet<string>;
 }
 
-/** The follow-up item's one proof (review-threads.ts `followUpTriageProof`): what marks a machine-filed follow-up. */
+/** The one proof review follow-up items were filed with until GY-1249: what marks a machine-filed follow-up. */
 export const followUpProof = 'manual:review-followups-triaged';
 /** The parent a follow-up item was filed for: the approved item it depends on, or null for any other item. */
 export function followUpParent(work: Pick<Work, 'criteria' | 'dependencies' | 'title'>): string | null {
@@ -151,6 +151,10 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
       const settled = time(watch.settledAt);
       if (settled !== null && now - settled > bound && listed(watch.agentName, watch.pane)) { lingering.push({ subject: watch.work, detail: `approver session ${watch.agentName ?? watch.pane} on ${watch.work}, ${minutes(now - settled)} after its decision settled` }); if (watch.agentName) named.add(watch.agentName); }
     }
+    for (const watch of Object.values(input.docsSyncs ?? {})) {
+      const settled = time(watch.settledAt);
+      if (settled !== null && now - settled > bound && listed(watch.agentName, watch.pane)) lingering.push({ subject: watch.work, detail: `docs-sync session ${watch.agentName ?? watch.pane} on ${watch.work}, ${minutes(now - settled)} after it settled` });
+    }
     // An approver the loop no longer watches — launched by hand (`master approver`, GY-403), or its watch retired — is
     // known by its name (master/autonomy.ts `approverSessionName`), which carries the item's key.
     for (const agent of input.agents) {
@@ -197,8 +201,8 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
     const github = observation?.githubQueue && observation.githubQueue.head === candidate?.sha ? observation.githubQueue : null;
     const mergeable = item.stage === 'merge' && !!candidate && !!observation && observation.mergeable === true && !observation.merged && observation.candidate.sha === candidate.sha
       && (!github || !github.queue && mergeableNow(github));
-    // A gate still failing is a recorded refusal (its reasons are on the item), and so are a refused guarded merge and GitHub's refusal of the request.
-    const refused = !item.gates.every(gate => gate.passed) || item.violations.length > 0 || !!input.refusedMerges?.has(item.id) || !!github?.refused;
+    // A gate still failing is a recorded refusal (its reasons are on the item), and so is GitHub's refusal of the request.
+    const refused = !item.gates.every(gate => gate.passed) || item.violations.length > 0 || !!github?.refused;
     if (!mergeable || refused) continue;
     waiting.add(item.id);
     const entry = record.mergeable[item.id]?.sha === candidate!.sha ? record.mergeable[item.id] : { sha: candidate!.sha, since: at };

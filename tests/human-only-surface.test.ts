@@ -91,8 +91,8 @@ const dashboard = (actor: Principal, work: Work[], humanOnly: HumanRequestRow[] 
     action: async (target: string, command: string, body: unknown) => { sent?.(target, command, body); }, setSelected: () => {} }) as unknown as Dashboard;
 
 /**
- * An unproven candidate GitHub merged with no execution authorizing it, whose two-party
- * reconciliation the record then refused: the exact state GY-92, GY-94 and GY-84 stand in.
+ * A candidate GitHub merged before its review gate passed (GY-1235: an unapproved head), whose
+ * two-party reconciliation the record then refused: the exact state GY-92, GY-94 and GY-84 stand in.
  */
 async function mergedWithRefusedReconciliation() {
   const n = ++serial;
@@ -103,14 +103,14 @@ async function mergedWithRefusedReconciliation() {
   work = await engine.execute(worker, 'submit', work.id, { epoch: 1, pr: 900 + n }, id());
   // One item in the queue at a time, so no entry of another item decides this one's gates.
   await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [work.id]);
-  work = await engine.observe(work.id, work.revision, observation(work));
+  work = await engine.observe(work.id, work.revision, observation(work, { reviews: [] }));
   const mergeSha = sha(`merge-${work.key}`);
   const merged = await mergedAt(work, mergeSha);
   const cutoff = Date.parse(merged.mergedAt!) + 1000;
   work = await engine.observe(work.id, (await reload(work.id)).revision, merged);
   assert.ok(work.violations.includes(unauthorizedMergeViolation), work.violations.join(' | '));
   await waitUntil(cutoff);
-  // The master's agent pair asks for a reconciliation; the acceptance gate was open at the merge
+  // The master's agent pair asks for a reconciliation; the review gate was open at the merge
   // cutoff, so the record refuses it and records what it lacked.
   const reconciliation = await mergeDecision(work, `Reconcile ${work.key} after the administrative merge`, masterAgent.token, approverAgent.token);
   work = await engine.observe(work.id, (await reload(work.id)).revision, { ...merged, at: new Date().toISOString() });
@@ -133,7 +133,7 @@ test('integration:human-only-actions-listed — an approval whose decision the s
 
   // The approval that now waits: requested by the master's agent, approvable by nobody it runs.
   const current = await reload(work.id);
-  const reason = `Operator-authorized delivery of ${work.key}, citing refused decision ${reconciliation}: the acceptance gate could only be closed after this change shipped`;
+  const reason = `Operator-authorized delivery of ${work.key}, citing refused decision ${reconciliation}: the review gate could only be closed after this change shipped`;
   const decision = await mergeDecision(current, reason, masterAgent.token);
   for (const agent of agentIdentities) assert.ok(humanOnlyRefusal(operatorApprovalRule.kind, agent), `${agent.id} must be refused this approval`);
   assert.equal(humanOnlyRefusal(operatorApprovalRule.kind, operator), null, 'the operator is not refused it');
@@ -149,7 +149,7 @@ test('integration:human-only-actions-listed — an approval whose decision the s
   assert.equal(row.request.requestedBy, masterAgent.id);
   assert.ok(row.waitedMs >= 0 && Date.parse(row.request.at) > 0, `waited ${row.waitedMs}ms since ${row.request.at}`);
   assert.equal(row.refusal, operatorCredentialRefusal({ id: 'an agent identity', role: 'operator-agent' }));
-  assert.deepEqual(row.answer.post, { command: 'approve', body: { decision }, field: 'reason', submit: `Approve and deliver ${work.key}`, decline: null });
+  assert.deepEqual(row.answer.post, { command: 'approve', body: { decision }, field: 'reason', submit: `Approve and deliver ${work.key}`, decline: { body: { action: 'refuse', decision }, submit: 'Decline' } });
 
   // The same rows ride the status read every client polls, and the CLI list prints them too.
   const status = await get(token(operator), 'status');
@@ -199,6 +199,30 @@ test('integration:approve-from-page — the operator answers the approval from t
   assert.equal((await events(work.id, 'merge.operator-authorized'))[0].actor, operator.id);
   const after = await get(token(operator), 'human-requests');
   assert.equal((after.requests as HumanRequestRow[]).some(entry => entry.request.id === decision), false, 'an answered approval no longer waits');
+});
+
+test('integration:decline-from-page — the operator declines an operator-only approval with one button on the card (GY-1041): the route it posts to records their considered refusal, and the approval leaves the human surface without delivering', async () => {
+  const { work, merged, reconciliation } = await mergedWithRefusedReconciliation();
+  const reason = `Operator-authorized delivery of ${work.key}, overriding refused reconciliation ${reconciliation}`;
+  const decision = await mergeDecision(await reload(work.id), reason, masterAgent.token);
+  const listed = await get(token(operator), 'human-requests');
+  const row = (listed.requests as HumanRequestRow[]).find(entry => entry.request.id === decision)!;
+  assert.deepEqual(row.choices!.map(choice => [choice.label, choice.declines]), [[`Approve and deliver ${work.key}`, false], ['Decline', true]], 'the card offers Decline beside Approve, as a park request does');
+  assert.match(row.answer.decline, new RegExp(`master refuse ${work.key} ${decision} REASON$`), 'the terminal equivalent is the operator\'s own refusal, not the requester\'s withdrawal');
+  const page = renderToStaticMarkup(createElement(HumanRequestsPage, dashboard(operator, await store.list(), listed.requests, Date.parse(listed.now))));
+  assert.ok(page.includes('>Decline</button>'), 'the Decline button is on the operator\'s card');
+
+  const decline = row.choices!.find(choice => choice.declines)!;
+  const typed = 'Declined: the refused reconciliation stands until the review gate passes on its own';
+  const declined = await post(token(operator), `work/${row.id}/${row.answer.post.command}`, { ...decline.body, [decline.note!]: typed });
+  assert.equal(declined.id, decision);
+  assert.equal(declined.state, 'refused');
+  const recorded = (await events(work.id, 'decision.declined')).find(entry => entry.payload.id === decision)!;
+  assert.deepEqual([recorded.actor, recorded.payload.reason, recorded.payload.requestedBy], [operator.id, typed, masterAgent.id]);
+  const observed = await engine.observe(work.id, (await reload(work.id)).revision, { ...merged, at: new Date().toISOString() });
+  assert.equal(observed.delivery, undefined, 'a declined approval delivers nothing');
+  const after = await get(token(operator), 'human-requests');
+  assert.equal((after.requests as HumanRequestRow[]).some(entry => entry.request.id === decision), false, 'a declined approval no longer waits');
 });
 
 test('unit:human-surface-derived-from-refusals — a human-only refusal added to the rule table is listed and answerable on the page with no change to the page: the surface is the table, never a list of kinds the page keeps', async () => {

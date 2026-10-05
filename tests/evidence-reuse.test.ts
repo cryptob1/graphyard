@@ -11,6 +11,7 @@ import { redactString, type ReplayRecord } from '../src/evidence-replay.js';
 import { defineScenario } from '../src/scenarios.js';
 import { server } from '../src/server.js';
 import { currentEvidence } from '../src/model.js';
+import { evidenceProves } from '../src/model/mechanical-proofs.js';
 import type { Principal, ScopeFile, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -109,7 +110,8 @@ async function newRequest(f: Fixture, candidateId: string) {
   const w = await current(f.w.id);
   return await validation.createRequest(operator, { candidateId, expectedWorkRevision: w.revision, runner: f.runnerRef, collector: f.collectorRef, deadline: new Date(Date.now() + 600_000).toISOString(), maxAttempts: 3 }, id()) as ValidationRequest;
 }
-const acceptance = (w: Work) => w.gates.find(g => g.name === 'acceptance')!;
+/** Whether the proof stands proven on the item: proofs gate no merge since GY-1235, so its current evidence is read directly. */
+const proven = (w: Work, proof: string) => { const evidence = currentEvidence(w, proof); return !!evidence && evidenceProves(proof, evidence); };
 const playwrightDocument = (executions: boolean) => ({ format: 'graphyard-playwright-v1', declared: [{ id: 'a'.repeat(64), expected: 'passed', location: { file: 'tests/behavior.spec.ts', line: 1, column: 1 } }, { id: 'b'.repeat(64), expected: 'passed', location: { file: 'tests/behavior.spec.ts', line: 9, column: 1 } }],
   executions: executions ? [{ id: 'a'.repeat(64), status: 'passed', retry: 0 }, { id: 'b'.repeat(64), status: 'passed', retry: 0 }] : [], steps: [], errors: 0, overflow: false, status: 'passed' });
 const upload = (command: { requestId: string; attemptId: string; epoch: number }, name: string, document: unknown) => ({ ...command, name, mediaType: 'application/json', bytes: Buffer.from(JSON.stringify(document)).toString('base64'), capturePolicy: 'approved-test-data-only' });
@@ -129,7 +131,7 @@ test('D6 glob and classification: relevant categories win, ignorable paths are n
 test('D6-1 relevant dependency and configuration changes invalidate reuse; an ignorable change is reused with exact binding', async () => {
   const f = await fixture(); const command = await pass(f);
   const before = await current(f.w.id);
-  assert.equal(acceptance(before).passed, true, acceptance(before).reasons.join('; '));
+  assert.equal(proven(before, f.proof), true);
   assert.equal(before.validation![f.proof].attemptId, command.attemptId);
   assert.equal((await request(f.r.id)).attempts[0].sequence, 1, 'dispatch takes the durable sequence');
   // A dependency change: refused, recorded, and nothing is selected for the new head.
@@ -137,7 +139,7 @@ test('D6-1 relevant dependency and configuration changes invalidate reuse; an ig
   assert.equal(dependency.outcome, 'refused'); assert.match(dependency.reasons.join('\n'), /package\.json \(added\) is a relevant dependencies change/);
   assert.equal(dependency.of?.sequence, 1); assert.equal(dependency.candidateId, null);
   let w = await current(f.w.id);
-  assert.equal(acceptance(w).passed, false, 'the pass for the previous head does not carry over by itself');
+  assert.equal(proven(w, f.proof), false, 'the pass for the previous head does not carry over by itself');
   assert.equal(currentEvidence(w, f.proof), undefined);
   // A configuration change on the same head: refused as configuration, whatever the ignorable docs beside it.
   const configuration = await decide(f, heads.two, [...filesOne, file('config/app.yaml', 'y'), file('docs/guide.md', 'h')]);
@@ -154,7 +156,7 @@ test('D6-1 relevant dependency and configuration changes invalidate reuse; an ig
   assert.equal(evidence.sha, heads.two); assert.equal(evidence.producer, collector.id); assert.equal(evidence.trusted, true);
   assert.equal(evidence.reuse?.decisionId, granted.id); assert.equal(evidence.reuse?.sourceSha, heads.one); assert.equal(evidence.reuse?.sequence, 1);
   assert.deepEqual(evidence.validation, { candidateId: granted.candidateId, requestId: f.r.id, attemptId: command.attemptId });
-  assert.equal(acceptance(w).passed, true, acceptance(w).reasons.join('; '));
+  assert.equal(proven(w, f.proof), true);
   const derived = (await store.pool.query('SELECT document FROM validation_candidates WHERE id=$1', [granted.candidateId])).rows[0].document as ValidationCandidate;
   assert.equal(derived.sourceSha, heads.two); assert.deepEqual(derived.reuse?.of, { candidateId: f.c.id, requestId: f.r.id, attemptId: command.attemptId, sequence: 1 });
   // The derived candidate is attributable like an executed one: the same artifact digests run, while the manifest
@@ -192,7 +194,7 @@ test('D6-1 relevant dependency and configuration changes invalidate reuse; an ig
   w = await engine.execute(operator, 'revoke', f.w.id, { proof: f.proof, sha: heads.one, baseSha: base, policyRevision: 1, reason: 'Attributed to the wrong artifact' }, id());
   assert.equal(currentEvidence(w, f.proof), undefined);
   assert.ok(w.evidence.filter(e => e.reuse).every(e => e.revocation?.reason === 'Attributed to the wrong artifact'), 'every derived record is annotated, not deleted');
-  assert.equal(acceptance(w).passed, false);
+  assert.equal(proven(w, f.proof), false);
 });
 
 test('GY-135: a pass with no failing run against the stripped tree is never carried onto a new head', async () => {
@@ -204,7 +206,7 @@ test('GY-135: a pass with no failing run against the stripped tree is never carr
   const decision = await decide(f, heads.two, [file('src/app.ts', 'a'), file('docs/guide.md', 'h')]);
   assert.equal(decision.outcome, 'refused'); assert.equal(decision.evidenceId, null);
   assert.match(decision.reasons.join('\n'), new RegExp(`${f.proof} does not exercise AC-1: it passed, but no run of it against a tree with the criterion's behaviour removed was recorded`));
-  assert.equal(acceptance(await current(f.w.id)).passed, false);
+  assert.equal(proven(await current(f.w.id), f.proof), false);
 });
 test('D6-2 requirement, scenario, proof policy, bundle, environment, freshness and independence changes invalidate reuse when source is unchanged', async () => {
   // Requirement revision: the pass at policy v1 cannot stand for v2 even with no file changed.
@@ -297,13 +299,13 @@ test('D6-3 newer blocked, timed-out, unmeasured or incomplete attempts prevent f
   // A later failure supersedes a reused pass: grant reuse on a fresh item, then run a live attempt for the same head that fails.
   const g = await fixture(); await pass(g);
   const granted = await decide(g, heads.two, ignorable); assert.equal(granted.outcome, 'granted', granted.reasons.join('; '));
-  assert.equal(acceptance(await current(g.w.id)).passed, true);
+  assert.equal(proven(await current(g.w.id), g.proof), true);
   const live = await newRequest(g, granted.candidateId!);
-  w = await current(g.w.id); assert.equal(acceptance(w).passed, false, 'a newer queued attempt withdraws the reused pass');
+  w = await current(g.w.id); assert.equal(proven(w, g.proof), false, 'a newer queued attempt withdraws the reused pass');
   assert.equal(currentEvidence(w, g.proof), undefined);
   const liveCommand = await start(g, live.id);
   const failed: any = await validation.result(collector, report(g, liveCommand, { behavior: 'failed' }), id()); assert.equal(failed.passed, false);
-  w = await current(g.w.id); assert.equal(acceptance(w).passed, false); assert.equal(currentEvidence(w, g.proof)?.result, 'fail');
+  w = await current(g.w.id); assert.equal(proven(w, g.proof), false); assert.equal(currentEvidence(w, g.proof)?.result, 'fail');
   const again = await decide(g, heads.two, ignorable);
   assert.equal(again.outcome, 'refused'); assert.match(again.reasons.join('\n'), /not passed/);
   assert.equal(again.of?.sequence, (await request(live.id)).attempts[0].sequence);
@@ -372,7 +374,7 @@ test('D6-5 replay reports coverage and cannot authorize current live behavior by
   // Replay after the head moves and the pass is no longer current: the record is unchanged in meaning and still authorizes nothing.
   await observe(after, heads.two, [file('src/app.ts', 'z')]); await validation.reconcile();
   const later = await validation.replay.replay(operator, { requestId: f.r.id, attemptId: command.attemptId }) as ReplayRecord;
-  assert.equal(later.outcome, 'consistent'); assert.equal(acceptance(await current(f.w.id)).passed, false, 'a clean replay does not stand in for live verification of the new head');
+  assert.equal(later.outcome, 'consistent'); assert.equal(proven(await current(f.w.id), f.proof), false, 'a clean replay does not stand in for live verification of the new head');
   assert.equal((await validation.replay.replays()).replays.length >= 2, true);
   assert.equal((await events('validation.replayed')).filter(e => e.replay.id === replay.id).length, 1);
   // A collector's report that disagrees with its own retained artifacts is an inconsistent replay.

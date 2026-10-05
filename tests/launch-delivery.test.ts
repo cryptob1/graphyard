@@ -55,7 +55,14 @@ function work(overrides: Partial<Work> = {}): Work {
     lease: null, workspaces: [{ host: 'h', path: '/w/gy-121', branch: 'graphyard/gy-121-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 121 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation: observation(candidate), blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [], ...overrides } as Work;
 }
-const requested = () => { const item = work(); reconcileAutoDispatch(item, [item], new Date(clock)); return item; };
+// Dispatch no longer opens producer requests (GY-1235: proofs gate nothing), but the producer
+// launcher and the dispatcher's launch of a standing request remain: the requests are built by hand.
+const requested = () => {
+  const item = work(); reconcileAutoDispatch(item, [item], new Date(clock));
+  for (const group of ['unit', 'integration'] as const)
+    item.autoDispatch!.producers.push({ id: `producer-${group}`, kind: 'producer', group, proofs: item.criteria[0].proofs.filter(proof => proof.startsWith(`${group}:`)), sha: H, baseSha: B, policyRevision: 1, pr: 121, requestedAt: at, reason: 'unproven', state: 'requested' });
+  return item;
+};
 
 /** A master installed in a throwaway repository with one Claude producer profile, its credential outside it. */
 async function installed() {
@@ -64,7 +71,7 @@ async function installed() {
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);
   const credential = join(credentials, 'producer.token'); await writeFile(credential, 'producer-token-'.padEnd(40, 'x'), { mode: 0o600 });
-  await saveProducerProfile(root, { name: 'claude-producer', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential }, producerVerify);
+  await saveProducerProfile(root, { name: 'claude-producer', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, concurrency: 1 }, producerVerify);
   return { root, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); } };
 }
 

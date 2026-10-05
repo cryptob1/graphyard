@@ -221,6 +221,36 @@ test('unit:api-key-sealed-to-host — a pasted key is sealed to the host, stored
   assert.ok(!markup.includes(KEY), 'the card carries no key');
 });
 
+test('connect Pi — a z.ai key pasted for Pi lands in Pi\'s own auth document in a pi-<letter> home and registers a Pi account for approval and proofs', async () => {
+  const { hosts } = await ok('agent-registry/connect/host-key', operator);
+  const publicKey = hosts.find((entry: { host: string }) => entry.host === HOST)?.publicKey!;
+  const provider = connectProviders.find(entry => entry.id === 'pi-zai')!;
+  assert.equal(provider.runtime, 'pi');
+  await ok('agent-registry/connect', operator, { host: HOST, provider: provider.id, sealed: await sealForHost(publicKey, KEY), reason: 'Connect Pi with the z.ai key' });
+  const smoked: { command: string; args: string[]; home?: string }[] = [];
+  const reports = await runWorker({ runner: async (command: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => { smoked.push({ command, args, home: options.env?.PI_CODING_AGENT_DIR }); return ''; } });
+  assert.equal(reports[0].state, 'healthy', reports[0].detail);
+  const name = reports[0].detail.split(' ')[0];
+  assert.match(name, /^pi-[a-z]$/);
+  assert.equal(reports[0].detail, `${name} joined approver, producer`, 'Pi joins no research: the research wrapper reads an OpenCode key');
+  const home = join(scratch, 'agents', name);
+  // Pi's letter never collides with an OpenCode account's research wrapper directory.
+  const opencodeLetters = (await ok('agent-registry/document', operator)).accounts.filter((account: { runtime: string }) => account.runtime === 'opencode').map((account: { name: string }) => account.name.split('-').at(-1));
+  assert.ok(!opencodeLetters.includes(name.split('-').at(-1)), `${name} is clear of ${opencodeLetters.join(', ')}`);
+  assert.deepEqual(JSON.parse(await readFile(join(home, 'auth.json'), 'utf8')), { zai: { type: 'api_key', key: KEY } });
+  assert.equal((await stat(join(home, 'auth.json'))).mode & 0o777, 0o600);
+  assert.equal(JSON.parse(await readFile(join(home, 'settings.json'), 'utf8')).defaultProvider, 'zai');
+  assert.deepEqual(smoked, [{ command: 'pi', args: provider.smoke.args, home }], 'the smoke runs pi inside the new home');
+  const document = await ok('agent-registry/document', operator);
+  const account = document.accounts.find((entry: { name: string }) => entry.name === name);
+  assert.equal(account?.runtime, 'pi');
+  assert.deepEqual(account?.credential, { host: HOST, home });
+  assert.ok(document.runtimes.some((runtime: { name: string; launch: { homeVariable: string } }) => runtime.name === 'pi' && runtime.launch.homeVariable === 'PI_CODING_AGENT_DIR'));
+  for (const role of ['approver', 'producer']) assert.ok(document.roles.find((entry: { name: string }) => entry.name === role)?.accounts.includes(name), role);
+  assert.ok(!document.roles.find((entry: { name: string }) => entry.name === 'worker')?.accounts.includes(name));
+  assert.ok(!JSON.stringify(await ok('agent-registry/connect', operator)).includes(KEY), 'no API read returns the key');
+});
+
 test('unit:subscription-login-relayed — the provider login runs on the host, its URL and code reach the UI, and the card turns healthy once the login file appears and the smoke passes', async () => {
   await ok('agent-registry/connect', operator, { host: HOST, provider: 'chatgpt', reason: 'Connect the ChatGPT subscription' });
   const working = runWorker();

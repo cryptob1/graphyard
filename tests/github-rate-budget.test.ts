@@ -7,16 +7,22 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server/index.js';
-import { CHECK_NAME, GitHub, mergePathReserve, observationBand, observationCadence, observationCadenceMs, processJob, reserveDecision, steadyStateInterval, steadyStateShare } from '../src/github.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { CHECK_NAME, GitHub, comparePage, mergePathReserve, observationBand, observationCadence, observationCadenceMs, processJob, reserveDecision, steadyStateInterval, steadyStateShare } from '../src/github.js';
 import { evaluate, type Principal, type Work } from '../src/model.js';
 import { exhaustionAttention, githubBudgetAttention, pauseAttention, webhookAttention } from '../src/cli/github-budget-attention.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { baseChangeFiles, baseMoveWakes } from '../src/observation-priority.js';
+import { simulateObservationScheduler } from '../src/observation-simulation.js';
+import { baseMoveSubjects, webhookSubjects } from '../src/server/routes/github.js';
 
 // GY-117. Each test is named for the proof it produces: unit:github-budget-tracked,
 // integration:observation-cadence-by-state, integration:merge-path-reserve-held,
 // unit:unchanged-candidate-observation-cost, integration:rate-limit-pause-single-incident,
 // manual:github-budget-docs-review, unit:steady-state-spend-bounded,
 // integration:webhook-liveness-visible.
+// GY-1231: unit:base-move-wakes-only-affected-items, unit:merge-burst-request-budget.
+// GY-1272: manual:fault-class-resources (the GitHub App budget spent at 06:36:13Z on 5 October 2026).
 
 // ---- GitHub's REST surface at the fetch level: ETags, rate-limit headers, and a refusal mode ----
 
@@ -34,16 +40,30 @@ const etagOf = (body: string) => `"${createHash('sha1').update(body).digest('hex
  */
 class Api {
   main = sha('main-1');
-  pulls = new Map<number, { head: string; branch: string; approved: boolean; checks: 'success' | 'in_progress' }>();
+  pulls = new Map<number, { head: string; cut?: string; branch: string; approved: boolean; checks: 'success' | 'in_progress' }>();
+  /** The files a pull request changes, where a scenario names them (GY-1231); every other one changes one route file. */
+  files = new Map<number, string[]>();
+  /** GitHub's `mergeable_state` of a pull request, where a scenario names it (GY-1231); every other one is clean. */
+  states = new Map<number, string>();
   limit = 5000; remaining = 5000; resetAt = Math.ceil(Date.now() / 1000) + 3000;
   refuse = false;
   requests: { method: string; path: string; status: number }[] = [];
   open(pr: number, branch: string, options: { approved?: boolean; checks?: 'success' | 'in_progress' } = {}) {
-    this.pulls.set(pr, { head: sha(`head-${pr}-${this.main}`), branch, approved: options.approved ?? true, checks: options.checks ?? 'success' });
+    this.pulls.set(pr, { head: sha(`head-${pr}-${this.main}`), cut: this.main, branch, approved: options.approved ?? true, checks: options.checks ?? 'success' });
     return this.pulls.get(pr)!;
   }
+  /**
+   * The base tips main has moved past, oldest first, where a scenario moves main along one line
+   * (GY-1272): a head then contains every tip up to the one it was cut from, and main contains them all.
+   */
+  history: string[] = [];
   /** The candidate contains the base tip when its head was cut from it; two heads never contain each other. */
-  private contains(base: string, head: string) { return base === head || base === this.main && [...this.pulls.values()].some(pr => pr.head === head); }
+  private contains(base: string, head: string) {
+    if (base === head) return true;
+    if (!this.history.length) return base === this.main && [...this.pulls.values()].some(pr => pr.head === head);
+    const line = [...this.history, this.main], cut = head === this.main ? this.main : [...this.pulls.values()].find(pr => pr.head === head)?.cut;
+    return cut !== undefined && line.includes(base) && line.indexOf(base) <= line.indexOf(cut);
+  }
   private body(method: string, path: string): unknown {
     if (method !== 'GET') return { id: 12 };
     const [route, query = ''] = path.replace(`/repos/${REPOSITORY}`, '').split('?'); const params = new URLSearchParams(query);
@@ -51,14 +71,14 @@ class Api {
     let match = /^\/pulls\/(\d+)$/.exec(route);
     if (match) {
       const pr = this.pulls.get(Number(match[1]))!;
-      return { number: Number(match[1]), state: 'open', draft: false, merged: false, mergeable: true, merge_commit_sha: null, merged_at: null, created_at: '2026-09-21T10:00:00Z', user: { login: 'implementer', id: 7 },
+      return { number: Number(match[1]), state: 'open', draft: false, merged: false, mergeable: true, mergeable_state: this.states.get(Number(match[1])) ?? 'clean', merge_commit_sha: null, merged_at: null, created_at: '2026-09-21T10:00:00Z', user: { login: 'implementer', id: 7 },
         head: { sha: pr.head, ref: pr.branch, repo: { full_name: REPOSITORY } }, base: { sha: this.main, ref: 'main', repo: { full_name: REPOSITORY } } };
     }
     match = /^\/pulls\/(\d+)\/reviews$/.exec(route);
     if (match) return params.get('page') !== '1' ? [] : this.pulls.get(Number(match[1]))!.approved ? [{ id: 40 + Number(match[1]), user: { login: 'independent-reviewer' }, commit_id: this.pulls.get(Number(match[1]))!.head, state: 'APPROVED', submitted_at: '2026-09-21T10:05:00Z' }] : [];
     match = /^\/pulls\/(\d+)\/files$/.exec(route);
     // GY-883: a public API path keeps the item in the high lane, whose full path still demands the proof the cadence bands presuppose.
-    if (match) return params.get('page') !== '1' ? [] : [{ filename: 'src/server/routes/feature.ts', status: 'modified', sha: sha(`blob-${match[1]}`), additions: 3, deletions: 1, patch: '@@' }];
+    if (match) return params.get('page') !== '1' ? [] : (this.files.get(Number(match[1])) ?? ['src/server/routes/feature.ts']).map(filename => ({ filename, status: 'modified', sha: sha(`blob-${match![1]}-${filename}`), additions: 3, deletions: 1, patch: '@@' }));
     match = /^\/commits\/([a-f0-9]{40})\/check-runs$/.exec(route);
     if (match) {
       if (params.get('check_name')) return { check_runs: [] };
@@ -168,7 +188,8 @@ test('unit:steady-state-spend-bounded — twenty unchanged candidates polled for
   const api = new Api();
   t.mock.method(globalThis, 'fetch', api.fetch);
   const github = api.client();
-  const candidates = Array.from({ length: 20 }, (_, index) => { const pr = api.open(100 + index, `graphyard/gy-${index}-1`, { approved: index >= 10 }); return item(`GY-${index}`, 100 + index, pr.head, api.main); });
+  // Ten await review; ten were approved and sent back for rework, whose next action is a worker's dispatch.
+  const candidates = Array.from({ length: 20 }, (_, index) => { const pr = api.open(100 + index, `graphyard/gy-${index}-1`, { approved: index >= 10 }); return item(`GY-${index}`, 100 + index, pr.head, api.main, { reworkRequested: index >= 10 }); });
   // The premise: every candidate has been observed once already and nothing has changed since.
   let all: Work[] = [];
   for (const candidate of candidates) all.push(evaluated(candidate, candidates, await github.observe(candidate, candidates)));
@@ -224,7 +245,8 @@ test('manual:github-budget-docs-review — the operations reference states the r
   for (const band of ['merge', 'active', 'steady', 'idle']) assert.match(reference, new RegExp(`^\\| \`${band}\` \\|`, 'm'), `the schedule table has a ${band} row`);
   assert.match(reference, /\*\*500 requests\*\* by default, `GRAPHYARD_GITHUB_RESERVE`/);
   assert.match(reference, /\*\*at most 40%\*\* \(`steadyStateShare`\)/);
-  assert.match(reference, /gates read stale until it lifts/);
+  assert.match(reference, /gates read the last observation until it lifts/);
+  assert.doesNotMatch(reference, /observation over two minutes old/, 'no gate refuses on observation age (GY-1235)');
   assert.match(reference, /`graphyard status` \(or `GET \/api\/status`\) → `githubBudget`/);
   assert.match(reference, /settings\/apps\/APP-SLUG/);
   const operations = await readFile(new URL('../docs/operations.md', import.meta.url), 'utf8');
@@ -270,10 +292,10 @@ const status = async () => (await realFetch(`${origin}/api/status`, { headers: {
  * One signed webhook delivery, as GitHub sends it. A delivery wakes only the pull request it
  * names; one naming none is a push to the base branch, which wakes every job.
  */
-async function webhook(work?: Work) {
+async function webhook(work?: Work, commits?: { added: string[]; removed: string[]; modified: string[] }[]) {
   process.env.GITHUB_WEBHOOK_SECRET ??= 'webhook-secret-for-the-test';
   const raw = JSON.stringify(work ? { action: 'synchronize', repository: { full_name: REPOSITORY }, pull_request: { number: work.submission!.pr } }
-    : { repository: { full_name: REPOSITORY }, ref: 'refs/heads/main', after: sha(`push-${randomUUID()}`) });
+    : { repository: { full_name: REPOSITORY }, ref: 'refs/heads/main', after: sha(`push-${randomUUID()}`), ...(commits ? { commits } : {}) });
   const response = await realFetch(`${origin}/api/github/webhook`, { method: 'POST', body: raw, headers: { 'content-type': 'application/json', 'x-github-delivery': randomUUID(), 'x-hub-signature-256': `sha256=${createHmac('sha256', process.env.GITHUB_WEBHOOK_SECRET).update(raw).digest('hex')}` } });
   assert.equal(response.status, 202, 'the delivery is accepted');
 }
@@ -310,15 +332,15 @@ test('integration:observation-cadence-by-state — a merge-gate candidate is obs
   const api = new Api();
   t.mock.method(globalThis, 'fetch', api.fetch);
   const github = api.client(); await serve(github);
-  // Three items in three states: proved and approved (merge gate), approved but unproven (the
-  // next action is a producer dispatch), and awaiting review (GitHub can still deliver it).
-  // The proved, approved candidate enters the queue on one observation and is bound to its tip on
-  // the next (the publication wakes the job at once); after that it is at the merge gate.
-  let merging = await submitted(api, 'At the merge gate'); merging = await job(merging, github); merging = await prove(merging); merging = await job(merging, github); merging = await job(merging, github);
+  // Three items in three states: approved and green (merge gate: GitHub's to merge, GY-1235), sent
+  // back for rework (the next action is a worker's dispatch, which nothing on GitHub can move), and
+  // awaiting review (GitHub can still deliver it).
+  let merging = await submitted(api, 'At the merge gate'); merging = await job(merging, github); merging = await job(merging, github);
   const mergeMs = await scheduledInMs(merging);
-  let idle = await submitted(api, 'Awaiting proof'); idle = await job(idle, github);
+  let idle = await submitted(api, 'Sent back for rework');
+  idle = await engine.execute(operator, 'rework', idle.id, { reason: 'Address a review finding', previousWorkerStopped: true }, randomUUID());
+  idle = await job(idle, github);
   const idleMs = await scheduledInMs(idle);
-  // A manual-only criterion: since GY-115 an unproven automatable proof holds review, which is the idle case above.
   let active = await submitted(api, 'Awaiting review', { approved: false, proofs: ['manual:budget'] }); active = await job(active, github);
   const activeMs = await scheduledInMs(active);
   const all = await store.list(); const now = new Date();
@@ -337,7 +359,7 @@ test('integration:observation-cadence-by-state — a merge-gate candidate is obs
   assert.ok(await scheduledInMs(active) >= 120_000 - 1000);
   api.pulls.get(active.submission!.pr)!.approved = true;
   active = await job(active, github);
-  assert.equal(github.budget().observations.jobs.find(entry => entry.work === active.id)?.band, 'idle', 'approved and unproven: the next action is a producer dispatch');
+  assert.equal(github.budget().observations.jobs.find(entry => entry.work === active.id)?.band, 'merge', 'approved: every gate passes and GitHub may merge it, so it joins the merge band');
   // A webhook wake observes the slow-cadence item immediately, whatever its schedule said.
   const before = idle.observation!.at;
   await webhook(idle);
@@ -355,7 +377,8 @@ test('integration:merge-path-reserve-held — below the reserve a merge-gate can
   const github = api.client(); await serve(github);
   let merging = await submitted(api, 'Landing under a low budget'); merging = await job(merging, github); merging = await prove(merging); merging = await job(merging, github); merging = await job(merging, github);
   assert.equal(merging.stage, 'merge');
-  let building = await submitted(api, 'Just submitted under a low budget');
+  // Awaiting review: a candidate GitHub cannot merge yet, so it never joins the merge path.
+  let building = await submitted(api, 'Just submitted under a low budget', { approved: false });
   assert.equal(building.stage, 'build'); assert.equal(building.observation, null);
   // The budget falls below the reserve; the next response says so, and the client reads it.
   api.remaining = 120; api.resetAt = Math.ceil(Date.now() / 1000) + 1800;
@@ -425,7 +448,8 @@ test('integration:rate-limit-pause-single-incident — twenty jobs refused for r
   for (let index = 0; index < 20; index++) { let work = await submitted(api, `Paused ${index}`); work = await job(work, github); items.push(work); }
   assert.ok(items.every(work => work.observation), 'all twenty were observed while the budget lasted');
   await webhook();
-  const spent = api.charged();
+  // GraphQL spends its own point budget, not the REST core allowance the hour counts (GY-1052).
+  const spent = api.charged() - api.requests.filter(request => request.path === '/graphql' && request.status === 200).length;
   // GitHub refuses: every job that runs into it records the refusal, once.
   api.refuse = true; api.resetAt = Math.ceil(Date.now() / 1000) + 900;
   await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL,error=NULL');
@@ -503,4 +527,208 @@ test('integration:webhook-liveness-visible — status reports the last delivery 
   // With nothing open there is nothing to wake, so silence is not a fault.
   assert.deepEqual(webhookAttention({ ...after, webhooks: { ...after.webhooks, openPullRequests: 0 } }, Date.now() + 7_200_000), []);
   assert.equal(githubBudgetAttention(after, Date.now()).length, 0, 'nothing else is raised on a healthy budget');
+});
+
+test('unit:base-move-wakes-only-affected-items — a merge touching one file wakes exactly the open items whose pull requests touch it, or whose mergeability GitHub has not settled; every other job keeps its schedule', async t => {
+  const api = new Api();
+  t.mock.method(globalThis, 'fetch', api.fetch);
+  const github = api.client(); await serve(github);
+  // Ten open items, each observed once: two change src/a.ts, eight change files of their own.
+  const items: Work[] = [];
+  for (let index = 0; index < 10; index++) {
+    api.files.set(prNumber + 1, index < 2 ? ['src/a.ts', `src/own-${index}.ts`] : [`src/own-${index}.ts`]);
+    items.push(await job(await submitted(api, `Open ${index}`), github));
+  }
+  assert.ok(items.every(work => work.observation?.mergeableState === 'clean'), 'every reading records GitHub\'s merge state, here CLEAN');
+  // Every job is scheduled an hour out, then main moves by one change to src/a.ts.
+  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour',webhook_at=NULL");
+  await webhook(undefined, [{ added: [], removed: [], modified: ['src/a.ts'] }]);
+  const woken = async () => (await store.pool.query('SELECT work_id FROM jobs WHERE available_at <= now()')).rows.map(row => String(row.work_id)).sort();
+  assert.deepEqual(await woken(), items.slice(0, 2).map(work => work.id).sort(), 'exactly the two items touching src/a.ts are woken');
+  // GitHub now reports two items that touch no base file BLOCKED (awaiting review) and BEHIND: neither is CLEAN or UNSTABLE, so a base move wakes both.
+  api.states.set(items[2].submission!.pr, 'blocked'); api.states.set(items[3].submission!.pr, 'behind');
+  items[2] = await job(items[2], github); items[3] = await job(items[3], github);
+  assert.deepEqual([items[2].observation?.mergeableState, items[3].observation?.mergeableState], ['blocked', 'behind']);
+  api.states.set(items[4].submission!.pr, 'unstable'); items[4] = await job(items[4], github);
+  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour',webhook_at=NULL");
+  await webhook(undefined, [{ added: [], removed: [], modified: ['src/a.ts'] }]);
+  assert.deepEqual(await woken(), items.slice(0, 4).map(work => work.id).sort(), 'the two touching src/a.ts, and the BLOCKED and BEHIND ones; the UNSTABLE and CLEAN ones keep their schedule');
+  // A push whose files the payload cannot name (none listed, forced, or truncated at 20 commits) wakes every job, as before.
+  await store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour',webhook_at=NULL");
+  await webhook();
+  assert.equal((await woken()).length, 10, 'a base push with unknown files wakes every item');
+  assert.equal(baseChangeFiles({ forced: true, commits: [{ added: [], removed: [], modified: ['x'] }] }), null);
+  assert.equal(baseChangeFiles({ commits: Array.from({ length: 20 }, () => ({ added: [], removed: [], modified: ['x'] })) }), null);
+  assert.deepEqual(baseChangeFiles({ commits: [{ added: ['n.ts'], removed: ['o.ts'], modified: ['m.ts'] }, { added: [], removed: [], modified: ['m.ts'] }] }), ['n.ts', 'o.ts', 'm.ts']);
+
+  // The selection itself: an item whose last reading is BLOCKED, BEHIND, conflicting (DIRTY), still
+  // computing (UNKNOWN), recorded no state, or is missing, is woken whatever its files; a CLEAN or
+  // UNSTABLE one only when its files overlap.
+  const fleet = await store.list();
+  const [dirty, unknown, stateless, unread] = [fleet[5], fleet[6], fleet[7], fleet[8]];
+  const states = fleet.map(work => work.id === dirty.id ? { ...work, observation: { ...work.observation!, mergeable: false, conflicting: true, mergeableState: 'dirty' } }
+    : work.id === unknown.id ? { ...work, observation: { ...work.observation!, mergeable: false, mergeabilityUnknown: true, mergeableState: 'unknown' } }
+      : work.id === stateless.id ? { ...work, observation: { ...work.observation!, mergeableState: undefined } }
+        : work.id === unread.id ? { ...work, observation: null } : work) as Work[];
+  const unsettled = [items[2].id, items[3].id, dirty.id, unknown.id, stateless.id, unread.id];
+  assert.deepEqual(baseMoveWakes(states, ['src/a.ts']).sort(), [items[0].id, items[1].id, ...unsettled].sort());
+  assert.deepEqual(baseMoveWakes(states, []).sort(), unsettled.sort());
+  assert.equal(baseMoveWakes(states, null).length, 10);
+  // The route's subjects: the woken items' pull requests, never `all`; a queue ref still wakes every job.
+  const push = { ref: 'refs/heads/main', after: sha('m'), commits: [{ added: [], removed: [], modified: ['src/a.ts'] }] };
+  const subjects = baseMoveSubjects(webhookSubjects(push, 'main'), fleet, baseChangeFiles(push));
+  assert.deepEqual([subjects.all, subjects.prs.sort()], [false, items.slice(0, 4).map(work => work.submission!.pr).sort()]);
+  assert.equal(webhookSubjects({ ref: 'refs/graphyard/queue/GY-1', after: sha('q') }, 'main').all, true);
+});
+
+test('unit:merge-burst-request-budget — ten merges in ten minutes over 80 open items spend at most 1500 charged GitHub requests, with each reading costed by the real client against a provider that answers conditional reads with free 304s', async t => {
+  const api = new Api();
+  t.mock.method(globalThis, 'fetch', api.fetch);
+  const github = api.client();
+  // 80 open candidates: candidate i changes one of twenty areas, so each area is shared by four.
+  // Half of them await their independent review, which GitHub reports BLOCKED: a base move wakes them all.
+  const blocked = (index: number) => index % 2 === 0;
+  const candidates = Array.from({ length: 80 }, (_, index) => {
+    const pr = api.open(400 + index, `graphyard/gy-m${index}-1`, { approved: !blocked(index) }); api.files.set(400 + index, [`src/area-${index % 20}.ts`, `src/own-${index}.ts`]);
+    if (blocked(index)) api.states.set(400 + index, 'blocked');
+    return item(`GY-M${index}`, 400 + index, pr.head, api.main);
+  });
+  // What one reading costs, measured with the real client over the whole fleet: the first, an unchanged one, and the first after main moved.
+  let all: Work[] = [];
+  const first: number[] = [];
+  for (const candidate of candidates) { const measured = await github.measured(() => github.observe(candidate, candidates)); first.push(measured.uncached); all.push(evaluated(candidate, candidates, measured.value)); }
+  const read = async () => { const costs: number[] = []; for (const candidate of [...all]) { const measured = await github.measured(() => github.observe(candidate, all)); costs.push(measured.uncached); all = all.map(entry => entry.id === candidate.id ? evaluated(candidate, all, measured.value) : entry); } return costs; };
+  await read();
+  const unchanged = await read();
+  // Main moves, and its push webhook ends the client's shared read of the base ref, as in production.
+  api.main = sha('main-2'); github.noteWebhook('push', { ref: 'refs/heads/main' });
+  const moved = await read();
+  // Each reading is charged the worst any candidate paid for it: the bound holds for the costliest readings.
+  // The first reading after the move also paid the cycle's shared base reads, which every later one is
+  // served: those are charged once per move, and each base-moved reading the worst of the rest.
+  const max = (costs: number[]) => Math.max(...costs), mean = (costs: number[]) => costs.reduce((sum, cost) => sum + cost, 0) / costs.length;
+  const requestCost = { unchanged: max(unchanged), changed: max(first), baseMoved: max(moved.slice(1)), baseMoveShared: moved[0] - Math.min(...moved.slice(1)) };
+  // Its compares of the new tip are one charged read since GY-1272: every question about one pair shares a page.
+  assert.ok(requestCost.baseMoved >= 2, `a base-moved reading pays at least its pull request and its compare of the new tip (${requestCost.baseMoved})`);
+  assert.ok(mean(unchanged) <= 2 && mean(moved) > mean(unchanged), `a base move is paid for, and an unchanged reading mostly is not (${mean(unchanged)}, ${mean(moved)})`);
+  // Four candidates GitHub last read as conflicting: a base move may settle them, so every merge wakes them.
+  all = all.map((work, index) => index % 20 === 7 ? { ...work, observation: { ...work.observation!, mergeable: false, conflicting: true } } : work) as Work[];
+  // Ten merges a minute apart, each changing one area; ten minutes of the default workers.
+  const options = { all, workers: 8, steadyMs: steadyStateInterval(80, null, 5000), jobMs: 13_000, durationMs: 10 * 60_000, changedShare: 0.1, requestCost,
+    baseMoves: Array.from({ length: 10 }, (_, index) => ({ atMs: 30_000 + index * 60_000, files: [`src/area-${index * 2}.ts`] })) };
+  const run = simulateObservationScheduler(options);
+  if (process.env.GRAPHYARD_BUDGET_DEBUG) console.log('merge burst', { requestCost, requests: run.requests, claims: run.claims, woken: run.woken.map(keys => keys.length) });
+  assert.equal(all.filter(work => work.observation?.mergeableState === 'blocked').length, 40, 'forty readings record GitHub\'s BLOCKED');
+  // Each merge wakes the forty BLOCKED candidates (its area's four among them, every even area being blocked) and the four conflicting ones.
+  assert.ok(run.woken.every(keys => keys.length === 44), `each merge wakes 44 of 80 (${run.woken.map(keys => keys.length)})`);
+  assert.ok(run.requests <= 1500, `ten merges over 80 open items spent ${run.requests} charged requests, over 1500`);
+  // The simulation discriminates: over a fleet GitHub reads CLEAN (none awaiting review or conflicting) a
+  // merge wakes only its area's four, and waking every open item on each merge, as before GY-1231, spends
+  // far more. With half the fleet BLOCKED, as above, the woken readings already fill the workers.
+  const everything = options.baseMoves.map(move => ({ ...move, files: null }));
+  const clean = all.map(work => ({ ...work, observation: { ...work.observation!, mergeable: true, conflicting: false, mergeableState: 'clean' } })) as Work[];
+  const cleanRun = simulateObservationScheduler({ ...options, all: clean }), cleanBefore = simulateObservationScheduler({ ...options, all: clean, baseMoves: everything });
+  if (process.env.GRAPHYARD_BUDGET_DEBUG) console.log('clean', cleanRun.requests, cleanBefore.requests);
+  assert.ok(cleanBefore.woken.every(keys => keys.length === 80), 'a base push whose files are unknown wakes all 80');
+  assert.ok(cleanRun.woken.every(keys => keys.length === 4) && cleanRun.requests * 2 < cleanBefore.requests, `over a CLEAN fleet a merge wakes its area's four, spending ${cleanRun.requests} against ${cleanBefore.requests}`);
+});
+
+/**
+ * GY-1272. Six of the seven resources faults were one event: the plane's GitHub App budget at its
+ * bound at 06:36:13Z on 5 October 2026 (the resource itself, and installation, GY-711, GY-1052,
+ * GY-1241 and GY-1245 held by it). The plane's own usage lines for that hour put `GET /compare/:range`
+ * at up to 211 of 286 requests a minute through the merge burst. The base asked GitHub one SHA pair
+ * under three queries on every base move: `contains` with `?per_page=1`, the landing diff bare and
+ * `historySince` with `?per_page=100&page=1`, each charged on its own. The candidate reads every
+ * question about a pair from one page (`comparePage`).
+ */
+const pairs = ['ancestry', 'history', 'files'] as const;
+/** The client with each compare it reads labelled by the question asked: the base asked each under its own query. */
+function labelledCompares(github: GitHub) {
+  const asking = new AsyncLocalStorage<typeof pairs[number]>(), reads: string[] = [];
+  for (const [method, label] of [['contains', 'ancestry'], ['historySince', 'history']] as const) {
+    const own = github[method].bind(github) as (a: string, b: string) => Promise<any>;
+    (github as any)[method] = (a: string, b: string) => asking.run(label, () => own(a, b));
+  }
+  const request = github.request.bind(github);
+  github.request = (path: string, method?: string, body?: unknown) => {
+    const pair = /^\/compare\/([a-f0-9]{40}\.\.\.[a-f0-9]{40})/.exec(path);
+    if (pair) reads.push(`${pair[1]}|${asking.getStore() ?? 'files'}`);
+    return request(path, method, body);
+  };
+  // What the base would have been charged for the compares read so far: once per pair and question (its ancestry, immutable
+  // and history caches each kept their own), where the candidate is charged once per pair.
+  const charged = () => ({ base: new Set(reads).size, candidate: new Set(reads.map(read => read.split('|')[0])).size });
+  return { charged };
+}
+
+test('manual:fault-class-resources — GY-1272: every question about one SHA pair is one charged compare; the base charged one per query', async t => {
+  const api = new Api();
+  t.mock.method(globalThis, 'fetch', api.fetch);
+  const github = api.client();
+  const [from, to] = [api.main, sha('head-pair')];
+  // REPRODUCE against base: its three readers of one pair asked it under three queries, three charged requests.
+  for (const query of ['?per_page=1', '', comparePage]) await github.request(`/compare/${from}...${to}${query}`);
+  assert.equal(api.charged(), 3, 'the base\'s reads of one pair are three charged compares');
+  // CANDIDATE: ancestry, the commit list, the file lists and the patch-ids of a pair are one charged compare.
+  // A head cut from main: GitHub reports it ahead, so no listing asks the reverse compare.
+  const [other, tip] = [api.main, api.open(9, 'graphyard/gy-pair-1').head];
+  const before = api.charged();
+  await github.contains(other, tip);
+  await github.historySince(other, tip);
+  await github.changedFiles(other, tip);
+  await github.diffPatchId(other, tip);
+  await github.sideFiles(other, tip);
+  await github.nonDocsPatchId(other, tip);
+  assert.equal(api.charged() - before, 1, 'one charged compare for every question about the pair');
+  assert.deepEqual(api.requests.slice(-1).map(request => request.path), [`/repos/${REPOSITORY}/compare/${other}...${tip}${comparePage}`]);
+});
+
+test('manual:fault-class-resources — GY-1272: the 5 October merge burst replayed spends the App budget on the base and stays under its warning floor on the candidate', async t => {
+  const api = new Api();
+  t.mock.method(globalThis, 'fetch', api.fetch);
+  const github = api.client();
+  const { charged } = labelledCompares(github);
+  // The fleet of unit:merge-burst-request-budget: 80 open candidates, half awaiting review (BLOCKED), over twenty areas.
+  // The other half are approved with CI still running: an approved, green candidate is GitHub's to merge (GY-1235) and
+  // leaves the fleet within the burst, so the ones still open through the hour are those GitHub cannot merge yet.
+  const blocked = (index: number) => index % 2 === 0;
+  const candidates = Array.from({ length: 80 }, (_, index) => {
+    const pr = api.open(600 + index, `graphyard/gy-b${index}-1`, { approved: !blocked(index), checks: blocked(index) ? 'success' : 'in_progress' }); api.files.set(600 + index, [`src/area-${index % 20}.ts`, `src/own-${index}.ts`]);
+    if (blocked(index)) api.states.set(600 + index, 'blocked');
+    return item(`GY-B${index}`, 600 + index, pr.head, api.main);
+  });
+  let all: Work[] = [];
+  for (const candidate of candidates) all.push(evaluated(candidate, candidates, await github.observe(candidate, candidates)));
+  /** One reading of every open candidate, each costed on the candidate and as the base would have been charged for it. */
+  const read = async () => {
+    const costs: { candidate: number; base: number }[] = [];
+    for (const candidate of [...all]) {
+      const [spent, compares] = [api.charged(), charged()];
+      const value = await github.observe(candidate, all);
+      const now = charged(), cost = api.charged() - spent;
+      costs.push({ candidate: cost, base: cost + (now.base - compares.base) - (now.candidate - compares.candidate) });
+      all = all.map(entry => entry.id === candidate.id ? evaluated(candidate, all, value) : entry);
+    }
+    return costs;
+  };
+  await read();
+  const unchanged = await read();
+  // Main moves along one line, as a merge moves it: every candidate is held on the base it was cut from, so its landing is checked.
+  api.history.push(api.main); api.main = sha('main-burst'); github.noteWebhook('push', { ref: 'refs/heads/main' });
+  const moved = await read();
+  assert.ok(all.every(work => work.observation!.candidate.baseSha === api.history[0] && work.observation!.landing?.base === api.main), 'each candidate is held on its base and its landing is checked on the new tip');
+  const cost = (side: 'candidate' | 'base') => ({ unchanged: Math.max(...unchanged.map(entry => entry[side])), changed: 8,
+    baseMoved: Math.max(...moved.slice(1).map(entry => entry[side])), baseMoveShared: moved[0][side] - Math.min(...moved.slice(1).map(entry => entry[side])) });
+  const [base, candidate] = [cost('base'), cost('candidate')];
+  assert.equal(base.baseMoved - candidate.baseMoved, 2, `the base asked the new tip about each head three times, the candidate once (${base.baseMoved} against ${candidate.baseMoved})`);
+  // One hour of the burst: a merge every two minutes over the 80, the default eight workers.
+  const burst = (requestCost: typeof base) => simulateObservationScheduler({ all, workers: 8, steadyMs: steadyStateInterval(80, null, 5000), jobMs: 13_000, durationMs: 60 * 60_000, changedShare: 0.1, requestCost,
+    baseMoves: Array.from({ length: 30 }, (_, index) => ({ atMs: 30_000 + index * 2 * 60_000, files: [`src/area-${(index * 2) % 20}.ts`] })) }).requests;
+  const [spentOnBase, spentOnCandidate] = [burst(base), burst(candidate)];
+  if (process.env.GRAPHYARD_BUDGET_DEBUG) console.log('GY-1272 burst', { base, candidate, spentOnBase, spentOnCandidate });
+  // REPRODUCE against base: the hour spends the whole budget, so the client pauses and every subject it holds waits.
+  assert.ok(spentOnBase > api.limit, `the base spends ${spentOnBase} of ${api.limit} requests in the hour`);
+  // CANDIDATE: the same hour stays under the budget's 500-request warning floor.
+  assert.ok(spentOnCandidate < api.limit - 500, `the candidate spends ${spentOnCandidate} of ${api.limit} requests in the hour`);
 });

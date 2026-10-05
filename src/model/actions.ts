@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { demand } from './refusal.js';
+import { claimOrder, yieldsTo } from './action-candidates.js';
 import { actionRecordLimit, actionRetryAt, actionStall, claimable, claimLive, settling, type ActionStall } from './action-progress.js';
 import { nextAction, sameAction, type NextAction, type NextActionInputs, type NextActionKind } from './next-action.js';
 import type { Work } from './work.js';
@@ -83,6 +84,8 @@ export interface ActionRow {
    * escalation name it and the loop never applies it twice for the same run.
    */
   remedy?: RemedyRecord;
+  /** The executor this row already stepped aside for once since its last failure (`yieldsTo`). */
+  yielded?: string;
   resolvedAt?: string; result?: 'done' | 'failed'; resolution?: string;
   history: ActionRecord[];
 }
@@ -214,7 +217,8 @@ export function settleDelivered(work: Work, all: Work[], now: Date): boolean {
 }
 
 /**
- * Every row an executor may take now, oldest request first, so the queue is served fairly.
+ * Every row an executor may take now, in claim order (`claimOrder`): the item's priority, then rows
+ * that unblock a merge, then the oldest request.
  *
  * A delivered item owes nothing an executor can run but the deployment that carries it: whatever
  * else it still holds is left over from before it was delivered, and running it is refused every
@@ -225,29 +229,36 @@ export function openActions(all: Work[], now: Date, kinds?: readonly NextActionK
     .filter(row => work.stage !== 'done' || row.kind === 'verify-deployment')
     .filter(row => claimable(row, now) && (!kinds || kinds.includes(row.kind)))
     .map(row => ({ work, row })))
-    .sort((a, b) => Date.parse(a.row.requestedAt) - Date.parse(b.row.requestedAt) || a.row.id.localeCompare(b.row.id));
+    .sort(claimOrder);
 }
 
 /**
- * Claim the oldest open row this executor can run, under a bounded lease.
+ * Claim the first open row this executor can run, in claim order, under a bounded lease. A row
+ * whose last attempt this executor failed yields to any other claimable row once (`yieldsTo`);
+ * `yielded` lists the other items whose rows stepped aside: they now carry that mark, so they are
+ * saved with the claim.
  *
  * Called inside the coordination transaction, so two executors reading the same queue at the same
  * instant are serialized: the first writes the claim, the second sees it and takes the next row.
  * Neither knows the other exists, which is the point — executors coordinate through the record.
  */
-export function claimAction(all: Work[], executor: { id: string; host: string; principal: string }, now: Date, options: { kinds?: readonly NextActionKind[]; leaseMs?: number; work?: string } = {}): { work: Work; row: ActionRow } | null {
-  const entry = openActions(all, now, options.kinds).find(candidate => !options.work || candidate.work.id === options.work || candidate.work.key === options.work);
+export function claimAction(all: Work[], executor: { id: string; host: string; principal: string }, now: Date, options: { kinds?: readonly NextActionKind[]; leaseMs?: number; work?: string } = {}): { work: Work; row: ActionRow; yielded: Work[] } | null {
+  const open = openActions(all, now, options.kinds).filter(candidate => !options.work || candidate.work.id === options.work || candidate.work.key === options.work);
+  const entry = open.find(candidate => !yieldsTo(candidate.row, executor.id)) ?? open[0];
   if (!entry) return null;
+  // Rows ahead of the one taken stepped aside for this executor: each is marked so it does so once.
+  const passed = open.slice(0, open.indexOf(entry));
+  for (const ahead of passed) ahead.row.yielded = executor.id;
   const { work, row } = entry;
   const at = now.toISOString();
   const superseded = row.state === 'claimed' ? row.claim?.executor ?? null : null;
   if (superseded) record(row, { at, event: 'reclaimed', requester: row.requestedBy, executor: superseded, result: null, reason: `claim by ${superseded} expired without a result` });
   row.attempts += 1;
   row.state = 'claimed';
-  delete row.retryAt;
+  delete row.retryAt; delete row.yielded;
   row.claim = { executor: executor.id, host: executor.host, principal: executor.principal, claimedAt: at, expiresAt: new Date(now.getTime() + (options.leaseMs ?? actionClaimMs)).toISOString(), attempt: row.attempts };
   record(row, { at, event: 'claimed', requester: row.requestedBy, executor: executor.id, result: null, reason: `attempt ${row.attempts} claimed by ${executor.id} on ${executor.host}` });
-  return { work, row };
+  return { work, row, yielded: [...new Set(passed.map(ahead => ahead.work))].filter(other => other !== work) };
 }
 
 /**

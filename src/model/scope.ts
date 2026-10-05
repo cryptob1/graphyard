@@ -1,6 +1,6 @@
 import { documentationGlobMatches } from './documentation-glob.js';
-import { companionGround } from './scope-companions.js';
-export { companionGround, plannedCompanions } from './scope-companions.js';
+import { companionGround as recordCompanionGround, followUpPaths, timingBaseline, type FollowUpSource } from './scope-companions.js';
+export { followUpPaths, plannedCompanions } from './scope-companions.js';
 import { addsTestFile, timingBaselinePath } from './timing-companion.js';
 import { type CollapsedScope, collapseArea, collapsePlannedFiles, describeWidening, plannedFilesCovered, routableScopeRequest, terminalScopeRefusal } from './scope-collapse.js';
 // Deliberately bounded scope syntax: exact paths or directory prefixes ending /, /*, /**.
@@ -117,15 +117,16 @@ export const wellFormed = (path: string) => {
 export function namedPaths(text: string) {
   return [...new Set((text.match(pathToken) ?? []).map(token => token.replace(/[.,;:)\]]+$/, '')).filter(token => token.includes('/') || /^[\w-]+\.[A-Za-z0-9]{1,5}$/.test(token)).filter(wellFormed))];
 }
-
 export interface ScopeImplication { scope: string; kind: 'criteria' | 'documentation' | 'documentation-consumer' | 'companion' | 'timing-companion'; why: string }
 /**
  * Every path scope the item itself already implies: the files its criteria name, and the
- * documentation the repository requires updating for the behaviour those criteria change.
+ * documentation the repository requires updating for the behaviour those criteria change — and, on a
+ * review follow-up (GY-1116), the files its findings and description name.
  */
-export function impliedScopes(criteria: readonly ScopeCriterion[], documentation: readonly string[] = documentationScopes): ScopeImplication[] {
+export function impliedScopes(criteria: readonly ScopeCriterion[], documentation: readonly string[] = documentationScopes, origin?: FollowUpSource['origin'], description?: string | null): ScopeImplication[] {
   return [
     ...criteria.flatMap(criterion => namedPaths(criterion.text).map(scope => ({ scope, kind: 'criteria' as const, why: `${criterion.id} names ${scope}` }))),
+    ...(origin?.reviewFollowUps ? followUpPaths(origin.reviewFollowUps.findings ?? [], description) : []).map(scope => ({ scope, kind: 'criteria' as const, why: `review follow-up names ${scope}` })),
     ...documentation.map(scope => ({ scope, kind: 'documentation' as const, why: `${scope} is documentation this repository requires updating when behaviour changes` })),
   ];
 }
@@ -153,6 +154,21 @@ export const scopeBlockedBudgetMs = 900_000;
 export const scopeDecisionSample = 10;
 /** The most entries plannedFiles holds: the one bound the work schema, the follow-up planner and every widening share (GY-630). */
 export const plannedFilesMax = 100;
+/**
+ * The companion ground a requested path stands on (GY-955), with the timing baseline held to the
+ * merge gate's own rule (GY-1187): the baseline is a companion only of a test file it times — a
+ * top-level tests/*.test.ts, or the tests/ scope — never a nested or browser test, whose line
+ * `timingBaselineCompanion` refuses, so granting it would promise a write the gate rejects. The rule
+ * holds for every spelling `timingBaseline` recognises (GY-1263): the gate judges lines only at
+ * `timingBaselinePath`, so a baseline anywhere else (test/timing_baseline.json) is no companion at all.
+ */
+export function companionGround(...args: Parameters<typeof recordCompanionGround>): string | null {
+  const [path, item, ask] = args;
+  if (!timingBaseline(path)) return recordCompanionGround(...args);
+  if (path !== timingBaselinePath) return null;
+  const timed = [...ask, ...(item.plannedFiles ?? [])].find(entry => entry !== path && addsTestFile({ plannedFiles: [entry] }));
+  return timed ? `${path} is the test-duration baseline a change to ${timed} must keep covering` : null;
+}
 /** `companions`: approved paths implied only as the timing baseline's companion (GY-1023), never added to plannedFiles so its line judgement stays in force. */
 export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; paths: string[]; companions?: string[] }
 /**
@@ -161,7 +177,7 @@ export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; p
  * audited reason; everything else is refused with the reason it was refused for.
  */
 export function decideScopeRequest(
-  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[] } | null },
+  item: { plannedFiles?: readonly string[]; criteria: readonly ScopeCriterion[]; documentation?: ItemDocumentation | null; observation?: { files?: readonly string[] } | null } & FollowUpSource,
   request: Pick<ScopeRequestState, 'paths' | 'remove' | 'criteria'>,
   options: { documentation?: readonly string[]; documentationConsumers?: readonly string[] } = {},
 ): ScopeVerdict {
@@ -173,7 +189,7 @@ export function decideScopeRequest(
   if (request.remove?.length) return refused(`the request drops planned paths (${request.remove.join(', ')}); only additive scope is decided automatically, and narrowing containment is an operator requirements revision`);
   if (request.criteria?.length) return refused('the request rewrites criteria or proofs; requirements are decided by an operator and approved by an independent agent, never by the loop');
   if (!paths.length) return refused('the request names no path outside the planned scope; nothing is left to widen');
-  const implied = [...impliedScopes(item.criteria, options.documentation ?? itemDocumentationPaths(item)),
+  const implied = [...impliedScopes(item.criteria, options.documentation ?? itemDocumentationPaths(item), item.origin, item.description),
     ...(plansDocumentationTree(item.plannedFiles) ? (options.documentationConsumers ?? documentationConsumerScopes).map(scope => ({ scope, kind: 'documentation-consumer' as const, why: `${scope} renders or tests the documentation this item rewrites` })) : []),
     // A change that adds a test file may record its timing line (GY-1023): the baseline is implied by the test.
     ...(addsTestFile(item) ? [{ scope: timingBaselinePath, kind: 'timing-companion' as const, why: `${timingBaselinePath} records the timing line of a test file this item adds or changes` }] : [])];

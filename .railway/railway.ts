@@ -10,9 +10,10 @@ export default defineRailway(ctx => {
   // and without the GitHub App: with no GITHUB_* variable it holds no credential that can write to
   // the production repository, so it never merges, dispatches or spends the App's request budget.
   const uat = ctx.isEnvironment("uat");
-  const Postgres = postgres("Postgres", { region: "us-west2" });
-  Postgres.networking = { privateNetworkEndpoint: "postgres" };
-  const postgresVolume = volume("postgres-volume", { alerts: { usage: { "100": {}, "80": {}, "95": {} } }, allowOnlineResize: true, region: "us-west2", sizeMB: 5000 });
+  // Each environment keeps the database and volume it was created with; UAT's carry Railway's generated suffixes.
+  const Postgres = postgres(uat ? "Postgres-B0rl" : "Postgres", { region: uat ? "sfo" : "us-west2" });
+  if (!uat) Postgres.networking = { privateNetworkEndpoint: "postgres" };
+  const postgresVolume = volume(uat ? "postgres-volume-MrSK" : "postgres-volume", { alerts: { usage: { "100": {}, "80": {}, "95": {} } }, allowOnlineResize: true, region: uat ? "sfo" : "us-west2", sizeMB: uat ? 50000 : 20000 });
   const graphyard = service("graphyard", {
     source: github("cryptob1/graphyard", { branch: uat ? releaseBranches.uat : releaseBranches.production }),
     build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile" },
@@ -31,7 +32,9 @@ export default defineRailway(ctx => {
       : { DATABASE_URL: preserve(), GITHUB_REPOSITORY: preserve(), GRAPHYARD_PRINCIPALS: preserve(), HOST: preserve(), PORT: preserve(),
         GITHUB_APP_ID: preserve(), GITHUB_INSTALLATION_ID: preserve(), GITHUB_PRIVATE_KEY: preserve(), GITHUB_WEBHOOK_SECRET: preserve(),
         GRAPHYARD_MAX_SLICE_LEADS: preserve(), GRAPHYARD_MAX_ENGINEERS_PER_LEAD: preserve(), GRAPHYARD_MIN_REVIEWERS: preserve(), GRAPHYARD_MAX_REVIEWERS: preserve(), GRAPHYARD_GENERATED_FILES: preserve(),
-        RAILWAY_API_TOKEN: preserve() },
+        RAILWAY_API_TOKEN: preserve(), GRAPHYARD_DIRECT_MERGE_SINCE: preserve(),
+        GRAPHYARD_DATABASE_MAX_BYTES: preserve(), GRAPHYARD_DATABASE_POOL_SIZE: preserve(), GRAPHYARD_ESCALATION_CONTEXT_BUDGET: preserve(),
+        GRAPHYARD_OBSERVATION_CONCURRENCY: preserve(), GRAPHYARD_RECONCILE_BATCH_MS: preserve(), RAILWAY_HEALTHCHECK_TIMEOUT_SEC: preserve() },
   });
 
   return project("graphyard", {

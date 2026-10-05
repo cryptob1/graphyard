@@ -174,19 +174,8 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
   const profiles = [{ name: 'reviewer-a', runtime: 'claude', reviewerApp: 'app-a', timeoutSeconds: 1800 }];
   const scopeFile = { path: 'src/other.ts', status: 'modified' as const, sha: sha40('11'), baseSha: sha40('22'), additions: 0, deletions: 4, binary: false };
   const landingFile = { path: 'src/a.ts', status: 'removed' as const, sha: null, baseSha: sha40('33'), additions: 0, deletions: 0, binary: false };
-  // A bootstrap deferral another item made on a contract this one's planned files touch.
-  const deferrer = { ...other, id: randomUUID(), key: 'GY-BOOT', criteria: [{ id: 'AC-9', text: 'Deferred', proofs: ['unit:contract'], bootstrap: { reason: 'bootstrap', contractPaths: ['src/'], declaredBy: 'operator', declaredAt: now.toISOString(), policyRevision: 1 } }] } as Work;
-  // Two proven candidates hold queue entries, so the one behind is sequenced behind the one ahead.
-  const queueEntry = (work: Work, sequence: number) => ({ ...work, queue: { sequence, enqueuedAt: now.toISOString(), policyRevision: work.policyRevision, speculation: null }, queueSequence: sequence } as Work);
-  const ahead = queueEntry({ ...proven, id: randomUUID(), key: 'GY-AHEAD' } as Work, 1);
-  const behind = queueEntry({ ...proven, id: randomUUID(), key: 'GY-BEHIND' } as Work, 2);
-
-  const waiting = { ...proven, id: randomUUID(), key: 'GY-WAITING', queueEjection: { at: now.toISOString(), sequence: 3,
-    reason: `Speculative merge of ${head.slice(0, 12)} into graphyard/gy-waiting-1 conflicts and cannot be resolved by Graphyard`, sha: head, policyRevision: proven.policyRevision, predecessors: ['GY-AHEAD'] } } as Work;
-
   // The battery. Each entry is a real work document put through the real evaluator, so every
   // refusal below is the engine's own wording rather than a string this test invented.
-  const world: Work[] = [ahead, behind, deferrer];
   const probes: { name: string; work: Work; all?: Work[] }[] = [
     { name: 'backlog', work: { ...unproven, ready: false } as Work },
     { name: 'unfinished dependency', work: { ...unproven, dependencies: [other.id] } as Work, all: [other, unproven] },
@@ -198,10 +187,6 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
     { name: 'diff never compared', work: { ...unproven, observation: { ...unproven.observation!, scopeFiles: undefined } } as Work },
     { name: 'out of scope against the bound base', work: { ...unproven, plannedFiles: ['docs/'], observation: { ...unproven.observation!, scopeFiles: [scopeFile] } } as Work },
     { name: 'would revert work on the commit it lands on', work: { ...unproven, plannedFiles: ['docs/'], observation: { ...unproven.observation!, scopeFiles: [], landing: { base: sha40('cc'), files: [landingFile] } } } as Work },
-    // GY-568: a speculative tip built behind an entry that left the queue unlanded waits for its restore,
-    // and files another open candidate's commits put on the head are that candidate's, not rework.
-    { name: 'stale speculative tip after its predecessor left the queue', work: { ...unproven, key: 'GY-STALE', queueHistory: [{ at: now.toISOString(), event: 'predicted', sequence: 5, tip: head, predecessors: ['GY-GONE'], from: sha40('0e') }] } as Work,
-      all: [{ ...other, id: randomUUID(), key: 'GY-GONE', queue: null } as Work, { ...unproven, key: 'GY-STALE' } as Work] },
     { name: 'files another candidate\'s commits carried', work: { ...unproven, plannedFiles: ['docs/'], observation: { ...unproven.observation!, scopeFiles: [], landing: { base: sha40('cc'), files: [landingFile], foreign: [{ key: 'GY-FOREIGN', pr: 9, head: sha40('0f') }] } } } as Work,
       all: [{ ...other, id: randomUUID(), key: 'GY-FOREIGN', plannedFiles: ['src/a.ts'] } as Work, unproven] },
     // A unit or integration proof that failed on the head returns it to its worker before review (GY-115).
@@ -209,6 +194,7 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
     { name: 'no approval', work: { ...unproven, observation: { ...unproven.observation!, reviews: [] } } as Work },
     { name: 'requirement-review baseline', work: { ...unproven, formalReviewResetRequired: true, observation: { ...unproven.observation!, reviews: [] } } as Work },
     { name: 'changes requested', work: { ...unproven, observation: { ...unproven.observation!, reviews: [{ reviewer: 'reviewer', sha: head, state: 'CHANGES_REQUESTED' }] } } as Work },
+    { name: 'approval naming mechanical nits', work: { ...unproven, observation: { ...unproven.observation!, reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED', id: 901, submittedAt: now.toISOString(), mechanical: 2 }] } } as Work },
     { name: 'codex provider', work: { ...unproven, policy: { ...unproven.policy, reviewProvider: 'codex' }, observation: { ...unproven.observation!, reviews: [] } } as Work },
     { name: 'codex reason of its own', work: { ...unproven, policy: { ...unproven.policy, reviewProvider: 'codex' },
       observation: { ...unproven.observation!, reviews: [], agentReview: { provider: 'codex', sha: head, approved: false, reason: 'Pull request is draft; mark it ready to request code review' } } } as Work },
@@ -218,27 +204,14 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
     { name: 'a required check failed', work: { ...unproven, observation: { ...unproven.observation!, checks: [{ name: 'test', result: 'failure', appId: CI_APP }, { name: 'typecheck', result: 'success', appId: CI_APP }] } } as Work },
     { name: 'a check only branch protection requires failed', work: { ...unproven, observation: { ...unproven.observation!, requiredChecks: [{ name: 'secrets', appId: null }], checks: [...unproven.observation!.checks, { name: 'secrets', result: 'failure', appId: CI_APP }] } } as Work },
     { name: 'a required check has not answered', work: { ...unproven, observation: { ...unproven.observation!, checks: [] } } as Work },
-    { name: 'no trusted evidence', work: unproven },
-    { name: 'an inherited bootstrap obligation', work: unproven, all: [deferrer, unproven] },
-    { name: 'evidence from an implementer', work: { ...unproven, evidence: [{ id: randomUUID(), proof: PROOF, sha: head, baseSha: base, policyRevision: unproven.policyRevision, producer: worker.id, trusted: true, result: 'pass', executed: 3, skipped: 0, at: now.toISOString() }] } as Work },
-    { name: 'a stale observation', work: { ...unproven, observation: { ...unproven.observation!, at: new Date(now.getTime() - 600_000).toISOString() } } as Work },
-    { name: 'branch protection unverified', work: { ...unproven, observation: { ...unproven.observation!, protected: false } } as Work },
+    // GitHub merges (GY-1235): the merge gate reads GitHub at the current candidate, its
+    // mergeability, conversation-protection drift and standing escalations — no proof, queue,
+    // observation age or protection verification gates it.
+    { name: 'observed at another head', work: { ...unproven, observation: { ...unproven.observation!, candidate: { ...unproven.observation!.candidate, sha: sha40('dd') } } } as Work },
     { name: 'not mergeable', work: { ...unproven, observation: { ...unproven.observation!, mergeable: false } } as Work },
     { name: 'unresolved review threads', work: { ...unproven, observation: { ...unproven.observation!, conversations: { required: true, unresolved: [{ id: 'PRRT_1', author: 'chatgpt-codex-connector', path: 'docs/a.md', line: 1, outdated: false }] } } } as Work },
     { name: 'a standing escalation', work: { ...unproven, escalations: [{ trigger: 'security-concern', reason: 'the candidate ships a credential', at: now.toISOString(), actor: 'reviewer' }] } as Work },
     { name: 'a slice lead hold', work: { ...unproven, leadHold: { action: 'send-back', rulingId: 'R-1', leadId: 'lead-a', slice: 'product', ruleId: 'R-1', reason: 'the slice is frozen for the release', at: now.toISOString() } } as Work },
-    { name: 'ejected from the queue', work: { ...unproven, queueEjection: { at: now.toISOString(), sequence: 1, reason: 'Pull request was closed without merging', sha: head, policyRevision: unproven.policyRevision } } as Work },
-    // GY-321: a speculative merge that conflicted behind a queued predecessor waits for it, not for a sync.
-    { name: 'ejected behind a queued predecessor', work: waiting, all: [ahead, behind, waiting] },
-    { name: 'first in the merge queue', work: ahead, all: world },
-    { name: 'second in the merge queue', work: behind, all: world },
-    // CI on the entry's own published speculative tip is the merge step validating it (GY-292).
-    { name: 'validating its speculative tip', work: { ...proven, queue: { sequence: 1, enqueuedAt: now.toISOString(), policyRevision: proven.policyRevision,
-      speculation: { ref: `graphyard/queue/${proven.key}`, tip: head, base, baseTree: sha40('7e'), predecessors: [], policyRevision: proven.policyRevision, publishedAt: now.toISOString() } }, queueSequence: 1,
-      observation: { ...proven.observation!, checks: [{ name: 'test', result: 'in_progress', appId: CI_APP }, { name: 'typecheck', result: 'success', appId: CI_APP }] } } as Work },
-    // The one placement branch the evaluator keeps for a queued entry its own graph does not
-    // hold: eligible, enqueued, and nowhere in the order it was placed against.
-    { name: 'eligible and unplaced', work: proven, all: [] },
   ];
 
   const produced = new Map<string, { gate: string; refusal: string; probes: string[] }>();
@@ -277,7 +250,7 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
   const declared = gateRefusalCatalogue.filter(shape => !shape.free);
   const reached = new Set([...produced.values()].map(entry => gateRefusalCatalogue.find(shape => shape.gate === entry.gate && shape.match.test(entry.refusal))!.id));
   assert.deepEqual(declared.filter(shape => !reached.has(shape.id)).map(shape => shape.id), [], 'every declared refusal shape was produced by the battery');
-  assert.deepEqual([...new Set(declared.map(shape => shape.gate))].sort(), ['acceptance', 'build', 'merge', 'ready', 'review', 'test'], 'every gate declares refusals');
+  assert.deepEqual([...new Set(declared.map(shape => shape.gate))].sort(), ['build', 'merge', 'ready', 'review', 'test'], 'every gate declares refusals; acceptance gates nothing (GY-1235)');
   assert.ok(produced.size >= declared.length, `the battery worded ${produced.size} distinct refusals for ${declared.length} declared shapes`);
 
   // Totality over rules as well: every rule in the mapping is reachable from a declared shape, so

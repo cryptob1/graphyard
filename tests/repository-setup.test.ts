@@ -18,7 +18,7 @@ test('managed instructions refresh one section and preserve all surrounding oper
   const bootstrap = "The initial MVP is a single-agent bootstrap under the operator's supervision. Do not launch other agents for bootstrap work.";
   const original = `# Operator rules\n${bootstrap}\nNever delete customer data.\n`;
   const first = managedInstructions(original, 'https://one.example');
-  assert.match(first, /dedicated master coordinator must keep cycling: status, dispatch ready work,\nshepherd review and proof collection, guarded merge, then deployment verification/);
+  assert.match(first, /dedicated master coordinator must keep cycling: status, dispatch ready work,\nshepherd review, reconcile what GitHub merged, then deployment verification/);
   assert.match(first, /both conditions hold: \(1\) every in-scope item is Done or has a genuinely\nexternal blocker recorded in Graphyard; and \(2\) every merged change is deployed and\nlive-verified against the exact deployed release, or a genuinely external deployment\nblocker is recorded in Graphyard/);
   assert.match(first, /Delivered work is immutable, so a deployment\nblocker is recorded as a follow-up work item naming the delivered item, its merge\ncommit, and the external cause/);
   assert.match(first, /An observed merge alone does not end the loop/);

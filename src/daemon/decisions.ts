@@ -1,15 +1,20 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, RefusedResponse } from '../model.js';
-import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason } from '../model/scope.js';
+import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker } from '../model/scope.js';
+import { widenedPlannedFiles } from '../model/scope-collapse.js';
+import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
 import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
-import { unexercisedFindings } from '../auto-dispatch.js';
-import { decisionBindingMax } from '../model/approval.js';
+import { extractProducerAccountsOrRuntimes, unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
+import { decisionBindingMax, type DecisionSituation } from '../model/approval.js'; import { unsettledApproval } from './decision-reads.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
-import { researchRework } from '../research.js';
+import { researchRework } from '../research.js'; import { baseBreakHold } from '../master/base-break-refresh.js';
+import { unproducedManualProofs } from '../model/unproduced-attestation.js';
+import { mechanicalRework, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { triageClosure } from '../model/machine-backlog.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf } from '../review-cap.js';
+import { sessionName } from '../session-name.js';
 
 /** What the routine decisions read of the master configuration: automatic merging, and the review-round cap (GY-1118). */
 export type ReviewCapConfig = Pick<MasterConfig, 'autoMerge'> & Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>;
@@ -96,6 +101,8 @@ export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'rev
  * moved past. The loop waits for a fresh observation and decides from that.
  */
 export const reworkObservationMaxAgeMs = 120_000;
+/** GY-1266's former age bound on the woken observation, lifted by GY-1257 (a cycle may outlast it); the span a burst replay covers. */
+export const reworkWokenObservationMaxAgeMs = 15 * 60_000;
 export interface GitHubPause { until: string }
 /**
  * Whether the control plane's GitHub client is paused, read from the observation jobs it refused:
@@ -115,26 +122,27 @@ export const observedFrom = (work: Work) => work.observation
   ? `[Decided from the GitHub observation taken at ${work.observation.at} of candidate ${work.observation.candidate.sha}; if the item has moved since, this request no longer describes it.]`
   : '[Decided with no GitHub observation of the item.]';
 /**
- * Why a rework request must wait for a fresh observation, or null when the one on the item may be
- * decided from. The reason names the stale observation — its time and head — and never its age,
- * so it reads the same on every cycle it stands.
+ * Why a rework request must wait for a fresh observation, or null when the one on the item may be decided
+ * from. The reason names the stale observation — its time and head — never its age, so it reads the same each cycle.
  */
-export function reworkObservationWait(work: Work, now: number, pause: GitHubPause | null): string | null {
+export function reworkObservationWait(work: Work, now: number, pause: GitHubPause | null, wokenAt?: string | null): string | null {
   const observation = work.observation;
   if (!observation) return `${work.key}: rework waits for a GitHub observation of the item; there is none to decide from`;
   const seen = `the last GitHub observation (taken at ${observation.at} of head ${observation.candidate.sha.slice(0, 12)})`;
   if (pause) return `${work.key}: rework waits for a fresh GitHub observation — GitHub requests are paused until ${pause.until}, so ${seen} is a stale observation that may describe a head the branch has moved past`;
   const age = now - Date.parse(observation.at);
+  // GY-1266/GY-1257. The loop's own woken observation of the submitted head is the reading it waited for: the next cycle reads it
+  // an interval or a slow cycle later, past any age bound on the cycle clock, so on such a bound every landed wake was stale again,
+  // re-sent, and no rework was ever requested. Its head must still be the candidate's; apply time withdraws one the item moved past.
+  if (wokenAt && Date.parse(observation.at) > Date.parse(wokenAt) && observation.candidate.sha === work.candidate?.sha) return null;
   if (!(Number.isFinite(age) && age < reworkObservationMaxAgeMs)) return `${work.key}: rework waits for a fresh GitHub observation — ${seen} is a stale observation, older than two minutes, and the branch may have moved past that head`;
   return null;
 }
 
 /**
- * GY-710. A step refused for want of a fresh observation wakes the item's observation job at once
- * and waits for that observation to land, rather than for whatever the job's cadence brings round.
- * One wake stands until an observation newer than it lands; a wake that brought none within this
- * bound (the job failed, or the server lost it) is sent again. During a GitHub pause the job can
- * observe nothing, so no wake is sent.
+ * GY-710. A step refused for want of a fresh observation wakes the item's observation job at once and waits for that
+ * observation to land, not the job's cadence. One wake stands until a newer observation lands; a wake that brought none
+ * within this bound (the job failed, or the server lost it) is sent again. During a GitHub pause no wake is sent.
  */
 export const observationWakeRetryMs = 5 * 60_000;
 export function observationWakeDue(work: Work, wokenAt: string | null | undefined, now: number, pause: GitHubPause | null): boolean {
@@ -147,41 +155,10 @@ export function observationWakeDue(work: Work, wokenAt: string | null | undefine
   return now - woken >= observationWakeRetryMs;
 }
 
-/** The merge gate's refusal of an item whose last observation is missing or older than two minutes (model/gates.ts). */
-export const staleObservationMergeReason = 'GitHub observation missing or older than two minutes';
-/** The guarded merge's refusal (engine.ts) when the authorization it checks — the observation's two-minute bound among it — no longer holds. */
-export const staleMergeRefusal = /Merge authorization is no longer current/;
-/**
- * GY-710. Why the guarded merge waits for a fresh observation, or null when it may be asked. The
- * merge keeps its two-minute bound: a candidate the merge gate refuses for a stale observation is
- * not asked at all — the refusal would only restate it — and waits for the woken observation.
- */
-export function mergeObservationWait(work: Work): string | null {
-  const gate = work.gates.find(entry => entry.name === 'merge');
-  if (!gate || gate.passed || !gate.reasons.includes(staleObservationMergeReason)) return null;
-  const seen = work.observation ? `the last GitHub observation (taken at ${work.observation.at} of head ${work.observation.candidate.sha.slice(0, 12)})` : 'no GitHub observation of the item';
-  return `${work.key}: the guarded merge waits for a fresh GitHub observation — the merge gate refuses ${seen}, which is missing or older than two minutes`;
-}
-/** GY-710. Whether the last guarded merge was refused for a stale observation and the wake that refusal sent stands. */
-export function awaitingObservation(previous: { state: string; detail: string } | undefined, wake: { state: string } | undefined): boolean {
-  return previous?.state === 'failed' && staleMergeRefusal.test(previous.detail) && wake?.state === 'done';
-}
-/**
- * GY-710. Whether the observation a stale merge refusal woke has landed — an observation newer than
- * the wake — with every gate passing: the merge is asked again at once, the attempt following the
- * observation rather than the retry backoff (`mergeRetryDue`).
- */
-export function mergeObservationLanded(wake: { state: string; at: string } | undefined, work: Work): boolean {
-  if (wake?.state !== 'done' || work.violations.length || !work.gates.every(gate => gate.passed)) return false;
-  const observed = work.observation ? Date.parse(work.observation.at) : Number.NaN, woken = Date.parse(wake.at);
-  return Number.isFinite(observed) && Number.isFinite(woken) && observed > woken;
-}
-
 export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements', 'close', 'attest'] as const;
 export type RoutineDecisionAction = typeof routineDecisionActions[number];
 /** `input` is what the decision names beyond what `decisionInput` derives from the item: a resolve's trigger, and the grounds binding a situated request judges (GY-407). */
-/** `escalation` is the one standing escalation a resolve settles: a standing request for any other is not this decision. */
-/** `scope` is the worker request a `requirements` decision answers; `input.answers` binds the decision to it. */
+/** `escalation` is the one standing escalation a resolve settles: a standing request for any other is not this decision. `scope` is the worker request a `requirements` decision answers; `input.answers` binds the decision to it. */
 export interface RoutineDecision { action: RoutineDecisionAction; reason: string; binding: string; input?: Record<string, unknown>; escalation?: { trigger: string; at: string }; scope?: NonNullable<ApprovalWatch['scope']> }
 /**
  * Whether two decisions answer the same scope request. Compared field by field: the ledger keeps
@@ -220,13 +197,40 @@ export function scopeRoutineDecision(work: Work, now: number, judged: boolean): 
     scope: { epoch: request.epoch, at: request.at, requestedBy: request.requestedBy, paths: paths.slice(0, 50).map(path => path.slice(0, 500)) } };
 }
 /**
+ * GY-1008. A planned-file-scope blocker — a worker's blocker naming the files its change needs and
+ * the commit it needs them for — as the same additive `requirements` decision a routed scope request
+ * becomes, requested by the master's operator-agent identity and judged by the independent
+ * approver, with no master session involved. The recorded blocker already ended its attempt, so
+ * nothing about a worker is attested; the approver judges the widening alone. Null when the
+ * blocker is anything else, when plannedFiles already cover every file it names (the blocker step
+ * then clears it), or when no fold represents the widening under the plannedFiles cap.
+ */
+export function blockerScopeDecision(work: Work): RoutineDecision | null {
+  if (work.stage === 'done' || !work.blocker || work.scopeRequest || work.blocker.startsWith(scopeRefusalBlocker)) return null;
+  const classification = itemBlockerClass(work);
+  if (classification?.class !== 'planned-file-scope' || (work.blockerProbe?.clears ?? 0) >= maxAutomaticClears) return null;
+  const paths = uncoveredBlockerPaths(work, classification);
+  if (!paths.length) return null;
+  const widened = widenedPlannedFiles(work, paths);
+  if (!widened.representable) return null;
+  let broad: string | null = null;
+  try { guardBroadScope({ ...work, plannedFiles: widened.plannedFiles }, work.blocker, { allow: false, command: 'the loop', existing: work.plannedFiles }); }
+  catch (error) { broad = `${guardBroadScope({ ...work, plannedFiles: widened.plannedFiles }, 'the approver grants it only with a stated reason', { allow: true, command: 'the loop', existing: work.plannedFiles })} (${message(error)})`; }
+  const asked = `${work.key}: its worker recorded a planned-file-scope blocker naming ${paths.join(', ')} for commit ${classification.commit}, which ended its attempt: "${work.blocker.slice(0, 500)}". `
+    + 'Approve the additive plannedFiles widening if the item\'s criteria justify those files, refuse with the reason otherwise; the loop clears the blocker once plannedFiles cover them. '
+    + (broad ? `${broad.slice(0, 300)} It needs the broad-scope flag: grant it only with a stated reason why narrower paths will not do. ` : '');
+  const named = `Criteria: ${work.criteria.map(criterion => `${criterion.id}: ${criterion.text}`).join(' | ')}`;
+  return { action: 'requirements', binding: `blocker-scope:${classification.commit}:${paths.join(',')}`.slice(0, decisionBindingMax), input: { plannedFiles: widened.plannedFiles },
+    reason: (asked + named).slice(0, 2000) };
+}
+/**
  * The decision one item needs right now, or null. Rework returns a head nothing can carry forward
  * — a standing verdict, or a base branch Graphyard could not merge in — to a fresh attempt.
  * Recovery releases a delivered item whose supervisor is still quarantined. A merge decision is
  * needed only where automatic merging is off, and then for the exact candidate that is mergeable.
  */
-export function routineDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
-  const needed = neededDecision(work, config, exhausted);
+export function routineDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = []): RoutineDecision | null {
+  const needed = neededDecision(work, config, baseFailed, exhausted, mechanical);
   if (!needed) return null;
   // None attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item,
   // and an attestation's approver judges the proof.
@@ -249,9 +253,9 @@ export function awaitingEjectionRestore(work: Pick<Work, 'gates'>): boolean {
 }
 /**
  * What the item calls for, before asking whether the loop may attest that its worker is stopped.
- * `exhausted` is the producer requests the loop escalated as spent on an earlier cycle (GY-496).
+ * `baseFailed` names required checks the base head fails too (GY-528); `exhausted`, spent producer requests (GY-496).
  */
-export function neededDecision(work: Work, config: ReviewCapConfig, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
+export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = []): RoutineDecision | null {
   if (work.stage === 'done') {
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
@@ -291,7 +295,7 @@ export function neededDecision(work: Work, config: ReviewCapConfig, exhausted: r
   // which waits for one — must not hold this rework.
   const proofs = proofRework(work);
   if (proofs) return { action: 'rework', ...proofs };
-  const ci = failedCheckRework(work);
+  const ci = failedCheckRework(work, baseFailed);
   if (ci) return { action: 'rework', ...ci };
   const spent = exhaustedProofRework(work, exhausted);
   if (spent) return { action: 'rework', ...spent };
@@ -322,28 +326,68 @@ export function neededDecision(work: Work, config: ReviewCapConfig, exhausted: r
   // settling it is a routine two-party decision, not a wait on a human master session (GY-161,
   // 2026-09-24: its first worker exited five minutes in, a new attempt took the item, and the
   // standing escalation would have refused the merge until somebody asked for the resolution).
+  // An otherwise-approved head whose approval raised findings classified mechanical (GY-971) returns
+  // to a worker-class bot round for one commit that fixes exactly those, before the fresh read.
+  const fix = mechanicalRework(work, mechanical);
+  if (fix) return { action: 'rework', ...fix };
   const lost = leaseLossDecision(work);
   if (lost) return lost;
-  if (!config.autoMerge && mergeableCandidate(work)) return { action: 'merge', reason: `${work.key}: every gate passes for candidate ${work.candidate!.sha.slice(0, 12)} and automatic merging is off, so the merge needs an approved decision.`, binding: work.candidate!.sha };
   return null;
+}
+/**
+ * The attestation decisions one item needs right now, one per `manual:` proof no producer session
+ * may run (`unproducedManualProofs`, GY-521), or none. Each binds the proof, the exact head, its base
+ * and the policy revision — the attest input names all four, so an approval can never apply to a
+ * later head — and asks the approver to verify the criterion on that head before approving. Like a
+ * merge decision it attests nothing about a worker, so it is requested whatever the lease says.
+ */
+export function attestDecisions(work: Work, all: Work[], now: number): RoutineDecision[] {
+  const candidate = work.candidate;
+  if (!candidate || work.stage === 'done') return [];
+  return unproducedManualProofs(work, all, new Date(now)).map(proof => {
+    const criteria = work.criteria.filter(criterion => criterion.proofs.includes(proof));
+    const named = criteria.length ? criteria.map(criterion => `${criterion.id} ("${boundDetail(criterion.text, 600)}")`).join('; ') : 'an inherited bootstrap obligation';
+    return { action: 'attest', binding: `${proof}:${candidate.sha}:${candidate.baseSha}`, input: { proof },
+      reason: `${work.key}: every gate before acceptance passes for candidate ${candidate.sha.slice(0, 12)} (base ${candidate.baseSha.slice(0, 12)}, policy revision ${work.policyRevision}), and ${proof}, required by ${named}, is a manual proof no producer session may run, so only this two-party attestation satisfies it. Approve only after verifying on that exact head that the criterion holds; refuse naming what is missing otherwise.` };
+  });
+}
+/**
+ * The withdrawal reason for a merge or attest decision standing on `work` that can never apply to
+ * the one now needed, or null when it is this decision (or another action). Only a merge decision
+ * and an attest decision (GY-521) name what they bind: one for an earlier head is taken back if it
+ * is still requested; one for another proof on this head is judged first, one attest at a time. An approval of any action the item moved past, or one stalled, is settled by the withdrawal, never adopted (GY-1297).
+ */
+export function overtakenDecision(work: Work, decision: RoutineDecision, standing: { id: string; state: string; input?: any; action?: string; approvedBy?: string | null; approvedAt?: string | null; situation?: DecisionSituation | null }, canWithdraw: boolean, now = Date.now()): string | null {
+  const settle = unsettledApproval(work, { action: decision.action, ...standing }, now); if (settle) { if (!canWithdraw) throw new Error(`${settle}, and this loop has no way to settle it: graphyard master decisions ${work.key}`); return settle; }
+  if (decision.action !== 'merge' && decision.action !== 'attest') return null;
+  const head = standing.input?.sha === work.candidate?.sha && standing.input?.baseSha === work.candidate?.baseSha && standing.input?.policyRevision === work.policyRevision;
+  if (head && (decision.action === 'merge' || standing.input?.proof === decision.input?.proof)) return null;
+  const merge = decision.action === 'merge', sha = merge ? decision.binding : work.candidate?.sha ?? '';
+  const other = merge
+    ? `merge decision ${standing.id} is ${standing.state} for candidate ${String(standing.input?.sha).slice(0, 12)}, not the current ${sha.slice(0, 12)}`
+    : `attest decision ${standing.id} is ${standing.state} for ${String(standing.input?.proof)} on ${String(standing.input?.sha).slice(0, 12)}, not ${String(decision.input?.proof)} on ${sha.slice(0, 12)}`;
+  if (head) throw new Error(`${other}; the control plane holds one attest decision at a time, so this one is requested once it settles: graphyard master decisions ${work.key}`);
+  if (standing.state !== 'requested' || !canWithdraw) throw new Error(`${other}, and ${canWithdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}: graphyard master decisions ${work.key}`);
+  return `The candidate moved to ${sha.slice(0, 12)}; ${other}, so it can never apply and is withdrawn for a request that names the current ${merge ? 'candidate' : 'head'}`;
 }
 /**
  * The rework a required CI check that failed on exactly the current head calls for, or null. The
  * next action for such a head is already `request-rework` (refusal-mapping.ts), but nothing asked
- * for the round: on 2026-09-25 GY-245's worker had completed, a base refresh produced
- * a3b75653db55, its `test` check failed, and the item sat in Test for over four hours with its
- * next step named for no one. The latest attempt of each check decides, so a rerun that is still
- * going or passed asks for nothing; the binding names the head and the failed checks.
+ * for the round: GY-245 sat in Test for four hours after its refreshed head's `test` failed. The latest attempt of each check decides, so a rerun that is still
+ * going or passed asks for nothing; the binding names the head and the failed checks. A candidate
+ * failed only on what the base broke and its tip fixed is refreshed onto that tip instead (GY-793).
  */
-export function failedCheckRework(work: Work): { reason: string; binding: string } | null {
+export function failedCheckRework(work: Work, baseFailed?: ReadonlySet<string>): { reason: string; binding: string } | null {
   const candidate = work.candidate, observation = work.observation;
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
-  if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
+  if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed' || baseBreakHold(work)) return null;
+  // A check the base head fails too is no worker's to fix (GY-528): the loop raises it against the base once.
   // The policy's checks and the base branch's other required checks alike (GY-430): PR #221's
   // `secrets` scan failed, GitHub blocked the merge, and nothing asked for the round. A policy
   // check's run is read through the test gate's trust boundary (GY-731); a protection-only
   // check's through the app protection binds it to, or any app with the CI apps preferred (GY-1060).
   const failed = requiredChecksOf(work).filter(required => {
+    if (baseFailed?.has(required.name)) return false;
     const latest = required.policy ? requiredCheck(work, required.name) : requiredCheckRun(required, observation.checks, ciAppIdsOf(work));
     // A failure awaiting its one rerun (GY-516) is not yet the worker's: a rework round would push a
     // new head and lose the queue position, approval and proofs the rerun keeps.
@@ -367,6 +411,12 @@ const groupName = (entry: ExhaustedProof) => `the ${entry.group ?? 'producer'} p
 const quoteAttempts = (entry: ExhaustedProof, limit = 1600) => { const text = entry.attempts.map(attempt => `"${attempt}"`).join('; '); return text.length > limit ? `${text.slice(0, limit - 1)}…` : text || 'no attempt recorded'; };
 /** The attention the loop raises the cycle it first sees the request spent: group, every attempt's outcome, and the next step's owner. */
 export function exhaustedProofEscalation(entry: ExhaustedProof) {
+  const unacted = unactedProducerAttempts(entry.attempts);
+  if (unacted) {
+    const runtimesOrAccounts = extractProducerAccountsOrRuntimes(entry.attempts);
+    const target = runtimesOrAccounts.length ? runtimesOrAccounts.join(', ') : 'producer runtime or account';
+    return boundDetail(`${entry.work}: producer attempts for ${groupName(entry)} on ${entry.sha.slice(0, 12)} are used up (${entry.reason}); no producer is launched for this head until an eligible account exists. Attempts: ${quoteAttempts(entry)}. Next step, owned by the master loop: no rework is requested for ${entry.work}; the attempts name a producer-runtime fault on ${target}; the loop relaunches the request once an eligible producer account exists`);
+  }
   return boundDetail(`${entry.work}: producer attempts for ${groupName(entry)} on ${entry.sha.slice(0, 12)} are used up (${entry.reason}); no producer is launched for this head again. Attempts: ${quoteAttempts(entry)}. Next step, owned by the master loop: on its next cycle it requests a rework decision for ${entry.work} quoting these attempts, and the independent approver judges it; the master fixes a launcher fault (a producer profile or its credential) if the attempts name one`);
 }
 /** The rework an item whose proof requests are spent calls for, once the escalation has stood a cycle, or null. */
@@ -375,8 +425,15 @@ export function exhaustedProofRework(work: Work, exhausted: readonly ExhaustedPr
   if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
   const spent = exhausted.filter(entry => entry.work === work.key && entry.sha === candidate.sha);
   if (!spent.length) return null;
-  const each = Math.max(200, Math.floor(1600 / spent.length));
-  return { reason: `${work.key}: the producer attempts for ${spent.map(entry => `${groupName(entry)} on ${candidate.sha.slice(0, 12)} ended without trusted evidence — ${quoteAttempts(entry, each)}`).join('. And ')}. No producer is launched for this head again, so it cannot pass its proofs; the item returns to a worker to fix what the attempts name and push a fresh head the producers are requested for.`,
+  // GY-1153: When every spent producer attempt on a head ended without the session acting (never
+  // started, profile busy, account exhausted or launch refused), the loop requests no rework for the head.
+  // A head whose producer attempts include at least one session that acted and failed to produce
+  // evidence still gets the GY-496 rework, and so does a spent entry with no recorded attempt
+  // (GY-1227), exactly as `exhaustedProofEscalation` announced it.
+  const acted = spent.filter(entry => !unactedProducerAttempts(entry.attempts));
+  if (!acted.length) return null;
+  const each = Math.max(200, Math.floor(1600 / acted.length));
+  return { reason: `${work.key}: the producer attempts for ${acted.map(entry => `${groupName(entry)} on ${candidate.sha.slice(0, 12)} ended without trusted evidence — ${quoteAttempts(entry, each)}`).join('. And ')}. No producer is launched for this head again, so it cannot pass its proofs; the item returns to a worker to fix what the attempts name and push a fresh head the producers are requested for.`,
     // Keyed on the head alone: a second group spent on the same head asks for no second rework.
     binding: `${candidate.sha}:proof-exhausted` };
 }
@@ -454,7 +511,10 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
   if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
   const tip = observation.baseTip ?? candidate.baseSha;
-  if (observation.conflicting && !work.queue)
+  // While the control plane's own test merge of the head onto that tip is pending, it decides: a
+  // confirmed conflict is `baseRefreshConflict`'s, routed to a docs-sync session when it is confined
+  // to docs pages (GY-566), and a clean one costs no round at all.
+  if (observation.conflicting && !work.queue && !pendingBaseRefresh(work))
     return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
   const ejection = work.queueEjection;
   if (ejection && !work.queue && ejection.sha === candidate.sha && ejection.policyRevision === work.policyRevision && speculativeConflict(ejection) && !ejection.predecessors?.length && !pendingBaseRefresh(work)) {
@@ -668,18 +728,17 @@ export type ApprovalStep =
   | { step: 'rerequest'; detail: string }
   | { step: 'relaunch'; detail: string }
   | { step: 'exhausted'; detail: string };
-export function approvalStep(watch: ApprovalWatch, decision: { state: string; outcome?: string | null; refusal?: { approver: string; reason: string } | null } | null | undefined,
+export function approvalStep(watch: ApprovalWatch, decision: { id?: string; action?: string; state: string; outcome?: string | null; refusal?: { approver: string; reason: string } | null; approvedBy?: string | null; approvedAt?: string | null; situation?: DecisionSituation | null } | null | undefined,
   sessions: { agents: HerdrAgent[]; available: boolean }, now: number): ApprovalStep {
   const label = `${watch.action} decision ${watch.decision} on ${watch.work}`;
   // `undefined`: the history could not be read this cycle. Nothing is concluded from that.
   if (decision === undefined) return { step: 'wait', detail: `The decision history of ${watch.work} could not be read; ${label} is looked at again next cycle` };
   if (decision === null) return { step: 'rerequest', detail: `The control plane no longer holds ${label}` };
   if (decision.state === 'applied') return { step: 'settled', detail: `The approver applied ${label}` };
-  // A refusal is the approver's considered judgement (GY-141), not a session to replace or a
-  // request to repeat: the server refuses the same request unchanged, and answering it is the master's.
+  // A refusal is the approver's considered judgement (GY-141), not a session to replace or a request to repeat: the server refuses the same request unchanged, and answering it is the master's.
   if (decision.state === 'refused') return { step: 'refused', detail: `${label} was refused by ${decision.refusal?.approver ?? 'its approver'}: ${decision.refusal?.reason ?? decision.outcome ?? 'no reason recorded'}` };
-  if (decision.state !== 'requested' && decision.state !== 'approved')
-    return { step: 'rerequest', detail: `${label} ended ${decision.state}${decision.outcome ? ` (${decision.outcome})` : ''}` };
+  if (decision.state !== 'requested' && decision.state !== 'approved') return { step: 'rerequest', detail: `${label} ended ${decision.state}${decision.outcome ? ` (${decision.outcome})` : ''}` };
+  if (decision.state === 'approved') { const settle = unsettledApproval({ key: watch.work }, { id: watch.decision, action: watch.action, ...decision }, now); if (settle) return { step: 'rerequest', detail: settle }; } // GY-1297: the server settles it, this cycle
   if (!sessions.available) return { step: 'wait', detail: `Herdr could not be read, so the approver session of ${label} is unknown this cycle` };
   const session = watch.agentName ? sessions.agents.find(agent => agent.name === watch.agentName) : undefined;
   const launchedAt = watch.launchedAt ? Date.parse(watch.launchedAt) : Number.NaN, age = Number.isFinite(launchedAt) ? now - launchedAt : 0;
@@ -698,4 +757,18 @@ export function repeatedMergeRefusal(work: Pick<Work, 'mergeRefusal' | 'candidat
   const refusal = work.mergeRefusal, candidate = work.candidate;
   return refusal && refusal.action === 'rework' && candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha && refusal.policyRevision === work.policyRevision ? refusal : null;
 }
+
+/** The launcher key of the approver launch for a decision (GY-616). */
+export const approverLaunchKey = (decision: string) => `launch:approver:${decision}`;
+/** The approval-watch key of an approver session no request of the loop's launched (GY-403). */
+export const handWatchPrefix = 'hand:';
+/** The name prefixes every approver session for `key` starts with (see `approverSessionName`). */
+export const approverPrefixes = (key: string) => ['graphyard-approver', 'gy-approver'].map(prefix => `${sessionName(prefix, key)}-`);
+
+/** Record how a watch's session ended (GY-551). */
+export function recordWatchEnded(watch: ApprovalWatch, detail: string) {
+  const entry = `${watch.agentName ? `session ${watch.launches}: ` : ''}${detail}`.slice(0, 300);
+  if (watch.ended.at(-1) !== entry) watch.ended = [...watch.ended, entry].slice(-10);
+}
+
 

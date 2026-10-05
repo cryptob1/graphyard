@@ -134,7 +134,7 @@ async function launchedMaster() {
   await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentials, 'reviewers') }, reviewerVerify);
   await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' });
   const tokenFile = async (name: string) => { const file = join(credentials, `${name}.token`); await writeFile(file, `${name}-token-`.padEnd(40, 'x'), { mode: 0o600 }); return file; };
-  await saveProducerProfile(root, { name: 'claude-producer', principal: 'proof-runner', agentName: 'produce-claude-1', kind: 'claude', credentialFile: await tokenFile('producer') }, producerVerify);
+  await saveProducerProfile(root, { name: 'claude-producer', principal: 'proof-runner', agentName: 'produce-claude-1', kind: 'claude', credentialFile: await tokenFile('producer'), concurrency: 1 }, producerVerify);
   const config = await loadMasterConfig(root);
   const [workerToken, approverToken, operatorToken] = await Promise.all([tokenFile('worker'), tokenFile('approver'), tokenFile('operator')]);
   const enriched = {
@@ -161,7 +161,10 @@ test('unit:session-end-closes-pane — one session of every pane-opening role is
       item('GY-1', { stage: 'ready', epoch: 0, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }] }),
       // The reviewer and the producer: candidate shapes whose requests the loop's ledger holds.
       reviewCandidate('GY-2'),
-      (() => { const producer = reviewCandidate('GY-3'); producer.criteria = [{ id: 'AC-1', text: 'Proven', proofs: ['unit:producer-launch'] }]; reconcileAutoDispatch(producer, [producer], new Date(clockStart)); return producer; })(),
+      // Dispatch opens no producer request since GY-1235; the producer launcher still binds one, built by hand.
+      (() => { const producer = reviewCandidate('GY-3'); producer.criteria = [{ id: 'AC-1', text: 'Proven', proofs: ['unit:producer-launch'] }]; reconcileAutoDispatch(producer, [producer], new Date(clockStart));
+        producer.autoDispatch!.producers.push({ id: 'producer-unit', kind: 'producer', group: 'unit', proofs: ['unit:producer-launch'], sha: producer.candidate!.sha, baseSha: producer.candidate!.baseSha, policyRevision: producer.policyRevision, pr: producer.candidate!.pr, requestedAt: new Date(clockStart).toISOString(), reason: 'unproven', state: 'requested' });
+        return producer; })(),
       // The escalation handler's item: open, with the standing escalation its context carries.
       item('GY-4', { stage: 'review', ready: false, escalation: { trigger: 'review-unavailable', reason: 'no reviewer could be launched', at: iso(), actor: 'graphyard' } as never }),
       // The approver's item: delivered, so the loop closes the approver still judging it.
@@ -185,7 +188,6 @@ test('unit:session-end-closes-pane — one session of every pane-opening role is
     const wired = daemonEffects(root, config, {
       snapshot: async () => ({ work: items.map(entry => ({ ...entry, sessions: [...(entry.sessions ?? [])] })), now: iso() }),
       mutate: record as never,
-      executor: { principal: 'graphyard-master', instance: 'pane-reclaim' },
       run: herdr.run,
     });
     // The plane's merge and plane-health answers: no candidate here is ever merged, the dispatch
@@ -200,7 +202,6 @@ test('unit:session-end-closes-pane — one session of every pane-opening role is
       return { epoch, path, base: config.baseBranch, branch };
     };
     const plane: Partial<DaemonEffects> = {
-      merge: async () => ({ result: 'merged', merged: true }),
       planeHealth: async () => null,
       dispatch: async (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, herdr.run, snapshot.work, prepare, undefined, undefined, snapshot.now),
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(), reason: 'not configured', deployed: [], pending: [] }),

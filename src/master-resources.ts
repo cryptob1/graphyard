@@ -1,13 +1,15 @@
 import { execFileSync } from 'node:child_process';
-import { lstat, readdir, readFile, statfs } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { lstat, mkdir, readdir, readFile, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isProfileSession, neverStartedReason, privateFile, profileConcurrency, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
 import { describeTmpReclaim, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
 import { upgradeTouchesCode } from './daemon/upgrade.js';
 import type { Work } from './model.js';
+import { runChild } from './child-runner.js';
 
 /**
  * The control plane's own resources (GY-132).
@@ -63,7 +65,15 @@ export interface ResourceInputs {
   work: Work[];
   plane: PlaneResources | null;
   loop: { lagMs: number | null; stalledAfterMs: number; detail: string } | null;
-  revision: { behind: number; loaded: string; checkout: string } | null;
+  /** `movedAt`: when the checkout first moved onto code the loop has not loaded (epoch ms), absent when it has not. */
+  revision: { behind: number; loaded: string; checkout: string; movedAt?: number } | null;
+  /**
+   * The restart the loop's self-upgrade still owes, from the daemon cursor (state.upgrade.pending)
+   * and the time of its latest attempt (GY-1198): absent or null when none is owed or the cursor is unread.
+   */
+  upgrade?: { from: string | null; to: string; code: boolean; attemptedAt: number | null } | null;
+  /** The reclaim pass's seen-unowned map (pane → first seen), from .graphyard/resource-reclaims.json; absent or null when unread. */
+  reclaimSeen?: Record<string, string> | null;
   disk: { path: string; totalBytes: number; freeBytes: number; thresholdBytes: number } | null;
   /** The host temporary directory's inodes, and what the loop's last /tmp pass removed (GY-1074); absent or null when unread. */
   tmp?: TmpInodes | null;
@@ -115,6 +125,27 @@ export const finishedSessionGraceMs = 60_000;
  * pane once its lease ends — so the name is a fault; before it, the reclaim is under way (GY-1089).
  */
 export const nameReclaimBoundMs = stuckSessionMs;
+/**
+ * How long a pane holding a name must have been seen unowned before the reclaim closes it on
+ * Herdr's report alone — no settled record left on the name, or a status Herdr does not recognise
+ * as finished (GY-1166). It equals the launcher's `launchAppearanceMs` (src/daemon/effects.ts): a
+ * launch whose runtime has not yet appeared reads the same way, and is never taken for a leak.
+ */
+export const unownedPaneConfirmMs = 120_000;
+/**
+ * How long the loop may run behind code its checkout moved onto before that is a fault (GY-1196).
+ * The checkout moves while the loop runs — the self-upgrade aligns it between cycles, and then
+ * restarts the executors and the loop once their held claims settle — so a move read a moment
+ * later is that upgrade under way, not a loop left on old code. Loaded cycles have run for up to
+ * fifteen minutes, so the bound gives the upgrade two of them.
+ */
+export const selfUpgradeBoundMs = 30 * 60_000;
+/**
+ * The upgrade's bound for this loop (GY-1255): the upgrade runs between cycles, so a loop whose
+ * `run` config spaces cycles further apart than the fixed bound allows gets its own stalled bound
+ * (two intervals and any backoff) instead; it is never shorter than `selfUpgradeBoundMs`.
+ */
+export const upgradeBoundMs = (loop: ResourceInputs['loop']) => Math.max(selfUpgradeBoundMs, loop?.stalledAfterMs ?? 0);
 /** The plane's database bound when GRAPHYARD_DATABASE_MAX_BYTES is unset. */
 export const defaultDatabaseMaxBytes = 10 * 1024 ** 3;
 /** The default warning line: a tenth of the bound, and at least one unit. */
@@ -125,8 +156,37 @@ export const tenthOf = (bound: number) => Math.max(1, Math.ceil(bound / 10));
 export const reviewLedgerBound = sessionLedgerBound;
 export const producerLedgerBound = sessionLedgerBound;
 
+const sameCommit = (a: string, b: string) => !!a && !!b && (a.startsWith(b) || b.startsWith(a));
 const settledAt = (record: { closedAt?: string; idleSince?: string; requestedAt: string }) => Date.parse(record.closedAt ?? record.idleSince ?? record.requestedAt);
 const finished = ['idle', 'done', 'blocked'];
+/**
+ * A worker launch under way: an implementation session of the principal not yet ended that started
+ * within `unownedPaneConfirmMs` — its pane can stand before the runtime reports or the lease lands.
+ */
+const launchingWorker = (principal: string | undefined, work: Work[], now: number) => work.some(item => (item.sessions ?? []).some(handle =>
+  handle.kind === 'implementation' && handle.principal === principal && !handle.endedAt && now - Date.parse(handle.startedAt) < unownedPaneConfirmMs));
+const reclaimableStatus = (agent: HerdrAgent) => agent.agent_status !== 'working';
+/**
+ * The gates the reclaim pass closes an unowned holder through. `reclaimable` is the status a holder
+ * must report; `recordless` is how long a reviewer or producer pane with no ledger record on its name
+ * must be seen that way before it closes, or null when it never does.
+ *
+ * A recordless pane that is idle or done finished, so it waits the grace. One `blocked` or `unknown`
+ * may be a launch stuck on a prompt before its record landed: it waits `stuckSessionMs`, the bound a
+ * pending session stuck on a prompt gets, and is closed as never started (GY-1192). A worker pane is
+ * not given that bound: the launcher claims the item before it creates the pane, so a worker between
+ * launch and claim already holds a live lease and is spared as owned.
+ */
+export interface ReclaimGates { reclaimable: (agent: HerdrAgent) => boolean; recordless: (agent: HerdrAgent) => number | null }
+export const reclaimGates: ReclaimGates = {
+  reclaimable: reclaimableStatus,
+  recordless: agent => agent.agent_status === 'idle' || agent.agent_status === 'done' ? finishedSessionGraceMs : stuckSessionMs,
+};
+/**
+ * The gates before GY-1165, kept so its reproduction runs the base's own pass rather than restating
+ * it: a holder closed only when Herdr reported it finished, and a recordless pane never.
+ */
+export const baseReclaimGates: ReclaimGates = { reclaimable: agent => finished.includes(agent.agent_status ?? ''), recordless: () => null };
 type Role = 'worker' | 'reviewer' | 'producer';
 const roleProfiles = (input: Pick<ResourceInputs, 'profiles'>): { role: Role; name: string; agentName: string; concurrency?: number; principal?: string }[] => [
   ...input.profiles.workers.filter(profile => profile.mode === 'launch' && profile.agentName).map(profile => ({ role: 'worker' as const, name: profile.name, agentName: profile.agentName, principal: profile.principal })),
@@ -206,7 +266,7 @@ export const resourceRegistry: ResourceDefinition[] = [
     id: 'agent-names', title: 'Herdr agent-name namespace', unit: 'names',
     bound: "each launch profile's concurrency: its fixed agent name at concurrency 1, or that many derived <agentName>-<8hex> names above it",
     usage: 'Herdr agent list: every agent whose name is one of the profile\'s session names', owner: 'Herdr, through the worker, reviewer and producer launchers in src/master.ts',
-    reclaim: `the reclaim pass closes a finished pane on one of the names once its session has settled ${finishedSessionGraceMs / 1000}s and two passes that far apart saw it unowned`,
+    reclaim: `the reclaim pass closes a finished pane on one of the names once its session has settled ${finishedSessionGraceMs / 1000}s and two passes that far apart saw it unowned; a pane whose status Herdr does not report as finished is closed on Herdr's report once two passes ${unownedPaneConfirmMs / 1000}s apart saw it unowned and not working, and a pane no record accounts for once two passes the grace apart (idle or done) or ${stuckSessionMs / 60_000} minutes apart (blocked or unknown, a launch that never started) saw it`,
     remedy: 'close the finished panes holding the names (graphyard master run --once, or herdr pane close PANE after confirming the session posted its result)',
     // A name held by a live session is the slot pool working; only names nothing live owns, and no
     // reclaim gave back within its bound, warn (GY-1089). A running session is never reclaimable: it
@@ -216,16 +276,26 @@ export const resourceRegistry: ResourceDefinition[] = [
       if (!input.agents) return { id: profile.name, used: null, bound: profileConcurrency(profile), detail: 'Herdr could not be read', reclaimable: 0 };
       const held = input.agents.filter(agent => isProfileSession(profile, agent.name));
       const stale = held.filter(agent => agent.agent_status !== 'working' && !liveOwner(profile, agent.name!, input));
-      const overdue = stale.filter(agent => { const at = holderSettledAt(profile, agent.name!, input); return at === null || input.now - at >= nameReclaimBoundMs; });
+      // A pane the reclaim pass has seen unowned runs on the pass's own clock (GY-1198): it closes
+      // the pane on a later pass, once per cycle, so the reclaim is under way until the pane has
+      // stood seen-unowned for the bound. A holder the pass has not seen, or with no pane it could
+      // close, keeps the settling clock.
+      const seenAt = (agent: HerdrAgent) => { const first = agent.pane_id ? input.reclaimSeen?.[agent.pane_id] : undefined; const at = first ? Date.parse(first) : NaN; return Number.isFinite(at) ? at : null; };
+      const overdue = stale.filter(agent => {
+        const seen = seenAt(agent);
+        if (seen !== null) return input.now - seen >= nameReclaimBoundMs;
+        const at = holderSettledAt(profile, agent.name!, input); return at === null || input.now - at >= nameReclaimBoundMs;
+      });
+      const late = (agent: HerdrAgent) => seenAt(agent) !== null ? `not reclaimed within ${nameReclaimBoundMs / 60_000} minutes of the reclaim pass first seeing it unowned` : `not reclaimed within ${nameReclaimBoundMs / 60_000} minutes of settling`;
       return { id: profile.name, used: held.length, bound: profileConcurrency(profile), reclaimable: stale.length, overdue: overdue.length,
-        detail: held.length ? `${profile.role} profile ${profile.name}: ${held.map(agent => `${agent.name} (${agent.agent_status ?? 'unknown'}${overdue.includes(agent) ? `, no live session, not reclaimed within ${nameReclaimBoundMs / 60_000} minutes of settling` : stale.includes(agent) ? ', no live session, reclaim under way' : ''}${agent.pane_id ? `, pane ${agent.pane_id}` : ''})`).join(', ')}` : `${profile.role} profile ${profile.name}: no name held` };
+        detail: held.length ? `${profile.role} profile ${profile.name}: ${held.map(agent => `${agent.name} (${agent.agent_status ?? 'unknown'}${overdue.includes(agent) ? `, no live session, ${late(agent)}` : stale.includes(agent) ? `, no live session, reclaim under way${seenAt(agent) !== null ? ` (seen unowned since ${new Date(seenAt(agent)!).toISOString()})` : ''}` : ''}${agent.pane_id ? `, pane ${agent.pane_id}` : ''})`).join(', ')}` : `${profile.role} profile ${profile.name}: no name held` };
     }),
   },
   {
     id: 'session-slots', title: 'Session slots', unit: 'sessions',
     bound: 'the summed concurrency of the role\'s launch profiles in .graphyard/master.json',
     usage: 'pending reviewer and producer ledger records, and live worker leases held by launch-profile principals', owner: 'the master loop and its dispatcher (src/master-daemon.ts, src/auto-dispatch.ts)',
-    reclaim: `a session settles when its request is answered or superseded; the reclaim pass fails a pending session blocked on a prompt for ${stuckSessionMs / 60_000} minutes, or absent from Herdr on every pass for ${stuckSessionMs / 60_000} minutes, which releases its slot`,
+    reclaim: `a session settles when its request is answered or superseded; the reclaim pass fails a pending session finished or blocked on a prompt for ${stuckSessionMs / 60_000} minutes, or absent from Herdr on every pass for ${stuckSessionMs / 60_000} minutes, which releases its slot`,
     remedy: 'raise concurrency on a profile of the role, or add a profile on another account, in .graphyard/master.json',
     warnBelow: () => 1, symptoms: [/every (?:reviewer|independent producer) profile is busy/, /is at its concurrency limit/],
     read: input => (['worker', 'reviewer', 'producer'] as const).map(role => {
@@ -242,13 +312,13 @@ export const resourceRegistry: ResourceDefinition[] = [
       const answered = new Set(pending.map(record => record.requestId).filter(Boolean));
       const waiting = input.work.flatMap(item => role === 'reviewer' ? [item.autoDispatch?.review?.id] : (item.autoDispatch?.producers ?? []).map(entry => entry.id)).filter((id): id is string => !!id && live.has(id) && !answered.has(id)).length;
       const stuck = pending.filter(record => stuckSession(record, input.agents, input.now)).length;
-      return { id: role, used: pending.length, bound, waiting, reclaimable: stuck, detail: `${pending.length} ${role} session(s) pending across ${profiles.length} profile(s), ${waiting} request(s) waiting for a slot${stuck ? `, ${stuck} stuck on a prompt or never started` : ''}` };
+      return { id: role, used: pending.length, bound, waiting, reclaimable: stuck, detail: `${pending.length} ${role} session(s) pending across ${profiles.length} profile(s), ${waiting} request(s) waiting for a slot${stuck ? `, ${stuck} finished, stuck on a prompt or never started` : ''}` };
     }),
   },
   {
     id: 'github-budget', title: 'GitHub App request budget', unit: 'requests',
     bound: 'the installation token\'s hourly core rate limit, as GitHub reports it on GET /rate_limit',
-    usage: '/healthz resources.github, read by the plane from GET /rate_limit (cached for a minute; that read costs nothing against the budget); while the client is paused after a rate-limit refusal it reads as spent until the pause ends', owner: 'the control plane\'s GitHub client (src/github.ts) and its observation jobs',
+    usage: '/healthz resources.github, read by the plane from GET /rate_limit (cached for a minute; that read costs nothing against the budget); while the client is paused after a rate-limit refusal its usage is unread (the pause is the remediation under way, counted once as an observation fault) until the pause ends, when the read resumes', owner: 'the control plane\'s GitHub client (src/github.ts) and its observation jobs',
     reclaim: 'GitHub restores the budget at the reset time it reports; the client pauses every request until then once it is spent',
     remedy: 'lower observation load (fewer open candidates, a longer job interval) until the reset; every merge waits on fresh observations',
     warnBelow: tenthOf, symptoms: [/GitHub requests paused until/, /rate limited; requests paused/],
@@ -267,10 +337,26 @@ export const resourceRegistry: ResourceDefinition[] = [
     id: 'loaded-revision', title: 'Loop loaded-code revision', unit: 'commits behind',
     bound: 'zero: the loop must run the code its checkout holds',
     usage: 'commits the coordinator checkout moved past the one the running loop process loaded, from the checkout\'s HEAD reflog and the process start time; a move that touches no loaded code (src/, scripts/, bin/, package.json) counts none, as the self-upgrade restarts nothing for it', owner: 'the master loop process and the coordinator checkout',
-    reclaim: 'a restart loads the checkout\'s revision',
+    reclaim: `the between-cycles self-upgrade restarts the loop onto the checkout's revision; a move it has not loaded within ${selfUpgradeBoundMs / 60_000} minutes counts, unless the restart it owes onto that revision was attempted within the same bound (retried each cycle while an executor holds a claim)`,
     remedy: 'graphyard master restart so the loop runs the code the checkout holds',
     warnBelow: () => 0, symptoms: [],
-    read: input => [{ id: '', used: input.revision?.behind ?? null, bound: 0, detail: input.revision ? `the loop loaded ${input.revision.loaded.slice(0, 12)}; the checkout is at ${input.revision.checkout.slice(0, 12)}` : 'no running loop process, or its start could not be read', reclaimable: 0 }],
+    // A move the self-upgrade is still within its bound for is the upgrade under way (GY-1196):
+    // the upgrade itself moves the checkout, so a reading taken just after always saw it behind.
+    read: input => {
+      const revision = input.revision;
+      if (!revision) return [{ id: '', used: null, bound: 0, detail: 'no running loop process, or its start could not be read', reclaimable: 0 }];
+      const bound = upgradeBoundMs(input.loop);
+      const pending = revision.behind > 0 && revision.movedAt !== undefined && input.now - revision.movedAt < bound;
+      // A restart the self-upgrade owes onto this checkout and retried within the bound is the
+      // upgrade under way too (GY-1198): a claim held across every cycle refuses it, and the
+      // cursor keeps it owed until a quiet instant; only one not attempted within the bound counts.
+      const owed = input.upgrade?.code === true && sameCommit(input.upgrade.to, revision.checkout) ? input.upgrade : null;
+      const restarting = !pending && revision.behind > 0 && owed?.attemptedAt != null && input.now - owed.attemptedAt < bound;
+      return [{ id: '', used: pending || restarting ? 0 : revision.behind, bound: 0, reclaimable: 0,
+        detail: `the loop loaded ${revision.loaded.slice(0, 12)}; the checkout is at ${revision.checkout.slice(0, 12)}${pending ? ` (${revision.behind} commits behind since ${new Date(revision.movedAt!).toISOString()}; the self-upgrade has until ${new Date(revision.movedAt! + bound).toISOString()})`
+          : restarting ? ` (${revision.behind} commits behind; the self-upgrade's owed restart onto it is under way, last attempted ${new Date(owed!.attemptedAt!).toISOString()} and retried each cycle until ${new Date(owed!.attemptedAt! + bound).toISOString()})`
+          : owed ? ` (the self-upgrade owes a restart onto it, ${owed.attemptedAt === null ? 'with no attempt recorded' : `last attempted ${new Date(owed.attemptedAt).toISOString()}`})` : ''}` }];
+    },
   },
   {
     id: 'database-capacity', title: 'Control-plane database', unit: 'bytes',
@@ -332,7 +418,9 @@ function stuckSession(record: { state: string; agentName: string; idleSince?: st
   if (record.state !== 'pending' || !agents) return false;
   const agent = agents.find(candidate => candidate.name === record.agentName);
   if (!agent) return now - Date.parse(record.requestedAt) >= stuckSessionMs;
-  return (agent.agent_status === 'blocked' || finished.includes(agent.agent_status ?? '')) && now - Date.parse(record.idleSince ?? record.requestedAt) >= stuckSessionMs;
+  if (agent.agent_status === 'blocked') return now - Date.parse(record.idleSince ?? record.requestedAt) >= stuckSessionMs;
+  if (finished.includes(agent.agent_status ?? '')) return !!record.idleSince && now - Date.parse(record.idleSince) >= stuckSessionMs;
+  return false;
 }
 
 const disk = new Set<ResourceId>(['worktree-disk', 'database-capacity']);
@@ -461,7 +549,16 @@ export async function readPlaneResources(url: string, fetcher: typeof fetch = fe
  * started (from the times of the checkout's reflog entries) against HEAD now. Null when the process is gone or the
  * reflog does not reach back to its start.
  */
-export function loadedRevision(root: string, pid: number, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }), now = Date.now()) {
+type Run = (command: string, args: string[]) => string;
+const runCommand: Run = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 });
+/**
+ * Whether a move touches loaded code, per runner and by `root loaded..sha`: both ends are commits,
+ * so the answer never changes, and a long-lived loop's readings diff only the moves new since the
+ * last one rather than every move since it started (GY-1255). Each runner's cache is bounded.
+ */
+const touchesCodeCache = new WeakMap<Run, Map<string, boolean>>();
+const touchesCodeCacheBound = 1_000;
+export function loadedRevision(root: string, pid: number, run: Run = runCommand, now = Date.now()) {
   try {
     const elapsed = Number(run('ps', ['-o', 'etimes=', '-p', String(pid)]).trim());
     if (!Number.isFinite(elapsed)) return null;
@@ -476,9 +573,23 @@ export function loadedRevision(root: string, pid: number, run: (command: string,
     if (loaded === checkout) return { loaded, checkout, behind: 0 };
     // A move that touches no code the loop loads leaves it running the checkout's code (GY-1089):
     // the self-upgrade restarts nothing for it, so it is never behind on it.
-    const changed = run('git', ['-C', root, 'diff', '--name-only', loaded, checkout]).split('\n').map(path => path.trim()).filter(Boolean);
-    if (!upgradeTouchesCode(changed)) return { loaded, checkout, behind: 0 };
-    return { loaded, checkout, behind: Number(run('git', ['-C', root, 'rev-list', '--count', `${loaded}..${checkout}`]).trim()) || 0 };
+    const cache = touchesCodeCache.get(run) ?? new Map<string, boolean>();
+    touchesCodeCache.set(run, cache);
+    const touchesCode = (to: string) => {
+      const key = `${root}\0${loaded}\0${to}`;
+      const known = cache.get(key);
+      if (known !== undefined) return known;
+      const touches = upgradeTouchesCode(run('git', ['-C', root, 'diff', '--name-only', loaded, to]).split('\n').map(path => path.trim()).filter(Boolean));
+      if (cache.size >= touchesCodeCacheBound) cache.delete(cache.keys().next().value!);
+      cache.set(key, touches);
+      return touches;
+    };
+    if (!touchesCode(checkout)) return { loaded, checkout, behind: 0 };
+    // When the checkout first moved onto code the loop has not loaded: the oldest move since the
+    // start whose revision differs from the loaded one in loaded code (GY-1196).
+    const since = moves.filter(([, at]) => Number(at) > startedAt).reverse();
+    const first = since.find(([sha]) => sha === checkout || touchesCode(sha!));
+    return { loaded, checkout, behind: Number(run('git', ['-C', root, 'rev-list', '--count', `${loaded}..${checkout}`]).trim()) || 0, ...(first ? { movedAt: Number(first[1]) * 1000 } : {}) };
   } catch { return null; }
 }
 
@@ -546,7 +657,81 @@ async function readReclaimFile(root: string): Promise<ReclaimFile> {
   try { await privateFile(resourceReportFile(root)); const body = JSON.parse(await readFile(resourceReportFile(root), 'utf8')); return { version: 1, reports: body.reports ?? [], seen: body.seen ?? {}, tmpLatest: body.tmpLatest ?? null }; }
   catch { return { version: 1, reports: [], seen: {} }; }
 }
+/** A holder that has not released the reclaim file's lock in this long is dead or wedged; its lock is taken over. */
+export const reclaimLockStaleMs = 60_000;
+/**
+ * The dispatcher tick's name pass and the cycle's full pass each read-modify-write the reclaim
+ * file (GY-1255): the write happens under this lock (`FILE.lock`, a directory) from a fresh read,
+ * so one pass never drops a sighting, a stuck-session clock or a report the other recorded.
+ *
+ * Each holder writes its own token into the lock (GY-1270). A stale lock is taken over by renaming
+ * it aside — atomic, so of two waiters that both saw it stale only one moves it — and only when the
+ * lock moved aside still carries the token seen stale; a fresh lock moved aside by mistake is put
+ * back. A holder removes the lock on release only while it still carries its own token.
+ */
+const lockOwner = 'owner';
+const lockToken = (lock: string) => readFile(resolve(lock, lockOwner), 'utf8').catch(() => null);
+/** Moves the lock aside and removes it, while it still carries `token`; a lock moved aside that does not is put back. */
+async function removeLock(lock: string, token: string | null) {
+  const aside = `${lock}.${randomUUID()}`;
+  try { await rename(lock, aside); } catch { return; }
+  if (await lockToken(aside) === token) { await rm(aside, { recursive: true, force: true }); return; }
+  // Another waiter took the lock over and acquired it between this look and this move: put the
+  // live lock back. Where a newer lock already stands, the moved one's holder has lost it.
+  await rename(aside, lock).catch(() => rm(aside, { recursive: true, force: true }));
+}
+export async function withReclaimLock<T>(root: string, body: () => Promise<T>, waitMs = 30_000, staleMs = reclaimLockStaleMs): Promise<T> {
+  const lock = `${resourceReportFile(root)}.lock`, deadline = Date.now() + waitMs, token = randomUUID();
+  await mkdir(dirname(lock), { recursive: true, mode: 0o700 });
+  for (;;) {
+    try { await mkdir(lock, { mode: 0o700 }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const held = await stat(lock).then(entry => Date.now() - entry.mtimeMs, () => 0);
+      if (held > staleMs) { await removeLock(lock, await lockToken(lock)); continue; }
+      if (Date.now() > deadline) throw new Error(`another reclaim pass has held ${lock} for ${Math.round(held / 1000)}s`);
+      await new Promise(done => setTimeout(done, 20 + Math.random() * 30));
+      continue;
+    }
+    // Exclusive: a lock put back over this one's empty directory already carries its holder's token.
+    try { await writeFile(resolve(lock, lockOwner), token, { mode: 0o600, flag: 'wx' }); break; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue; await rm(lock, { recursive: true, force: true }); throw error; }
+  }
+  try { return await body(); } finally { if (await lockToken(lock) === token) await removeLock(lock, token); }
+}
+/**
+ * The clocks one pass leaves, merged onto the file as it stands now. A key this pass read and
+ * dropped (its pane closed, its session failed or back) goes, unless another pass has set it since;
+ * a key this pass read and carried stands as the file has it when another pass changed or dropped
+ * it since the read — that pass saw the condition clear after this one read, so the older time is
+ * never brought back (GY-1270) — and is kept otherwise; a key this pass set new keeps the earlier
+ * of its time and one another pass set meanwhile; a key this pass does not own — the `missing:`
+ * clocks, for the name pass — and any key another pass added are kept as they stand.
+ */
+export function mergeReclaimSeen(fresh: Record<string, string>, read: Record<string, string>, mine: Record<string, string>, owns: (key: string) => boolean) {
+  const merged = { ...fresh };
+  for (const [key, at] of Object.entries(read)) if (owns(key) && !(key in mine) && merged[key] === at) delete merged[key];
+  for (const [key, at] of Object.entries(mine)) {
+    if (!owns(key)) continue;
+    if (key in read && at === read[key]) continue;
+    merged[key] = merged[key] !== undefined && Date.parse(merged[key]) < Date.parse(at) ? merged[key] : at;
+  }
+  return merged;
+}
 export async function readReclaimReports(root: string): Promise<ResourceReclaimReport[]> { return (await readReclaimFile(root)).reports; }
+/** The reclaim pass's reports and its seen-unowned map, read once (GY-1198). */
+export async function readReclaimState(root: string): Promise<{ reports: ResourceReclaimReport[]; seen: Record<string, string> }> { const file = await readReclaimFile(root); return { reports: file.reports, seen: file.seen }; }
+/**
+ * The restart the loop's self-upgrade owes, from the daemon cursor (GY-1198): its pending move and
+ * the latest attempt the upgrade recorded (its `upgrade:<release>` action), or null when none is owed.
+ */
+export function owedUpgrade(state: { upgrade?: { pending: { from: string | null; to: string; code: boolean } | null } | null; actions?: Record<string, { at: string }> } | null): ResourceInputs['upgrade'] {
+  const pending = state?.upgrade?.pending;
+  if (!pending) return null;
+  const attempts = Object.entries(state!.actions ?? {}).filter(([key]) => key.startsWith('upgrade:') && key !== 'upgrade:refused' && key !== 'upgrade:unit')
+    .map(([, action]) => Date.parse(action.at)).filter(Number.isFinite);
+  return { from: pending.from, to: pending.to, code: pending.code, attemptedAt: attempts.length ? Math.max(...attempts) : null };
+}
 
 /**
  * Gives every reclaimable resource back, and records what it took. Within the bounds the registry
@@ -554,7 +739,7 @@ export async function readReclaimReports(root: string): Promise<ResourceReclaimR
  * answers no live request; a finished pane holding a profile's name whose record settled
  * `finishedSessionGraceMs` ago, with no pending record on the name, is closed and its name
  * released once an earlier pass at least that long before saw it the same way; a pending session
- * blocked on a prompt for `stuckSessionMs`, or absent from every pass for that long, is failed —
+ * finished or blocked on a prompt for `stuckSessionMs`, or absent from every pass for that long, is failed —
  * its slot released and the relaunch rule free to try again — and its pane closed. The ledger is
  * written from a fresh read once the panes are closed, so a launch recorded meanwhile survives.
  *
@@ -589,8 +774,17 @@ export function takeTmpReclaim(run: () => Promise<TmpReclaimReport> = () => recl
 /** Wait for the /tmp pass in flight, if any: for a caller that must see it finish. */
 export const settleTmpReclaim = async () => { await tmpPass; };
 
-export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'> & { workers?: ProfileSet['workers'] }, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void>; tmpRoot?: string; tmpPass?: (options: TmpReclaimOptions) => Promise<TmpReclaimReport> } = {}): Promise<ResourceReclaimReport> {
+/**
+ * `namesOnly` runs just the name half — closing finished panes on profile names — for the
+ * dispatcher's tick (GY-1196). The cycle runs this pass once per cycle, and a loaded cycle runs
+ * for ten minutes and more, so the two passes the grace apart a close needs took two cycles: past
+ * `nameReclaimBoundMs` every time. The tick runs every few seconds, so the name is given back
+ * inside its bound however long the cycle takes. It fails, reaps and sweeps nothing, and keeps the
+ * stuck-session clocks the full pass records.
+ */
+export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'> & { workers?: ProfileSet['workers'] }, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void>; tmpRoot?: string; tmpPass?: (options: TmpReclaimOptions) => Promise<TmpReclaimReport>; namesOnly?: boolean; gates?: ReclaimGates } = {}): Promise<ResourceReclaimReport> {
   const now = options.now ?? Date.now();
+  const gates = options.gates ?? reclaimGates;
   const close = options.closePane ?? (pane => { closeHerdrPane(pane); });
   const report: ResourceReclaimReport = { at: new Date(now).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: [] };
   // A pane is closed only once it has been seen finished and unowned by an earlier pass at least
@@ -598,15 +792,16 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   // A pending session is failed as absent only once every pass for `stuckSessionMs` missed it: one
   // inventory that omits a working session is not its end.
   const file = await readReclaimFile(root);
-  const seen: Record<string, string> = {};
+  const namesOnly = !!options.namesOnly;
+  const seen: Record<string, string> = namesOnly ? Object.fromEntries(Object.entries(file.seen).filter(([key]) => key.startsWith('missing:'))) : {};
   const live = liveRequests(observed.work);
   type Settleable = { id: string; state: string; agentName: string; pane: string | null; requestId?: string; closedAt?: string; idleSince?: string; requestedAt: string; resolution?: string; acknowledgedAt?: string };
   const identity = (record: Settleable) => record.id;
   /** Decides from one read what to fail, close and reap; the ledger is written from a fresh read afterwards. */
   const reclaimLedger = async (kind: 'review' | 'producer', records: Settleable[], profiles: { name: string; agentName: string; concurrency?: number }[]) => {
     const failed = new Map<string, { resolution: string }>();
-    // 1. Pending sessions stuck on a prompt, or absent from Herdr for the whole bound: failed, so their slot is released.
-    for (const record of records) {
+    // 1. Pending sessions finished or stuck on a prompt, or absent from Herdr for the whole bound: failed, so their slot is released.
+    for (const record of namesOnly ? [] : records) {
       if (!stuckSession(record, observed.agents, now)) continue;
       const agent = observed.agents?.find(candidate => candidate.name === record.agentName);
       if (!agent) {
@@ -624,23 +819,44 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
       failed.set(identity(record), { resolution });
       report.released.push({ name: record.agentName, ledger: kind, reason });
     }
-    // 2. Panes on a profile's names whose session settled and nothing pending holds the name.
+    // 2. Panes on a profile's names that nothing pending holds. A pane whose record settled and
+    //    which Herdr reports finished waits out the grace; one whose record is gone (reaped, or never
+    //    written) or whose status Herdr does not recognise is closed on Herdr's own report once two
+    //    passes its bound apart saw it unowned (GY-1165, GY-1166): a reaped record or an unknown
+    //    status otherwise pinned the name at its bound for good. A running session is never closed.
+    const closedNames = new Set<string>();
     for (const agent of observed.agents ?? []) {
       if (!agent.pane_id || !agent.name || !profiles.some(profile => isProfileSession(profile, agent.name))) continue;
       if (records.some(record => record.state === 'pending' && record.agentName === agent.name && !failed.has(identity(record)))) continue;
       const settled = records.filter(record => record.agentName === agent.name).at(-1);
       // A session this pass just released is closed at once; any other waits out the grace, finished.
+      // A holder with no record (reaped at retention, or never written) has no settle time of its
+      // own: two passes its bound apart are its clock, so its name is never pinned (GY-1165). The
+      // bound is the grace when it finished, and `stuckSessionMs` when it may be a launch stuck on a
+      // prompt before its record landed (GY-1192). A holder whose record settled but whose status
+      // Herdr does not report as finished waits `unownedPaneConfirmMs` (GY-1166).
       const released = report.released.some(entry => entry.name === agent.name);
-      if (!settled || (!released && (now - settledAt(settled) < finishedSessionGraceMs || !finished.includes(agent.agent_status ?? '')))) continue;
+      const wait = settled ? (finished.includes(agent.agent_status ?? '') ? finishedSessionGraceMs : unownedPaneConfirmMs) : gates.recordless(agent);
+      if (!released && (!gates.reclaimable(agent) || wait === null || (settled && now - settledAt(settled) < finishedSessionGraceMs))) continue;
       const first = file.seen[agent.pane_id] ?? report.at;
-      if (!released && now - Date.parse(first) < finishedSessionGraceMs) { seen[agent.pane_id] = first; continue; }
-      const state = failed.has(identity(settled)) ? 'failed' : settled.state, resolution = failed.get(identity(settled))?.resolution ?? settled.resolution;
-      try { await close(agent.pane_id); report.closed.push({ name: agent.name, pane: agent.pane_id, reason: `its ${kind} session ${state}${resolution ? `: ${resolution.slice(0, 160)}` : ''}` }); }
+      if (!released && now - Date.parse(first) < wait!) { seen[agent.pane_id] = first; continue; }
+      // A recordless pane that never finished is closed as never started, the cause the launcher's
+      // retry policy keys on, rather than as a session that merely left no record.
+      const neverStarted = !settled && wait !== finishedSessionGraceMs;
+      const state = !settled ? 'left no record' : failed.has(identity(settled)) ? 'failed' : settled.state;
+      const resolution = settled ? failed.get(identity(settled))?.resolution ?? settled.resolution
+        : neverStarted ? `${neverStartedReason}: ${agent.agent_status ?? 'unknown'} in Herdr for over ${stuckSessionMs / 60_000} minutes before any record of its launch landed` : undefined;
+      const herdr = settled && !finished.includes(agent.agent_status ?? '') ? ` (Herdr reports ${agent.agent_status ?? 'no status'})` : '';
+      try { await close(agent.pane_id); closedNames.add(agent.name); report.closed.push({ name: agent.name, pane: agent.pane_id, reason: `its ${kind} session ${state}${resolution ? `: ${resolution.slice(0, 160)}` : ''}${herdr}` }); }
       catch (error) { report.errors.push(`Closing ${agent.name} (pane ${agent.pane_id}): ${error instanceof Error ? error.message : String(error)}`); }
     }
     // 3. Terminal records past retention that answer no live request.
     // A pinned record (GY-131) is never reaped: an open request or a pending review still reads it.
-    const reap = new Set(unpinnedTerminal(records).filter(record => !(record.requestId && live.has(record.requestId)) && now - settledAt(record) >= ledgerRetentionMs).map(identity));
+    // Nor is the newest record on a name a pane still holds and this pass did not close (GY-1166):
+    // it is the close decision's evidence, so retention never outruns the reclaim of its pane.
+    const evidence = new Set((observed.agents ?? []).filter(agent => agent.pane_id && agent.name && !closedNames.has(agent.name))
+      .map(agent => records.filter(record => record.agentName === agent.name).at(-1)).filter((record): record is Settleable => !!record).map(identity));
+    const reap = new Set(namesOnly ? [] : unpinnedTerminal(records).filter(record => !(record.requestId && live.has(record.requestId)) && !evidence.has(identity(record)) && now - settledAt(record) >= ledgerRetentionMs).map(identity));
     return { failed, reap };
   };
   /**
@@ -670,20 +886,24 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
       if (result.changed) await saveProducerLedger(root, { ...ledger, producers: result.records });
     }
   } catch (error) { report.errors.push(`Producer ledger: ${error instanceof Error ? error.message : String(error)}`); }
-  // 4. Worker panes on a profile's names whose session settled and no live lease holds the profile's principal.
+  // 4. Worker panes on a launch profile's names whose session settled and no live lease holds the profile's principal.
   for (const worker of config.workers ?? []) {
+    if (worker.mode !== 'launch') continue;
     const held = (observed.agents ?? []).filter(agent => agent.pane_id && agent.name && isProfileSession(worker, agent.name));
     for (const agent of held) {
       const profile = { role: 'worker' as const, name: worker.name, agentName: worker.agentName, principal: worker.principal };
       if (liveOwner(profile, agent.name!, { reviews: [], producers: [], work: observed.work, now })) continue;
-      if (!finished.includes(agent.agent_status ?? '')) continue;
+      // A holder Herdr reports 'unknown' or with no status is closed too, once confirmed unowned for
+      // `unownedPaneConfirmMs` and no launch of the principal is under way (GY-1166); only a running one is spared.
+      const recognised = finished.includes(agent.agent_status ?? '');
+      if (!gates.reclaimable(agent) || (!recognised && launchingWorker(worker.principal, observed.work, now))) continue;
       const settled = holderSettledAt(profile, agent.name!, { reviews: [], producers: [], work: observed.work });
       if (settled !== null && now - settled < finishedSessionGraceMs) continue;
       const first = file.seen[agent.pane_id!] ?? report.at;
-      if (now - Date.parse(first) < finishedSessionGraceMs) { seen[agent.pane_id!] = first; continue; }
+      if (now - Date.parse(first) < (recognised ? finishedSessionGraceMs : unownedPaneConfirmMs)) { seen[agent.pane_id!] = first; continue; }
       try {
         await close(agent.pane_id!);
-        report.closed.push({ name: agent.name!, pane: agent.pane_id!, reason: 'its worker session finished and holds no active assignment' });
+        report.closed.push({ name: agent.name!, pane: agent.pane_id!, reason: recognised ? 'its worker session finished and holds no active assignment' : `its worker session holds no active assignment and Herdr reports it ${agent.agent_status ?? 'with no status'}` });
       } catch (error) {
         report.errors.push(`Closing ${agent.name} (pane ${agent.pane_id}): ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -698,7 +918,7 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   // which a caller may set anywhere: a directory is old only when it truly is.
   // `tmpRoot` names the directory scanned and `tmpPass` the pass itself, for a caller that must
   // keep the sweep off the host's /tmp or watch it run; the loop passes neither.
-  const tmp = takeTmpReclaim(() => (options.tmpPass ?? reclaimTmpDirectories)(loopTmpReclaimOptions(options.tmpRoot)));
+  const tmp = namesOnly ? null : takeTmpReclaim(() => (options.tmpPass ?? reclaimTmpDirectories)(loopTmpReclaimOptions(options.tmpRoot)));
   if (tmp) {
     report.tmp = { removed: tmp.removed.length, bytes: tmp.bytes };
     report.errors.push(...tmp.errors.map(error => `Tmp reclaim: ${error}`));
@@ -707,7 +927,13 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   // A finished pass is recorded as the latest even when it removed nothing, so status never shows an old count as current.
   const tmpLatest = tmp ? { removed: tmp.removed.length, at: report.at } : file.tmpLatest ?? null;
   if (took || tmp || JSON.stringify(seen) !== JSON.stringify(file.seen)) {
-    try { await atomicPrivateWrite(resourceReportFile(root), { version: 1, reports: (took ? [...file.reports, report] : file.reports).slice(-retainedReports), seen, tmpLatest }); }
+    try {
+      await withReclaimLock(root, async () => {
+        const fresh = await readReclaimFile(root);
+        const merged = mergeReclaimSeen(fresh.seen, file.seen, seen, key => !namesOnly || !key.startsWith('missing:'));
+        await atomicPrivateWrite(resourceReportFile(root), { version: 1, reports: (took ? [...fresh.reports, report] : fresh.reports).slice(-retainedReports), seen: merged, tmpLatest: tmp ? tmpLatest : fresh.tmpLatest ?? null });
+      });
+    }
     catch (error) { report.errors.push(`Recording the reclaim: ${error instanceof Error ? error.message : String(error)}`); }
   }
   return report;
@@ -844,9 +1070,12 @@ const budgetCache = new WeakMap<object, { at: number; reading: PlaneReading }>()
 const minimumInstallationLimit = 5000;
 /**
  * The App installation's core budget, read at most once a minute; `/rate_limit` costs nothing
- * against it. The client pauses every request once a rate limit refuses one (src/github.ts), and
- * only a rate limit pauses it, so a live pause is the budget spent: it reads as used to its bound
- * until the pause ends, and no request is made while it lasts.
+ * against it. The client pauses every request once a rate limit refuses one (src/github.ts) until
+ * the reset GitHub reported: that pause is the remediation under way, healing itself at the reset,
+ * and the observation class already counts it once. No request is made while it lasts, so its
+ * usage is unread rather than fabricated at the bound (GY-1278): the reading names the pause and
+ * its reset, faults nothing and leaves the plane healthy. Once the pause ends the real read
+ * resumes, and a budget still spent then reads exhausted as before.
  */
 export async function readGitHubBudget(github: object | null, now = Date.now()): Promise<PlaneReading | null> {
   if (!github) return null;
@@ -855,7 +1084,7 @@ export async function readGitHubBudget(github: object | null, now = Date.now()):
     const until = client.blockedUntil ?? 0;
     if (until <= now) return null;
     const bound = budgetCache.get(github)?.reading.bound ?? minimumInstallationLimit;
-    return { used: bound, bound, detail: `the GitHub client paused every request until ${new Date(until).toISOString()} after a rate-limit refusal; the budget is spent until then` };
+    return { used: null, bound, detail: `the GitHub client paused every request until ${new Date(until).toISOString()} after a rate-limit refusal; the budget is read again once the pause ends at that reset` };
   };
   const pause = paused();
   if (pause) return pause;
@@ -902,4 +1131,90 @@ export async function dispatchRefusal(url: string, fetcher: typeof fetch = fetch
     if (response.ok && body.healthy !== false) return null;
     return `the control plane reports itself unhealthy (${(body.causes ?? [`HTTP ${response.status}`]).join('; ')}), so nothing is dispatched into a plane that cannot record the result`;
   } catch (error) { return `the control plane's /healthz could not be read (${error instanceof Error ? error.message : String(error)}), so nothing is dispatched into a plane that may not record the result`; }
+}
+
+/**
+ * Host memory (GY-612). The loop launched sessions whatever the host had left: on 26 September 2026
+ * a 62 GB host fell to one or two gigabytes available with nineteen verification runs live, and
+ * agent runtimes were reaped mid-session. Before any worker, reviewer or producer launch the loop
+ * reads the host's available memory; below the floor — 10% of total or 4 GB, whichever is larger —
+ * it defers new launches on that host with the reason recorded, raises one `resources` attention
+ * item naming the top memory consumers, and resumes launching once memory is back above the floor.
+ * Sessions already running are never stopped for it.
+ */
+export interface MemoryConsumer { command: string; processes: number; rssBytes: number }
+export interface HostMemoryReading { totalBytes: number; availableBytes: number; consumers?: MemoryConsumer[] }
+export interface HostMemoryState { host: string | null; at: string; totalBytes: number; availableBytes: number; floorBytes: number; low: boolean; since: string | null; consumers: MemoryConsumer[] }
+/** A deferral lifts only this far above the floor, so a host hovering at it does not flap launches. */
+export const memoryFloorShare = 0.1, memoryFloorMinimumBytes = 4 * 2 ** 30, memoryRecoveryMarginBytes = 2 ** 30;
+export const hostMemoryFloor = (totalBytes: number) => Math.max(totalBytes * memoryFloorShare, memoryFloorMinimumBytes);
+const gib = (bytes: number) => `${(bytes / 2 ** 30).toFixed(1)} GB`;
+
+/** The largest resident-memory users on the host, summed by command name. */
+export function memoryConsumers(listing: string, limit = 5): MemoryConsumer[] {
+  const byCommand = new Map<string, MemoryConsumer>();
+  for (const line of listing.split('\n')) {
+    const match = /^\s*(\d+)\s+(.+?)\s*$/.exec(line);
+    if (!match) continue;
+    const entry = byCommand.get(match[2]) ?? { command: match[2], processes: 0, rssBytes: 0 };
+    entry.processes++; entry.rssBytes += Number(match[1]) * 1024;
+    byCommand.set(match[2], entry);
+  }
+  return [...byCommand.values()].sort((a, b) => b.rssBytes - a.rssBytes).slice(0, limit);
+}
+
+/** The variable the suite's runner sets on the runs it starts (tests/helpers/run-tests.ts, value `unreadable`): a run so marked reads nothing, so a busy host's real memory cannot flip launch behaviour inside tests that stub no reading of their own. Production never sets it. */
+export const hostMemoryVariable = 'GRAPHYARD_HOST_MEMORY';
+
+/** This host's memory from /proc/meminfo, with its top consumers when it is below the floor; null where it cannot be read. */
+export async function readHostMemory(): Promise<HostMemoryReading | null> {
+  if (process.env[hostMemoryVariable] === 'unreadable') return null;
+  let meminfo: string;
+  try { meminfo = await readFile('/proc/meminfo', 'utf8'); } catch { return null; }
+  const field = (name: string) => { const match = new RegExp(`^${name}:\\s+(\\d+) kB`, 'm').exec(meminfo); return match ? Number(match[1]) * 1024 : null; };
+  const totalBytes = field('MemTotal'), availableBytes = field('MemAvailable');
+  if (totalBytes === null || availableBytes === null) return null;
+  if (availableBytes >= hostMemoryFloor(totalBytes)) return { totalBytes, availableBytes };
+  let listing = '';
+  try { listing = await runChild('ps', ['-eo', 'rss=,comm='], { timeoutMs: 5_000 }); } catch { /* the deferral stands without its consumers */ }
+  return { totalBytes, availableBytes, consumers: memoryConsumers(listing) };
+}
+
+const describeConsumers = (consumers: MemoryConsumer[]) => consumers.map(entry => `${entry.command}${entry.processes > 1 ? ` ×${entry.processes}` : ''} ${gib(entry.rssBytes)}`).join(', ');
+/** Why launches wait on this host, while its memory is below the floor. */
+export const memoryDeferral = (state: HostMemoryState) =>
+  `host ${state.host ?? 'this host'} has ${gib(state.availableBytes)} of ${gib(state.totalBytes)} memory available, below its ${gib(state.floorBytes)} floor, so new session launches on it are deferred until memory recovers${state.consumers.length ? `; top consumers: ${describeConsumers(state.consumers)}` : ''}`;
+
+/**
+ * Judge one reading against the last: the state the loop keeps, and the event to record when the
+ * host crossed its floor — `deferred` on the way down, `resumed` once back above it by the margin.
+ */
+export function judgeHostMemory(previous: HostMemoryState | null, reading: HostMemoryReading, now: number, host: string | null = null): { state: HostMemoryState; event: 'deferred' | 'resumed' | null; detail: string } {
+  const floorBytes = hostMemoryFloor(reading.totalBytes), at = new Date(now).toISOString();
+  const low = reading.availableBytes < floorBytes + (previous?.low ? memoryRecoveryMarginBytes : 0);
+  const state: HostMemoryState = { host, at, totalBytes: reading.totalBytes, availableBytes: reading.availableBytes, floorBytes, low,
+    since: low ? previous?.low ? previous.since : at : null, consumers: low ? reading.consumers ?? previous?.consumers ?? [] : [] };
+  if (low && !previous?.low) return { state, event: 'deferred', detail: `Launches deferred: ${memoryDeferral(state)}` };
+  if (!low && previous?.low) return { state, event: 'resumed', detail: `Launches resumed: host ${host ?? 'this host'} has ${gib(reading.availableBytes)} of ${gib(reading.totalBytes)} memory available again, above its ${gib(floorBytes)} floor (deferred since ${previous.since})` };
+  return { state, event: null, detail: low ? `Launches deferred: ${memoryDeferral(state)}` : '' };
+}
+
+/** The one `resources` attention item a host below its memory floor raises, naming its top consumers. */
+export function hostMemoryAttention(state: HostMemoryState | null | undefined): AttentionItem[] {
+  if (!state?.low) return [];
+  return [{ subject: 'memory', text: `${memoryDeferral(state)}. Deferred since ${state.since}`,
+    ...agentOwner('master', 'Let running verification finish or stop what holds the memory named here; master run resumes launches on its own once available memory is back above the floor, and GRAPHYARD_VERIFICATION_SLOTS on the host lowers how many full suites and type checks run at once') }];
+}
+
+/** Host memory rides the loop's cursor: `master status` judges it only while the loop runs. */
+export function loopMemoryAttention(cycling: { running: boolean; memory?: HostMemoryState | null } | null): AttentionItem[] {
+  return cycling?.running ? hostMemoryAttention(cycling.memory) : [];
+}
+
+/** Why no session may be launched on `host` now, or null: an executor's `launchHold` (GY-612). */
+export async function hostMemoryHold(host: string | null, read: () => Promise<HostMemoryReading | null> = readHostMemory, now: () => number = Date.now): Promise<string | null> {
+  const reading = await read();
+  if (!reading) return null;
+  const { state } = judgeHostMemory(null, reading, now(), host);
+  return state.low ? memoryDeferral(state) : null;
 }

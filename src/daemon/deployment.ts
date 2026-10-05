@@ -4,7 +4,7 @@ import { productionEnvironmentFromEnv } from '../flow-analytics.js';
 import type { ChildRun } from '../child-runner.js';
 import type { Work } from '../model.js';
 import type { MasterConfig } from '../master.js';
-import { boundDeployment, type ContainmentRetention, type DeploymentObservation, deploymentObservationSchema, message, retainedContainments } from './state.js';
+import { boundDeployment, type ContainmentRetention, type DeploymentObservation, deploymentObservationSchema, message, type PromotionState, retainedContainments } from './state.js';
 
 export function deploymentDetail(observation: DeploymentObservation) {
   if (observation.source === 'unavailable') return `Deployment SHA is unverified: ${observation.reason ?? 'no deployment observation is configured or available'}`;
@@ -87,8 +87,24 @@ export const productionEnvironmentRecord = (environment: unknown, production: st
 
 /** GitHub's node ids are opaque base64-like tokens; anything else is not sent inside a query. */
 const deploymentNodeId = /^[A-Za-z0-9_=-]{1,200}$/;
-/** How many of a deployment's statuses the batched read asks for, to tell whether it ever reached success. */
-const deploymentStatusHistory = 20;
+/**
+ * How many of a deployment's statuses the batched read asks for at each end of its history, to tell
+ * whether it ever reached success: the earliest and the latest, GitHub's connection maximum each, so
+ * the success is seen whichever order the connection lists them in and however many statuses were
+ * added after it. Only a deployment with more than twice this many statuses, its success in the
+ * middle, is unseen, and that one fails closed.
+ */
+const deploymentStatusHistory = 100;
+/** States of a deployment still on its way: it does not serve yet, so it supersedes nothing. */
+const inFlightStates = new Set(['pending', 'queued', 'in_progress', 'waiting']);
+/**
+ * How long a deployment may stay in flight and still not supersede the release behind it. A
+ * deployment that never concludes — abandoned, or a `waiting` one held by a protection rule nobody
+ * approves, or one with no status at all, which reads as `pending` — would otherwise keep an older
+ * inactive release asserted as served indefinitely. Past this age, from its `created_at`, it counts
+ * as a newer production record like any other; one whose age cannot be read never shadows.
+ */
+export const inFlightShadowBound = 60 * 60_000;
 /**
  * The latest status of each listed deployment, in listing order, in one GraphQL read: the REST API
  * has only a per-deployment status listing. A deployment whose status could not be read has no
@@ -102,7 +118,7 @@ async function deploymentStates(repository: string, deployments: any[], run: Chi
   if (!readable.length) return { states: [], succeeded: [], failure: 'GitHub listed it without a node id' };
   let nodes: any[];
   try {
-    const query = `query { nodes(ids: ${JSON.stringify(readable)}) { ... on Deployment { databaseId latestStatus { state } statuses(first: ${deploymentStatusHistory}) { nodes { state } } } } }`;
+    const query = `query { nodes(ids: ${JSON.stringify(readable)}) { ... on Deployment { databaseId latestStatus { state } statuses(first: ${deploymentStatusHistory}) { nodes { state } } recent: statuses(last: ${deploymentStatusHistory}) { nodes { state } } } } }`;
     const answer = JSON.parse(await run('gh', ['api', 'graphql', '-f', `query=${query}`]));
     nodes = Array.isArray(answer?.data?.nodes) ? answer.data.nodes : [];
   } catch (error) { return { states: [], succeeded: [], failure: message(error) }; }
@@ -115,9 +131,16 @@ async function deploymentStates(repository: string, deployments: any[], run: Chi
   return {
     failure: null,
     states: answers.map(node => node === undefined ? undefined : typeof node.latestStatus?.state === 'string' ? node.latestStatus.state.toLowerCase() : 'pending'),
-    succeeded: answers.map(node => Array.isArray(node?.statuses?.nodes) && node.statuses.nodes.some((status: any) => typeof status?.state === 'string' && status.state.toLowerCase() === 'success')),
+    succeeded: answers.map(node => [node?.statuses?.nodes, node?.recent?.nodes].some(history => Array.isArray(history)
+      && history.some((status: any) => typeof status?.state === 'string' && status.state.toLowerCase() === 'success'))),
   };
 }
+
+/** How long ago a listed deployment was created; never within the bound when GitHub gave no readable time. */
+const inFlightAge = (deployment: any, at: number) => {
+  const created = typeof deployment?.created_at === 'string' ? Date.parse(deployment.created_at) : Number.NaN;
+  return Number.isFinite(created) ? at - created : Number.POSITIVE_INFINITY;
+};
 
 export async function observeDeployment(config: MasterConfig, delivered: Work[], run: ChildRun, fetcher: typeof fetch = fetch, now = () => Date.now(),
   options: { root: string; retained?: ContainmentRetention | null }): Promise<DeploymentObservation> {
@@ -151,8 +174,9 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
     // Whether a production deployment newer than the one being read has been listed: a release
     // Railway marked inactive is served only while nothing newer was deployed to production.
     let newerProduction = false;
-    // Environments named like production under another identity, reported when no release is found
-    // so an unconfigured Railway installation is told the name to configure rather than left pending.
+    // Environments named like production under another identity, reported when the production
+    // environment records nothing so an unconfigured Railway installation is told the name to
+    // configure rather than left pending. Only the unfiltered page below can list them.
     const namesake = new Set<string>();
     for (let page = 1; page <= deploymentListingPages && !sha && !exhausted; page++) {
       let deployments: any[];
@@ -174,10 +198,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
         // The base branch and its commits are deployed to staging and previews as readily as to
         // production, whether the ref names the branch or the commit; only the production
         // environment's record says what production serves.
-        if (!productionEnvironmentRecord(deployment?.environment, production)) {
-          if (typeof deployment?.environment === 'string' && deployment.environment.endsWith(` / ${production}`) && namesake.size < 5) namesake.add(deployment.environment);
-          continue;
-        }
+        if (!productionEnvironmentRecord(deployment?.environment, production)) continue;
         // A release is the base branch or a commit on it; another branch's deployment is not.
         const ref = typeof deployment?.ref === 'string' ? deployment.ref : null;
         let candidate = true;
@@ -199,6 +220,11 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
       // GitHub deactivates it when a newer deployment succeeds. Behind any newer production record
       // — a successful one, a failed attempt, one whose status is unread or not a release — an
       // inactive deployment is never taken, so a superseded or rolled-back release is not served.
+      // A newer release still pending, queued, in progress or waiting is the exception: production
+      // keeps serving the release until it concludes, so a deploy window leaves no delivery pending.
+      // The exception lasts `inFlightShadowBound` from the deployment's creation, so one that never
+      // concludes stops shadowing the supersession. A newer record that is not a release is not
+      // read, so it supersedes whatever its state: conservative, the delivery only stays pending.
       for (const { deployment, candidate } of records) {
         if (candidate) {
           const index = candidates.indexOf(deployment);
@@ -209,6 +235,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
             if (state === 'inactive') inactive = `${production} deployment ${deployment.id} reached success and was later marked inactive with no newer ${production} deployment, so it is the release production serves`;
             break;
           }
+          if (inFlightStates.has(state) && inFlightAge(deployment, now()) <= inFlightShadowBound) continue;
         }
         newerProduction = true;
       }
@@ -258,4 +285,125 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
   const reasons = [inactive, stale ? `Containment was derived without a fresh base branch: ${stale}` : null].filter(Boolean);
   return deploymentObservationSchema.parse({ source, sha, at, reason: reasons.length ? reasons.join('; ') : null, deployed: deployed.slice(-200), pending: pending.slice(-200),
     requests, derived, retained: retainedCount, containment: { release: sha, settled: Object.fromEntries(keep) } });
+}
+
+// ——— Promotion (GY-1302): the loop, not GitHub's cron, moves production along. ———
+
+/** The workflow the loop dispatches with `promote=true`: it cuts main's tip, validates it in UAT, then promotes it. */
+export const promotionWorkflow = 'release-candidate.yml';
+/** How often, at most, the loop dispatches a promotion when main has moved; `run.promoteEveryMinutes`, 0 turns it off. */
+export const defaultPromoteEveryMinutes = 120;
+/** How long a read of the workflow's runs is reused, so a candidate in UAT for hours costs one GitHub request a minute, not one a cycle. */
+export const promotionRunsReadMs = 60_000;
+/**
+ * How long a read of the base branch tip and the last promotion record is reused. That read fetches
+ * from the remote, so it runs once in this window rather than every cycle (at the default 20-second
+ * interval, that would be about 4,300 fetches a day). A promotion waits at most this long for a move
+ * of main, and `behind` in `master status` is at most this old.
+ */
+export const promotionLedgerReadMs = 5 * 60_000;
+/** Run states of a release candidate still being cut or validated. */
+const runningStates = new Set(['queued', 'in_progress', 'waiting', 'pending', 'requested']);
+
+export interface PromotionLedger { mainSha: string | null; promotedSha: string | null; promotedAt: string | null; behind: number | null }
+/** One run of the release-candidate workflow as `gh run list --json status,createdAt,event` lists it. */
+export interface PromotionRun { status: string; createdAt: string; event: string }
+export interface PromotionReads {
+  /** The base branch's tip, the newest `rc-production/` record and the first-parent merges between them. */
+  ledger: () => Promise<PromotionLedger>;
+  /** The workflow's recent runs, newest first. */
+  runs: () => Promise<PromotionRun[]>;
+  dispatch: () => Promise<void>;
+}
+
+const later = (...times: (string | null | undefined)[]) => times.filter((time): time is string => !!time && Number.isFinite(Date.parse(time)))
+  .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null;
+
+/**
+ * One cycle of the promotion drive. The workflow is dispatched with `promote=true` exactly when the
+ * base branch differs from the last promoted SHA, no release candidate is in validation, and
+ * `everyMinutes` have passed since the last dispatch — the loop's own or a run GitHub lists (a
+ * scheduled run that does fire counts too, so the cadence never doubles). Runs a pushed `rc-*` tag
+ * starts validate one pinned commit and promote nothing, so they never hold a promotion back.
+ *
+ * It never throws. A failed read or dispatch comes back as `failure` with the cycle's stamps kept:
+ * a failed ledger read waits out `promotionLedgerReadMs` and a failed run read `promotionRunsReadMs`
+ * like a successful one, and a dispatch attempt is stamped before it is made, so a dispatch that
+ * fails (or that GitHub accepted before `gh` failed) counts toward the interval and is never
+ * repeated cycle after cycle.
+ */
+export async function promotionCycle(previous: PromotionState | null, reads: PromotionReads, options: { now: number; everyMinutes: number }): Promise<{ state: PromotionState; dispatched: boolean; failure: string | null }> {
+  const at = new Date(options.now).toISOString(), everyMs = options.everyMinutes * 60_000;
+  const settle = (state: Omit<PromotionState, 'nextDueAt' | 'reason'>, reason: string, due: boolean) => ({ ...state, reason: reason.slice(0, 500),
+    nextDueAt: due && state.lastDispatchAt ? new Date(Math.max(options.now, Date.parse(state.lastDispatchAt) + everyMs)).toISOString() : due ? at : null });
+  const done = (state: Omit<PromotionState, 'nextDueAt' | 'reason'>, reason: string, due: boolean, dispatched = false) => ({ state: settle(state, reason, due), dispatched, failure: null });
+  const failed = (state: Omit<PromotionState, 'nextDueAt' | 'reason'>, failure: string) => ({ state: settle(state, failure, true), dispatched: false, failure });
+  const kept = { mainSha: previous?.mainSha ?? null, promotedSha: previous?.promotedSha ?? null, promotedAt: previous?.promotedAt ?? null, behind: previous?.behind ?? null, ledgerReadAt: previous?.ledgerReadAt ?? null };
+  const carried = { inFlight: previous?.inFlight ?? false, runsReadAt: previous?.runsReadAt ?? null, dispatchedAt: previous?.dispatchedAt ?? null, lastDispatchAt: previous?.lastDispatchAt ?? null };
+  // Off reads nothing at all: no fetch, no GitHub request.
+  if (options.everyMinutes <= 0) return done({ checkedAt: at, ...kept, ...carried }, 'Promotion by the loop is off (run.promoteEveryMinutes is 0)', false);
+  let ledger = kept;
+  if (!kept.ledgerReadAt || options.now - Date.parse(kept.ledgerReadAt) >= promotionLedgerReadMs) {
+    try { ledger = { ...await reads.ledger(), ledgerReadAt: at }; } catch (error) {
+      return failed({ checkedAt: at, ...kept, ledgerReadAt: at, ...carried }, `The base branch and the promotion record could not be read: ${message(error)}`);
+    }
+  }
+  const base = { checkedAt: at, ...ledger, ...carried };
+  if (!ledger.mainSha) return done(base, 'The base branch tip could not be read, so nothing is promoted', false);
+  if (ledger.mainSha === ledger.promotedSha) return done(base, 'Production runs the base branch tip; nothing to promote', false);
+  const sinceLast = base.lastDispatchAt ? options.now - Date.parse(base.lastDispatchAt) : Number.POSITIVE_INFINITY;
+  if (sinceLast < everyMs) return done(base, `The last promotion was dispatched ${Math.round(sinceLast / 60_000)} minute(s) ago; the next is due ${options.everyMinutes} minute(s) after it`, true);
+  let state = base;
+  if (!base.runsReadAt || options.now - Date.parse(base.runsReadAt) >= promotionRunsReadMs) {
+    let listed: PromotionRun[];
+    try { listed = await reads.runs(); } catch (error) {
+      return failed({ ...base, runsReadAt: at }, `The ${promotionWorkflow} runs could not be read: ${message(error)}`);
+    }
+    const cuts = listed.filter(run => run.event === 'workflow_dispatch' || run.event === 'schedule');
+    state = { ...base, runsReadAt: at, inFlight: cuts.some(run => runningStates.has(run.status)), lastDispatchAt: later(base.dispatchedAt, ...cuts.map(run => run.createdAt)) };
+    const since = state.lastDispatchAt ? options.now - Date.parse(state.lastDispatchAt) : Number.POSITIVE_INFINITY;
+    if (since < everyMs) return done(state, `A release candidate was started ${Math.round(since / 60_000)} minute(s) ago; the next promotion is due ${options.everyMinutes} minute(s) after it`, true);
+  }
+  if (state.inFlight) return done(state, 'A release candidate is still in validation; the next promotion waits for it to conclude', true);
+  // The attempt is stamped before it is made: whatever the dispatch's outcome, the next is due an interval later.
+  const attempted = { ...state, dispatchedAt: at, lastDispatchAt: at, runsReadAt: at };
+  try { await reads.dispatch(); } catch (error) {
+    return failed(attempted, `Dispatching ${promotionWorkflow} with promote=true failed; the next attempt is due ${options.everyMinutes} minute(s) after this one: ${message(error)}`);
+  }
+  return done({ ...attempted, inFlight: true }, `Dispatched ${promotionWorkflow} with promote=true to carry ${ledger.mainSha.slice(0, 12)} to production`, true, true);
+}
+
+/** What `master status` reports of the promotion drive: the last promoted SHA, how far production is behind, and when the next promotion is due. */
+export function promotionStatus(state: PromotionState | null | undefined) {
+  if (!state) return { lastPromotedSha: null, promotedAt: null, behind: null, nextDueAt: null, inFlight: false, checkedAt: null, reason: 'The loop has not checked promotion yet' };
+  return { lastPromotedSha: state.promotedSha, promotedAt: state.promotedAt, behind: state.behind, nextDueAt: state.nextDueAt, inFlight: state.inFlight, checkedAt: state.checkedAt, reason: state.reason };
+}
+
+/** The promotion reads over the managed checkout and GitHub; null when the repository has no release-candidate workflow to dispatch. */
+export function promotionReads(config: MasterConfig, root: string, run: ChildRun, workflowExists: boolean): PromotionReads | null {
+  if (!workflowExists) return null;
+  const git = (...args: string[]) => run('git', ['-C', root, ...args]);
+  return {
+    ledger: async () => {
+      await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`, '+refs/tags/rc-production/*:refs/tags/rc-production/*');
+      const mainSha = (await git('rev-parse', `refs/remotes/origin/${config.baseBranch}^{commit}`)).trim().toLowerCase() || null;
+      let promotedSha: string | null = null, promotedAt: string | null = null;
+      try {
+        const record = JSON.parse((await git('for-each-ref', '--sort=-refname', '--count=1', '--format=%(contents)', 'refs/tags/rc-production/')).trim());
+        promotedSha = typeof record?.sha === 'string' ? record.sha.toLowerCase() : null;
+        promotedAt = typeof record?.at === 'string' ? record.at : null;
+      } catch { /* no production record yet */ }
+      let behind: number | null = null;
+      if (mainSha && promotedSha) {
+        try { behind = Number((await git('rev-list', '--first-parent', '--count', `${promotedSha}..${mainSha}`)).trim()); } catch { behind = null; }
+        if (!Number.isInteger(behind)) behind = null;
+      }
+      return { mainSha, promotedSha, promotedAt, behind };
+    },
+    runs: async () => {
+      const listed = JSON.parse(await run('gh', ['run', 'list', '--repo', config.repository, '--workflow', promotionWorkflow, '--limit', '50', '--json', 'status,createdAt,event']));
+      return Array.isArray(listed) ? listed.filter(entry => typeof entry?.status === 'string' && typeof entry?.createdAt === 'string' && typeof entry?.event === 'string') : [];
+    },
+    dispatch: async () => { await run('gh', ['workflow', 'run', promotionWorkflow, '--repo', config.repository, '--ref', config.baseBranch, '-f', 'promote=true']); },
+  };
 }

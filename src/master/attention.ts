@@ -1,5 +1,6 @@
 // Concern: who owns each attention item, control-plane attention, fleet and production summaries.
 import { environmentBlocked, blockedPath } from '../worker-sandbox.js';
+import { blockerView } from '../model/blocker-class.js';
 import { humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { automatableProof } from '../model/mechanical-proofs.js';
 import { type Work, standingEscalations } from '../model.js';
@@ -32,20 +33,28 @@ export interface ControlPlaneStatus {
  * and `humanOnly` then names which of those decisions it is.
  */
 export interface AttentionOwner { role: 'master' | 'reviewer' | 'control plane' | 'human'; approvedBy: 'approver' | null; human: boolean; humanOnly: typeof humanOnlyDecisions[number] | null; next: string }
-/** An attention item carries its fault kind and class (GY-173); a builder that sets neither is classified by its wording. */
-export interface AttentionItem extends AttentionOwner { subject: string; text: string; kind?: FaultKind; faultClass?: FaultClass }
+/**
+ * An attention item carries its fault kind and class (GY-173); a builder that sets neither is classified by its wording.
+ * `resource` names the registered resource a symptom was attributed to (GY-1272), so the loop tracks it as that resource's fault.
+ */
+export interface AttentionItem extends AttentionOwner { subject: string; text: string; kind?: FaultKind; faultClass?: FaultClass; resource?: string }
 export const agentOwner = (role: 'master' | 'reviewer' | 'control plane', next: string, approvedBy: 'approver' | null = null): AttentionOwner => ({ role, approvedBy, human: false, humanOnly: null, next });
 export const humanOwner = (humanOnly: typeof humanOnlyDecisions[number], next: string): AttentionOwner => ({ role: 'human', approvedBy: null, human: true, humanOnly, next });
 /** The sources of installation attention; each is also its fault kind. */
 export const installationSources = ['app-permissions', 'held-jobs', 'delegation-limits', 'production'] as const;
 /** The owner of one installation attention line, by the source that raised it. */
-export function installationOwner(source: typeof installationSources[number], text: string): AttentionOwner {
+export function installationOwner(source: typeof installationSources[number], text: string, productionBranch: string | null = null): AttentionOwner {
   // Reinstating a suspended App installation is an account decision on the operator's GitHub account.
   if (source === 'app-permissions') return /suspended/i.test(text) ? humanOwner('spending money or opening third-party accounts', 'Reinstate the suspended GitHub App installation from the account that owns it')
     : agentOwner('master', 'graphyard master browser app-permissions, then graphyard master browser installation-accept');
   if (source === 'held-jobs') return agentOwner('control plane', 'Nothing to run: held jobs resume once graphyard master browser installation-accept grants the permission');
   if (source === 'delegation-limits') { const assignment = /Set (\S+=\S+)/.exec(text)?.[1]; return agentOwner('master', assignment ? `Set ${assignment} on the deployment (Railway: railway variables --set ${assignment} --service graphyard), then redeploy` : 'Set the named capacity variable on the deployment, then redeploy'); }
-  return agentOwner('master', 'Fix or trigger the deployment of the base branch with the configured provider, then graphyard master verify-deployment GY-N for each pending delivery');
+  // Production may track a release branch only `graphyard release promote` moves: the fix is the
+  // deployment of what production tracks, never a deploy of main past the release gates (GY-1207).
+  // The branch is the one the watch reported (GRAPHYARD_PRODUCTION_BRANCH when set), never a fixed name (GY-1256).
+  return agentOwner('master', productionBranch
+    ? `Fix the failing deployment of ${productionBranch}, the branch production tracks, with the configured provider, never deploying main past graphyard release; then graphyard master verify-deployment GY-N for each pending delivery`
+    : 'Fix the failing deployment of the base branch, which production tracks, with the configured provider; then graphyard master verify-deployment GY-N for each pending delivery');
 }
 /** Why a work item raises attention; each cause is also its fault kind. */
 export const workAttentionCauses = ['human-request', 'containment-settleable', 'containment-grace', 'containment', 'session', 'proof-gap', 'reviewer-exhausted', 'launch-review', 'launch-producer',
@@ -111,6 +120,11 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause): Atten
   if (cause === 'launch-producer') return agentOwner('master', 'Fix the refusal reason (graphyard master producer add FILE for a missing profile); the loop relaunches the producer on its own');
   const escalation = standingEscalations(work)[0];
   if (escalation) return agentOwner('master', `graphyard master decide ${key} resolve '{"trigger":"${escalation.trigger}"}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
+  // A blocker of a routine class is the loop's to clear (GY-1008): it probes the cause every cycle.
+  const blocker = blockerView(work);
+  // A sandbox refusal the probe keeps failing on is the launcher's grant to fix (GY-134); the loop clears it once the grant lands.
+  const grant = environmentBlocked(work.blocker) ? `; while it fails, grant ${blockedPath(work.blocker!) ?? 'the refused path'} to the worker's sandbox (docs/master-agent-sessions.md "Worker sandbox")` : '; nothing to run by hand';
+  if (blocker && !blocker.needsSomeone) return agentOwner('control plane', `The loop re-checks the ${blocker.class} blocker every cycle and clears it once the probe passes${blocker.lastProbe ? ` (last probe ${blocker.lastProbe.at}: ${blocker.lastProbe.result})` : ''}${grant}`);
   // A required command the worker's sandbox refused is the launcher's to fix, never the item's (GY-134).
   if (environmentBlocked(work.blocker)) return agentOwner('master', `Grant ${blockedPath(work.blocker!) ?? 'the refused path'} to the worker's sandbox (docs/master-agent-sessions.md "Worker sandbox"), then graphyard master unblock ${key} REASON and dispatch it again`);
   // The owner follows the refusal the row shows: the first failing gate, then a bare blocker.
@@ -119,7 +133,7 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause): Atten
   if (manual && driven && automatableProof(work, manual)) return agentOwner('control plane', `The loop's producer session produces ${manual} on the exact head; once the loop stops relaunching its request, graphyard master decide ${key} attest '{"proof":"${manual}"}' REASON, then graphyard master approver ${key} DECISION`);
   if (manual) return agentOwner('master', `graphyard master decide ${key} attest '{"proof":"${manual}"}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
   if (first?.name === 'review') return agentOwner('reviewer', driven ? `The reviewer session judges it; ${reviewNext}` : `The reviewer session judges it; graphyard master review ${key} relaunches a refused review`);
-  if (first?.name === 'merge' && work.stage === 'merge') return agentOwner('master', driven ? `Nothing to run by hand: the loop's merge step performs the guarded merge of ${key} once its authorization is current` : `graphyard master merge ${key}`);
+  if (first?.name === 'merge' && work.stage === 'merge') return agentOwner('master', `Nothing to run by hand: GitHub merges ${key} once its merge gate passes`);
   if (work.blocker) return agentOwner('master', `Clear the cause, then graphyard master unblock ${key} REASON; a cause that needs money, a third-party account or a person's credential goes to the human`);
   return agentOwner('master', `graphyard diagnose ${key}`);
 }
@@ -132,7 +146,7 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause): Atten
 export function controlPlaneAttention(status: ControlPlaneStatus | undefined) {
   const report = status?.appPermissions;
   const items: AttentionItem[] = [];
-  const raise = (source: Parameters<typeof installationOwner>[0], text: string) => items.push({ subject: 'installation', text, ...installationOwner(source, text), ...classified(source) });
+  const raise = (source: Parameters<typeof installationOwner>[0], text: string) => items.push({ subject: 'installation', text, ...installationOwner(source, text, source === 'production' ? status?.production?.release?.branch ?? null : null), ...classified(source) });
   for (const text of report?.attention ?? []) raise('app-permissions', text);
   if (status?.heldJobs) raise('held-jobs', `${status.heldJobs} integration job${status.heldJobs === 1 ? ' is' : 's are'} held on that permission shortfall rather than retried; they resume on their own once the installation reports the permission`);
   for (const text of status?.delegationLimits?.attention ?? []) raise('delegation-limits', text);
@@ -182,9 +196,13 @@ export function fleetStatus(fleet: FleetView | null | undefined) {
 export function productionSummary(report: Partial<ProductionReport>) {
   const incidents = (report.incidents ?? []).map(incident => ({ key: incident.key, mergeSha: incident.mergeSha, status: incident.status, reason: incident.reason, deploymentId: incident.deploymentId ?? null, since: incident.since }));
   const ahead = report.ahead ?? null;
-  const summary = ahead ? ahead.by === 0 ? 'production serves the base branch tip' : `main is ${ahead.by} commit${ahead.by === 1 ? '' : 's'} ahead of production` : report.aheadError ?? 'production lag is unknown';
-  return { provider: report.provider ?? null, observedAt: report.observedAt ?? null, serving: report.serving ?? null, running: report.running ?? null, aheadBy: ahead?.by ?? null, aheadCommits: ahead?.commits ?? [], summary,
+  const release = report.release ?? null;
+  const awaiting = release && typeof release.unreleased === 'number' ? `; main is ${release.unreleased} commit${release.unreleased === 1 ? '' : 's'} ahead of it, awaiting the next release` : '';
+  const summary = release ? (ahead?.by === 0 ? `production serves ${release.branch}${awaiting}` : ahead ? `${release.branch} is ${ahead.by} commit${ahead.by === 1 ? '' : 's'} ahead of production${awaiting}` : `${report.aheadError ?? 'production lag is unknown'}${awaiting}`)
+    : ahead ? ahead.by === 0 ? 'production serves the base branch tip' : `main is ${ahead.by} commit${ahead.by === 1 ? '' : 's'} ahead of production${ahead.rollingOut ? `; rollout in flight since ${ahead.unservedSince}` : ''}` : report.aheadError ?? 'production lag is unknown';
+  return { provider: report.provider ?? null, observedAt: report.observedAt ?? null, serving: report.serving ?? null, running: report.running ?? null, aheadBy: ahead?.by ?? null, aheadCommits: ahead?.commits ?? [], release, summary,
+    unservedSince: ahead?.unservedSince ?? null, rollingOut: ahead?.rollingOut ?? false,
     latestDeployment: report.latest ? { id: report.latest.id, status: report.latest.providerStatus, commit: report.latest.commit, createdAt: report.latest.createdAt, url: report.latest.url ?? null } : null,
     deployed: report.deployed ?? [], pending: report.pending ?? [], incidents, error: report.error ?? null,
-    attention: attentionLines({ ahead, aheadError: report.aheadError ?? null, serving: report.serving ?? null, incidents: (report.incidents ?? []), error: report.error ?? null, latest: report.latest ?? null, provider: report.provider ?? null }) };
+    attention: attentionLines({ ahead, aheadError: report.aheadError ?? null, serving: report.serving ?? null, incidents: (report.incidents ?? []), error: report.error ?? null, latest: report.latest ?? null, provider: report.provider ?? null, release }) };
 }

@@ -54,16 +54,16 @@ type RoutedWatch = { work: string; action: string; decision: string; settledAt?:
  */
 export function routedScopeStatus<S extends { work: { key: string; attention: string | null; attentionOwner: AttentionOwner | null }[]; attentionItems: AttentionItem[] }>(status: S, work: readonly Work[], approvals: readonly RoutedWatch[] = [], config?: { reviewRoundCap?: number }): S {
   const judging = new Map(approvals.filter(watch => watch.action === 'requirements' && watch.scope && !watch.settledAt).map(watch => [`${watch.work}:${watch.scope!.epoch}:${watch.scope!.at}`, watch.decision]));
-  const rows = status.work.map(row => {
+  let rows = status.work.map(row => {
     const item = work.find(entry => entry.key === row.key), request = item?.scopeRequest;
     const decision = request && judging.get(`${row.key}:${request.epoch}:${request.at}`);
     if (!decision || !row.attention || request.decision?.decidedBy !== 'graphyard' || !item!.blocker?.startsWith(scopeRefusalBlocker)) return row;
     const next = `Nothing to run: the approver judges requirements decision ${decision} (graphyard master decisions ${row.key}); ${request.requestedBy} reads the outcome with scope-request ${row.key} ${request.epoch} --wait`;
     return { ...row, routedScope: next, attention: `${row.key}'s scope request for ${request.paths.join(', ')} is with the independent approver: the rule refused it and the loop routed it as requirements decision ${decision}`, attentionOwner: agentOwner('control plane', next, 'approver') };
   });
-  // `master status` also shows each item's review round against the configured cap (GY-1118).
-  if (config) withReviewRounds(rows, work, reviewRoundCapOf(config));
   const routed = new Map(rows.flatMap((row, index) => row !== status.work[index] ? [[row.key, { from: status.work[index].attention, row }]] : []));
+  // `master status` also shows each item's review round against the configured cap (GY-1118).
+  if (config) rows = withReviewRounds(rows, work, reviewRoundCapOf(config));
   return { ...status, work: rows, attentionItems: status.attentionItems.map(entry => {
     const change = routed.get(entry.subject);
     return change && entry.text === change.from ? { subject: entry.subject, text: change.row.attention!, ...change.row.attentionOwner! } : entry;
@@ -108,4 +108,24 @@ export function owedAttention(snapshot: { work: Work[]; now: string }, rows: { k
   return { rows: humanNeededActions(snapshot.work, new Date(snapshot.now)).map(row => row.source === 'action' && routed(row.key)
     ? { ...row, decision: `the independent approver's judgement of ${row.key}'s routed scope request`, resolve: routed(row.key)! } : row), items,
     counted: items.length + scopeRequests.filter(item => !rowAttention(item.subject)).length };
+}
+
+type DecisionHistoryRow = { id: string; action: string; state: string; requestedAt?: string; outcome?: string | null };
+/**
+ * GY-1294. A release decision the server settled `stale` — the item revision moved between the
+ * request and its approver's read — releases nothing, and an item in backlog shows no other sign
+ * that it waits: five diagnosed root-cause fixes sat there for 2–23 hours, each behind a stale
+ * release nobody asked for again. While the item is still in backlog and that stale release is
+ * its latest — no later release requested, approved or applied — the release is owed, and it is
+ * named so, as owed decision attention with how long it has waited, never left silent. Null for
+ * any other item.
+ */
+export function staleReleaseAttention(work: { key: string; stage: string; ready?: boolean }, decisions: readonly DecisionHistoryRow[], now: number): AttentionItem | null {
+  if (work.stage !== 'backlog' || work.ready) return null;
+  const release = decisions.filter(decision => decision.action === 'release').at(-1);
+  if (release?.state !== 'stale') return null;
+  const waited = release.requestedAt ? Math.max(0, now - Date.parse(release.requestedAt)) : 0;
+  const next = `graphyard master release ${work.key}, or graphyard master decide ${work.key} release REASON then graphyard master approver ${work.key} DECISION`;
+  return { subject: work.key, text: `${work.key} sits in backlog behind release decision ${release.id}, which went stale: ${release.outcome ?? 'the item revision moved before its approver read it'} — no executor may run it; the release of ${work.key} has been owed for ${elapsed(waited)}`,
+    ...agentOwner('master', next, 'approver') };
 }

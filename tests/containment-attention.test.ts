@@ -142,7 +142,7 @@ async function loop(work: Work, overrides: Partial<DaemonEffects> = {}, carried?
   const effects: DaemonEffects = {
     agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(entry => [entry.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: [work], now: observedAt }),
-    closeSession: paneId => { closed.push(paneId); }, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    closeSession: paneId => { closed.push(paneId); }, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: observedAt, reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
     settleContainment: async (_item, assessment) => { settled.push(assessment); },

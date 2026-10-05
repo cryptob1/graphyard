@@ -1052,11 +1052,12 @@ test('master run executes the durable loop as a supervised process and master st
     await assert.rejects(exec(process.execPath, [launcher, 'master', 'run', '--once', '--interval', '2'], { cwd: root, env }), /whole seconds between 5 and 900/);
     proofScoped = true;
     await assert.rejects(exec(process.execPath, [launcher, 'master', 'run', '--once'], { cwd: root, env }), /refuses a credential that is also allowed to produce evidence/);
-    // GY-59: a deployed server behind the CLI's merge protocol is refused as version skew by the loop and by
-    // master merge, naming both commits, and master status reports the same skew without refusing.
+    // GY-59: a deployed server behind the CLI's merge protocol is refused as version skew by the loop, naming
+    // both commits, and master status reports the same skew without refusing. master merge runs no merge since
+    // GY-1235, so it only answers that GitHub merges.
     proofScoped = false; skewed = true;
     await assert.rejects(exec(process.execPath, [launcher, 'master', 'run', '--once'], { cwd: root, env }), new RegExp(`server runs an unknown commit, CLI expects [0-9a-f]{40}: deploy main first \\(server merge protocol ${MERGE_PROTOCOL - 1}, CLI merge protocol ${MERGE_PROTOCOL}`));
-    await assert.rejects(exec(process.execPath, [launcher, 'master', 'merge', '--all'], { cwd: root, env }), /deploy main first/);
+    assert.match((await exec(process.execPath, [launcher, 'master', 'merge', '--all'], { cwd: root, env })).stdout, /GitHub merges/);
     const skewedStatus = JSON.parse((await exec(process.execPath, [launcher, 'master', 'status'], { cwd: root, env })).stdout);
     assert.match(skewedStatus.versionSkew, /deploy main first/); assert.match(skewedStatus.cli.commit, /^[0-9a-f]{40}$/);
     assert.deepEqual(skewedStatus.controlPlane.build, { commit: null, protocol: MERGE_PROTOCOL - 1 });

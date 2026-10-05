@@ -5,12 +5,14 @@ import type { Work } from '../model.js';
 import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, standingScopeRequest, statusFaults, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
 import { buildMasterStatus, diskThresholdBytes, type AttentionItem, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
+import { hostMemoryAttention } from '../master-resources.js';
 import { qualifyTimingFailures, type CheckAnnotations } from '../cli/timing-failures.js';
 import { type DaemonAction, type DaemonState, faultActionKey, message } from './state.js';
 import { readyToRetry } from './sessions.js';
 import { type DaemonEffects, record } from './effects.js';
 import { loopAttention } from './liveness.js';
 import { daemonSummary } from './run.js';
+import { baseFailureAttention } from './cycle-base-failures.js';
 import type { Cycle } from './cycle.js';
 import { budgetedPage, docsHeadroom, docsHeadroomText, docsTrimItem, docsWords, openDocsTrimItem, repositoryConfigFile, repositoryDocsBudget, type DocsHeadroom, type DocsWordBudget, type DocsWordCount } from '../model/documentation.js';
 import { agentOwner } from '../master/attention.js';
@@ -18,8 +20,10 @@ import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { diagnosisStep, standingFaultClassItem } from './diagnosis.js';
 import { candidateKey } from './reconcile.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
-import { currentRestore } from '../merge-queue.js';
+import { baseRefreshConflict, currentRestore } from '../merge-queue.js';
 import { mergeBaseDismissal } from '../merge-base-ancestry.js';
+import { containmentGraceMs, containmentPhase } from '../model/containment.js';
+import { openAction } from '../model/next-action.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
 export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[];
@@ -51,17 +55,21 @@ export interface FaultSources {
  * pause, unserved executors, no GitHub connection); and disk below its bound. Each has a stable
  * subject, so a fault that keeps standing is one instance; one that clears and returns is another.
  * The lines go through the report's own attribution first, so a symptom the report names as its
- * cause (a full ledger, a resource at its bound) is tracked as that cause alone. A derived line that
+ * cause (a full ledger, a resource at its bound) is tracked as that cause alone: a resource at its
+ * bound is one fault on its own subject, however many subjects it holds (GY-1272). A derived line that
  * restates a fault the item's own record shows (the same kind, or a kind in `restatements`) is that
  * fault, so it is not counted twice; a different fault of the same class on the item is its own
- * instance. Nor is the one-hour dwell line (`gate`) counted, which is the ordinary pace of work — a
- * gate nothing moves is `stalled-item`. Failed actions are not read here: the action history
- * retains failures long after they stopped mattering, so each is noted once, as it happens, by storeAction.
+ * instance. Nor is the one-hour dwell line (`gate`) or containment grace window (`containment-grace`) counted,
+ * nor a lapsed fence the loop is still settling (containmentInMotion), which are the ordinary pace of work — a gate nothing moves is `stalled-item`. Failed actions are not read here:
+ * the action history retains failures long after they stopped mattering, so each is noted once, as it happens, by storeAction.
  */
-export function cycleFaults(state: DaemonState, work: Work[], now: number, sources: FaultSources = {}): FaultObservation[] {
+export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, sources: FaultSources = {}): FaultObservation[] {
   const routes = sources.scopeRoutes ?? true;
-  const own = work.flatMap(item => workFaults(item, now, routes));
-  const derived: FaultObservation[] = [];
+  // A fence the loop settled — this cycle's reclaim step included — is gone, though the snapshot the cycle began with still shows it (GY-1299).
+  const work = snapshot.map(item => fenceSettled(state, item) ? { ...item, containmentQuarantine: null } : item);
+  const byKey = new Map(work.map(item => [item.key, item]));
+  const own = work.flatMap(item => workFaults(item, now, routes)).filter(fault => !(containmentKinds.has(fault.kind) && containmentInMotion(byKey.get(fault.subject), now)));
+  const derived: FaultObservation[] = [], attributed: FaultObservation[] = [];
   const { config } = sources;
   if (config) {
     let status: { work: any[]; attentionItems: AttentionItem[] } = { work: [], attentionItems: [] };
@@ -71,15 +79,26 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
       derived.push({ ...classified('loop-failures'), subject: 'loop', text: `The loop could not derive this cycle's attention to classify it: ${message(error)}`.slice(0, 500) });
     }
     const listed = { work: status.work, attentionItems: [...(sources.loop ?? []), ...status.attentionItems, ...(sources.reported ?? [])] };
-    const byKey = new Map(work.map(item => [item.key, item]));
     for (const item of classifyAttention(sources.attribute ? sources.attribute(listed) : listed.attentionItems))
-      if (item.kind !== 'gate' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))
+      if (item.kind !== 'gate' && item.kind !== 'containment-grace' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))
+        && !(containmentKinds.has(item.kind) && containmentInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'contaminated' && restoreInMotion(byKey.get(item.subject), now))
-        && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now)))
-        derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
+        && !(item.kind === 'base-conflict' && baseConflictInMotion(byKey.get(item.subject), now))
+        && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now))
+        && !(item.kind === 'owed-decision' && owedReworkLine(byKey.get(item.subject), item.text) && reworkDecisionInMotion(byKey.get(item.subject), now)))
+        if (item.kind === 'resource-bound' && item.resource) attributed.push({ kind: item.kind, faultClass: item.faultClass, subject: `resource:${item.resource}`, text: item.text.slice(0, 500) });
+        else derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
+    // GY-1272: a symptom the report attributes to a registered resource is that resource's one fault, on the resource's own subject:
+    // one spent GitHub budget holding five subjects at once was six instances of its class. The resource's own line stands for it,
+    // and where none was listed the first symptom does.
+    for (const fault of attributed) if (!derived.some(other => other.kind === fault.kind && other.subject === fault.subject)) derived.push(fault);
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
     if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
       derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space below its configured bound at the last reclaim (${reclaim.at})` });
+    // A host below its memory floor defers every launch on it (GY-612): one instance for the whole dip. A fault is its
+    // wording, and the attention item's text names consumers whose ranking moves from cycle to cycle, so this wording
+    // carries none of it — the attention item keeps the moving detail, and the instance stands until memory recovers.
+    for (const item of hostMemoryAttention(state.memory)) derived.push({ ...classified('memory-pressure'), subject: item.subject, text: 'Host memory is below its floor: new session launches on this host are deferred until it recovers (the memory attention item names the current top consumers)' });
   }
   // The reported attention names each unserved executor kind on the item it holds, and master status already derived its installation
   // lines from the same status: the status's copy of those lines is not a second fault (distinct faults of one kind stay distinct).
@@ -90,6 +109,31 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
   const settling = new Set(work.filter(item => item.scopeRequest && !standingScopeRequest(item, now, routes)).map(item => item.key));
   const shown = new Set([...own.map(fault => `${fault.subject}|${fault.kind}`), ...[...settling].map(key => `${key}|scope-request`)]);
   return [...own, ...derived.filter(fault => ![fault.kind, ...(restatements[fault.kind] ?? [])].some(kind => shown.has(`${fault.subject}|${kind}`)))];
+}
+/** Whether the loop recorded the settlement of the item's standing fence: its settle action for the fence's epoch is done. */
+const fenceSettled = (state: Pick<DaemonState, 'actions'>, item: Work) =>
+  !!item.containmentQuarantine && state.actions[`settle:${item.id}:${item.containmentQuarantine.epoch}`]?.state === 'done';
+/** The kinds a lapsed fence is counted under: the item's own record, and the settle or hold line master status derives for it. */
+const containmentKinds: ReadonlySet<FaultKind> = new Set<FaultKind>(['containment', 'containment-settleable']);
+/** How long a lapsed containment fence may wait, past its grace window, for the loop to verify and settle it before it counts as a containment fault (GY-1299). */
+export const containmentSettleWaitBoundMs = 10 * 60_000;
+/**
+ * GY-1299. Whether a containment fence is still in motion: its owner's lease has lapsed and the
+ * fence is inside its grace window or within `containmentSettleWaitBoundMs` after it. The reclaim
+ * step probes the host and settles a verified-dead fence on its own (settleQuarantine; cycleFaults
+ * reads a fence whose settle action is done as gone, even in the cycle that settled it), so a fence
+ * that recent is a step the loop is already taking, not a fault: on 5 October 2026 GY-1147 counted
+ * 11s past its grace window and autosettled 28s later, and GY-1289 counted twice for one fence —
+ * once as verified settleable while its grace window still ran, once as a hold 90s later, in the
+ * very cycle that settled it. Neither kind counts inside the bound, so a fence the loop settles
+ * opens no instance, and one standing past it counts once, as the item's own `containment` fault
+ * (the settleable line restates it). A fence with no deadline to date it counts at once.
+ */
+export function containmentInMotion(work: Work | undefined, now: number): boolean {
+  const phase = work ? containmentPhase(work, now) : null;
+  if (!phase || phase.state === 'live') return false;
+  if (phase.state === 'grace') return true;
+  return !!phase.lapsedAt && now - Date.parse(phase.lapsedAt) - containmentGraceMs <= containmentSettleWaitBoundMs;
 }
 /** How long an ejected tip's restore may stay owed before its contaminated head counts as a merge fault (GY-1087). */
 export const restoreWaitBoundMs = 30 * 60_000;
@@ -109,6 +153,37 @@ export function restoreInMotion(work: Work | undefined, now: number): boolean {
   const since = restore ? restore.requested?.at ?? ejected?.at : ejected?.at;
   return !!since && now - Date.parse(since) <= restoreWaitBoundMs;
 }
+/**
+ * GY-1269. Whether an owed line names the item's rework decision: its open action is `request-rework`
+ * and the line carries that action's own owed decision (`needsHuman.decision`), the phrase
+ * `humanNeededActions` puts in the action's row and `humanNeededAttention` reports. The phrase is
+ * read from the item, not restated here, so rewording it in concerns.ts or the line around it in
+ * owed-report.ts cannot silently disarm the rework guard. A concern carried beside the action
+ * (a standing escalation) is owed under its own decision, so its line is not this one and counts at once.
+ */
+export function owedReworkLine(work: Work | undefined, text: string): boolean {
+  const action = work && openAction(work);
+  const decision = action?.kind === 'request-rework' ? action.needsHuman?.decision : undefined;
+  return !!decision && text.includes(decision);
+}
+/** How long a rework decision (a new head owed by `request-rework`) may stay owed before it counts as a decision fault (GY-1251). */
+export const reworkDecisionWaitBoundMs = 30 * 60_000;
+/**
+ * GY-1251. Whether the rework decision an item owes is still in motion: its open action is
+ * `request-rework` and the queue row for that action was requested within `reworkDecisionWaitBoundMs`.
+ * The loop requests that decision and supervises its approver session on its own (cycle-decisions
+ * step 4c), so a new head owed for minutes after a failed CI rerun or a reviewer's changes is the
+ * ordinary rework round, not a decision fault (GY-1168, GY-1244, GY-1238, GY-1062, GY-1124 on
+ * 5 October 2026: each counted 15s to 4m after the action was computed). A rework owed past the
+ * bound counts, as does one with no queue row to date it; an owed escalation is never in motion here.
+ */
+export function reworkDecisionInMotion(work: Work | undefined, now: number): boolean {
+  const action = work && openAction(work);
+  if (action?.kind !== 'request-rework') return false;
+  const row = (work!.actionQueue?.actions ?? []).find(entry => entry.kind === action.kind && entry.binding === action.binding);
+  const since = row?.requestedAt ? Date.parse(row.requestedAt) : Number.NaN;
+  return Number.isFinite(since) && now - since <= reworkDecisionWaitBoundMs;
+}
 /** How long an approval dismissed for a merge-base change may stay in motion before it counts as a review-convergence fault (GY-1140). */
 export const mergeBaseDismissalWaitBoundMs = 30 * 60_000;
 /**
@@ -125,6 +200,23 @@ export function mergeBaseDismissalInMotion(work: Work | undefined, now: number):
   if (!dismissal?.at) return false;
   const since = Date.parse(dismissal.at);
   return Number.isFinite(since) && now - since <= mergeBaseDismissalWaitBoundMs;
+}
+/**
+ * GY-1129. Whether a base refresh conflict is still in motion: the candidate has a confirmed conflict
+ * with the base branch, first found on this head within `restoreWaitBoundMs` (the time the loop takes
+ * to return the item and decide its rework). The control plane requests and approves that rework on
+ * its own, so a conflict that recent is a step it is already handling, not a merge fault (GY-501,
+ * GY-1073, GY-417 on 3 October 2026: each counted within minutes of the conflict). `reworkRequested`
+ * plays no part: a conflict still standing past the bound counts as a merge fault whether or not rework
+ * was requested. The bound runs from the first conflict on this head (`conflictSince`, GY-1200), not
+ * from the latest refresh: each refresh onto a new base tip re-records the conflict, and on a base that
+ * moves more often than the bound an unhandled conflict would otherwise never count.
+ */
+export function baseConflictInMotion(work: Work | undefined, now: number): boolean {
+  if (!work?.candidate) return false;
+  if (!baseRefreshConflict(work)) return false;
+  const since = work.baseRefresh?.conflictSince ?? work.baseRefresh?.at;
+  return !!since && now - Date.parse(since) <= restoreWaitBoundMs;
 }
 /**
  * The timing-dependent check failures `master status` names (qualifyTimingFailures), for the loop to
@@ -332,13 +424,12 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
     .catch(error => { partial = true; return { items: [{ subject: 'loop', text: `The loop could not read the attention master status adds to classify it: ${message(error)}`, kind: 'loop-failures' } as AttentionItem] }; });
   // The loop's own health lines, as master status puts them first: its cost, silence and delivery budget. The loop reading
   // them is cycling, so its liveness is not in question here, and a failed cycle is noted once as it happens (noteCycleFailure).
-  const loop = loopAttention({ liveness: { ...summary.liveness, state: 'running' }, silence: summary.silence, budget: summary.budget, cost: summary.cost });
+  const loop = [...loopAttention({ liveness: { ...summary.liveness, state: 'running' }, silence: summary.silence, budget: summary.budget, cost: summary.cost }), ...baseFailureAttention(summary.baseFailures, config.baseBranch)];
   endFailingRuns(state, policy, clock);
   // The system invariants (GY-404): properties of the running pipeline no per-item gate can see,
   // judged on each observation over the same snapshot; each violation is one fault of its class below.
-  const invariants = checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, approvals: state.approvals,
-    agents: herdrRead.available ? seen : null, build: controlPlane?.build?.commit ?? null,
-    refusedMerges: new Set(snapshot.work.filter(item => item.candidate && state.actions[candidateKey('merge', item)]?.state === 'failed').map(item => item.id)) });
+  const invariants = checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, approvals: state.approvals, docsSyncs: state.docsSyncs,
+    agents: herdrRead.available ? seen : null, build: controlPlane?.build?.commit ?? null });
   trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available, scopeRoutes: !!effects.decide && !!effects.approver }), ...invariantFaults(invariants)],
     new Date(clock).toISOString(), partial || (herdrRead.available ? false : new Set<string>([...herdrFaultKinds, invariantFaultKind('lingering-sessions')])));
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);

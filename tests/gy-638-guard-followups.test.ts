@@ -68,8 +68,9 @@ test('manual:review-followups-triaged: a queued stale tip with no landing regres
 
   // No adverse conclusion about the tip: it stays queued for the queue to rebuild.
   assert.equal(ejectionReason(calm, [1], all), null);
+  // Evaluation places nothing in the queue since GY-1235 (GitHub merges), so the place itself is
+  // not asserted here; what is pinned is that nothing ejects the entry and the gates wait.
   const judged = settle(calm, all);
-  assert.ok(judged.queue, 'the entry keeps its queue place');
   assert.equal(judged.queueEjection ?? null, null, 'nothing is ejected');
   assert.equal(ejectedTipRestore(judged, [head, judged]), null, 'no ejection owes a restore while the entry is queued');
   // The gates still hold the tree back while the wait stands.

@@ -1,7 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { availableRuntimes, discover } from '../onboarding.js';
+import { availableRuntimes, describeMergeGate, discover } from '../onboarding.js';
+import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
 import { startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, readDocumentationConfig, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { protectionRun } from '../protection.js';
@@ -58,9 +59,21 @@ export const installCommands = defineCommands([
       '          [--plan|--apply] [--domain HOST] [--workers N] [--reviewer NAME]',
       '          [--producer-proof PROOF] [--ssh-host HOST] [--ssh-user USER]',
       '          [--ssh-key NAME] [--port N] [--workspace NAME-OR-ID] [--image REF]',
+      '          [--create-environments]',
       '                                Install or reconcile a complete control plane.',
+      '  install --target host|hetzner --repo OWNER/NAME [--plan|--apply]',
+      '          [--ssh-host HOST | --local] [--migrate] [--max-monthly N | --confirm-price X]',
+      '          [--github-app FILE]',
+      '                                Self-contained host: server, Postgres, loop, executors,',
+      '                                Herdr and agent runtimes on one machine (hetzner creates it',
+      '                                and needs its monthly price confirmed). --migrate moves an',
+      '                                installation there from GRAPHYARD_MIGRATE_DATABASE_URL.',
+      '                                An App already saved for the repository (--github-app,',
+      '                                or .graphyard/github-app.json) is reused: no browser step.',
       '                                --plan prints every action with secrets redacted and',
-      '                                changes nothing; --apply executes the same plan.',
+      '                                changes nothing; --apply executes the same plan. UAT and',
+      '                                production resources that cost money are created only with',
+      '                                --create-environments.',
       '                                See docs/install.md for the agent-executable runbook.',
     ],
     // The installer creates the connection file; it must never read a stale one.
@@ -73,16 +86,29 @@ export const installCommands = defineCommands([
         'required-check': { type: 'string', multiple: true }, 'review-count': { type: 'string' },
         'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' }, 'ssh-key': { type: 'string' }, 'server-name': { type: 'string' }, workspace: { type: 'string' },
         'server-type': { type: 'string' }, location: { type: 'string' }, port: { type: 'string' }, logs: { type: 'boolean' },
+        target: { type: 'string' }, local: { type: 'boolean' }, migrate: { type: 'boolean' }, 'max-monthly': { type: 'string' }, 'confirm-price': { type: 'string' },
+        'github-app': { type: 'string' },
+        'create-environments': { type: 'boolean' },
       }, allowPositionals: false });
       if (!values.repo) throw new Error('Use --repo OWNER/NAME');
-      if (!values.provider || !providers.includes(values.provider as any)) throw new Error(`Use --provider ${providers.join('|')}`);
+      // --target names a self-contained install (GY-717): an existing machine, or a Hetzner server it creates.
+      if (values.target && values.provider) throw new Error('Use either --target host|hetzner (a self-contained host) or --provider (a server-only install)');
+      if (values.target && !['host', 'hetzner'].includes(values.target)) throw new Error('Use --target host (an existing Linux machine) or --target hetzner (a server the installer creates)');
+      const provider = values.target ?? values.provider;
+      if (!provider || !providers.includes(provider as any)) throw new Error(`Use --provider ${providers.join('|')}, or --target host|hetzner`);
+      const money = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`--${flag} takes an amount such as 19.52`); return parsed; };
       if (values.plan && values.apply) throw new Error('Choose either --plan or --apply');
       const reviewPolicy = values['review-policy'];
       if (reviewPolicy && !['github', 'agent'].includes(reviewPolicy)) throw new Error('Use --review-policy github or agent');
       // A count that silently became NaN would install a control plane with no worker principal
       // or an unusable port, so a non-numeric value stops the command instead.
       const count = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`--${flag} takes a whole number`); return parsed; };
-      const inputs: InstallInputs = { repository: values.repo, provider: values.provider as InstallInputs['provider'],
+      const inputs: InstallInputs = { repository: values.repo, provider: provider as InstallInputs['provider'],
+        ...(values.target || provider === 'host' ? { selfContained: true } : {}),
+        ...(values.local ? { local: true } : {}), ...(values.migrate ? { migrate: true } : {}),
+        ...(values['max-monthly'] ? { maxMonthly: money('max-monthly', values['max-monthly']) } : {}),
+        ...(values['confirm-price'] ? { confirmPrice: money('confirm-price', values['confirm-price']) } : {}),
+        ...(values['github-app'] ? { githubAppFile: values['github-app'] } : {}),
         ...(values['base-branch'] ? { baseBranch: values['base-branch'] } : {}),
         ...(values.domain ? { domain: values.domain } : {}), ...(values.workers ? { workers: count('workers', values.workers) } : {}),
         ...(values.port ? { port: count('port', values.port) } : {}),
@@ -94,7 +120,8 @@ export const installCommands = defineCommands([
         ...(values['ssh-host'] ? { sshHost: values['ssh-host'] } : {}), ...(values['ssh-user'] ? { sshUser: values['ssh-user'] } : {}),
         ...(values['ssh-key'] ? { sshKey: values['ssh-key'] } : {}),
         ...(values['server-name'] ? { serverName: values['server-name'] } : {}), ...(values.workspace ? { workspace: values.workspace } : {}),
-        ...(values['server-type'] ? { serverType: values['server-type'] } : {}), ...(values.location ? { location: values.location } : {}) };
+        ...(values['server-type'] ? { serverType: values['server-type'] } : {}), ...(values.location ? { location: values.location } : {}),
+        ...(values['create-environments'] ? { createEnvironments: true } : {}) };
       const session = await prepareInstall(process.cwd(), inputs, {
         cliPath: await context.activeCliPath(), hostId: context.individualHostId(), log: line => console.error(line),
         githubApp: request => runManifestFlow(request.root, request.repository, request.origin, { reviewer: request.reviewer, announce: line => console.error(line), dependencies: { file: request.file } }),
@@ -109,17 +136,27 @@ export const installCommands = defineCommands([
     name: 'init',
     help: [
       '  init [--scan] [--apply] [--url URL] [--herdr] [--token-stdin]',
-      '                                Scan and propose the delivery workflow (--scan), or apply the reviewed proposal (--apply)',
+      '       [--delivery release-candidate|per-pr] [--candidate-cron CRON|off]',
+      '                                Scan and propose the delivery workflow (--scan), or apply the reviewed proposal (--apply);',
+      '                                the scan shows the merge-gate split (pre-merge vs per-candidate checks) before anything is applied',
     ],
     async run(context) {
       const { base, connection, print } = context;
       const root = context.repositoryRoot();
-      const { values } = parseArgs({ args: context.rest, options: { url: { type: 'string' }, herdr: { type: 'boolean' }, 'token-stdin': { type: 'boolean' }, 'host-id': { type: 'string' }, 'cli-path': { type: 'string' }, scan: { type: 'boolean' }, apply: { type: 'boolean' } }, allowPositionals: false });
+      const { values } = parseArgs({ args: context.rest, options: { url: { type: 'string' }, herdr: { type: 'boolean' }, 'token-stdin': { type: 'boolean' }, 'host-id': { type: 'string' }, 'cli-path': { type: 'string' }, scan: { type: 'boolean' }, apply: { type: 'boolean' },
+        delivery: { type: 'string' }, 'candidate-cron': { type: 'string' } }, allowPositionals: false });
+      if (values.delivery !== undefined && !(deliveryModes as readonly string[]).includes(values.delivery)) throw new Error(`Use --delivery ${deliveryModes.join(' or ')}`);
+      if ((values.delivery !== undefined || values['candidate-cron'] !== undefined) && !values.scan) throw new Error('--delivery and --candidate-cron choose the proposal; pass them with init --scan');
+      const cron = values['candidate-cron'];
+      const choices = { ...(values.delivery ? { mode: values.delivery as DeliveryMode } : {}), ...(cron !== undefined ? { candidateSchedule: cron === 'off' ? null : cron } : {}) };
       if (values.scan || values.apply) {
         if (values.herdr || values['token-stdin']) throw new Error('--scan/--apply propose and apply the delivery workflow; run them as the operator before any worker credential setup');
-        const fresh = await scanProposal(root, { url: values.url ?? null, runtimes: availableRuntimes() });
+        const stored = values.apply ? await loadProposal(root) : null;
+        // Applying rescans with the choices the operator reviewed, so a confirmed opt-out or cadence
+        // is compared with the checkout rather than read back as a difference.
+        const reviewed = stored?.proposal.delivery ? { mode: stored.proposal.delivery.mode, candidateSchedule: stored.proposal.delivery.candidateSchedule } : undefined;
+        const fresh = await scanProposal(root, { url: values.url ?? null, runtimes: availableRuntimes(), delivery: values.apply ? { ...reviewed, ...choices } : choices });
         if (values.apply) {
-          const stored = await loadProposal(root);
           if (!stored) throw new Error('No stored setup proposal to apply. Run init --scan, review .graphyard/setup-proposal.json, then rerun with --apply');
           const differences = repositoryScanDifference(fresh, stored.proposal);
           if (differences.length) throw new Error(`${differences.join('; ')}. Rerun init --scan, review the refreshed proposal, then apply it again. The stored proposal was left unchanged.`);
@@ -136,10 +173,11 @@ export const installCommands = defineCommands([
         await saveProposal(root, fresh);
         const applied = await loadAppliedSetup(root);
         return print({ proposalFile: '.graphyard/setup-proposal.json', proposal: fresh,
+          mergeGate: fresh.delivery ? describeMergeGate(fresh.delivery) : [],
           applied: applied ? { at: applied.appliedAt, githubApp: applied.artifacts.githubApp } : null,
           drift: setupDrift(applied, fresh),
           appliedNothingElse: true,
-          next: 'Review .graphyard/setup-proposal.json, then rerun init --scan --apply --url SERVER_URL to apply the reviewed proposal' });
+          next: 'Review .graphyard/setup-proposal.json and the mergeGate split above (move a check by editing delivery.mergeGate in graphyard.json and rescanning, or opt out with --delivery per-pr), then rerun init --scan --apply --url SERVER_URL to apply the reviewed proposal' });
       }
       let workerToken = await context.individualToken();
       if (values['token-stdin']) {
