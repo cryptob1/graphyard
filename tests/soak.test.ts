@@ -1902,9 +1902,12 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     // the 24-hour main day runs it: its candidates are held without rework either way, and that
     // day is where the filing, rerun and refresh recovery is asserted. The window is sized to the
     // push cadence — one worker pushes every fifteen minutes — so exactly one push lands inside it
-    // and is held, and the repair lands early enough that the refreshed candidate re-merges into
-    // the long gap before the next release's merge: every merge the day delays otherwise moves the
-    // base under a queued tip and reads as churn beside the remedy refresh itself.
+    // (item twelve's first head) and is held, and the repair lands early enough that the refreshed
+    // candidate re-merges into the long gap before the next release's merge: every merge the day
+    // delays otherwise moves the base under a queued tip and reads as churn beside the remedy
+    // refresh itself. It stands three hours in, clear of the morning's scenarios: the memory dip
+    // holds the first launches, so items one and two push together past half an hour, and a hold
+    // there would replace the spent producer's head (GY-496) before its request is spent.
     if (mainDay && options.hours >= 24 && !broken && elapsed >= plan.baseFailure.breaks) { broken = true; github.baseFailure.broken = github.commit('Add a test holding a fixed date against the clock', github.files).sha; }
     if (mainDay && options.hours >= 24 && !repaired && elapsed >= plan.baseFailure.repaired) { repaired = true; github.baseFailure.repaired = github.commit('Repair the fixed-date test', github.files).sha; }
     // Once the repair has landed and the loop has retired the base failure, the person who repaired
