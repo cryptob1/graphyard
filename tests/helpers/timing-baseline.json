@@ -580,6 +580,7 @@
     "tests/test-case-repository-ui.test.ts": 744,
     "tests/test-case-repository.test.ts": 4051,
     "tests/tmp-cleanup.test.ts": 13603,
-    "tests/unblock-stale-revision.test.ts": 4873
+    "tests/unblock-stale-revision.test.ts": 4873,
+    "tests/exhausted-proof-runtime.test.ts": 350
   }
 }
