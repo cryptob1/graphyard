@@ -298,6 +298,18 @@ export const unauthorizedMergeViolation = 'Merge observed without a prior author
  * and nothing a gate reads; everything else is compared by its stable JSON, so any other change
  * still counts.
  */
+/**
+ * The refresh record a stale mergeability reading (GY-375) leaves for its head: the reading over
+ * whatever the record for that same head carried onto it. `conflictSince` and `conflictPaths` are
+ * kept only beside a conflict (GY-1230), so what an earlier conflict on the head recorded never
+ * survives on a record whose conflict the stale reading cleared.
+ */
+export function staleRefreshRecord(previous: BaseRefresh | null | undefined, refresh: BaseRefresh): BaseRefresh {
+  const kept = previous?.head === refresh.from.sha ? previous : null;
+  const record: BaseRefresh = { ...(kept ?? {}), ...refresh, merge: kept?.merge ?? null, carry: kept?.carry ?? null, ...(kept?.restoredApproval ? { restoredApproval: kept.restoredApproval } : {}) };
+  if (!record.conflict) { delete record.conflictSince; delete record.conflictPaths; }
+  return record;
+}
 export function sameBesideActions(read: Work, current: Work): boolean {
   const rest = ({ actionQueue: _queue, revision: _revision, updatedAt: _updated, ...others }: Work) => stableJson(others);
   return rest(read) === rest(current);
@@ -1968,8 +1980,7 @@ export class Engine {
         // GitHub's conflict reading was stale (GY-375): the test merge was clean and nothing was
         // written. The reading replaces the refresh record for this head, keeping what it carried
         // onto the head, and the stored observation has its conflict disproved.
-        const kept = work.baseRefresh?.head === refresh.from.sha ? work.baseRefresh : null;
-        work.baseRefresh = { ...(kept ?? {}), ...refresh, merge: kept?.merge ?? null, carry: kept?.carry ?? null, ...(kept?.restoredApproval ? { restoredApproval: kept.restoredApproval } : {}) };
+        work.baseRefresh = staleRefreshRecord(work.baseRefresh, refresh);
         const disproved = work.observation?.conflicting ? disprovedConflict(work, work.observation) : null;
         if (disproved) work.observation = withDisprovedConflict(work.observation!, disproved);
         this.evaluate(work, all, now);
