@@ -106,6 +106,14 @@ test('integration:live-scope-widening — an additive plannedFiles widening appl
   assert.deepEqual(work.plannedFiles, ['src/widget/Layout.tsx', specFile.path, 'docs/widget.md']);
   assert.ok(work.containmentQuarantine && work.containmentQuarantine.epoch === work.epoch, 'the live quarantine survives a live widening');
   assert.ok(work.lease && work.lease.epoch === work.epoch, 'the live lease survives a live widening');
+
+  // GY-1293 (GY-1235 on 5 October 2026): the loop's successor re-plan was posted from the snapshot
+  // its own widening had just outdated. Against requirements it never saw, the additive widening
+  // read as a narrowing and was refused as a quarantine breach; it is refused as the stale revision it is.
+  const stale = await call(master.token, 'POST', `work/${work.id}/requirements`, { ...widen({ ...work, policyRevision: work.policyRevision - 1, plannedFiles: work.plannedFiles.slice(0, -1) }, ['src/widget/Successor.tsx']), reason: 'Re-planned onto a successor from a stale read' });
+  assert.equal(stale.status, 409, JSON.stringify(stale.body));
+  assert.match(stale.body.error, /^Policy revision changed; reload before revising$/);
+  assert.deepEqual((await reload(work.id)).plannedFiles, ['src/widget/Layout.tsx', specFile.path, 'docs/widget.md'], 'the stale revision changes nothing');
 });
 
 test('integration:scope-request-flow — the request surfaces to the master and one command applies it without ending the attempt', async () => {

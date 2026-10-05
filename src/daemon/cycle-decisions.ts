@@ -332,9 +332,13 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   for (const read of workToProcess) await isolate('decision', read, read.key, async () => {
     let item = read;
     const assessment = assessments[item.id];
-    // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it.
+    // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it, and
+    // its decision is requested against that revision: one a partial widening moved past the
+    // snapshot's would carry a policy revision its approval could never apply to (GY-1293).
     const scoped = settled.get(item.id) ?? item;
-    let decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? blockerScopeDecision(scoped) ?? routineDecision(item, config, clock, assessment, exhausted);
+    const scope = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? blockerScopeDecision(scoped);
+    if (scope) item = scoped;
+    let decision = scope ?? routineDecision(item, config, clock, assessment, exhausted);
     if (!decision) {
       // Still called for, only not attestable this cycle: its request is not one the item moved past.
       const called = neededDecision(item, config, exhausted);
