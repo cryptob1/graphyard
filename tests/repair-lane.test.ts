@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyProtection, mergeQueueRuleset, mergeQueueRulesetName, protectionPlan, repairBypassActor, withMergeSettings, withQueueRuleset } from '../src/protection.js';
-import { normalMergeState, repairLaneAttention, repairLaneVerdict, repairScopeRefusal, repairStallMs, type RepairAudit, type RepairDecision } from '../src/master/repair-lane.js';
+import { mergePath, namedMergePathFault, normalMergeState, repairLaneAttention, repairLaneVerdict, repairScopeRefusal, repairStallMs, type RepairAudit, type RepairDecision } from '../src/master/repair-lane.js';
+import { addressesStall, mergeBandStall, repairTriggerDecision } from '../src/daemon/repair-trigger.js';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { masterConfigSchema } from '../src/master.js';
 import { repairLaneStep } from '../src/github.js';
 import { decisionInputs, decisionPrecondition } from '../src/model/approval.js';
 import { createSchema, type Observation, type Work } from '../src/model.js';
@@ -79,9 +82,9 @@ test('unit:repair-lane-conditions — each missing condition is refused by name;
   assert.equal(createSchema.safeParse({ title: 't', criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }], repair: 'merge-path' }).success, true);
   assert.equal(createSchema.safeParse({ title: 't', criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }], repair: 'anything' }).success, false);
   assert.equal(repairScopeRefusal({ repair: 'merge-path', plannedFiles: ['src/github.ts', 'src/merge-queue.ts', 'src/model/queue.ts', 'src/daemon/cycle.ts', '.github/workflows/ci.yml'] }), null);
-  assert.match(repairScopeRefusal({ repair: 'merge-path', plannedFiles: ['src/github.ts', 'src/engine.ts'] })!, /outside the merge path .*: src\/engine\.ts/);
+  assert.match(repairScopeRefusal({ repair: 'merge-path', plannedFiles: ['src/github.ts', 'src/cli.ts'] })!, /outside the merge path .*: src\/cli\.ts/);
   assert.match(repairScopeRefusal({ repair: 'merge-path', plannedFiles: [] })!, /names no plannedFiles/);
-  assert.match(repairScopeRefusal({ repair: 'merge-path', plannedFiles: ['src/daemon/../engine.ts'] })!, /outside the merge path/);
+  assert.match(repairScopeRefusal({ repair: 'merge-path', plannedFiles: ['src/daemon/../cli.ts'] })!, /outside the merge path/);
   assert.equal(repairScopeRefusal({ plannedFiles: ['src/engine.ts'] }), null, 'an ordinary item carries no repair');
 
   // The decision is head-bound, requested only on a repair item for its current head.
@@ -107,7 +110,7 @@ test('unit:repair-lane-conditions — each missing condition is refused by name;
   refused(repairLaneVerdict(repairItem(), [decision({ approvedBy: 'graphyard-operator' })], stalledMerge, stalled), 'decision', /no independent approver/);
   refused(repairLaneVerdict(repairItem(), [decision({ input: { sha: 'c'.repeat(40) } })], stalledMerge, stalled), 'decision', /no repair-merge decision names head/);
   refused(repairLaneVerdict(repairItem(), [decision({ reason: 'please merge it' })], stalledMerge, stalled), 'fault-named', /does not name the merge-path fault/);
-  refused(repairLaneVerdict(repairItem(), [decision({ reason: 'the fault is in src/engine.ts' })], stalledMerge, stalled), 'fault-named', /merge-path fault/);
+  refused(repairLaneVerdict(repairItem(), [decision({ reason: 'the fault is in src/cli.ts' })], stalledMerge, stalled), 'fault-named', /merge-path fault/);
   refused(repairLaneVerdict(repairItem(), [decision()], { state: 'none', since: null, detail: null }, stalled), 'normal-merge-stalled', /has not been refused or left pending/);
   refused(repairLaneVerdict(repairItem(), [decision()], stalledMerge, stalled - 60_000), 'normal-merge-stalled', /refused for 14 minute\(s\).*waits 15/);
 
@@ -182,4 +185,76 @@ test('unit:repair-lane-audited — a repair-lane merge appends its audit entry b
   assert.match(attention[0].text, /merged through the repair lane .*bypassing a normal guarded merge refused since 2026-09-25T00:00:00\.000Z .*decision d-1 requested by graphyard-operator and approved by graphyard-approver .*src\/merge-queue\.ts.*unproven until the next normal merge/);
   assert.deepEqual(repairLaneAttention([earlierNormal, repaired, delivered('GY-11', '2026-09-25T00:30:00.000Z', null)]), [], 'a later normal merge proves the merge path healthy');
   assert.equal(repairLaneAttention([repaired, delivered('GY-12', '2026-09-25T00:30:00.000Z', { ...audit, item: 'GY-12' })]).length, 2, 'a second repair is no normal merge');
+});
+
+// GY-1218: on 2026-10-04 lock contention kept every GitHub observation stale, so every merge was
+// refused — including GY-1124, the approved fix in src/engine.ts and src/store/. The repair lane's
+// scope now covers the coordination store, and the loop requests the lane on its own.
+test('unit:repair-scope-covers-coordination-store — the repair lane scope covers src/engine.ts and src/store/ beside the merge-path entries; other paths are refused', () => {
+  assert.ok(mergePath.includes('src/engine.ts') && mergePath.includes('src/store/'), mergePath.join(', '));
+  for (const entry of ['src/github.ts', 'src/merge-queue.ts', 'src/model/queue.ts', 'src/daemon/', '.github/workflows/']) assert.ok((mergePath as readonly string[]).includes(entry), `${entry} stays in the merge path`);
+  assert.equal(repairScopeRefusal({ key: 'GY-1124', repair: 'merge-path', plannedFiles: ['src/engine.ts', 'src/store/locks.ts'] }), null);
+  assert.match(repairScopeRefusal({ key: 'GY-7', repair: 'merge-path', plannedFiles: ['src/web/'] })!, /GY-7 carries "repair": "merge-path" but plans files outside the merge path .*: src\/web\//);
+  assert.match(repairScopeRefusal({ repair: 'merge-path', plannedFiles: ['src/engine.ts', 'src/web/app.ts'] })!, /: src\/web\/app\.ts$/);
+  assert.match(repairScopeRefusal({ repair: 'merge-path', plannedFiles: ['src/store/../web/app.ts'] })!, /outside the merge path/);
+  assert.equal(namedMergePathFault('reconciliation starves the merge gate in src/store/locks.ts.'), 'src/store/locks.ts');
+});
+
+const stale = 'GitHub observation missing or older than two minutes';
+const now = Date.parse('2026-10-04T12:00:00Z');
+const at = (offsetMs: number) => new Date(now + offsetMs).toISOString();
+function banded(key: string, extra: Partial<Work> = {}, mergeReasons = [stale, `Pull request of ${key} is not mergeable against the current base`]): Work {
+  const sha = key.replace(/\D/g, '').padEnd(40, 'c');
+  const gates = [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: true, reasons: [] }, { name: 'test', passed: true, reasons: [] },
+    { name: 'acceptance', passed: true, reasons: [] }, { name: 'merge', passed: false, reasons: mergeReasons }];
+  return { id: `id-${key}`, key, title: key, description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'a page renders', proofs: ['unit:x'] }],
+    policy: { checks: ['test'], review: true }, plannedFiles: ['src/web/app.ts'], stage: 'merge', revision: 5, policyRevision: 1, epoch: 1, lease: null,
+    createdAt: at(-3_600_000), updatedAt: at(0), stageEnteredAt: at(-20 * 60_000), ready: true, workspaces: [],
+    candidate: { sha, baseSha: base, pr: 1 }, submission: { epoch: 1, pr: 1, sha }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null,
+    blocker: null, gates, violations: [], escalations: [], ...extra } as unknown as Work;
+}
+
+test('unit:loop-requests-repair-on-band-stall — a band-wide stale-observation stall makes the loop request exactly one repair-merge for the repair candidate and launch its approver', async () => {
+  const fix = banded('GY-1124', { repair: 'merge-path', plannedFiles: ['src/engine.ts', 'src/store/locks.ts'] } as Partial<Work>);
+  const band = [banded('GY-1100'), banded('GY-1101'), fix];
+  const stall = mergeBandStall(band, now);
+  assert.equal(stall?.reason, stale, 'the one reason every candidate shares, not each item\'s own');
+  assert.equal(stall?.faultClass, 'observation');
+  assert.equal(mergeBandStall(band, now - 6 * 60_000), null, 'refused for less than repairStallMs is no stall yet');
+  assert.equal(mergeBandStall([...band, banded('GY-1102', {}, ['Pull request is not mergeable against the current base'])], now), null, 'a candidate refused on another reason means no shared fault');
+  assert.equal(mergeBandStall([...band, banded('GY-1103', { gates: banded('GY-1103').gates.map(entry => ({ ...entry, passed: true, reasons: [] })) } as Partial<Work>)], now), null, 'a candidate that may merge means the band is not stalled');
+  // Only an approved candidate with passing checks inside the repair scope is the repair; the criteria may name the fault class instead of the mark.
+  assert.equal(repairTriggerDecision(band[0], band, now), null);
+  assert.equal(repairTriggerDecision({ ...fix, gates: fix.gates.map(entry => entry.name === 'review' ? { ...entry, passed: false } : entry) } as Work, band, now), null, 'an unapproved fix is not asked for');
+  assert.equal(repairTriggerDecision({ ...fix, gates: fix.gates.map(entry => entry.name === 'test' ? { ...entry, passed: false } : entry) } as Work, band, now), null, 'a fix whose required checks have not passed is not asked for');
+  assert.equal(repairTriggerDecision({ ...fix, plannedFiles: ['src/web/'] } as Work, band, now), null, 'a fix outside the repair scope is not asked for');
+  const named = banded('GY-1125', { plannedFiles: ['src/store/locks.ts'], criteria: [{ id: 'AC-1', text: 'clears the stale observation fault class on merge', proofs: ['unit:y'] }] } as Partial<Work>);
+  assert.ok(addressesStall(named, stall!), 'criteria naming the fault class address the stall');
+
+  const decided: { work: string; action: string; reason: string }[] = [], approvers: string[] = [];
+  const effects = {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+    snapshot: async () => ({ work: band, now: at(0), jobs: [] }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: at(0), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {},
+    decide: async (work: Work, action: string, reason: string) => { decided.push({ work: work.key, action, reason }); return { id: '5d8a8b9e-0000-4000-8000-000000001218' }; },
+    decisions: async (work: Work) => ({ decisions: decided.filter(entry => entry.work === work.key).map(entry => ({ id: '5d8a8b9e-0000-4000-8000-000000001218', action: entry.action, state: 'requested', input: { sha: fix.candidate!.sha }, approvedBy: null, requestedBy: 'graphyard-operator' })) }),
+    approver: async (_work: Work, decision: string) => { approvers.push(decision); return { agentName: 'graphyard-approver-gy-1124', pane: 'pane-1' }; },
+    persist: async () => {},
+  } as unknown as DaemonEffects;
+  const loopConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/outside/graphyard.mjs',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
+  const state = emptyDaemonState(loopConfig);
+  await runCycle(loopConfig, state, effects, () => now);
+  const repairs = decided.filter(entry => entry.action === 'repair-merge');
+  assert.equal(repairs.length, 1, JSON.stringify(decided));
+  assert.equal(repairs[0].work, 'GY-1124');
+  assert.match(repairs[0].reason, /GitHub observation missing or older than two minutes/, 'the request names the fault');
+  assert.ok(namedMergePathFault(repairs[0].reason), 'the reason names the merge-path location the server requires');
+  assert.deepEqual(approvers, ['5d8a8b9e-0000-4000-8000-000000001218'], 'the loop launches the approver for it');
+  // The next cycles supervise that one request: one per stall.
+  await runCycle(loopConfig, state, effects, () => now + 30_000);
+  await runCycle(loopConfig, state, effects, () => now + 60_000);
+  assert.equal(decided.filter(entry => entry.action === 'repair-merge').length, 1);
 });

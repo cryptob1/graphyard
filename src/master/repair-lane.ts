@@ -8,8 +8,13 @@
 import type { Work } from '../model.js';
 import type { AttentionItem } from './attention.js';
 
-/** The merge path: where a fault can stop every merge, so where a repair item's plannedFiles must stay. */
-export const mergePath = ['src/github.ts', 'src/merge-queue.ts', 'src/model/queue.ts', 'src/daemon/', '.github/workflows/'] as const;
+/**
+ * The merge path: where a fault can stop every merge, so where a repair item's plannedFiles must stay.
+ * The coordination store and reconciliation (src/engine.ts, src/store/) belong to it (GY-1218): when
+ * lock contention starves reconciliation, every merge is refused on a stale observation as surely as
+ * when src/github.ts breaks.
+ */
+export const mergePath = ['src/github.ts', 'src/merge-queue.ts', 'src/model/queue.ts', 'src/daemon/', '.github/workflows/', 'src/engine.ts', 'src/store/'] as const;
 export const withinMergePath = (path: string) => !path.includes('..') && mergePath.some(entry => entry.endsWith('/') ? path.startsWith(entry) : path === entry);
 /** How long the normal guarded merge must have been refused or pending before the lane may bypass it. */
 export const repairStallMs = 15 * 60_000;

@@ -16,6 +16,7 @@ import type { Cycle } from './cycle.js';
 import { baseRefreshConflict } from '../merge-queue.js';
 import { docsSyncRoute } from './docs-sync-route.js';
 import { wakeObservationJob } from './cycle-delivery.js';
+import { repairTriggerDecision } from './repair-trigger.js';
 
 /** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403). */
 export { handWatchPrefix };
@@ -572,7 +573,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const assessment = assessments[item.id];
     // A request step 2 refused this cycle is read as it was decided, not as the snapshot saw it.
     const scoped = settled.get(item.id) ?? item;
-    const decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? blockerScopeDecision(scoped) ?? routineDecision(item, config, clock, assessment, exhausted);
+    // GY-1218: a merge band stalled on one shared fault asks for the repair lane for the approved fix (repair-trigger.ts).
+    const decision = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? blockerScopeDecision(scoped) ?? routineDecision(item, config, clock, assessment, exhausted) ?? repairTriggerDecision(item, snapshot.work, clock);
     if (!decision) {
       // Still called for, only not attestable this cycle: its request is not one the item moved past.
       const called = neededDecision(item, config, exhausted);
