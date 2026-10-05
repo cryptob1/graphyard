@@ -7,7 +7,7 @@
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses releases *unobserved*, *stale* (rerun), not serving the merge, *already recording deployment*. Without `--deployment-url` it reads `productionEnvironment` deployments (newest success counts).
+`master verify-deployment GY-N` refuses releases *unobserved*, *stale* (rerun), not serving the merge, or already recorded. Without `--deployment-url` it reads `productionEnvironment` deployments (newest success counts).
 
 ## Lost worker before submission
 
