@@ -18,7 +18,7 @@ The loop attests unproduced `manual:` proofs through an independent approver, on
 ### Session liveness is reconciled, not trusted
 
 **The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep
-that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to
+that misses it; an unobserved one is left alone for its first 3 minutes, and a worker handle with no pane yet reads `launching` while its attempt's lease stands, which the launch renews until its supervisor's first heartbeat. A handle another host launched is left to
 that host's loop. `dispatch.sessionReconcile` reports each closure:
 
 - **Vanished**: missing from two consecutive listings.
@@ -39,6 +39,10 @@ another session's handle finished to free a slot.
 ### System invariants
 
 Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Fault thresholds: `invariants` in `.graphyard/master.json`; `tests/soak.test.ts` enforces.
+
+### The pipeline doctor
+
+Every `run.doctor.intervalMinutes` (default 10) the loop's [doctor](onboarding.md#the-pipeline-doctor-on-by-default) checks stuck work. Sanctioned: `scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`; never merge, dispatch, evidence or leases. Off: `run.doctor.enabled=false`.
 
 ## Research and diagnosis
 
