@@ -255,11 +255,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   promptSession?: (agent: HerdrAgent, text: string) => void | Promise<void>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<Work>;
   blockDispatch?: (work: Work, reason: string) => Promise<unknown>; // GY-1078: an item's repeated dispatch-failure cause as its blocker; absent, the loop holds it
-  /**
-   * Run one master browser flow as a child command and resolve with what it reported (GY-949): the
-   * remedy step applies the installation-accept remedy through it. A refusal resolves; only a child
-   * that printed no result rejects. Absent, no remedy is applied.
-   */
+  /** Run one master browser flow as a child command (GY-949); a refusal resolves, only a child that printed no result rejects. */
   browserFlow?: (flow: RemedyFlow) => Promise<FlowResult>;
   /** Record the loop's attempt of a remedy on the stalled row it was applied for (`POST /api/actions/:id/remedy`). */
   recordRemedy?: (row: string, attempt: Omit<RemedyRecord, 'at' | 'by'>) => Promise<unknown>;

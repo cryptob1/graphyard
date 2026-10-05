@@ -78,11 +78,7 @@ export interface ActionRow {
    * `actionStall` recomputes it from the history so the two can never disagree.
    */
   stall?: ActionStall;
-  /**
-   * The loop's attempt of the remedy its stall reason binds to (GY-949, src/stall-remedies.ts):
-   * recorded once per unchanged run, with what the remedy did, so the attention and the
-   * escalation name it and the loop never applies it twice for the same run.
-   */
+  /** The loop's one attempt per unchanged run of the remedy its stall reason binds to (GY-949, src/stall-remedies.ts). */
   remedy?: RemedyRecord;
   /** The executor this row already stepped aside for once since its last failure (`yieldsTo`). */
   yielded?: string;
