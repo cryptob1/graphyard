@@ -12,7 +12,7 @@ import { escalationTriggers, type Evidence, type Observation, type Work } from '
 import { nameUnobtainableReviews, requestAttemptLimit, settledAnswerGraceMs, unansweredRequest, type DispatchRequest, type RequestProgress } from '../src/model/dispatch.js';
 import { applyRegistryMutation, emptyRegistry, fleetRoles, fleetView, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { agentOwner, buildMasterStatus, controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type AttentionItem, type MasterConfig } from '../src/master.js';
-import { cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, faultObservationIntervalMs, deploymentObservationSchema, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { containmentSettleWaitBoundMs, cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, faultObservationIntervalMs, deploymentObservationSchema, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { attributeAttention, derivedAttention, faulted } from '../src/master-status.js';
 import { sessionRetries } from '../src/producer.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from '../src/cli/unanswered-requests.js';
@@ -456,7 +456,9 @@ test('unit:recurring-class-item — containment grace window is no fault; lapsed
   // After grace window has elapsed (120s past leaseExpiresAt)
   const lapsedClock = clock + 180_000;
   assert.deepEqual(workFaults(fenced, lapsedClock).map(fault => fault.kind), ['containment'], 'lapsed quarantine is a containment fault');
-  assert.equal(cycleFaults(emptyDaemonState(config()), [fenced], lapsedClock, { config: config() }).filter(fault => fault.faultClass === 'containment').length, 1);
+  // The loop is still settling a fence that recent (GY-1299), so it counts once it stands past the settle wait bound.
+  assert.equal(cycleFaults(emptyDaemonState(config()), [fenced], lapsedClock, { config: config() }).filter(fault => fault.faultClass === 'containment').length, 0, 'a fence the loop is still settling is no fault');
+  assert.equal(cycleFaults(emptyDaemonState(config()), [fenced], lapsedClock + containmentSettleWaitBoundMs, { config: config() }).filter(fault => fault.faultClass === 'containment').length, 1);
 });
 
 test('unit:recurring-class-item — a recurring human-decision class keeps the decision with the human', () => {
