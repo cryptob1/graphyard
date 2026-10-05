@@ -1,15 +1,17 @@
-import { existsSync, readFileSync, symlinkSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, symlinkSync } from 'node:fs';
 import { access, constants, readdir, rm } from 'node:fs/promises';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { Work } from './model.js';
 import { runChild, type ChildRun } from './child-runner.js';
 import type { CoordinatorConfinement, MasterConfig } from './master/profiles.js';
 import { loadMasterConfig } from './master/config.js';
-import { accountLaunch, sharedGitDirectory } from './master/environments.js';
-import { closeFailedLaunch, launchStartMs, sessionConfinement, startAgentSession } from './master/launch.js';
+import { accountLaunch } from './master/environments.js';
+import { closeFailedLaunch, launchStartMs, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from './master/launch.js';
+import { checkoutGitDirectory } from './master/checkout-git.js';
+import { sessionGitAdminDirectory } from './master/profiles.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson, observeHerdrAgents } from './master/herdr.js';
 import { autonomousSession, destructivePromptGuidance, herdrAttach } from './master/dispatch.js';
-import { selectApproverAccount, type SessionRegistrar } from './master/autonomy.js';
+import { selectApproverAccount, type ApproverSelection, type SessionRegistrar } from './master/autonomy.js';
 import { registeredLaunch } from './model/session-state.js';
 import { sessionName } from './session-name.js';
 import { failureText, settleCheckout } from './master/worktrees.js';
@@ -100,6 +102,28 @@ export async function prepareDocsSyncCheckout(root: string, plan: DocsSyncPlan, 
   return checkout;
 }
 
+/** Remove one docs-sync checkout and its worktree registration now, as a refused launch leaves it. */
+async function removeDocsSyncCheckout(root: string, checkout: string, run: ChildRun) {
+  try { await run('git', ['-C', root, 'worktree', 'remove', '--force', checkout], { timeoutMs: 60_000 }); } catch { /* never registered */ }
+  await rm(checkout, { recursive: true, force: true });
+  try { await run('git', ['-C', root, 'worktree', 'prune'], { timeoutMs: 60_000 }); } catch { /* the next add prunes too */ }
+}
+
+/**
+ * What a docs-sync launch grants writable to the runtime's own sandbox (a codex `--add-dir`): the
+ * checkout and exactly the shared Git paths the read-only mount re-exposes (readOnlyMountWrapper) —
+ * the object store, the checkout's own worktree admin and the remote-tracking refs it pushes
+ * through — never the whole common Git directory, whose HEAD, index and local refs are the
+ * coordinator's (GY-1273). Not a pure query: it first creates the shared Git paths the confinement
+ * re-exposes (prepareConfinedGitPaths), so each one exists to be granted.
+ */
+export function docsSyncWritablePaths(root: string, checkout: string): string[] {
+  prepareConfinedGitPaths(root);
+  const gitDir = checkoutGitDirectory(root), admin = sessionGitAdminDirectory(checkout, root);
+  const directory = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
+  return [checkout, join(gitDir, 'objects'), ...(admin ? [admin] : []), join(gitDir, 'refs', 'remotes'), join(gitDir, 'logs', 'refs', 'remotes')].filter(directory);
+}
+
 /**
  * Why a docs-sync session would be unable to write its checkout, or null: the directory is not
  * writable on the host, or the confinement the session carries leaves it read-only — the last
@@ -123,12 +147,17 @@ export async function docsSyncCheckoutRefusal(checkout: string, confinement: Coo
  * profiles name, chosen as an approver's are (`selectApproverAccount`). The instruction is the
  * session's own first request, like every session Graphyard launches.
  */
-export async function launchDocsSync(root: string, work: Work, plan: DocsSyncPlan, herdr: { agents: HerdrAgent[]; available: boolean }, run?: ChildRun, register?: SessionRegistrar) {
-  const config = await loadMasterConfig(root);
+export interface DocsSyncLaunchSeams {
+  config?: () => Promise<MasterConfig>;
+  select?: (config: MasterConfig, key: string, principal: string, probe: { runtime: { agents: HerdrAgent[]; available: boolean } }) => Promise<ApproverSelection>;
+  confinement?: typeof sessionConfinement;
+}
+export async function launchDocsSync(root: string, work: Work, plan: DocsSyncPlan, herdr: { agents: HerdrAgent[]; available: boolean }, run?: ChildRun, register?: SessionRegistrar, seams: DocsSyncLaunchSeams = {}) {
+  const config = await (seams.config ?? (() => loadMasterConfig(root)))();
   const name = docsSyncSessionName(plan);
   if (!herdr.available) throw new Error(`Herdr's session inventory could not be read, so no docs-sync session for ${work.key} is launched into it; the launch is made again once Herdr answers`);
   if (herdr.agents.some(agent => agent.name === name)) throw new Error(`Docs-sync session ${name} is already visible in Herdr; let it finish first`);
-  const chosen = await selectApproverAccount(config, work.key, config.approver?.id ?? 'graphyard-docs-sync', { runtime: herdr });
+  const chosen = await (seams.select ?? selectApproverAccount)(config, work.key, config.approver?.id ?? 'graphyard-docs-sync', { runtime: herdr });
   const kind = chosen.account?.kind ?? config.reviewers[0]?.kind ?? config.workers[0]?.kind;
   const release = (why: string) => chosen.fleet?.release(why).catch(() => false);
   if (!kind) { await release(`docs-sync launch for ${work.key} found no runtime`); throw new Error('No runtime is configured for a docs-sync session: name reviewer profiles or approver accounts'); }
@@ -137,18 +166,21 @@ export async function launchDocsSync(root: string, work: Work, plan: DocsSyncPla
   // this process holds it against the reclaim pass for the session's bounded life and settles it
   // after; a loop that dies first leaves it to the orphan reclaim. `.graphyard/docs-sync` is only
   // swept, for checkouts launches before GY-866 left there.
-  let checkout: string, launch: ReturnType<typeof accountLaunch>, managed: Awaited<ReturnType<typeof coordinationCheckout>> | undefined, unhold = () => {};
+  let checkout: string | undefined, launch: ReturnType<typeof accountLaunch>, managed: Awaited<ReturnType<typeof coordinationCheckout>> | undefined, unhold = () => {};
   const unwind = async () => { unhold(); if (managed) await settleCheckout(root, managed.directory); };
+  // A launch that fails leaves a checkout no session will ever own, so it is reclaimed now, its
+  // worktree registration with it, rather than at the next launch (GY-1273).
+  const reclaim = async () => { if (checkout) await removeDocsSyncCheckout(root, checkout, run ?? runChild).catch(() => undefined); await unwind(); };
   try {
     await reclaimDocsSyncCheckouts(root, herdr.agents.map(agent => agent.name ?? ''), run);
     managed = await coordinationCheckout(root, config, work.key, plan.head);
     unhold = holdCheckout(managed.directory);
     checkout = await prepareDocsSyncCheckout(root, plan, run, managed.worktree);
-    launch = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, chosen.account ?? null, { writable: [checkout, await sharedGitDirectory(root)].filter((path): path is string => !!path) });
-    const refusal = await docsSyncCheckoutRefusal(checkout, await sessionConfinement(kind, launch.args, { directory: checkout }));
+    launch = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, chosen.account ?? null, { writable: docsSyncWritablePaths(root, checkout) });
+    const refusal = await docsSyncCheckoutRefusal(checkout, await (seams.confinement ?? sessionConfinement)(kind, launch.args, { directory: checkout }));
     if (refusal) throw new Error(refusal);
   } catch (error) {
-    await unwind();
+    await reclaim();
     await release(`docs-sync launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
     throw error;
   }
@@ -162,7 +194,7 @@ export async function launchDocsSync(root: string, work: Work, plan: DocsSyncPla
     () => startAgentSession(name, kind, created.pane, launch.args, docsSyncPrompt(config, plan, root, checkout), run, { directory: checkout, retry: `docs-sync of ${work.key}`, contract: launch.contract, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined);
   } catch (error) {
     if (pane || tab) await closeFailedLaunch(pane, tab, run).catch(() => undefined);
-    await unwind();
+    await reclaim();
     await release(`docs-sync launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
     throw error;
   }

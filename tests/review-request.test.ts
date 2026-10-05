@@ -11,12 +11,13 @@ import { GitHub } from '../src/github.js';
 import type { BaseRefresh } from '../src/merge-queue.js';
 import { conflictRoute, docsOnlyConflict, docsSyncAdoption, docsSyncCarry, overlappingPaths } from '../src/model/docs-sync.js';
 import { conflictHotspots, hotspotAttentionText, ledgerConflicts, type ConflictOccurrence } from '../src/model/conflict-hotspots.js';
-import { docsSyncCheckout, docsSyncCheckoutRefusal, docsSyncPrompt, docsSyncSessionName, prepareDocsSyncCheckout, reclaimDocsSyncCheckouts, type DocsSyncPlan } from '../src/docs-sync.js';
+import { docsSyncCheckout, docsSyncCheckoutRefusal, docsSyncPrompt, docsSyncSessionName, docsSyncWritablePaths, launchDocsSync, prepareDocsSyncCheckout, reclaimDocsSyncCheckouts, type DocsSyncLaunchSeams, type DocsSyncPlan } from '../src/docs-sync.js';
+import { runChild, type ChildRun } from '../src/child-runner.js';
 import { coordinatorConfinement } from '../src/master/profiles.js';
 import { prepareConfinedGitPaths } from '../src/master/launch.js';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { accessSync, chmodSync, constants, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { sessionNameRefusal } from '../src/session-name.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -433,25 +434,77 @@ test('unit:docs-sync-unwritable-checkout-refused — a docs-sync launch whose ch
   const base = await temporaryDirectory('docs-sync');
   const checkout = join(base, 'GY-42-aaaaaaa');
   mkdirSync(checkout);
+  // Under a confinement that leaves it behind the read-only coordinator bind, it is refused too.
+  const hidden = (path: string) => ({ mechanism: 'read-only-mount' as const, detail: '', wrapper: ['bwrap', '--dev-bind', '/', '/', '--ro-bind', path, path, '--bind', join(path, 'other'), join(path, 'other'), '--'] });
+  assert.match((await docsSyncCheckoutRefusal(checkout, hidden(base)))!, new RegExp(`${checkout}.*under the session's confinement`));
   try {
-    // Under a confinement that leaves it behind the read-only coordinator bind, it is refused too.
-    const hidden = { mechanism: 'read-only-mount' as const, detail: '', wrapper: ['bwrap', '--dev-bind', '/', '/', '--ro-bind', base, base, '--bind', join(base, 'other'), join(base, 'other'), '--'] };
-    assert.match((await docsSyncCheckoutRefusal(checkout, hidden))!, new RegExp(`${checkout}.*under the session's confinement`));
     chmodSync(checkout, 0o555);
+    // A superuser writes through 0o555 (GY-1273): the host check is asserted only where the mode holds.
+    let writable = true;
+    try { accessSync(checkout, constants.W_OK); } catch { writable = false; }
     const refusal = await docsSyncCheckoutRefusal(checkout, null);
-    assert.ok(refusal?.includes(`The docs-sync checkout ${checkout} is not writable`), `the refusal names the path: ${refusal}`);
-
-    const docs = { decided: [] as string[], synced: [] as DocsSyncPlan[], agents: [] as string[] };
-    const item = conflicted(['docs/master-agent.md']);
-    const state = emptyDaemonState(docsConfig());
-    const effects = loop(() => item, docs);
-    let started = false;
-    effects.docsSync = async () => { const why = await docsSyncCheckoutRefusal(checkout, null); if (why) throw new Error(why); started = true; return { agentName: 'never', pane: null, account: null, runtime: 'claude', session: null }; };
-    const cycle = await runCycle(docsConfig(), state, effects, () => clock);
-    assert.equal(started, false, 'no session is started');
-    assert.deepEqual(docs.decided, ['rework'], 'the conflict is routed to rework in the same cycle');
-    assert.equal(state.conflicts[0].route, 'rework');
-    assert.ok(cycle.actions.some(action => action.work === 'GY-42' && action.detail.includes(`The docs-sync checkout ${checkout} is not writable`)), 'the cycle report names the unwritable path');
+    if (writable) assert.equal(refusal, null, 'a directory the host can write is not refused');
+    else assert.ok(refusal?.includes(`The docs-sync checkout ${checkout} is not writable`), `the refusal names the path: ${refusal}`);
   } finally { chmodSync(checkout, 0o755); }
+
+  // The cycle drives the real launchDocsSync (GY-1273): its herdr and git calls go through `run`,
+  // so a refusal checked after the tab is created would show as a herdr call here.
+  const { root, head } = await docsSyncRepository();
+  const calls: string[][] = [];
+  const run: ChildRun = async (command, args, options) => {
+    calls.push([command, ...args]);
+    if (command === 'herdr') throw new Error('no herdr in this test');
+    return runChild(command, args, options);
+  };
+  let released: string | null = null;
+  const seams = (confinement: DocsSyncLaunchSeams['confinement']): DocsSyncLaunchSeams => ({
+    config: async () => ({ ...docsConfig(), reviewers: [{ kind: 'claude' }] } as unknown as MasterConfig),
+    select: async () => ({ fleet: { release: async (why: string) => { released = why; return true; } }, account: null, profile: 'docs-sync', skipped: [] }) as any,
+    confinement,
+  });
+  const relocate = (plan: DocsSyncPlan): DocsSyncPlan => ({ ...plan, head, base: head });
+  // GY-866: the checkout lies in a managed checkout of the session's own, at a path the launcher
+  // picks, so the confinement records the directory it is asked about and hides its parent.
+  let launched: string | null = null;
+  const hiding: DocsSyncLaunchSeams['confinement'] = async (_kind, _args, options) => { launched = options.directory; return hidden(dirname(options.directory)); };
+
+  const docs = { decided: [] as string[], synced: [] as DocsSyncPlan[], agents: [] as string[] };
+  const item = conflicted(['docs/master-agent.md']);
+  const state = emptyDaemonState(docsConfig());
+  const effects = loop(() => item, docs);
+  let planned: DocsSyncPlan | null = null;
+  effects.docsSync = async (work, plan) => { planned = plan; return launchDocsSync(root, work, relocate(plan), { agents: [], available: true }, run, undefined, seams(hiding)); };
+  const cycle = await runCycle(docsConfig(), state, effects, () => clock);
+  assert.ok(planned, 'the loop tried the docs-sync launch');
+  assert.ok(launched, 'the launch checked its checkout under the confinement');
+  const refused: string = launched;
+  assert.ok(calls.some(call => call[0] === 'git' && call.includes('worktree') && call.includes('add')), 'the launcher created the checkout first');
+  assert.ok(!calls.some(call => call[0] === 'herdr'), 'no herdr tab is created for a refused launch');
+  assert.ok(!existsSync(refused), 'the refused checkout is removed at once, not at the next docs-sync launch');
+  assert.ok(!execFileSync('git', ['-C', root, 'worktree', 'list'], { encoding: 'utf8' }).includes(refused), 'and its worktree registration with it');
+  assert.match(released ?? '', /not writable/, 'the account reservation is released naming the refusal');
+  assert.deepEqual(docs.decided, ['rework'], 'the conflict is routed to rework in the same cycle');
+  assert.equal(state.conflicts[0].route, 'rework');
+  assert.ok(cycle.actions.some(action => action.work === 'GY-42' && action.detail.includes(`The docs-sync checkout ${refused} is not writable`)), 'the cycle report names the unwritable path');
+
+  // The same launch, not refused, goes on to create the tab: the check sits between the two.
+  calls.length = 0;
+  await assert.rejects(launchDocsSync(root, item, relocate(planned!), { agents: [], available: true }, run, undefined, seams(async (_kind, _args, options) => { launched = options.directory; return null; })), /no herdr in this test/);
+  assert.ok(calls.some(call => call[0] === 'herdr' && call.includes('tab') && call.includes('create')), 'an allowed launch reaches the herdr tab');
+  const allowed: string = launched;
+  assert.notEqual(allowed, refused, 'each launch allocates a checkout of its own');
+  assert.ok(!existsSync(allowed), 'a launch failing after the tab is created reclaims its checkout at once too');
+  assert.ok(!execFileSync('git', ['-C', root, 'worktree', 'list'], { encoding: 'utf8' }).includes(allowed), 'and its worktree registration with it');
+});
+
+test('unit:docs-sync-writable-grant-narrow — a docs-sync launch grants its runtime sandbox the checkout and the read-only mount\'s shared Git paths, never the whole common Git directory with the coordinator\'s HEAD and index', async () => {
+  const { root, head } = await docsSyncRepository();
+  const plan: DocsSyncPlan = { key: 'GY-42', pr: 42, branch: 'graphyard/gy-42-1', baseBranch: 'main', head, base: head, paths: ['docs/page.md'] };
+  const checkout = await prepareDocsSyncCheckout(root, plan);
+  const writable = docsSyncWritablePaths(root, checkout);
+  const git = join(root, '.git');
+  assert.deepEqual(writable, [checkout, join(git, 'objects'), join(git, 'worktrees', `GY-42-${head.slice(0, 7)}`), join(git, 'refs', 'remotes'), join(git, 'logs', 'refs', 'remotes')]);
+  for (const coordinator of [git, join(git, 'HEAD'), join(git, 'index'), join(git, 'refs'), join(git, 'refs', 'heads')])
+    assert.ok(!writable.includes(coordinator), `${coordinator} is not granted`);
 });
 }

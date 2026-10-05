@@ -94,11 +94,23 @@ export async function noteConfigReload(state: DaemonState, reload: ConfigReload,
   return noted;
 }
 
-/** A watchdog window too short for the configured interval is recorded once, not obeyed silently. */
+/**
+ * A watchdog window too short for the configured interval is recorded once, not obeyed silently:
+ * once per process start at most, and not again while the same refusal stands on the cursor.
+ * Once the installed unit's window covers the interval — the alignment step rewrites a drifted
+ * unit before it re-executes the loop (GY-916) — the standing refusal is cleared, so a mismatch is
+ * converged rather than faulted at every start.
+ */
 export async function noteWatchdog(state: DaemonState, plan: ReturnType<typeof watchdogPlan>, at: string, persist: DaemonEffects['persist']) {
-  if (!plan.refusal) return [];
+  if (!plan.refusal) {
+    if (!plan.supervised || plan.windowMs === null) return [];
+    const cleared = Object.entries(state.actions).filter(([key, action]) => key.startsWith('escalation:watchdog:') && action.state === 'failed')
+      .map(([key, action]) => storeAction(state, key, { ...action, state: 'done', detail: `Cleared: the supervisor's watchdog window is now ${Math.round(plan.windowMs! / 1000)}s, longer than two cycle intervals; it was: ${action.detail}`, cycle: state.cycle, at }, 'action:config'));
+    if (cleared.length) await persist(state);
+    return cleared;
+  }
   const key = `escalation:watchdog:${plan.windowMs}`;
-  if (state.actions[key]) return [];
+  if (state.actions[key]?.state === 'failed') return [];
   const entry = storeAction(state, key, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: plan.refusal, attempts: 1, epoch: null, cycle: state.cycle, at }, 'action:config');
   await persist(state);
   return [entry];
@@ -275,7 +287,11 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       // GY-857: never while the checkout is dirty — the alignment would check out over work it
       // holds and re-execute the loop onto code no commit names.
       // GY-866: the guard reads the checkout every cycle, not only when an alignment is due.
-      await guard.betweenCycles(stopping ? undefined : effects.selfUpgrade);
+      // The executor restart can wait minutes on held claims and re-registration: the watchdog is
+      // fed on each poll so that wait is not mistaken for a hung loop (GY-916).
+      const keepAlive = watchdog.supervised ? async () => { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } } : undefined;
+      const selfUpgrade = effects.selfUpgrade;
+      await guard.betweenCycles(stopping || !selfUpgrade ? undefined : current => selfUpgrade(current, keepAlive));
       // The keep-alive says the process is alive, which a failed cycle leaves true: the watchdog
       // is for a cycle that hangs, and a thrown one has just proved it did not.
       if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
@@ -393,7 +409,8 @@ export function coordinatorCheckoutGuard(deps: {
       try {
         upgraded = await selfUpgrade(deps.state());
         if (upgraded.outcome !== 'skipped') deps.log(`[graphyard-master] upgrade ${describeSelfUpgrade(upgraded)}`);
-        if (upgraded.outcome === 'upgraded' || upgraded.outcome === 'up-to-date') {
+        // A pending upgrade has moved the checkout too: only the restarts it owes wait (GY-916).
+        if (upgraded.outcome === 'upgraded' || upgraded.outcome === 'up-to-date' || upgraded.outcome === 'pending') {
           const aligned = await deps.read();
           if (aligned.commit) expectedHead = aligned.commit;
         }
