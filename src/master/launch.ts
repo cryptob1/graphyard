@@ -505,7 +505,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
   // verdict is not kept, so the next launch on that endpoint reports it instead.
   let launched = false, settle!: (ok: boolean) => void;
   const outcome = new Promise<boolean>(done => { settle = done; });
-  void (options.keyringWarning ?? ((session, bound, ok) => keyringEndpointWarning(session, bound, undefined, undefined, undefined, ok, keyringProbeBackoff)))(name, confinement, outcome).then(line => { if (line) log(line); }, () => undefined);
+  void (options.keyringWarning ?? ((session, bound, ok) => keyringEndpointWarning(session, bound, undefined, undefined, undefined, ok, keyringProbeBackoff, log)))(name, confinement, outcome).then(line => { if (line) log(line); }, () => undefined);
   try {
     let started: Awaited<ReturnType<typeof awaitRuntimeStart>>;
     try { started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: startedStates }); }
