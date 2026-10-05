@@ -8,9 +8,9 @@ import type { Evidence, Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { atomicPrivateWrite, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { exhaustedProofKey, type ExhaustedProof } from '../src/daemon/decisions.js';
+import { exhaustedProofEscalation, exhaustedProofKey, exhaustedProofRework, type ExhaustedProof } from '../src/daemon/decisions.js';
 import { sessionRetryLimit } from '../src/producer.js';
-import { dispatchFailureAttention, emptyDispatchCursor, extractProducerAccountsOrRuntimes, isUnactedProducerAttempt, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { describeAttempts, dispatchFailureAttention, dispatchFailureLimit, emptyDispatchCursor, extractProducerAccountsOrRuntimes, instantExitReason, isUnactedProducerAttempt, runDispatchTick, unactedProducerAttempts, type DispatchEffects } from '../src/auto-dispatch.js';
 
 // GY-1153: Producer attempts that never started (runtime quota, trust prompt, busy profiles)
 // send a correct candidate back to a worker as a rework.
@@ -291,4 +291,55 @@ test('GY-1153 review follow-ups — a sole profile keeps its unstarted retries, 
     'attempt 2 on claude-b: failed — never started: account exhausted',
     'attempt 3 on agy: failed — never started',
   ]), ['agy', 'claude-b']);
+});
+
+test('GY-1227 review follow-ups — shared unacted wording, unacknowledged sessions, empty attempts, settled-path profiles and a recovered sole profile', async () => {
+  // An expired session that recorded no resolution and was never acknowledged acted on nothing; one acknowledged acted.
+  const unacknowledged = describeAttempts([{ requestId: 'r', state: 'expired', requestedAt: at, profile: 'agy' }], 'r');
+  assert.match(unacknowledged[0], /never acknowledged/);
+  assert.equal(unactedProducerAttempts(unacknowledged), true);
+  assert.equal(unactedProducerAttempts(describeAttempts([{ requestId: 'r', state: 'expired', requestedAt: at, profile: 'agy', acknowledgedAt: at }], 'r')), false);
+  // The instant-exit refusal is read through the constant its error is built from.
+  assert.equal(isUnactedProducerAttempt(`${instantExitReason} on its provider's limit notice: usage limit`), true);
+
+  // A spent entry with no recorded attempt is acted in both the escalation and the rework.
+  const empty: ExhaustedProof = { requestId: 'r', work: 'GY-1127', sha: H, group: 'unit', proofs: ['unit:a'], attempts: [], reason: 'spent' };
+  assert.equal(unactedProducerAttempts([]), false);
+  assert.match(exhaustedProofEscalation(empty), /requests a rework decision for GY-1127/);
+  assert.ok(exhaustedProofRework(work(), [empty]), 'the rework the escalation announced is delivered');
+
+  const root = await temporaryDirectory('exhausted-proof-runtime-gy1227');
+  try {
+    const token = join(root, 'coordinator.token');
+    await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const profile = (name: string) => ({ name, principal: `proof-${name}`, agentName: `produce-${name}`, kind: 'agy' as const, credentialFile: join(root, `${name}.token`) }) as MasterConfig['producers'][number];
+    for (const name of ['agy', 'claude-b', 'claude-c']) await writeFile(join(root, `${name}.token`), `${name}-token-`.padEnd(40, 'x'), { mode: 0o600 });
+
+    // Settled at the limit: the relaunch is held to the untried profile, and a refusal there does not fail over onto a tried one.
+    const three = masterConfig(token, [profile('agy'), profile('claude-b'), profile('claude-c')]);
+    const item = requested('unit:never-started-producers-request-no-rework');
+    const unit = item.autoDispatch!.producers.find(request => request.group === 'unit')!;
+    const settled = Array.from({ length: dispatchFailureLimit }, (_, index) => ({ requestId: unit.id, attempt: index + 1, profile: index === dispatchFailureLimit - 1 ? 'claude-b' : 'agy',
+      state: index === dispatchFailureLimit - 1 ? 'cancelled' : 'failed', requestedAt: iso(-7_200_000 + index * 60_000), closedAt: iso(-3_600_000 + index * 60_000), resolution: 'launch refused: the pane could not be created' }));
+    const tried: string[] = [], effects = dispatchEffects(() => [item], [], settled);
+    effects.launchProducer = async (_item, _request, candidate) => { tried.push(candidate.name); throw Object.assign(new Error(`${candidate.name} has no account`), { accountsExhausted: true }); };
+    await runDispatchTick(three, emptyDispatchCursor(three), effects, () => clock);
+    assert.deepEqual(tried, ['claude-c'], 'the settled-path relaunch only tries the profile no attempt ran on');
+
+    // A sole profile whose attempts exited at launch on its account's limit notice is relaunched on once its credential is available again.
+    const sole = masterConfig(token, [profile('agy')]);
+    const limited = [1, 2, 3, 4].map(attempt => ({ requestId: unit.id, attempt, profile: 'agy', state: 'failed', requestedAt: iso(-7_200_000 + attempt * 60_000), closedAt: iso(-3_600_000 + attempt * 60_000),
+      resolution: `${instantExitReason} on its provider's limit notice: usage limit reached` }));
+    const log: string[] = [], cursor = emptyDispatchCursor(sole);
+    await runDispatchTick(sole, cursor, dispatchEffects(() => [item], log, limited), () => clock);
+    assert.deepEqual(log.filter(entry => entry.includes(':unit:')), ['producer:GY-1127:unit:agy'], 'the recovered sole profile is relaunched on');
+    // Once: a further attempt on it after the request was spent leaves the request to the master.
+    const again = [...limited, { ...limited[3], attempt: 5, requestedAt: iso(-60_000), closedAt: iso(-30_000) }];
+    const later: string[] = [], next = emptyDispatchCursor(sole);
+    await runDispatchTick(sole, next, dispatchEffects(() => [item], later, again), () => clock);
+    assert.deepEqual(later.filter(entry => entry.includes(':unit:')), [], 'the recovered profile is relaunched on once');
+    assert.ok(next.abandoned[unit.id], 'the request is raised to the master after its one recovered relaunch');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

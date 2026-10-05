@@ -21,6 +21,8 @@ Every worker, reviewer and producer Graphyard launches starts with a project-mem
 - Recurring fault classes with their sanctioned remedies.
 - Merges to main after the session's base, with their files (the last 24 hours when the base is not a remembered merge).
 
+An entry that would overrun the budget is skipped, not the end of its section: later, shorter entries are still added. An oversized decision is cut to the words that fit and marked `…`; it is shown when it is the first decision or at least five words remain.
+
 The loop updates it only from decisions it sees applied (never a refusal), answered human requests, recurring fault classes and merges — never from an agent's claim — and keeps it in its cursor and `.graphyard/project-memory.json`. `graphyard master status` reports it as `projectMemory`, and the Workers page shows it.
 
 ## Risk lanes
@@ -31,7 +33,7 @@ Every item rides a **risk lane**, decided from the paths its change touches by t
 - **Medium** adds its producer-run proofs (`unit:`, `integration:`); its reworks need no approver either.
 - **High** keeps the full path: producer proofs, `manual:` attestations, and a two-party approver decision for every rework.
 
-An `e2e:` proof and an inherited bootstrap obligation are required in every lane, and a change not yet observed rides high. A rework needing no approver is recorded in the decision ledger as approved by `graphyard-risk-lane`. Speed targets ship per lane — low p50 30 min, medium 60 min, high 4 h — and are reported beside it.
+An `e2e:` proof and an inherited bootstrap obligation are required in every lane, and a change not yet observed rides high. A rework needing no approver is recorded in the decision ledger as approved by `graphyard-risk-lane`. Its application is a separate step: one interrupted before recording an outcome is resumed by the next decision request for the item, under any key, so it never stands approved and unapplied — applied, it answers a new rework request; failed, the new request supersedes it. Speed targets ship per lane — low p50 30 min, medium 60 min, high 4 h — and are reported beside it.
 
 ![Bootstrap versus normal operation: one supervised worker, then a fleet with separate credentials.](diagrams/bootstrap-vs-normal.svg)
 
