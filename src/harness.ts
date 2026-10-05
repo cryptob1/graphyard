@@ -400,6 +400,8 @@ export function harnessDecision(plan: Pick<HarnessPlan, 'allow' | 'deny'>, comma
   return parts.length && allowed.every(Boolean) ? { decision: 'allow', rule: allowed[0]! } : { decision: 'ask', rule: null };
 }
 
+/** What turns a `gh api` read into a write besides POST, PUT and DELETE, which the master's plan denies everywhere. */
+const readWriteFlags = ['PATCH', ' -f', ' -F', ' --field', ' --raw-field', ' --input'];
 /** The one GraphQL write a session may make: resolving a review thread (the master's audit, the reviewer's verdict). */
 export const resolveThreadScript = (root: string) => resolve(root, 'scripts/resolve-thread.mjs');
 
@@ -413,6 +415,7 @@ export function masterHarnessPlan(input: { harness: string; root: string; cliPat
     note: `Graphyard generates harness permissions for Claude Code and trust configuration for Codex; ${input.harness} has no generated rules, so its own approval configuration applies.` };
   const cli = `node ${input.cliPath}`;
   const protection = `repos/${input.repository}/branches/${encodeURIComponent(input.baseBranch)}/protection`;
+  const readPaths = [`repos/${input.repository}/pulls`, `repos/${input.repository}/commits`];
   const allow: HarnessRule[] = [
     { rule: `Bash(${cli} master:*)`, why: 'Run the master\'s own coordinator commands: status, dispatch, review, reviewer, protection, browser, harness, run, merge, and guide.' },
     { rule: `Bash(${cli} master review:*)`, why: 'The reviewer launcher. Listed on its own because the classifier reads launching a second agent as a permission grant; the launched reviewer holds a read-only, hour-long App token and no Graphyard credential.' },
@@ -428,6 +431,10 @@ export function masterHarnessPlan(input: { harness: string; root: string; cliPat
     { rule: 'Bash(gh pr diff:*)', why: 'Read the candidate diff while routing or triaging a review.' },
     { rule: 'Bash(gh pr checks:*)', why: 'Read CI results for a candidate.' },
     { rule: 'Bash(gh api user)', why: 'Name the GitHub identity an audit entry attributes an administration action to.' },
+    // GY-1237: reads of the managed repository's pull requests and commits (merged, mergeable,
+    // merge_commit_sha) run without a prompt, so a classifier mode cannot refuse them. Only a
+    // command whose first argument is the path matches; every write on these paths is denied below.
+    ...readPaths.map(path => ({ rule: `Bash(gh api ${path}*)`, why: `Read ${path} (state, merged, mergeable, the pull request behind a commit) as a GET, so the classifier cannot refuse a routing read; every method or field flag that would write is denied.` })),
     { rule: `Bash(gh api ${protection}*)`, why: 'Read the managed base branch\'s protection and its subresources before and after reconciliation; the classifier otherwise refuses protection reads as CI-bypass reconnaissance.' },
     { rule: `Bash(gh api --method PATCH ${protection}/*)`, why: 'Reconcile one protection subresource (required reviews, required status checks) with the open review policies. A subresource PATCH cannot remove protection itself, and the App-bound check is re-verified before every guarded merge; the classifier otherwise refuses it as a CI bypass.' },
     { rule: 'Bash(gh api user/installations*)', why: 'Read the control-plane App\'s installation and the permissions it grants, before and after an installation acceptance. Installation writes have no API path the master may take directly; master browser installation-accept is the only one.' },
@@ -445,7 +452,10 @@ export function masterHarnessPlan(input: { harness: string; root: string; cliPat
     // line, so a read whose path or jq filter said `merged` or `mergeable` was refused, and a refused
     // read sends the master to the operator. Every REST path that merges is named here; merge-queue
     // enqueue and auto-merge exist only as GraphQL mutations, denied below.
-    { rule: 'Bash(gh api *pulls/*/merge*)', why: 'A raw pull-request merge call (PUT repos/R/pulls/N/merge) is an administrative merge bypass.' },
+    // The merge endpoint merges only on PUT (GY-1237): naming the method, like the siblings below,
+    // leaves GET repos/R/pulls/N/merge (the is-merged check) and a jq path that says pulls/N/merge open.
+    { rule: 'Bash(gh api *PUT*pulls/*/merge*)', why: 'A raw pull-request merge call (PUT repos/R/pulls/N/merge) is an administrative merge bypass.' },
+    { rule: 'Bash(gh api *pulls/*/merge*PUT*)', why: 'The same merge call with the method flag after the path.' },
     { rule: 'Bash(gh api *repos/*/merges*)', why: 'A raw branch-merge call (POST repos/R/merges) moves a branch outside the guarded merge.' },
     { rule: 'Bash(gh api *merge-upstream*)', why: 'Merging an upstream branch into a fork branch (POST repos/R/merge-upstream) moves a branch outside the guarded merge.' },
     { rule: 'Bash(gh api *pulls/*/reviews*)', why: 'Posting or dismissing a pull-request review through the API is the same verdict the master must never give.' },
@@ -456,6 +466,10 @@ export function masterHarnessPlan(input: { harness: string; root: string; cliPat
     { rule: 'Bash(gh api *DELETE*)', why: 'Deleting protection, a check, or an installation is never reconciliation, wherever the method flag sits in the command.' },
     { rule: 'Bash(gh api *PUT*)', why: 'Replacing whole branch protection could drop the App-bound check, and adding a repository to an installation is a grant; only subresource PATCHes and the recorded browser flows change those, wherever the method flag sits in the command.' },
     { rule: 'Bash(gh api *POST*)', why: 'The master creates nothing through the API: no review, comment, check run, or installation.' },
+    // The read allows above take any text after the path; these keep them GET-only. POST, PUT and
+    // DELETE are denied everywhere; PATCH, and a field or body flag (which makes gh send a POST), are
+    // denied on the read paths.
+    ...readPaths.flatMap(path => readWriteFlags.map(flag => ({ rule: `Bash(gh api ${path}*${flag}*)`, why: `${flag.trim()} turns a read of ${path} into a write; the master edits no pull request and comments on no commit.` }))),
     { rule: 'Bash(agent-browser *)', why: 'The operator\'s browser profile is their identity and is driven only by the recorded master browser flows. A direct command would open that profile outside the three flows, and its cookies, state, restore, and auth-vault commands would export the operator\'s login; the recorded steps and screenshots under .graphyard/master-actions are the way to inspect what a flow saw.' },
     { rule: 'Bash(git push:*)', why: 'The master implements nothing and pushes nothing.' },
     { rule: `Read(//${input.credentialHome}/**)`, why: 'Coordinator, worker, and reviewer credentials live here; the master uses them through the CLI and never reads their bytes.' },
@@ -470,10 +484,42 @@ export function masterHarnessPlan(input: { harness: string; root: string; cliPat
 }
 /**
  * Rules an earlier Graphyard wrote into the master's settings and no longer generates: word-wide
- * merge and GraphQL denies that refused reads (GY-1217). An installed copy is harness drift, and
- * `master harness --apply` removes it; any other operator-added entry is kept.
+ * merge and GraphQL denies that refused reads (GY-1217), and the merge-endpoint deny that also
+ * refused the GET is-merged check (GY-1237). An installed copy Graphyard wrote is harness drift,
+ * and `master harness --apply` removes it; an operator's identical entry is kept (generatedRecord).
  */
-export const retiredMasterRules = ['Bash(gh api *merge*)', 'Bash(gh api graphql*)'];
+export const retiredMasterRules = ['Bash(gh api *merge*)', 'Bash(gh api graphql*)', 'Bash(gh api *pulls/*/merge*)'];
+
+/**
+ * The rules Graphyard itself wrote into a plan's settings file (GY-1237), kept beside the master's
+ * configuration so a retired rule is removed only where Graphyard installed it: the settings file
+ * cannot tell a generated entry from an operator's identical one. Written only for a plan that
+ * retires rules, the master's, whose root holds `.graphyard/` already. A file installed before the
+ * record existed has none; its installed copies of the plan's and retired rules are taken as
+ * Graphyard's once, since those are the strings an earlier Graphyard wrote, and recorded from then on.
+ */
+type GeneratedRules = Record<'allow' | 'deny', string[]>;
+const generatedRecordFile = (root: string) => resolve(root, '.graphyard', 'harness-generated.json');
+async function readGeneratedRecord(root: string, plan: HarnessPlan & { file: string }, permissions: any): Promise<GeneratedRules> {
+  let files: any = null;
+  try { files = JSON.parse(await readFile(generatedRecordFile(root), 'utf8'))?.files; }
+  catch (error: any) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
+  const recorded = files && typeof files === 'object' ? files[plan.file] : undefined;
+  const strings = (value: unknown) => (Array.isArray(value) ? value : []).filter((rule): rule is string => typeof rule === 'string');
+  if (recorded && typeof recorded === 'object') return { allow: strings(recorded.allow), deny: strings(recorded.deny) };
+  const legacy = (list: 'allow' | 'deny') => strings(permissions[list]).filter(rule => plan.retired?.includes(rule) || plan[list].some(entry => entry.rule === rule));
+  return { allow: legacy('allow'), deny: legacy('deny') };
+}
+async function writeGeneratedRecord(root: string, plan: HarnessPlan & { file: string }, generated: GeneratedRules) {
+  const file = generatedRecordFile(root);
+  let existing: any = {};
+  try { existing = JSON.parse(await readFile(file, 'utf8')); } catch (error: any) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
+  const files = existing?.files && typeof existing.files === 'object' && !Array.isArray(existing.files) ? existing.files : {};
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  await writeFile(temporary, `${JSON.stringify({ version: 1, files: { ...files, [plan.file]: generated } }, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+  await rename(temporary, file);
+}
 
 async function ignoredByGit(root: string, path: string) {
   try { await defaultChildRun('git', ['check-ignore', '--quiet', '--', path], { cwd: root }); return true; }
@@ -494,8 +540,9 @@ const harnessFile = (root: string, plan: HarnessPlan & { file: string }) => {
   return file;
 };
 const harnessPermissions = (settings: any) => settings.permissions && typeof settings.permissions === 'object' && !Array.isArray(settings.permissions) ? settings.permissions : {};
-const staleRules = (plan: HarnessPlan, permissions: any) => (['allow', 'deny'] as const).flatMap(list =>
-  (Array.isArray(permissions[list]) ? permissions[list] as unknown[] : []).filter((rule): rule is string => typeof rule === 'string' && !!plan.retired?.includes(rule)).map(rule => ({ list, rule })));
+const staleRules = (plan: HarnessPlan, permissions: any, generated: GeneratedRules | null) => (['allow', 'deny'] as const).flatMap(list =>
+  (Array.isArray(permissions[list]) ? permissions[list] as unknown[] : []).filter((rule): rule is string => typeof rule === 'string' && !!plan.retired?.includes(rule) && !!generated?.[list].includes(rule)).map(rule => ({ list, rule })));
+const generatedFor = (root: string, plan: HarnessPlan & { file: string }, permissions: any) => plan.retired ? readGeneratedRecord(root, plan, permissions) : Promise.resolve(null);
 
 /**
  * How the installed harness settings differ from the current plan: rules the plan generates that
@@ -510,7 +557,7 @@ export async function harnessDrift(root: string, plan: HarnessPlan) {
   catch (error: any) { if (error.code === 'ENOENT') return null; throw error; }
   const permissions = harnessPermissions(settings && typeof settings === 'object' ? settings : {});
   const absent = [...missing(plan.allow, permissions.allow).map(entry => ({ list: 'allow' as const, rule: entry.rule })), ...missing(plan.deny, permissions.deny).map(entry => ({ list: 'deny' as const, rule: entry.rule }))];
-  const stale = staleRules(plan, permissions);
+  const stale = staleRules(plan, permissions, await generatedFor(root, plan as HarnessPlan & { file: string }, permissions));
   if (!absent.length && !stale.length) return null;
   const named = [stale.length ? `stale ${stale.map(entry => `${entry.list} ${entry.rule}`).join(', ')}` : '', absent.length ? `missing ${absent.map(entry => `${entry.list} ${entry.rule}`).join(', ')}` : ''].filter(Boolean).join('; ');
   return { file: plan.file, stale, missing: absent, text: `Harness drift in ${plan.file}: ${named}. Run graphyard master harness ${plan.harness} --apply to rewrite it.` };
@@ -529,16 +576,21 @@ export async function writeHarnessPermissions(root: string, plan: HarnessPlan, a
   const permissions = harnessPermissions(settings);
   const addedAllow = missing(plan.allow, permissions.allow), addedDeny = missing(plan.deny, permissions.deny);
   const added = [...addedAllow.map(entry => ({ list: 'allow' as const, ...entry })), ...addedDeny.map(entry => ({ list: 'deny' as const, ...entry }))];
-  const removed = staleRules(plan, permissions);
+  const generated = await generatedFor(root, plan as HarnessPlan & { file: string }, permissions);
+  const removed = staleRules(plan, permissions, generated);
   if (!apply) return { harness: plan.harness, file: plan.file, applied: false, added, removed, manual: plan.manual, note: plan.note };
-  // Operator-added entries are never removed; generation adds the master's own rules and removes
-  // only the retired rules an earlier Graphyard itself generated.
-  const kept = (list: unknown) => (Array.isArray(list) ? list : []).filter(rule => !plan.retired?.includes(rule));
-  const next = { ...settings, permissions: { ...permissions, allow: [...kept(permissions.allow), ...addedAllow.map(entry => entry.rule)], deny: [...kept(permissions.deny), ...addedDeny.map(entry => entry.rule)] } };
+  // Operator-added entries are never removed, even one identical to a retired rule; generation adds
+  // the master's own rules and removes only the retired rules Graphyard itself installed.
+  const kept = (list: 'allow' | 'deny') => (Array.isArray(permissions[list]) ? permissions[list] as unknown[] : []).filter(rule => !removed.some(entry => entry.list === list && entry.rule === rule));
+  const next = { ...settings, permissions: { ...permissions, allow: [...kept('allow'), ...addedAllow.map(entry => entry.rule)], deny: [...kept('deny'), ...addedDeny.map(entry => entry.rule)] } };
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   await assertIgnored(root, plan.file);
   const temporary = `${file}.${randomUUID()}.tmp`;
   await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
   await rename(temporary, file); await chmod(file, 0o600);
+  if (generated) {
+    const still = (list: 'allow' | 'deny') => generated[list].filter(rule => next.permissions[list].includes(rule));
+    await writeGeneratedRecord(root, plan as HarnessPlan & { file: string }, { allow: [...new Set([...still('allow'), ...addedAllow.map(entry => entry.rule)])], deny: [...new Set([...still('deny'), ...addedDeny.map(entry => entry.rule)])] });
+  }
   return { harness: plan.harness, file: plan.file, applied: true, added, removed, manual: plan.manual, note: plan.note };
 }

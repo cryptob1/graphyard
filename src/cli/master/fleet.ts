@@ -6,6 +6,7 @@ import { readReviewLedger, reviewCommand as launchReview } from '../../reviewer.
 import { readDispatchCursor } from '../../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection, readWorkflows } from '../../protection.js';
 import { harnessDrift, writeHarnessPermissions } from '../../harness.js';
+import { readMasterLaunch } from '../../master/master-session.js';
 import { browserFlows, runBrowserFlow, type BrowserFlow } from '../../master-browser.js';
 import { reviewerCommand } from '../master-reviewer.js';
 import { registryCommand } from '../master-registry.js';
@@ -15,14 +16,19 @@ import { unhandled, type MasterSession } from './session.js';
 import type { AttentionItem, MasterConfig } from '../../master.js';
 
 /**
- * The master's installed Claude harness judged against the current `masterHarness` plan (GY-1217):
- * an attention item naming the stale and missing rules, repaired by `master harness claude --apply`,
- * or null when it matches or nothing is installed. A settings file it cannot read is reported too.
+ * The master's installed harness judged against the current `masterHarness` plan for the runtime
+ * it runs under (GY-1217, GY-1237): an attention item naming the stale and missing rules, repaired
+ * by `master harness KIND --apply`, or null when it matches, nothing is installed, or the runtime
+ * has no generated settings file. The runtime is the one the loop's launch record names for the
+ * master agent; with no record (a `master start` launch) the Claude plan is judged, as before. So a
+ * Codex master is never reported drift from a stale Claude settings file an earlier master left.
+ * A settings file it cannot read is reported too.
  */
 export async function masterHarnessDrift(root: string, master: MasterConfig): Promise<(AttentionItem & { drift: Awaited<ReturnType<typeof harnessDrift>> }) | null> {
-  const repair = 'graphyard master harness claude --apply';
+  const kind = (await readMasterLaunch(root, master.masterAgentName ?? '').catch(() => null))?.runtime ?? 'claude';
+  const repair = `graphyard master harness ${kind} --apply`;
   try {
-    const drift = await harnessDrift(root, masterHarness(root, master, 'claude'));
+    const drift = await harnessDrift(root, masterHarness(root, master, kind));
     return drift ? { subject: 'harness', text: drift.text, drift, ...agentOwner('master', repair) } : null;
   } catch (error) {
     return { subject: 'harness', text: `The master's harness settings cannot be compared with the current plan: ${error instanceof Error ? error.message : 'unknown reason'}`, drift: null, ...agentOwner('master', repair) };
