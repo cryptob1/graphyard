@@ -325,6 +325,18 @@ export function sameBesideActions(read: Work, current: Work): boolean {
   const rest = ({ actionQueue: _queue, revision: _revision, updatedAt: _updated, ...others }: Work) => stableJson(others);
   return rest(read) === rest(current);
 }
+/**
+ * Whether two readings of one item differ only in the loop's own bookkeeping (GY-1257): the action
+ * queue (`sameBesideActions`), plus what each save re-derives or the loop records about the item
+ * rather than the submitted work — its next action, gates and the lane they stamp, the sessions it
+ * reports, and the escalations it raises for attention. None of it is what a GitHub observation
+ * reads, and the observation's own save re-evaluates the gates, so it never stands on a stale one.
+ */
+export function sameBesideBookkeeping(read: Work, current: Work): boolean {
+  const rest = ({ actionQueue: _queue, revision: _revision, updatedAt: _updated, nextAction: _next, gates: _gates, lane: _lane, speedTarget: _target,
+    sessions: _sessions, escalation: _escalation, escalations: _escalations, ...others }: Work) => stableJson(others);
+  return rest(read) === rest(current);
+}
 /** How many saves behind a reader may be and still have its read resolved from the ledger. */
 export const actionOnlyLookback = 20;
 /**
@@ -332,11 +344,11 @@ export const actionOnlyLookback = 20;
  * ledger — differs from `work` only in action-queue bookkeeping. A writer that read the item at
  * that revision may then still write: what it read is what it would read now.
  */
-async function onlyActionsMovedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number): Promise<boolean> {
+async function onlyActionsMovedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number, same = sameBesideActions): Promise<boolean> {
   const behind = work.revision - revision;
   if (!Number.isInteger(behind) || behind <= 0 || behind > actionOnlyLookback) return false;
   const read = (await db.query(`SELECT ${eventWorkSql('saved')} AS work FROM (SELECT work_id, payload FROM events WHERE work_id=$1 AND (payload ? 'work' OR payload ? 'delta') ORDER BY seq DESC OFFSET $2 LIMIT 1) saved`, [work.id, behind])).rows[0]?.work as Work | undefined;
-  return !!read && read.revision === revision && sameBesideActions(read, work);
+  return !!read && read.revision === revision && same(read, work);
 }
 
 /**
@@ -2690,7 +2702,8 @@ export class Engine {
    * action-queue bookkeeping (`onlyActionsMovedSince`): an executor claiming or settling the item's
    * `resync` row saves the item, and refusing the observation over that write discarded the very
    * reading the row was waiting for, so the item stayed stale and the row was claimed again,
-   * forever (GY-607).
+   * forever (GY-607). The loop's own bookkeeping counts the same way (`sameBesideBookkeeping`,
+   * GY-1257): its per-cycle writes refused the very observation it had woken for a rework decision.
    */
   async observe(id: string, expectedRevision: number, observation: Observation, jobToken?: string) {
     return this.store.transaction(async (db, now) => {
@@ -2707,7 +2720,7 @@ export class Engine {
       }
       const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
-      requireCurrent(work && (work.revision === expectedRevision || await onlyActionsMovedSince(db, work, expectedRevision)), 'Task changed while GitHub was being observed; retry');
+      requireCurrent(work && (work.revision === expectedRevision || await onlyActionsMovedSince(db, work, expectedRevision, sameBesideBookkeeping)), 'Task changed while GitHub was being observed; retry');
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
