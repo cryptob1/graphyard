@@ -4,10 +4,13 @@ import { join } from 'node:path';
 import { rm } from 'node:fs/promises';
 import EmbeddedPostgres from 'embedded-postgres';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { main, refusedBeforeReady } from '../src/server/main.js';
+import { main, readinessHeader, refusedBeforeReady } from '../src/server/main.js';
 import { Validation } from '../src/validation.js';
+import { freePort } from '../src/cli/test-isolation.js';
 
-const port = Number(process.env.GRAPHYARD_STARTUP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1127);
+// A kernel-chosen free port, not an offset above GRAPHYARD_TEST_PORT: 1127 lay outside the run's
+// reserved window and past the nested-run gap, where another file's or run's Postgres could bind it.
+let port: number;
 let database: EmbeddedPostgres;
 let scratch: string;
 let databaseUrl: string;
@@ -19,6 +22,7 @@ const credentials = [
 
 before(async () => {
   scratch = await temporaryDirectory('startup-readiness');
+  port = Number(process.env.GRAPHYARD_STARTUP_TEST_PORT ?? await freePort());
   database = new EmbeddedPostgres({
     databaseDir: join(scratch, 'pg'),
     user: 'graphyard',
@@ -67,7 +71,11 @@ test('unit:server-listens-before-startup-validation — with startup artifact ex
       assert.ok(elapsed < 10_000, `answered GET /healthz within 10 s of start (took ${elapsed} ms)`);
       assert.equal(res.status, 200);
       const body = await res.json() as any;
-      assert.equal(body.ok, true);
+      // Liveness answers 200; the verdict is unhealthy until startup validation completes, so an
+      // installer's `ok` check and the loop's dispatch gate wait for it (GY-1238).
+      assert.equal(body.ok, false);
+      assert.equal(body.healthy, false);
+      assert.match(body.causes[0], /startup validation has not completed/);
       assert.equal(body.readiness, false);
       assert.equal(instance.isReady(), false);
     } finally {
@@ -101,13 +109,22 @@ test('unit:startup-validation-gates-coordination — until the startup validatio
 
       // 1. GET /healthz reports liveness throughout with readiness false
       const healthBefore = await fetch(`${baseUrl}/healthz`).then(r => r.json()) as any;
-      assert.equal(healthBefore.ok, true);
+      assert.equal(healthBefore.ok, false);
+      assert.equal(healthBefore.healthy, false);
       assert.equal(healthBefore.readiness, false);
       // A readiness probe asking ?ready is kept off this replica until startup validation completes.
       assert.equal((await fetch(`${baseUrl}/healthz?ready`)).status, 503);
       // Only mutations are refused: a webhook delivery and a lease heartbeat pass, and so do reads.
       assert.equal(refusedBeforeReady('POST', '/api/github/webhook'), false);
       assert.equal(refusedBeforeReady('POST', '/api/work/GY-1/heartbeat'), false);
+      // Validation attempt and collection lease renewals pass too, so a long startup lapses no lease (GY-1238).
+      assert.equal(refusedBeforeReady('POST', '/api/validation/heartbeat'), false);
+      assert.equal(refusedBeforeReady('POST', '/api/validation/collection-heartbeat'), false);
+      assert.equal(refusedBeforeReady('POST', '/api/validation/result'), true);
+      // A read answered before readiness says so.
+      const earlyRead = await fetch(`${baseUrl}/api/status`, { headers: { 'Authorization': `Bearer ${'a'.repeat(32)}` } });
+      await earlyRead.arrayBuffer();
+      assert.equal(earlyRead.headers.get(readinessHeader), 'startup-validation-pending');
       assert.equal(refusedBeforeReady('GET', '/api/work/GY-1'), false);
       assert.equal(refusedBeforeReady('POST', '/api/work/GY-1/complete'), true);
       assert.equal(refusedBeforeReady('POST', '/api/actions/0123456789abcdef0123456789abcdef/renew'), true);
@@ -154,7 +171,9 @@ test('unit:startup-validation-gates-coordination — until the startup validatio
       assert.ok(instance.isReady(), 'instance became ready after startup validation completed');
 
       // 5. GET /healthz reports readiness true
-      const healthAfter = await fetch(`${baseUrl}/healthz`).then(r => r.json()) as any;
+      const healthAfterRes = await fetch(`${baseUrl}/healthz`);
+      assert.equal(healthAfterRes.headers.get(readinessHeader), null);
+      const healthAfter = await healthAfterRes.json() as any;
       assert.equal(healthAfter.ok, true);
       assert.equal(healthAfter.readiness, true);
       assert.equal((await fetch(`${baseUrl}/healthz?ready`)).status, 200);
@@ -241,15 +260,45 @@ test('unit:startup-validation-failure-retried — a startup validation failure i
 test('close during startup validation stops cleanly without launching background work', async () => {
   const origExpire = Validation.prototype.expireArtifacts;
   const origReconcile = Validation.prototype.reconcile;
+  let resolveExpire!: (value: number) => void, expiring = false;
+  const expired = new Promise<number>(resolve => { resolveExpire = resolve; });
   try {
-    Validation.prototype.expireArtifacts = async () => new Promise<number>(resolve => setTimeout(() => resolve(0), 5000));
+    Validation.prototype.expireArtifacts = async () => { expiring = true; return expired; };
     const instance = await main({ port: 0 });
+    const waitStart = Date.now();
+    while (!expiring && Date.now() - waitStart < 5000) await new Promise(r => setTimeout(r, 20));
+    assert.ok(expiring, 'startup validation reached artifact expiry before close');
     assert.equal(instance.isReady(), false);
+    assert.deepEqual(instance.background(), { watching: false, observing: false });
     await instance.close();
+    // Startup validation finishing after close neither turns the replica ready nor starts the
+    // production watch or the observation workers (GY-1238).
+    resolveExpire(0);
+    await new Promise(resolve => setTimeout(resolve, 100));
     assert.equal(instance.isReady(), false);
+    assert.deepEqual(instance.background(), { watching: false, observing: false });
   } finally {
     Validation.prototype.expireArtifacts = origExpire;
     Validation.prototype.reconcile = origReconcile;
   }
 });
 
+
+test('ready replica starts its background work, and close stops accepting requests before it waits on the observation workers', async () => {
+  const origExpire = Validation.prototype.expireArtifacts;
+  try {
+    Validation.prototype.expireArtifacts = async () => 0;
+    const instance = await main({ port: 0 });
+    const waitStart = Date.now();
+    while (!instance.isReady() && Date.now() - waitStart < 5000) await new Promise(r => setTimeout(r, 20));
+    assert.ok(instance.isReady());
+    // GitHub is not configured here, so only the production watch runs beside the tick.
+    assert.deepEqual(instance.background(), { watching: true, observing: false });
+    const closing = instance.close();
+    assert.equal(instance.http.listening, false, 'intake closed synchronously, before close awaited anything');
+    await closing;
+    assert.deepEqual(instance.background(), { watching: false, observing: false });
+  } finally {
+    Validation.prototype.expireArtifacts = origExpire;
+  }
+});

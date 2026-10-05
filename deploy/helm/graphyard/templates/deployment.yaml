@@ -12,6 +12,10 @@ spec:
       {{- include "graphyard.serverSelectorLabels" . | nindent 6 }}
   # Replicas share the Postgres ledger; coordination locks and job leases live there, so a
   # rolling update needs no sticky sessions and the additive schema serves both versions.
+  # The readiness probe holds a new pod out of service until its startup validation completes,
+  # which can take minutes against a busy database; the default 600 s deadline would mark such a
+  # rollout failed while it is only validating (GY-1238). Override with progressDeadlineSeconds.
+  progressDeadlineSeconds: {{ .Values.progressDeadlineSeconds | default 1800 }}
   strategy:
     type: RollingUpdate
     rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }

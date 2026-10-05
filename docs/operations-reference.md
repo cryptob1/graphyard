@@ -15,7 +15,7 @@ A lease expires 120 s after the last heartbeat (one more lease period after a re
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker, `graphyard master settle-containment GY-N "reason"` verifies nothing survives (the loop alone excuses a childless `herdr server` pane shell). If refused, confirm the stop, then `rework` (`recover-containment` once delivered; [recipes](operations.md#recovery-recipes)). Autosettle's [clock bound](protocol/leases.md#watch).
+On the worker, `graphyard master settle-containment GY-N "reason"` verifies nothing survives (the loop alone excuses a childless `herdr server` pane shell). If refused, confirm the stop, `rework` (`recover-containment` once delivered; [recipes](operations.md#recovery-recipes)). Autosettle's [clock bound](protocol/leases.md#watch).
 
 ## Submitted implementation needs rework
 
@@ -23,7 +23,7 @@ Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`
 
 ## Retro synthesis
 
-With `GRAPHYARD_INTERVENTION_PATTERNS=1`, a minutely scan groups refusal/rework interventions by cause: declared refusal shape (`build/out-of-scope-count`), loop refusal trigger or normalised rework reason. A cause reaching the threshold gets drafted, never applied or filed, artefacts (`retro.drafted`): a standards/criteria wording update, mechanical check, producer-method correction or fault-catalogue entry. An agent holding `decision:approve` (not a human, the drafter, or an instance's recorder) approves one, applying it at its registry's next revision (`requirements`, `checks`, `catalogue`), recording cause, fingerprint and closed instances, or refuses it. In force: requirements show `retroStanding` in `graphyard status GY-N`; a check (`planned-files`, `merges-onto-base`, `checks-passed`) runs on each submission's candidate, refusing `complete` (`409`); a catalogue entry files later instances under its fault class (`catalogue` on interventions, `retroCatalogued` on gate refusals) and counts its recurrences. Drafted instances never count again; a recurrence after application is redrafted naming it (`recurredAfter`). Routes: [work commands](protocol/work-commands.md).
+With `GRAPHYARD_INTERVENTION_PATTERNS=1`, a minutely scan groups refusal/rework interventions by cause: declared refusal shape (`build/out-of-scope-count`), loop refusal trigger or normalised rework reason. A cause at the window's threshold gets unapplied, unfiled drafts (`retro.drafted`): standards/criteria wording update, mechanical check, producer-method correction or fault-catalogue entry. An agent holding `decision:approve` (not a human, drafter or instance recorder) approves or refuses one, applied at its registry's next revision (`requirements`, `checks`, `catalogue`) recording cause, fingerprint, closed instances. In force: requirements show `retroStanding` (`graphyard status GY-N`); a check (`planned-files`, `merges-onto-base`, `checks-passed`) runs on each submission's candidate, refusing `complete` (`409`); a catalogue entry files later instances under its fault class (`catalogue` on interventions, `retroCatalogued` on gate refusals) counting recurrences. Drafted instances never count again; a recurrence after application is redrafted naming it (`recurredAfter`). Routes: [work commands](protocol/work-commands.md).
 
 ## Flaky CI check
 
@@ -31,7 +31,7 @@ A required check failing on a tip or head reruns once per sha (*rerun failed job
 
 ## Accepted evidence turns out to be wrong
 
-`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes the gate and ejects it.
+`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes the gate, ejecting it.
 
 ## GitHub request budget
 
@@ -62,7 +62,7 @@ Immutable, per-cycle and webhook-driven reads: [not repeated](protocol/github-we
 
 ### What a pause means for gates
 
-A `403`/`429` pauses requests; gates read stale until it lifts: nothing merges on an observation over two minutes old. A merge stalled only on observation freshness is observed, not reworked or ejected ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
+A `403`/`429` pauses requests; gates read stale until it lifts: nothing merges on observations over two minutes old. A merge stalled only on observation freshness is observed, not reworked or ejected ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
 
 ### Reading the budget
 
@@ -74,7 +74,7 @@ A silent hour: `master status` points to `https://github.com/settings/apps/APP-S
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (warns under 25%) and loop-removed 2h-idle files. Database bound: `GRAPHYARD_DATABASE_MAX_BYTES`, else `data_directory`'s volume, else silent 10 GiB. `agent-names` flags holders 10m past settling, reclaimed each tick; `loaded-revision` counts code moves after 30m self-upgrade.
+Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: system-wide free `/tmp` inodes (warns <25%); loop removes 2h-idle `graphyard-*`, `gy-*`, `landing-merge-result*`, `native-*`, `pg-password*`, `playwright_chromiumdev_profile*`. Database bound: `GRAPHYARD_DATABASE_MAX_BYTES`, else same-host `data_directory` volume, else silent advisory 10 GiB. `agent-names` flags holders 10m past settling, reclaimed each tick; `loaded-revision` counts code moves after 30m self-upgrade.
 
 ## Storage retention
 
@@ -84,9 +84,9 @@ Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`;
 
 ### Host memory
 
-Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` wait for one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`) in the managed root's `.verification-slots`; CI unbounded.
+Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` wait for one of max(2,floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`) in the managed root's `.verification-slots`; CI unbounded.
 
-Below max(10% RAM, 4 GB) available, launches defer (`escalation:dispatch:memory`; `resources` item `memory` names top consumers; one `memory-pressure` fault per dip) until 1 GB above.
+Below max(10% RAM,4 GB) available, launches defer (`escalation:dispatch:memory`; `resources` `memory` names top consumers; one `memory-pressure` fault per dip) until 1 GB above.
 
 ## Bootstrap mode for a self-proving change
 
@@ -94,7 +94,7 @@ A `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths"
 
 ## Delivered with a failed smoke proof
 
-Stays Done, **delivered with failure**; revert via a new item, never backfill.
+It stays Done, **delivered with failure**; revert via new item, never backfill.
 
 ## Merged but not deployed
 
@@ -102,7 +102,7 @@ A merge production never served is a `delivery.deployment-incident` ([observatio
 
 ## Merge bypass
 
-An ungated merge is a permanent violation: repair access, file a follow-up, never backfill evidence. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
+An ungated merge is a permanent violation: repair access, file a follow-up, never backfill. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Credentials
 
@@ -124,11 +124,11 @@ graphyard grants revoke ci "integration:claim-safety" "Runner decommissioned"
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) share one pace per token. Claims: webhook-woken, head `max(2,batchSize,parallelTips)` band, in-flight merges, review requests 15+ min stale, never-observed, due, waits, sessions. `observationThroughput`: budget, pace, head lag, oldest unobserved, `bands` lag (`github` past merge 2, review 30 min). Heartbeat, claim, `complete` and `blocked` own the lease pool; `leaseHealth` reports heartbeat p50/p95 and failures (raised past 5 s).
+`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes reconcile batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) share one pace per token. Claims: webhook-woken, head `max(2,batchSize,parallelTips)` band, in-flight merges, review requests 15+ min stale, never-observed, due, waits, sessions. `observationThroughput`: budget, pace, head lag, oldest unobserved, `bands` lag (`github` past merge 2, review 30 min). Heartbeat, claim, `complete`, `blocked` own the lease pool; `leaseHealth` reports heartbeat p50/p95 and failures (raised past 5 s).
 
-Heartbeats lock only their item, others fleet then item. Reconcile opens on [cached stand-ins](operations.md#safety-facts-that-never-change), evaluating moved-`xmin` rows (all after non-renewal changes or each `GRAPHYARD_RECONCILE_FULL_MS`=10000 ms), skipping writer-held rows. Contended batches rerun twice, halved, then defer; deferrals, >5s ticks warn. Resyncs share one tick and connection.
+Heartbeats lock their item; others, fleet then item. Reconcile opens on [cached stand-ins](operations.md#safety-facts-that-never-change), evaluating moved-`xmin` rows (all after non-renewal changes or each `GRAPHYARD_RECONCILE_FULL_MS`=10000ms), skipping writer-held rows. Contended batches retry twice halved, then defer; deferrals, >5s ticks warn. Resyncs share one tick, connection/server.
 
-Listening precedes startup validation; meanwhile `/healthz` reports `readiness: false`, `/healthz?ready` 503.
+Listening precedes startup validation, until which `/healthz` reports `healthy: false`, `readiness: false`; `?ready`, and mutations but webhooks and heartbeats, 503; reads carry `x-graphyard-readiness`. Helm: `progressDeadlineSeconds` 1800.
 
 ### Concurrent reconciliation
 
