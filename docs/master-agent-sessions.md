@@ -27,11 +27,11 @@ A profile's `accounts` lists [agent environments](onboarding.md#agent-environmen
 
 A runtime failing to start fails over too, named in `master status` (`opencode-a failed to start: …; launched on claude-b`); three in a row raise attention until a start.
 
-On a runtime's limit notice (never agent text; a working session's, master included, only beside its retry marker `[retrying in 4s attempt #5]`), the loop commits work as unpushed `WIP:`, records `capacity.exhausted`, relaunches elsewhere or awaits reset (agy's `Individual quota reached`).
+On a runtime's limit notice (never agent text; a working session's (master too) needs its retry marker `[retrying in 4s]`), the loop commits work as unpushed `WIP:`, records `capacity.exhausted`, relaunches elsewhere or awaits reset (agy's `Individual quota reached`).
 
 ## The loop's own master session
 
-The loop launches the master session as a fleet role (`master registry role set master ACCOUNTS …`) pinned to one session, holding its registry slot until ended; unconfigured, nothing launches. Either path (`master start` too) adopts a live session named `masterAgentName`. Its first request is the master prompt plus a durable handover naming standing judgement work. It relaunches on exit (two missed readings; an unreadable inventory is none), a limit notice (account held), or past `run.masterSessionMinutes` (default 240), deferred at most 30 minutes for an open item's merge. A failed registry end retries each cycle. Each cycle wakes it naming changed subjects; `run.masterHeartbeatMinutes` (default 30) of silence buys one heartbeat. `master status` shows `daemon.master`.
+The loop launches the master session as a fleet role (`master registry role set master ACCOUNTS …`) pinned to one session, holding its registry slot until ended; unconfigured, nothing launches. Either path (`master start` too) adopts a live session named `masterAgentName`. Its first request is the master prompt plus a durable handover. It relaunches on exit (two missed readings; an unreadable inventory is none), a limit notice (account held), or past `run.masterSessionMinutes` (default 240), deferred up to 30 minutes for an open merge. A failed registry end retries each cycle. Each cycle wakes it naming changes; `run.masterHeartbeatMinutes` (default 30) of silence buys one heartbeat. `master status` shows `daemon.master`.
 
 ## How a session starts
 

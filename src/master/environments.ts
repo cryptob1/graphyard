@@ -48,8 +48,7 @@ const providerUsageErrors: readonly RegExp[] = [
 export const providerLimitNotices: Readonly<Record<string, readonly RegExp[]>> = {
   claude: [...providerUsageErrors, /\bClaude AI usage limit reached\b/],
   codex: [...providerUsageErrors],
-  // OpenCode 1.18 on a spent plan: `Weekly/Monthly Limit Exhausted. Your limit will reset at …` (GY-973).
-  opencode: [...providerUsageErrors, /\b(?:weekly|monthly|daily|hourly|usage)(?:\/(?:weekly|monthly|daily|hourly))? limit exhausted\b/i],
+  opencode: [...providerUsageErrors, /\b(?:weekly|monthly|daily|hourly|usage)(?:\/(?:weekly|monthly|daily|hourly))? limit exhausted\b/i], // OpenCode 1.18's `Weekly/Monthly Limit Exhausted` (GY-973)
   cursor: [...providerUsageErrors],
   agy: [...providerUsageErrors, /\bIndividual quota reached\b(?=.*\b(?:upgrade your subscription|resets? in)\b)/i], // GY-1135
 };
