@@ -40,8 +40,7 @@ const containment = (work: Work) => ({
   cycle: cycleFaults(emptyDaemonState(config()), [work], clock, { config: config() }).filter(fault => fault.kind === 'containment').length,
 });
 
-// Review finding 1: quarantine.ts is outside this item's scope, and the model module stays free of its node-only
-// imports for the browser bundle, so the two definitions stay and this test fails the moment they drift.
+// Review finding 1 (GY-1214): the model module owns the window and quarantine.ts re-exports it, so both name one value.
 test('manual:review-followups-triaged — fault counting and settlement share one containment grace window', () => {
   assert.equal(modelGraceMs, settlementGraceMs);
   assert.equal(containmentPhase(fenced(null), clock)?.state, 'lapsed');
