@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CODEX_APP_ID, CODEX_USER_ID } from '../src/codex-review.js';
-import { GitHub, CHECK_NAME, scopeLookupBudget, compareFileCap } from '../src/github.js';
+import { GitHub, CHECK_NAME, RerunPending, scopeLookupBudget, compareFileCap } from '../src/github.js';
+// A namespace import, so on a base without GY-1329's helpers these tests fail as cases rather than the file failing to load.
+import * as mergeQueue from '../src/merge-queue.js';
+import type { CheckRerun } from '../src/merge-queue.js';
 import { Refusal, type Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free inspection script.
@@ -683,4 +686,110 @@ test('unit:queue-real-base-tip — a change list at GitHub\'s compare cap is rec
   const sync = (await f.github.refreshCandidateBase(f.work)).merge!;
   assert.equal(sync.baseChanges!.length, 3);
   assert.equal(f.calls.filter(call => call.path.startsWith(`/compare/${base}...${movedBase}`)).length, 1, 'the comparison is read once');
+});
+
+// GY-1329: GitHub answers 403 to a rerun of a workflow run whose other jobs are still running, and
+// that 403 was filed as a missing App permission. An owed rerun now waits for the run to complete.
+const { checkRerunStatus, checkRerunVisibilityMs, owedCheckReruns, reconcileCheckReruns } = mergeQueue;
+const owedRerunAfter: typeof mergeQueue.owedRerunAfter = (...args) => { assert.equal(typeof mergeQueue.owedRerunAfter, 'function', 'owedRerunAfter records an owed rerun\'s outcome'); return mergeQueue.owedRerunAfter(...args); };
+function rerunFixture() {
+  const github = new GitHub({ repository: 'owner/repo', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used-in-adapter-test' });
+  const calls: { path: string; method: string }[] = [];
+  let status = 'in_progress';
+  github.request = async (path, method = 'GET') => {
+    calls.push({ path, method });
+    if (path === '/actions/jobs/77') return { id: 77, run_id: 500, run_attempt: 1 };
+    if (path === '/actions/runs/500') return { id: 500, status, conclusion: status === 'completed' ? 'failure' : null, run_attempt: 1 };
+    if (path === '/actions/runs/500/rerun-failed-jobs' && method === 'POST') return null;
+    throw new Error(`Unexpected request ${method} ${path}`);
+  };
+  const sha = 'd'.repeat(40);
+  const work = (checkReruns: CheckRerun[]) => ({ key: 'GY-1329', policy: { review: true, checks: ['test'] }, candidate: { sha, baseSha: base, pr: 10 }, checkReruns,
+    observation: { candidate: { sha, baseSha: base, pr: 10 }, checks: [{ name: 'test', result: 'failure', appId: 15368, id: 77 }], merged: false } }) as unknown as Work;
+  return { github, calls, sha, work, posts: () => calls.filter(call => call.method === 'POST').length, status: (next: string) => { status = next; } };
+}
+test('unit:rerun-owed-holds-while-run-in-progress — an owed rerun whose workflow run is unfinished is not asked of GitHub; it stays owed and waiting, and is requested once the run completes', async () => {
+  const f = rerunFixture();
+  const t0 = Date.parse('2026-10-05T20:00:00Z');
+  let [owed] = reconcileCheckReruns(f.work([]), [15368], 1, new Date(t0)).reruns;
+  assert.equal(owed.state, 'owed');
+
+  // The failed test job's workflow run is still running other jobs: no POST, a wait.
+  const pending = (fields: Partial<RerunPending>) => (error: unknown) => { assert.ok(error instanceof RerunPending); assert.deepEqual({ runId: error.runId, status: error.status, attempt: error.attempt, unreadable: error.unreadable }, { runId: 500, status: 'in_progress', attempt: 1, unreadable: undefined, ...fields }); return true; };
+  await assert.rejects(f.github.rerunFailedJobs(77), pending({}));
+  assert.equal(f.posts(), 0, 'rerun-failed-jobs is not POSTed while the run is unfinished');
+  owed = owedRerunAfter(owed, { state: 'waiting', runId: 500, attempt: 1, status: 'in_progress' }, new Date(t0 + 60_000).toISOString());
+  assert.equal(owed.state, 'owed', 'still owed');
+  assert.equal(owed.resolvedAt, undefined, 'not resolved');
+  assert.equal(owed.detail, undefined, 'no refusal, permission or otherwise, is recorded');
+  assert.deepEqual(owed.waiting, { status: 'in_progress', at: new Date(t0 + 60_000).toISOString() });
+  assert.match(checkRerunStatus(f.work([owed]), 'test'), /one rerun of its failed jobs is owed, once its workflow run 500 completes \(now in progress\)/);
+
+  // Read again each observation, it keeps holding past the visibility bound, still owed.
+  const later = t0 + 2 * checkRerunVisibilityMs;
+  owed = owedRerunAfter(owed, { state: 'waiting', runId: 500, attempt: 1, status: 'in_progress' }, new Date(later - 60_000).toISOString());
+  assert.equal(owed.waiting!.at, new Date(t0 + 60_000).toISOString(), 'an unchanged wait keeps when it began');
+  const reconciled = reconcileCheckReruns(f.work([owed]), [15368], 1, new Date(later));
+  assert.deepEqual(reconciled.transitions, [], 'a wait read within the bound neither expires nor adds a rerun');
+  assert.deepEqual(owedCheckReruns(f.work(reconciled.reruns), [15368]).map(entry => entry.state), ['owed'], 'GitHub is asked again on the next observation');
+  // A wait no longer read lapses as an owed rerun always did.
+  assert.equal(reconcileCheckReruns(f.work([owed]), [15368], 1, new Date(later - 60_000 + checkRerunVisibilityMs)).reruns[0].state, 'expired');
+
+  // A waiting rerun names its run, so each further wait reads only the run, not the job again.
+  f.calls.length = 0;
+  await assert.rejects(f.github.rerunFailedJobs(77, { run: { runId: 500, attempt: 1 } }), pending({}));
+  assert.deepEqual(f.calls.map(call => `${call.method} ${call.path}`), ['GET /actions/runs/500']);
+  // A run GitHub cannot read for now is neither a wait nor a refusal: nothing is POSTed.
+  const request = f.github.request;
+  f.github.request = async (path, method) => { if (path === '/actions/runs/500') throw new Refusal('GitHub GET /actions/runs/500 failed (502)', 502); return request(path, method); };
+  await assert.rejects(f.github.rerunFailedJobs(77, { run: { runId: 500, attempt: 1 } }), pending({ status: 'unreadable', unreadable: 'GitHub GET /actions/runs/500 failed (502)' }));
+  f.github.request = request;
+  assert.equal(f.posts(), 0);
+
+  // The run completes: the rerun is POSTed and recorded as requested, timed from the request.
+  f.status('completed');
+  const requested = await f.github.rerunFailedJobs(77, { run: { runId: 500, attempt: 1 } });
+  assert.deepEqual(requested, { runId: 500, attempt: 1 });
+  assert.equal(f.posts(), 1);
+  const at = new Date(later).toISOString();
+  const after = owedRerunAfter(owed, { state: 'requested', runId: 500, attempt: 1 }, at);
+  assert.deepEqual(after, { sha: f.sha, check: 'test', failedRunId: 77, state: 'requested', at, runId: 500, attempt: 1 });
+});
+test('unit:rerun-requested-when-run-completed — an owed rerun whose workflow run completed is POSTed and recorded requested with its run and attempt, as before', async () => {
+  const f = rerunFixture();
+  f.status('completed');
+  const t0 = new Date('2026-10-05T21:00:00Z');
+  const [owed] = reconcileCheckReruns(f.work([]), [15368], 1, t0).reruns;
+  const requested = await f.github.rerunFailedJobs(77);
+  assert.deepEqual(requested, { runId: 500, attempt: 1 });
+  assert.deepEqual(f.calls.map(call => `${call.method} ${call.path}`), ['GET /actions/jobs/77', 'GET /actions/runs/500', 'POST /actions/runs/500/rerun-failed-jobs']);
+  assert.deepEqual(owedRerunAfter(owed, { state: 'requested', ...requested }, new Date(t0.getTime() + 1000).toISOString()),
+    { sha: f.sha, check: 'test', failedRunId: 77, state: 'requested', at: t0.toISOString(), runId: 500, attempt: 1 });
+  // The probe paths' reruns, asked of a run they already read, POST without the extra read.
+  f.calls.length = 0;
+  assert.deepEqual(await f.github.rerunFailedJobs(77, { runRead: true }), { runId: 500, attempt: 1 });
+  assert.deepEqual(f.calls.map(call => `${call.method} ${call.path}`), ['GET /actions/jobs/77', 'POST /actions/runs/500/rerun-failed-jobs']);
+  // A refusal still resolves the rerun at once.
+  const refused = owedRerunAfter(owed, { state: 'refused', detail: 'no' }, t0.toISOString());
+  assert.deepEqual([refused.state, refused.detail, refused.resolvedAt], ['refused', 'no', t0.toISOString()]);
+});
+test('unit:github-403-keeps-github-body — a 403 with no missing permission in the preflight carries GitHub\'s own answer and the preflight reading, never a guessed shortfall', async () => {
+  const github = new GitHub({ repository: 'owner/repo', base: 'main', appId: 1234, installationId: 161493384, privateKey: 'not-used-in-adapter-test' });
+  const refuse = (body: string) => (github as any).refusal(new Response(body, { status: 403 }), 'POST /repos/owner/repo/actions/runs/500/rerun-failed-jobs') as Promise<Error>;
+  const report = { app: 'graphyard-owner-repo', installationUrl: 'https://github.com/settings/installations/161493384', observedAt: '2026-10-05T20:01:00.000Z', verifiedAt: '2026-10-05T20:01:00.000Z', error: null, suspended: false, missing: [] };
+  Object.assign(github, { preflightState: report });
+  const refused = await refuse(JSON.stringify({ message: 'This workflow run is not completed', documentation_url: 'https://docs.github.com/rest' }));
+  assert.equal(refused.message, 'GitHub POST /repos/owner/repo/actions/runs/500/rerun-failed-jobs failed (403) "This workflow run is not completed": the App permission preflight at 2026-10-05T20:01:00.000Z found no missing permission');
+  assert.doesNotMatch(refused.message, /lacks a permission|update-permissions/);
+  // A body that is not JSON is carried as GitHub sent it; an empty one says so.
+  assert.match((await refuse('Forbidden by policy\n')).message, /\(403\) "Forbidden by policy": the App permission preflight/);
+  assert.match((await refuse('')).message, /\(403\): GitHub gave no reason; the App permission preflight at 2026-10-05T20:01:00.000Z found no missing permission$/);
+  // An unreadable installation is the preflight's reading, not a shortfall.
+  Object.assign(github, { preflightState: { ...report, verifiedAt: null, error: 'GitHub GET /app/installations failed (502)' } });
+  assert.match((await refuse('{"message":"Resource not accessible by integration"}')).message, /\(403\) "Resource not accessible by integration": the App permission preflight at 2026-10-05T20:01:00.000Z could not read the installation: GitHub GET \/app\/installations failed \(502\)$/);
+  Object.assign(github, { preflightState: null });
+  assert.match((await refuse('{"message":"Nope"}')).message, /\(403\) "Nope": no App permission preflight has run yet$/);
+  // A shortfall the preflight did find is still named.
+  Object.assign(github, { preflightState: { ...report, missing: [{ permission: 'actions', required: 'write', granted: 'read', features: ['check-rerun'], reasons: ['rerun failed workflow jobs'] }] } });
+  assert.match((await refuse('{"message":"Resource not accessible by integration"}')).message, /lacks Actions: write/);
 });

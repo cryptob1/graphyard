@@ -761,6 +761,8 @@ export interface CheckRerun {
    * `owed` until the control plane asks GitHub, `requested` once GitHub accepted, `refused` when it
    * did not (the failure then stands), and the rerun's conclusion once observed: `passed` or
    * `failed`. `expired` is a request whose rerun never appeared within `checkRerunVisibilityMs`.
+   * An owed rerun whose workflow run is still running its other jobs stays `owed`, with `waiting`
+   * naming the run's status, and is asked of GitHub once the run completes (GY-1329).
    */
   state: 'owed' | 'requested' | 'refused' | 'passed' | 'failed' | 'expired';
   at: string;
@@ -773,7 +775,8 @@ export interface CheckRerun {
   /**
    * GY-1096: what GitHub last said of the rerun's workflow run once no new check run had appeared
    * within `checkRerunVisibilityMs`: still `queued`, `waiting`, `in_progress` and the like is a
-   * runner-queue wait, which keeps holding the failure until the rerun concludes.
+   * runner-queue wait, which keeps holding the failure until the rerun concludes. On an `owed`
+   * rerun (GY-1329) it is the unfinished run the rerun waits on before GitHub is asked.
    */
   waiting?: { status: string; at: string };
   /** When the workflow run was last read for this rerun (GY-1096). */
@@ -859,7 +862,10 @@ export function reconcileCheckReruns(work: Work, ciAppIds: readonly number[], li
     // An accepted rerun naming its workflow run is asked of GitHub by the integration job instead
     // (GY-1096): queued behind busy runners it is a wait, not a failure, however long it takes.
     if (entry.state === 'requested' && entry.runId !== undefined) return entry;
-    if (now.getTime() - Date.parse(entry.at) >= checkRerunVisibilityMs) {
+    // An owed rerun waiting on its unfinished workflow run (GY-1329) is held while that run is read;
+    // its bound runs from the last read, so it lapses only once GitHub stops being asked.
+    const since = entry.state === 'owed' && entry.waiting ? entry.probedAt ?? entry.waiting.at : entry.at;
+    if (now.getTime() - Date.parse(since) >= checkRerunVisibilityMs) {
       const expired = { ...entry, state: 'expired' as const, detail: `${entry.state === 'owed' ? 'The rerun remained owed' : 'GitHub accepted the rerun'} but no new ${entry.check} run appeared within ${checkRerunVisibilityMs / 60_000} minutes`, resolvedAt: at };
       transitions.push({ kind: 'check.rerun.expired', rerun: expired }); return expired;
     }
@@ -886,6 +892,25 @@ export function owedCheckReruns(work: Work, ciAppIds: readonly number[]): CheckR
   if (!observation || !candidate || observation.candidate.sha !== candidate.sha || observation.merged) return [];
   return checkReruns(work).filter(entry => entry.sha === candidate.sha && entry.state === 'owed'
     && latestTrusted(observation, entry.check, ciAppIds)?.id === entry.failedRunId);
+}
+/** What asking GitHub for an owed rerun came to (GY-1329): accepted, refused, or held until its workflow run completes. */
+export type OwedRerunOutcome =
+  | { state: 'requested'; runId: number; attempt?: number }
+  | { state: 'waiting'; runId: number; attempt?: number; status: string }
+  | { state: 'refused'; detail?: string };
+/**
+ * The owed rerun `entry` after `outcome`, at `at`. `requested` and `refused` are recorded as they
+ * always were; `waiting` keeps the entry owed, unresolved, naming the unfinished run's status and
+ * when it was read, so the next observation asks again and requests the rerun once the run completes.
+ * A rerun requested after a wait is timed from the request, as an unwaited one is.
+ */
+export function owedRerunAfter(entry: CheckRerun, outcome: OwedRerunOutcome, at: string): CheckRerun {
+  if (outcome.state === 'waiting') return { ...entry, runId: outcome.runId, ...(outcome.attempt !== undefined ? { attempt: outcome.attempt } : {}), probedAt: at,
+    waiting: entry.waiting?.status === outcome.status ? entry.waiting : { status: outcome.status, at } };
+  const { waiting, probedAt, ...rest } = entry;
+  const waited = waiting ? { at } : {};
+  if (outcome.state === 'requested') return { ...rest, ...waited, state: 'requested', runId: outcome.runId, ...(outcome.attempt !== undefined ? { attempt: outcome.attempt } : {}) };
+  return { ...rest, state: 'refused', ...(outcome.detail ? { detail: outcome.detail } : {}), resolvedAt: at };
 }
 /**
  * GY-1096: the accepted reruns on the current candidate whose new check run has not appeared within
@@ -931,7 +956,7 @@ export function checkRerunStatus(work: Work, check: string): string {
   const sha = work.candidate?.sha;
   const last = checkReruns(work).filter(entry => entry.sha === sha && entry.check === check).at(-1);
   if (!last) return '';
-  const state = last.state === 'owed' ? 'one rerun of its failed jobs is owed'
+  const state = last.state === 'owed' ? `one rerun of its failed jobs is owed${last.waiting ? `, once its workflow run${last.runId ? ` ${last.runId}` : ''} completes (now ${last.waiting.status.replace(/_/g, ' ')})` : ''}`
     : last.state === 'requested' ? `its failed jobs are rerunning${last.runId ? ` (workflow run ${last.runId})` : ''}${runnerWait(last)}`
     : last.state === 'failed' ? 'failed again after rerunning its failed jobs'
     : last.state === 'passed' ? 'passed'

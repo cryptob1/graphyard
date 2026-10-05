@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Run, RunEvent, RunOptions, RunResult, Runner } from '../../src/runner/types.js';
-import { landingCheck, scopeLookupBudget, type GitHub, type LandingGitHub } from '../../src/github.js';
+import { RerunPending, landingCheck, scopeLookupBudget, type GitHub, type LandingGitHub } from '../../src/github.js';
 import type { HerdrAgent } from '../../src/master.js';
 import type { Observation, Work } from '../../src/model.js';
 import type { AgentReview, ReviewRequest } from '../../src/model/review.js';
@@ -158,6 +158,15 @@ export class SimulatedGitHub {
    * and the one rerun the control plane asks for passes (`rerun-passes`) or fails again (`rerun-fails`).
    */
   flaky = new Map<string, 'rerun-passes' | 'rerun-fails'>();
+  /**
+   * GY-1329: items whose flake's workflow run keeps running its other jobs for this long after the
+   * failed `test` check reported. GitHub refuses (403) to rerun a run that has not completed, so an
+   * owed rerun must wait for it: every read of the run while it runs is kept in `runReads`.
+   */
+  unfinishedRunMs = new Map<string, number>();
+  runReads: { key: string; checkRunId: number; status: string; at: number }[] = [];
+  /** The rerun POSTs GitHub refused because the workflow run had not completed (GY-1329). */
+  refusedReruns: { key: string; checkRunId: number; at: number }[] = [];
   /** The CI runs reported per commit, created once CI finishes on it; a rerun appends a later attempt. */
   runs = new Map<string, { name: string; result: string; id: number; attempt: number; at: number; tests: string[] }[]>();
   /** Every rerun the control plane asked for: the item, the tip and the failed check run. */
@@ -462,6 +471,10 @@ export class SimulatedGitHub {
     if (!head || !runs || !failed || failed.result !== 'failure') throw new Error(`GitHub POST /actions/jobs/${checkRunId}/rerun refused: not a failed job`);
     const pr = [...this.prs.values()].find(entry => entry.head === head)!;
     const now = clock.now();
+    if (this.runStatus(checkRunId, now) !== 'completed') {
+      this.refusedReruns.push({ key: pr.key, checkRunId, at: now });
+      throw new Error(`GitHub POST /actions/runs/${900_000 + checkRunId}/rerun-failed-jobs failed (403) "This workflow run is not completed": the App permission preflight found no missing permission`);
+    }
     const base = failed.tests.length > 0;
     if (base) this.baseReruns.push({ jobId: checkRunId, by });
     else this.reruns.push({ key: pr.key, sha: head, checkRunId, at: now });
@@ -477,6 +490,25 @@ export class SimulatedGitHub {
     if (brokenBase) this.annotations.set(rerun.id, [{ message: failedTestsAnnotation([brokenBaseTest]) }]);
     runs.push(rerun);
     return { runId: 900_000 + checkRunId };
+  }
+  /** The status of the workflow run behind check run `checkRunId` (GY-1329): `in_progress` while an `unfinishedRunMs` item's first attempt still runs its other jobs. */
+  runStatus(checkRunId: number, now: number) {
+    const [head, runs] = [...this.runs].find(([, entries]) => entries.some(entry => entry.id === checkRunId)) ?? [];
+    const run = runs?.find(entry => entry.id === checkRunId);
+    const key = head && [...this.prs.values()].find(entry => entry.head === head)?.key;
+    const unfinished = key ? this.unfinishedRunMs.get(key) : undefined;
+    return run && unfinished !== undefined && run.attempt === 1 && now < run.at + unfinished ? 'in_progress' : 'completed';
+  }
+  /** GitHub's "rerun failed jobs" as the adapter asks it: the run is read first, and an unfinished one is named instead (GY-1329); the probe paths' `runRead` skips the read. */
+  rerunFailedJobs(checkRunId: number, options: { runRead?: boolean } = {}) {
+    if (!options.runRead) {
+      const now = clock.now(), status = this.runStatus(checkRunId, now);
+      const head = [...this.runs].find(([, entries]) => entries.some(entry => entry.id === checkRunId))?.[0];
+      const key = [...this.prs.values()].find(entry => entry.head === head)?.key ?? '';
+      this.runReads.push({ key, checkRunId, status, at: now });
+      if (status !== 'completed') throw new RerunPending(900_000 + checkRunId, status, 1);
+    }
+    return this.rerun(checkRunId);
   }
   /** The latest completed run of one check on one commit, as the base-breakage judgement reads the base's and the tip's own runs (GY-793). */
   checkRun(commit: string, name: string): { id: number; conclusion: string | null } | null {
@@ -760,7 +792,7 @@ export class SimulatedGitHub {
       },
       async dequeuePullRequest(state: GitHubMergeQueueState) { const pr = world.prs.get(Number(state.pullRequestId.slice(3)))!; pr.autoMerge = false; },
       async publishGroupCheck() {},
-      async rerunFailedJobs(checkRunId: number) { return world.rerun(checkRunId); },
+      async rerunFailedJobs(checkRunId: number, options?: { runRead?: boolean }) { return world.rerunFailedJobs(checkRunId, options); },
       // GY-1250: the main guard's surface, each call one GitHub request the soak counts.
       ...(options.mainGuard ? {
         async mainHistory(limit = 100) { world.guardRequests.push({ kind: 'history', at: clock.now() }); return world.mainHistory(limit); },
