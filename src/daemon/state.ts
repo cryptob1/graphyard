@@ -157,6 +157,13 @@ export const reclaimSummarySchema = z.object({
 }).strict();
 export type ReclaimSummary = z.infer<typeof reclaimSummarySchema>;
 
+/** The host's memory at the last cycle (GY-612): below its floor, new launches on the host are deferred. */
+export const hostMemoryStateSchema = z.object({
+  host: z.string().max(200).nullable(), at: z.string(), totalBytes: z.number().min(0), availableBytes: z.number().min(0), floorBytes: z.number().min(0),
+  low: z.boolean(), since: z.string().nullable(),
+  consumers: z.array(z.object({ command: z.string().max(200), processes: z.number().int().min(0), rssBytes: z.number().min(0) }).strict()).max(10).default([]),
+}).strict();
+
 export const scopeMeasurementSchema = z.object({
   work: z.string().max(200), epoch: z.number().int().min(0), at: z.string(),
   waitedMs: z.number().int().min(0), state: z.enum(['approved', 'refused']),
@@ -389,6 +396,8 @@ export const daemonStateSchema = z.object({
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),
   /** The last worktree reclamation: what it removed and how much room the host has. */
   reclaim: reclaimSummarySchema.nullable().default(null),
+  /** The host's memory as the last cycle read it, and whether launches are deferred on it. */
+  memory: hostMemoryStateSchema.nullable().default(null),
   /** Per-item passage clocks and the samples they produced; the loop's own latency measurement. */
   clocks: z.record(z.string(), itemClockSchema).default({}),
   latency: z.array(latencySampleSchema).default([]),
@@ -504,8 +513,9 @@ export function pruneDaemonState(state: DaemonState) {
   // A watch is retired when its item moves on; this bound only catches items the loop stopped seeing.
   const watches = Object.entries(state.approvals).sort((a, b) => Date.parse(a[1].requestedAt) - Date.parse(b[1].requestedAt));
   if (watches.length > retainedClocks) for (const [key] of watches.slice(0, watches.length - retainedClocks)) delete state.approvals[key];
-  // A settled diagnosis is kept for the report; the oldest settled ones go past the bound, never one still in flight.
-  const settled = Object.entries(state.diagnoses).filter(([, entry]) => diagnosisSettled(entry)).sort((a, b) => Date.parse(a[1].updatedAt) - Date.parse(b[1].updatedAt));
+  // A settled diagnosis is kept for the report; the oldest settled ones go past the bound, never one still in flight
+  // and never one waiting on its provider: that record is the hold, and dropping it would relaunch its subject early (GY-1245).
+  const settled = Object.entries(state.diagnoses).filter(([, entry]) => diagnosisSettled(entry) && entry.state !== 'waiting').sort((a, b) => Date.parse(a[1].updatedAt) - Date.parse(b[1].updatedAt));
   const excess = Object.keys(state.diagnoses).length - retainedDiagnoses;
   if (excess > 0) for (const [key] of settled.slice(0, excess)) delete state.diagnoses[key];
   const runs = Object.entries(state.dispatchFailures).sort((a, b) => Date.parse(a[1].lastAt) - Date.parse(b[1].lastAt));

@@ -10,7 +10,7 @@ import { loopBlockerProbe, type BlockerClassification, type BlockerProbeRecord, 
 import { successorWidening } from '../model/successors.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
-import { type ResourceReclaimReport, reclaimResources, dispatchRefusal } from '../master-resources.js';
+import { type HostMemoryReading, type ResourceReclaimReport, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { mergeBatchSize, mergeParallelTips, rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
@@ -149,13 +149,7 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
    * escalates each and, a cycle later, requests the rework. Absent, nothing is escalated.
    */
   exhaustedProofs?: () => Promise<ExhaustedProof[]>;
-  /**
-   * GY-1118: records a capped change request's non-blocking findings as the item's follow-up batch
-   * (`POST /api/work/KEY/followups`), as the master's operator-agent identity, idempotent on `key`.
-   * With `withdrawReview` absent too, a capped change request is escalated instead.
-   */
-  fileReviewFollowUps?: (work: Work, findings: { path: string | null; text: string }[], reason: string, key: string) => Promise<unknown>;
-  /** GY-1118: withdraws a capped change request as the reviewer App that posted it (GitHub's review dismissal). */
+  /** GY-1118: withdraws a capped change request as the reviewer App that posted it (GitHub's review dismissal); absent, it is escalated instead. */
   withdrawReview?: (work: Work, reviewId: number, message: string) => Promise<void>;
   /**
    * GY-437: between cycles, aligns this checkout with the verified deployed release — fetches the
@@ -178,13 +172,12 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
    * no Graphyard record, so it needs no credential and is safe to run on every cycle.
    */
   reclaim?: (work: Work[]) => Promise<WorktreeReclaimReport>;
-  /**
-   * The resource reclaim pass (GY-132): reaps terminal ledger records, closes finished sessions
-   * holding profile names, and releases the slots of stuck sessions. Runs every cycle.
-   */
+  /** The resource reclaim pass (GY-132): reaps terminal records, closes finished sessions holding profile names, frees stuck sessions' slots; every cycle. */
   reclaimResources?: (work: Work[], agents: HerdrAgent[] | null) => Promise<ResourceReclaimReport>;
   /** Why the plane cannot record a dispatch's result (its /healthz verdict), or null when it can. */
   planeHealth?: () => Promise<string | null>;
+  /** This host's memory (GY-612): below its floor, new launches are deferred. A loop wired without it never defers. */
+  hostMemory?: () => Promise<HostMemoryReading | null>;
   /** GY-1008: probe a blocker's cause as the next attempt meets it (blocker-probes.ts), and record it as the coordinator; a pass clears it. */ probeBlocker?: (work: Work, classification: BlockerClassification) => Promise<BlockerProbeResult | null>; recordBlockerProbe?: (work: Work, body: BlockerProbeRecord) => Promise<Work>;
   /**
    * Requests one routine decision with the master's own operator-agent identity and returns it.
@@ -267,8 +260,6 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
   adoptRuns?: () => Promise<AdoptedRun[]>; // the headless runs a restart left running (GY-453, run-adoption.ts); unwired adopts nothing
   /** Records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage). */
   recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>;
-  /** Asks the control plane for the one-time follow-up migration (GY-402, POST followups/migrate) as the operator agent. */
-  migrateFollowUps?: () => Promise<{ merged: number; already?: boolean }>;
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
   /** The account the profile's current session was launched on, as its launcher recorded it. */
@@ -584,7 +575,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     research: { cwd: root },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
     recordTriage: (work, body) => mutate(`work/${work.id}/triage`, body),
-    migrateFollowUps: () => asOperatorAgent('POST', 'followups/migrate', {}, 'graphyard-followups-migration'),
     launchedSessions: async () => [
       ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending' && !entry.launching).map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
       ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId })),
@@ -650,6 +640,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     closeSession: pane => closeHerdrPane(pane, run),
     reclaimResources: (work, agents) => reclaimResources(root, withReviewerDefaults(current()), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
     planeHealth: () => dispatchRefusal(current().url, fetcher),
+    hostMemory: readHostMemory,
     probeBlocker: (work, classification) => loopBlockerProbe(current(), root, run, () => dispatchRefusal(current().url, fetcher))(work, classification), recordBlockerProbe: (work, body) => mutate(`work/${work.id}/blocker-probe`, body) as Promise<Work>,
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
@@ -668,10 +659,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get replan() {
       return current().operatorAgent ? async (work: Work, paths: string[], reason: string) =>
         asOperatorAgent('POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)) : undefined;
-    },
-    get fileReviewFollowUps() {
-      return current().operatorAgent ? async (work: Work, findings: { path: string | null; text: string }[], reason: string, key: string) =>
-        asOperatorAgent('POST', `work/${encodeURIComponent(work.key)}/followups`, { findings, reason }, key) : undefined;
     },
     get withdrawReview() {
       const reviewer = current().reviewer;
