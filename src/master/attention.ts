@@ -199,8 +199,9 @@ export function productionSummary(report: Partial<ProductionReport>) {
   const release = report.release ?? null;
   const awaiting = release && typeof release.unreleased === 'number' ? `; main is ${release.unreleased} commit${release.unreleased === 1 ? '' : 's'} ahead of it, awaiting the next release` : '';
   const summary = release ? (ahead?.by === 0 ? `production serves ${release.branch}${awaiting}` : ahead ? `${release.branch} is ${ahead.by} commit${ahead.by === 1 ? '' : 's'} ahead of production${awaiting}` : `${report.aheadError ?? 'production lag is unknown'}${awaiting}`)
-    : ahead ? ahead.by === 0 ? 'production serves the base branch tip' : `main is ${ahead.by} commit${ahead.by === 1 ? '' : 's'} ahead of production` : report.aheadError ?? 'production lag is unknown';
+    : ahead ? ahead.by === 0 ? 'production serves the base branch tip' : `main is ${ahead.by} commit${ahead.by === 1 ? '' : 's'} ahead of production${ahead.rollingOut ? `; rollout in flight since ${ahead.unservedSince}` : ''}` : report.aheadError ?? 'production lag is unknown';
   return { provider: report.provider ?? null, observedAt: report.observedAt ?? null, serving: report.serving ?? null, running: report.running ?? null, aheadBy: ahead?.by ?? null, aheadCommits: ahead?.commits ?? [], release, summary,
+    unservedSince: ahead?.unservedSince ?? null, rollingOut: ahead?.rollingOut ?? false,
     latestDeployment: report.latest ? { id: report.latest.id, status: report.latest.providerStatus, commit: report.latest.commit, createdAt: report.latest.createdAt, url: report.latest.url ?? null } : null,
     deployed: report.deployed ?? [], pending: report.pending ?? [], incidents, error: report.error ?? null,
     attention: attentionLines({ ahead, aheadError: report.aheadError ?? null, serving: report.serving ?? null, incidents: (report.incidents ?? []), error: report.error ?? null, latest: report.latest ?? null, provider: report.provider ?? null, release }) };

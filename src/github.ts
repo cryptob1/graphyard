@@ -20,7 +20,7 @@ import { lockedWork } from './store/locked-read.js';
 import { save } from './store/store.js';
 export { CHECK_NAME, LANDABLE_CHECK };
 import { baseBreakRefreshNeeded, readBaseBreak, type BaseBreak } from './master/base-break-refresh.js';
-import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind, type CheckRerun } from './merge-queue.js';
+import { alreadyMergeableRefusal, approvalOfHead, baseRefreshNeeded, requestedBaseRefresh, failedConclusions as failedCheckConclusions, dismissedVerdict, enqueueRequestCurrent, mergeableNow, ejectedTipRestore, heldBase, mergeAuthorized, mergeBaseDismissalPattern, mergeQueueAction, ownHeads, owedCheckReruns, dueCheckRerunProbes, ciAppIdsOf, classifyRerunRun, checkRerunUnreadableMs, checkRerunVisibilityMs, cancelledRerunLimit, pendingRestore, predictQueue, queuePlacement, queueRef, mergeCheckBranch, treeIdenticalPrediction, type GitHubMergeQueueState, type HeadForcePush, type MergeEnqueueRequest, type MergeQueueAction, type BaseRefresh, type BranchRestore, type RerunWorkflowRun, type CarriedCandidate, type ForeignCandidate, type LandingCheck, type ObservedApproval, type QueuePlacement, type QueueSpeculation, type RevertedDelivery, type ReviewDismissal, type ReviewThread, type RestoreFailureKind, type CheckRerun } from './merge-queue.js';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, requiredPermissions, type PermissionFeature, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
 import { budgetedPage, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsWordBudget, type DocsWordCount, type TipDocs } from './model/documentation.js';
@@ -2251,6 +2251,20 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const record = (fields: Partial<BaseRefresh>): BaseRefresh => ({ from, base: branch.tip, baseTree: branch.tree,
       policyRevision: work.policyRevision, at: new Date().toISOString(), head: null, conflict: null, merge: null, carry: null, trigger: 'conflict confirmed', ...fields });
     await beforeWrite();
+    // A refresh the coordinator requested for a base failure the base has since repaired (GY-528) is
+    // the one refresh that writes to the branch: the repaired base is merged in by this App, and the
+    // binding carry (model/carry.ts) decides on GitHub's account of that merge what the new head keeps.
+    const requested = requestedBaseRefresh(work);
+    if (requested) {
+      const trigger = 'base failure repaired' as const;
+      try {
+        const merged = await this.mergeBranch(pr.head.ref, branch.tip, `Graphyard base refresh for ${work.key} onto ${this.config.base}`);
+        return record({ head: merged ?? candidate!.sha, merge: merged ? await this.describeMerge(candidate!.sha, merged, candidate!.baseSha, branch.tip) : null, trigger, requested: { by: requested.by, at: requested.at, reason: requested.reason } });
+      } catch (error) {
+        if (!(error instanceof SpeculativeConflict)) throw error;
+        return record({ trigger, requested: { by: requested.by, at: requested.at, reason: requested.reason }, conflict: `Candidate ${candidate!.sha.slice(0, 12)} cannot be brought onto the repaired base branch tip ${branch.tip.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: ${error.message}. Run graphyard sync ${work.key}, resolve it and push.` });
+      }
+    }
     // GitHub's `mergeable: false` is not trusted on its own (GY-375): it is recomputed lazily after
     // the base moves and read clean candidates as conflicting, and every refresh they were given
     // dropped their review and proofs. The conflict is confirmed first by a test merge that never
@@ -3323,7 +3337,9 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       // A base branch that moved under this candidate is Graphyard's to absorb, not the worker's.
       // The republished head is what the review, the checks and the proofs then bind to, so the
       // refresh runs before any review is dispatched and the job requeues onto the new head.
-      if (baseRefreshNeeded(work)) {
+      // GY-528: the coordinator-requested refresh of a base failure's blocked candidates rides the
+      // same job, once the repaired base has passed again.
+      if (baseRefreshNeeded(work) || requestedBaseRefresh(work)) {
         const refreshed = await refreshBase(engine, github, work, job, guard, hold);
         work = refreshed.work; held ??= refreshed.held;
         if (refreshed.published) { await engine.store.finishJob(job.work_id, job.token, undefined, true, undefined, observed); return true; }

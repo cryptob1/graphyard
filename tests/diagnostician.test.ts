@@ -13,6 +13,7 @@ import { decisionCapabilities, decisionInputs, decisionPrecondition } from '../s
 import { faultClassItem, recurringClasses as classes, type FaultInstance, type FaultClassPolicy } from '../src/model/fault-classes.js';
 import { registryRoles, roleSchema, fleetRoles } from '../src/model/registry.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { decisionInput } from '../src/master/autonomy.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { standingFaultClassItem, clearDiagnoses, diagnosesSettled, diagnosisStep, diagnosisSubjects, type DiagnosticianEffects, type DiagnosisContext, type DiagnosisSubject } from '../src/daemon/diagnosis.js';
 import type { Cycle } from '../src/daemon/cycle.js';
@@ -80,8 +81,8 @@ const fix = { title: 'Refresh the observation of a CLEAN candidate after its bas
 
 interface Harness {
   diagnostician: DiagnosticianEffects; seen: { runner: string; prompt: string; options: RunOptions<unknown> }[]; contexts: { subject: DiagnosisSubject; pullRequests: number[] }[];
-  filed: { input: any; key: string }[]; requested: { work: string; action: string; reason: string; input: Record<string, unknown>; id: string }[];
-  approvers: { work: string; decision: string }[]; outcomes: Map<string, { state: string; approvedBy?: string; refusal?: { approver: string; reason: string } }>;
+  filed: { input: any; key: string }[]; requested: { work: string; action: string; reason: string; input: Record<string, unknown>; id: string; revision: number }[];
+  approvers: { work: string; decision: string }[]; outcomes: Map<string, { state: string; approvedBy?: string; refusal?: { approver: string; reason: string }; outcome?: string }>;
 }
 function harness(primary: (prompt: string) => unknown, fallback: (prompt: string) => unknown = primary, context: DiagnosisContext = {
   journal: ['2030-01-01T11:40:00Z graphyard-master: merge GY-1 waiting: observation older than two minutes'],
@@ -94,7 +95,7 @@ function harness(primary: (prompt: string) => unknown, fallback: (prompt: string
     runner: async attempt => attempt === 'primary' ? { runner: fakeRunner('pi', primary, h.seen), runtime: 'pi', model: settings.model } : { runner: fakeRunner('pi-fallback', fallback, h.seen), runtime: 'pi', model: settings.fallbackModel },
     context: async (subject, pullRequests) => { h.contexts.push({ subject, pullRequests }); return context; },
     file: async (input, key) => { h.filed.push({ input, key }); return item(`GY-${200 + h.filed.length}`, { title: input.title, priority: input.priority, criteria: input.criteria, plannedFiles: input.plannedFiles } as unknown as Partial<Work>); },
-    decide: async (work, action, reason, input) => { const id = randomUUID(); h.requested.push({ work: work.key, action, reason, input, id }); h.outcomes.set(id, { state: 'requested' }); return { id }; },
+    decide: async (work, action, reason, input) => { const id = randomUUID(); h.requested.push({ work: work.key, action, reason, input, id, revision: work.revision }); h.outcomes.set(id, { state: 'requested' }); return { id }; },
   };
   return h;
 }
@@ -108,7 +109,7 @@ function effects(h: Harness, work: () => Work[], now: () => number): DaemonEffec
     approver: async (target: Work, decision: string) => { h.approvers.push({ work: target.key, decision }); return { agentName: `approver-${decision.slice(0, 8)}`, pane: null }; },
     decisions: async (target: Work) => ({ decisions: h.requested.filter(entry => entry.work === target.key).map(entry => {
       const outcome = h.outcomes.get(entry.id)!;
-      return { id: entry.id, action: entry.action, state: outcome.state, input: entry.input, approvedBy: outcome.approvedBy ?? null, refusal: outcome.refusal ?? null };
+      return { id: entry.id, action: entry.action, state: outcome.state, input: entry.input, approvedBy: outcome.approvedBy ?? null, refusal: outcome.refusal ?? null, outcome: outcome.outcome ?? null };
     }) }),
   } as unknown as DaemonEffects;
 }
@@ -256,6 +257,70 @@ test('unit:diagnosis-files-fix — a fix diagnosis files the item, releases it a
   assert.equal(state.diagnoses['GY-101'].answeredBy, fixKey);
 });
 
+// GY-1296: the server settles an approval that fails the revision precondition as terminal 'stale';
+// the diagnosis step asked again against the current revision instead of sitting in 'releasing'.
+const staleOutcome = (revision: number) => `Task revision changed (now ${revision}); reload and request again; the decision was not applied`;
+/** A diagnosis that filed GY-201 and requested its release; `snapshot` puts the fix item in at a revision. */
+async function releasing() {
+  const h = harness(() => diagnosis('GY-101', { fix }));
+  const state = emptyDaemonState(config());
+  const recurringItem = recurring(state);
+  const fx = effects(h, () => [], () => clock);
+  await step(state, fx, [recurringItem], clock);
+  await step(state, fx, [recurringItem], clock + minute);
+  assert.equal(state.diagnoses['GY-101'].state, 'releasing');
+  return { h, state, fx, snapshot: (fixRevision: number) => [recurringItem, item('GY-201', { priority: 1, revision: fixRevision } as Partial<Work>)] };
+}
+
+test('unit:diagnosis-stale-release-re-requested — a release settled stale by a revision race is requested again against the current revision and released on its approval', async () => {
+  const { h, state, fx, snapshot } = await releasing();
+  assert.deepEqual(h.requested.map(entry => [entry.work, entry.action]), [['GY-201', 'release']]);
+  // The loop's own writes moved the fix item to revision 3 while the approver judged: the approval settles stale.
+  h.outcomes.set(h.requested[0].id, { state: 'stale', outcome: staleOutcome(3) });
+  const performed = await step(state, fx, snapshot(3), clock + 2 * minute);
+  assert.ok(performed.some(action => action.kind === 'diagnosis' && /settled stale: Task revision changed \(now 3\).*requesting it again against revision 3 \(request 2 of 3\)/.test(action.detail)), JSON.stringify(performed));
+  assert.deepEqual(h.requested.map(entry => [entry.work, entry.action, entry.revision]), [['GY-201', 'release', 1], ['GY-201', 'release', 3]], 'the release is requested again, against the item as it is now');
+  assert.equal(state.diagnoses['GY-101'].state, 'releasing');
+  assert.equal(state.diagnoses['GY-101'].decision?.id, h.requested[1].id, 'the diagnosis follows the new decision');
+  assert.deepEqual(h.approvers.at(-1), { work: 'GY-201', decision: h.requested[1].id }, 'and puts it to an independent approver');
+  assert.match(state.diagnoses['GY-101'].detail, /Launched approver/);
+  // The new decision is approved and applied: the fix is released and the recurring item's closure follows.
+  h.outcomes.set(h.requested[1].id, { state: 'applied', approvedBy: 'approver-agent' });
+  await step(state, fx, snapshot(3), clock + 3 * minute);
+  assert.deepEqual(h.requested.map(entry => [entry.work, entry.action]), [['GY-201', 'release'], ['GY-201', 'release'], ['GY-101', 'close']]);
+  h.outcomes.set(h.requested[2].id, { state: 'applied', approvedBy: 'approver-agent' });
+  await step(state, fx, snapshot(3), clock + 4 * minute);
+  assert.equal(state.diagnoses['GY-101'].state, 'answered');
+  assert.equal(state.diagnoses['GY-101'].answeredBy, 'GY-201');
+});
+
+test('unit:diagnosis-stale-release-retries-are-bounded — a release settled stale on every request fails the diagnosis and escalates the manual release', async () => {
+  const { h, state, fx, snapshot } = await releasing();
+  for (let round = 0; round < 3; round++) {
+    h.outcomes.set(h.requested.at(-1)!.id, { state: 'stale', outcome: staleOutcome(round + 3) });
+    await step(state, fx, snapshot(round + 3), clock + (2 + round) * minute);
+  }
+  assert.equal(h.requested.length, 3, 'requested maxDecisionRequests times, no more');
+  assert.ok(h.requested.every(entry => entry.work === 'GY-201' && entry.action === 'release'));
+  const entry = state.diagnoses['GY-101'];
+  assert.equal(entry.state, 'failed', 'the diagnosis no longer sits in releasing');
+  assert.match(entry.detail, /settled stale: Task revision changed \(now 5\).*3 release request\(s\).*not requested again/);
+  const escalation = Object.entries(state.actions).find(([key]) => key.startsWith('escalation:diagnosis-stale:'));
+  assert.ok(escalation, JSON.stringify(state.actions));
+  assert.equal(escalation[1].kind, 'escalation');
+  assert.equal(escalation[1].work, 'GY-201');
+  assert.match(escalation[1].detail, /graphyard master decide GY-201 release REASON, then graphyard master approver GY-201 DECISION/);
+  // Settled: nothing more is requested on later cycles.
+  await step(state, fx, snapshot(6), clock + 10 * minute);
+  assert.equal(h.requested.length, 3);
+  // A withdrawn decision is the same retriable end.
+  clearDiagnoses();
+  const other = await releasing();
+  other.h.outcomes.set(other.h.requested[0].id, { state: 'withdrawn', outcome: 'taken back' });
+  await step(other.state, other.fx, other.snapshot(2), clock + 2 * minute);
+  assert.deepEqual(other.h.requested.map(request => [request.action, request.revision]), [['release', 1], ['release', 2]]);
+});
+
 test('unit:diagnosis-files-fix — a covering item closes the recurring item as its duplicate; a refused decision, or a fix master create would refuse, changes nothing', async () => {
   // The duplicate path: nothing is filed; the closure names the covering item and waits on the approver.
   const h = harness(() => diagnosis('GY-101', { covering: 'GY-50' }));
@@ -325,7 +390,7 @@ const operator: Principal = { id: 'diagnosis-operator', role: 'admin', sessionKi
 const credentials = [{ ...operator, token: `diagnosis-operator-${'x'.repeat(32)}` }];
 const master = { id: 'diagnosis-master', token: `diagnosis-master-${'m'.repeat(32)}`, capabilities: ['intent:create', 'intent:ready', 'decision:approve'] };
 const approver = { id: 'diagnosis-approver', token: `diagnosis-approver-${'a'.repeat(32)}`, capabilities: ['decision:approve'] };
-let database: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string;
+let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 const call = async (credential: string, path: string, body?: unknown) => {
   const response = await fetch(`${url}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   return { status: response.status, body: await response.json() as any };
@@ -336,7 +401,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('diagnostician'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('diagnostician_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/diagnostician_test`); await store.init();
-  const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
+  engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
@@ -380,4 +445,100 @@ test('unit:diagnosis-files-fix — release and closure are two-party decisions t
   assert.equal(recurringClasses(later, all, policy, clock + 2 * hour).find(entry => entry.faultClass === 'stalled-gate')!.file, false);
   const delivered = all.map(entry => entry.id === fixItem.id ? { ...entry, stage: 'done' } as Work : entry);
   assert.equal(recurringClasses(later, delivered, policy, clock + 2 * hour).find(entry => entry.faultClass === 'stalled-gate')!.file, true);
+});
+
+/** The loop's report of an approver session it watches, saved on the item the session judges: each change moves the item's revision. */
+const observe = (work: Work, decision: string, at: number) => ok(credentials[0].token, `work/${work.id}/session`, { id: `approver:${decision}`, kind: 'coordination', principal: approver.id, role: 'approver',
+  runtime: 'claude', host: 'machine-a', subject: `${work.key}: judge decision ${decision}`, observed: 'working', observedAt: new Date(at).toISOString(), missedReports: 0 });
+
+test('unit:diagnosis-stale-release-re-requested — a release whose item moved only in the loop\'s bookkeeping is applied; any other move still settles it stale', async () => {
+  const requested = async () => {
+    const work = await ok(master.token, 'work', { ...fix, title: `Release judged across bookkeeping ${randomUUID().slice(0, 8)}`, reason: 'The diagnostician found the root cause' }) as Work;
+    const decision = await ok(master.token, `work/${work.key}/decide`, { action: 'release', input: decisionInput('release', work, {}), reason: 'Release the diagnosed fix' });
+    return { work, decision: decision.id as string };
+  };
+  // The approver's session handle and the loop's reports of it move the revision, and nothing the release judged.
+  const kept = await requested();
+  for (let report = 0; report < 3; report++) await observe(kept.work, kept.decision, clock + report * minute);
+  const moved = (await store.list()).find(entry => entry.id === kept.work.id)!;
+  assert.equal(moved.revision, kept.work.revision + 3);
+  const applied = await ok(approver.token, `work/${kept.work.key}/approve`, { decision: kept.decision, reason: 'The diagnosis is sound' });
+  assert.equal(applied.state, 'applied', JSON.stringify(applied));
+  assert.equal((await store.list()).find(entry => entry.id === kept.work.id)!.ready, true, 'released at the revision it was judged at');
+  // A change to what the release judged — the item's requirements — settles it stale, as before.
+  const changed = await requested();
+  await engine.execute(operator, 'requirements', changed.work.id, { expectedPolicyRevision: changed.work.policyRevision, reason: 'A criterion is added',
+    criteria: [...changed.work.criteria.map(({ id, text, proofs }) => ({ id, text, proofs })), { id: 'AC-2', text: 'The refresh is logged', proofs: ['unit:refresh-logged'] }],
+    dependencies: [], plannedFiles: changed.work.plannedFiles, exclusiveResources: [], producerProofs: [] }, randomUUID());
+  const refused = await call(approver.token, `work/${changed.work.key}/approve`, { decision: changed.decision, reason: 'The diagnosis is sound' });
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.match(refused.body.error, /Task revision changed .*the decision was not applied/);
+  const history = (await ok(master.token, `work/${changed.work.id}/decisions`)).decisions;
+  assert.equal(history.find((entry: { id: string }) => entry.id === changed.decision).state, 'stale');
+  assert.equal((await store.list()).find(entry => entry.id === changed.work.id)!.ready, false);
+});
+
+test('unit:diagnosis-release-stale-recurrence-reproduced — the loop moves the fix item it asked about, the approval settles stale, and the loop asks again and releases', async () => {
+  // Recurrence evidence (2026-10-04/05): the release decisions of GY-1198 (2a12346e), GY-1209 (5d4c9afa),
+  // GY-1257 (1b50bf71), GY-1278 (d9446140) and GY-1289 (b16ccd28) each settled stale with "Task revision
+  // changed (now N); reload and request again; the decision was not applied" and sat in 'releasing' until
+  // the pipeline doctor released them by hand. Here the same shape runs against the real engine.
+  const instances: FaultInstance[] = ['GY-1', 'GY-2', 'GY-3'].map(subject => ({ id: `blocker|${subject}|stale-release`, kind: 'blocker', faultClass: 'stalled-gate', subject, text: `${subject} stalls`, at: iso(0), lastSeenAt: iso(0), linkedTo: null }));
+  const recurringItem = await ok(master.token, 'work', faultClassItem({ faultClass: 'stalled-gate', recent: instances }, policy, clock)) as Work;
+  const diagnostician: DiagnosticianEffects = {
+    settings, cwd: '/checkout/project',
+    runner: async () => ({ runner: fakeRunner('pi', () => diagnosis(recurringItem.key, { fix: { ...fix, title: 'Re-request a stale diagnosis release' } }), []), runtime: 'pi', model: settings.model }),
+    context: async () => ({ journal: [], serverLog: [], pullRequests: [] }),
+    file: async input => ok(master.token, 'work', input),
+    // As the loop's effects: the binding is filled from the item the loop read, as master decide does.
+    decide: async (work, action, reason, input) => ok(master.token, `work/${work.key}/decide`, { action, reason, input: decisionInput(action, work, input) }),
+  };
+  const fx = {
+    diagnostician, persist: async () => {},
+    decisions: async (work: Work) => ok(master.token, `work/${encodeURIComponent(work.id)}/decisions`),
+    // As the loop's approver effect: the launched session's handle is recorded on the very item the decision is pinned to.
+    approver: async (work: Work, decision: string) => { await observe(work, decision, clock); return { agentName: `approver-${decision.slice(0, 8)}`, pane: null }; },
+  } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config());
+  state.faults.instances.push(...instances.map(entry => ({ ...entry, linkedTo: recurringItem.key })));
+  const cycle = async (at: number) => step(state, fx, await store.list(), at);
+  await cycle(clock);
+  await cycle(clock + minute);
+  const entry = state.diagnoses[recurringItem.key];
+  assert.equal(entry.state, 'releasing', entry.detail);
+  const fixKey = entry.fix!, first = entry.decision!.id;
+  const fixOf = async () => (await store.list()).find(work => work.key === fixKey)!;
+  // While the approver judges, the loop reports its session on the fix item again and again — past
+  // what the server can trace back to the revision the release is pinned to.
+  for (let report = 1; report <= 21; report++) await observe(await fixOf(), first, clock + report * 1000);
+  const [pinned] = (await ok(master.token, `work/${(await fixOf()).id}/decisions`)).decisions;
+  assert.equal((await fixOf()).revision - pinned.input.expectedRevision, 22, 'the loop\'s own writes moved the item past the revision the release is pinned to');
+
+  // The approver approves: the server settles the decision stale and applies nothing.
+  const refused = await call(approver.token, `work/${fixKey}/approve`, { decision: first, reason: 'The diagnosis is sound' });
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.match(refused.body.error, /Task revision changed \(now \d+\); reload and request again; the decision was not applied/);
+  assert.equal((await fixOf()).ready, false);
+
+  // The next diagnosis step asks again against the current revision instead of parking in 'releasing'.
+  await cycle(clock + 2 * minute);
+  assert.equal(entry.state, 'releasing', entry.detail);
+  const second = entry.decision!.id;
+  assert.notEqual(second, first, 'a new release decision is requested');
+  const history = (await ok(master.token, `work/${(await fixOf()).id}/decisions`)).decisions as { id: string; state: string; input: { expectedRevision: number } }[];
+  assert.deepEqual(history.map(decision => [decision.id, decision.state]).sort(), [[first, 'stale'], [second, 'requested']].sort());
+  // Its approver's own session handle moved the item once more, and the approval still applies.
+  assert.equal((await fixOf()).revision, history.find(decision => decision.id === second)!.input.expectedRevision + 1);
+  const approved = await ok(approver.token, `work/${fixKey}/approve`, { decision: second, reason: 'The diagnosis is sound' });
+  assert.equal(approved.state, 'applied', JSON.stringify(approved));
+  assert.equal((await fixOf()).ready, true, 'the fix is released');
+
+  // The loop completes: the recurring item is closed as the fix's duplicate on its own approved decision.
+  await cycle(clock + 3 * minute);
+  assert.equal(entry.state, 'closing', entry.detail);
+  assert.equal((await ok(approver.token, `work/${recurringItem.key}/approve`, { decision: entry.decision!.id, reason: 'The fix answers it' })).state, 'applied');
+  await cycle(clock + 4 * minute);
+  assert.equal(entry.state, 'answered', entry.detail);
+  assert.equal(entry.answeredBy, fixKey);
+  assert.equal((await store.list()).find(work => work.id === recurringItem.id)!.stage, 'done');
 });
