@@ -6,7 +6,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { processJob, type GitHub } from '../src/github.js';
+import { GitHub as GitHubClient, RerunPending, processJob, type GitHub } from '../src/github.js';
 import { server } from '../src/server.js';
 import { daemonEffects, routineDecision } from '../src/master-daemon.js';
 import { checkStates } from '../src/model/pr-steps.js';
@@ -256,4 +256,38 @@ test('manual:review-followups-triaged GY-731.2b: unqueued terminal rerun outcome
     assert.equal(plainReason(reason, 'test').known, true);
     assert.match(plainReason(reason, 'test').text, new RegExp(`rerun: ${state}`));
   }
+});
+
+test('unit:rerun-waits-for-running-workflow GY-1328: a failed job whose workflow run still runs is rerun once the run completes, never refused with 403', async () => {
+  // The adapter: rerun-failed-jobs is not asked while the run is in progress (GitHub answers 403 to it).
+  const client = new GitHubClient({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 1, privateKey: 'not-used-in-adapter-test' });
+  let status = 'in_progress';
+  const calls: string[] = [];
+  client.request = (async (path: string, method = 'GET') => {
+    calls.push(`${method} ${path}`);
+    if (path === '/actions/jobs/42') return { id: 42, run_id: 37381434491, run_attempt: 1 };
+    if (path === '/actions/runs/37381434491') return { id: 37381434491, status, conclusion: null };
+    return {};
+  }) as GitHub['request'];
+  await assert.rejects(client.rerunFailedJobs(42), (error: unknown) => error instanceof RerunPending && /still in_progress/.test((error as Error).message));
+  assert.equal(calls.some(call => call.startsWith('POST')), false, 'no rerun is asked of a running workflow run');
+  status = 'completed';
+  assert.deepEqual(await client.rerunFailedJobs(42), { runId: 37381434491, attempt: 1 });
+  assert.equal(calls.at(-1), 'POST /actions/runs/37381434491/rerun-failed-jobs');
+  // GitHub's own 403 message is kept, so a refusal that is not a missing grant says what it is.
+  const refused = await (client as any).refusal(new Response(JSON.stringify({ message: 'This workflow is already running' }), { status: 403 }), 'POST /actions/runs/1/rerun-failed-jobs');
+  assert.match(refused.message, /failed \(403\) "This workflow is already running": /);
+
+  // The job loop: a pending rerun keeps the entry owed, unrefused, and holds the head; once the run completes it is requested.
+  let work = await submitted('Typecheck fails while tests run');
+  const candidate = { sha: sha40('a1328'), baseSha: sha40('b1328') };
+  const checks = [run('test', 41, 'success'), run('typecheck', 42, 'failure')];
+  work = await engine.observe(work.id, work.revision, seen(work, candidate, checks));
+  let step = await reconcile(work, checks, async id => { throw new RerunPending(id, 'in_progress'); });
+  assert.deepEqual(step.reruns, [42]);
+  assert.deepEqual(step.work.checkReruns!.map(entry => [entry.check, entry.state]), [['typecheck', 'owed']]);
+  assert.equal(routineDecision(step.work, { autoMerge: true }, Date.now()), null, 'no rework while the run is still running');
+  step = await reconcile(step.work, checks, async () => ({ runId: 37381434491 }));
+  assert.deepEqual(step.reruns, [42]);
+  assert.deepEqual(step.work.checkReruns!.map(entry => [entry.check, entry.state, entry.runId]), [['typecheck', 'requested', 37381434491]]);
 });

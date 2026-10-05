@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { blockedFeatures, controlPlanePermissions, describeShortfall, permissionShortfalls, permissionTable, requiredPermissions, reviewerPermissions } from '../src/github-permissions.js';
 import { appManifest, reviewerAppManifest } from '../src/github-setup.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // unit:app-permissions-declaration
 test('the control-plane declaration carries the merge queue\'s Contents: write and nothing beyond what a feature names', () => {
@@ -73,6 +74,36 @@ test('Actions write is diagnosed before attempting failed-job reruns', () => {
     assert.deepEqual(blockedFeatures(missing), ['check-rerun']);
     assert.match(describeShortfall(missing[0], 'control', 'https://github.com/settings/installations/42'), /lacks Actions: write.*rerun failed workflow jobs/);
   }
+});
+
+test('unit:github-setup-rerun-permission — github-setup names Actions: write as the failed-rerun shortfall when the installation lacks it, and verifies it once held (GY-1328)', async () => {
+  const { generateKeyPairSync } = await import('node:crypto');
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const { inspectAppPermissions } = await import('../src/github-setup.js');
+  const root = await temporaryDirectory('gy-1328');
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  await mkdir(join(root, '.graphyard'), { recursive: true });
+  await writeFile(join(root, '.graphyard', 'github-app.json'), JSON.stringify({ appId: 123, slug: 'graphyard-owner-repo', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), webhookSecret: 'test-only', repository: 'owner/repo', installationId: 161493384 }), { mode: 0o600 });
+  const full = requiredPermissions(controlPlanePermissions);
+  let granted: Record<string, string> = { ...full, actions: 'read' };
+  const fetcher = (async (url: unknown) => String(url) === 'https://api.github.com/app'
+    ? new Response(JSON.stringify({ id: 123, slug: 'graphyard-owner-repo', owner: { login: 'owner', type: 'User' }, permissions: full }))
+    : new Response(JSON.stringify({ id: 161493384, html_url: 'https://github.com/settings/installations/161493384', permissions: granted }))) as typeof fetch;
+  for (const actions of ['read', undefined]) {
+    granted = { ...full }; if (actions) granted.actions = actions; else delete granted.actions;
+    const short = await inspectAppPermissions(root, { fetcher });
+    assert.equal(short.verified, false);
+    assert.deepEqual(short.appShortfalls, []);
+    assert.deepEqual(short.installationShortfalls.map(entry => [entry.permission, entry.required, entry.granted, entry.features]), [['actions', 'write', actions ?? null, ['check-rerun']]]);
+    assert.match(short.steps[0], /^Open https:\/\/github\.com\/settings\/installations\/161493384 and accept the pending permission request for Actions: write \(failed CI reruns\)\./);
+    assert.match(short.steps[1], /github-setup --update-permissions/);
+  }
+  granted = { ...full };
+  const held = await inspectAppPermissions(root, { fetcher });
+  assert.equal(held.verified, true);
+  assert.deepEqual(held.installationShortfalls, []); assert.deepEqual(held.steps, []);
+  assert.equal(held.granted!.actions, 'write');
 });
 
 // GY-1327: the GitHub-deployments provider reads /deployments with the control-plane App.

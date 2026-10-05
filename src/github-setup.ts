@@ -4,7 +4,7 @@ import { readFile, writeFile, rename } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { GitHub, appJwt, installationSettingsUrl } from './github.js';
 import { localDirectory } from './onboarding.js';
-import { controlPlaneEvents, controlPlanePermissions, describePermission, permissionShortfalls, requiredPermissions, reviewerEvents, reviewerPermissions, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
+import { controlPlaneEvents, controlPlanePermissions, describePermission, featureLabels, permissionShortfalls, requiredPermissions, reviewerEvents, reviewerPermissions, type PermissionLevel, type PermissionShortfall } from './github-permissions.js';
 
 export interface AppCredentials { appId: number; slug: string; privateKey: string; webhookSecret: string; repository: string; installationId?: number; reviewer?: string; botUserId?: number }
 const credentialFile = (root: string, reviewer?: string) => resolve(root, '.graphyard', reviewer ? `github-reviewer-${reviewer}.json` : 'github-app.json');
@@ -94,10 +94,13 @@ export async function inspectAppPermissions(root: string, options: { reviewer?: 
   const excess = Object.entries(granted ?? registered).filter(([permission, level]) => levelRank(level) > levelRank(required[permission] ?? null))
     .map(([permission, level]) => ({ permission, granted: level, declared: required[permission] ?? null })).sort((a, b) => a.permission < b.permission ? -1 : 1);
   const list = (shortfalls: PermissionShortfall[]) => shortfalls.map(shortfall => describePermission(shortfall.permission, shortfall.required)).join(', ');
+  // The acceptance step names what each missing grant blocks, so an Actions: write gap reads as
+  // the failed CI reruns it stops before a rerun is ever attempted (GY-1328).
+  const blocking = (shortfalls: PermissionShortfall[]) => shortfalls.map(shortfall => `${describePermission(shortfall.permission, shortfall.required)} (${shortfall.features.map(feature => featureLabels[feature]).join(', ')})`).join(', ');
   const steps: string[] = [];
   if (appShortfalls.length) steps.push(`Open ${settingsUrl}, set ${list(appShortfalls)} under Repository permissions, and save. GitHub has no API for changing a registered App's permissions, so this is a browser step.`);
   if (!installationId) steps.push(`Install the App on ${app.repository} at ${installationUrl}, then rerun github-setup so the installation is recorded.`);
-  else if (appShortfalls.length || installationShortfalls.length) steps.push(`Open ${installationUrl} and accept the pending permission request for ${list(installationShortfalls.length ? installationShortfalls : appShortfalls)}. GitHub only applies an App permission change to an installation after its owner accepts it there.`);
+  else if (appShortfalls.length || installationShortfalls.length) steps.push(`Open ${installationUrl} and accept the pending permission request for ${blocking(installationShortfalls.length ? installationShortfalls : appShortfalls)}. GitHub only applies an App permission change to an installation after its owner accepts it there.`);
   if (excess.length && reviewer) steps.push(`Reduce ${excess.map(entry => `${describePermission(entry.permission, entry.granted as PermissionLevel)}`).join(', ')} at ${settingsUrl}: a reviewer App must never hold more than its declaration, and never Contents: write.`);
   if (steps.length) steps.push('Rerun graphyard github-setup --update-permissions (add --wait SECONDS to poll) to verify acceptance; the server preflight releases held jobs on its own once the installation reports the permission.');
   const verified = !!installationId && !appShortfalls.length && !installationShortfalls.length && !(reviewer && excess.length);
