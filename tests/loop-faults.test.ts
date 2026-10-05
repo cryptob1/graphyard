@@ -5,10 +5,10 @@ import type { Work } from '../src/model.js';
 import { faultClassItem, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
 import { providerLimit } from '../src/model/capacity.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { actionableSubjects, emptyDaemonState, loopAttention, loopLiveness, trackSilence, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { clearDiagnoses, diagnosesSettled, diagnosisLimitHoldMs, diagnosisReport, diagnosisStep, diagnosticianGate, diagnosticianHeldUntil, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
+import { actionableSubjects, emptyDaemonState, pruneDaemonState, loopAttention, loopLiveness, trackSilence, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { clearDiagnoses, diagnosesSettled, diagnosisLimitHoldMs, diagnosisReport, diagnosisStep, diagnosticianGate, diagnosticianHeldUntil, probeSubject, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
 import type { Cycle } from '../src/daemon/cycle.js';
-import { diagnosticianSettings, diagnosisSettled } from '../src/runner/payloads.js';
+import { diagnosticianSettings, diagnosisSettled, retainedDiagnoses } from '../src/runner/payloads.js';
 import type { RunFailure, RunOptions, RunResult, Runner } from '../src/runner/types.js';
 
 // GY-1092 names this file for its proof: manual:fault-class-loop. The master loop filed ten loop
@@ -292,4 +292,38 @@ test('manual:fault-class-loop — a waiting diagnosis is settled so inFlight cou
   state.diagnoses['GY-1084'] = { subject: 'GY-1084', kind: 'recurring', faultClass: 'loop', work: 'GY-1084', state: 'running',
     startedAt: iso(refusedAt + 15 * minute), updatedAt: iso(refusedAt + 15 * minute), runs: [], diagnosis: null, fix: null, decision: null, answeredBy: null, retryAt: null, refusedAt: null, detail: '' } as DaemonState['diagnoses'][string];
   assert.equal(diagnosticianGate(state, refusedAt + 20 * minute), 'held', 'the in-flight probe holds other launches even if waiting entry updatedAt changed');
+});
+
+// ---- GY-1245: follow-ups from the review of GY-1092 --------------------------------------------
+
+const diagnosisRecord = (subject: string, state: 'waiting' | 'answered', at: number, refused: number | null = null) => ({
+  subject, kind: 'recurring', faultClass: 'loop', work: subject, state, startedAt: iso(at), updatedAt: iso(at), runs: [], diagnosis: null, fix: null,
+  decision: null, answeredBy: null, retryAt: refused === null ? null : iso(refused + hour), refusedAt: refused === null ? null : iso(refused), detail: '' }) as DaemonState['diagnoses'][string];
+
+test('GY-1245 — retention past the bound never prunes a waiting diagnosis, so the provider hold survives the overflow', () => {
+  const state = emptyDaemonState(config());
+  // The waiting entry is the oldest record, the first a settled-only prune would take.
+  state.diagnoses['GY-1083'] = diagnosisRecord('GY-1083', 'waiting', refusedAt - hour, refusedAt);
+  for (let index = 0; index < retainedDiagnoses + 5; index++) state.diagnoses[`GY-${2000 + index}`] = diagnosisRecord(`GY-${2000 + index}`, 'answered', refusedAt + index * 1000);
+  pruneDaemonState(state);
+  assert.equal(state.diagnoses['GY-1083']?.state, 'waiting');
+  assert.equal(Object.keys(state.diagnoses).length, retainedDiagnoses);
+  assert.equal(diagnosticianGate(state, refusedAt + 30 * minute), 'held');
+});
+
+test('GY-1245 — a probe runs the waiting subject refused longest ago, not whichever subject is listed first', () => {
+  const state = emptyDaemonState(config());
+  state.diagnoses['GY-1084'] = diagnosisRecord('GY-1084', 'waiting', refusedAt + 3 * hour, refusedAt);
+  state.diagnoses['GY-1083'] = diagnosisRecord('GY-1083', 'waiting', refusedAt, refusedAt - 10 * minute);
+  const subjects = [{ id: 'GY-1200' }, { id: 'GY-1084' }, { id: 'GY-1083' }];
+  assert.deepEqual(probeSubject(state, subjects), [{ id: 'GY-1083' }]);
+  assert.deepEqual(probeSubject(emptyDaemonState(config()), subjects), [{ id: 'GY-1200' }]);
+  assert.deepEqual(probeSubject(state, []), []);
+});
+
+test('GY-1245 — a 429 is a limit only as the provider\'s status, never inside an id or an echoed body', () => {
+  for (const text of ['429 Too Many Requests', 'Error: 429 rate limited', 'HTTP 429: slow down', 'HTTP/1.1 429', 'request failed with status code 429', '{"status": 429, "error": "quota"}', '{"code":429}', limitError])
+    assert.ok(providerLimit(text, refusedAt), text);
+  for (const text of ['request 429 failed: model not found', 'invalid tool call in message 429 of the transcript', 'ENOENT /tmp/run-429/models.json', 'id req_429 failed: internal error'])
+    assert.equal(providerLimit(text, refusedAt), null, text);
 });
