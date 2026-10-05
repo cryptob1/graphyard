@@ -37,4 +37,4 @@ The full suite is CI's gate: workers run build and `graphyard verify GY-N` (own 
 
 ## Ship in under thirty minutes
 
-[Speed](master-agent-reference.md#pipeline-speed): `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci), conflict avoidance. `graphyard diagnose GY-N` names holds; `base-behind`/`base-conflict` get rework or, docs-only, [docs-sync](development.md#documentation-that-rarely-conflicts). Three unobserved observation jobs: `observation-starved` (master attention; `/api/status` `starvedJobs`).
+[Speed](master-agent-reference.md#pipeline-speed): `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci), conflict avoidance. `graphyard diagnose GY-N` names holds; `base-behind`/`base-conflict` get rework or, docs-only, [docs-sync](development.md#documentation-that-rarely-conflicts), launched in its own managed checkout. Three unobserved observation jobs: `observation-starved` (master attention; `/api/status` `starvedJobs`).

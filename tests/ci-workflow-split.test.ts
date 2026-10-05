@@ -94,7 +94,9 @@ test('unit:fast-gate-required-set — the required CI checks exclude the soak, c
 
   // The recorded per-file durations fit each shard's bound even run one file after another.
   const shard = jobs.get('test-shard')!;
-  const shards = shardFiles(preMergeTestFiles(), readDurations(), 4);
+  const shardCount = (shard.text.match(/shard: \[([^\]]*)\]/)?.[1] ?? '').split(',').filter(entry => entry.trim()).length;
+  assert.ok(shardCount >= 4, 'the test-shard matrix lists its shards');
+  const shards = shardFiles(preMergeTestFiles(), readDurations(), shardCount);
   for (const entry of shards) assert.ok(entry.durationMs < shard.timeout! * 60_000, `a shard's recorded files take ${Math.round(entry.durationMs / 1000)}s in series, within its ${shard.timeout}-minute bound`);
 });
 
