@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-Restarting `graphyard master run` never double-dispatches. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95); cycles over 60 s raise `loop`. Log: `journalctl --user -u graphyard-master`.
+`master status` → `daemon`: health, `cycleTime` (30-minute p50/p95); cycles over 60 s raise `loop`. Log: `journalctl --user -u graphyard-master`.
 
 ### Perpetual master loop
 
@@ -23,7 +23,7 @@ Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next wo
 
 ## Retro synthesis
 
-`GRAPHYARD_INTERVENTION_PATTERNS=1`: scans group refusal/rework interventions by cause; at the threshold → unapplied drafts (`retro.drafted`) (wording, check, producer method, fault-catalogue entry). An AI operator agent with `decision:approve` (not the drafter) [approves](protocol/work-commands.md)/refuses each. Requirements → [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete` (`409`); catalogue entries count under fault classes.
+`GRAPHYARD_INTERVENTION_PATTERNS=1` groups refusal and rework interventions by cause; at the threshold it drafts unapplied changes (`retro.drafted`: wording, check, producer method, fault-catalogue entry), each [approved](protocol/work-commands.md) or refused by a non-drafting AI operator agent with `decision:approve`. Approved requirements show as [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse a failing `complete` (`409`).
 
 ## Flaky CI check
 
@@ -113,7 +113,7 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (default 250): batch size. `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (default 8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace per token, merge path first. `observationThroughput` reports budget, pace and lag; heartbeat, claim, `complete`, `blocked` own the lease pool (`leaseHealth` in `GET /api/status`: heartbeat p50/p95). Reconcile row-locks only its batch, skipping writer-held rows; contended batches rerun, then defer. Until startup validation finishes, `/healthz` reports `readiness: false` and `/healthz?ready` 503.
+`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace per token, merge path first (`observationThroughput`). Heartbeat, claim, `complete`, `blocked` own the lease pool (`leaseHealth` in `GET /api/status`). Reconcile skips writer-held rows. Until startup validation finishes, `/healthz` reports `readiness: false` and `/healthz?ready` 503.
 
 ### Concurrent reconciliation
 

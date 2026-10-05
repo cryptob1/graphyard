@@ -11,6 +11,6 @@ An `e2e:` proof passes from a pinned candidate, bundle and separate [collector](
 
 `kind: bundle` pins `scenario`, `scenarioRevision`, `scenarioHash`, `digest`, `runnerImageDigest`, `reportFormat`. Operators create candidates from build attestations.
 
-Requests bind observed targets; new manifests supersede. Runners `ack` within 30 s, heartbeat every 20 s until `collection-authority`. Pass: `matched` target, verified artifacts, settled run. Recover: `cancel`, `settle` (stop evidence), `retry`; `graphyard validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics) stalls.
+Requests bind observed targets. Runners `ack` within 30 s and heartbeat every 20 s; a pass needs a `matched` target, verified artifacts and a settled run. Recover with `cancel`, `settle` or `retry`; `graphyard validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics) stalls.
 
-`reportFormat`: `graphyard-playwright-v1` (default) or `junit-xml-v1`; each test passes once, and skips, retries, timeouts, miscounts fail; preview: `graphyard runner verify-report junit-xml-v1 inventory.json report.xml`.
+`reportFormat`: `graphyard-playwright-v1` or `junit-xml-v1`; skips, retries, timeouts and miscounts fail (`graphyard runner verify-report junit-xml-v1 inventory.json report.xml` previews).

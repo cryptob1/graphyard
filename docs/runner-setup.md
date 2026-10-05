@@ -28,7 +28,7 @@ Unscoped `worker` credential: `graphyard runner attempt runner.json`:
 }
 ```
 
-`runAsUser`: non-root container UID, boundary-group GID; target, digests, network, key only from the grant. Attestor (`graphyard runner supervise`, own OS account): `enumerate` offline, then `execute` read-only, capability-free; signs what it saw.
+`runAsUser`: non-root UID, boundary-group GID; everything else comes from the grant. The attestor (`graphyard runner supervise`, own OS account) enumerates offline, executes read-only and signs what it saw.
 
 ### The acknowledgement is retried, never repeated
 
@@ -78,4 +78,4 @@ Proof-scoped `producer` credential, own boundary-group OS account: `graphyard ru
 }
 ```
 
-`grant`: from runner output. Collector (`collection-authority`) verifies attestor signature, inventory, both containers gone; uploads artifacts privately. `observations` bracket the run, gaps under `maxGapMs`; difference, gap or `unknown` measurement refuses; infrastructure faults publish `blocked`.
+The collector (`collection-authority`) verifies the signature, inventory and container teardown, and uploads artifacts privately. `observations` must bracket the run within `maxGapMs`; a difference, gap or `unknown` measurement refuses; infrastructure faults publish `blocked`.

@@ -29,7 +29,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 ## Workflow base syncs
 
-Worker tokens carry `contents`, `pull_requests` and `workflows` write ([push credential](protocol/leases.md#push-credential)). If GitHub still refuses a base sync, `sync GY-N --push-via-control-plane COMMIT` has the control plane push COMMIT when it fast-forwards the branch, merges `origin/BASE` and keeps its workflow files (`sync.workflow-push`).
+Worker tokens carry `contents`, `pull_requests` and `workflows` write ([push credential](protocol/leases.md#push-credential)). If GitHub refuses a base sync, `sync GY-N --push-via-control-plane COMMIT` has the control plane push a COMMIT that fast-forwards the branch and merges `origin/BASE` (`sync.workflow-push`).
 
 ## Require the check
 
@@ -41,13 +41,13 @@ Once gated, a speculative tip pushed onto the candidate branch once and `refs/gr
 
 ### Bindings and carry
 
-Reviews/proofs bind head, base, policy revision. Moved base: all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, plus disjoint-`scopeFiles` proofs; a republished Graphyard tip of the same head and patch keeps its approval.
+Reviews and proofs bind head, base and policy revision. On a moved base all carry if the clean merge kept the patch-id; else the approval carries if no reviewed file changed, and disjoint-`scopeFiles` proofs carry.
 
-A carried review missing from the PR is re-posted before merging (`review.carry-refreshed`), else `mergerefused` requests a fresh review (`mergeRefusal.action: rereview`). Refusals past 10 minutes raise attention; the loop then clears carried approvals or requests rework (`mergeRefusal.action: rework`; refusing it emits `merge.refusal.lifted`), once per recovery phase.
+A carried review missing from the PR is re-posted before merging (`review.carry-refreshed`), else `mergerefused` requests a fresh review (`mergeRefusal.action: rereview`). Refusals past 10 minutes raise attention, then the loop clears carried approvals or requests rework (`mergeRefusal.action: rework`), once per phase.
 
 ### Parallel tips
 
-`mergeQueue.parallelTips` (master config, default 4; `POST /api/merge-queue`): stacked per-entry tips test concurrently (`parallelTips: 1` batches). Entries merge in order once all tips through theirs pass; a failing tip ejects its entry once those ahead pass; later tips rebuild. Failing only `unit:docs-word-budget` ejects the first entry whose running total exceeds the budget, naming words over and pages grown; otherwise the budget only warns ([development](development.md#documentation)).
+`mergeQueue.parallelTips` (master config, default 4; `POST /api/merge-queue`): stacked per-entry tips test concurrently (`parallelTips: 1` batches). Entries merge in order; a failing tip ejects its entry once those ahead pass, and later tips rebuild. Failing only `unit:docs-word-budget` ejects the first entry whose running total exceeds the budget, naming words over and pages grown; otherwise the budget only warns ([development](development.md#documentation)).
 
 ### Optimistic merges
 
@@ -61,4 +61,4 @@ Protected `pull_request_target` workflow per `graphyard/*` push: **plan** finds 
 
 ## Identity-bound agent review
 
-`reviewProvider: "codex"` accepts only Codex's clean result on the exact head. `agent` needs a non-author reviewer App (`github-setup URL --reviewer claude`; `GRAPHYARD_REVIEWER_APPS`), adopted by `graphyard reviewpolicy GY-N agent REVISION "reason" --profiles` [FILE](../examples/reviewer-profiles.json); approving via `graphyard-verdict` comment naming the head.
+`reviewProvider: "codex"` accepts Codex's clean result on the exact head; `agent` needs a non-author reviewer App (`github-setup URL --reviewer claude`; `GRAPHYARD_REVIEWER_APPS`), adopted by `graphyard reviewpolicy GY-N agent REVISION "reason" --profiles` [FILE](../examples/reviewer-profiles.json); approving via `graphyard-verdict` comment naming the head.

@@ -11,7 +11,7 @@ One group per open item (a tile counts and filters it): **Needs you** (yours alo
 
 `graphyard login` prints the operator's single-use sign-in link. Requests offer choices; **Provide now** seals credentials for `unseal GY-N`.
 
-An operator approval offers **Approve** or **Decline**. **Decline** is terminal, refusing with your reason (`master refuse GY-N DECISION REASON`). Only a sign-in session of an admin declared `"sessionKind": "human"` answers.
+An operator approval offers **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`), answered only from a human admin's sign-in session.
 
 ## Workers
 

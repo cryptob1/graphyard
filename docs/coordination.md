@@ -11,15 +11,15 @@ Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit
 
 `plannedFiles` (paths, `/`-ending prefixes) is the scope contract, not a lock: the [merge queue](github.md#merge-queue), `sync` integrate overlaps. `master status` shows `overlap.concurrent`, `git merge-tree` failures. Root-level directories are `highConflict`, refused without `--allow-broad-scope`; only `exclusiveResources` (reserved at claim) hold dispatch.
 
-`worktree GY-N EPOCH` frees the branch first: an earlier attempt's worktree is recorded (`workspace.preserved`) and detached, abandoned checkouts removed (`reclaimed`), leased, dirty or external ones kept. A workspace failure releases the claim, sparing epoch and profile. After **3** single-cause dispatch failures, the loop records a `dispatchblock` blocker until `graphyard unblock GY-N REASON`.
+`worktree GY-N EPOCH` frees the branch first: an earlier attempt's worktree is recorded (`workspace.preserved`) and detached, abandoned ones removed (`reclaimed`). A workspace failure releases the claim without spending the epoch. After **3** single-cause dispatch failures, the loop records a `dispatchblock` blocker until `graphyard unblock GY-N REASON`.
 
 ## Review gate: verdicts, not threads
 
-Reviewer approval of the exact head plus required CI gates landing; threads are inputs. Approvals mark each listed thread resolved, follow-up (held until ship, then filed) or overridden by thread or comment ID; missed threads withdraw approval, relaunching by thread ID. Retries stop after 10 identical 4xx failures. After two rework rounds bot threads are advisory. Past the review-round cap (default 3) only a `BLOCKING:` finding holds a head, escalating rather than reworking ([follow-ups](followups.md#past-the-review-round-cap)). Required conversation resolution is drift: `master protection --apply`.
+Reviewer approval of the exact head plus required CI gates landing; threads are inputs. Approvals mark each listed thread resolved, follow-up (filed on ship) or overridden; a missed thread withdraws the approval. After two rework rounds bot threads are advisory. Past the review-round cap (default 3) only a `BLOCKING:` finding holds a head, escalating rather than reworking ([follow-ups](followups.md#past-the-review-round-cap)). Required conversation resolution is drift: `master protection --apply`.
 
 ## Refuse candidates that revert shipped code outside their scope
 
-`plannedFiles` bounds changes: at `complete`, new heads and landings, files inside scope, new files, touched `tests/helpers/timing-baseline.json` lines of top-level tests pass; other files must match base byte-for-byte. Carried files never eject; scope requests or audited revisions widen it.
+`plannedFiles` bounds changes at `complete`, new heads and landings: files in scope, new files and touched `tests/helpers/timing-baseline.json` lines pass; others must match base byte-for-byte. Scope requests or audited revisions widen it.
 
 `evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: build/acceptance gates and queue ejections are its refusals, published as required check `graphyard/landable`, never a verdict input.
 

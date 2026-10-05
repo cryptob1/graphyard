@@ -16,7 +16,7 @@ The loop records them idempotently (`POST /api/work/GY-N/followups`; `followups.
 
     graphyard promote-followup GY-N INDEX
 
-An operator (`intent:create`) promotes finding `INDEX` (`POST /api/work/GY-N/promote`) to a backlog item requiring `manual:review-followup-addressed`, no longer waiting on ship; repeats answer `"duplicate": true`.
+An operator (`intent:create`) promotes finding `INDEX` (`POST /api/work/GY-N/promote`) to a backlog item requiring `manual:review-followup-addressed`; repeats answer `"duplicate": true`.
 
 ## Past the review-round cap
 

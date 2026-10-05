@@ -15,7 +15,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 **A merge-base dismissal is not a reviewer withdrawing a verdict.** Only a current-head approval dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); its re-post is no new verdict (`observation.dismissedReviewIds`).
 
-**A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejected branches restore onto the base tip in one push (`baseRefresh.restore`; a second failure → `escalated` in `master status`). A tip behind an unlanded departed entry awaits its restored head (`Restoring after predecessor ejection`); another item's carried files (`Carried from another item's tip`) are neither rework nor ejection.
+**A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejected branches restore onto the base tip in one push (`baseRefresh.restore`; a second failure → `escalated` in `master status`). Another item's carried files (`Carried from another item's tip`) are neither rework nor ejection.
 
 #### A contaminated branch
 
@@ -47,7 +47,7 @@ Missing or retired rules (`gh api *merge*`, `gh api graphql*`) are drift, named 
 
 One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units, claiming rows under their own credential; `master executors restart` moves them to the current release. Verified deployments move clean checkouts to the base tip and restart executors, then the loop (`upgrade` attention if dirty).
 
-A `resync` completes only on an observation newer than its claim (`POST /api/work/:id/resync` `{ since }` wakes observation; else `no observation newer than the claim was saved`).
+A `resync` (`POST /api/work/:id/resync` `{ since }`) completes only on an observation newer than its claim.
 
 A `dispatch` or `request-review` finding a session already answering the head completes on it; standing verdicts block a second reviewer until dismissed; busy or reserved worker profiles wait 30 minutes before stalling. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle, in no count and no list), shown in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate it. Ticks requeue ownerless items (`liveness.violations`).
 
@@ -63,7 +63,7 @@ A producer request spent with no attempt acting (never started, launch refused, 
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen standing faults. Workless sessions raise `fleet-capacity`. Sandbox or `workflows`-permission refusal blockers are `configuration`.
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`). Workless sessions raise `fleet-capacity`; sandbox or `workflows`-permission refusals are `configuration`.
 
 ## Pipeline speed
 

@@ -3,11 +3,11 @@
 
 ## Runner capacity and request diagnostics
 
-`graphyard validation capacity` → per live request: `queued-starved` (fix runner), `queued-waiting-for-slot` (add runner), `queued-resource-held`/`awaiting-settlement` (holder stopped → `validation settle`), `unacknowledged`/`retryable` (`validation retry`), `heartbeat-missing` (keep reservations), `collection-stalled` (check collector).
+`graphyard validation capacity` classes each live request: `queued-starved` (fix runner), `queued-waiting-for-slot` (add runner), `queued-resource-held`/`awaiting-settlement` (`validation settle`), `unacknowledged`/`retryable` (`validation retry`), `heartbeat-missing`, `collection-stalled`.
 
 ## Artifact backends, capacity and migration
 
-Postgres (default) or S3: `GRAPHYARD_ARTIFACT_BACKEND=s3`, `GRAPHYARD_ARTIFACT_S3_ENDPOINT`, `_BUCKET`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, optional `_PREFIX`. Failed upload: 503; over `GRAPHYARD_ARTIFACT_CAPACITY_BYTES` (default 2 GiB): 507. `graphyard validation artifact-migrate s3|postgres [LIMIT]` moves ≤100 per call; at `remaining` 0, switch backends.
+Postgres (default) or S3 (`GRAPHYARD_ARTIFACT_BACKEND=s3`, `GRAPHYARD_ARTIFACT_S3_ENDPOINT`, `_BUCKET`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_PREFIX`). Over `GRAPHYARD_ARTIFACT_CAPACITY_BYTES` (2 GiB): 507. `graphyard validation artifact-migrate s3|postgres [LIMIT]` moves ≤100 a call; at `remaining` 0, switch.
 
 ## Rollback
 
@@ -19,7 +19,7 @@ Completes once the target [verifies](delivery.md#observe-and-verify). Service-sc
  "services":["api","web"],"rollback":{"fencing":"provider","automatic":true}}
 ```
 
-Fencing: `provider` conditions writes on expected running release; `serialized` freezes environment until settled; `none` never automatic. Promoter `delegate` lease or operator requests verified release (`POST /api/delivery/rollback`):
+Fencing: `provider`, `serialized` or `none` (never automatic). A promoter or operator requests a verified release (`POST /api/delivery/rollback`):
 
 ```json
 {"environment":{"id":"production","revision":1},"target":{"id":"2026.09.17-4","revision":1},"expectedGeneration":7,
@@ -47,4 +47,4 @@ reports `applied`/`failed`/`unknown` (`POST /api/delivery/rollback-settle`):
  "evidence":"https://railway.app/project/example/deployments/01J8Q5"}
 ```
 
-`"automaticRollback": true` rolls degraded generations to last verified release if fenced automatic executors cover every service; else `automaticRollbackRefusal` explains.
+`"automaticRollback": true` rolls a degraded generation back when fenced automatic executors cover every service (else `automaticRollbackRefusal`).

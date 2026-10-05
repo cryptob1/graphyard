@@ -30,9 +30,9 @@ Never attest a stop you have not confirmed; merged work changes only via follow-
 
 ## Worker host keyring proxy
 
-A confined master, approver or proof producer reads its GitHub login with `gh auth git-credential` through a keyring-only D-Bus proxy; workers and reviewers carry their own credential and never get it. Install it once per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service` and `graphyard-secrets-bus-filter.service` to `~/.config/systemd/user/`, then `systemctl --user daemon-reload && systemctl --user enable --now graphyard-secrets-bus.socket` (an earlier install that enabled `graphyard-secrets-bus.service` itself disables it first). The socket listens at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` (else `/run/user/<uid>/graphyard-secrets-bus`); `GRAPHYARD_SECRETS_BUS` in the launcher's environment names another socket. Without a live socket the session bus is masked by `/dev/null`, and a session pushes with `GH_TOKEN` from its environment.
+A confined master, approver or proof producer reads its GitHub login (`gh auth git-credential`) through a keyring-only D-Bus proxy; workers and reviewers use their own credential. Install once per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service` and `graphyard-secrets-bus-filter.service` to `~/.config/systemd/user/`, then `systemctl --user daemon-reload && systemctl --user enable --now graphyard-secrets-bus.socket` (disable an earlier-enabled `graphyard-secrets-bus.service` first). It listens at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` unless `GRAPHYARD_SECRETS_BUS` names another; without it the bus is masked and sessions push with `GH_TOKEN`.
 
-The filter admits only the Secret Service methods a credential read needs, but by method and path, not by item: a session can read every unlocked item, not only the GitHub login. On such a host keep other secrets out of that keyring, or leave the proxy uninstalled and use `GH_TOKEN`.
+The filter cannot select keyring items: keep other secrets out of that keyring, or skip the proxy and use `GH_TOKEN`.
 
 ## Safety facts that never change
 
@@ -49,4 +49,4 @@ The filter admits only the Secret Service methods a credential read needs, but b
 
 ## Resources and disk
 
-`resourceRegistry` declares bounded resources, reported in `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop removes finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed; `.graphyard/worktree-reclaim.jsonl`), stale [test temp entries](operations-reference.md#control-plane-resources) and idle `/tmp/tsx-<uid>`; unowned idle profile panes close ([panes](master-agent-sessions.md#panes-are-closed-and-reclaimed)); `disk` attention below `run.diskThresholdGb`. Checkouts: `run.worktreeRoot`.
+`resourceRegistry` declares bounded resources, reported in `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop removes finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed), stale test temp entries and idle [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed); `disk` attention below `run.diskThresholdGb`. Checkouts: `run.worktreeRoot`.

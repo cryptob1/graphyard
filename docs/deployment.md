@@ -11,13 +11,13 @@ One stateless container plus Postgres: `node "$GRAPHYARD_CLI" install --provider
 
 | Variable | Purpose
 | --- | ---
-| `GRAPHYARD_PRINCIPALS` | Principals JSON (`role`, `sessionKind`); operator declared `human`, rotation refuses the rest; an AI `admin` judging retro artefacts declares `sessionKind: "ai"`
-| `GRAPHYARD_MAX_SLICE_LEADS` | Slice leads (default 3)
-| `GRAPHYARD_MAX_ENGINEERS_PER_LEAD` | Engineers per lead (default 2)
-| `GRAPHYARD_MIN_REVIEWERS` | Reviewers with a lead (default 1)
-| `GRAPHYARD_MAX_REVIEWERS` | ≥ `producer` count (default 2)
+| `GRAPHYARD_PRINCIPALS` | Principals JSON (`role`, `sessionKind`: operator `human`, retro-judging AI `admin` `ai`)
+| `GRAPHYARD_MAX_SLICE_LEADS` | Slice leads (3)
+| `GRAPHYARD_MAX_ENGINEERS_PER_LEAD` | Engineers per lead (2)
+| `GRAPHYARD_MIN_REVIEWERS` | Reviewers with a lead (1)
+| `GRAPHYARD_MAX_REVIEWERS` | ≥ `producer` count (2)
 
-Installers derive these from the principals; an unset one is `delegationLimits` drift.
+Installers derive the limits; an unset one is `delegationLimits` drift.
 
 ### CI producer
 
@@ -27,11 +27,11 @@ Installers derive these from the principals; an unset one is `delegationLimits` 
 {"id":"ci-proofs","role":"producer","runtime":"github-actions","proofs":["unit:*","integration:*"],"token":"…"}
 ```
 
-`GRAPHYARD_CI_PRODUCER_TOKEN`, `GRAPHYARD_URL`: default-branch-only `graphyard-reporting` environment. `scripts/configure-integrations.mjs --apply` merges `.graphyard/credentials.json` into the live roster (`--remove ID` drops a principal, `--rotate ID` rotates a producer, `--deploy` sets the GitHub secret).
+`GRAPHYARD_CI_PRODUCER_TOKEN`, `GRAPHYARD_URL` live in the default-branch-only `graphyard-reporting` environment. `scripts/configure-integrations.mjs --apply` merges `.graphyard/credentials.json` into the live roster (`--remove ID`, `--rotate ID`, `--deploy`).
 
 ### Production deployment observation
 
-A new `GRAPHYARD_BUILD_SHA` checks undeployed merges once; one unserved after five minutes is a `delivery.deployment-incident` (shown in `master status`). Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
+A merge unserved five minutes after a new `GRAPHYARD_BUILD_SHA` is a `delivery.deployment-incident`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
 
 ## Backup, upgrade, rollback
 
@@ -39,7 +39,7 @@ A new `GRAPHYARD_BUILD_SHA` checks undeployed merges once; one unserved after fi
 
 ## Manual fallback
 
-Unsupported or existing deployments: set the variables table by hand, `node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN`, `doctor`.
+Otherwise set the variables table by hand, then `node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN` and `doctor`.
 
 - Compose: `cp .env.example .env`, replace secrets, `docker compose --profile full up -d`; TLS on 4310, Postgres private.
 - Kubernetes: `helm install graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials …`.

@@ -3,7 +3,7 @@
 
 ## Authority boundaries
 
-An AI `slice-lead` leads an optional slice (`product`, `infrastructure`, `docs-experience`): coordinates workers, rules on plans, sends back, escalates; never implements, claims, submits evidence, reviews its slice, changes requirements or merges (`lead.action.refused`). `reject-plan`/`send-back` hold the merge gate (**lead hold**) until that lead's `approve-plan` with `"supersedes": "RULING-ID"` / `rework`.
+An AI `slice-lead` leads an optional slice (`product`, `infrastructure`, `docs-experience`): rules on plans, sends back, escalates; never implements, reviews, proves or merges (`lead.action.refused`). `reject-plan`/`send-back` hold the merge gate (**lead hold**) until that lead's `approve-plan` with `"supersedes": "RULING-ID"` / `rework`.
 
 Producers ever assigned the item or in its slice: `evidence.producer.refused`. Limits: [deployment variables](deployment.md#variables).
 

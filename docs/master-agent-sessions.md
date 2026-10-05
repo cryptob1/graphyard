@@ -15,15 +15,15 @@
 
 ### The coordinator checkout is confined at the OS level
 
-Every launch but the master session's gets the checkout unwritable to shell commands: Codex by `--sandbox workspace-write` with grants confined to its worktree and admin directory; others by bubblewrap (checkout read-only, PIDs unshared, session bus a [keyring-only proxy](operations.md#worker-host-keyring-proxy)), re-exposing only the session worktree, worktree-admin directories and shared Git areas. Refused with reason: missing bubblewrap, non-Linux, refused namespaces, confinement off, underivable checkout. Loop and executors never start, self-upgrade or restart on dirty checkouts.
+Every launch but the master session's gets the checkout unwritable to shell commands: Codex by a confined `--sandbox workspace-write`, others by bubblewrap (checkout read-only, session bus a [keyring-only proxy](operations.md#worker-host-keyring-proxy)) re-exposing only the session worktree and shared Git areas. A launch that cannot be confined is refused with the reason. Loop and executors never start, self-upgrade or restart on dirty checkouts.
 
 ## Accounts and failover
 
-A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first logged-in account under `run.quotaCeilingPercent`, else **fail over** (`dispatch.accounts`); so does a runtime failing to start (three in a row raise attention). A limit notice, even mid-retry, commits work as unpushed `WIP:`, sets `capacity.exhausted`, and relaunches on another account or after reset.
+A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first account under `run.quotaCeilingPercent`, else **fail over** (`dispatch.accounts`), as does a runtime failing to start. A limit notice commits work as unpushed `WIP:`, sets `capacity.exhausted` and relaunches elsewhere or after reset.
 
 ## The loop's own master session
 
-Fleet role `master registry role set master ACCOUNTS …` (unconfigured, nothing launches), one session holding its registry slot until the loop ends it; loop and `master start` adopt a live `masterAgentName`. Starts on the master prompt plus durable handover of standing judgement work; relaunches on exit, a limit notice (account held), or past `run.masterSessionMinutes` (default 240; open merge defers ≤30 min). Changed subjects wake it; `run.masterHeartbeatMinutes` (default 30) of silence sends a heartbeat (`master status` `daemon.master`).
+Fleet role `master registry role set master ACCOUNTS …` (unconfigured, nothing launches): one session holding its slot; the loop and `master start` adopt a live `masterAgentName`. It starts on the master prompt plus a handover of standing judgement work and relaunches on exit, a limit notice or past `run.masterSessionMinutes` (240). Changed subjects wake it; after `run.masterHeartbeatMinutes` (30) of silence it gets a heartbeat (`master status` `daemon.master`).
 
 ### The request is the session's first message
 
@@ -51,13 +51,13 @@ On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-
 
 Reviewers and producers are `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once if quiet past `run.acknowledgementSeconds` (default 90); settling resultless is **`never started`**: relaunched free a minute later, three at most (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
 
-A resolved blocker or scope request re-prompts the inactive session once (item, epoch, change, `complete GY-N EPOCH PR`); re-blocking that epoch ends attempt and blocker for a fresh session. **Idle-with-lease** (30 quiet minutes, nothing open): re-prompted once, after 30 more handed to a new attempt on its branch.
+A resolved blocker or scope request re-prompts the inactive session once; re-blocking hands the item to a fresh session. **Idle-with-lease** (30 quiet minutes, nothing open): re-prompted once, after 30 more handed to a new attempt on its branch.
 
 Headless Pi runs (`.graphyard/runs/`) survive restarts.
 
 ### Panes are closed and reclaimed
 
-Ending a session closes its pane; each cycle closes ≤**6** more launched **on this host** with session or worktree gone, agentless past **120 s**, never one with an agent or live-leased worktree; over **20** agentless → attention (`daemon.escalations`).
+Ending a session closes its pane; each cycle closes ≤**6** more launched **on this host** whose session or worktree is gone and agentless past **120 s**; over **20** raise attention (`daemon.escalations`).
 
 ### The dispatcher's own state
 
