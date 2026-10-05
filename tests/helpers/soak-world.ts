@@ -516,7 +516,8 @@ export class SimulatedGitHub {
     const at = this.commits.get(commit)?.at;
     if (at === undefined || now - at < this.options.ciMs) return [];
     if (!this.commitRuns.has(commit)) {
-      const red = this.broken.some(entry => this.contains(commit, entry.mergeSha) && ![...entry.clearedBy].some(clear => this.contains(commit, clear)));
+      // GY-793: a base-branch commit that itself broke the suite (`broken`) fails `test` too.
+      const red = !!this.commits.get(commit)!.broken || this.broken.some(entry => this.contains(commit, entry.mergeSha) && ![...entry.clearedBy].some(clear => this.contains(commit, clear)));
       this.commitRuns.set(commit, ['test', 'typecheck', protectionOnlyCheck].map(name => ({ name, result: name === 'test' && red ? 'failure' : 'success', id: ++this.serial })));
     }
     return this.commitRuns.get(commit)!;
@@ -555,13 +556,6 @@ export class SimulatedGitHub {
     const commit = this.commit(`Fix main forward after ${mergeSha.slice(0, 12)}`, this.files, clock.now(), [this.tip], undefined, { changed: [] });
     this.broken.find(entry => entry.mergeSha === mergeSha)?.clearedBy.add(commit.sha);
     return commit;
-  }
-
-  /** The required suite on a base-branch commit, as CI's push run reports it `ciMs` after the commit landed. */
-  commitChecks(commit: string, now: number) {
-    const found = this.commits.get(commit);
-    if (!found || now - found.at < this.options.ciMs) return [];
-    return ['test', 'typecheck'].map((name, index) => ({ name, result: name === 'test' && found.broken ? 'failure' : 'success', appId: this.options.ciAppId, id: Number.parseInt(commit.slice(0, 8), 16) * 2 + index }));
   }
 
   /** The distinct docs trees and blobs the real word counter has read (GY-574): the cache bounds the soak asserts. */
