@@ -678,3 +678,61 @@ test('fault-class-loop — a doctor command its allowlist refused and a decision
   assert.equal(silent({ kind: 'decision', work: 'GY-949', detail: 'GY-949 needs a rework decision requested and approved' }).faultClass, 'loop', 'a decision nobody requested is the loop\'s to request');
   assert.equal(silent({ kind: 'dispatch', work: 'GY-949', detail: 'GY-949 is claimable and waiting for a worker' }).kind, 'loop-silence');
 });
+
+// GY-1318 instance 2: doctor:2026-10-05T15:21:52.963Z — "no report: zai/glm-5.3-flash exit; zai/glm-5.3
+// cancelled": the primary's model died and the fallback was cancelled by the loop's own shutdown.
+test('unit:doctor-no-report-not-a-loop-fault — a doctor run that returns no report stays failed, posted and retried, and opens no loop fault; one whose report cannot be applied still does', async () => {
+  clearDoctorRuns();
+  const loopFaults = (state: DaemonState) => state.faults.instances.filter(entry => faultClassOf(entry.kind) === 'loop');
+  const posted: string[] = [];
+  let postRefusals = 1;
+  const settings = doctorSettingsSchema.parse({}) as DoctorEffects['settings'];
+  const recordRun: DoctorEffects['recordRun'] = async run => { if (postRefusals-- > 0) throw new Error('Graphyard refused doctor-runs (502)'); posted.push(run.at); };
+  const dying: DoctorEffects = { settings, cwd: '/tmp', env: {}, file: async () => { throw new Error('nothing is filed'); }, recordRun,
+    runner: async attempt => ({ runtime: 'pi', model: attempt === 'primary' ? 'zai/glm-5.3-flash' : 'zai/glm-5.3', release: async () => {}, runner: {
+      name: 'pi', start: () => {
+        let cancelled!: () => void;
+        const held = new Promise<void>(resolve => { cancelled = resolve; });
+        return { id: attempt, events: [], onEvent: () => () => {}, cancel: () => cancelled(),
+          result: async () => attempt === 'primary' ? { ok: false as const, failure: { reason: 'exit' as const, detail: 'pi exited 1' }, payloads: [] }
+            : (await held, { ok: false as const, failure: { reason: 'cancelled' as const, detail: 'the loop is stopping' }, payloads: [] }) };
+      } } as unknown as Runner }) };
+  const replay = cycle([item()], { doctor: dying });
+  await doctorStep(replay);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  await stopDoctorRuns('the loop is upgrading itself');
+  const run = replay.state.doctor.runs[0];
+  assert.equal(run.state, 'failed', 'the run record stays failed');
+  assert.equal(run.detail, 'no report: zai/glm-5.3-flash exit; zai/glm-5.3 cancelled', 'as the instance recorded it');
+  assert.ok(Object.values(replay.state.actions).some(action => action.state === 'failed' && action.detail === `The doctor run returned no report: ${run.detail}`), 'the failure is still recorded');
+  assert.deepEqual(replay.state.doctor.unposted, [run.at], 'a refused post is held for another');
+  replay.state.cycle += 1;
+  await doctorStep(cycle([item()], { doctor: dying, state: replay.state }));
+  assert.deepEqual(posted, [run.at], 'and posted on a later cycle');
+  // The refused post is the control plane's own recorded failure (doctor:post:…), kept as it was.
+  assert.deepEqual(loopFaults(replay.state).filter(entry => entry.subject === `doctor:${run.at}`), [], 'but the loop did not fail to cycle: the run opens no loop fault instance');
+  clearDoctorRuns();
+
+  // A run whose models both die, with no shutdown at all, is the same handled outcome.
+  const exiting: DoctorEffects = { ...dying, recordRun: async () => {}, runner: async attempt => ({ runtime: 'pi', model: attempt, release: async () => {}, runner: {
+    name: 'pi', start: () => ({ id: attempt, events: [], onEvent: () => () => {}, cancel: () => {}, result: async () => ({ ok: false as const, failure: { reason: 'exit' as const, detail: 'died' }, payloads: [] }) }) } as unknown as Runner }) };
+  const died = cycle([item()], { doctor: exiting });
+  await doctorStep(died);
+  await doctorRunsSettled();
+  assert.equal(died.state.doctor.runs[0].state, 'failed');
+  assert.deepEqual(loopFaults(died.state), []);
+  clearDoctorRuns();
+
+  // The bound is not weakened: a report that cannot be applied is still a loop fault.
+  const report = { findings: [{ subject: 'GY-74', check: 'blocked' as const, detail: 'blocked', unactionable: false }], actions: [], filed: [] };
+  const unappliable: DoctorEffects = { ...exiting, runner: async () => ({ runtime: 'pi', model: 'test/model', release: async () => {}, runner: {
+    name: 'pi', start: (_prompt: string, options: { tool: string }) => ({ id: 'run', events: [], onEvent: () => () => {}, cancel: () => {},
+      result: async () => ({ ok: true as const, tool: options.tool, payload: report, payloads: [report] }) }) } as unknown as Runner }) };
+  let persistFailures = 1;
+  const unapplied = cycle([item()], { doctor: unappliable, effects: { persist: async () => { if (persistFailures-- > 0) throw new Error('the cursor is momentarily unwritable'); } } });
+  await doctorStep(unapplied);
+  await doctorRunsSettled();
+  assert.match(unapplied.state.doctor.runs[0].detail, /Applying the report failed/);
+  assert.deepEqual(loopFaults(unapplied.state).map(entry => entry.kind), ['action:fault'], 'an apply failure still opens its loop fault');
+  clearDoctorRuns();
+});
