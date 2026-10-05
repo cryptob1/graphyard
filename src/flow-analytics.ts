@@ -2009,6 +2009,9 @@ export interface DeliverySpeedTargets { readyToMergedP90Ms: number; mergedToProd
 export const defaultDeliverySpeedTargets: DeliverySpeedTargets = { readyToMergedP90Ms: 2 * 3_600_000, mergedToProductionP90Ms: 8 * 3_600_000 };
 /** The window a breach is judged over: a week's sample, so one slow item in a quiet day is not an alarm. */
 export const deliverySpeedJudgedWindow: DeliverySpeedWindow = '7d';
+/** The judged window in words, for the report's sentences ("7 days"). */
+const judgedWindowLabel = ((ms: number) => ms % day === 0 ? `${ms / day} day${ms === day ? '' : 's'}` : `${ms / 3_600_000} hours`)(
+  deliverySpeedWindows.find(window => window.id === deliverySpeedJudgedWindow)!.ms);
 /** The fewest measured items a breach is judged on (provisional): below it the p90 is reported, never alarmed. */
 export const deliverySpeedMinimumSample = 10;
 /** Which path lands work on main: GitHub merging on CI and review, or Graphyard's own merge queue. */
@@ -2041,9 +2044,14 @@ function mainMerge(work: Work): { mergedAt: number; reverted: boolean } | null {
   const mergedAt = time(work.delivery?.mergedAtRepository ?? work.delivery?.mergedAt ?? (reverted ? work.observation?.mergedAt : null));
   return mergedAt === null ? null : { mergedAt, reverted };
 }
-/** The live delivery mode, read from the most recently evaluated item: the server marks every item it gates under GitHub delivery. */
+/**
+ * The live delivery mode, read from the most recently evaluated item: the server marks every item it
+ * gates under GitHub delivery. A closed item, or one never evaluated, carries no current gates, so
+ * only open items holding gates are read.
+ */
 export function deliveryPathMode(items: readonly Work[]): DeliveryPathMode {
-  const latest = items.reduce<Work | null>((newest, work) => !newest || (time(work.updatedAt) ?? 0) > (time(newest.updatedAt) ?? 0) ? work : newest, null);
+  const latest = items.reduce<Work | null>((newest, work) => work.closure || !work.gates?.length ? newest
+    : !newest || (time(work.updatedAt) ?? 0) > (time(newest.updatedAt) ?? 0) ? work : newest, null);
   return latest && deliveredByGitHub(latest) ? 'github' : 'graphyard';
 }
 const deliveryModeStatement: Record<DeliveryPathMode, string> = {
@@ -2070,7 +2078,7 @@ export function deliverySpeed(items: readonly Work[], options: { now: number; re
   }
   const deliveryMode = options.deliveryMode ?? deliveryPathMode(items), unmeasured = readyToMerged[deliverySpeedJudgedWindow].unmeasured ?? 0;
   const statements = [deliveryModeStatement[deliveryMode],
-    ...(readyComplete ? [] : [`The ready-event read was incomplete: ${unmeasured} item${unmeasured === 1 ? '' : 's'} merged over 7 days with no ready event found ${unmeasured === 1 ? 'is' : 'are'} unmeasured, so ready→merged is a partial figure and is not judged against its target.`])];
+    ...(readyComplete ? [] : [`The ready-event read was incomplete: ${unmeasured} item${unmeasured === 1 ? '' : 's'} merged over ${judgedWindowLabel} with no ready event found ${unmeasured === 1 ? 'is' : 'are'} unmeasured, so ready→merged is a partial figure and is not judged against its target.`])];
   return { readyToMerged, mergedToProduction, targets: { ...defaultDeliverySpeedTargets, ...options.targets }, productionEnvironment, at: new Date(now).toISOString(),
     readyEventsComplete: readyComplete, deliveryMode, statements };
 }
@@ -2091,7 +2099,7 @@ export function deliverySpeedBreaches(speed: DeliverySpeed, minimumSample = deli
     const value = speed[measure][deliverySpeedJudgedWindow];
     if (!judged || value.count < minimumSample || value.p90Ms === null || value.p90Ms <= target) return [];
     const slowest = value.slowest.map(sample => `${sample.key} ${hours(sample.ms)}${sample.pending ? ' (pending)' : ''}${sample.reverted ? ' (reverted)' : ''}`).join(', ');
-    return [{ measure, text: `${label} p90 is ${hours(value.p90Ms)} over 7 days (${value.count} item${value.count === 1 ? '' : 's'}), above the ${hours(target)} target; slowest: ${slowest}` }];
+    return [{ measure, text: `${label} p90 is ${hours(value.p90Ms)} over ${judgedWindowLabel} (${value.count} item${value.count === 1 ? '' : 's'}), above the ${hours(target)} target; slowest: ${slowest}` }];
   });
 }
 /**

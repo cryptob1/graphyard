@@ -12,7 +12,7 @@ import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { daemonEffects } from '../src/master-daemon.js';
 import {
   classifyWait, computeFlow, coveredWindow, dayBuckets, deriveFacts, distribution, flowDrilldown, flowExport, flowLimits, flowWindowLabel, flowWindowMessage, flowWindows, gateFactStep,
-  coveredUntil, defaultDeliverySpeedTargets, deliverySpeed, deliverySpeedBreaches, deliverySpeedMinimumSample, mergeReadyGate, pooledFlowDrilldown, pooledFlowReport, projectFlow, readFlow, separateKinds, stepEntries, stepMoves, workSlices, type FlowDataset, type FlowFact, type FlowQuery, type FlowWindow, type ProjectionState,
+  coveredUntil, defaultDeliverySpeedTargets, deliveryPathMode, deliverySpeed, deliverySpeedBreaches, deliverySpeedMinimumSample, mergeReadyGate, pooledFlowDrilldown, pooledFlowReport, projectFlow, readFlow, separateKinds, stepEntries, stepMoves, workSlices, type FlowDataset, type FlowFact, type FlowQuery, type FlowWindow, type ProjectionState,
 } from '../src/flow-analytics.js';
 import { attributionWindows } from '../src/attribution.js';
 import { act, createElement } from 'react';
@@ -1583,6 +1583,10 @@ test('manual:review-followups-triaged GY-1275.3 — a reverted delivery is named
   assert.match(deliverySpeed([...readyItems(2), github], { now: deliveryNow }).statements[0], /^Delivery mode: GitHub merges each pull request into main/);
   assert.equal(speed.deliveryMode, 'graphyard');
   assert.match(speed.statements[0], /^Delivery mode: Graphyard's merge queue/);
+  // A newer closed item, or one not evaluated since, does not stand for the live mode.
+  const closedLater = { ...mergedItem('GY-X', hour, hour), updatedAt: at(-hour), closure: { reason: 'superseded' }, gates: [{ name: 'ready', passed: true, reasons: [] }] } as unknown as Work;
+  const unevaluatedLater = { ...mergedItem('GY-Y', hour, hour), updatedAt: at(-hour), gates: [] } as unknown as Work;
+  assert.equal(deliveryPathMode([github, closedLater, unevaluatedLater]), 'github');
 });
 
 /**
