@@ -99,6 +99,17 @@ test('unit:merge-row-served-by-live-loop — with a live master loop merging, ex
   assert.equal(loopPresenceLiveMs(20), 120_000, 'never under an executor\'s window');
   assert.equal((await reportedLoopMerger(loops, query, new Date(lastRead + 900_000)))?.live, true);
   assert.equal(await reportedLoopMerger(loops, query, new Date(lastRead + 900_001)), null);
+  // A loop seen reading that requests a merge and then crashes: once its reads lapse it is not live,
+  // although its merge request is still inside the ledger's window; the report is the fleet's again.
+  const crashed = new LoopRegistry();
+  ledger.unshift({ by: 'graphyard-master#daemon-5e1f', created_at: new Date(clock - 60_000) });
+  crashed.observe({ principal: 'graphyard-master', intervalSeconds: 20 }, new Date(clock - 300_000));
+  assert.equal((await ledgerLoopMerger(query, now))?.live, true, 'the ledger still holds its recent merge request');
+  assert.equal(await reportedLoopMerger(crashed, query, now), null, 'a lapsed reader with a recent merge request is not the merger');
+  assert.deepEqual(executorReport(work, registry, now, undefined, await reportedLoopMerger(crashed, query, now)), before, 'with no live loop the report and its start command are unchanged');
+  // A control plane that has never seen the loop read (just restarted) still reads the ledger.
+  assert.equal((await reportedLoopMerger(new LoopRegistry(), query, now))?.live, true);
+  ledger.shift();
   // Only an interval `master run` accepts names a loop.
   assert.deepEqual(['300', ['20'], undefined, '', '4', '901', '1.5', 'x'].map(value => loopPresenceInterval(value as never)), [300, 20, null, null, null, null, null, null]);
 

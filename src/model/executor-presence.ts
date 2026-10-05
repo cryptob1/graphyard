@@ -75,6 +75,8 @@ export class LoopRegistry {
   observe(poll: { principal: string; intervalSeconds: number }, now: Date) {
     this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString() };
   }
+  /** Whether this process has ever seen the loop read: once it has, a lapse means the loop stopped. */
+  get observed(): boolean { return this.latest !== null; }
   live(now: Date): LoopPresence | null {
     const latest = this.latest;
     return latest && now.getTime() - Date.parse(latest.seenAt) <= loopPresenceLiveMs(latest.intervalSeconds) ? latest : null;
@@ -92,10 +94,15 @@ export function loopPresenceInterval(header: string | string[] | undefined): num
   return Number.isInteger(value) && value >= 5 && value <= 900 ? value : null;
 }
 
-/** The installation's loop as the control plane knows it: seen reading, else its ledger's merge requests. */
+/**
+ * The installation's loop as the control plane knows it: seen reading, else — only while this process
+ * has never seen it read — its ledger's merge requests. A loop seen reading whose reads have lapsed has
+ * stopped, and a recent merge request it left behind does not make it live.
+ */
 export async function reportedLoopMerger(registry: LoopRegistry, query: (text: string, values: unknown[]) => Promise<{ rows: any[] }>, now: Date): Promise<ReportedLoopMerger | null> {
   const seen = registry.live(now);
   if (seen) return { live: true, name: `the master loop (${seen.principal}, cycling every ${seen.intervalSeconds}s, last read ${seen.seenAt})` };
+  if (registry.observed) return null;
   return ledgerLoopMerger(query, now);
 }
 
