@@ -757,8 +757,8 @@ test('unit:recurring-class-item — the loop tracks the report\'s final attribut
   const state = emptyDaemonState(config());
   await runCycle(config(), state, effects, () => now);
   assert.equal(attributed.length, 1, 'the report\'s attribution runs over the cycle\'s list');
-  assert.deepEqual(state.faults.instances.filter(entry => entry.subject === 'GY-1').map(entry => [entry.kind, entry.faultClass]), [['resource-bound', 'resources']],
-    'the session symptom is tracked as the resource it names, not also as session liveness');
+  assert.deepEqual(state.faults.instances.filter(entry => entry.subject === 'GY-1' || entry.subject === 'resource:agent-names').map(entry => [entry.kind, entry.faultClass, entry.subject]), [['resource-bound', 'resources', 'resource:agent-names']],
+    'the session symptom is tracked as the resource it names, on the resource\'s own subject (GY-1272), not also as session liveness');
   // Without the report's attribution the raw symptom stands for itself.
   const raw = cycleFaults(emptyDaemonState(config()), [], clock, { config: config(), reported: [symptom('GY-2')] });
   assert.deepEqual(raw.filter(fault => fault.subject === 'GY-2').map(fault => fault.kind), ['launch-review']);

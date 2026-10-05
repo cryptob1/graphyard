@@ -3,13 +3,15 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { HerdrAgent, MasterConfig } from '../src/master.js';
+import { agentOwner, masterConfigSchema, type AttentionItem, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import type { ReviewRecord } from '../src/reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from '../src/producer.js';
 import { baseReclaimGates, finishedSessionGraceMs, loadedRevision, nameReclaimBoundMs, readReclaimReports, readResources, reclaimResources, resourceAttention, selfUpgradeBoundMs, stuckSessionMs, type ResourceInputs } from '../src/master-resources.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { classifyAttention } from '../src/model/fault-classes.js';
+import { classifyAttention, faultClassPolicyDefaults, recurringClasses, trackFaults } from '../src/model/fault-classes.js';
+import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
+import { attributeAttention } from '../src/master-status.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -473,4 +475,61 @@ test('GY-1192: a recordless producer pane blocked or unknown waits the stuck-ses
   await pass(now + stuckSessionMs);
   assert.deepEqual(closed.map(entry => entry.pane).sort(), ['w1V:pR1', 'w1V:pR2', 'w1V:pR3']);
   for (const entry of closed.filter(entry => entry.pane !== 'w1V:pR3')) assert.match(entry.reason, /left no record: never started: (blocked|unknown) in Herdr for over 10 minutes/);
+});
+
+/**
+ * GY-1272: seven resources faults in 24 hours. Six were one event — the plane's GitHub App budget
+ * spent at 06:36:13Z on 5 October 2026 — counted once for the resource and once more for each subject
+ * it held (installation, GY-711, GY-1052, GY-1241, GY-1245): the report attributes each held
+ * subject's symptom to the resource, and the loop tracked each under its own subject. The seventh,
+ * loaded-revision at 05:29:45Z, was the self-upgrade's own checkout move read 32 seconds later by a
+ * loop that had loaded 5f2df649, which predates the upgrade grace GY-1196 delivered (9961b70f5).
+ */
+const budgetConfig: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/nonexistent/coordinator.token', cliPath: '/nonexistent/graphyard.mjs',
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'host-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
+const spentAt = Date.parse('2026-10-05T06:36:13.546Z'), pausedUntil = '2026-10-05T06:38:26.160Z';
+const budgetSpent = readResources(inputs({ now: spentAt, plane: { writable: true, writeError: null, database: null,
+  github: { used: 5000, bound: 5000, detail: `the GitHub client paused every request until ${pausedUntil} after a rate-limit refusal; the budget is spent until then` } } }));
+const heldByBudget = ['installation', 'GY-711', 'GY-1052', 'GY-1241', 'GY-1245'];
+/** What each held subject showed before the report attributed it: its own stalled read. */
+const budgetSymptom = (subject: string): AttentionItem => ({ subject, text: `${subject}'s observe action is stalled — GitHub requests paused until ${pausedUntil} after a rate/access refusal`, ...agentOwner('master', 'Clear what that reason names') });
+const attributeToBudget = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(status.attentionItems, budgetSpent);
+const budgetReport = () => ({ reported: [...resourceAttention(budgetSpent), ...heldByBudget.map(budgetSymptom)], attribute: attributeToBudget });
+const unloaded = { behind: 24, loaded: '5f2df649755cfc8f637c558a24b28a19d9c5ced7', checkout: '6b0e67da1b29e796415a00f763da73095ef9fe50', movedAt: Date.parse('2026-10-05T05:29:13.000Z') };
+const unloadedReadAt = Date.parse('2026-10-05T05:29:45.052Z');
+
+test('manual:fault-class-resources — GY-1272: one GitHub budget at its bound is one resources fault however many subjects it holds (the six 06:36:13Z instances)', () => {
+  assert.equal(budgetSpent.find(reading => reading.id === 'github-budget')!.state, 'exhausted', 'the recorded reading is the budget at its bound');
+  // The report still names the resource on every subject it holds: master status shows it where it is held.
+  const attributed = attributeAttention([...resourceAttention(budgetSpent), ...heldByBudget.map(budgetSymptom)], budgetSpent);
+  assert.deepEqual(attributed.filter(item => /is held by a registered resource at its bound: GitHub App request budget/.test(item.text)).map(item => item.subject), heldByBudget);
+  // REPRODUCE against base: the loop tracked each held subject as its own resources fault, six for one bound.
+  // CANDIDATE: the spent budget is one fault, on its own subject and in its own words.
+  const state = emptyDaemonState(budgetConfig);
+  const tracked = cycleFaults(state, [], spentAt, { config: budgetConfig, ...budgetReport() }).filter(fault => fault.faultClass === 'resources');
+  assert.deepEqual(tracked.map(fault => [fault.kind, fault.subject]), [['resource-bound', 'resource:github-budget']], `one fault for the spent budget: ${JSON.stringify(tracked.map(fault => fault.subject))}`);
+  assert.match(tracked[0].text, /^GitHub App request budget is at its bound: 5000 requests used of 5000 requests/);
+  assert.equal(trackFaults(state.faults, tracked, iso(spentAt)).length, 1, 'one instance where the loop recorded six');
+  // It stands while the budget stays spent: the next cycle opens nothing.
+  assert.deepEqual(trackFaults(state.faults, cycleFaults(state, [], spentAt + 30_000, { config: budgetConfig, ...budgetReport() }), iso(spentAt + 30_000)), []);
+  // Where only the held subjects were listed, the first stands for the resource: still one.
+  const symptomsOnly = cycleFaults(emptyDaemonState(budgetConfig), [], spentAt, { config: budgetConfig, reported: heldByBudget.map(budgetSymptom), attribute: attributeToBudget });
+  assert.deepEqual(symptomsOnly.filter(fault => fault.faultClass === 'resources').map(fault => fault.subject), ['resource:github-budget']);
+});
+
+test('manual:fault-class-resources — GY-1272: the 05:29:45Z loaded-revision instance is the upgrade\'s own move, which the loaded code read without its move time', () => {
+  // REPRODUCE against the code that filed it (5f2df649, before GY-1196): no move time, every commit behind counted at once.
+  const { movedAt: _, ...untimed } = unloaded;
+  assert.deepEqual(faults(inputs({ now: unloadedReadAt, revision: untimed })), ['resource:loaded-revision']);
+  // CANDIDATE: 32 seconds after the move is the upgrade under way; the bound still holds once it passes.
+  assert.deepEqual(faults(inputs({ now: unloadedReadAt, revision: unloaded })), []);
+  assert.deepEqual(faults(inputs({ now: unloaded.movedAt + selfUpgradeBoundMs, revision: unloaded })), ['resource:loaded-revision']);
+});
+
+test('manual:fault-class-resources — GY-1272: the day\'s seven instances replay as one, below the threshold, so the class files nothing', () => {
+  const state = emptyDaemonState(budgetConfig);
+  trackFaults(state.faults, cycleFaults(state, [], unloadedReadAt, { config: budgetConfig, reported: resourceAttention(readResources(inputs({ now: unloadedReadAt, revision: unloaded }))) }), iso(unloadedReadAt));
+  trackFaults(state.faults, cycleFaults(state, [], spentAt, { config: budgetConfig, ...budgetReport() }), iso(spentAt));
+  assert.deepEqual(state.faults.instances.filter(entry => entry.faultClass === 'resources').map(entry => entry.subject), ['resource:github-budget'], 'one resources instance, not seven');
+  assert.equal(recurringClasses(state.faults.instances, [], faultClassPolicyDefaults, spentAt).find(entry => entry.faultClass === 'resources')?.file, false, 'no recurring-class item');
 });
