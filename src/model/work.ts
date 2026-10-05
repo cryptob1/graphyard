@@ -105,7 +105,7 @@ export interface Observation {
   agentReview?: AgentReview;
   prState?: 'open' | 'closed'; draft?: boolean; prCreatedAt?: string;
   candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number; source?: 'status' }[]; // `status`: a required context's commit status, app 0 (GY-1060)
-  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string; body?: string; blocking?: string[] }[]; // body: a change request's text, read past the review-round cap; blocking: its BLOCKING: findings, read from the whole body (GY-1118)
+  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string; body?: string; blocking?: string[]; mechanical?: number }[]; // body: a change request's text, read past the review-round cap; blocking: its BLOCKING: findings, read from the whole body (GY-1118); mechanical: an approval's nits classified mechanical, which hold the review gate for their bot round (GY-971)
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean; mergeableState?: string; // GitHub's `mergeable_state` as last read (clean, unstable, blocked, behind, dirty, unknown, ...); unset before GY-1231
   // GitHub computed a merge conflict with the base (`pr.mergeable === false`), not merely still computing it;
   // a conflicting head is withheld and sent back (GY-191). `disproved` keeps GitHub's raw reading a test merge disproved (GY-390).

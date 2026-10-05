@@ -11,6 +11,7 @@ import { heldBase, mergeableNow, requestedBaseRefresh, type BaseRefresh, type Gi
 import type { Succession } from '../../src/model/successors.js';
 import type { BaseCheck } from '../../src/model/base-failure.js';
 import { failedTestsAnnotation, readBaseBreak, type BaseBreak } from '../../src/master/base-break-refresh.js';
+import { botCommitSubjectPattern, parseClassifiedFindings } from '../../src/mechanical-findings.js';
 
 // The outside world of the soak test (GY-404), simulated deterministically: one clock that both the
 // test process and the test Postgres read, a GitHub repository with pull requests, CI, a reviewer and
@@ -175,6 +176,16 @@ export class SimulatedGitHub {
    * as reverts — the reading this item fixes, staged as a fault the simulated day must recover from.
    */
   staleMergeBase = new Set<string>();
+  /**
+   * GY-971. Items whose reviewer reads only heads a person or a worker pushed, as a reviewer asked for
+   * a review does: a Graphyard-authored tip or base refresh carries its approval and is not read again.
+   */
+  carriedOnly = new Set<string>();
+  /**
+   * GY-971. The body of a review, when the day writes one: an approval's nits classified mechanical
+   * are counted onto its observed review, except on a head that is the bot round's own commit.
+   */
+  reviewBody: ((key: string, review: { id: number; sha: string; state: string; reviewer: string }) => string) | null = null;
   /** How many times the landing check ran in the loop, the bases it judged, and the two compare kinds it asked. */
   landingChecks = 0; landingBases = new Set<string>(); ancestorCompares = 0; blindCompares = 0;
   /**
@@ -247,6 +258,12 @@ export class SimulatedGitHub {
    * split). It changed `changed` (default: the files added or removed). `contents` overrides the
    * merged content, as a hand edit's tree really holds it.
    */
+  /** An approval's mechanical-nit count as the real adapter observes it (src/github.ts), when the day writes review bodies. */
+  mechanicalNits(key: string, review: { id: number; sha: string; state: string; reviewer: string }): { mechanical?: number } {
+    if (!this.reviewBody || review.state !== 'APPROVED' || botCommitSubjectPattern.test(this.commits.get(review.sha)?.message ?? '')) return {};
+    const count = parseClassifiedFindings(this.reviewBody(key, review)).filter(finding => finding.classification === 'mechanical').length;
+    return count ? { mechanical: count } : {};
+  }
   commit(message: string, files: string[], at = clock.now(), parents = [this.tip], tree?: string, change: { changed?: string[]; broken?: boolean } = {}, contents?: Map<string, string>) {
     const parent = this.commits.get(parents[0]), before = new Set(parent?.files ?? []), after = new Set(files);
     const changed = change.changed ?? [...files.filter(path => !before.has(path)), ...[...before].filter(path => !after.has(path))];
@@ -478,8 +495,10 @@ export class SimulatedGitHub {
     for (const pr of [...this.prs.values()].filter(entry => entry.open)) {
       const pushedAt = pr.pushed.get(pr.head)!;
       const ciDone = now - pushedAt >= this.options.ciMs;
-      // The reviewer judges a head once CI reported on it.
-      if (ciDone && now - pushedAt >= this.options.ciMs + this.options.reviewMs && !pr.reviews.some(review => review.sha === pr.head)) {
+      // The reviewer judges a head once CI reported on it; an item in `carriedOnly` is not asked
+      // again for a Graphyard-authored base refresh, whose approval carries.
+      const graphyardHead = this.carriedOnly.has(pr.key) && /^Graphyard /.test(this.commits.get(pr.head)?.message ?? '');
+      if (ciDone && !graphyardHead && now - pushedAt >= this.options.ciMs + this.options.reviewMs && !pr.reviews.some(review => review.sha === pr.head)) {
         const plan = this.verdicts.get(pr.key) ?? [];
         const state = plan.shift() ?? 'APPROVED';
         this.verdicts.set(pr.key, plan);
@@ -634,7 +653,7 @@ export class SimulatedGitHub {
           candidate: { sha: pr.head, baseSha: pr.base, pr: pr.number, branch: pr.branch, author: pr.author, createdAt: new Date(pr.createdAt).toISOString() },
           checks,
           // GitHub's latest verdict per reviewer, and the id of every review, as the real adapter reports them.
-          reviews: [...new Map(pr.reviews.map(review => [review.reviewer, { ...review }])).values()], reviewIds: pr.reviews.map(review => review.id),
+          reviews: [...new Map(pr.reviews.map(review => [review.reviewer, { ...review, ...world.mechanicalNits(pr.key, review) }])).values()], reviewIds: pr.reviews.map(review => review.id),
           // A reviewer App's verdict is read for the request the item is bound to, never for another.
           ...(pr.agentReview && work.reviewRequest?.commentId === pr.agentReview.requestId ? { agentReview: { ...pr.agentReview } } : {}),
           merged: !!pr.merged, mergeSha: pr.merged?.sha ?? null, mergedAt: pr.merged ? new Date(pr.merged.at).toISOString() : null,

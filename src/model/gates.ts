@@ -6,6 +6,7 @@ import { requiredCheckFailure } from './required-check-refusal.js';
 import { leadHoldRefusal } from './delegation.js';
 import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
 import { carriedApproval } from './carry.js';
+import { mechanicalReviewHold } from '../mechanical-findings.js';
 import { evaluateLandability, landabilityAudit, landabilityRefusals } from './landability.js';
 import { itemLane, laneRequirements, laneSpeedTargets, type Lane } from './policy.js';
 import { isDelivered } from './closure.js';
@@ -76,9 +77,12 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
       ? `Every configured reviewer profile is exhausted for this candidate (${exhaustedReviewerProfiles(work).join(', ') || 'none configured'}); add reviewer capacity or select another review provider`
       : agentReview?.reason ?? `Verified approval from reviewer profile ${selectedProfile.name} is required for the current commit`
     : work.formalReviewResetRequired ? 'A new independent GitHub approval after the requirement-review baseline is required' : 'Independent approval of the current commit is required';
+  // An approval naming mechanical nits waits for its worker-bot round before GitHub may merge (GY-971).
+  const mechanicalHold = reviewPassed ? mechanicalReviewHold(work, now.getTime()) : null;
   add('review', work.policy.review ? [
     ...(!reviewPassed ? [reviewRefusal] : []),
     ...(changesRequested ? ['Outstanding change requests must be resolved through a new review'] : []),
+    ...(mechanicalHold ? [mechanicalHold] : []),
   ] : []);
   // The policy's checks and every other check the base branch's protection requires (GY-430):
   // GitHub refuses the merge while any of them has not passed, so none is left for it to find.

@@ -677,7 +677,7 @@ test('unit:queue-real-base-tip — a change list at GitHub\'s compare cap is rec
   assert.equal((await f.github.refreshCandidateBase(f.work)).merge!.baseChanges, null, 'a list that reaches the cap cannot be told from a truncated one');
   f.compare('ahead', changed(compareFileCap + 50));
   assert.equal((await f.github.refreshCandidateBase(f.work)).merge!.baseChanges, null, 'GitHub returns only the first page of files, so a longer diff looks exactly like one at the cap');
-  assert.ok(f.calls.filter(call => call.path.startsWith(`/compare/${base}...${movedBase}`)).every(call => !/[?&]page=/.test(call.path)), 'no later page is requested: it would never extend the file list');
+  assert.ok(f.calls.filter(call => call.path.startsWith(`/compare/${base}...${movedBase}`)).every(call => !/[?&]page=(?!1(&|$))/.test(call.path)), 'no later page is requested: it would never extend the file list');
   f.compare('ahead', changed(3));
   f.calls.length = 0;
   const sync = (await f.github.refreshCandidateBase(f.work)).merge!;

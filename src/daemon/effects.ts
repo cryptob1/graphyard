@@ -54,6 +54,7 @@ import { diagnosticianSettings } from '../runner/payloads.js';
 import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
+import { readMechanicalFixState, type MechanicalFixState } from '../mechanical-findings.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
@@ -136,6 +137,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * escalates each and, a cycle later, requests the rework. Absent, nothing is escalated.
    */
   exhaustedProofs?: () => Promise<ExhaustedProof[]>;
+  /** The review ledger's planned mechanical fixes (GY-971), one bot round each: each asks for its round's rework decision. */ mechanicalFixes?: () => Promise<MechanicalFixState>;
   /** GY-1118: withdraws a capped change request as the reviewer App that posted it (GitHub's review dismissal); absent, it is escalated instead. */
   withdrawReview?: (work: Work, reviewId: number, message: string) => Promise<void>;
   /**
@@ -203,6 +205,8 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * item this names unmoved; absent, every history is read again each cycle.
    */
   decisionChanges?: (after: string | null) => Promise<{ seq: string; work: string[]; complete: boolean }>;
+  /** The deadline the decisions step's control-plane reads share, in ms (GY-1241); `decisionReadDeadlineMs` when unset. */
+  decisionReadDeadlineMs?: number;
   /**
    * Takes back one of the loop's own requests, as its requester. Only for a request the item has
    * moved past — a merge decision bound to an earlier candidate, a round the item no longer needs —
@@ -676,6 +680,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
+    mechanicalFixes: () => readMechanicalFixState(root),
     requestSmoke: async work => {
       const config = current();
       await run('gh', ['workflow', 'run', config.run.smokeWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,

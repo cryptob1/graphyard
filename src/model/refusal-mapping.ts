@@ -6,6 +6,7 @@ import type { Work } from './work.js';
 import type { NextActionKind } from './action-kinds.js';
 import { ciCheckName, ciCheckRefusalPattern } from './ci-refusal.js';
 import { requiredCheckFailurePattern } from './required-check-refusal.js';
+import { mechanicalHoldPattern } from './refusal-catalogue.js';
 
 /**
  * From a gate's refusal to the one action kind that answers it.
@@ -49,6 +50,8 @@ export const refusalRules: { gate: string | null; match: RegExp; kind: NextActio
   { gate: 'build', match: /conflict/i, kind: 'request-rework' },
   // review
   { gate: 'review', match: /^Outstanding change requests/, kind: 'request-rework' },
+  // An approval whose mechanical nits await the worker bot's round (GY-971): that round is a rework.
+  { gate: 'review', match: mechanicalHoldPattern, kind: 'request-rework' },
   { gate: 'review', match: /.*/, kind: 'request-review' },
   // test: a check that failed needs a new head; one that has not answered yet needs a fresh read.
   { gate: 'test', match: ciCheckRefusalPattern, kind: 'resync' },

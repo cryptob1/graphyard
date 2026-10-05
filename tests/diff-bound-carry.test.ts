@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { GitHub, patchId } from '../src/github.js';
+import { GitHub, comparePath, patchId } from '../src/github.js';
 import { ciCheckName, ciCheckRefusal } from '../src/model/ci-refusal.js';
 import { gateRefusalCatalogue } from '../src/model/refusal-catalogue.js';
 import { carriedApproval, currentCarry, decideCarry, describeGround, evidenceBindsCandidate, type CarryInput, type Evidence, type TipMerge, type Work } from '../src/model.js';
@@ -71,7 +71,7 @@ test('unit:diff-bound-carry — an approval and every proof carry across a base 
   const { client, requested } = github({ [`${B}...${H}`]: reviewedFiles(), [`${P}...${TIP}`]: tipFiles(), [`${B}...${P}`]: [{ filename: 'src/queue.ts' }, { filename: 'docs/queue.md' }] });
   const merge: TipMerge = await (client as any).describeMerge(H, TIP, B, P);
   // Each side of the diff is GitHub's compare of the head against its merge base with its own base.
-  assert.ok(requested.includes(`/compare/${B}...${H}`) && requested.includes(`/compare/${P}...${TIP}`), requested.join(' '));
+  assert.ok(requested.includes(comparePath(B, H)) && requested.includes(comparePath(P, TIP)), requested.join(' '));
   assert.deepEqual(merge.baseChanges, ['src/queue.ts', 'docs/queue.md'], 'the base changed a reviewed file');
   assert.equal(merge.diff!.reviewed, patchId(reviewedFiles()));
   assert.equal(merge.diff!.tip, merge.diff!.reviewed);

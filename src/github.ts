@@ -28,6 +28,10 @@ export { etagCacheBytes, etagCacheEntries } from './github-response-cache.js';
 import { describePushShortfall, grantedPushPermissions, pushShortfallMarker, type PushPermissionShortfall } from './worker-credential.js';
 import { firstObservationOwed, observationBandLag, observationClaim, reviewCadenceCapMs } from './observation-priority.js';
 import { observedReviewBody } from './review-cap.js';
+import { botCommitSubjectPattern, parseClassifiedFindings } from './mechanical-findings.js';
+
+/** How many of an approval's nits are classified mechanical (GY-971): the review gate holds such an approval for its bot round. */
+const mechanicalNitCount = (body: unknown) => parseClassifiedFindings(body).filter(finding => finding.classification === 'mechanical').length;
 
 /** Out-of-scope paths compared against the base tip per observation; the rest are refused as uncompared. */
 export const scopeLookupBudget = 200;
@@ -36,6 +40,18 @@ export const scopeLookupBudget = 200;
  * so a list this long may be truncated: it is treated as incomplete and nothing is carried.
  */
 export const compareFileCap = 300;
+/**
+ * GY-1272. The one page every compare of two exact SHAs is read as. GitHub lists the changed files,
+ * the status, `ahead_by` and the merge base on a compare's first page whatever its size, so the
+ * ancestry question (`contains`), the commit list (`historySince`), the landing diff and every
+ * file listing of one pair are a single immutable read. Asked each under its own query, one base
+ * move cost each open candidate two to three charged compares of the same pair, which spent the
+ * App's hourly budget during the 5 October merge burst.
+ */
+export const comparePage = '?per_page=100&page=1';
+const shaPair = (from: string, to: string) => /^[a-f0-9]{40}$/.test(from) && /^[a-f0-9]{40}$/.test(to);
+/** The compare path of `from...to`: the shared first page (`comparePage`) for two exact SHAs, `query` otherwise. */
+export const comparePath = (from: string, to: string, query = '') => `/compare/${from}...${to}${shaPair(from, to) && (query === '' || query === '?per_page=1') ? comparePage : query}`;
 /** Re-requests of a pull request GitHub answered with `mergeable: null`, `mergeabilityRetryMs` apart: at most 10 seconds (GY-548). */
 export const mergeabilityRetries = 3, mergeabilityRetryIntervalMs = 3_000;
 /** One file of a GitHub compare, as far as a patch-id reads it. */
@@ -206,7 +222,7 @@ export const requestEndpoint = (method: string, path: string) => `${method} ${pa
  * request at all — not even a conditional one — for as long as the entry is kept.
  */
 export const immutableRead = (path: string) => /^\/repos\/[^/]+\/[^/]+\/(commits\/[a-f0-9]{40}|compare\/[a-f0-9]{40}\.\.\.[a-f0-9]{40}(\?[^/]*)?)$/.test(path)
-  // `contains` keeps the one answer it needs from its `?per_page=1` compare in the ancestry cache already.
+  // A bare `?per_page=1` compare is no reader's own any more (`comparePath` reads the shared page); its answer is not kept.
   && !/\?per_page=1$/.test(path);
 /**
  * One observation cycle (GY-806): every observation that starts within it shares one read of the
@@ -1402,7 +1418,7 @@ export class GitHub {
     await this.warm();
     const known = /^[a-f0-9]{40}\.\.\.[a-f0-9]{40}$/.test(key) ? this.ancestry.get(key) : undefined;
     if (known !== undefined) { this.persisted?.touch('ancestry', key); return known; }
-    const comparison = await this.request(`/compare/${base}...${head}?per_page=1`);
+    const comparison = await this.request(comparePath(base, head, '?per_page=1'));
     demand(typeof comparison?.status === 'string', `GitHub did not compare ${base.slice(0, 12)} with ${head.slice(0, 12)}`, 502);
     const contained = comparison.status === 'ahead' || comparison.status === 'identical';
     if (/^[a-f0-9]{40}\.\.\.[a-f0-9]{40}$/.test(key)) {
@@ -1433,6 +1449,7 @@ export class GitHub {
     if (pinned && this.histories.has(key)) { this.persisted?.touch('history', key); return this.histories.get(key)!; }
     const shas = new Set<string>(); let total = 0;
     for (let page = 1; page <= 3; page++) {
+      // Page 1 is `comparePage`, the read every other question about this pair shares.
       const comparison = await this.request(`/compare/${base}...${head}?per_page=100&page=${page}`);
       // No commit list means no shortcut: containment is then asked per commit, exactly as before.
       if (!Array.isArray(comparison?.commits) || !Number.isSafeInteger(comparison?.total_commits)) return null;
@@ -1499,6 +1516,12 @@ export class GitHub {
     // given on (GY-127): the review list alone cannot tell a reviewer withdrawing a verdict from
     // GitHub withdrawing an approval because the merge base moved under an unchanged head.
     const dismissals = [...latest.values()].some(r => r.state === 'DISMISSED') ? await this.reviewDismissals(pr.number) : { read: new Map<number, ReviewDismissal>(), unread: null as string | null };
+    // An approval of the head naming mechanical nits holds the review gate for their bot round
+    // (GY-971), unless the head is that round's bot commit: one round per approved head, so the fresh
+    // read's own nits stay follow-ups. The head commit is read only when such an approval exists.
+    const nitted = [...latest.values()].some(r => r.state === 'APPROVED' && r.commit_id === pr.head.sha && mechanicalNitCount(r.body) > 0);
+    const botHead = nitted && await this.request(`/commits/${pr.head.sha}`).then(commit => botCommitSubjectPattern.test(String(commit?.commit?.message ?? '').split('\n')[0]!), () => false);
+    const mechanicalNits = (r: any) => { const count = r.state === 'APPROVED' && !botHead ? mechanicalNitCount(r.body) : 0; return count ? { mechanical: count } : {}; };
     const dismissalOf = (id: number): ReviewDismissal | undefined => dismissals.read.get(id) ?? (dismissals.unread ? { reason: null, mergeBase: false, verdict: null, commit: null, at: null, by: null, unread: dismissals.unread } : undefined);
     // A head that already contains the branch tip is up to date and binds to it. A head that does
     // not holds the base it was bound to while Graphyard brings it onto the new one — but only
@@ -1549,6 +1572,7 @@ export class GitHub {
       dismissedReviewIds: dismissedReviewIds(reviews),
       reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at,
         ...(r.state === 'CHANGES_REQUESTED' && typeof r.body === 'string' && r.body.trim() ? observedReviewBody(r.body) : {}),
+        ...mechanicalNits(r),
         ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open', conflicting: pr.mergeable === false && pr.state === 'open',
       ...(pr.mergeable === null && pr.state === 'open' && !pr.merged ? { mergeabilityUnknown: true } : {}),
@@ -1574,7 +1598,7 @@ export class GitHub {
    */
   private async landingCheck(work: Work, head: string, files: any[], bound: string, branch: { tip: string; tree: string }, peers: Work[] | undefined, budget: { remaining: number }): Promise<LandingCheck> {
     return landingCheck({
-      compare: (from, to, query = '') => this.request(`/compare/${from}...${to}${query}`),
+      compare: (from, to, query = '') => this.request(comparePath(from, to, query)),
       pull: pr => this.request(`/pulls/${pr}`),
       blobAt: (path, ref) => this.blobAt(path, ref),
       blobContent: sha => this.blobContent(sha),
@@ -1795,7 +1819,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    */
   async changedFiles(from: string, to: string): Promise<string[] | null> {
     if (from === to) return [];
-    const comparison = await this.request(`/compare/${from}...${to}`);
+    const comparison = await this.request(comparePath(from, to));
     const files = comparison?.files;
     demand(Array.isArray(files), `GitHub did not list the files changed between ${from.slice(0, 12)} and ${to.slice(0, 12)}`, 502);
     if (files.length >= compareFileCap) return null;
@@ -1804,7 +1828,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     // sideways has changes on the `from` side too, which a head brought onto it no longer holds;
     // both sides are listed.
     if (comparison.status === 'behind' || comparison.status === 'diverged') {
-      const reverse = await this.request(`/compare/${to}...${from}`);
+      const reverse = await this.request(comparePath(to, from));
       demand(Array.isArray(reverse?.files), `GitHub did not list the files changed between ${to.slice(0, 12)} and ${from.slice(0, 12)}`, 502);
       if (reverse.files.length >= compareFileCap) return null;
       return [...new Set([...paths(files), ...paths(reverse.files)])];
@@ -1818,7 +1842,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    */
   async diffPatchId(base: string, head: string): Promise<string | null> {
     if (base === head) return null;
-    try { return patchId((await this.request(`/compare/${base}...${head}`))?.files); }
+    try { return patchId((await this.request(comparePath(base, head)))?.files); }
     catch { return null; }
   }
   /**
@@ -1925,7 +1949,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
   /** The paths `head` changed against its merge base with `base`, or null when GitHub could not list them completely. */
   async sideFiles(base: string, head: string): Promise<string[] | null> {
     try {
-      const files = (await this.request(`/compare/${base}...${head}`))?.files;
+      const files = (await this.request(comparePath(base, head)))?.files;
       if (!Array.isArray(files) || files.length >= compareFileCap) return null;
       return [...new Set(files.flatMap((file: any) => [file?.filename, file?.previous_filename]).filter((path: unknown): path is string => typeof path === 'string'))];
     } catch { return null; }
@@ -1938,7 +1962,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    */
   async nonDocsPatchId(base: string, head: string): Promise<string | null> {
     try {
-      const files = base === head ? [] : (await this.request(`/compare/${base}...${head}`))?.files;
+      const files = base === head ? [] : (await this.request(comparePath(base, head)))?.files;
       if (!Array.isArray(files) || files.length >= compareFileCap) return null;
       return patchId(files.filter((file: any) => !isDocsPage(String(file?.filename ?? '')) || (typeof file?.previous_filename === 'string' && !isDocsPage(file.previous_filename))));
     } catch { return null; }
@@ -2126,7 +2150,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const merge = await this.request(`/commits/${mergeSha}`);
     const parent = merge?.parents?.[0]?.sha;
     demand(typeof parent === 'string' && /^[a-f0-9]{40}$/.test(parent), `GitHub did not return the first parent of ${mergeSha}`, 502);
-    const compare = await this.request(`/compare/${parent}...${mergeSha}`);
+    const compare = await this.request(comparePath(parent, mergeSha));
     demand(Array.isArray(compare?.files), `GitHub did not compare ${mergeSha} with its parent`, 502);
     // A compare lists at most 300 files; a longer list may be incomplete, so it cannot verify a revert.
     demand(compare.files.length < 300, `merge ${mergeSha.slice(0, 12)} changes 300 or more files, more than GitHub's compare lists`, 502);

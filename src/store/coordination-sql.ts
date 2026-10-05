@@ -124,20 +124,20 @@ export const reconcileRereadSql = 'SELECT w.id, w.number, w.xmin::text AS versio
 export const reconcileVersionsSql = `SELECT w.id, w.xmin::text AS version FROM work_items w
   JOIN (SELECT unnest($1::uuid[]) AS id UNION SELECT i.id FROM work_index i WHERE NOT i.settled) live ON live.id = w.id`;
 /**
- * One batch item's row lock, taken as the batch reaches it (GY-727), with the version of the row
- * it locked. Locked row by row, a batch holds only its own items, so a mutation on any other item
- * commits while the batch holds its transaction. A row a writer holds is skipped, never waited on
- * (GY-1115): a batch waiting on a row held its other rows and its connection behind that writer,
- * and the writer, holding the coordination lock, made the batch's commit fail anyway. No row means
- * the item is locked or gone; the pass tries it once more at its end.
+ * The row lock of an item a reconciliation batch writes (GY-1290), with the version of the row it
+ * locked. Taken only once the batch holds the coordination lock, so the only writer it can wait
+ * on is a lease renewal, which holds its item's lock alone for the length of its own write and
+ * never waits on the coordination lock. It is the lock the batch's own UPDATE takes (`NO KEY
+ * UPDATE`), never `FOR UPDATE`: a job wake inserting a job row checks its foreign key with `FOR
+ * KEY SHARE` on the item after locking job rows, and the batch takes job rows at its commit, so a
+ * `FOR UPDATE` here deadlocked against that check.
  */
-export const reconcileItemLockSql = 'SELECT xmin::text AS version FROM work_items WHERE id = $1 FOR UPDATE SKIP LOCKED';
+export const reconcileRowLockSql = 'SELECT xmin::text AS version FROM work_items WHERE id = $1 FOR NO KEY UPDATE';
 /**
  * Whether a session holding the coordination lock (`$1`, a single-key advisory lock) waits on this
- * session (GY-1115): a reconciliation batch queuing for that lock then would deadlock with it. Read
- * with it, the session's `deadlock_timeout` in milliseconds (GY-1212): a holder that starts waiting
- * on the batch only after this check is resolved by the batch's own `lock_timeout`, which must
- * therefore fire before any deadlock check does (`commitLockWaitMs`).
+ * session (GY-1115), read with the session's `deadlock_timeout` in milliseconds (GY-1212). A
+ * reconciliation batch asks before it queues for that lock to write; since GY-1290 it holds no row
+ * lock then, so the answer is no unless that ever changes.
  */
 export const reconcileCommitBlockingSql = `SELECT EXISTS (SELECT 1 FROM pg_locks l WHERE l.locktype = 'advisory' AND l.granted
   AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
@@ -145,9 +145,8 @@ export const reconcileCommitBlockingSql = `SELECT EXISTS (SELECT 1 FROM pg_locks
   AND pg_backend_pid() = ANY(pg_blocking_pids(l.pid))) AS blocking,
   (SELECT setting::int FROM pg_settings WHERE name = 'deadlock_timeout') AS deadlock_ms`;
 /**
- * The `lock_timeout` a batch's commit waits in line with (GY-1212): `wantedMs`, at most half of
- * `deadlockMs`, so the batch's wait always gives up well before a deadlock check fires and the
- * batch, never a mutation holding the coordination lock, is the side that yields.
+ * The `lock_timeout` a batch's wait for the coordination lock uses (GY-1212): `wantedMs`, at most
+ * half of `deadlockMs`, so the wait always gives up before a deadlock check would fire.
  */
 export function commitLockWaitMs(wantedMs: number, deadlockMs: number) {
   const wanted = Math.max(1, Math.floor(wantedMs));

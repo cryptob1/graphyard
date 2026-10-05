@@ -10,6 +10,7 @@ import { Engine } from '../src/engine.js';
 import { AgentRegistry } from '../src/agent-registry.js';
 import { coordinationProjection, isSettledSummary, isStandIn, lockedWork } from '../src/store/locked-read.js';
 import { coordinationDocumentSql, coordinationRelevance, coordinationTail, detoasted } from '../src/store/coordination-sql.js';
+import { advisoryLocks } from '../src/store/locks.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -131,7 +132,8 @@ after(async () => { if (store) await store.close(); if (database) await database
  * How long each transaction held the coordination lock, by the operation that took it, and which
  * documents its queries returned whole (a stand-in is returned as JSON text, a document as an object).
  * A transaction opened without the lock (a reconciliation batch, GY-727) holds it only from a
- * successful `pg_try_advisory_xact_lock` to its end; `locked` says whether it held it at all.
+ * successful `pg_try_advisory_xact_lock`, or a reconciliation write's wait for the coordination lock
+ * (GY-1290), to its end; `locked` says whether it held it at all.
  */
 const holds: { label: string; ms: number; keys: string[]; locked: boolean }[] = [];
 let label = 'other', timing = false;
@@ -146,6 +148,7 @@ function timeTransactions() {
     const counted = new Proxy(db, { get: (target, property) => property !== 'query' ? Reflect.get(target, property, target) : async (...args: unknown[]) => {
       const result = await (target.query as any)(...args);
       if (started === null && String(args[0]).includes('pg_try_advisory_xact_lock') && result?.rows?.[0]?.ok) started = performance.now();
+      if (started === null && args[0] === 'SELECT pg_advisory_xact_lock($1)' && (args[1] as unknown[])?.[0] === advisoryLocks.coordination) started = performance.now();
       for (const row of result?.rows ?? []) if (row.document && typeof row.document === 'object' && (row.document as Work).key) keys.add((row.document as Work).key);
       return result;
     } });
@@ -317,7 +320,10 @@ test('unit:reconcile-lock-hold-bounded — a full reconciliation pass over 1000 
   try { await engine.reconcile(); } finally { engine.reconcileBatchMs = budget; label = 'other'; }
   const slowBatches = holds.slice(slow), slowRead = slowBatches.reduce((sum, entry) => sum + seededOpen(entry), 0);
   console.log(`slow reconcile pass: ${slowBatches.length} batches, ${slowRead} open documents read whole (${opened_} open)`);
-  assert.ok(slowBatches.length > batches.length, `a 1 ms budget yields more often: ${slowBatches.length} batches against ${batches.length}`);
+  // Each planned write commits in a transaction of its own under the lock (GY-1290), and the reset pass
+  // writes almost nothing: the budget is counted on the evaluating batches, which hold no lock.
+  const evaluating = (entries: typeof holds) => entries.filter(entry => !entry.locked).length;
+  assert.ok(evaluating(slowBatches) > evaluating(batches), `a 1 ms budget yields more often: ${evaluating(slowBatches)} evaluating batches against ${evaluating(batches)}`);
   assert.ok(slowRead < opened_ * 2, `with every batch yielding on its budget the pass read ${slowRead} open documents whole for ${opened_} open items`);
 });
 
