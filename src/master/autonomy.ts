@@ -437,7 +437,7 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // It names the item and decision too (GY-403), so the loop watches a session `master approver`
   // launched exactly as one of its own, and closes it once its decision settles.
   try { await saveApproverLaunch(root, { agentName: name, account: spentOn, runtime: kind, session, launchedAt: new Date().toISOString(), work: work.key, decision, checkout: checkout.directory }); }
-  catch (error) { throw await abandonLaunch(error, pane, tabId, selected, `approver launch record for ${work.key} could not be written: ${failureText(error).slice(0, 300)}`, run); }
+  catch (error) { const failure = await abandonLaunch(error, pane, tabId, selected, `approver launch record for ${work.key} could not be written: ${failureText(error).slice(0, 300)}`, run); await settleCheckout(root, checkout.directory); throw failure; }
   return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane! as string | null, delivery, focusChanged: false, runtime: kind as string, session,
     account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped }
       : chosen?.account ? { environment: chosen.account.name, kind, reason: `the first healthy account of profile ${chosen.profile}`, skipped: chosen.skipped } : null,

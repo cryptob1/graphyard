@@ -1,18 +1,19 @@
 import { execFileSync } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { Work } from './model.js';
 import type { ChildRun } from './child-runner.js';
 import type { MasterConfig } from './master/profiles.js';
 import { loadMasterConfig } from './master/config.js';
-import { accountLaunch } from './master/environments.js';
+import { accountLaunch, sharedGitDirectory } from './master/environments.js';
 import { closeFailedLaunch, launchStartMs, startAgentSession } from './master/launch.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson, observeHerdrAgents } from './master/herdr.js';
 import { autonomousSession, destructivePromptGuidance, herdrAttach } from './master/dispatch.js';
 import { selectApproverAccount, type SessionRegistrar } from './master/autonomy.js';
 import { registeredLaunch } from './model/session-state.js';
 import { sessionName } from './session-name.js';
-import { failureText } from './master/worktrees.js';
+import { failureText, settleCheckout } from './master/worktrees.js';
+import { coordinationCheckout } from './reviewer.js';
+import { holdCheckout } from './producer.js';
 
 // GY-566: the docs-sync session the loop launches for a docs-only conflict; the routing and carry
 // rules it serves are in model/docs-sync.ts.
@@ -45,9 +46,12 @@ export const docsSyncMaxMs = 30 * 60_000;
 export const docsSyncSessionName = (plan: Pick<DocsSyncPlan, 'key' | 'head'>) => sessionName('gy-docs-sync', plan.key, plan.head.slice(0, 7));
 export const docsSyncCheckout = (root: string, plan: Pick<DocsSyncPlan, 'key' | 'head'>) => resolve(root, '.graphyard', 'docs-sync', `${plan.key}-${plan.head.slice(0, 7)}`);
 
-/** The docs-sync session's whole instruction: narrow by design, it resolves prose and nothing else. */
-export function docsSyncPrompt(config: Pick<MasterConfig, 'repository' | 'cliPath'>, plan: DocsSyncPlan, root: string) {
-  const worktree = docsSyncCheckout(root, plan);
+/**
+ * The docs-sync session's whole instruction: narrow by design, it resolves prose and nothing else.
+ * `worktree` is where it adds its worktree of the reviewed head: the path its launch allocated in
+ * the session's own managed checkout (GY-866), `docsSyncCheckout` for a prompt built without one.
+ */
+export function docsSyncPrompt(config: Pick<MasterConfig, 'repository' | 'cliPath'>, plan: DocsSyncPlan, root: string, worktree = docsSyncCheckout(root, plan)) {
   return `You are a Graphyard docs-sync session for ${config.repository}. Work item ${plan.key} (pull request #${plan.pr}, branch ${plan.branch}) was reviewed at head ${plan.head}, and it conflicts with base branch tip ${plan.base} only in documentation: ${plan.paths.join(', ')}. Resolve exactly that, nothing else. `
     + `Create a detached worktree of the reviewed head: git -C ${root} fetch origin ${plan.branch} ${plan.baseBranch} && git -C ${root} worktree add --detach ${worktree} ${plan.head}; if ${root}/package-lock.json and ${worktree}/package-lock.json are identical, link ${root}/node_modules into ${worktree}, otherwise run npm ci there. `
     + `In it run git merge --no-ff ${plan.base}. Resolve each conflicted paragraph so both sides' meaning survives — keep what the base added and what this item added, merging sentences rather than choosing a side — and stay within the documentation word budget. Touch only the conflicted paragraphs of the conflicted docs pages: never edit a file outside docs/, never change a line that did not conflict, and never rewrite, reword or drop anything else. If a conflicted path is not a docs page, or the conflict cannot be resolved while keeping both meanings, abort the merge (git merge --abort) and stop: the control plane then returns the item to a worker. `
@@ -71,22 +75,31 @@ export async function launchDocsSync(root: string, work: Work, plan: DocsSyncPla
   const kind = chosen.account?.kind ?? config.reviewers[0]?.kind ?? config.workers[0]?.kind;
   const release = (why: string) => chosen.fleet?.release(why).catch(() => false);
   if (!kind) { await release(`docs-sync launch for ${work.key} found no runtime`); throw new Error('No runtime is configured for a docs-sync session: name reviewer profiles or approver accounts'); }
-  const checkout = docsSyncCheckout(root, plan);
-  await mkdir(resolve(checkout, '..'), { recursive: true });
-  const launch = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, chosen.account ?? null, { writable: [resolve(checkout, '..')] });
-  let pane: string | undefined, tab: string | undefined;
+  // GY-866: the session starts in a managed checkout of its own, never in the coordinator checkout,
+  // and adds its worktree of the reviewed head there: confined, it cannot write the coordinator
+  // checkout at all. No ledger record owns the directory, so this process holds it against the
+  // reclaim pass for the session's bounded life and settles it after; a loop that dies first
+  // leaves it to the orphan reclaim.
+  let pane: string | undefined, tab: string | undefined, checkout: Awaited<ReturnType<typeof coordinationCheckout>> | undefined, unhold = () => {};
   try {
-    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Docs sync · ${work.key}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
+    checkout = await coordinationCheckout(root, config, work.key, plan.head);
+    unhold = holdCheckout(checkout.directory);
+    const directory = checkout.directory;
+    const launch = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, chosen.account ?? null, { writable: [directory, await sharedGitDirectory(root)].filter((path): path is string => !!path) });
+    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', directory, '--label', `Docs sync · ${work.key}`, '--env', `GRAPHYARD_REPOSITORY_ROOT=${root}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tab = created.tab;
     await registeredLaunch(register, { id: `docs-sync:${plan.head}:${plan.base}`, kind: 'coordination', role: 'docs-sync', runtime: kind, host: config.hostId, head: plan.head,
       agentName: name, pane: created.pane, attach: herdrAttach(created.pane, config.herdrWorkspace), ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
       subject: `${work.key}: docs-sync onto ${plan.base.slice(0, 12)}`, state: 'running' },
-    () => startAgentSession(name, kind, created.pane, launch.args, docsSyncPrompt(config, plan, root), run, { directory: root, retry: `docs-sync of ${work.key}`, contract: launch.contract, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined);
+    () => startAgentSession(name, kind, created.pane, launch.args, docsSyncPrompt(config, plan, root, checkout!.worktree), run, { directory, cwd: directory, retry: `docs-sync of ${work.key}`, contract: launch.contract, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined);
   } catch (error) {
     if (pane || tab) await closeFailedLaunch(pane, tab, run).catch(() => undefined);
+    unhold(); if (checkout) await settleCheckout(root, checkout.directory);
     await release(`docs-sync launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
     throw error;
   }
+  const settled = checkout.directory;
+  setTimeout(() => { unhold(); void settleCheckout(root, settled); }, docsSyncMaxMs + 60_000).unref();
   return { agentName: name, pane: pane ?? null, account: chosen.account?.name ?? null, runtime: kind, session: chosen.fleet?.account.fleet.session ?? null };
 }
 
