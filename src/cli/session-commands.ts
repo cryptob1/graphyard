@@ -1,6 +1,7 @@
 import { constants as cryptoConstants, createDecipheriv, createPublicKey, generateKeyPairSync, privateDecrypt, randomUUID } from 'node:crypto';
 import { chmod, link, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { Work } from '../model.js';
 import { humanDecisionKinds, type HumanChoice, type HumanDecisionKind, type HumanRequestRow } from '../model/human-request.js';
 import { configHome } from '../install/secrets.js';
@@ -152,24 +153,24 @@ export function parkArgs(words: readonly string[]) {
 
 /**
  * This host's sealing key: an RSA key pair kept under the Graphyard configuration home, mode 0600;
- * the public half is returned. Each half is written whole to a scratch name and then moved into
- * place, so a process killed mid-write never leaves a partial key under the real name. A key file
- * an older version left truncated is replaced; a whole one missing its public half keeps its key,
- * and a public half an older version left truncated is derived again from the private key.
+ * the public half is returned. The private key is the authority: the public half is derived from it
+ * on every use, and the `.pub` copy beside it is rewritten whenever it differs, so a copy an older
+ * version left truncated, or one a lost concurrent first use wrote, never outlives the key it names.
+ * Each half is written whole to a scratch name and then moved into place, so a process killed
+ * mid-write never leaves a partial key under the real name; a key file left truncated is replaced.
+ * `linkKey` is the hard-link primitive, replaceable so a test can stand in for a filesystem without one.
  */
-export async function hostSealKey(hostId: string, home = configHome()) {
+export async function hostSealKey(hostId: string, home = configHome(), linkKey: typeof link = link) {
   const path = join(home, 'seal', `${hostId}.pem`);
-  try {
-    const stored = (await readFile(`${path}.pub`, 'utf8')).trim();
-    createPublicKey(stored);
-    return stored;
-  } catch { /* first use on this host, or an interrupted one */ }
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const publicKey = await sealPublicHalf(path) ?? await createSealKey(path);
-  const scratch = `${path}.pub.${randomUUID()}.tmp`;
-  await writeFile(scratch, publicKey, { mode: 0o644 });
-  await rename(scratch, `${path}.pub`);
-  return publicKey.trim();
+  const publicKey = (await sealPublicHalf(path) ?? await createSealKey(path, linkKey)).trim();
+  const stored = await readFile(`${path}.pub`, 'utf8').then(text => text.trim(), () => undefined);
+  if (stored !== publicKey) {
+    const scratch = `${path}.pub.${randomUUID()}.tmp`;
+    await writeFile(scratch, `${publicKey}\n`, { mode: 0o644 });
+    await rename(scratch, `${path}.pub`);
+  }
+  return publicKey;
 }
 
 /** The public half of the private key at `path`, or undefined when there is none; a malformed one is removed. */
@@ -182,24 +183,63 @@ async function sealPublicHalf(path: string) {
 /**
  * A new private key under `path`, published by a hard link so it appears whole or not at all; a
  * concurrent first use keeps whichever landed first. Where the filesystem has no hard links (some
- * FUSE or network mounts), the whole scratch file is renamed into place unless a key already landed.
+ * FUSE or network mounts), first uses take turns under a lock and the whole scratch file is renamed
+ * into place only when no key has landed (GY-1211).
  */
-async function createSealKey(path: string): Promise<string> {
+async function createSealKey(path: string, linkKey: typeof link): Promise<string> {
   const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 3072, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
   const scratch = `${path}.${randomUUID()}.tmp`;
   try {
     await writeFile(scratch, privateKey, { mode: 0o600, flag: 'wx' });
     await chmod(scratch, 0o600);
-    await link(scratch, path).catch(async (error: NodeJS.ErrnoException) => {
+    await linkKey(scratch, path).catch(async (error: NodeJS.ErrnoException) => {
       if (error.code === 'EEXIST') return;
       if (!noHardLinks.has(error.code ?? '')) throw error;
-      if (!await stat(path).then(() => true, () => false)) await rename(scratch, path);
+      await renameUnlessLanded(scratch, path);
     });
   } finally { await rm(scratch, { force: true }); }
   const publicKey = await sealPublicHalf(path);
   if (!publicKey) throw new Error(`The sealing key at ${path} could not be created`);
   return publicKey;
 }
+
+/**
+ * Rename `scratch` to `path` unless a key is already there, without hard links. A check followed by
+ * a rename is not atomic, so first uses take turns under `path.lock`, created exclusively: whoever
+ * holds it checks and renames, and the others wait until it is released or a key has landed. A
+ * later first use therefore never replaces a key an earlier one already returned. A lock left by a
+ * process killed while holding it, older than any publication takes, is never removed while no key
+ * has landed: checking its age and then removing it is not atomic, in place or after a rename, and
+ * a waiter that judged the old lock could remove the fresh one another waiter just took, leaving
+ * two holders (GY-1219). A stale lock is superseded instead: the turn passes to the next name in
+ * the chain `path.lock`, `path.lock.1`, …, taken exclusively like the first, so every lock is only
+ * ever removed by its own holder. The holder removes the stale locks it passed once a key has
+ * landed, when a lock no longer decides anything: every later holder finds the key and keeps it.
+ */
+async function renameUnlessLanded(scratch: string, path: string) {
+  const landed = () => stat(path).then(() => true, () => false);
+  const stale: string[] = [];
+  for (const deadline = Date.now() + sealLockWaitMs; ;) {
+    const lock = `${path}.lock${stale.length ? `.${stale.length}` : ''}`;
+    const held = await writeFile(lock, `${process.pid}\n`, { mode: 0o600, flag: 'wx' }).then(() => true, (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EEXIST') return false;
+      throw error;
+    });
+    if (held) {
+      try {
+        if (!await landed()) await rename(scratch, path);
+        for (const passed of stale) await rm(passed, { force: true });
+      } finally { await rm(lock, { force: true }); }
+      return;
+    }
+    if (await landed()) return;
+    const lockedAt = await stat(lock).then(info => info.mtimeMs, () => undefined);
+    if (lockedAt !== undefined && Date.now() - lockedAt > sealLockStaleMs) stale.push(lock);
+    else if (Date.now() > deadline) throw new Error(`The sealing key lock ${lock} is still held`);
+    else await delay(25);
+  }
+}
+const sealLockStaleMs = 10_000, sealLockWaitMs = 20_000;
 
 /** The `link()` errors of a filesystem that has no hard links. */
 const noHardLinks = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS']);

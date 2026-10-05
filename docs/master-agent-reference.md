@@ -47,6 +47,10 @@ Permission flows read `GET /api/github/installation` (App credential, not gh). E
 
 A harness classifier refuses routine administration; `master harness claude --apply` (Codex: `master harness codex`) writes rules to `.claude/settings.local.json`.
 
+Denied, by endpoint: `gh pr merge`/`review`, `gh api` `pulls/N/merge`, `repos/R/merges`, `merge-upstream`, `pulls/N/reviews`, `access_tokens`, `PUT`/`POST`/`DELETE`; `gh api graphql` with `mutation` (merge, enqueue, auto-merge, approval) or `=@`/`--input`.
+
+Missing or retired rules (`gh api *merge*`, `gh api graphql*`) are drift, named by `master status` (`harness`); `master harness claude --apply` rewrites them.
+
 ## Typed actions and executors
 
 Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release. After a verified deployment the loop moves a clean detached checkout to the base tip (else `upgrade` attention); `src/`, `scripts/`, `bin/` or `package.json` changes restart executors, then the loop. `releaseLag` flags >1-delivery lag past 10 minutes. A moved checkout exits the executor 0 for systemd; one killed mid-action is named in `master status`. `Nothing can run KIND` skips `merge` beside a merging loop, empty fleets ≤120 s post-restart, `deactivating` units.
@@ -67,6 +71,10 @@ A dead supervisor fences its item; `containment` lists each surviving process's 
 
 An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and `stopped-by-attestation` lapses are history); any admin settles an explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). 
 
+### Producer-runtime faults
+
+A producer request spent with no attempt acting (`never started`, run could not start, launch refused, exited at launch) requests no rework: attention names the attempts and their profiles, and the request relaunches on an independent, credentialed profile none of them ran on.
+
 `master escalation GY-N` spawns a handler answering with `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
 ## Fault classes
@@ -76,3 +84,5 @@ Faults carry `faultClass` (`master status` `faults`); recurring classes file one
 ## Pipeline speed
 
 Target: submit→merge p50 ≤ 30 minutes and p90 ≤ 60 minutes over ten-plus deliveries. Rows' `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
+
+The loop's decisions step stays within 10 s a cycle at about 90 open items: one read of the `decision.*` ledger names the items whose decisions moved, and only those histories are reread, eight at a time. A history whose ledger has not moved is kept, not read.

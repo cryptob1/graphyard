@@ -305,17 +305,49 @@ export function outputAfterCommand(screen: string | null, command: string) {
   return after.length ? after.slice(-exitedLineLimit).map(line => line.length > paneLineLimit ? `${line.slice(0, paneLineLimit)}…` : line) : null;
 }
 /**
+ * Whether a foreground process's argv is a `graphyard watch` supervisor (GY-1213): `watch`, after
+ * the CLI that runs it, then its operands and any flags, then the `--` that opens the runtime's
+ * command — however many words lie between — or a shell wrapper's single `-c` string spelling the
+ * same. Pinned against `launchCommand` with the supervisor prefix dispatch builds.
+ */
+export function supervisorArgv(argv: string[]) {
+  const at = argv.indexOf('watch');
+  if (at > 0 && argv.indexOf('--', at + 2) > 0) return true;
+  return argv.some(word => /\S\s+watch\s+\S.*\s--(\s|$)/.test(word));
+}
+/**
+ * Whether a foreground process's argv runs `program` (GY-1213): a word, or a word of a wrapper's
+ * `-c` string, whose basename is the program or an interpreter script named for it (`codex.js`).
+ * A runtime started as a script of another name (`node …/cli.js`) is not recognised; that is
+ * harmless while its supervisor stays in the launch's foreground group, which is classed first.
+ */
+export function runsProgram(argv: string[], program: string) {
+  return argv.flatMap(word => word.split(/\s+/)).some(word => { const base = word.split('/').at(-1) ?? ''; return base === program || base.replace(/\.[cm]?js$/, '') === program; });
+}
+/**
  * Who holds the pane's terminal foreground, as `herdr pane process-info` reports it: `shell` when
  * the pane's own shell does (nothing the launch typed is still running), `command` when another
  * process group does (the typed launch command — its supervisor, then the runtime — is executing),
- * null when Herdr cannot say.
+ * null when Herdr cannot say. Given the runtime's program, a group Herdr lists the processes of is
+ * told apart (GY-1184): `supervisor` when one is a `graphyard watch` supervisor, `runtime` when one
+ * runs that program, and `other` (naming it) when none is — an unrelated job left in a reused pane,
+ * not this launch. The real Herdr lists them; a group listed empty stays `command`.
  */
-export async function paneForeground(pane: string, run?: ChildRun): Promise<'shell' | 'command' | null> {
+export async function paneForeground(pane: string, run?: ChildRun, program?: string): Promise<'shell' | 'command' | 'supervisor' | 'runtime' | { other: string } | null> {
   try {
     const raw = await herdrJson(['pane', 'process-info', '--pane', pane], run);
     const info = raw?.process_info ?? raw;
     if (!Number.isSafeInteger(info?.shell_pid) || info.shell_pid <= 0 || !Number.isSafeInteger(info?.foreground_process_group_id) || info.foreground_process_group_id <= 0) return null;
-    return info.foreground_process_group_id === info.shell_pid ? 'shell' : 'command';
+    if (info.foreground_process_group_id === info.shell_pid) return 'shell';
+    const processes: { argv?: unknown; name?: unknown }[] = Array.isArray(info.foreground_processes) ? info.foreground_processes : [];
+    const argvs = processes.map(entry => Array.isArray(entry?.argv) ? entry.argv.filter((word): word is string => typeof word === 'string') : []);
+    if (!program || !argvs.some(argv => argv.length)) return 'command';
+    if (argvs.some(supervisorArgv)) return 'supervisor';
+    if (argvs.some(argv => runsProgram(argv, program))) return 'runtime';
+    // The refusal names the process that was inspected: the first one listed with an argv.
+    const at = argvs.findIndex(argv => argv.length), inspected = processes[at];
+    const named = typeof inspected?.name === 'string' && inspected.name ? inspected.name : argvs[at][0].split('/').at(-1);
+    return { other: named || 'an unnamed process' };
   } catch { return null; }
 }
 /** Whether the pane's own shell holds its terminal's foreground (paneForeground). False when Herdr cannot say. */
@@ -330,8 +362,8 @@ export async function observeStart(pane: string, kind: string, command: string, 
   // started one is, and has not read its request (GY-130).
   if (agent?.agent === kind && agent.agent_status === 'working' && readyStates.includes('working')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime working`, line: '' };
   const screen = await readPaneScreen(pane, run), last = paneLastLine(screen, Infinity), line = paneLastLine(screen);
-  let foreground: 'shell' | 'command' | null | undefined;
-  const readForeground = async () => (foreground !== undefined ? foreground : (foreground = await paneForeground(pane, run)));
+  let foreground: Awaited<ReturnType<typeof paneForeground>> | undefined;
+  const readForeground = async () => (foreground !== undefined ? foreground : (foreground = await paneForeground(pane, run, launchProgram(kind))));
   // A runtime that printed below its command and handed the terminal back to the shell has exited
   // before it was ready — Cursor's IDE launcher saying "No Cursor IDE installation found", a
   // command not found — and nothing will start in that pane however long the bound (GY-976).
@@ -360,11 +392,17 @@ export async function observeStart(pane: string, kind: string, command: string, 
   // spawns the runtime. That launch is starting, given until the ceiling, never refused as absent
   // at the bound (GY-1033). Its detail quotes what the supervisor last printed, if anything. Only
   // a pane whose shell is back in the foreground with nothing printed, or one Herdr cannot
-  // describe, is absent. A pane where Herdr reports a different agent is absent (GY-1053).
-  if (!agent?.agent && (printed || commandEchoing(last, command)) && await readForeground() === 'command') {
+  // describe, is absent. A pane where Herdr reports a different agent is absent (GY-1053). So is
+  // one whose foreground Herdr lists as neither the supervisor nor the runtime (GY-1184): an
+  // unrelated job is refused at the bound, not waited on to the ceiling.
+  const echoing = !agent?.agent && (printed || commandEchoing(last, command));
+  const held = echoing ? await readForeground() : null;
+  if (held === 'runtime') return { state: 'starting', agent: null, line, detail: `the ${kind} runtime holds the pane's foreground before Herdr reports it` };
+  if (held === 'command' || held === 'supervisor') {
     const said = printed?.at(-1);
     return { state: 'starting', agent: null, line, detail: said ? `the launch command is running, its supervisor setting up: "${said}"` : 'the launch command is running, its supervisor still setting up' };
   }
+  if (held && typeof held === 'object') return { state: 'absent', agent: null, line, detail: `the pane's foreground is held by ${held.other}, not the launch command` };
   return { state: 'absent', agent: null, line, detail: agent?.agent ? `the pane holds ${agent.agent}, not ${kind}` : commandEchoing(last, command) ? 'command still echoing' : 'no runtime under the pane' };
 }
 export async function awaitRuntimeStart(pane: string, kind: string, command: string, run?: ChildRun, bounds: StartBounds = {}) {
@@ -466,7 +504,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
   // verdict is not kept, so the next launch on that endpoint reports it instead.
   let launched = false, settle!: (ok: boolean) => void;
   const outcome = new Promise<boolean>(done => { settle = done; });
-  void (options.keyringWarning ?? ((session, bound, ok) => keyringEndpointWarning(session, bound, undefined, undefined, undefined, ok)))(name, confinement, outcome).then(line => { if (line) log(line); }, () => undefined);
+  void (options.keyringWarning ?? ((session, bound, ok) => keyringEndpointWarning(session, bound, undefined, undefined, undefined, ok, keyringProbeBackoff)))(name, confinement, outcome).then(line => { if (line) log(line); }, () => undefined);
   try {
     let started: Awaited<ReturnType<typeof awaitRuntimeStart>>;
     try { started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: startedStates }); }
@@ -538,12 +576,16 @@ export async function secretsBusEndpointProblem(run: ChildRun | undefined, path:
  * this socket was already judged. A probe that cannot judge the socket — no user manager answers,
  * or its answer is unreadable — is not remembered, so a later launch, and any launch that was
  * awaiting that probe, asks again and still reports an unmigrated endpoint once the user manager
- * answers. The line is the launch's own: when `started` settles false (the launch failed and its
+ * answers. Given a `backoff` (the launcher passes keyringProbeBackoff), an unjudged probe opens a
+ * window on that socket in which no launch asks again — it logs nothing — so a user manager that
+ * stays unreachable costs one probe per window rather than one per confined launch; each further
+ * unjudged probe doubles the window up to its cap, and a judged one closes it (GY-1206). The line
+ * is the launch's own: when `started` settles false (the launch failed and its
  * pane was closed) nothing is returned under that session's name. A racing launch that succeeds
  * reports the endpoint instead of staying silent, and the verdict is forgotten only when every
  * racing launch has failed without reporting it, so the next launch reports it.
  */
-export async function keyringEndpointWarning(name: string, confinement: CoordinatorConfinement | null, run?: ChildRun, path: string | null = secretsBusPath(), verdicts: Map<string, KeyringEndpointVerdict> = keyringEndpointVerdicts, started: Promise<boolean> = Promise.resolve(true)): Promise<string | null> {
+export async function keyringEndpointWarning(name: string, confinement: CoordinatorConfinement | null, run?: ChildRun, path: string | null = secretsBusPath(), verdicts: Map<string, KeyringEndpointVerdict> = keyringEndpointVerdicts, started: Promise<boolean> = Promise.resolve(true), backoff: KeyringProbeBackoff | null = null): Promise<string | null> {
   if (!confinement || !path) return null;
   let endpoint: string, socket: string;
   try { endpoint = realpathSync(path); const stat = statSync(endpoint, { bigint: true }); socket = `${stat.dev}:${stat.ino}:${stat.ctimeNs}`; } catch { return null; }
@@ -556,11 +598,22 @@ export async function keyringEndpointWarning(name: string, confinement: Coordina
     const outcome = await held.claim(name, started);
     if (outcome !== undefined) return outcome;
   }
+  const waiting = backoff?.windows.get(endpoint);
+  if (waiting?.socket === socket && backoff!.now() < waiting.retryAt) return null;
   let waiters = 0;
   let reported = false;
   let problemResult: string | null | undefined;
   const forget = () => { if (verdicts.get(endpoint)?.verdict === verdict) verdicts.delete(endpoint); return undefined; };
-  const verdict: Promise<string | null | undefined> = secretsBusEndpointProblem(run, path).then(problem => problem === secretsBusUnjudged ? forget() : problem ? `${problem.text}; migrate: ${problem.next}` : null, forget);
+  const unjudged = () => {
+    if (backoff) {
+      const last = backoff.windows.get(endpoint);
+      const delayMs = last?.socket === socket ? Math.min(last.delayMs * 2, keyringProbeBackoffMaxMs) : keyringProbeBackoffMs;
+      backoff.windows.set(endpoint, { socket, delayMs, retryAt: backoff.now() + delayMs });
+    }
+    return forget();
+  };
+  const judged = (line: string | null) => { backoff?.windows.delete(endpoint); return line; };
+  const verdict: Promise<string | null | undefined> = secretsBusEndpointProblem(run, path).then(problem => problem === secretsBusUnjudged ? unjudged() : judged(problem ? `${problem.text}; migrate: ${problem.next}` : null), unjudged);
   const claim = async (sessionName: string, sessionStarted: Promise<boolean>): Promise<string | null | undefined> => {
     waiters++;
     try {
@@ -593,6 +646,16 @@ export interface KeyringEndpointVerdict {
 }
 /** The latest socket's verdict per keyring endpoint path in this process (keyringEndpointWarning). */
 const keyringEndpointVerdicts = new Map<string, KeyringEndpointVerdict>();
+/** The window an unjudged keyring probe opens before a launch asks the user manager again, and its cap as it doubles (GY-1206). */
+export const keyringProbeBackoffMs = 30_000;
+export const keyringProbeBackoffMaxMs = 300_000;
+/** Per keyring endpoint path, the socket whose last probe went unjudged and when a launch may ask again (keyringEndpointWarning). */
+export interface KeyringProbeBackoff {
+  windows: Map<string, { socket: string; delayMs: number; retryAt: number }>;
+  now: () => number;
+}
+/** The launcher's backoff on unjudged keyring probes in this process. */
+const keyringProbeBackoff: KeyringProbeBackoff = { windows: new Map(), now: () => Date.now() };
 
 /**
  * A launch that failed before its runtime started closes what it created (GY-413): its pane
