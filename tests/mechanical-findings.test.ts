@@ -30,13 +30,13 @@ const botWorker = 'graphyard-bot-worker';
 const criteria = [{ id: 'AC-1', text: 'The widget counts every frob.', proofs: ['unit:frob-count'] }];
 const verdict = [
   'AC-1 met.',
-  'Follow-up finding: docs/widget.md:12 — "recieve" is a typo (mechanical: typo)',
-  'Follow-up finding: src/widget.ts:40 — the counter variable name frobCnt does not match the frobCount convention used elsewhere (mechanical: naming)',
-  'Follow-up finding: docs/operations.md:3 — this paragraph belongs in docs/widget.md (mechanical: docs-placement)',
-  'Follow-up finding: src/widget.ts:9 — trailing whitespace and a blank line (mechanical: formatting)',
-  'Follow-up finding: src/widget.ts:55 — the retry loop is unbounded when the source keeps failing (substantive: behavior)',
-  'Follow-up finding: src/other.ts:2 — rename this, and it also returns null for an empty list (mechanical: naming)',
-  'Follow-up finding: consider a cache someday',
+  'Nit: docs/widget.md:12 — "recieve" is a typo (mechanical: typo)',
+  'Nit: src/widget.ts:40 — the counter variable name frobCnt does not match the frobCount convention used elsewhere (mechanical: naming)',
+  'Nit: docs/operations.md:3 — this paragraph belongs in docs/widget.md (mechanical: docs-placement)',
+  'Nit: src/widget.ts:9 — trailing whitespace and a blank line (mechanical: formatting)',
+  'Nit: src/widget.ts:55 — the retry loop is unbounded when the source keeps failing (substantive: behavior)',
+  'Nit: src/other.ts:2 — rename this, and it also returns null for an empty list (mechanical: naming)',
+  'Nit: consider a cache someday',
   'Resolved threads: none', 'Follow-up threads: none', 'Overridden threads: none',
 ].join('\n');
 const approval = { key: 'GY-7', pr: 7, sha: H, reviewId: 901, state: 'APPROVED', body: verdict };
@@ -146,7 +146,7 @@ test('unit:mechanical-findings-auto-fixed — review findings are classified, an
   assert.equal(unlabelled('typo in the "fails" message').classification, 'mechanical');
   // Only an approval gets a bot: a REQUEST_CHANGES head is reworked by its worker.
   assert.equal(mechanicalFixPlan({ ...approval, state: 'CHANGES_REQUESTED' }), null);
-  assert.equal(mechanicalFixPlan({ ...approval, body: 'AC-1 met.\nFollow-up finding: src/a.ts:1 — the retry is unbounded' }), null, 'nothing mechanical, nothing to fix');
+  assert.equal(mechanicalFixPlan({ ...approval, body: 'AC-1 met.\nNit: src/a.ts:1 — the retry is unbounded' }), null, 'nothing mechanical, nothing to fix');
   // Every review asks for the classification on each finding line.
   const plain = reviewPrompt({ repository: 'owner/project' }, { key: 'GY-7', pr: 7, sha: H, baseSha: B, policyRevision: 1 }, undefined, undefined, criteria);
   for (const fragment of ['(mechanical: CATEGORY)', 'typo, docs-placement, formatting, naming', '(substantive: CATEGORY)', 'behavior, criteria, scope']) assert.ok(plain.includes(fragment), fragment);
@@ -198,7 +198,7 @@ test('unit:mechanical-findings-auto-fixed — review findings are classified, an
     }
     // 5. The fresh read approves: the bot commit is accepted, the plan applied, and the fresh read's own follow-ups handled.
     const done = await reconcileReviews(root, round.config, { run: herdr().run, observe: verdictOf(902, 'APPROVED'), work: [item(BOT, 2, [{ reviewer, sha: BOT, state: 'APPROVED', id: 902 }])],
-      threadsRun: github({ 902: { body: 'AC-1 met.\nFollow-up finding: src/widget.ts:55 — the retry loop is unbounded (substantive: behavior)\nResolved threads: none\nFollow-up threads: none', sha: BOT, state: 'APPROVED' } }) });
+      threadsRun: github({ 902: { body: 'AC-1 met.\nNit: src/widget.ts:55 — the retry loop is unbounded (substantive: behavior)\nResolved threads: none\nFollow-up threads: none', sha: BOT, state: 'APPROVED' } }) });
     assert.equal(recordOf(done.reviews, BOT).freshRead?.judged?.outcome, 'accepted');
     assert.equal(recordOf(done.reviews, H).mechanicalFix?.state, 'applied');
     assert.equal(recordOf(done.reviews, H).mechanicalFix?.commit, BOT);
@@ -214,7 +214,7 @@ test('unit:mechanical-findings-auto-fixed — review findings are classified, an
   assert.match((verifyBotCommit(plannedFix, { ...observed(plannedFix), sha: 'nope' }, reviewer) as { reason: string }).reason, /could not be verified/, 'a malformed observation is a refusal, not a throw');
 
   // A plan holds back every finding it keeps from filing: an approval with more substantive findings than the ledger holds is not planned.
-  const many = ['AC-1 met.', 'Follow-up finding: docs/widget.md:12 — "recieve" is a typo (mechanical: typo)', ...Array.from({ length: 51 }, (_, index) => `Follow-up finding: src/widget.ts:${index + 1} — the retry ${index} is unbounded (substantive: behavior)`)].join('\n');
+  const many = ['AC-1 met.', 'Nit: docs/widget.md:12 — "recieve" is a typo (mechanical: typo)', ...Array.from({ length: 51 }, (_, index) => `Nit: src/widget.ts:${index + 1} — the retry ${index} is unbounded (substantive: behavior)`)].join('\n');
   assert.equal(planMechanicalFix({ key: 'GY-7', pr: 7, sha: H }, 901, many, 1, new Date().toISOString()).state, 'none');
 
   // A head that is not the planned bot commit is refused as one: the reviewer is handed the mechanical findings back.
@@ -262,7 +262,7 @@ test('unit:mechanical-findings-auto-fixed — review findings are classified, an
 
 test('unit:mechanical-mislabel-caught — a substantive finding misclassified as mechanical is caught: the fresh read sees the full diff, rejects the bot commit, and the misclassification is an intervention signal for the retro', async () => {
   // The classifier takes the reviewer's label at its word when no substantive sign shows: this one changes a limit.
-  const mislabelled = 'AC-1 met.\nFollow-up finding: src/limits.ts:4 — tidy the MAX constant (mechanical: formatting)\nResolved threads: none\nFollow-up threads: none';
+  const mislabelled = 'AC-1 met.\nNit: src/limits.ts:4 — tidy the MAX constant (mechanical: formatting)\nResolved threads: none\nFollow-up threads: none';
   const { root, cleanup } = await boundMaster();
   try {
     const round = await approvedThenBotRound(root, mislabelled, { parents: [H], files: ['src/limits.ts'] });

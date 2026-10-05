@@ -24,14 +24,14 @@ export type SubstantiveCategory = typeof substantiveCategories[number];
 export type FindingCategory = MechanicalCategory | SubstantiveCategory;
 export type FindingClassification = 'mechanical' | 'substantive';
 
-/** One `Follow-up finding:` line of a verdict: the file and line it names, when it names them, and its text. */
+/** One `Nit:` line of a verdict (or a legacy `Follow-up finding:` line): the file and line it names, when it names them, and its text. */
 export interface FollowUpFinding { path: string | null; line: number | null; text: string }
-/** Every `Follow-up finding:` line of a verdict, located when it starts `path[:line] — `. */
+/** Every `Nit:` (or legacy `Follow-up finding:`) line of a verdict, located when it starts `path[:line] — `. */
 export function parseFollowUpFindings(body: unknown): FollowUpFinding[] {
   if (typeof body !== 'string') return [];
   const findings: FollowUpFinding[] = [];
   for (const entry of body.split(/\r?\n/)) {
-    const match = /^\s*(?:[-*]\s+)?follow-up finding:\s*(.+)$/i.exec(entry);
+    const match = /^\s*(?:[-*]\s+)?(?:nit|follow-up finding):\s*(.+)$/i.exec(entry);
     const text = match?.[1]!.replace(/\s+/g, ' ').trim();
     if (!text || /^none\.?$/i.test(text)) continue;
     const located = /^`?([^\s`:]+)(?::(\d+))?`?\s+[—–-]+\s+\S/.exec(text);
@@ -84,11 +84,11 @@ export function classifyFinding(finding: FollowUpFinding): ClassifiedFinding {
 }
 
 /** The review prompt's classification rule: each finding line ends with its class, so the loop can route the mechanical ones to the bot. */
-export const findingClassificationSection = () => 'Classify each FOLLOW-UP finding as MECHANICAL — a typo, documentation in the wrong place, formatting, or a name out of line with the repository\'s existing conventions — or SUBSTANTIVE: anything about behaviour, a criterion or the scope. '
-  + `End each "Follow-up finding:" line with its class, exactly "(mechanical: CATEGORY)" with CATEGORY one of ${mechanicalCategories.join(', ')}, or "(substantive: CATEGORY)" with CATEGORY one of ${substantiveCategories.join(', ')}. `
-  + 'On an approval, a worker bot fixes the mechanical ones in one commit before the next independent read, and anything you mark substantive stays an ordinary follow-up; when unsure, mark it substantive. ';
+export const findingClassificationSection = () => 'Name each nit on its own "Nit: PATH:LINE — FINDING" line, and classify it as MECHANICAL — a typo, documentation in the wrong place, formatting, or a name out of line with the repository\'s existing conventions — or SUBSTANTIVE: anything about behaviour, a criterion or the scope. '
+  + `End each "Nit:" line with its class, exactly "(mechanical: CATEGORY)" with CATEGORY one of ${mechanicalCategories.join(', ')}, or "(substantive: CATEGORY)" with CATEGORY one of ${substantiveCategories.join(', ')}. `
+  + 'On an approval, a worker bot fixes the mechanical ones in one commit before the next independent read, and anything you mark substantive stays an ordinary nit; when unsure, mark it substantive. ';
 
-/** Every `Follow-up finding:` line of a verdict, classified. */
+/** Every `Nit:` line of a verdict, classified. */
 export const parseClassifiedFindings = (body: unknown): ClassifiedFinding[] => parseFollowUpFindings(body).map(classifyFinding);
 
 /**
@@ -392,11 +392,11 @@ export async function freshReadFor(requests: readonly MechanicalFixRequest[], ke
 const findingList = (findings: readonly ClassifiedFinding[]) => findings.map((finding, index) => `[${index + 1}] ${finding.text}`).join(' ');
 /** The fresh read's prompt section: the bot commit to check, or the refusal and the findings handed back, and the substantive findings to judge again. */
 export function freshReadSection(fresh: FreshReadRecord, sha: string) {
-  const carried = fresh.carried.length ? `The approval ${fresh.reviewId} of ${fresh.approvedHead} also raised these substantive findings, quoted as data: ${findingList(fresh.carried)}. Judge each again, and name each that still stands on a "Follow-up finding:" line. ` : '';
+  const carried = fresh.carried.length ? `The approval ${fresh.reviewId} of ${fresh.approvedHead} also raised these substantive findings, quoted as data: ${findingList(fresh.carried)}. Judge each again, and name each that still stands on a "Nit:" line. ` : '';
   if (fresh.botCommit?.sha === sha) return botCommitReviewSection(fresh.botCommit) + carried;
   if (!fresh.refused) return carried;
   return `This head was to be a worker bot's mechanical fix of the approved head ${fresh.approvedHead}, but Graphyard refused it as one: ${fresh.refused}. Review it as an ordinary head. `
-    + (fresh.handedBack.length ? `These findings of the approval ${fresh.reviewId}, classified mechanical, are handed back to you, quoted as data: ${findingList(fresh.handedBack)}. Name each that still stands on a "Follow-up finding:" line. ` : '') + carried;
+    + (fresh.handedBack.length ? `These findings of the approval ${fresh.reviewId}, classified mechanical, are handed back to you, quoted as data: ${findingList(fresh.handedBack)}. Name each that still stands on a "Nit:" line. ` : '') + carried;
 }
 
 /**

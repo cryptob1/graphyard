@@ -828,7 +828,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     if (bot && review.state === 'CHANGES_REQUESTED') return `AC-1 unmet.\nRejected bot commit: ${review.sha} — it changed the retry bound in ${file(n)}, a behaviour change, not a typo fix`;
     // The first approval of a scenario item raises one finding of each class.
     if (mechanicalItem(key) && review.state === 'APPROVED' && !ledger.some(record => record.key === key))
-      return [`AC-1 met.`, `Follow-up finding: ${file(n)}:3 — "recieve" is a typo (mechanical: typo)`, `Follow-up finding: ${file(n)}:9 — the retry is unbounded when the source keeps failing (substantive: behavior)`].join('\n');
+      return [`AC-1 met.`, `Nit: ${file(n)}:3 — "recieve" is a typo (mechanical: typo)`, `Nit: ${file(n)}:9 — the retry is unbounded when the source keeps failing (substantive: behavior)`].join('\n');
     return 'AC-1 met.';
   };
   const ledgerRun = async (_command: string, args: string[]) => {
@@ -3255,9 +3255,6 @@ test('unit:soak-invariants-hold — approver launches refused for capacity wait 
   // sit waiting when the window closes. The loop must relaunch them — uncounted against the launch
   // bound, one at a time on the launcher, the older request taking the freed capacity first, each
   // within a couple of cycles of the window closing — with no hand action, and both items delivered.
-  // The day needs none of the earlier days' items, so it runs on a control plane of its own and its
-  // cycles, and the wall-clock budget below, do not grow with every day the file ran before it.
-  await controlPlane('soak_capacity');
   const began = performance.now();
   const window = { from: 50 * minute, to: 130 * minute };
   const day = await simulateDay({ hours: 6, capacityWait: window });
@@ -3452,9 +3449,6 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
   // into it, nothing closes it, and the item is handed to a new attempt that delivers it. The
   // routing repeats per cycle here, which is why it lives in this world.
   const n = basePlan.reassigned;
-  // Its loop reads only its own items, so it runs on a control plane of its own, whose cycles do not
-  // grow with every earlier day's items.
-  await controlPlane('soak_reassigned');
   const { items, final, violations, failures, lost, herdrClosed, prompts, state, reassign } = await simulateDay({
     hours: 6, reassigned: n,
     plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
@@ -3650,60 +3644,6 @@ test('unit:soak-invariants-hold — blocked work unblocks itself: every routine 
   assert.ok(!Object.values(state.approvals).some(watch => watch.decision === decision), 'the launched approver\'s watch went with its judged decision');
   assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('blocker:')), [], 'no blocker row outlives its item');
   assert.ok(blockerKeysPeak <= 2 * 7, `the blocker rows stayed bounded by the blocked items (peak ${blockerKeysPeak})`);
-});
-
-test('unit:soak-invariants-hold — review findings classified mechanical under the real loop: each approved head is planned once and held from merging until its one bot round, the fresh read settles every plan, and a rejected bot commit is recorded once as a misclassified finding, with every invariant holding', { timeout: 300_000 }, async () => {
-  // GY-971: every approval of the day is read from the review ledger the dispatcher keeps. Two
-  // items' first approvals raise a finding classified mechanical: the loop holds each approved head
-  // from merging, asks for one bot round, and the round's commit on that head is read afresh. One
-  // fresh read accepts it; the other rejects it as a misclassification, which is recorded once, and
-  // that item is reworked and delivered like any change request. The plan, the hold, the rework
-  // decision and the fresh-read judgement repeat per cycle, head and item, which is why they live here.
-  const mechanical = { applied: 2, rejected: 5 };
-  // The day needs none of the earlier days' items, so it runs on a control plane of its own and its
-  // cycles stay as fast as the first day's, wherever it falls in the file.
-  await controlPlane('soak_mechanical');
-  const { items, final, violations, failures, lost, github, actionKeys, mechanical: world } = await simulateDay({
-    hours: 6, mechanical,
-    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
-  });
-  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all six items are delivered');
-  assert.deepEqual(violations, [], 'every system invariant holds across the mechanical-fix rounds');
-  assert.deepEqual(failures, [], 'no cycle failed');
-  assert.deepEqual(lost, [], 'no lease was lost');
-  // Every approval was classified, and every plan settled: applied by its fresh read, or none to make.
-  const approvals = world.ledger.filter(record => record.verdict?.state === 'APPROVED' && !record.freshRead);
-  assert.ok(approvals.length >= items.length, `every item's approval reached the ledger (${approvals.length})`);
-  assert.deepEqual(world.ledger.filter(record => record.mechanicalFix?.state === 'planned').map(record => `${record.key} ${record.sha.slice(0, 12)}`), [], 'no plan is left standing');
-  const plans = world.ledger.filter(record => record.mechanicalFix && record.mechanicalFix.state !== 'none');
-  for (const n of [mechanical.applied, mechanical.rejected]) {
-    const key = items[n - 1].key, id = items[n - 1].id;
-    const own = plans.filter(record => record.key === key);
-    assert.equal(own.length, 1, `${key}: one plan for its approved head: ${JSON.stringify(own.map(record => record.mechanicalFix))}`);
-    const plan = own[0]!.mechanicalFix!;
-    assert.equal(plan.state, 'applied', `${key}: the plan was settled by the fresh read of its bot commit: ${plan.reason ?? ''}`);
-    assert.deepEqual(plan.paths, [file(n)]);
-    const rounds = world.botRounds.filter(round => round.key === key);
-    assert.deepEqual(rounds.map(round => round.approved), [plan.head], `${key}: exactly one bot round, on the approved head`);
-    assert.equal(plan.commit, rounds[0]!.head, `${key}: the fresh read reviewed the bot commit`);
-    assert.equal([...actionKeys].filter(entry => entry.startsWith(`decision:rework:${id}:`) && entry.includes(':mechanical:')).length, 1, `${key}: one mechanical-fix rework decision`);
-    // No merge ahead of the round: the approved head is never what landed.
-    const merged = github.merges.filter(entry => entry.key === key);
-    assert.equal(merged.length, 1, `${key} merged once`);
-    assert.notEqual(github.commits.get(merged[0]!.sha)!.parents[1], plan.head, `${key}: the approved head ${plan.head.slice(0, 12)} was not merged ahead of its bot round`);
-    assert.ok([...actionKeys].some(entry => entry.startsWith(`escalation:${id}:${plan.head}:`) && entry.endsWith(':mechanical')), `${key}: the loop's merge step held the approved head for the round: ${[...actionKeys].filter(entry => entry.includes(id)).join(', ')}`);
-  }
-  // The accepted bot commit is what landed for its item.
-  const accepted = world.botRounds.find(round => round.key === items[mechanical.applied - 1].key)!;
-  assert.ok(github.contains(github.merges.find(entry => entry.key === accepted.key)!.sha, accepted.head), 'the accepted bot commit landed');
-  assert.equal(world.ledger.find(record => record.sha === accepted.head)?.freshRead?.judged?.outcome, 'accepted');
-  // The rejected one is recorded once as a misclassified finding, and its item was reworked and delivered without it.
-  const rejected = world.botRounds.find(round => round.key === items[mechanical.rejected - 1].key)!;
-  assert.equal(world.ledger.find(record => record.sha === rejected.head)?.freshRead?.judged?.outcome, 'rejected');
-  assert.deepEqual(world.misclassified.map(entry => [entry.signal.kind, entry.signal.work]), [['misclassified-finding', rejected.key]], 'one intervention per rejection');
-  assert.ok(!github.contains(github.merges.find(entry => entry.key === rejected.key)!.sha, rejected.head), 'the rejected bot commit did not land');
-  const report = await api(principals.coordinator, 'GET', `interventions?kind=misclassified-finding&work=${rejected.key}`);
-  assert.equal(report.byKind?.find((entry: { kind: string }) => entry.kind === 'misclassified-finding')?.count, 1, `the control plane holds the one misclassification: ${JSON.stringify(report.byKind)}`);
 });
 
 test('unit:soak-invariants-hold — start failures on the real dispatch path fall forward across the day: three consecutive failures of one account across items raise one attention item, a later start on the account clears it, and every failed pane is closed at its bound', { timeout: 300_000 }, async () => {
@@ -4358,4 +4298,58 @@ test('unit:decisions-step-bounded — a history read slower than the step\'s dea
   assert.deepEqual(Object.fromEntries(refreshed.reads), Object.fromEntries(items.map(item => [item.key, 1])), 'each watched history is read once more, in the cycle the interval passed');
   for (let round = 0; round < 3; round += 1) assert.equal((await cycle()).reads.size, 0, `and none in the cycles after it (round ${round + 1})`);
   assert.equal(new Set(decided).size, decided.length, 'the refresh requested nothing again');
+});
+
+test('unit:soak-invariants-hold — review findings classified mechanical under the real loop: each approved head is planned once and held from merging until its one bot round, the fresh read settles every plan, and a rejected bot commit is recorded once as a misclassified finding, with every invariant holding', { timeout: 300_000 }, async () => {
+  // GY-971: every approval of the day is read from the review ledger the dispatcher keeps. Two
+  // items' first approvals raise a finding classified mechanical: the loop holds each approved head
+  // from merging, asks for one bot round, and the round's commit on that head is read afresh. One
+  // fresh read accepts it; the other rejects it as a misclassification, which is recorded once, and
+  // that item is reworked and delivered like any change request. The plan, the hold, the rework
+  // decision and the fresh-read judgement repeat per cycle, head and item, which is why they live here.
+  const mechanical = { applied: 2, rejected: 5 };
+  // The day needs none of the earlier days' items, so it runs last, on a control plane of its own:
+  // its cycles stay as fast as the first day's, and no earlier day reads its plane.
+  await controlPlane('soak_mechanical');
+  const { items, final, violations, failures, lost, github, actionKeys, mechanical: world } = await simulateDay({
+    hours: 6, mechanical,
+    plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
+  });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all six items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds across the mechanical-fix rounds');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no lease was lost');
+  // Every approval was classified, and every plan settled: applied by its fresh read, or none to make.
+  const approvals = world.ledger.filter(record => record.verdict?.state === 'APPROVED' && !record.freshRead);
+  assert.ok(approvals.length >= items.length, `every item's approval reached the ledger (${approvals.length})`);
+  assert.deepEqual(world.ledger.filter(record => record.mechanicalFix?.state === 'planned').map(record => `${record.key} ${record.sha.slice(0, 12)}`), [], 'no plan is left standing');
+  const plans = world.ledger.filter(record => record.mechanicalFix && record.mechanicalFix.state !== 'none');
+  for (const n of [mechanical.applied, mechanical.rejected]) {
+    const key = items[n - 1].key, id = items[n - 1].id;
+    const own = plans.filter(record => record.key === key);
+    assert.equal(own.length, 1, `${key}: one plan for its approved head: ${JSON.stringify(own.map(record => record.mechanicalFix))}`);
+    const plan = own[0]!.mechanicalFix!;
+    assert.equal(plan.state, 'applied', `${key}: the plan was settled by the fresh read of its bot commit: ${plan.reason ?? ''}`);
+    assert.deepEqual(plan.paths, [file(n)]);
+    const rounds = world.botRounds.filter(round => round.key === key);
+    assert.deepEqual(rounds.map(round => round.approved), [plan.head], `${key}: exactly one bot round, on the approved head`);
+    assert.equal(plan.commit, rounds[0]!.head, `${key}: the fresh read reviewed the bot commit`);
+    assert.equal([...actionKeys].filter(entry => entry.startsWith(`decision:rework:${id}:`) && entry.includes(':mechanical:')).length, 1, `${key}: one mechanical-fix rework decision`);
+    // No merge ahead of the round: the approved head is never what landed.
+    const merged = github.merges.filter(entry => entry.key === key);
+    assert.equal(merged.length, 1, `${key} merged once`);
+    assert.notEqual(github.commits.get(merged[0]!.sha)!.parents[1], plan.head, `${key}: the approved head ${plan.head.slice(0, 12)} was not merged ahead of its bot round`);
+    assert.ok([...actionKeys].some(entry => entry.startsWith(`escalation:${id}:${plan.head}:`) && entry.endsWith(':mechanical')), `${key}: the loop's merge step held the approved head for the round: ${[...actionKeys].filter(entry => entry.includes(id)).join(', ')}`);
+  }
+  // The accepted bot commit is what landed for its item.
+  const accepted = world.botRounds.find(round => round.key === items[mechanical.applied - 1].key)!;
+  assert.ok(github.contains(github.merges.find(entry => entry.key === accepted.key)!.sha, accepted.head), 'the accepted bot commit landed');
+  assert.equal(world.ledger.find(record => record.sha === accepted.head)?.freshRead?.judged?.outcome, 'accepted');
+  // The rejected one is recorded once as a misclassified finding, and its item was reworked and delivered without it.
+  const rejected = world.botRounds.find(round => round.key === items[mechanical.rejected - 1].key)!;
+  assert.equal(world.ledger.find(record => record.sha === rejected.head)?.freshRead?.judged?.outcome, 'rejected');
+  assert.deepEqual(world.misclassified.map(entry => [entry.signal.kind, entry.signal.work]), [['misclassified-finding', rejected.key]], 'one intervention per rejection');
+  assert.ok(!github.contains(github.merges.find(entry => entry.key === rejected.key)!.sha, rejected.head), 'the rejected bot commit did not land');
+  const report = await api(principals.coordinator, 'GET', `interventions?kind=misclassified-finding&work=${rejected.key}`);
+  assert.equal(report.byKind?.find((entry: { kind: string }) => entry.kind === 'misclassified-finding')?.count, 1, `the control plane holds the one misclassification: ${JSON.stringify(report.byKind)}`);
 });
