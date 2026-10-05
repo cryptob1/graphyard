@@ -504,7 +504,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
   // verdict is not kept, so the next launch on that endpoint reports it instead.
   let launched = false, settle!: (ok: boolean) => void;
   const outcome = new Promise<boolean>(done => { settle = done; });
-  void (options.keyringWarning ?? ((session, bound, ok) => keyringEndpointWarning(session, bound, undefined, undefined, undefined, ok, keyringProbeBackoff)))(name, confinement, outcome).then(line => { if (line) log(line); }, () => undefined);
+  void (options.keyringWarning ?? ((session, bound, ok) => keyringEndpointWarning(session, bound, undefined, undefined, undefined, ok, keyringProbeBackoff, log)))(name, confinement, outcome).then(line => { if (line) log(line); }, () => undefined);
   try {
     let started: Awaited<ReturnType<typeof awaitRuntimeStart>>;
     try { started = await awaitRuntimeStart(pane, kind, command, run, { ...options, readyStates: startedStates }); }
@@ -577,15 +577,16 @@ export async function secretsBusEndpointProblem(run: ChildRun | undefined, path:
  * or its answer is unreadable — is not remembered, so a later launch, and any launch that was
  * awaiting that probe, asks again and still reports an unmigrated endpoint once the user manager
  * answers. Given a `backoff` (the launcher passes keyringProbeBackoff), an unjudged probe opens a
- * window on that socket in which no launch asks again — it logs nothing — so a user manager that
- * stays unreachable costs one probe per window rather than one per confined launch; each further
+ * window on that socket in which no launch asks again — it returns null, and the first one per window
+ * that succeeds passes `skipped` a line saying so (GY-1226) — so a user manager that stays
+ * unreachable costs one probe per window rather than one per confined launch; each further
  * unjudged probe doubles the window up to its cap, and a judged one closes it (GY-1206). The line
  * is the launch's own: when `started` settles false (the launch failed and its
  * pane was closed) nothing is returned under that session's name. A racing launch that succeeds
  * reports the endpoint instead of staying silent, and the verdict is forgotten only when every
  * racing launch has failed without reporting it, so the next launch reports it.
  */
-export async function keyringEndpointWarning(name: string, confinement: CoordinatorConfinement | null, run?: ChildRun, path: string | null = secretsBusPath(), verdicts: Map<string, KeyringEndpointVerdict> = keyringEndpointVerdicts, started: Promise<boolean> = Promise.resolve(true), backoff: KeyringProbeBackoff | null = null): Promise<string | null> {
+export async function keyringEndpointWarning(name: string, confinement: CoordinatorConfinement | null, run?: ChildRun, path: string | null = secretsBusPath(), verdicts: Map<string, KeyringEndpointVerdict> = keyringEndpointVerdicts, started: Promise<boolean> = Promise.resolve(true), backoff: KeyringProbeBackoff | null = null, skipped: ((line: string) => void) | null = null): Promise<string | null> {
   if (!confinement || !path) return null;
   let endpoint: string, socket: string;
   try { endpoint = realpathSync(path); const stat = statSync(endpoint, { bigint: true }); socket = `${stat.dev}:${stat.ino}:${stat.ctimeNs}`; } catch { return null; }
@@ -599,7 +600,14 @@ export async function keyringEndpointWarning(name: string, confinement: Coordina
     if (outcome !== undefined) return outcome;
   }
   const waiting = backoff?.windows.get(endpoint);
-  if (waiting?.socket === socket && backoff!.now() < waiting.retryAt) return null;
+  if (waiting?.socket === socket && backoff!.now() < waiting.retryAt) {
+    // The first launch inside each window that succeeds records the skip, so a missing warning leaves a trace (GY-1226).
+    if (!skipped || waiting.noted) return null;
+    waiting.noted = true;
+    const line = `graphyard: ${name}: keyring endpoint ${endpoint} not checked: the systemd user manager did not answer its last probe, so launches skip the check for ${Math.ceil((waiting.retryAt - backoff!.now()) / 1000)} s more (window ${Math.round(waiting.delayMs / 1000)} s); the first launch after that asks again and reports an unmigrated endpoint`;
+    if (await started.catch(() => false)) skipped(line); else waiting.noted = false;
+    return null;
+  }
   let waiters = 0;
   let reported = false;
   let problemResult: string | null | undefined;
@@ -651,7 +659,7 @@ export const keyringProbeBackoffMs = 30_000;
 export const keyringProbeBackoffMaxMs = 300_000;
 /** Per keyring endpoint path, the socket whose last probe went unjudged and when a launch may ask again (keyringEndpointWarning). */
 export interface KeyringProbeBackoff {
-  windows: Map<string, { socket: string; delayMs: number; retryAt: number }>;
+  windows: Map<string, { socket: string; delayMs: number; retryAt: number; /** a skip inside the window was logged (GY-1226) */ noted?: boolean }>;
   now: () => number;
 }
 /** The launcher's backoff on unjudged keyring probes in this process. */
