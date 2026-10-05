@@ -515,7 +515,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * wake is lost too, so the loop must ask again in the next observation window.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; slowDecisions?: { from: number; to: number; ms: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
   failover?: Failover }) {
@@ -526,6 +526,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const failover = options.failover;
   const config: MasterConfig = failover ? failover.master : options.queued
     ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...queueWorkers], mergeQueue: { parallelTips: options.queued.window } })
+    // GY-1286: the slow-server day staffs every item at once, so their decisions fall due together.
+    : options.slowDecisions ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...queueWorkers] })
     : options.master ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, masterSessionMinutes: options.master.sessionMinutes, masterHeartbeatMinutes: options.master.heartbeatMinutes } })
     : options.decomposition ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, research: { command: 'pi', model: 'research-pi-model' }, decomposition: { concurrency: options.decomposition.concurrency ?? 2 } } })
     : soakConfig;
@@ -1557,21 +1559,36 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     wakes: [] as { at: number; cycle: number; text: string; clock?: number }[],
     ended: [] as string[], refusedEnds: [] as string[], killed: null as string | null,
     maxLive: 0, cycleOf: 0, rotations: [] as { at: number; detail: string; before: number; after: number }[],
+    // GY-1223: the master pane the day set working, every read of a master screen, the accounts each launch took and the loop held.
+    worked: null as string | null, bannerAt: null as number | null, reads: [] as { at: number; pane: string; status: string }[],
+    accounts: [] as string[], holds: [] as { account: string; resetsAt: string | null; at: number }[],
   };
   if (options.master) {
     const plan = options.master, name = config.masterAgentName!;
     // Timed on the day's schedule position, as every other fault of the day is.
     const refusing = () => elapsed >= plan.refuseRelease.from && elapsed < plan.refuseRelease.to;
+    // The registry launches the master role on its first account the loop does not hold (GY-1223).
     effects.masterSession = { launch: async () => {
       const pane = herdr.open(name, 'idle'), session = `master-registry-${master.launches.length + 1}`;
+      const account = ['claude-master', 'claude-master-b'].find(candidate => !accountHeld(candidate)) ?? 'claude-master';
       master.launches.push({ at: elapsed, pane, session });
-      return { agentName: name, pane, runtime: 'claude', account: 'claude-master', session };
+      master.accounts.push(account);
+      return { agentName: name, pane, runtime: 'claude', account, session };
     } };
     effects.endRegistrySession = async session => {
       if (refusing()) { master.refusedEnds.push(session); throw new Error('the agent registry is unreachable: timeout'); }
       master.ended.push(session);
     };
-    effects.holdAccount = async () => {};
+    effects.holdAccount = async (account, observed) => { heldAccounts.set(account, { resetsAt: observed.resetsAt }); master.holds.push({ account, resetsAt: observed.resetsAt, at: elapsed }); };
+    // GY-1223: the loop reads the master's screen every cycle it supervises it. A working master
+    // shows its own prose — which names the limit banner with no retry marker — until the day
+    // prints its runtime's retry banner; any other pane reads as no screen, as on the other days.
+    const workerOutput = effects.sessionOutput;
+    effects.sessionOutput = agent => {
+      if (agent.name !== name) return workerOutput ? workerOutput(agent) : null;
+      master.reads.push({ at: elapsed, pane: agent.pane_id ?? '', status: agent.agent_status ?? '' });
+      return screens.get(agent.pane_id ?? '') ?? '● Waiting for the next wake\n';
+    };
     const workerPrompt = effects.promptSession!;
     // A wake leaves the master idle, as a session that read master status and found nothing to do.
     effects.promptSession = async (agent, text) => agent.name === name ? void master.wakes.push({ at: elapsed, cycle: master.cycleOf, text }) : workerPrompt(agent, text);
@@ -1635,6 +1652,21 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         reason: `The soak loop verified on ${assessment.host} that the supervisor of epoch ${assessment.epoch} is gone`, verification: assessment.verification });
       fenced.settled.push({ key: work.key, epoch: assessment.epoch, elapsed, cycle: cycles });
     };
+  }
+  // ---- GY-1286: the slow-server day. Inside the window every decision request and observation wake
+  // ---- the loop sends takes `ms` of the clock before the plane answers, as the 30s-timeout writes of
+  // ---- cycles 12285 and 12293 did, so the decisions step runs past its budget and puts items off.
+  const budgetDay = { cycles: [] as { cycle: number; elapsed: number; spentMs: number; slow: number; deferred: string[] }[], withdrawn: [] as { key: string; cycle: number }[], slowCalls: 0, cycleSlow: 0 };
+  if (options.slowDecisions) {
+    const window = options.slowDecisions, { decide, wakeObservation, withdraw } = effects;
+    const slow = async () => {
+      const at = clock.now() - dayStart;
+      if (at < window.from || at >= window.to) return;
+      budgetDay.slowCalls++; budgetDay.cycleSlow++; fenced.drift += window.ms; await moveClock(window.ms);
+    };
+    effects.decide = async (work, action, reason, input) => { await slow(); return decide!(work, action, reason, input); };
+    effects.wakeObservation = async work => { await slow(); return wakeObservation!(work); };
+    effects.withdraw = async (work, decision, reason) => { budgetDay.withdrawn.push({ key: work.key, cycle: cycles }); return withdraw!(work, decision, reason); };
   }
   let publishedMergeQueue: string | null = null;
   const mergeQueuePosts: { at: number; settings: Record<string, number> }[] = [];
@@ -2188,6 +2220,18 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         const live = herdr.byName(config.masterAgentName!);
         if (live?.pane_id) { herdr.kill(live.pane_id); master.killed = live.pane_id; }
       }
+      // GY-1223: from `working.from` the live master works (Herdr reports it working) and its screen
+      // carries a bare limit notice it wrote itself; at `working.retryAt` its runtime prints the
+      // retry banner on its spent account and keeps retrying, still working, until the loop acts.
+      const working = options.master?.working;
+      if (working && !master.worked && elapsed >= working.from) {
+        const live = herdr.byName(config.masterAgentName!);
+        if (live?.pane_id) {
+          herdr.status(live.pane_id, 'working'); master.worked = live.pane_id;
+          screens.set(live.pane_id, `● Reading docs/master-agent-sessions.md\n\nWeekly/Monthly Limit Exhausted. Your limit will reset at ${hostWallClock(retryReset)} is the banner a working session must carry its retry marker beside\n● Working as ${config.masterAgentName}…\n`);
+        }
+      }
+      if (working && master.worked && master.bannerAt === null && elapsed >= working.retryAt) { screens.set(master.worked, retryBanner); master.bannerAt = elapsed; }
       if (options.staleRework && await restartOnVerdict(now)) { elapsed += minute; await moveClock(minute); continue; }
       if (options.staleMerge && await restartOnMerge(now)) { elapsed += minute; await moveClock(minute); continue; }
       master.cycleOf = cycles;
@@ -2200,7 +2244,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
           // An adopted run that already ended is applied on adoption, before the cycle judges its decision.
           headless.adoptedEnded++; await run.settled; headless.settling.delete(run.directory); await new Promise(resolve => setImmediate(resolve));
         }
+        const cycleStart = clock.now(); budgetDay.cycleSlow = 0;
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
+        if (options.slowDecisions) budgetDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, slow: budgetDay.cycleSlow, deferred: [...state.decisionsDeferred] });
         if (options.workspaceFailure) for (const [name, entry] of Object.entries(state.profiles)) if (/worktree/.test(entry.reason ?? '')) workspaceCooled.push(`+${Math.round(elapsed / minute)} min ${name}: ${entry.reason}`);
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
         escalations.push(...result.actions.filter(action => action.kind === 'escalation').map(action => action.detail));
@@ -2334,7 +2380,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, staleMerges, restartLog, guardDay, decompositionDay: decompositionHistory };
+    wakes, staleMerges, restartLog, guardDay, budgetDay, decompositionDay: decompositionHistory };
 }
 
 /**
@@ -3016,7 +3062,7 @@ test('unit:soak-invariants-hold — a guarded merge that refuses a queue head is
   const stuck = 4, lostCarry = 2;
   const { items, final, github, violations, failures, lost, escalations, state, herdr, stale, config, dayStart } =
     await simulateDay({ hours: 4, queued: { window: 4, releaseEveryMs: 3 * minute }, stale: { stuck, lostCarry }, plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set([5]), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 } } });
-  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all ten items are delivered');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all seven items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds across the refusals, the rereviews and the rework');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no worker lost its lease');
@@ -3105,7 +3151,7 @@ test('unit:soak-invariants-hold — candidates whose polled observation is starv
     plan: { items: 6, leftovers: 2, releaseEveryMs: 10 * minute, workMs: 15 * minute, rework: new Set(), deaths: new Set(), slowRecompute: 0, unstable: 0, exhaustedReviewer: 0,
       flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), split: { at: far, item: 6 }, blind: { from: far, to: far }, notice: far, deploys: [],
       heldJob: { at: [], forMs: 0 }, dirtyCheckout: { from: far, to: far }, outOfQueue: { item: 6, afterMs: far } } });
-  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all six items are delivered');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all seven items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds across the starved observations');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no worker lost its lease');
@@ -3186,11 +3232,13 @@ test('unit:soak-invariants-hold — approver launches refused for capacity wait 
   assert.ok(seconds < 200, `the capacity-wait day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
 
-test('unit:soak-invariants-hold — the loop\'s own master session across a day: launched once, relaunched within three cycles of dying while the registry refuses to end its session (which stays owed until it is ended), rotated at its budget, never two at once, and woken only by material events with the heartbeat as the fallback', { timeout: 600_000 }, async () => {
+test('unit:soak-invariants-hold — the loop\'s own master session across a day: launched once, relaunched within three cycles of dying while the registry refuses to end its session (which stays owed until it is ended), rotated at its budget, never two at once, woken only by material events with the heartbeat as the fallback, and rotated once off a spent account it keeps retrying on while working', { timeout: 600_000 }, async () => {
   // GY-898: the master-session step runs every cycle of the real loop here. The session dies at
   // minute 70, inside a window (minutes 60–100) in which the registry refuses every end, so the
   // rotation's release is owed and retried; the relaunched session passes its 90-minute budget.
-  const plan = { exitAt: 70 * minute, refuseRelease: { from: 60 * minute, to: 100 * minute }, sessionMinutes: 90, heartbeatMinutes: 30 };
+  // GY-1223: the third session works from minute 200 with a bare limit notice of its own on screen,
+  // and from minute 230 its runtime retries on its spent account, still working.
+  const plan = { exitAt: 70 * minute, refuseRelease: { from: 60 * minute, to: 100 * minute }, sessionMinutes: 90, heartbeatMinutes: 30, working: { from: 200 * minute, retryAt: 230 * minute } };
   const day = await simulateDay({ hours: 6, master: plan });
   const { final, violations, failures, state, master, cycles } = day;
   assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all fifteen items are delivered with the master session in the loop');
@@ -3215,6 +3263,26 @@ test('unit:soak-invariants-hold — the loop\'s own master session across a day:
   assert.ok(budget && budget.after >= relaunched + plan.sessionMinutes * minute && budget.before <= relaunched + (plan.sessionMinutes + 32) * minute,
     `the relaunched session rotated at its ${plan.sessionMinutes}-minute budget: ${JSON.stringify({ relaunched, rotations: master.rotations })}`);
   assert.equal(master.launches.length, master.rotations.length + 1, 'every rotation relaunched exactly one session');
+  // GY-1223: a working master is read and judged every cycle by the real loop; its own prose about
+  // the banner never rotates it, the retry banner rotates it exactly once, its account is held to
+  // the banner's reset, and no later launch takes that account before the reset.
+  const worked = master.launches.findIndex(launch => launch.pane === master.worked);
+  assert.ok(worked >= 0 && master.bannerAt !== null, `the scenario set a live master working and printed its retry banner: ${JSON.stringify({ worked: master.worked, bannerAt: master.bannerAt })}`);
+  const workingReads = master.reads.filter(read => read.pane === master.worked && read.status === 'working');
+  assert.ok(workingReads.some(read => read.at < master.bannerAt!), `the loop read the working master's own prose before the banner: ${workingReads.length} reads`);
+  // The soak cadence equals workingOutputReadMs, so this proves one read per cycle, not the
+  // throttle itself; unit:working-session-output-read-throttled pins the throttle.
+  assert.ok(workingReads.length <= new Set(workingReads.map(read => read.at)).size, 'a working master is read at most once a cycle (the throttle is pinned by its unit test)');
+  const exhausted = master.rotations.filter(rotation => /\(exhausted\)/.test(rotation.detail));
+  assert.equal(exhausted.length, 1, `exactly one rotation off the spent account: ${JSON.stringify(master.rotations)}`);
+  assert.ok(exhausted[0].at >= master.bannerAt! && exhausted[0].at <= master.bannerAt! + 2 * minute, `the retrying master rotated within two cycles of its banner: ${JSON.stringify({ bannerAt: master.bannerAt, rotation: exhausted[0] })}`);
+  assert.match(exhausted[0].detail, /is retrying on its provider's limit notice/);
+  assert.ok(!master.rotations.some(rotation => rotation.at >= plan.working.from && rotation.at < master.bannerAt!), 'the working master\'s own prose about the banner rotated nothing');
+  assert.deepEqual(master.holds.map(hold => hold.account), [master.accounts[worked]], 'the spent account, and only it, was held');
+  assert.equal(master.holds[0].resetsAt, day.retryReset.toISOString(), 'the hold lasts until the banner\'s reset');
+  assert.ok(master.accounts.slice(worked + 1).length > 0 && master.accounts.slice(worked + 1).every(account => account !== master.accounts[worked]),
+    `no later master launched into the held account before its reset: ${JSON.stringify(master.accounts)}`);
+  assert.equal(master.launches[worked + 1]?.at !== undefined && master.launches[worked + 1].at <= exhausted[0].at + 3 * minute, true, 'the role relaunched within three cycles of the rotation');
   // AC-2: at most one wake per cycle, every event wake names its causes, heartbeats are spaced by
   // the configured window, and no cycle repeats the previous cycle's causes (a wake storm).
   const perCycle = new Map<number, number>();
@@ -3350,7 +3418,7 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
     hours: 6, reassigned: n,
     plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
   });
-  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all six items are delivered');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all seven items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds across the idle re-prompt and the reclaim');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no lease was lost: the idle attempt was reclaimed');
@@ -3889,6 +3957,44 @@ test('unit:soak-invariants-hold — launches that keep failing for one cause are
   assert.deepEqual(state.dispatchFailures, {}, 'every failure run was retired: by the blocker, or by the launch that landed');
 });
 
+test('unit:soak-invariants-hold — a slow control plane carries the decisions step past its budget for an hour and a half: every cycle stays within the interval, every item put off is reached within a few cycles, attestations included, none has its standing decision withdrawn while put off, nothing is left put off once the plane is fast, and every invariant holds', { timeout: 600_000 }, async () => {
+  // GY-1286: for the window every decision request and observation wake takes 12 s to answer, so
+  // the step's 30 s budget (two fifths of the 60 s interval, never under the actionable cadence)
+  // holds two requests a cycle and the rest are put off; ten items release thirty seconds apart
+  // and nine of them are sent back once, so several need a decision at once, and item 3's `manual:` proof needs the loop's attestation.
+  const slow = { from: 5 * minute, to: 150 * minute, ms: 15_000 }, rework = new Set([1, 2, 4, 5, 6, 7]);
+  const { items, final, violations, failures, lost, decideCalls, budgetDay } = await simulateDay({
+    hours: 5, slowDecisions: slow,
+    plan: { items: 7, leftovers: 0, slowRecompute: 0, releaseEveryMs: 1_000, workMs: 50 * minute, rework, deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, attested: 3, exhaustedReviewer: 0, unstable: 0, lowLane: 0, outOfQueue: { item: 7, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 7 } },
+  });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all seven items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds while the step is bounded and once the plane is fast');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  const cycles = budgetDay.cycles, deferring = cycles.filter(entry => entry.deferred.length);
+  assert.ok(budgetDay.slowCalls >= 6 && deferring.length >= 2, `the window ran and the step put items off across cycles (${budgetDay.slowCalls} slow calls, ${deferring.length} cycles deferring)`);
+  // The step's budget plus the request in flight at the bound and each pass's one guaranteed
+  // request: never the whole interval, however many items wait.
+  assert.deepEqual(cycles.filter(entry => entry.spentMs > soakConfig.run.intervalSeconds * 1000).map(entry => `cycle ${entry.cycle} +${Math.round(entry.elapsed / minute)} min: ${entry.spentMs}ms, ${entry.slow} slow calls`), [], 'every cycle stays within the interval');
+  // Nothing waits for good: an item stays put off a handful of consecutive cycles at most.
+  const runs = new Map<string, number>(), longest = new Map<string, number>();
+  for (const entry of cycles) for (const key of new Set([...runs.keys(), ...entry.deferred])) {
+    const run = entry.deferred.includes(key) ? (runs.get(key) ?? 0) + 1 : 0;
+    if (run) runs.set(key, run); else runs.delete(key);
+    longest.set(key, Math.max(longest.get(key) ?? 0, run));
+  }
+  assert.deepEqual([...longest].filter(([, run]) => run > 4), [], `no item is put off more than four cycles running: ${JSON.stringify([...longest])}`);
+  assert.ok(Math.max(...cycles.map(entry => entry.deferred.length)) <= items.length, 'what is put off is bounded by the open items');
+  assert.deepEqual(cycles.filter(entry => entry.elapsed >= slow.to + 2 * minute && entry.deferred.length).map(entry => `+${Math.round(entry.elapsed / minute)} min: ${entry.deferred.join(', ')}`), [], 'once the plane is fast, nothing is put off');
+  // A decision the step still needs is never withdrawn while its item waits for the next cycle.
+  const withdrawnDeferred = budgetDay.withdrawn.filter(entry => cycles.find(cycle => cycle.cycle === entry.cycle)?.deferred.includes(entry.key));
+  assert.deepEqual(withdrawnDeferred, [], 'no standing decision is withdrawn for an item put off');
+  // The attested item's attestation is requested, and it is delivered on it.
+  const attested = items[2].key;
+  assert.ok(decideCalls.some(call => call.key === attested && call.action === 'attest'), `${attested}'s attestation was requested: ${JSON.stringify(decideCalls.filter(call => call.key === attested).map(call => call.action))}`);
+  assert.ok(final.find(item => item.key === attested)!.evidence.some(entry => entry.proof === MANUAL && entry.result === 'pass'), `${attested} was delivered on its attestation`);
+});
+
 test('unit:soak-invariants-hold — containment quarantines of dead workers stand across many cycles while the timed clock read fails and then answers slowly, one read a cycle and none without an assessable quarantine, each escalation recorded once, and they settle once reads are fast, with every invariant holding', { timeout: 600_000 }, async () => {
   // GY-811: every supervised launch raises a containment quarantine; two workers die, so their
   // fences outlive them and only the loop can lower them. The work snapshot takes 6 s to read, so
@@ -3904,7 +4010,7 @@ test('unit:soak-invariants-hold — containment quarantines of dead workers stan
     hours: 3, containment: { failUntil, slowUntil },
     plan: { items: 6, leftovers: 2, slowRecompute: 0, releaseEveryMs: 5 * minute, workMs: 20 * minute, rework: new Set(), deaths: new Set(deaths), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set([3]), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
   });
-  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all six items are delivered');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all seven items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds while the fences stand and once they settle');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no lease was lost: a dead worker lapses and its fence waits for the loop');

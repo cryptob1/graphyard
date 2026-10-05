@@ -16,6 +16,7 @@ import { baseRefreshConflict } from '../merge-queue.js';
 import { docsSyncRoute } from './docs-sync-route.js';
 import { wakeObservationJob } from './cycle-delivery.js';
 import { createApproverSupervisor } from './cycle-approvers.js';
+import { decisionBudget, deferredFirst, settleDeferred } from './decision-budget.js';
 
 /** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403). */
 export { handWatchPrefix };
@@ -285,7 +286,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     await request(item, decision, key, watch);
   };
 
-  const needed = new Set<string>(), unattestable = new Set<string>();
+  const needed = new Set<string>(), unattestable = new Set<string>(), budget = decisionBudget(state, now, (config.run.intervalSeconds ?? 20) * 1000);
   const pause = githubPause(snapshot.jobs, clock);
   // A scope request is judged by the review-finding rule (step 2a) before it is the approver's: the
   // findings for this request and policy revision were read and named none of it. A loop that
@@ -315,7 +316,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (held === undefined || age < held) capacityRank.set(watch.work, age);
   }
   const waitingRank = (item: Work) => capacityRank.get(item.key) ?? Number.POSITIVE_INFINITY;
-  const workToProcess = capacityRank.size ? [...snapshot.work].sort((a, b) => waitingRank(a) - waitingRank(b)) : snapshot.work;
+  const ordered = deferredFirst(snapshot.work, state.decisionsDeferred), workToProcess = capacityRank.size ? [...ordered].sort((a, b) => waitingRank(a) - waitingRank(b)) : ordered;
   // A producer request whose attempts are used up calls for rework once its escalation stood a cycle (GY-496).
   const exhausted = (await cycle.exhaustedProofs()).filter(entry => { const raised = state.actions[exhaustedProofKey(entry)]; return !!raised && raised.cycle < state.cycle; });
   // A needed decision with no watch is requested once ready to retry, or escalated.
@@ -329,6 +330,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   };
   const wake = effects.observe && observationWaker(effects.observe);
   const noteWait = async (item: Work, detail: string) => { const waitKey = `wait:rework:${item.id}`; if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
+  const routinePass = budget.pass(), attestPass = budget.pass();
   for (const read of workToProcess) await isolate('decision', read, read.key, async () => {
     let item = read;
     const assessment = assessments[item.id];
@@ -347,12 +349,12 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       if (withheld && !(item.stage !== 'done' && assessment) && detailChanged(state.actions[escalationKey], detail)) await note(escalationKey, item, 'escalation', 'done', detail);
       return;
     }
-    let key = decisionKey(item, decision);
+    let key = decisionKey(item, decision); if (routinePass.over()) { needed.add(key); budget.defer(item); return; }
     // A confirmed conflict confined to docs pages is a docs-sync's, not a worker's (GY-566).
     if (decision.action === 'rework' && !state.approvals[key] && baseRefreshConflict(item) && decision.binding === `${item.candidate!.sha}:conflict` && await docsSync.holds(item)) return;
     needed.add(key);
     // Rework waits for an observation that still describes the item (GY-144); the step wakes it unless paused (GY-793) and re-decides.
-    // The loop's own landed wake of the submitted head counts as that observation (GY-1266).
+    // The loop's own landed wake of the submitted head counts as that observation, whatever its age (GY-1266, GY-1257).
     const woken = state.actions[`wake:observation:${item.id}`];
     let wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause, woken?.state === 'done' ? woken.at : null) : null;
     const fresh = wait && !pause && wake && !state.approvals[key] ? await wake(item, clock) : null;
@@ -376,8 +378,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     await requestNeeded(item, decision, key);
   });
   // 4c+. Attestations (GY-521): one attest decision per `manual:` proof no producer may run, bound to its head, one at a time.
-  for (const item of snapshot.work) await isolate('decision', item, item.key, async () => {
-    const attestations = attestDecisions(item, snapshot.work, clock); let judging = false;
+  for (const item of ordered) await isolate('decision', item, item.key, async () => {
+    const attestations = attestDecisions(item, snapshot.work, clock); let judging = false; if (attestations.length && attestPass.over()) { for (const decision of attestations) needed.add(decisionKey(item, decision)); budget.defer(item); return; }
     for (const decision of attestations) {
       const key = decisionKey(item, decision), watch = state.approvals[key];
       needed.add(key);
@@ -430,7 +432,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // role's slot, so the watch stays, past any bound, until the registry is told.
     if ((closed && withdrawn) || (watch.closeAttempts >= maxApproverCloses && !watch.session)) delete state.approvals[key];
   });
-
+  await settleDeferred(cycle, budget);
   await approvers.superviseHandApprovers();
   await approvers.reconcileRegistrySessions();
 }
