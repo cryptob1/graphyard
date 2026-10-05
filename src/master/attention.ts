@@ -37,7 +37,9 @@ export interface AttentionOwner { role: 'master' | 'reviewer' | 'control plane' 
  * An attention item carries its fault kind and class (GY-173); a builder that sets neither is classified by its wording.
  * `resource` names the registered resource a symptom was attributed to (GY-1272), so the loop tracks it as that resource's fault.
  */
-export interface AttentionItem extends AttentionOwner { subject: string; text: string; kind?: FaultKind; faultClass?: FaultClass; resource?: string }
+export interface AttentionItem extends AttentionOwner { subject: string; text: string; kind?: FaultKind; faultClass?: FaultClass; resource?: string;
+  /** Until when the loop is itself carrying what the line names (GY-1315): shown in master status, counted as a fault only past it. */
+  inMotionUntil?: string }
 export const agentOwner = (role: 'master' | 'reviewer' | 'control plane', next: string, approvedBy: 'approver' | null = null): AttentionOwner => ({ role, approvedBy, human: false, humanOnly: null, next });
 export const humanOwner = (humanOnly: typeof humanOnlyDecisions[number], next: string): AttentionOwner => ({ role: 'human', approvedBy: null, human: true, humanOnly, next });
 /** The sources of installation attention; each is also its fault kind. */

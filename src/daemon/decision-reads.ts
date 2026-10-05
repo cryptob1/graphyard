@@ -4,6 +4,7 @@ import { approvalApplyGraceMs, situationLabel, stalledApproval, supersededSituat
 import { routableScopeRequest } from '../model/scope.js';
 import type { ApprovalWatch } from './state.js';
 import type { DaemonEffects } from './effects.js';
+import { staleReleaseCandidates } from '../model/stale-release.js';
 
 /** Every kind the control plane folds an item's decision history from (server/decision-ledger.ts). */
 export const decisionEventKinds = ['requested', 'concurred', 'refused', 'declined', 'approved', 'applied', 'failed', 'stale', 'withdrawn', 'superseded'].map(kind => `decision.${kind}`);
@@ -51,6 +52,7 @@ export const decisionRefreshMs = 30 * 60_000;
  * an approver this cycle, then the open watches. A worker waits on that request, inside the scope
  * budget: read only when the step reached it, its history missed the deadline behind every slower
  * read ahead of it, cycle after cycle (GY-1287 on 5 October 2026, twice, until the budget passed).
+ * The unreleased backlog items the stale-release step reads come last (GY-1315).
  */
 export async function decisionReads(effects: DaemonEffects, held: HeldDecisions, open: readonly Work[], watched: readonly ApprovalWatch[], clock = Date.now(), deadlineMs = decisionReadDeadlineMs) {
   const until = performance.now() + deadlineMs;
@@ -96,7 +98,10 @@ export async function decisionReads(effects: DaemonEffects, held: HeldDecisions,
   // The waiting scope requests' and open watches' histories are read ahead, a bounded few at a time, while the step works.
   const keys = new Set(watched.filter(watch => !watch.settledAt).map(watch => watch.work));
   const scoped = open.filter(item => item.stage !== 'done' && !!routableScopeRequest(item, clock));
-  const ahead = effects.decisions ? [...scoped, ...open.filter(item => keys.has(item.key) && !scoped.includes(item))].filter(item => !held.histories.has(item.id)) : [];
+  const watching = open.filter(item => keys.has(item.key) && !scoped.includes(item));
+  // Last, the unreleased backlog the stale-release step reads (GY-1315), so a cold backlog is read while the step works, not when it reaches them.
+  const backlog = staleReleaseCandidates(open).filter(item => !scoped.includes(item) && !watching.includes(item));
+  const ahead = effects.decisions ? [...scoped, ...watching, ...backlog].filter(item => !held.histories.has(item.id)) : [];
   const next = async (): Promise<void> => { const item = ahead.shift(); if (item) { if (!held.histories.has(item.id)) await start(item).catch(() => undefined); return next(); } };
   void Promise.all(Array.from({ length: decisionReadConcurrency }, next));
   return reads;

@@ -17,6 +17,7 @@ import { docsSyncRoute } from './docs-sync-route.js';
 import { wakeObservationJob } from './cycle-delivery.js';
 import { createApproverSupervisor } from './cycle-approvers.js';
 import { decisionBudget, deferredFirst, settleDeferred } from './decision-budget.js';
+import { staleReleaseStep } from './stale-releases.js';
 
 /** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403). */
 export { handWatchPrefix };
@@ -330,7 +331,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // replaces it, so the bound survives a request that is itself refused.
     if (watch.requests >= maxDecisionRequests) { if (!watch.exhaustedAt) await escalateUnjudged(item, watch, step.detail); return; }
     if (state.actions[key]?.state === 'failed' && !readyToRetry(state.actions[key], state.cycle)) return;
-    if (!state.actions[`${base}:ended`]) await note(`${base}:ended`, item, 'decision', 'failed', `${step.detail}; ${item.key} still needs it, so it is requested again`);
+    // One the server settled stale, superseded or withdrawn never failed: it no longer describes the item, and asking again is the
+    // loop's own next step, not a failed action — GY-949's superseded rework counted at 15:37:28 and applied a minute later (GY-1315).
+    const moved = judged?.state === 'stale' || judged?.state === 'superseded' || judged?.state === 'withdrawn';
+    if (!state.actions[`${base}:ended`]) await note(`${base}:ended`, item, 'decision', moved ? 'done' : 'failed', `${step.detail}; ${item.key} still needs it, so it is requested again`);
     await request(item, decision, key, watch);
   };
 
@@ -488,4 +492,6 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   await settleDeferred(cycle, budget);
   await approvers.superviseHandApprovers();
   await approvers.reconcileRegistrySessions();
+  // 4c++. A stale release of a backlog item is asked again, whoever asked first (GY-1315): last, so its backlog reads hold nothing above.
+  await staleReleaseStep(cycle, effects);
 }

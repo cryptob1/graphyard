@@ -180,9 +180,10 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   /**
    * Requests one routine decision with the master's own operator-agent identity and returns it.
    * A loop configured without these three keeps cycling: each routine decision is then recorded as
-   * an escalation naming the command a master session runs, exactly as before.
+   * an escalation naming the command a master session runs, exactly as before. It also requests a
+   * stale backlog release again (GY-1315).
    */
-  decide?: (work: Work, action: RoutineDecisionAction, reason: string, input?: Record<string, unknown>) => Promise<{ id: string }>;
+  decide?: (work: Work, action: RoutineDecisionAction | 'release', reason: string, input?: Record<string, unknown>) => Promise<{ id: string }>;
   /**
    * Launches the independent approver session for one requested decision, under the name
    * `approverSessionName` gives it, and reports the session so later cycles can supervise it.
