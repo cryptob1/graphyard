@@ -20,7 +20,7 @@
 - **GitHub paused or webhook silent**: [request budget](operations-reference.md#github-request-budget).
 - **Smoke proof failed**: [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
 - **Main ahead of production**: a [deployment incident](operations-reference.md#merged-but-not-deployed). An up-to-date release starts without taking coordination locks; a migrating release fails fast within the health check, and live traffic migrates safely: it touches only the tables whose DDL changed since it recorded a digest per table (unchanged tables are skipped without any lock), locks each table before rebuilding its trigger, and retries a deadlock or expired lock wait with backoff inside one 30-second lock budget, failed locks release at once; each attempt waits at most 3 seconds for a lock, so live writes never queue behind it longer; migrations and backups lock separately. First `work_index` rebuild briefly locks `work_items`.
-- **Diagnosis `waiting`** (`daemon.diagnoses`): its provider refused every run for quota (429 or limit notice). No fault, not `inFlight`; `refusedAt` is the refusal, `retryAt` the provider's reset (else an hour on). Nothing launches before it; then one probe runs the subject refused longest ago, the rest once the provider answers. Never pruned.
+- **Diagnosis `waiting`**: a [provider hold](recovery.md#provider-held-diagnoses), not a fault.
 - **Loop down**: [master coordination loop](operations-reference.md#master-coordination-loop).
 - **A change must prove itself**: [bootstrap mode](operations-reference.md#bootstrap-mode-for-a-self-proving-change).
 
