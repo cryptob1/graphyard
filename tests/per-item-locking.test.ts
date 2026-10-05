@@ -266,6 +266,18 @@ function holdEvaluation(id: string) {
   };
   return { reached, release, restore: () => { internals.reconcileItem = original; } };
 }
+/** Hold the reconciliation batch's write of `id` (GY-1290), before its transaction starts, until `release`; `reached` resolves once it is there. */
+function holdWrite(id: string) {
+  const internals = engine as unknown as { reconcileWrite: (plan: { id: string }, ...rest: unknown[]) => Promise<unknown> };
+  const original = internals.reconcileWrite;
+  let release!: () => void, entered!: () => void, armed = true;
+  const released = new Promise<void>(resolve => { release = resolve; }), reached = new Promise<void>(resolve => { entered = resolve; });
+  internals.reconcileWrite = async function (this: Engine, plan, ...rest) {
+    if (armed && plan.id === id) { armed = false; entered(); await released; }
+    return original.call(this, plan, ...rest);
+  };
+  return { reached, release, restore: () => { internals.reconcileWrite = original; } };
+}
 
 // GY-1290 AC-1: production's ticks took 22-53 s for 28 items and deferred some. Measured here, the
 // contention came from observation saves: each holds the coordination lock across its whole
@@ -315,15 +327,15 @@ test('unit:reconcile-uncontended-under-load 30 items reconciled beside lease ren
 });
 
 // GY-1290 AC-2: three workers lost their leases while reconciliation contended.
-test('unit:renewal-independent-of-reconcile a lease renewal completes within 1000 ms while a reconciliation batch is held open on its item', { timeout: 60_000 }, async () => {
-  const worker = { ...workers[0], id: 'renewal-worker' };
-  engine.principals = [...engine.principals, worker];
+test('unit:renewal-independent-of-reconcile a lease renewal completes within 1000 ms while a reconciliation batch is held open on its item, in its evaluation and in its writes', { timeout: 60_000 }, async () => {
+  const worker = { ...workers[0], id: 'renewal-worker' }, laterWorker = { ...workers[1], id: 'renewal-worker-later' };
+  engine.principals = [...engine.principals, worker, laterWorker];
   const work = await claimed(worker);
   // Its gates cleared, the item's next evaluation writes it: the batch evaluates it and then writes it.
-  const unevaluated = async () => store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{gates}', '[]'::jsonb) WHERE id = $1`, [work.id]);
-  const renewWithin = async (what: string) => {
+  const unevaluated = async (id = work.id) => store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{gates}', '[]'::jsonb) WHERE id = $1`, [id]);
+  const renewWithin = async (what: string, by = worker, item = work) => {
     const started = performance.now();
-    const renewed = await heartbeat(worker, work);
+    const renewed = await heartbeat(by, item);
     assert.ok(performance.now() - started < 1_000, `${what}: the renewal took ${Math.round(performance.now() - started)} ms`);
     return renewed;
   };
@@ -354,7 +366,24 @@ test('unit:renewal-independent-of-reconcile a lease renewal completes within 100
     stored = (await store.workItem(work.id))!;
     assert.equal(stored.lease!.expiresAt, renewed.lease!.expiresAt, 'the renewal stands');
     assert.ok(stored.gates.length > 0, 'and the batch wrote its evaluation');
-  } finally { engine.reconcileBatchMs = 250; }
+
+    // Held open in its writes: the batch has written the first item and holds the write of the next.
+    const later = await claimed(laterWorker);
+    await unevaluated(); await unevaluated(later.id);
+    engine.reconcileBatchWrites = 100;
+    const writing = holdWrite(later.id);
+    pass = engine.reconcile();
+    await writing.reached;
+    assert.ok((await store.workItem(work.id))!.gates.length > 0, 'the batch wrote the first item before it reached the next');
+    renewed = await renewWithin('on an item the batch has already written');
+    const renewedLater = await renewWithin('on an item the batch has planned to write next', laterWorker, later);
+    writing.release(); await pass; writing.restore();
+    stored = (await store.workItem(work.id))!;
+    assert.equal(stored.lease!.expiresAt, renewed.lease!.expiresAt, 'the renewal of the written item stands');
+    const storedLater = (await store.workItem(later.id))!;
+    assert.equal(storedLater.lease!.expiresAt, renewedLater.lease!.expiresAt, 'the batch wrote the next item over its renewal, not instead of it');
+    assert.ok(storedLater.gates.length > 0, 'and wrote its evaluation');
+  } finally { engine.reconcileBatchMs = 250; engine.reconcileBatchWrites = 8; }
 });
 
 test('unit:per-item-locking 100 items and 20 concurrent writers keep p95 request latency under 1 s', { timeout: 300_000 }, async () => {

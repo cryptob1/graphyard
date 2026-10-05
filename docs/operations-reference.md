@@ -124,7 +124,7 @@ Only `admin` grants or revokes, to `producer` principals: exact name, `kind:*` o
 A tick runs every 2 s and should finish within 5 s (slower logs `reconciliation tick took N ms`, with its writes and longest lock wait). Locks, in order:
 
 1. Opening: the coordination lock, briefly, to read row versions and sweep direct merges.
-2. Each batch evaluates up to 250 ms with no lock, writing nothing; renewals, observations and requests on any item proceed.
-3. Only if an item changes does the batch take the coordination lock (waiting at most 500 ms, holding no row), then each written item's row (`FOR NO KEY UPDATE`), re-evaluating it on the current fleet; at most 8 writes per batch. Job wakes follow at commit, in work-id order.
+2. Each batch evaluates up to 250 ms with no lock, writing nothing, and plans at most 8 writes; renewals, observations and requests on any item proceed.
+3. Each planned write is its own transaction: the coordination lock (waiting at most 500 ms, holding no row), then that item's row (`FOR NO KEY UPDATE`), then commit. The batch's evaluation is written as is unless the item or another item's face moved since; then the item is re-evaluated on the current fleet. Job wakes follow at commit, in work-id order.
 
-A batch whose lock wait expires three times defers only its writes to the next tick. Renewals take only their item's lock, never waiting on evaluation. Stale observation snapshots retry after 2 s.
+A write whose lock wait expires three times defers the batch's unwritten items to the next tick. Renewals take only their item's lock and wait on reconciliation for at most one write of their own item, never on evaluation or on other items' writes. Stale observation snapshots retry after 2 s.
