@@ -74,7 +74,7 @@ A silent hour: `master status` points to `https://github.com/settings/apps/APP-S
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (warns under 25%) and loop-removed 2h-idle temporary files. Database bound: `GRAPHYARD_DATABASE_MAX_BYTES`, else readable same-host `data_directory` volume, else advisory, silent 10 GiB. `agent-names` flags holders 10m past settling; `loaded-revision` counts code moves.
+Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (warns under 25%) and loop-removed 2h-idle temporary files. Database bound: `GRAPHYARD_DATABASE_MAX_BYTES`, else readable same-host `data_directory` volume, else advisory, silent 10 GiB. `agent-names` flags holders 10m past settling (reclaimed each dispatcher tick); `loaded-revision` counts code moves after a 30m self-upgrade window.
 
 ## Storage retention
 
@@ -94,7 +94,7 @@ A `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths"
 
 ## Delivered with a failed smoke proof
 
-It stays Done, **delivered with failure**; revert via a new item, never backfill.
+Stays Done, **delivered with failure**; revert via a new item, never backfill.
 
 ## Merged but not deployed
 

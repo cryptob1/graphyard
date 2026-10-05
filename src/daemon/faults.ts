@@ -21,6 +21,7 @@ import { candidateKey } from './reconcile.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
 import { baseRefreshConflict, currentRestore } from '../merge-queue.js';
 import { mergeBaseDismissal } from '../merge-base-ancestry.js';
+import { openAction } from '../model/next-action.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
 export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[];
@@ -77,7 +78,8 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
       if (item.kind !== 'gate' && item.kind !== 'containment-grace' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))
         && !(item.kind === 'contaminated' && restoreInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'base-conflict' && baseConflictInMotion(byKey.get(item.subject), now))
-        && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now)))
+        && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now))
+        && !(item.kind === 'owed-decision' && item.text.includes(`; a new head for ${item.subject} has been owed for`) && reworkDecisionInMotion(byKey.get(item.subject), now)))
         derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
     if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
@@ -114,6 +116,24 @@ export function restoreInMotion(work: Work | undefined, now: number): boolean {
   const ejected = work.queueEjection?.sha === work.candidate.sha ? work.queueEjection : null;
   const since = restore ? restore.requested?.at ?? ejected?.at : ejected?.at;
   return !!since && now - Date.parse(since) <= restoreWaitBoundMs;
+}
+/** How long a rework decision (a new head owed by `request-rework`) may stay owed before it counts as a decision fault (GY-1251). */
+export const reworkDecisionWaitBoundMs = 30 * 60_000;
+/**
+ * GY-1251. Whether the rework decision an item owes is still in motion: its open action is
+ * `request-rework` and the queue row for that action was requested within `reworkDecisionWaitBoundMs`.
+ * The loop requests that decision and supervises its approver session on its own (cycle-decisions
+ * step 4c), so a new head owed for minutes after a failed CI rerun or a reviewer's changes is the
+ * ordinary rework round, not a decision fault (GY-1168, GY-1244, GY-1238, GY-1062, GY-1124 on
+ * 5 October 2026: each counted 15s to 4m after the action was computed). A rework owed past the
+ * bound counts, as does one with no queue row to date it; an owed escalation is never in motion here.
+ */
+export function reworkDecisionInMotion(work: Work | undefined, now: number): boolean {
+  const action = work && openAction(work);
+  if (action?.kind !== 'request-rework') return false;
+  const row = (work!.actionQueue?.actions ?? []).find(entry => entry.kind === action.kind && entry.binding === action.binding);
+  const since = row?.requestedAt ? Date.parse(row.requestedAt) : Number.NaN;
+  return Number.isFinite(since) && now - since <= reworkDecisionWaitBoundMs;
 }
 /** How long an approval dismissed for a merge-base change may stay in motion before it counts as a review-convergence fault (GY-1140). */
 export const mergeBaseDismissalWaitBoundMs = 30 * 60_000;

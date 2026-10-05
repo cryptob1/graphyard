@@ -5,7 +5,6 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, saveDiscovery, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
-import { defaultOptimisticExclude } from './optimistic-merge.js';
 import { onboardingParallelTips } from './master/profiles.js';
 import { generatedFilesAssignment } from './install/generated-files.js';
 import { ensureMergeMode, type ProtectionRun } from './protection.js';
@@ -531,14 +530,12 @@ export async function readDocumentationConfig(root: string): Promise<Documentati
 
 /**
  * The `mergeQueue` configuration onboarding writes when a repository's master config names none:
- * the product's recommended parallel-tips value (`onboardingParallelTips`, master/profiles.ts) and
- * shared-infrastructure globs (`defaultOptimisticExclude`, optimistic-merge.ts) under the keys
- * `mergeQueue.parallelTips` and `mergeQueue.optimisticExclude`, where the operator tunes them for
- * this repository. A later `master init` keeps what is written, exactly as it keeps an operator-tuned
- * profile, so the defaults are named once per repository and the product hardcodes nobody's file
- * list or concurrency settings.
+ * the product's recommended parallel-tips value (`onboardingParallelTips`, master/profiles.ts) under
+ * `mergeQueue.parallelTips`, where the operator tunes it for this repository. A later `master init`
+ * keeps what is written, exactly as it keeps an operator-tuned profile, so the default is named once
+ * per repository and the product hardcodes nobody's concurrency settings.
  */
-export const onboardingMergeQueue = (): { parallelTips: number; optimisticExclude: string[] } => ({ parallelTips: onboardingParallelTips, optimisticExclude: [...defaultOptimisticExclude] });
+export const onboardingMergeQueue = (): { parallelTips: number } => ({ parallelTips: onboardingParallelTips });
 
 // --- Executor supervision: what a host runs, and the unit that keeps it running (GY-105) -----------
 

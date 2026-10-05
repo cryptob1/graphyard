@@ -14,7 +14,6 @@ import { plainReason } from '../src/model/plain-status.js';
 import { refusalAction } from '../src/model/refusal-mapping.js';
 import { checkRerunVisibilityMs, queueRef, reconcileCheckReruns, rerunFailedChecksEvent, tipVerdict, type QueuePlacement, type QueueSpeculation } from '../src/merge-queue.js';
 import { defaultRerunFailedChecks, masterConfigSchema, maxRerunFailedChecks, rerunFailedChecks } from '../src/master/profiles.js';
-import { defaultOptimisticExclude } from '../src/optimistic-merge.js';
 import { evaluate, type Observation, type Principal, type Work } from '../src/model.js';
 
 // GY-516: a single infrastructure flake on a merge-queue tip ejected the validated head and cost the
@@ -223,7 +222,7 @@ test('unit:tip-flake-rerun-configurable — mergeQueue.rerunFailedChecks default
     assert.equal((await api('merge-queue', tokens.coordinator, {})).status, 400);
     await effects.publishMergeBatchSize!();
     await effects.publishMergeBatchSize!();
-    assert.deepEqual(posted, [{ batchSize: 4, optimistic: true, optimisticExclude: [...defaultOptimisticExclude], parallelTips: 4, rerunFailedChecks: 0 }], 'published once, not every cycle');
+    assert.deepEqual(posted, [{ batchSize: 4, parallelTips: 4, rerunFailedChecks: 0 }], 'published once, not every cycle');
     assert.equal(engine.rerunFailedChecks, 0, 'the control plane applies the master\'s setting at once');
     assert.equal(await new Engine(store).loadRerunFailedChecks(), 0, 'a restarted control plane reads it back from the installation ledger');
     await clearQueue();
@@ -236,7 +235,7 @@ test('unit:tip-flake-rerun-configurable — mergeQueue.rerunFailedChecks default
     // Removing the setting publishes the product default again.
     configured = undefined;
     await effects.publishMergeBatchSize!();
-    assert.deepEqual(posted.at(-1), { batchSize: 4, optimistic: true, optimisticExclude: [...defaultOptimisticExclude], parallelTips: 4, rerunFailedChecks: 1 });
+    assert.deepEqual(posted.at(-1), { batchSize: 4, parallelTips: 4, rerunFailedChecks: 1 });
     assert.equal(await new Engine(store).loadRerunFailedChecks(), 1);
     assert.equal((await store.pool.query('SELECT count(*)::int AS n FROM events WHERE work_id IS NULL AND kind=$1', [rerunFailedChecksEvent])).rows[0].n, 2, 'one ledger entry per change');
   } finally {
