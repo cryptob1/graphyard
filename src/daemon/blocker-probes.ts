@@ -8,7 +8,7 @@ import type { BlockerClass, BlockerClassification } from '../model/blocker-class
 export type { BlockerClassification };
 import { grantWorkerPaths, runtimeSandboxes, workerPaths, writablePaths } from '../worker-sandbox.js';
 import type { WorkerProfile } from '../master/profiles.js';
-import { accountLaunch, readEnvironmentLog, selectionKey, sharedGitDirectory, type LaunchAccount } from '../master/environments.js';
+import { accountLaunch, checkAgentEnvironment, readEnvironmentLog, selectionKey, sharedGitDirectory, type LaunchAccount } from '../master/environments.js';
 import { readFleet, type FleetLaunchAccount, type FleetProbe } from '../fleet.js';
 import { rolePolicy } from '../model/registry.js';
 import { sessionConfinement } from '../master/launch.js';
@@ -18,7 +18,8 @@ export interface BlockerProbeRecord { blocker: string; class: BlockerClass; prob
 /** The launch a worker gets: its runtime kind, the arguments that carry its sandbox, its environment, and the coordinator confinement words placed before its runtime (GY-888). */
 export interface WorkerLaunch { kind?: string | null; args: string[]; environment?: Record<string, string>; confinement?: readonly string[] }
 /** What one probe found: what it ran, whether the cause no longer stands, and what it saw. */
-export interface BlockerProbeResult { probe: string; passed: boolean; detail: string; /** outside-scope-test-failure: the base tip the probe read. */ baseTip?: string }
+export interface BlockerProbeResult { probe: string; passed: boolean; detail: string; /** outside-scope-test-failure: the base tip the probe read. */ baseTip?: string;
+  /** outside-scope-test-failure: the base commit the blocked attempt's branch was built on, the one its suite failed on, when its worktree is here. */ failedOn?: string }
 
 /**
  * The command that runs `script` inside the confinement the worker's own launch describes: the
@@ -56,6 +57,8 @@ export interface BlockerProbeDeps {
   planeHealth?: () => Promise<string | null>;
   /** The base branch's current tip. */
   baseTip?: () => Promise<string>;
+  /** The base commit the blocked attempt's branch was built on, when its worktree is on this host. */
+  failedBase?: () => Promise<string | null>;
   /** The launch of the worker profile the next attempt would get. */
   launch: WorkerLaunch | null;
   /** Where the next attempt runs: the blocked attempt's worktree on this host, else this checkout. */
@@ -95,7 +98,13 @@ export async function probeBlocker(item: Work, classification: BlockerClassifica
     }
     case 'outside-scope-test-failure': {
       if (!deps.baseTip) return null;
-      try { const tip = (await deps.baseTip()).trim(); return { probe: 'the base branch has moved since the failure', passed: false, detail: `the base tip is ${tip.slice(0, 12)}`, baseTip: tip }; }
+      try {
+        const tip = (await deps.baseTip()).trim();
+        // The base the failure was met on is the attempt's own, read from its branch, so a base that
+        // moved before the loop's first probe still counts as moved (GY-1055).
+        const failedOn = (await deps.failedBase?.().catch(() => null))?.trim() || null;
+        return { probe: 'the base branch has moved since the failure', passed: false, detail: `the base tip is ${tip.slice(0, 12)}`, baseTip: tip, ...(failedOn && /^[0-9a-f]{40}$/.test(failedOn) ? { failedOn } : {}) };
+      }
       catch (error) { return { probe: 'the base branch has moved since the failure', passed: false, detail: bound(`the base tip could not be read: ${firstLine(error)}`) }; }
     }
     default: return null;
@@ -139,10 +148,47 @@ export async function blockedAttemptAccount(config: MasterConfig, work: Work, pr
     return { name: account.name, kind: runtime.launch.kind, home: account.credential.home, key: account.credential.key ?? null,
       fleet: { runtime: runtime.name, contract: runtime.launch, model: model?.name ?? account.model, modelId: model?.id ?? null, session: session?.id ?? 'blocker-probe', reason: `blocker probe for ${work.key}`, role: 'worker', policy: rolePolicy(role), revision: registry.revision } } satisfies FleetLaunchAccount;
   }
-  const chosen = (await readEnvironmentLog(config)).selected[selectionKey('worker', profile.name)];
+  const log = await readEnvironmentLog(config);
+  const chosen = log.selected[selectionKey('worker', profile.name)];
   const environments = config.environments ?? [];
-  const name = chosen?.work === work.key && chosen.environment ? chosen.environment : profile.accounts?.find(account => environments.some(entry => entry.name === account));
-  return environments.find(entry => entry.name === name) ?? null;
+  const configured = (name: string) => environments.find(entry => entry.name === name);
+  if (chosen?.work === work.key && chosen.environment && configured(chosen.environment)) return configured(chosen.environment)!;
+  // The log keeps one selection per profile, so a later launch for another item replaced this one's.
+  // The retry's account is then the one dispatch's `selectAccount` would choose now: the first
+  // configured account no session saw spent whose login and quota check healthy (GY-1055). Read
+  // only: nothing is recorded or reserved. When none is healthy no retry launches; the first stands.
+  const now = probe.now?.() ?? Date.now();
+  const held = Object.fromEntries(Object.entries(log.exhausted ?? {}).filter(([, entry]) => Date.parse(entry.until) > now));
+  const candidates = (profile.accounts ?? []).map(configured).filter((entry): entry is NonNullable<typeof entry> => !!entry);
+  for (const environment of candidates) {
+    if (held[environment.name]) continue;
+    if ((await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent }).catch(() => null))?.healthy) return environment;
+  }
+  return candidates[0] ?? null;
+}
+
+/**
+ * The launch profile the blocked attempt ran under. Several profiles may share a principal, so the
+ * principal alone does not name it: the attempt's own session handle records its agent name, and
+ * the environment log the profile whose latest worker launch was for this item. Only when neither
+ * says is it the first launch profile of the principal, else the first launch profile.
+ */
+export async function blockedAttemptProfile(config: MasterConfig, work: Work): Promise<WorkerProfile | undefined> {
+  const holder = work.lease?.owner ?? work.lastAssignment?.owner;
+  const epoch = work.lease?.epoch ?? work.lastAssignment?.epoch ?? work.epoch;
+  const launched = config.workers.filter(worker => worker.mode === 'launch');
+  const owned = launched.filter(worker => worker.principal === holder);
+  const sessions = (work.sessions ?? []).filter(session => session.kind === 'implementation' && session.principal === holder && session.agentName);
+  const session = sessions.find(entry => entry.id === `${holder}:${epoch}`) ?? sessions.sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt))[0];
+  const named = session ? owned.find(worker => worker.agentName === session.agentName) : undefined;
+  if (named) return named;
+  if (owned.length > 1) {
+    const selected = (await readEnvironmentLog(config).catch(() => null))?.selected ?? {};
+    const latest = owned.filter(worker => selected[selectionKey('worker', worker.name)]?.work === work.key)
+      .sort((a, b) => Date.parse(selected[selectionKey('worker', b.name)].at) - Date.parse(selected[selectionKey('worker', a.name)].at))[0];
+    if (latest) return latest;
+  }
+  return owned[0] ?? launched[0];
 }
 
 /**
@@ -174,9 +220,7 @@ const confinedClasses: readonly BlockerClass[] = ['github-credential', 'sandbox-
  */
 export function loopBlockerProbe(config: MasterConfig, root: string, run: ChildRun, planeHealth: () => Promise<string | null>, probe: FleetProbe = {}, coordinatorRoot?: string | null) {
   return async (work: Work, classification: BlockerClassification): Promise<BlockerProbeResult | null> => {
-    const holder = work.lease?.owner ?? work.lastAssignment?.owner;
-    const launched = config.workers.filter(worker => worker.mode === 'launch');
-    const profile = launched.find(worker => worker.principal === holder) ?? launched[0];
+    const profile = await blockedAttemptProfile(config, work);
     const workspace = work.workspaces.find(entry => entry.epoch === work.epoch && entry.host === config.hostId);
     const cwd = workspace && existsSync(workspace.path) ? workspace.path : root;
     let launch: WorkerLaunch | null = null;
@@ -186,6 +230,7 @@ export function loopBlockerProbe(config: MasterConfig, root: string, run: ChildR
     }
     return probeBlocker(work, classification, { run: (command, args, options) => run(command, args, { ...options, timeoutMs: 30_000 }), planeHealth,
       baseTip: async () => String(await run('git', ['-C', root, 'ls-remote', 'origin', `refs/heads/${config.baseBranch}`])).split(/\s/)[0] ?? '',
+      failedBase: async () => cwd === root ? null : String(await run('git', ['-C', cwd, 'merge-base', 'HEAD', `refs/remotes/origin/${config.baseBranch}`])).trim() || null,
       launch, cwd, clock: Date.now() });
   };
 }

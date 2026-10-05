@@ -3,23 +3,23 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
-import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, standingRefusal, type Decision, type DecisionState } from '../model/approval.js';
+import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, standingRefusal, approvalApplyGraceMs, type Decision, type DecisionState } from '../model/approval.js';
 import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
 import type { Services } from './routes.js';
 import { onlyActionsMovedSince, sameBesideBookkeeping } from '../engine.js';
-import { refuseDecision, withdrawDecision } from './decision-refusal.js';
+import { refuseDecision } from './decision-refusal.js';
 import { precedentAvailability } from './escalation-context.js';
 import { applyTriageClosure } from './followups.js';
 import { closeWork } from './close.js';
-import { answerWith, applyLaneRework, approvedUnapplied, resumeApprovedDecisions, resumeDecision } from './lane-rework.js';
+import { answerWith, applyLaneRework, approvedUnapplied, resumeDecision, settleApprovedDecisions, supersedeMoved, withdrawOrSettle } from './lane-rework.js';
 import { lockedWork, workIdByRef } from '../store/locked-read.js';
 
 type Db = pg.PoolClient;
 // The ledger's read half lives in decision-ledger.ts (GY-102); decision-refusal.ts reads it from here too.
 export { readDecisions, type DecisionRecord } from './decision-ledger.js';
-// The risk lane's own application of a rework, and the resumption of any approved decision whose
-// application was interrupted, live in lane-rework.ts (GY-1110, GY-1300).
-export { approvedUnapplied, laneApprover, resumeApproved, resumeApprovedDecisions } from './lane-rework.js';
+// The risk lane's own application of a rework (GY-1110), and the settlement of any approval left
+// unapplied (GY-1297) or its resumption by the loop (GY-1300), live in lane-rework.ts.
+export { approvedUnapplied, laneApprover, resumeApproved, settleApprovedDecisions } from './lane-rework.js';
 export const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const findWork = async (db: Db, id: string): Promise<Work | undefined> =>
   (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')} FOR UPDATE`, [id])).rows[0]?.document;
@@ -57,19 +57,21 @@ export async function requesterAuthority(services: Services, db: Db, decision: P
  * caller's own request back instead of creating one.
  */
 export async function requestDecision(services: Services, caller: Principal, id: string, body: unknown, key: string) {
-  if ((body as any)?.action === 'withdraw') return withdrawDecision(services, caller, id, body, key);
+  if ((body as any)?.action === 'withdraw') return withdrawOrSettle(services, caller, id, body, key);
   if ((body as any)?.action === 'resume') return resumeDecision(services, caller, id, body, key);
   const data = decisionRequestSchema.parse(body);
   const input = decisionInputs[data.action].parse(data.input);
   const fingerprint = digest({ id, action: data.action, input, reason: data.reason, ...(data.precedent ? { precedent: data.precedent } : {}), ...(data.context ? { context: data.context } : {}) });
-  // An approved decision whose application was interrupted — the lane's (GY-1110) or any
-  // approver's (GY-1300) — is resumed by the next request for the item, whatever its key, before
-  // the pending guard judges the request. One that applied answers a new request of its action in
-  // its place (a rework whatever its input, any other action only for the same input); one that
-  // settled failed or stale no longer stands, so the new request is recorded and supersedes it.
-  // Only a caller with authority for the request it makes triggers the resumption (GY-1244).
+  // An approved decision left without an outcome is settled by the next request for the item,
+  // whatever its key, before the pending guard judges the request: superseded once its situation
+  // no longer holds (GY-1297), or resumed under its recorded approval — the lane's at once
+  // (GY-1110), any approver's past the grace its own approval had to apply it (GY-1297, GY-1300).
+  // One that applied answers a new request of its action in its place (a rework whatever its
+  // input, any other action only for the same input); one that settled failed, stale or superseded
+  // no longer stands, so the new request is recorded in its place.
+  // Only a caller with authority for the request it makes triggers the settlement (GY-1244).
   await callerMayRequest(services, caller, id, data.action, input, key, fingerprint);
-  const resumed = await resumeApprovedDecisions(services, id);
+  const resumed = await settleApprovedDecisions(services, caller, id);
   const answered = resumed.find(decision => decision.state === 'applied' && decision.action === data.action
     && (data.action === 'rework' || JSON.stringify(canonical(decision.input)) === JSON.stringify(canonical(input))));
   if (answered) return answerWith(services, caller, key, fingerprint, answered);
@@ -102,7 +104,8 @@ async function recordRequest(services: Services, caller: Principal, id: string, 
     const work = await findWork(db, id); demand(work, 'Work item not found', 404);
     for (const capability of requiredDecisionCapabilities(data.action, input, work!)) assertDecisionAuthority(actor, capability, work!, services.repository);
     const precondition = decisionPrecondition(data.action, input, work!); demand(!precondition, precondition!, 409);
-    const history = await readDecisions(db, work!);
+    // An approved decision the item has moved past never blocks this request (GY-1297): it settles superseded here, in this transaction.
+    const history = await supersedeMoved(db, work!, (await readDecisions(db, work!)).filter(decision => decision.state === 'approved'), actor).then(() => readDecisions(db, work!));
     // A refused decision is answered, never retried unchanged (GY-141). A rework or recover
     // refusal judged the candidate and base it was requested against, and stands only for those (GY-229).
     const situation = decisionSituation(data.action, work!);
@@ -131,9 +134,9 @@ async function recordRequest(services: Services, caller: Principal, id: string, 
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       return result;
     }
-    // An approved one here is one whose resumption above just faulted (GY-1300): the next request retries it.
+    // An approved one here is still inside the grace its approval has to apply it, or the lane's whose resumption faulted (GY-1300).
     demand(!pending, pending?.state === 'approved'
-      ? `Decision ${pending.id} (${data.action}) on ${work!.key} was approved by ${pending.approvedBy} but its application could not be resumed; request again to retry it`
+      ? `Decision ${pending.id} (${data.action}) on ${work!.key} was approved by ${pending.approvedBy} at ${pending.approvedAt} and its application has recorded no outcome yet; a request after ${Math.round(approvalApplyGraceMs / 1000)}s resumes it`
       : `Decision ${pending?.id} (${data.action}) is already ${pending?.state} on ${work!.key}; wait for it before requesting another`, 409);
     const decisionId = randomUUID();
     await record(db, work!, actor.id, 'decision.requested', { id: decisionId, action: data.action, input, reason: data.reason, requester: { id: actor.id, role: actor.role }, capabilities: requiredDecisionCapabilities(data.action, input, work!),
@@ -157,6 +160,17 @@ export const staleEvent = (db: Db, stale: Stale) => db.query('INSERT INTO events
 /** A decision a race made permanently unappliable is settled as 'stale' in its own transaction. */
 async function recordStale(services: Services, stale: Stale) {
   await services.engine.store.transaction(db => staleEvent(db, stale));
+}
+
+/**
+ * The decision as its approval judges and applies it (GY-1296): a release, an unblock or a
+ * diagnostician's closure pinned to a revision that moved only in bookkeeping is rebased to the
+ * current revision; anything else is returned as it is. A resumption applies the same (GY-1300).
+ */
+export async function bookkeepingRebase(db: Db, decision: DecisionRecord, work: Work): Promise<DecisionRecord> {
+  const revisionPinned = decision.action === 'release' || decision.action === 'unblock' || (decision.action === 'close' && decision.input.triageAt === undefined && decision.input.expectedRevision !== undefined);
+  return revisionPinned && decision.input.expectedRevision !== work.revision && await onlyActionsMovedSince(db, work, decision.input.expectedRevision, sameBesideBookkeeping)
+    ? { ...decision, input: { ...decision.input, expectedRevision: work.revision } } : decision;
 }
 
 /**
@@ -209,13 +223,8 @@ export async function approveDecision(services: Services, caller: Principal, id:
       // only in that bookkeeping (sessions, gates, next action, action queue: sameBesideBookkeeping)
       // leaves what the requester judged in place, so the decision is judged at the current
       // revision, and applied at it; any other change to the item still settles it stale below.
-      let judged = decision!;
-      const revisionPinned = decision!.action === 'release' || decision!.action === 'unblock' || (decision!.action === 'close' && decision!.input.triageAt === undefined && decision!.input.expectedRevision !== undefined);
-      if (revisionPinned && decision!.input.expectedRevision !== work!.revision
-        && await onlyActionsMovedSince(db, work!, decision!.input.expectedRevision, sameBesideBookkeeping)) {
-        judged = { ...decision!, input: { ...decision!.input, expectedRevision: work!.revision } };
-        if (!resuming) precondition = decisionPrecondition(judged.action, judged.input, work!);
-      }
+      const judged = await bookkeepingRebase(db, decision!, work!);
+      if (judged !== decision && !resuming) precondition = decisionPrecondition(judged.action, judged.input, work!);
       if (precondition) {
         // A pin the item has moved past can never hold again, so the decision would stay
         // 'requested' forever and block every re-request; settle it as stale instead.

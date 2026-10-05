@@ -8,10 +8,11 @@ import { Store } from '../src/store.js';
 import { Refusal, type Principal } from '../src/model.js';
 import type { Observation, Work } from '../src/model/work.js';
 import { actionableSubjects, approvalStep, approvalWatchSchema, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { approverSettleMs, maxApproverLaunches, recordWatchEnded, routineDecision } from '../src/daemon/decisions.js';
+import { maxApproverLaunches, recordWatchEnded, routineDecision } from '../src/daemon/decisions.js';
 import { decisionKey } from '../src/daemon/reconcile.js';
 import { Launcher } from '../src/daemon/cycle.js';
 import { assertDispatchable, type HerdrAgent, type MasterConfig } from '../src/master.js';
+import { approvalApplyGraceMs } from '../src/model/approval.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1300: approval and application are two steps, and an interruption between them stranded a
@@ -46,10 +47,13 @@ test('unit:approval-step-approved-not-awaiting — an approved decision is appli
   const idle = { agents: [{ name: session, pane_id: 'p', agent_status: 'idle' }], available: true };
   assert.equal(approvalStep(watch, approved, idle, later).step, 'apply');
   assert.equal(approvalStep(watch, approved, { agents: [], available: false }, later).step, 'apply');
-  // Only the approver's own call, still in flight within a minute of its approval, is left to finish.
+  // Only the approver's own call, still in flight within a minute of its approval, is left to finish. Past the minute a session
+  // still working is not waited on either: it is put down and the control plane settles the decision (GY-1297), never relaunched.
   const working = { agents: [{ name: session, pane_id: 'p', agent_status: 'working' }], available: true };
   assert.equal(approvalStep(watch, approved, working, Date.parse(approvedAt) + 10_000).step, 'wait');
-  assert.equal(approvalStep(watch, approved, working, Date.parse(approvedAt) + approverSettleMs + 1).step, 'apply', 'past the minute the working session is not waited on');
+  const stalled = approvalStep(watch, { ...approved, id: decisionId, action: 'rework' }, working, Date.parse(approvedAt) + approvalApplyGraceMs + 1);
+  assert.equal(stalled.step, 'rerequest', 'past the minute the working session is not waited on');
+  assert.match(stalled.detail, /its application is resumed so it settles applied or failed/);
   // The requested and settled states are unchanged.
   assert.notEqual(approvalStep(watch, { state: 'requested' }, gone, later).step, 'apply');
   assert.equal(approvalStep(watch, { state: 'applied' }, gone, later).step, 'settled');
@@ -184,36 +188,52 @@ async function start() {
     assert.equal((await current(work)).reworkRequested, ran);
     return { work, decision };
   };
-  return { engine, store, master, approver, send, call, decisions, counts, current, submitted, faulting, stranded, url };
+  // The ledger is append-only, so time is moved instead: the control plane's clock runs `ms` ahead for the duration of `during`.
+  const later = async <T>(ms: number, during: () => Promise<T>): Promise<T> => {
+    const transaction = store.transaction;
+    store.transaction = ((fn, options) => transaction.call(store, (db, now) => fn(db, new Date(now.getTime() + ms)), options)) as typeof transaction;
+    try { return await during(); } finally { store.transaction = transaction; }
+  };
+  /** The loop's report of an approver session, saved on the item it judges: it moves the revision, and only in bookkeeping (GY-1296). */
+  const report = (work: Work, decision: string) => call(credentials[0].token, `work/${work.id}/session`, { id: `approver:${decision}`, kind: 'coordination', principal: approver.id, role: 'approver',
+    runtime: 'claude', host: 'decisions-host', subject: `${work.key}: judge decision ${decision}`, observed: 'working', observedAt: new Date().toISOString(), missedReports: 0 });
+  return { engine, store, master, approver, send, call, decisions, counts, current, submitted, faulting, stranded, later, report, url };
 }
 
 // ---- AC-2: a re-request reconciles instead of refusing ------------------------------------------
 test('unit:approved-rework-rerequest-reconciles — a decide request resumes the stranded approval before the pending guard, for session and lane approvals alike', { timeout: 120_000 }, async () => {
-  const { engine, master, send, call, decisions, current, submitted, faulting, stranded } = await plane();
+  const { engine, master, send, call, decisions, current, submitted, faulting, stranded, later } = await plane();
   const rework = { action: 'rework', input: { previousWorkerStopped: true }, reason: 'The loop requests the rework again' };
-  // Session-approved and applied on resume: the stranded decision answers the request, and replays answer the same.
+  // A session approval is stranded once the grace its own call had to apply it has passed (GY-1297): within it, the request is
+  // told the approval is still being applied and when a request resumes it, never to wait for it.
+  const stalled = approvalApplyGraceMs + 1000, past = <T>(act: () => Promise<T>) => later(stalled, act);
   const { work, decision } = await stranded('session-approved-resumed');
+  const early = await send(master.token, `work/${work.key}/decide`, rework);
+  assert.equal(early.status, 409);
+  assert.match(early.body.error, new RegExp(`approved by graphyard-approver-graphyard at .+ and its application has recorded no outcome yet; a request after 60s resumes it`));
+  assert.doesNotMatch(early.body.error, /wait for it before requesting another/);
+  // Session-approved and applied on resume: the stranded decision answers the request, and replays answer the same.
   const key = randomUUID();
-  const again = await send(master.token, `work/${work.key}/decide`, rework, key);
+  const again = await past(() => send(master.token, `work/${work.key}/decide`, rework, key));
   assert.equal(again.status, 200, `never 'already approved; wait for it': ${JSON.stringify(again.body)}`);
   assert.deepEqual([again.body.id, again.body.state, again.body.approvedBy], [decision.id, 'applied', 'graphyard-approver-graphyard']);
   assert.equal((await current(work)).reworkRequested, true, 'the item is sent back for rework');
-  assert.deepEqual((await send(master.token, `work/${work.key}/decide`, rework, key)).body, again.body, 'its replay answers the same');
+  assert.deepEqual((await past(() => send(master.token, `work/${work.key}/decide`, rework, key))).body, again.body, 'its replay answers the same');
   assert.equal((await decisions(work.key)).length, 1, 'no second rework was recorded');
   // An unrelated request resumes it too, and is judged on its own merits.
   const other = await stranded('session-approved-unrelated');
-  const unrelated = await send(master.token, `work/${other.work.key}/decide`, { action: 'unblock', input: { expectedRevision: 1 }, reason: 'Nothing to unblock' });
+  const unrelated = await past(() => send(master.token, `work/${other.work.key}/decide`, { action: 'unblock', input: { expectedRevision: 1 }, reason: 'Nothing to unblock' }));
   assert.equal(unrelated.status, 409, JSON.stringify(unrelated.body));
   assert.equal((await decisions(other.work.key)).find(entry => entry.id === other.decision.id)!.state, 'applied');
   // Settled failed on resume: the stranded decision stops blocking and the new request is recorded in its place.
   const refused = await stranded('session-approved-failed');
   const superseding = await faulting('rework', () => new Refusal('The item moved on before the rework was applied', 409),
-    () => send(master.token, `work/${refused.work.key}/decide`, rework));
+    () => past(() => send(master.token, `work/${refused.work.key}/decide`, rework)));
   assert.equal(superseding.status, 200, JSON.stringify(superseding.body));
   assert.notEqual(superseding.body.id, refused.decision.id, 'a new decision supersedes the stranded one');
   assert.equal(superseding.body.state, 'requested', 'and waits for its own approver, as a high-lane rework does');
   assert.equal((await decisions(refused.work.key)).find(entry => entry.id === refused.decision.id)!.state, 'failed');
-  // A lane-approved rework strands and reconciles the same way (GY-1110 is now one case of it).
+  // A lane-approved rework strands and reconciles the same way, at once: the lane's approval and application are one request.
   const low = await submitted('lane-approved', ['src/model/decisions-fixture.ts']);
   const interrupted = await faulting('rework', () => new Error('connection terminated'), () => send(master.token, `work/${low.key}/decide`, rework));
   assert.notEqual(interrupted.status, 200);
@@ -221,18 +241,20 @@ test('unit:approved-rework-rerequest-reconciles — a decide request resumes the
   assert.deepEqual([lane.state, lane.approvedBy], ['approved', 'graphyard-risk-lane']);
   const answered = await call(master.token, `work/${low.key}/decide`, rework);
   assert.deepEqual([answered.id, answered.state], [lane.id, 'applied']);
-  // A server fault on resume is no deadlock either: the request names the stranded approval and the next one retries it.
+  // A server fault on resume is no deadlock either: the stranded approval settles failed, naming the fault, and the request is recorded.
   const faulted = await stranded('session-approved-faulted');
-  const retry = await faulting('rework', () => new Error('connection terminated while resuming'), () => send(master.token, `work/${faulted.work.key}/decide`, rework));
-  assert.equal(retry.status, 409);
-  assert.match(retry.body.error ?? JSON.stringify(retry.body), /was approved by graphyard-approver-graphyard but its application could not be resumed; request again/);
-  assert.equal((await call(master.token, `work/${faulted.work.key}/decide`, rework)).state, 'applied');
+  const retry = await faulting('rework', () => new Error('connection terminated while resuming'), () => past(() => send(master.token, `work/${faulted.work.key}/decide`, rework)));
+  assert.equal(retry.status, 200, JSON.stringify(retry.body));
+  assert.deepEqual([retry.body.state, retry.body.id === faulted.decision.id], ['requested', false]);
+  const settled = (await decisions(faulted.work.key)).find(entry => entry.id === faulted.decision.id)!;
+  assert.equal(settled.state, 'failed');
+  assert.match(settled.outcome, /^Approved by graphyard-approver-graphyard at .+ but its application was never recorded; resuming it failed: connection terminated while resuming$/);
   void engine;
 });
 
 // ---- AC-3: idempotent and single-outcome --------------------------------------------------------
 test('integration:approved-resume-idempotent — the resume replays the decision-keyed engine call, records one outcome, settles a moved situation stale, and leaves a settled decision alone', { timeout: 120_000 }, async () => {
-  const { engine, store, master, approver, send, call, decisions, counts, current, faulting, stranded } = await plane();
+  const { engine, store, master, approver, send, call, decisions, counts, current, faulting, stranded, report } = await plane();
   // Concurrent resumers: one engine application and one outcome between them.
   const { work, decision } = await stranded('resume-concurrent');
   const resume = () => send(master.token, `work/${work.key}/decide`, { action: 'resume', decision: decision.id });
@@ -274,6 +296,23 @@ test('integration:approved-resume-idempotent — the resume replays the decision
   const fresh = await call(master.token, `work/${proposed.key}/decide`, { action: 'release', input: { expectedRevision: proposed.revision + 1 }, reason: 'Ready to build' });
   assert.notEqual(fresh.id, release.id);
   assert.equal(fresh.state, 'requested', 'the stale decision no longer blocks a fresh request');
+  // A revision that moved only in the loop's bookkeeping (its approver session's reports) is rebased as the approval rebases it
+  // (GY-1296). Lost before the engine call, the resume applies it rather than settling it stale; lost after the engine call
+  // committed under the rebased revision, the resume finds the decision-keyed call and settles applied, never stale.
+  for (const ran of [false, true]) {
+    const item = await call(master.token, 'work', { title: `resume-bookkeeping-${ran}`, plannedFiles: ['src/server/routes/decisions-fixture.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Decision application fixture' }) as Work;
+    const asked = await call(master.token, `work/${item.key}/decide`, { action: 'release', input: { expectedRevision: item.revision }, reason: 'Ready to build' });
+    await report(item, asked.id);
+    const interrupted = await faulting('ready', () => new Error('connection terminated while releasing'), () => send(approver.token, `work/${item.key}/approve`, { decision: asked.id, reason: 'Release it' }), ran);
+    assert.notEqual(interrupted.status, 200);
+    await report(item, asked.id);
+    assert.equal((await current(item)).ready, ran, ran ? 'the engine call committed before the crash' : 'nothing was applied');
+    const resumed = await call(master.token, `work/${item.key}/decide`, { action: 'resume', decision: asked.id });
+    assert.equal(resumed.state, 'applied', `${ran ? 'committed' : 'never ran'}: ${JSON.stringify(resumed)}`);
+    assert.match(resumed.outcome, ran ? /^Applied by its approval's own engine call \(decision:.+\), which committed before its outcome was recorded$/ : /^Released to ready$/);
+    assert.equal((await current(item)).ready, true);
+    assert.deepEqual(await counts(item, asked.id, 'ready'), { outcomes: 1, applications: 1 });
+  }
   // Only an identity with authority for the decision's action may ask for its resumption.
   const other = await stranded('resume-authority');
   const implementerToken = `decisions-decisions-implementer-${'x'.repeat(32)}`;

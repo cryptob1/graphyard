@@ -28,7 +28,8 @@ import { observedReviewBody } from '../src/review-cap.js';
  * The approver is not a stub. The loop's own effects launch it — `daemonEffects(...).approver`, which
  * is `launchApprover` — and close it with the real pane closer, both against a simulated Herdr that
  * keeps a finished tab listed exactly as the real one does. What a launched session then does is
- * scripted per launch: it approves, dies, declines, hangs, or has its decision fail on the server.
+ * scripted per launch: it approves, dies, declines, hangs, has its decision fail on the server, or
+ * approves a decision whose application is interrupted before an outcome is recorded (GY-1300).
  */
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -52,10 +53,10 @@ const profile = (name: string, overrides: Partial<WorkerProfile> = {}): WorkerPr
 type Round = 'die' | 'changes' | 'conflict' | 'pass';
 interface Script { key: string; rounds: Round[]; scopeOn?: number }
 
-interface PlaneDecision { id: string; action: string; state: string; input: any; approvedBy: string | null; reason: string; outcome: string | null }
+interface PlaneDecision { id: string; action: string; state: string; input: any; approvedBy: string | null; approvedAt?: string | null; reason: string; outcome: string | null }
 
 /** What one launched approver session does with the decision it was asked to judge. */
-type Judgement = 'approve' | 'die' | 'decline' | 'hang' | 'fail';
+type Judgement = 'approve' | 'die' | 'decline' | 'hang' | 'fail' | 'strand';
 
 /**
  * A repository the real launcher accepts: a Git checkout holding `.graphyard/master.json`, with the
@@ -159,6 +160,8 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
   }
   const decisions = new Map<string, PlaneDecision[]>();
   const judged = new Map<string, number>();
+  /** Every decision the loop asked the server to resume (GY-1300). */
+  const resumes: string[] = [];
   const find = (id: string) => work.find(item => item.id === id || item.key === id)!;
   const script = (item: Work) => scripts.find(entry => entry.key === item.key)!;
   const round = (item: Work): Round => { const rounds = script(item).rounds; return rounds[Math.min(rounds.length - 1, Math.max(0, item.epoch - 1))]; };
@@ -252,6 +255,8 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
       session.status = 'done';
       if (!decision || decision.state !== 'requested') continue;
       if (session.judgement === 'fail') Object.assign(decision, { state: 'failed', approvedBy: 'graphyard-approver', outcome: 'Worker startup remains fenced; stop its supervisor and wait for both lease and launch authority expiry before recovery' });
+      // The approval commits and the session ends, but the server faults before the application records an outcome.
+      else if (session.judgement === 'strand') Object.assign(decision, { state: 'approved', approvedBy: 'graphyard-approver', approvedAt: iso(), outcome: null });
       else approve(item, decision);
     }
   };
@@ -320,6 +325,13 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
       return wired!.approver!(find(item.id), decision);
     },
     decisions: async item => ({ decisions: (decisions.get(find(item.id).id) ?? []).map(entry => ({ ...entry })) }),
+    // The server's resume (GY-1300): an approved decision with no outcome is applied under its recorded approval; any other is answered as it stands.
+    resume: async (item, decision) => {
+      const target = find(item.id), entry = (decisions.get(target.id) ?? []).find(candidate => candidate.id === decision)!;
+      resumes.push(decision);
+      if (entry.state === 'approved') approve(target, entry, entry.approvedBy!);
+      return { ...entry };
+    },
     withdraw: async (item, decision, reason) => {
       const entry = (decisions.get(find(item.id).id) ?? []).find(candidate => candidate.id === decision)!;
       assert.equal(entry.state, 'requested', 'only a requested decision can be withdrawn');
@@ -350,7 +362,7 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
     ...overrides,
   });
 
-  return { work, decisions, sessions, effects, recompute, advance, approve, find, github, now: () => now, iso, hostId,
+  return { work, decisions, sessions, effects, recompute, advance, approve, find, github, resumes, now: () => now, iso, hostId,
     set: (at: number) => { now = at; } };
 }
 
@@ -361,6 +373,41 @@ async function cycle(state: DaemonState, master: MasterConfig, simulation: Retur
   return result;
 }
 const steps = (actions: DaemonAction[]) => actions.filter(action => action.kind !== 'deployment').map(action => `${action.kind}:${action.work ?? '-'}:${action.state}`);
+
+// GY-1300: the approver approves the rework and its session ends, but the server faults before the application records an
+// outcome. The loop's next cycle applies what was approved through the server's resume — once — and puts the session down; it
+// launches no second approver for a decision already judged, requests nothing again, and the item is delivered.
+test('integration:unattended-stranded-approval — an approval left unapplied is resumed once by the next cycle, its session closed and no approver relaunched, and the item is delivered', async t => {
+  const host = await approverHost({ workers: [profile('claude-a'), profile('claude-b')] });
+  t.after(host.cleanup);
+  const master = host.master;
+  const simulation = plane([{ key: 'GY-85', rounds: ['changes', 'pass'] }], { host, judgements: ['strand'] });
+  const state = emptyDaemonState(master);
+  const effects = simulation.effects();
+  const performed: DaemonAction[] = [];
+  const item = simulation.work[0];
+  let strandedAt: number | null = null, resumedAt: number | null = null;
+  for (let pass = 0; pass < 40 && item.stage !== 'done'; pass++) {
+    performed.push(...(await cycle(state, master, simulation, effects)).actions);
+    const [decision] = simulation.decisions.get(item.id) ?? [];
+    if (decision?.state === 'approved' && strandedAt === null) strandedAt = pass;
+    if (simulation.resumes.length && resumedAt === null) resumedAt = pass;
+  }
+  performed.push(...(await cycle(state, master, simulation, effects)).actions);
+  assert.equal(item.stage, 'done', 'the item is delivered');
+  const requested = simulation.decisions.get(item.id)!;
+  assert.deepEqual(requested.map(decision => [decision.action, decision.state, decision.approvedBy]), [['rework', 'applied', 'graphyard-approver']], 'one rework, applied under its approver\'s approval');
+  assert.ok(strandedAt !== null, 'the approval was left with no outcome');
+  assert.equal(resumedAt, strandedAt! + 1, 'the very next cycle applied it');
+  assert.deepEqual(simulation.resumes, [requested[0].id], 'resumed once, and never again once it settled');
+  const name = approverSessionName(item, requested[0].id);
+  assert.deepEqual(simulation.sessions.log, [`launch:${name}`, `close:${name}`], 'no approver was relaunched for a judged decision, and its session was put down');
+  assert.deepEqual([...simulation.sessions.sessions.keys()], [], 'no approver tab is left open');
+  assert.equal(performed.filter(action => action.kind === 'decision' && /^Requested decision /.test(action.detail)).length, 1, 'the decision was requested once');
+  assert.ok(performed.some(action => action.kind === 'decision' && new RegExp(`Applied rework decision ${requested[0].id} on GY-85: .*on the loop's resume`).test(action.detail)), steps(performed).join(', '));
+  assert.deepEqual(performed.filter(action => action.kind === 'escalation').map(action => action.detail), [], 'nothing is escalated');
+  assert.deepEqual(state.approvals, {}, 'the watch is retired with its decision');
+});
 
 test('integration:unattended-full-cycle — with no master session and no human input the loop drives one item from ready to delivered: it dispatches, reclaims a dead session, has an additive scope request decided, requests and dispatches rework after a verdict and after a base conflict through approver sessions that die and decline, and leaves the candidate whose gates are green to GitHub to merge', async t => {
   // Attempt 1's session dies under its fence; attempt 2 is told to change the work; attempt 3

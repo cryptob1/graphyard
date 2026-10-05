@@ -61,12 +61,12 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // second one; adopting it is what keeps a retry from leaving a decision nobody will judge.
       let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved'));
       // An approved decision is already judged (GY-1300): it is never adopted for an approver session. The control plane is asked to
-      // apply what was approved — through resume, or by this request itself, which the server answers by resuming it first — and
-      // only one that settled failed or stale is asked for again, below, within the same bound.
-      if (standing?.state === 'approved') {
-        const resumed = effects.resume ? await effects.resume(item, standing.id) : null;
-        if (resumed?.state === 'approved') throw new Error(`${decision.action} decision ${standing.id} was approved by ${standing.approvedBy ?? 'its approver'} but the control plane could not apply it yet; it is resumed again on the next try`);
-        if (resumed?.state === 'applied') {
+      // apply what was approved, and only one that settled failed, stale or superseded is asked for again, below, within the same
+      // bound. A loop without the resume settles it through the withdrawal below (GY-1297).
+      if (standing?.state === 'approved' && effects.resume) {
+        const resumed = await effects.resume(item, standing.id);
+        if (resumed.state === 'approved') throw new Error(`${decision.action} decision ${standing.id} was approved by ${standing.approvedBy ?? 'its approver'} but the control plane could not apply it yet; it is resumed again on the next try`);
+        if (resumed.state === 'applied') {
           const same = carried?.decision === standing.id ? carried : null;
           const watch = state.approvals[key] = approvalWatchSchema.parse({ ...same, work: item.key, action: decision.action, decision: standing.id, requestedAt: same?.requestedAt ?? stamp, settledAt: stamp, scope: same?.scope ?? decision.scope ?? null });
           recordSettledDecision(state.projectMemory, watch, { ...resumed, state: 'applied', approvedBy: resumed.approvedBy ?? null }, stamp);
