@@ -11,7 +11,7 @@ Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit
 
 `plannedFiles` (paths, `/`-ending prefixes) is the scope contract, not a lock: `sync` and GitHub's merges into main ([one delivery path](delivery.md#one-delivery-path)) integrate overlaps. `master status` shows `overlap.concurrent`, `git merge-tree` failures. Root-level directories are `highConflict`, refused without `--allow-broad-scope`; only `exclusiveResources` (reserved at claim) hold dispatch.
 
-`worktree GY-N EPOCH` frees the branch first: an earlier attempt's worktree is recorded (`workspace.preserved`) and detached, abandoned ones removed (`reclaimed`). A workspace failure releases the claim without spending the epoch. After **3** single-cause dispatch failures, the loop records a `dispatchblock` blocker until `graphyard unblock GY-N REASON`.
+`worktree GY-N EPOCH` frees the branch first: an earlier attempt's worktree is recorded (`workspace.preserved`) and detached, abandoned ones removed (`reclaimed`). A workspace failure releases the claim without spending the epoch. A profile whose Herdr session is idle or done with no live lease is launchable: the dispatch closes that pane (bounded) and launches; a refusal reason names each agent's state and remedy. Fleet-idle refusals never count; after **3** other single-cause dispatch failures the loop records a `dispatchblock` blocker until `graphyard unblock GY-N REASON`. An older blocker on a fleet-idle cause (class `dispatch-failure`) clears once a profile can launch.
 
 ## Review gate: verdicts, not threads
 
