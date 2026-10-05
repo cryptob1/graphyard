@@ -300,6 +300,50 @@ export const cycleFailureSchema = z.object({
 }).strict();
 export type CycleFailures = z.infer<typeof cycleFailureSchema>;
 
+// ---- The pipeline doctor's run record (GY-711, src/daemon/doctor.ts) ---------------------------
+const doctorLine = (max: number) => z.string().trim().min(1).max(max);
+/** One finding of a doctor run: what was stuck, under which check bound, and whether it could act. */
+export const doctorFindingsSchema = z.object({
+  subject: doctorLine(200),
+  check: z.enum(['blocked', 'worker', 'ci', 'review-request', 'launch', 'proofs', 'mergeable', 'decision', 'containment', 'refusal', 'overdue']),
+  detail: doctorLine(2000),
+  unactionable: z.boolean().default(false),
+}).strict();
+/** One sanctioned command the doctor ran, with what became of it. */
+export const doctorActionSchema = z.object({
+  subject: doctorLine(200), command: doctorLine(500), outcome: z.enum(['applied', 'refused']), detail: doctorLine(1000),
+}).strict();
+/** The fault item a doctor run asks the loop to file, deduplicated against open items. */
+export const doctorFileEntrySchema = z.object({
+  faultClass: z.enum(faultClasses), title: z.string().max(200), work: z.string().max(50).nullable().default(null), deduplicated: z.boolean().default(false),
+}).strict();
+/** The full fault-filing request a doctor run makes (src/daemon/doctor.ts doctorFileItem): what the loop files when no open item covers the class. */
+export const doctorFiledSchema = z.object({
+  faultClass: z.enum(faultClasses), title: doctorLine(200), description: doctorLine(20000),
+  priority: z.number().int().min(0).max(1),
+  criteria: z.array(z.object({ id: z.string().trim().regex(/^[A-Z]+-\d+$/), text: doctorLine(4000), proofs: z.array(doctorLine(200)).min(1).max(10) }).strict()).min(1).max(20),
+  plannedFiles: z.array(doctorLine(500)).min(1).max(100),
+}).strict();
+/** A filing the control plane did not accept when its run applied, kept for the later cycles that file it again. */
+export const doctorPendingFileSchema = z.object({
+  /** The filing's stable idempotency key: the same key the refused filing was posted under. */
+  key: doctorLine(200), at: z.string().max(40), file: doctorFiledSchema,
+}).strict();
+export const doctorStates = ['running', 'reported', 'failed'] as const;
+export const doctorRunRecordSchema = z.object({
+  at: z.string().max(40), state: z.enum(doctorStates),
+  runs: z.array(z.object({ runtime: z.string().max(40), model: z.string().max(200), result: z.string().max(40), detail: z.string().max(500) }).strict()).max(4).default([]),
+  findings: z.array(doctorFindingsSchema).max(50).default([]),
+  actions: z.array(doctorActionSchema).max(50).default([]),
+  filed: z.array(doctorFileEntrySchema).max(20).default([]),
+  detail: z.string().max(1000).default(''),
+}).strict();
+export const retainedDoctorRuns = 20;
+export type DoctorRunRecord = z.infer<typeof doctorRunRecordSchema>;
+export type DoctorFinding = z.infer<typeof doctorFindingsSchema>;
+export type DoctorAction = z.infer<typeof doctorActionSchema>;
+export type DoctorFiled = z.infer<typeof doctorFiledSchema>;
+export type DoctorPendingFile = z.infer<typeof doctorPendingFileSchema>;
 /**
  * The release this loop's own process loaded, read once at its startup exactly as an executor reads
  * its (GY-437) and overwritten by every new process: what every action it takes runs, until its
@@ -427,6 +471,19 @@ export const daemonStateSchema = z.object({
   faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}), observedAt: z.string().optional() }).strict()
     .default(() => ({ instances: [], open: {}, failing: {} })),
   /**
+   * The pipeline doctor's last runs (GY-711, src/daemon/doctor.ts): each with what it found, did
+   * and filed, and the runs it took. The newest is kept whole; the list is bounded below.
+   */
+  doctor: z.object({
+    runs: z.array(doctorRunRecordSchema).default([]),
+    /** The runs (by `at`) the control plane has not yet accepted: posted again on later cycles until it does. */
+    unposted: z.array(z.string().max(40)).max(40).default([]),
+    /** Filings the control plane did not accept when their run applied: filed again on later cycles, under the same key, until one is. */
+    pendingFiles: z.array(doctorPendingFileSchema).max(40).default([]),
+    /** When the approver remedy last read each open item's decision history, by item id. */
+    decisionsCheckedAt: z.record(z.string(), z.string()).default({}),
+  }).strict().default(() => ({ runs: [], unposted: [], pendingFiles: [], decisionsCheckedAt: {} })),
+  /**
    * Per recurring-fault item key or invariant-violation instance id, the diagnostician run the loop
    * launched for it and what became of the diagnosis (GY-439, src/daemon/diagnosis.ts).
    */
@@ -513,6 +570,15 @@ export function pruneDaemonState(state: DaemonState) {
   // A watch is retired when its item moves on; this bound only catches items the loop stopped seeing.
   const watches = Object.entries(state.approvals).sort((a, b) => Date.parse(a[1].requestedAt) - Date.parse(b[1].requestedAt));
   if (watches.length > retainedClocks) for (const [key] of watches.slice(0, watches.length - retainedClocks)) delete state.approvals[key];
+  // The doctor's runs are kept newest first from the report; the oldest go past the bound, never one still running.
+  if (state.doctor.runs.length > retainedDoctorRuns) {
+    const settled = state.doctor.runs.filter(entry => entry.state !== 'running');
+    const excess = state.doctor.runs.length - retainedDoctorRuns;
+    if (settled.length >= excess) {
+      const drop = new Set(settled.slice(0, excess).map(entry => entry.at));
+      state.doctor.runs = state.doctor.runs.filter(entry => !drop.has(entry.at));
+    }
+  }
   // A settled diagnosis is kept for the report; the oldest settled ones go past the bound, never one still in flight
   // and never one waiting on its provider: that record is the hold, and dropping it would relaunch its subject early (GY-1245).
   const settled = Object.entries(state.diagnoses).filter(([, entry]) => diagnosisSettled(entry) && entry.state !== 'waiting').sort((a, b) => Date.parse(a[1].updatedAt) - Date.parse(b[1].updatedAt));

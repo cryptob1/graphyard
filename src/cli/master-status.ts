@@ -162,6 +162,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // Commits no reviewer session ever got a verdict on, with the dismissed review.
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
     ...sectionsReport,
+    // Doctor runs: accepted, else cursor's.
+    doctor: coordinator?.doctor?.length ? coordinator.doctor : cycling?.doctor?.recent ?? null,
   };
 }
 
