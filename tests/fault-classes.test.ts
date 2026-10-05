@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { attentionKind, classifyAttention, faultCatalogue, faultClasses, faultClassOf, faultClassItem, faultKinds, groupFaults, isFaultKind, escalationFaultKind, noteActionOutcome, noteFault, recurringClasses, retainedFaultInstances, statusFaults, trackFaults, workFaults, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
+import { attentionKind, classifyAttention, launchWaitKind, faultCatalogue, faultClasses, faultClassOf, faultClassItem, faultKinds, groupFaults, isFaultKind, escalationFaultKind, noteActionOutcome, noteFault, recurringClasses, retainedFaultInstances, statusFaults, trackFaults, workFaults, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
 import { workOriginSchema } from '../src/model/interventions.js';
 import { escalationTriggers, type Evidence, type Observation, type Work } from '../src/model.js';
 import { nameUnobtainableReviews, requestAttemptLimit, settledAnswerGraceMs, unansweredRequest, type DispatchRequest, type RequestProgress } from '../src/model/dispatch.js';
@@ -82,7 +82,7 @@ test('unit:fault-classes — every existing attention kind maps to exactly one c
     ['master status builders', ['disk-pressure', 'resource-bound', 'ledger-refusal', 'scope-request', 'consent-hold', 'review-conflict', 'unobtainable-review', 'decision-refused', 'decision-stale', 'decision-unanswered',
       'approver-launch', 'request-remedy', 'stalled-action', 'stalled-item', 'unanswered-request', 'stuck-request', 'overlong-session', 'context-overflow', 'timing-failure', 'agent-request', 'owed-decision', 'generated-files',
       'github-budget', 'intervention-pattern', 'throughput', 'executor', 'setup', 'installation', 'sudo', 'unrunnable-remedy', 'role-capacity', 'concurrency-starved', 'fleet', 'fleet-capacity', 'actorless',
-      'nonexercising-proof', 'retry-stopped']],
+      'nonexercising-proof', 'retry-stopped', 'review-settlement', 'launch-review']],
     ['work item record', ['containment', 'human-request', 'scope-request', 'proof-gap', 'role-capacity', 'scope-violation', 'blocker', 'sandbox-blocker', 'workflow-permission']],
   ];
   for (const [source, kinds] of sources) for (const kind of kinds) {
@@ -153,6 +153,30 @@ test('unit:fault-classes — attention items, escalations and pipeline faults ca
   const failures = emptyDaemonState(config());
   for (let attempt = 0; attempt < cycleFailureAttentionAfter + 1; attempt++) await noteCycleFailure(failures, new Error('snapshot timed out'), 'cycle', { now: clock + attempt * 1000, intervalMs: 20_000, persist: async () => {} });
   assert.deepEqual(failures.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['loop-failures', 'loop']]);
+});
+
+test('unit:launch-wait-classified — the review launch-wait line classifies by its reason, never as unclassified', () => {
+  // GY-1175: the recorded GY-1171 instances, verbatim, with no kind set by the builder: the signature
+  // fallback recognises the line by its fixed wording and kinds it by the reason it names.
+  const recorded = classifyAttention([
+    { subject: 'GY-1141', text: "GY-1141's review request 7b7bb6d191339ac9930f178873f9031d on 5a121ecc8b7a has waited 21 min (since 2026-10-03T20:10:52.588Z) without a reviewer launch: reviewer session review-claude-1-7b7bb6d1 already answered with APPROVED (review 5402612611); the control plane settles the request once it reads that verdict" },
+    { subject: 'GY-1039', text: "GY-1039's review request 07750d6e93aabd0c412d6b8edefa115d on 25ea6a36f264 has waited 1 h 0 min (since 2026-10-03T20:42:24.520Z) without a reviewer launch: reviewer session review-opencode-1 already answered with APPROVED (review 5402739662); the control plane settles the request once it reads that verdict" },
+    { subject: 'GY-1158', text: "GY-1158's review request a8da2cffd0a2957d644dba21ef8ba3ec on d116b6ab834b has waited 21 min (since 2026-10-03T21:21:57.842Z) without a reviewer launch: every reviewer profile is busy: claude-reviewer: at its concurrency limit (6 running, limit 6); opencode-reviewer: at its concurrency limit (1 running, limit 1); claude-reviewer-2: at its concurrency limit (1 running, limit 1); claude-reviewer-3: at its concurrency limit (1 running, limit 1); opencode-reviewer-2: at its concurrency limit (1 runni" },
+    { subject: 'GY-1167', text: "GY-1167's review request 1c54475a0b26e5acdfbeb7598e7f68b9 on f73ebd15c5b5 has waited 16 min (since 2026-10-03T21:26:50.368Z) without a reviewer launch: every reviewer profile is busy: claude-reviewer: at its concurrency limit (6 running, limit 6); opencode-reviewer: at its concurrency limit (1 running, limit 1); claude-reviewer-2: at its concurrency limit (1 running, limit 1); claude-reviewer-3: at its concurrency limit (1 running, limit 1); opencode-reviewer-2: at its concurrency limit (1 runni" },
+    { subject: 'GY-1053', text: "GY-1053's review request 5b5e55871eee80821dae14d920f6cf52 on 117086f56b39 has waited 19 min (since 2026-10-03T21:36:47.143Z) without a reviewer launch: launch refused 1 time(s): The reviewer App could not mint an installation token (504); check the App installation and its private key; next attempt at 2026-10-03T21:50:15.503Z" },
+    { subject: 'GY-9', text: "GY-9's review request request-9 on 0123456789ab has waited 40 min (since 2026-10-03T21:00:00.000Z) without a reviewer launch: a reason no builder has worded yet" },
+  ]);
+  assert.deepEqual(recorded.map(entry => [entry.kind, entry.faultClass]), [
+    ['review-settlement', 'review-convergence'], ['review-settlement', 'review-convergence'],
+    ['concurrency-starved', 'capacity'], ['concurrency-starved', 'capacity'],
+    ['launch-review', 'session-liveness'], ['launch-review', 'session-liveness'],
+  ]);
+  assert.ok(recorded.every(entry => entry.kind === attentionKind({ subject: entry.subject, text: entry.text })), 'the fallback alone, with no kind set, names each kind');
+  // The builder's kind comes from the reason alone, so it survives a rewording of the line around it.
+  assert.equal(launchWaitKind('every reviewer profile is busy: a: at its concurrency limit (1 running, limit 1)'), 'concurrency-starved');
+  assert.equal(launchWaitKind('reviewer session r already answered with CHANGES_REQUESTED (review 1); the control plane settles the request once it reads that verdict'), 'review-settlement');
+  assert.equal(launchWaitKind('no reviewer profile is configured'), 'launch-review');
+  assert.equal(attentionKind({ subject: 'GY-9', text: 'reworded line: every reviewer profile is busy', kind: 'concurrency-starved' }), 'concurrency-starved');
 });
 
 test('unit:fault-classes — master status and the dashboard group open problems by class with a count', () => {

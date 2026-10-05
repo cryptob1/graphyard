@@ -70,7 +70,7 @@ before(async () => {
 after(async () => { http?.close(); await store?.close(); await database?.stop(); });
 
 /** An item whose candidate `head` on `base` carries a rework merge refusal, and a rework requested for `situation`. */
-async function held(title: string, refusal: { baseSha?: string; policyRevision?: number }, situation: { sha: string; baseSha: string } | null) {
+async function held(title: string, refusal: { baseSha?: string; policyRevision?: number }, situation: { sha: string; baseSha: string } | null, revisedAfterRequest = false) {
   const created = await call(master.token, 'POST', 'work', { title, plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Operator goal: a refused rework lifts its merge refusal' });
   assert.equal(created.status, 200, JSON.stringify(created.body));
   const decision = randomUUID();
@@ -81,6 +81,11 @@ async function held(title: string, refusal: { baseSha?: string; policyRevision?:
     work.mergeRefusal = { sha: head, baseSha: refusedBase, policyRevision: refusal.policyRevision ?? work.policyRevision, reason: 'awaits authorization', since: now.toISOString(), at: now.toISOString(), by: 'graphyard', action: 'rework' } as Work['mergeRefusal'];
     await save(db, work, 'graphyard', 'test.merge-refused', now, {});
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, master.id, 'decision.requested', JSON.stringify({ id: decision, action: 'rework', input: { previousWorkerStopped: true, binding: `${head}:merge-refused` }, reason: 'The guarded merge refused the candidate', ...(situation ? { situation } : {}) })]);
+    // GY-1146: the requirements moved on after the request, and the candidate was refused again under the new revision.
+    if (revisedAfterRequest) {
+      work.policyRevision++; work.mergeRefusal = { ...work.mergeRefusal!, policyRevision: work.policyRevision };
+      await save(db, work, master.id, 'requirements', now, {});
+    }
   });
   const refused = await call(approver.token, 'POST', `work/${created.body.key}/approve`, { action: 'refuse', decision, reason: 'The candidate needs no change' });
   assert.equal(refused.status, 200, JSON.stringify(refused.body));
@@ -113,4 +118,16 @@ test('integration:refused-rework-lift-transactional — refusing the rework requ
   const stale = await held('stale-policy', { policyRevision: 0 }, { sha: head, baseSha: base });
   assert.ok(stale.work.mergeRefusal);
   assert.deepEqual(stale.events.map(row => row.kind), ['decision.declined']);
+});
+
+test('manual:review-followups-triaged GY-1146.1 (refusal-lift-binds-policy-revision): a rework requested at policy revision v1 judged nothing of a refusal recorded at v2 for the same head, base and binding, so refusing it lifts nothing', async () => {
+  const revised = await held('revised-after-request', {}, { sha: head, baseSha: base }, true);
+  assert.ok(revised.work.mergeRefusal, 'the refusal recorded under the newer revision still stands');
+  assert.equal(revised.work.mergeRefusal!.policyRevision, revised.work.policyRevision);
+  assert.ok(standingMergeRefusal(revised.work));
+  assert.deepEqual(revised.events.map(row => row.kind), ['decision.declined']);
+  // The same refusal with no revision since the request is lifted, as GY-1073 established.
+  const current = await held('current-revision', {}, { sha: head, baseSha: base });
+  assert.equal(current.work.mergeRefusal, null);
+  assert.deepEqual(current.events.map(row => row.kind), ['decision.declined', 'merge.refusal.lifted']);
 });

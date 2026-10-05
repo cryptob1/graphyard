@@ -1,6 +1,6 @@
 import { documentationGlobMatches } from './documentation-glob.js';
-import { companionGround } from './scope-companions.js';
-export { companionGround, plannedCompanions } from './scope-companions.js';
+import { companionGround as recordCompanionGround } from './scope-companions.js';
+export { plannedCompanions } from './scope-companions.js';
 import { addsTestFile, timingBaselinePath } from './timing-companion.js';
 import { type CollapsedScope, collapseArea, collapsePlannedFiles, describeWidening, plannedFilesCovered, routableScopeRequest, terminalScopeRefusal } from './scope-collapse.js';
 // Deliberately bounded scope syntax: exact paths or directory prefixes ending /, /*, /**.
@@ -153,6 +153,18 @@ export const scopeBlockedBudgetMs = 900_000;
 export const scopeDecisionSample = 10;
 /** The most entries plannedFiles holds: the one bound the work schema, the follow-up planner and every widening share (GY-630). */
 export const plannedFilesMax = 100;
+/**
+ * The companion ground a requested path stands on (GY-955), with the timing baseline held to the
+ * merge gate's own rule (GY-1187): the baseline is a companion only of a test file it times — a
+ * top-level tests/*.test.ts, or the tests/ scope — never a nested or browser test, whose line
+ * `timingBaselineCompanion` refuses, so granting it would promise a write the gate rejects.
+ */
+export function companionGround(...args: Parameters<typeof recordCompanionGround>): string | null {
+  const [path, item, ask] = args;
+  if (path !== timingBaselinePath) return recordCompanionGround(...args);
+  const timed = [...ask, ...(item.plannedFiles ?? [])].find(entry => entry !== path && addsTestFile({ plannedFiles: [entry] }));
+  return timed ? `${path} is the test-duration baseline a change to ${timed} must keep covering` : null;
+}
 /** `companions`: approved paths implied only as the timing baseline's companion (GY-1023), never added to plannedFiles so its line judgement stays in force. */
 export interface ScopeVerdict { state: ScopeDecision['state']; reason: string; paths: string[]; companions?: string[] }
 /**

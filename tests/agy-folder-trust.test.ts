@@ -16,6 +16,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // shows fails the launch naming it. One case per proof: unit:agy-fresh-worktree-trusted,
 // unit:trust-prompt-screen-fails-launch.
 
+// agyConfigFile falls back to the launcher's own AGY_CONFIG_DIR, so a runner that exports it would
+// move every { HOME }-built expectation below; these cases name their homes explicitly (GY-1194).
+delete process.env.AGY_CONFIG_DIR;
+
 /** Antigravity's trust dialog as `pane read --source recent-unwrapped` returns it: an arrow-selected, unnumbered menu. */
 const agyTrustDialog = [
   ' Antigravity CLI v1.2.4',
@@ -126,4 +130,23 @@ test('GY-1183 — an agy account homed by AGY_CONFIG_DIR records trust in its ow
   assert.equal(existsSync(removed), false);
   assert.equal((await trustAgyFolder(next, { AGY_CONFIG_DIR: account })).written, true);
   assert.deepEqual(JSON.parse(await readFile(settings, 'utf8')).trustedWorkspaces, [operator, realpathSync(live), 7, realpathSync(next)]);
+});
+
+test('GY-1194 — re-trusting an already-trusted folder still prunes, and managed checkouts under any worktree root are pruned', async () => {
+  const account = await temporaryDirectory('agy-retrust-home'), settings = agyConfigFile({ AGY_CONFIG_DIR: account });
+  const root = realpathSync(await temporaryDirectory('agy-retrust')), worktree = join(root, '.graphyard', 'worktrees', 'GY-4-1');
+  mkdirSync(worktree, { recursive: true });
+  // A relocated run.worktreeRoot holds managed checkouts by their session name, not under .graphyard/worktrees.
+  const managed = join(root, 'elsewhere', 'graphyard-review-gy-5-abcdef1-0123abcd', 'checkout');
+  const lookalike = join(root, 'elsewhere', 'graphyard-notes', 'checkout');
+  await writeFile(settings, JSON.stringify({ trustedWorkspaces: [worktree, join(root, '.graphyard', 'worktrees', 'GY-2-1'), managed, lookalike] }));
+  assert.equal((await trustAgyFolder(worktree, { AGY_CONFIG_DIR: account })).written, false, 'the folder was already trusted');
+  assert.deepEqual(JSON.parse(await readFile(settings, 'utf8')).trustedWorkspaces, [worktree, lookalike], 'removed Graphyard checkouts go at once; an unmanaged name stays');
+  assert.equal((await trustAgyFolder(worktree, { AGY_CONFIG_DIR: account })).written, false);
+  assert.deepEqual(JSON.parse(await readFile(settings, 'utf8')).trustedWorkspaces, [worktree, lookalike]);
+  // A managed checkout that still exists is kept.
+  mkdirSync(managed, { recursive: true });
+  await writeFile(settings, JSON.stringify({ trustedWorkspaces: [worktree, managed] }));
+  assert.equal((await trustAgyFolder(worktree, { AGY_CONFIG_DIR: account })).written, false);
+  assert.deepEqual(JSON.parse(await readFile(settings, 'utf8')).trustedWorkspaces, [worktree, managed]);
 });

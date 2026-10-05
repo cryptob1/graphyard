@@ -1,3 +1,4 @@
+import { githubDelivery } from './delivery-mode.js';
 import { createHash } from 'node:crypto';
 import type { Work } from './work.js';
 import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
@@ -96,7 +97,8 @@ export function reviewNeed(work: Work, all: Work[] = [work], now = new Date()): 
   // Mechanical verification precedes judgment, for every provider: no reviewer is asked about a
   // head whose unit and integration proofs have not run, and a head that fails one goes back to
   // its worker (the build gate names the criterion) instead of consuming a reviewer session.
-  const held = mechanicalHold(work, all, now);
+  // Under GitHub delivery CI runs the unit tests and no producer is requested, so review is never held for proofs.
+  const held = githubDelivery() ? null : mechanicalHold(work, all, now);
   if (held) return held;
   // No reviewer identity is left to ask: the roster is spent for this candidate, and adding
   // capacity or selecting another provider is the operator's judgment, not a step anyone runs.
@@ -178,7 +180,8 @@ export function reconcileAutoDispatch(work: Work, all: Work[], now: Date): Dispa
     state.producers = kept;
     // Opened exactly for the groups the shared decision calls `request` — the same predicate the
     // planner reads before it names a proof dispatch (next-action.ts).
-    for (const decision of decisions) {
+    // Under GitHub delivery proofs gate nothing, so no producer is requested for them.
+    for (const decision of githubDelivery() ? [] : decisions) {
       if (decision.state !== 'request' || state.producers.some(request => request.group === decision.group)) continue;
       state.producers.push(open({ kind: 'producer', group: decision.group, proofs: decision.unproven, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: work.policyRevision, pr: candidate.pr, reason: decision.reason }));
     }

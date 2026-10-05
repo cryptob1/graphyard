@@ -11,7 +11,7 @@
 
 ## Items, scope and human waits
 
-An unplanned file needs `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (other flags before `--` refused). Automatic, grounded: documentation; files criteria name; for `docs/` items, single `web/` and `browser-tests/` files; base files named literally in an unresolved thread or `CHANGES_REQUESTED` review (rechecked every 2 min); tests pinning planned quotes or criterion labels; files defining or calling rare criterion symbols; successors (renames, copies, `Graphyard-Successor` trailers, barrels); companions: docs-budget gate, timing baseline (beside top-level `tests/*.test.ts`), proofs' test file, test imports, web-UI files. Approver judges the rest (`--allow-broad-scope` needs reason); workers keep leases (`--wait` reads outcome). `master create`/`requirements` plan proofs' test file, baseline and docs-budget gate up front. One decider per request (`approve-scope` executor, else loop); repeats get standing decisions. Attempt-bound: ending (submit, release, lapse, rework, revision) closes requests as `attempt ended`; next attempt asks afresh; `master unblock GY-N` closes ended requests. Human decisions need `park GY-N EPOCH KIND NEEDED [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you)).
+An unplanned file needs `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (other flags before `--` refused). Granted automatically when grounded: documentation; files criteria name; single `web/` and `browser-tests/` files for `docs/` items; base files named literally in an unresolved thread or `CHANGES_REQUESTED` review (rechecked every 2 min); tests pinning planned quotes or criterion labels; files defining or calling rare criterion symbols; successors (renames, copies, `Graphyard-Successor` trailers, barrels); and companions (docs-budget gate, timing baseline beside top-level `tests/*.test.ts`, proofs' test file, test imports, web-UI files), which `master create`/`requirements` also plan up front. The approver judges the rest (`--allow-broad-scope` needs a reason); workers keep leases (`--wait` reads the outcome). One decider per request (`approve-scope` executor, else loop); repeats get standing decisions. Ending an attempt (submit, release, lapse, rework, revision) closes its requests as `attempt ended`; `master unblock GY-N` closes ended requests. Human decisions need `park GY-N EPOCH KIND NEEDED [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you)).
 
 ## Conflict avoidance
 
@@ -47,9 +47,13 @@ Permission flows read `GET /api/github/installation` (App credential, not gh). E
 
 `master harness claude --apply` (Codex: `master harness codex`) writes harness-classifier rules to `.claude/settings.local.json`.
 
+Denied, by endpoint: `gh pr merge`/`review`, `gh api` `pulls/N/merge`, `repos/R/merges`, `merge-upstream`, `pulls/N/reviews`, `access_tokens`, `PUT`/`POST`/`DELETE`; `gh api graphql` with `mutation` (merge, enqueue, auto-merge, approval) or `=@`/`--input`.
+
+Missing or retired rules (`gh api *merge*`, `gh api graphql*`) are drift, named by `master status` (`harness`); `master harness claude --apply` rewrites them.
+
 ## Typed actions and executors
 
-Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release. After a verified deployment the loop moves a clean detached checkout to the base tip (else `upgrade` attention); `src/`, `scripts/`, `bin/` or `package.json` changes restart executors, then the loop. `releaseLag` flags >1-delivery lag past 10 minutes. A moved checkout exits the executor 0 for systemd; one killed mid-action is named in `master status`. `Nothing can run KIND` skips `merge` beside a merging loop, empty fleets ≤120 s post-restart, `deactivating` units.
+Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`; executors claim rows under their own credential, and `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release. After a verified deployment the loop moves a clean detached checkout to the base tip (else `upgrade` attention), restarting executors, then the loop, when `src/`, `scripts/`, `bin/` or `package.json` changed; the executor exits 0 for systemd, and one killed mid-action is named in `master status`. `releaseLag` flags >1-delivery lag past 10 minutes. `Nothing can run KIND` skips `merge` beside a merging loop, empty fleets ≤120 s after restart, and `deactivating` units.
 
 A `resync` needs a fresh observation: `POST /api/work/:id/resync` with `{ since }` (claim time) wakes the item's observation job, answering `observed`, `observedAt` and its `job`; `wake: false` only reads. Unobserved, the claim fails at once (`no observation newer than the claim was saved`, plus its condition). Failures against a scheduled job with no hold or error stall after thirty minutes; held, failed or missing, after three. Row bookkeeping (claim, renew, settle) never refuses a prior observation read.
 
@@ -57,22 +61,24 @@ A `dispatch` or `request-review` finding a session already answering the request
 
 A failed snapshot read retries once (0.5–1.5 s); a failed cycle waits min(interval, 30 s), doubling. One item's throw fails only its `isolated:KIND:ITEM-ID` action.
 
-## Resources and disk
-
-`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees (`run.reclaimIdleHours`; never dirty/unpushed), `run.worktreeRemovalLimit`/cycle, logging `.graphyard/worktree-reclaim.jsonl`, stale [test temp entries](operations-reference.md#control-plane-resources) and `tsx-<uid>` in `/tmp` (dead owner or 2h/6h idle; unheld; ≤100/cycle, one pass in flight); `disk` attention below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`). Agentless panes Graphyard launched are swept each cycle ([panes](master-agent-sessions.md#panes-are-closed-and-reclaimed)). The resource reclaim closes any unowned, non-`working` pane on a profile's name — `unknown` status or a recordless reviewer/producer included — once two passes 60 s apart saw it.
-
 ## Recovery
 
 A dead supervisor fences its item; `containment` lists each surviving process's pid, cmdline and cwd. With `settleable: true` run `master settle-containment`; otherwise stop the recorded scope unit (`containment.scope`) and request `rework`.
 
 An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and `stopped-by-attestation` lapses are history); any admin settles an explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). 
 
+### Producer-runtime faults
+
+A producer request spent with no attempt acting (`never started`, run could not start, launch refused, exited at launch) requests no rework: attention names the attempts and their profiles, and the request relaunches on an independent, credentialed profile none of them ran on.
+
 `master escalation GY-N` spawns a handler answering `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen, nor pruning retire, a standing fault. Full roles are slot waits; workless sessions raise `fleet-capacity` (capacity); unnamed master roles are no `configuration` fault. Scope requests count past 15 minutes open, or refused with no approver left. Settled requests turn `unanswered-request` past `settledAnswerGraceMs` (5 minutes), naming an owed relaunch or `request-remedy` decision. A failed section is listed only in `unavailable`. Sandbox or `workflows`-permission refusal blockers are `configuration`.
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen, nor pruning retire, a standing fault. Full roles are slot waits; workless sessions raise `fleet-capacity` (capacity); unnamed master roles are no `configuration` fault. Scope requests count past 15 minutes open, or refused with no approver left. Settled requests turn `unanswered-request` past `settledAnswerGraceMs` (5 minutes), naming the owed relaunch or `request-remedy` decision. A failed section is listed only in `unavailable`. Sandbox or `workflows`-permission refusal blockers are `configuration`.
 
 ## Pipeline speed
 
-Target: submit→merge p50 ≤ 30 minutes, p90 ≤ 60 minutes over 10+ deliveries. Each row's `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records it for `manual:speed-target-met`.
+Target: submit→merge p50 ≤ 30 minutes, p90 ≤ 60 minutes over 10+ deliveries. Rows' `speed` carries `executionMs`, `waitMs`, `reworkRounds` and `interventions`; `speed.submitToMerge` gives the verdict. `node scripts/measure-pipeline-speed.mjs` records it for `manual:speed-target-met`.
+
+The loop's decisions step stays within 10 s a cycle at about 90 open items: one read of the `decision.*` ledger names items whose decisions moved; only those histories are reread, eight at a time. A history whose ledger has not moved is kept, not read.
