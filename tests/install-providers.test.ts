@@ -7,7 +7,7 @@ import type { Provider } from '../src/install/types.js';
 import { harness, satisfiedProtection, RAILWAY_WORKSPACES, type Harness } from './install-harness.js';
 
 const supported: Provider[] = ['railway', 'hetzner', 'docker-host', 'compose'];
-const inputsFor = (provider: Provider) => ({ repository: 'owner/project', provider, ...(provider === 'railway' || provider === 'compose' ? {} : { sshHost: '203.0.113.10', sshUser: 'root', domain: 'graphyard.example.test' }), ...(provider === 'hetzner' ? { sshKey: 'graphyard-key' } : {}) });
+const inputsFor = (provider: Provider) => ({ repository: 'owner/project', provider, ...(provider === 'railway' || provider === 'compose' ? {} : { sshHost: '203.0.113.10', sshUser: 'root', domain: 'graphyard.example.test' }), ...(provider === 'hetzner' ? { sshKey: 'graphyard-key', maxMonthly: 50 } : {}) });
 
 function renderEnv(provider: Provider, values: { name: string; value: string }[]) {
   return provider === 'railway'

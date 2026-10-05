@@ -22,7 +22,7 @@ import { createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
 import { allocateManagedCheckout, failureText, settleCheckout } from './worktrees.js';
 import { herdrAttach } from './dispatch.js';
 import type { SessionHandleInput } from '../model/sessions.js';
-import type { FilesystemProbe } from '../install/worktree-root.js';
+import type { FilesystemProbe, SessionCheckout } from '../install/worktree-root.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { liveReviewRequest } from '../model/dispatch.js';
 import { narrowRoleRuntime, piRuntimeSchema } from '../runner/payloads.js';
@@ -99,8 +99,6 @@ export function decisionInput(action: string, work: Work, input: Record<string, 
   if (action === 'requirements') return { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies, plannedFiles: work.plannedFiles, exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], ...input };
   if ((action === 'merge' || action === 'attest') && work.candidate) return { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, ...(action === 'attest' ? { result: 'pass', executed: 1, skipped: 0, ...attestationExercise(work, input.proof) } : {}), ...input };
   if (action === 'rework' || action === 'recover') return { previousWorkerStopped: true, ...input };
-  // The repair lane (GY-406) binds the exact head it may merge.
-  if (action === 'repair-merge' && work.candidate) return { sha: work.candidate.sha, ...input };
   return input;
 }
 /**
@@ -416,17 +414,17 @@ export async function launchApprover(root: string, work: Work, decision: string,
   const cli = `node ${config.cliPath}`;
   let delivery: RequestDelivery | undefined;
   const prompt = `You are the independent Graphyard approver for ${config.repository}, acting as ${config.approver!.id}. Judge decision ${decision} on ${work.key}: run ${cli} master decisions ${work.key}, read the item with ${cli} status ${work.key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. ${attest ? attestConfirmation(work.candidate?.baseSha) : ''}If it is justified, run ${cli} master approve ${work.key} ${decision} "YOUR REASON". If not, record the refusal: run ${cli} master refuse ${work.key} ${decision} "YOUR REASON" — a decline is recorded, never expressed by exiting. Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop when the decision is judged.`;
-  let pane: string | undefined, tabId: string | undefined;
+  let pane: string | undefined, tabId: string | undefined, checkout: SessionCheckout | undefined; // GY-866: its own anchored checkout (reviewer.js, read dynamically: it reads this barrel at load)
   try {
-    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
+    checkout = await (await import('../reviewer.js')).coordinationCheckout(root, config, work.key, work.candidate?.sha, headless.filesystem); const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_REPOSITORY_ROOT=${root}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
     // Registered with its pane before its runtime starts (GY-172 AC-2), so the session report
     // observes this approver like every other session and closes it once it is gone.
     ({ delivery } = await registeredLaunch(register, { id: approverSessionId(decision), kind: 'coordination', role: 'approver', principal: config.approver!.id, runtime: kind, host: config.hostId,
       agentName: name, pane: created.pane, attach: herdrAttach(created.pane, config.herdrWorkspace), ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
-      subject: `${work.key}: judge decision ${decision}`, state: 'running' }, () => startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: root, retry, contract: launch.contract, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined));
+      subject: `${work.key}: judge decision ${decision}`, state: 'running' }, () => startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: checkout!.directory, cwd: checkout!.directory, retry, contract: launch.contract, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined));
   } catch (error) {
-    throw await abandonLaunch(error, pane, tabId, selected, `approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`, run);
+    if (checkout) await settleCheckout(root, checkout.directory); throw await abandonLaunch(error, pane, tabId, selected, `approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`, run);
   }
   const spentOn = selected?.account.name ?? chosen?.account?.name ?? null;
   // The registry session is kept with the launch: the loop ends it once the decision is judged, or
@@ -436,8 +434,8 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // slot are unknown, so a launch whose record cannot be written is closed and fails.
   // It names the item and decision too (GY-403), so the loop watches a session `master approver`
   // launched exactly as one of its own, and closes it once its decision settles.
-  try { await saveApproverLaunch(root, { agentName: name, account: spentOn, runtime: kind, session, launchedAt: new Date().toISOString(), work: work.key, decision }); }
-  catch (error) { throw await abandonLaunch(error, pane, tabId, selected, `approver launch record for ${work.key} could not be written: ${failureText(error).slice(0, 300)}`, run); }
+  try { await saveApproverLaunch(root, { agentName: name, account: spentOn, runtime: kind, session, launchedAt: new Date().toISOString(), work: work.key, decision, checkout: checkout.directory }); }
+  catch (error) { const failure = await abandonLaunch(error, pane, tabId, selected, `approver launch record for ${work.key} could not be written: ${failureText(error).slice(0, 300)}`, run); await settleCheckout(root, checkout.directory); throw failure; }
   return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane! as string | null, delivery, focusChanged: false, runtime: kind as string, session,
     account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped }
       : chosen?.account ? { environment: chosen.account.name, kind, reason: `the first healthy account of profile ${chosen.profile}`, skipped: chosen.skipped } : null,
@@ -453,7 +451,7 @@ export const approverLaunchSchema = z.object({ agentName: z.string().max(200), a
   /** The agent registry session the launch holds, when the registry chose its account. */
   session: z.string().max(200).nullable().default(null), launchedAt: z.string(),
   /** The item and decision it judges (GY-403): the loop registers the session in its approval watch from these. */
-  work: z.string().max(40).nullable().default(null), decision: z.string().max(100).nullable().default(null) }).strict();
+  work: z.string().max(40).nullable().default(null), decision: z.string().max(100).nullable().default(null), /** Its own managed directory, kept from reclaim while this record is (GY-866). */ checkout: z.string().max(4096).optional() }).strict();
 export type ApproverLaunch = z.infer<typeof approverLaunchSchema>;
 const approverLaunchesPath = async (root: string) => resolve(await localDirectory(root), 'approvers', 'launches.json');
 /** Every approver launch recorded on this host within the last day. */
@@ -508,7 +506,7 @@ export const escalationSessionSchema = z.object({
   session: z.string().max(200).nullable().default(null),
   waiting: z.object({ since: z.string(), retryAt: z.string(), reason: z.string().max(500) }).strict().nullable().default(null),
   /** When the loop first saw the handler stopped with no limit notice: past a grace, it has finished. */
-  idleSince: z.string().optional(),
+  idleSince: z.string().optional(), /** Its own managed directory, kept from reclaim while this record is (GY-866). */ checkout: z.string().max(4096).optional(),
 }).strict();
 export type EscalationSession = z.infer<typeof escalationSessionSchema>;
 export const retainedEscalationSessions = 50, escalationSessionMs = 86_400_000;
@@ -614,18 +612,18 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
     ? ` This is a requirement-weakening escalation, so judge it against this item's own revision: state each criterion whose text or proofs changed, before and after, from the item's requirements history (item.requirementRevisions), and name the decision that applied it — never copy another item's reason into yours; the precedent you cite is the rule followed, nothing more.`
     : '';
   const prompt = `You are a Graphyard escalation handler spawned for the ${context.escalation.trigger} escalation on ${context.key} in ${config.repository}, acting as ${config.operatorAgent!.id}. Your entire input is the file ${file}: the context the control plane assembled for this decision — the repository's own operating rules and policy, the current goals and priorities, the item (requirements, the standing refusal, the candidate, its typed history) and precedent (earlier ${escalationAction} decisions with their reasons and outcomes). Read that file and nothing else: do not run status, events or any other read, do not open the repository, and hold no state beyond it. Decide whether the ${context.escalation.trigger} escalation should be resolved, following the precedent that applies and saying which.${ownRevision} If it should, run ${cli} master decide ${context.key} ${escalationAction} '{"trigger":"${context.escalation.trigger}"}' --precedent DECISION_ID[,DECISION_ID] --context ${context.fingerprint} "YOUR REASON" exactly once, citing only ids listed in precedent.detail; when precedent.detail lists no decision that applies, leave out --precedent and the control plane records that no precedent was available — never invent an id. An independent approver judges it. If it should not, request nothing and state the reason in this tab. Never edit, push, merge, review, approve or submit evidence. Stop when the decision is recorded or declined.`;
-  let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined;
+  let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, checkout: SessionCheckout | undefined;
   try {
-    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Escalation · ${context.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', 'GRAPHYARD_ESCALATION_HANDLER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
+    checkout = await (await import('../reviewer.js')).coordinationCheckout(root, config, context.key, context.item?.candidate?.sha); const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory, '--label', `Escalation · ${context.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_REPOSITORY_ROOT=${root}`, '--env', 'GRAPHYARD_ESCALATION_HANDLER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
     // The instruction is the session's own first request (GY-93), never pasted into it: a handler
     // that refused a pasted prompt would record no decision and leave the escalation standing.
     // Registered first, like every launched session (GY-172 AC-2).
     ({ delivery } = await registeredLaunch(register, { id: `escalation:${context.escalation.trigger}:${context.fingerprint.slice(0, 12)}`, kind: 'coordination', role: 'escalation', principal: config.operatorAgent!.id, runtime, host: config.hostId,
       agentName: name, pane: created.pane, attach: herdrAttach(created.pane, config.herdrWorkspace), ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
-      subject: `${context.key}: handle the ${context.escalation.trigger} escalation`, state: 'running' }, () => startAgentSession(name, runtime, created.pane, launch.args, prompt, run, { directory: root, retry: escalationRetry, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined));
+      subject: `${context.key}: handle the ${context.escalation.trigger} escalation`, state: 'running' }, () => startAgentSession(name, runtime, created.pane, launch.args, prompt, run, { directory: checkout!.directory, cwd: checkout!.directory, retry: escalationRetry, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined));
   } catch (error) {
-    const failure = await abandonLaunch(error, pane, tabId, selected, `escalation handler launch for ${context.key} failed: ${failureText(error).slice(0, 300)}`, run);
+    if (checkout) await settleCheckout(root, checkout.directory); const failure = await abandonLaunch(error, pane, tabId, selected, `escalation handler launch for ${context.key} failed: ${failureText(error).slice(0, 300)}`, run);
     // A registry session that could not be ended is kept on a record due now: the loop ends it
     // before it launches the escalation again, so the role's slot is never left orphaned.
     const orphan = (failure as { registrySession?: string }).registrySession;
@@ -638,7 +636,7 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
   }
   // The record is part of the launch: it is how the loop finds a handler that stopped on a limit
   // notice and ends its registry session, so a launch whose record cannot be written is closed and fails.
-  try { await saveEscalationSession(root, context.key, context.escalation.trigger, { agentName: name, pane: pane!, work: context.key, trigger: context.escalation.trigger, kind, account: selected?.account.name ?? null, runtime, launchedAt: new Date().toISOString(), session: selected?.account.fleet.session ?? null, waiting: null }); }
+  try { await saveEscalationSession(root, context.key, context.escalation.trigger, { agentName: name, pane: pane!, work: context.key, trigger: context.escalation.trigger, kind, account: selected?.account.name ?? null, runtime, launchedAt: new Date().toISOString(), session: selected?.account.fleet.session ?? null, waiting: null, checkout: checkout.directory }); }
   catch (error) { throw await abandonLaunch(error, pane, tabId, selected, `escalation handler record for ${context.key} could not be written: ${failureText(error).slice(0, 300)}`, run); }
   return { agentName: name, work: context.key, trigger: context.escalation.trigger, fingerprint: context.fingerprint, context: file, identity: config.operatorAgent!.id, pane: pane!, delivery, focusChanged: false, account: selected?.account.name ?? null };
 }

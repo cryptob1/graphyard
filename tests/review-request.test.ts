@@ -7,6 +7,19 @@ import { emptyDaemonState, routineDecision, runCycle, type DaemonEffects } from 
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { actorlessBoundMs, actorlessSubmissions } from '../src/cli/actorless-submissions.js';
 import type { Evidence, Observation, Work } from '../src/model.js';
+import { GitHub } from '../src/github.js';
+import type { BaseRefresh } from '../src/merge-queue.js';
+import { conflictRoute, docsOnlyConflict, docsSyncAdoption, docsSyncCarry, overlappingPaths } from '../src/model/docs-sync.js';
+import { conflictHotspots, hotspotAttentionText, ledgerConflicts, type ConflictOccurrence } from '../src/model/conflict-hotspots.js';
+import { docsSyncCheckout, docsSyncCheckoutRefusal, docsSyncPrompt, docsSyncSessionName, docsSyncWritablePaths, launchDocsSync, prepareDocsSyncCheckout, reclaimDocsSyncCheckouts, type DocsSyncLaunchSeams, type DocsSyncPlan } from '../src/docs-sync.js';
+import { runChild, type ChildRun } from '../src/child-runner.js';
+import { coordinatorConfinement } from '../src/master/profiles.js';
+import { prepareConfinedGitPaths } from '../src/master/launch.js';
+import { execFileSync } from 'node:child_process';
+import { accessSync, chmodSync, constants, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { sessionNameRefusal } from '../src/session-name.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-191, 2026-09-24: four submitted candidates sat in review for hours. Each was one merge behind
 // main, so no review request was raised for its head (dispatch withheld it until the head contained
@@ -27,7 +40,7 @@ function observation(extra: Partial<Observation> = {}): Observation {
 }
 /** One commit behind base: the tip moved from B to B2, and the head's bound base is still B. */
 const behind = (extra: Partial<Observation> = {}) => observation({ baseTip: B2, baseTipContained: false, ...extra });
-const conflicting = () => behind({ mergeable: false, conflicting: true });
+const conflicting = (extra: Partial<Observation> = {}) => behind({ mergeable: false, conflicting: true, ...extra });
 
 function item(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 191, branch: 'graphyard/gy-191-1', author: 'implementer' };
@@ -86,7 +99,11 @@ function loopEffects(work: Work, decided: { action: string; reason: string }[], 
 }
 
 test('unit:conflicting-candidate-reworked — a behind-base candidate GitHub reports conflicting, with no lease, is sent back through a rework decision and an approver', async () => {
-  const work = item({ evidence: proven(), observation: conflicting() });
+  // While the control plane's own test merge onto that tip is pending, it decides (GY-566): a
+  // confirmed conflict is reworked on its record, or docs-synced when confined to docs pages.
+  assert.equal(routineDecision(item({ evidence: proven(), observation: conflicting() }), { autoMerge: true }, clock), null);
+  // GitHub's reading alone, with no test merge the control plane can run: containment is unknown.
+  const work = item({ evidence: proven(), observation: conflicting({ baseTipContained: undefined }) });
   const decision = routineDecision(work, { autoMerge: true }, clock);
   assert.equal(decision?.action, 'rework');
   assert.equal(decision?.binding, `${H}:sync:${B2}`);
@@ -94,7 +111,7 @@ test('unit:conflicting-candidate-reworked — a behind-base candidate GitHub rep
   // Merely behind, and mergeable, is not a rework: it is reviewed as it stands.
   assert.equal(routineDecision(item({ evidence: proven() }), { autoMerge: true }, clock), null);
   // A live worker still holds it: the round is not asked for over its head.
-  assert.equal(routineDecision(item({ observation: conflicting(), lease: { owner: 'implementer', epoch: 1, expiresAt: iso(60_000) } } as Partial<Work>), { autoMerge: true }, clock), null);
+  assert.equal(routineDecision(item({ observation: conflicting({ baseTipContained: undefined }), lease: { owner: 'implementer', epoch: 1, expiresAt: iso(60_000) } } as Partial<Work>), { autoMerge: true }, clock), null);
 
   const decided: { action: string; reason: string }[] = [], approvers: string[] = [];
   const state = emptyDaemonState(config());
@@ -169,4 +186,325 @@ test('unit:no-actor-item-surfaced — a submitted item with no review, producer 
 });
 function orphanFields(): Partial<Work> {
   return { evidence: proven(), observation: observation(), stageEnteredAt: iso(-actorlessBoundMs - 60_000) };
+}
+
+// GY-566, in its own scope: its fixtures shadow this file's.
+{
+
+/**
+ * GY-566. On 2026-09-26 thirteen queued items went back to a full worker rework in thirty minutes,
+ * almost all for conflicts in the same few docs pages. A conflict confined to docs pages now goes
+ * to a short docs-sync session and keeps its approval when the change outside docs/ is unchanged;
+ * master status and Insights name the paths that keep conflicting.
+ */
+
+const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
+const clock = Date.parse('2030-01-01T12:00:00Z');
+const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
+const minute = 60_000;
+const reviewed = 'a'.repeat(40), bound = 'b'.repeat(40), tip = 'c'.repeat(40), synced = 'd'.repeat(40);
+
+function docsConfig(): MasterConfig {
+  return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher,
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project',
+    autoMerge: true, mergeMethod: 'merge', workers: [] });
+}
+
+/** A submitted, approved item whose base refresh confirmed a conflict with base tip `tip` on `paths`. */
+function conflicted(paths: string[] | null, observedAt = iso(-30_000)): Work {
+  const candidate = { sha: reviewed, baseSha: bound, pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' };
+  const observation = {
+    clockOffset: { min: 0, max: 0 }, candidate, baseTip: tip, baseTipContained: false, conflicting: true,
+    checks: [{ name: 'test', result: 'success', appId: 15368 }], reviews: [{ reviewer: 'independent-reviewer', sha: reviewed, state: 'APPROVED', submittedAt: iso(-60 * minute) }],
+    protected: true, mergeable: false, merged: false, mergeSha: null, files: ['src/loop.ts', 'docs/master-agent.md'], scopeFiles: [], at: observedAt, prState: 'open', draft: false,
+  } as unknown as Observation;
+  const baseRefresh: BaseRefresh = { from: { sha: reviewed, baseSha: bound }, base: tip, baseTree: 'e'.repeat(40), policyRevision: 1, at: iso(-minute), head: null,
+    conflict: `Candidate ${reviewed.slice(0, 12)} cannot be brought onto base branch tip ${tip.slice(0, 12)} without resolving a conflict`, merge: null, carry: null, trigger: 'conflict confirmed', conflictPaths: paths };
+  return {
+    id: 'work-42', key: 'GY-42', title: 'A change that documents itself', description: '', type: 'bug', priority: 1,
+    dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:loop'] }], policy: { checks: ['test'], review: true },
+    plannedFiles: ['src/loop.ts', 'docs/master-agent.md'], stage: 'merge', revision: 5, policyRevision: 1, createdAt: iso(-4 * 60 * minute), updatedAt: iso(0),
+    stageEnteredAt: iso(-30 * minute), ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: 42 },
+    candidate, reworkRequested: false, scenarioRequirements: [], evidence: [], observation, baseRefresh, blocker: null, violations: [],
+    gates: [{ name: 'build', passed: true, reasons: [] }, { name: 'merge', passed: false, reasons: ['Pull request is not mergeable against the current base'] }],
+  } as Work;
+}
+
+function loop(work: () => Work, record: { decided: string[]; synced: DocsSyncPlan[]; agents: string[] }, local?: string[] | null): DaemonEffects {
+  return {
+    agents: () => [], herdr: () => ({ agents: record.agents.map((name, index) => ({ name, pane_id: `pane-${index}`, agent_status: 'working' })), available: true }),
+    credentials: async () => ({}),
+    snapshot: async () => ({ work: [work()], now: iso(0), jobs: [] }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {},
+    decide: async (_work, action) => { record.decided.push(action); return { id: '5d8a8b9e-0000-4000-8000-000000000001' }; },
+    decisions: async () => ({ decisions: [] }),
+    approver: async () => ({ agentName: 'graphyard-approver-gy-42', pane: 'pane-a' }),
+    docsSync: async (_item, plan) => { record.synced.push(plan); record.agents.push(`graphyard-docs-sync-gy-42-${plan.head.slice(0, 7)}`); return { agentName: record.agents.at(-1)!, pane: 'pane-s', account: 'reviewer-a', runtime: 'claude', session: null }; },
+    ...(local === undefined ? {} : { conflictPaths: async () => local }),
+    persist: async () => {},
+  };
+}
+
+test('unit:docs-only-conflict-synced — a docs-only conflict leads to a docs-sync session and no rework decision; a conflict touching src/ still goes to rework; the approval is kept when the non-docs patch is unchanged', async () => {
+  // The routing rule: docs/**/*.md only, and a known, non-empty set.
+  assert.equal(docsOnlyConflict(['docs/master-agent.md', 'docs/guides/onboarding.md']), true);
+  assert.equal(docsOnlyConflict(['docs/master-agent.md', 'src/cli/master-status.ts']), false);
+  assert.equal(docsOnlyConflict(['README.md']), false, 'only pages under docs/ are the docs-sync\'s');
+  assert.equal(docsOnlyConflict([]), false); assert.equal(docsOnlyConflict(null), false);
+  assert.equal(conflictRoute(['docs/onboarding.md', 'src/cli/master-status.ts']).route, 'rework');
+  assert.match(conflictRoute(['docs/onboarding.md', 'src/cli/master-status.ts']).reason, /src\/cli\/master-status\.ts/);
+  assert.deepEqual(overlappingPaths(['docs/a.md', 'src/x.ts', 'docs/b.md'], ['docs/b.md', 'docs/a.md', 'src/y.ts']), ['docs/a.md', 'docs/b.md']);
+  assert.equal(overlappingPaths(null, ['docs/a.md']), null, 'an unlisted side is unknown, never clean');
+
+  // 1. A docs-only conflict: the loop launches one docs-sync session and requests no rework.
+  const docs = { decided: [] as string[], synced: [] as DocsSyncPlan[], agents: [] as string[] };
+  let item = conflicted(['docs/master-agent.md', 'docs/onboarding.md']);
+  const state = emptyDaemonState(docsConfig());
+  const first = await runCycle(docsConfig(), state, loop(() => item, docs), () => clock);
+  assert.deepEqual(docs.decided, [], 'no rework decision is requested for a docs-only conflict');
+  assert.equal(docs.synced.length, 1, 'one docs-sync session is launched');
+  assert.deepEqual(docs.synced[0], { key: 'GY-42', pr: 42, branch: 'graphyard/gy-42-1', baseBranch: 'main', head: reviewed, base: tip, paths: ['docs/master-agent.md', 'docs/onboarding.md'] });
+  assert.ok(first.actions.some(action => action.work === 'GY-42' && /^Launched docs-sync session .* no rework decision is requested/.test(action.detail)), 'the cycle reports the launch');
+  assert.ok(first.actions.some(action => action.work === 'GY-42' && /both sides changed only docs pages/.test(action.detail)), 'the refresh report names the docs-sync route, not a worker');
+  assert.deepEqual(state.conflicts.map(entry => [entry.work, entry.route, entry.paths]), [['GY-42', 'docs-sync', ['docs/master-agent.md', 'docs/onboarding.md']]]);
+  // The session's instruction is narrow: merge the base, keep both meanings, stay in budget, touch only the conflicted paragraphs, rerun the checks.
+  const prompt = docsSyncPrompt(docsConfig(), docs.synced[0], '/repo');
+  for (const phrase of [`git merge --no-ff ${tip}`, 'both sides\' meaning', 'word budget', 'Touch only the conflicted paragraphs', 'tests/docs-budget.test.ts tests/docs-obligation.test.ts', 'never forced', 'Do not run graphyard complete'])
+    assert.ok(prompt.includes(phrase), `the prompt says: ${phrase}`);
+
+  assert.equal(sessionNameRefusal(docsSyncSessionName({ key: 'GY-1234', head: reviewed })), null, 'the session name is one every runtime accepts');
+  // While the session runs, nothing more happens; a second cycle neither relaunches nor reworks.
+  await runCycle(docsConfig(), state, loop(() => item, docs), () => clock);
+  assert.deepEqual(docs.decided, []); assert.equal(docs.synced.length, 1);
+
+  // The session ends without moving the head: once an observation taken after that still shows
+  // the reviewed head, the conflict goes back to a worker as before.
+  docs.agents.length = 0;
+  await runCycle(docsConfig(), state, loop(() => item, docs), () => clock);
+  assert.deepEqual(docs.decided, [], 'a push not yet observed is waited for');
+  item = conflicted(['docs/master-agent.md', 'docs/onboarding.md'], iso(1_000));
+  await runCycle(docsConfig(), state, loop(() => item, docs), () => clock + 2_000);
+  assert.deepEqual(docs.decided, ['rework'], 'a docs-sync that gave up is followed by rework');
+  assert.equal(state.conflicts[0].route, 'rework', 'and the conflict is counted as sent back');
+
+  // 2. A conflict touching src/ goes to rework, and no docs-sync is launched — the loop's own
+  // merge of the head and the base decides over the paths both sides changed.
+  const code = { decided: [] as string[], synced: [] as DocsSyncPlan[], agents: [] as string[] };
+  const mixed = conflicted(['docs/onboarding.md']);
+  await runCycle(docsConfig(), emptyDaemonState(docsConfig()), loop(() => mixed, code, ['docs/onboarding.md', 'src/cli/master-status.ts']), () => clock);
+  assert.deepEqual(code.decided, ['rework']); assert.deepEqual(code.synced, []);
+  const unknown = { decided: [] as string[], synced: [] as DocsSyncPlan[], agents: [] as string[] };
+  await runCycle(docsConfig(), emptyDaemonState(docsConfig()), loop(() => conflicted(null), unknown), () => clock);
+  assert.deepEqual(unknown.decided, ['rework'], 'unknown conflicted paths go to a worker'); assert.deepEqual(unknown.synced, []);
+
+  // 3. The synced head is recorded as the refresh's outcome, and the approval is kept only when
+  // the diff outside docs/ has the same patch-id on both sides.
+  const approved = conflicted(['docs/master-agent.md']);
+  const observed = { candidate: { sha: synced, baseSha: tip, pr: 42 }, merged: false, prState: 'open' };
+  const adoption = docsSyncAdoption(approved, observed)!;
+  assert.deepEqual(adoption, { from: { sha: reviewed, baseSha: bound }, base: tip, head: synced, to: { sha: synced, baseSha: tip }, paths: ['docs/master-agent.md'] });
+  assert.equal(docsSyncAdoption({ ...approved, reworkRequested: true }, observed), null, 'a worker\'s own sync after a rework is a new submission');
+  assert.equal(docsSyncAdoption(approved, { ...observed, candidate: { ...observed.candidate, sha: reviewed } }), null, 'the reviewed head itself is no docs-sync');
+
+  // GitHub describes the merge and both diffs; the docs hunk differs, the code hunk does not.
+  const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 1, privateKey: 'unused' });
+  const code1 = { filename: 'src/loop.ts', status: 'modified', changes: 2, patch: '@@ -1 +1 @@\n-old\n+new' };
+  const compare: Record<string, any[]> = {
+    [`${bound}...${reviewed}`]: [code1, { filename: 'docs/master-agent.md', status: 'modified', changes: 1, patch: '@@ -3 +3 @@\n-a\n+item text' }],
+    [`${tip}...${synced}`]: [code1, { filename: 'docs/master-agent.md', status: 'modified', changes: 2, patch: '@@ -7 +7 @@\n-b\n+base text and item text' }],
+    [`${bound}...${tip}`]: [{ filename: 'docs/master-agent.md', status: 'modified', changes: 1, patch: '@@ -3 +3 @@\n-a\n+base text' }],
+  };
+  (github as any).controlPlaneLogin = async () => 'graphyard-app[bot]';
+  (github as any).request = async (path: string) => {
+    if (path === `/commits/${synced}`) return { parents: [{ sha: reviewed }, { sha: tip }], author: { login: 'docs-sync-account' }, commit: { author: { email: 'sync@example.com' } } };
+    if (path === `/commits/${tip}`) return { commit: { tree: { sha: 'f'.repeat(40) } } };
+    const range = path.replace(/^\/compare\//, '');
+    if (compare[range]) return { status: 'ahead', files: compare[range] };
+    throw new Error(`unexpected request ${path}`);
+  };
+  const refresh = await github.docsSyncRefresh(approved, adoption);
+  assert.equal(refresh.head, synced); assert.equal(refresh.trigger, 'docs sync'); assert.equal(refresh.conflict, null);
+  assert.ok(refresh.docsSync!.reviewed && refresh.docsSync!.reviewed === refresh.docsSync!.synced, 'the diff outside docs/ has one patch-id on both sides');
+  const approval = { provider: 'github' as const, reviewer: 'independent-reviewer', sha: reviewed };
+  const carry = (docsSync = refresh.docsSync!, merge = refresh.merge!) => docsSyncCarry({ from: refresh.from, base: tip, at: iso(0), policyRevision: 1, merge, docsSync, reviewedFiles: ['src/loop.ts'], approval, proofs: [{ proof: 'unit:loop', evidence: undefined }] });
+  const kept = carry();
+  assert.equal(kept.approval.carried, true, 'the approval is kept on the docs-sync head');
+  assert.match(kept.approval.reason, /diff outside docs\/ is unchanged/);
+  assert.deepEqual(kept.to, { sha: synced, baseSha: tip });
+  assert.equal(kept.evidence[0].carried, false, 'the proofs run again on the synced head');
+
+  // The docs-sync also touched code: the approval is required again (still no rework round).
+  compare[`${tip}...${synced}`] = [{ ...code1, patch: '@@ -1 +1 @@\n-old\n+newer' }];
+  const touched = await github.docsSyncRefresh(approved, adoption);
+  assert.notEqual(touched.docsSync!.reviewed, touched.docsSync!.synced);
+  const required = carry(touched.docsSync!, touched.merge!);
+  assert.equal(required.approval.carried, false);
+  assert.match(required.approval.reason, /changed the diff outside docs\//);
+  // A head that is not exactly the reviewed head merged with the conflicting tip carries nothing.
+  assert.equal(carry(refresh.docsSync!, { ...refresh.merge!, parents: [reviewed, 'f'.repeat(40)] }).approval.carried, false);
+});
+
+test('unit:conflict-hotspots-reported — master status and Insights report the paths most often conflicting in the last 24 hours with counts and the items they sent back, and raise attention at 5 conflicts on one path', () => {
+  const at = (hoursAgo: number) => iso(-hoursAgo * 3_600_000);
+  const occurrences: ConflictOccurrence[] = [
+    { work: 'GY-268', at: at(1), paths: ['docs/master-agent.md', 'docs/onboarding.md'], route: 'rework' },
+    { work: 'GY-303', at: at(2), paths: ['docs/master-agent.md'], route: 'docs-sync' },
+    { work: 'GY-316', at: at(3), paths: ['docs/master-agent.md', 'src/cli/master-status.ts'], route: 'rework' },
+    { work: 'GY-401', at: at(5), paths: ['docs/master-agent.md'], route: 'docs-sync' },
+    { work: 'GY-404', at: at(8), paths: ['docs/master-agent.md', 'docs/master-agent.md'], route: 'docs-sync' },
+    { work: 'GY-417', at: at(9), paths: ['docs/onboarding.md'], route: 'docs-sync' },
+    // Older than the window: not counted.
+    { work: 'GY-100', at: at(30), paths: ['docs/master-agent.md'], route: 'rework' },
+  ];
+  const report = conflictHotspots(occurrences, clock);
+  assert.equal(report.windowHours, 24); assert.equal(report.threshold, 5);
+  assert.equal(report.conflicts, 6); assert.equal(report.sentBack, 2); assert.equal(report.docsSynced, 4);
+  assert.deepEqual(report.hotspots[0], { path: 'docs/master-agent.md', conflicts: 5, items: ['GY-268', 'GY-303', 'GY-316', 'GY-401', 'GY-404'], sentBack: ['GY-268', 'GY-316'] });
+  assert.deepEqual(report.hotspots.slice(1).map(entry => [entry.path, entry.conflicts]), [['docs/onboarding.md', 2], ['src/cli/master-status.ts', 1]]);
+  assert.deepEqual(report.attention.map(entry => entry.path), ['docs/master-agent.md'], 'one path causing 5 conflicts in 24 hours is raised');
+  const text = hotspotAttentionText(report.attention[0], report.windowHours);
+  assert.match(text, /docs\/master-agent\.md caused 5 merge conflicts in the last 24 hours/);
+  assert.match(text, /GY-268, GY-303, GY-316, GY-401, GY-404; 2 sent back to a worker/);
+  assert.equal(conflictHotspots(occurrences.slice(1), clock).attention.length, 0, 'four is below the threshold');
+
+  // Insights reads the same from the ledger: each confirmed conflict with its recorded paths,
+  // docs-synced when a docs-sync refresh adopted a head for the same reviewed head.
+  const rows = [
+    { key: 'GY-268', kind: 'base.conflict', at: at(1), details: { from: { sha: 'h1' }, conflictPaths: ['docs/master-agent.md'] } },
+    { key: 'GY-303', kind: 'base.conflict', at: at(2), details: { from: { sha: 'h2' }, conflictPaths: ['docs/master-agent.md'] } },
+    { key: 'GY-303', kind: 'base.refreshed', at: at(1.5), details: { from: { sha: 'h2' }, trigger: 'docs sync' } },
+    { key: 'GY-316', kind: 'base.conflict', at: at(3), details: { from: { sha: 'h3' }, conflict: 'recorded before GY-566' } },
+  ];
+  assert.deepEqual(ledgerConflicts(rows), [
+    { work: 'GY-268', at: at(1), paths: ['docs/master-agent.md'], route: 'rework' },
+    { work: 'GY-303', at: at(2), paths: ['docs/master-agent.md'], route: 'docs-sync' },
+  ]);
+  assert.deepEqual(conflictHotspots(ledgerConflicts(rows), clock).hotspots, [{ path: 'docs/master-agent.md', conflicts: 2, items: ['GY-268', 'GY-303'], sentBack: ['GY-268'] }]);
+});
+
+/**
+ * GY-1205. Every session runs with the coordinator checkout bind-mounted read-only (GY-888), and
+ * the docs-sync session was told to create its own worktree under it: on 2026-10-04 every one
+ * reported `.graphyard/docs-sync` read-only and sat idle until docsSyncMaxMs. The launcher now
+ * creates the worktree and starts the session in it, re-exposed writable.
+ */
+async function docsSyncRepository() {
+  const base = await temporaryDirectory('docs-sync');
+  const root = join(base, 'coordinator');
+  mkdirSync(join(root, 'docs'), { recursive: true });
+  writeFileSync(join(root, 'docs', 'page.md'), '# Page\n');
+  const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  execFileSync('git', ['init', '-b', 'main', root], { stdio: 'ignore' });
+  git('config', 'user.email', 'graphyard@localhost'); git('config', 'user.name', 'Graphyard');
+  git('add', '.'); git('commit', '-m', 'main');
+  return { root, head: git('rev-parse', 'HEAD') };
+}
+
+test('unit:docs-sync-checkout-writable-under-confinement — the docs-sync worktree is created by the launcher, the session starts in it, and a confined claude launch binds it and the shared Git directory writable after the read-only coordinator bind', async () => {
+  const { root, head } = await docsSyncRepository();
+  const plan: DocsSyncPlan = { key: 'GY-42', pr: 42, branch: 'graphyard/gy-42-1', baseBranch: 'main', head, base: head, paths: ['docs/page.md'] };
+  mkdirSync(join(root, '.graphyard', 'docs-sync'), { recursive: true });
+  const checkout = await prepareDocsSyncCheckout(root, plan);
+  assert.equal(checkout, docsSyncCheckout(root, plan));
+  assert.ok(existsSync(join(checkout, 'docs', 'page.md')), 'the launcher created the detached worktree of the reviewed head');
+  assert.ok(docsSyncPrompt(docsConfig(), plan, root).includes(`You start in ${checkout}`), 'the session is told it starts in that worktree');
+  assert.ok(!docsSyncPrompt(docsConfig(), plan, root).includes('worktree add'), 'the session no longer creates a worktree under the read-only checkout');
+
+  prepareConfinedGitPaths(root);
+  const confinement = await coordinatorConfinement({ kind: 'claude', args: [], coordinatorRoot: root, sessionDirectory: checkout, platform: 'linux', mountNamespaceWorks: true, bwrap: 'bwrap' });
+  assert.equal(confinement?.mechanism, 'read-only-mount');
+  const words = [...confinement!.wrapper];
+  const at = (flag: string, path: string) => words.findIndex((word, index) => word === flag && words[index + 1] === path && words[index + 2] === path);
+  const readOnly = at('--ro-bind', root);
+  assert.ok(readOnly > 0, 'the coordinator checkout is bound read-only');
+  assert.ok(at('--bind', checkout) > readOnly, 'the docs-sync checkout is bound writable after it');
+  for (const shared of [join(root, '.git', 'objects'), join(root, '.git', 'worktrees', 'GY-42-' + head.slice(0, 7)), join(root, '.git', 'refs', 'remotes')])
+    assert.ok(at('--bind', shared) > readOnly, `the shared Git path ${shared} is bound writable after it`);
+  assert.equal(await docsSyncCheckoutRefusal(checkout, confinement), null, 'the launch is not refused');
+
+  // A finished session's checkout is reclaimed; a live one's is kept.
+  assert.deepEqual(await reclaimDocsSyncCheckouts(root, [docsSyncSessionName(plan)]), []);
+  assert.deepEqual(await reclaimDocsSyncCheckouts(root, []), [checkout]);
+  assert.ok(!existsSync(checkout));
+});
+
+test('unit:docs-sync-unwritable-checkout-refused — a docs-sync launch whose checkout cannot be written is refused before the session starts, naming the path, and the conflict goes to rework in the same cycle', async () => {
+  const base = await temporaryDirectory('docs-sync');
+  const checkout = join(base, 'GY-42-aaaaaaa');
+  mkdirSync(checkout);
+  // Under a confinement that leaves it behind the read-only coordinator bind, it is refused too.
+  const hidden = (path: string) => ({ mechanism: 'read-only-mount' as const, detail: '', wrapper: ['bwrap', '--dev-bind', '/', '/', '--ro-bind', path, path, '--bind', join(path, 'other'), join(path, 'other'), '--'] });
+  assert.match((await docsSyncCheckoutRefusal(checkout, hidden(base)))!, new RegExp(`${checkout}.*under the session's confinement`));
+  try {
+    chmodSync(checkout, 0o555);
+    // A superuser writes through 0o555 (GY-1273): the host check is asserted only where the mode holds.
+    let writable = true;
+    try { accessSync(checkout, constants.W_OK); } catch { writable = false; }
+    const refusal = await docsSyncCheckoutRefusal(checkout, null);
+    if (writable) assert.equal(refusal, null, 'a directory the host can write is not refused');
+    else assert.ok(refusal?.includes(`The docs-sync checkout ${checkout} is not writable`), `the refusal names the path: ${refusal}`);
+  } finally { chmodSync(checkout, 0o755); }
+
+  // The cycle drives the real launchDocsSync (GY-1273): its herdr and git calls go through `run`,
+  // so a refusal checked after the tab is created would show as a herdr call here.
+  const { root, head } = await docsSyncRepository();
+  const calls: string[][] = [];
+  const run: ChildRun = async (command, args, options) => {
+    calls.push([command, ...args]);
+    if (command === 'herdr') throw new Error('no herdr in this test');
+    return runChild(command, args, options);
+  };
+  let released: string | null = null;
+  const seams = (confinement: DocsSyncLaunchSeams['confinement']): DocsSyncLaunchSeams => ({
+    config: async () => ({ ...docsConfig(), reviewers: [{ kind: 'claude' }] } as unknown as MasterConfig),
+    select: async () => ({ fleet: { release: async (why: string) => { released = why; return true; } }, account: null, profile: 'docs-sync', skipped: [] }) as any,
+    confinement,
+  });
+  const relocate = (plan: DocsSyncPlan): DocsSyncPlan => ({ ...plan, head, base: head });
+  // GY-866: the checkout lies in a managed checkout of the session's own, at a path the launcher
+  // picks, so the confinement records the directory it is asked about and hides its parent.
+  let launched: string | null = null;
+  const hiding: DocsSyncLaunchSeams['confinement'] = async (_kind, _args, options) => { launched = options.directory; return hidden(dirname(options.directory)); };
+
+  const docs = { decided: [] as string[], synced: [] as DocsSyncPlan[], agents: [] as string[] };
+  const item = conflicted(['docs/master-agent.md']);
+  const state = emptyDaemonState(docsConfig());
+  const effects = loop(() => item, docs);
+  let planned: DocsSyncPlan | null = null;
+  effects.docsSync = async (work, plan) => { planned = plan; return launchDocsSync(root, work, relocate(plan), { agents: [], available: true }, run, undefined, seams(hiding)); };
+  const cycle = await runCycle(docsConfig(), state, effects, () => clock);
+  assert.ok(planned, 'the loop tried the docs-sync launch');
+  assert.ok(launched, 'the launch checked its checkout under the confinement');
+  const refused: string = launched;
+  assert.ok(calls.some(call => call[0] === 'git' && call.includes('worktree') && call.includes('add')), 'the launcher created the checkout first');
+  assert.ok(!calls.some(call => call[0] === 'herdr'), 'no herdr tab is created for a refused launch');
+  assert.ok(!existsSync(refused), 'the refused checkout is removed at once, not at the next docs-sync launch');
+  assert.ok(!execFileSync('git', ['-C', root, 'worktree', 'list'], { encoding: 'utf8' }).includes(refused), 'and its worktree registration with it');
+  assert.match(released ?? '', /not writable/, 'the account reservation is released naming the refusal');
+  assert.deepEqual(docs.decided, ['rework'], 'the conflict is routed to rework in the same cycle');
+  assert.equal(state.conflicts[0].route, 'rework');
+  assert.ok(cycle.actions.some(action => action.work === 'GY-42' && action.detail.includes(`The docs-sync checkout ${refused} is not writable`)), 'the cycle report names the unwritable path');
+
+  // The same launch, not refused, goes on to create the tab: the check sits between the two.
+  calls.length = 0;
+  await assert.rejects(launchDocsSync(root, item, relocate(planned!), { agents: [], available: true }, run, undefined, seams(async (_kind, _args, options) => { launched = options.directory; return null; })), /no herdr in this test/);
+  assert.ok(calls.some(call => call[0] === 'herdr' && call.includes('tab') && call.includes('create')), 'an allowed launch reaches the herdr tab');
+  const allowed: string = launched;
+  assert.notEqual(allowed, refused, 'each launch allocates a checkout of its own');
+  assert.ok(!existsSync(allowed), 'a launch failing after the tab is created reclaims its checkout at once too');
+  assert.ok(!execFileSync('git', ['-C', root, 'worktree', 'list'], { encoding: 'utf8' }).includes(allowed), 'and its worktree registration with it');
+});
+
+test('unit:docs-sync-writable-grant-narrow — a docs-sync launch grants its runtime sandbox the checkout and the read-only mount\'s shared Git paths, never the whole common Git directory with the coordinator\'s HEAD and index', async () => {
+  const { root, head } = await docsSyncRepository();
+  const plan: DocsSyncPlan = { key: 'GY-42', pr: 42, branch: 'graphyard/gy-42-1', baseBranch: 'main', head, base: head, paths: ['docs/page.md'] };
+  const checkout = await prepareDocsSyncCheckout(root, plan);
+  const writable = docsSyncWritablePaths(root, checkout);
+  const git = join(root, '.git');
+  assert.deepEqual(writable, [checkout, join(git, 'objects'), join(git, 'worktrees', `GY-42-${head.slice(0, 7)}`), join(git, 'refs', 'remotes'), join(git, 'logs', 'refs', 'remotes')]);
+  for (const coordinator of [git, join(git, 'HEAD'), join(git, 'index'), join(git, 'refs'), join(git, 'refs', 'heads')])
+    assert.ok(!writable.includes(coordinator), `${coordinator} is not granted`);
+});
 }

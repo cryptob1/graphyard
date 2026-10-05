@@ -10,7 +10,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { buildMasterStatus, concurrencyAttention, concurrencyStarvedMs, isProfileSession, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, profileAtLimit, profileConcurrency, profileSessions, reviewerProfileSchema, roleConcurrency, sessionAgentName, sessionNameLimit, setupMaster, saveProducerProfile, type HerdrAgent, type MasterConfig } from '../src/master.js';
+import { automaticProducerConcurrency, buildMasterStatus, concurrencyAttention, concurrencyStarvedMs, isProfileSession, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, profileAtLimit, profileConcurrency, profileSessions, reviewerProfileSchema, roleConcurrency, sessionAgentName, sessionNameLimit, setupMaster, saveProducerProfile, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
 import { independentProducerProfiles, launchProducer, readProducerLedger, reconcileProducers, summarizeProducers } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
@@ -166,7 +166,7 @@ test('integration:concurrent-reviews — a reviewer profile with concurrency 3 r
 });
 
 test('integration:concurrent-producers — three proof groups run at once across producer profiles up to their concurrency, each binding its own request, and a producer that held an assignment on an item is refused that item however many slots it has', async () => {
-  const host = await fleet({ reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude', kind: 'claude' }], producers: [{ name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', concurrency: 2 }, { name: 'producer-b', principal: 'proof-runner-b', agentName: 'produce-b' }] });
+  const host = await fleet({ reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude', kind: 'claude' }], producers: [{ name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', concurrency: 2 }, { name: 'producer-b', principal: 'proof-runner-b', agentName: 'produce-b', concurrency: 1 }] });
   try {
     const config = await loadMasterConfig(host.root);
     assert.deepEqual(config.producers.map(profile => profileConcurrency(profile)), [2, 1]);

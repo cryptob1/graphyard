@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { loadMasterConfig, managedMasterInstructions, masterConfigSchema, masterHarness, setupMaster, type MasterConfig } from '../src/master.js';
 import { masterHarnessPlan, writeHarnessPermissions } from '../src/harness.js';
-import { agentBrowserArguments, agentBrowserPage, appendAdministrationEntry, browserFlows, controlPlanePermissions, detectSudo, missingPermissions, passSudo, readAdministrationLedger, readSudoState, recordingPage, runBrowserFlow, sudoAttention, summarizeAdministration, type BrowserPage, type Located, type SudoState } from '../src/master-browser.js';
+import { agentBrowserArguments, agentBrowserError, agentBrowserPage, appendAdministrationEntry, browserFlows, controlPlanePermissions, detectSudo, missingPermissions, passSudo, readAdministrationLedger, readSudoState, recordingPage, runBrowserFlow, sudoAttention, summarizeAdministration, type BrowserPage, type Located, type RecordedStep, type SudoState } from '../src/master-browser.js';
 import type { Work } from '../src/model.js';
 import { GitHub, type InstallationState } from '../src/github.js';
 import { statusRoutes } from '../src/server/routes/status.js';
@@ -336,6 +336,109 @@ test('unit:app-permissions-verify-via-installation — the control plane reads t
   await assert.rejects(route.handle(context('admin', false), []) as Promise<unknown>, /GitHub is not configured/);
 });
 
+/**
+ * GitHub's passkey-first Confirm-access page (seen 2026-10-02): "Use passkey" leads, and "Use
+ * GitHub Mobile" is a link under "Having problems?" while the page also keeps a hidden button of
+ * the same label. Commands go through the real agentBrowserPage, so a failed click carries what
+ * agent-browser itself printed.
+ */
+function passkeyFirstPage(options: { linkClickFails: boolean }) {
+  const passkeyText = 'Skip to content\nConfirm access\n\nSigned in as @operator\n\nPasskey\nWhen you are ready, authenticate using the button below.\nUse passkey\nHaving problems?\nUse GitHub Mobile\nUse your authenticator app\nSend a code via email';
+  const mobileHref = 'https://github.com/sessions/sudo?sudo_return_to=%2Fsettings%2Fapps%2Fx%2Fpermissions&type=github_mobile';
+  const state = { url: 'https://github.com/sessions/sudo?sudo_return_to=%2Fsettings%2Fapps%2Fx%2Fpermissions', mobile: false, polls: 0, clicked: [] as string[], opened: [] as string[] };
+  const verdict = (data: unknown) => JSON.stringify({ success: true, data, error: null });
+  // execFileSync's failure: a message that only repeats the command line, with agent-browser's
+  // own JSON verdict on stdout.
+  const failure = (args: string[], error: string) => Object.assign(new Error(`Command failed: agent-browser ${args.join(' ')}`), { status: 1, stdout: JSON.stringify({ success: false, data: null, error }), stderr: '' });
+  const page = agentBrowserPage({ profile: 'default' }, 'graphyard-master-owner-project', args => {
+    const [action, ...rest] = args.slice(5);
+    if (action === 'open') { state.opened.push(rest[0]); state.url = rest[0]; if (rest[0] === mobileHref) state.mobile = true; return verdict({}); }
+    // The operator approves on the device after a few polls; GitHub then returns to the target.
+    if (action === 'get' && rest[0] === 'url') { if (state.mobile && ++state.polls > 3) state.url = 'https://github.com/settings/apps/x/permissions'; return verdict({ url: state.url }); }
+    if (action === 'get') return verdict({ text: !state.url.includes('/sessions/sudo') ? 'Permissions & events\nSave changes' : state.mobile ? 'Confirm access\n\nApprove on GitHub Mobile\nEnter the digits shown below in the GitHub Mobile app\n\n57\n\nDidn\'t receive a notification? Resend' : passkeyText });
+    if (action === 'eval') {
+      const script = rest[0];
+      if (script.includes('kind = "button"') && script.includes('"Use GitHub Mobile"') && !state.mobile) return verdict({ result: JSON.stringify({ selector: '[data-graphyard-target="gy-1"]', tag: 'button', checked: null, value: '', text: 'use github mobile', href: null, visible: false }) });
+      if (script.includes('kind = "link"') && script.includes('"Use GitHub Mobile"') && !state.mobile) return verdict({ result: JSON.stringify({ selector: '[data-graphyard-target="gy-2"]', tag: 'a', checked: null, value: null, text: 'use github mobile', href: mobileHref, visible: true }) });
+      return verdict({ result: 'null' });
+    }
+    if (action === 'click') {
+      state.clicked.push(rest[0]);
+      if (rest[0].includes('gy-1')) throw failure(args, 'Element is not visible: [data-graphyard-target="gy-1"]');
+      if (options.linkClickFails) throw failure(args, 'Element is outside of the viewport: [data-graphyard-target="gy-2"]');
+      state.mobile = true; return verdict({});
+    }
+    return verdict({});
+  });
+  return { page, state, mobileHref };
+}
+
+test('unit:sudo-passkey-page-reaches-mobile — on the passkey-first Confirm-access page the sudo step clicks the "Use GitHub Mobile" link under "Having problems?" and surfaces the pairing code', async () => {
+  const { page, state } = passkeyFirstPage({ linkClickFails: false });
+  assert.equal(detectSudo(page.url(), page.text()).sudo, true, 'the passkey-first page is a Confirm-access page');
+  const codes: SudoState[] = [];
+  const result = await passSudo(page, { flow: 'app-permissions', record: 'r', onCode: code => { codes.push(code); }, sleep: noSleep, pollMs: 10, timeoutMs: 10_000 });
+  assert.deepEqual(result, { passed: true, attempts: 1, code: '57' });
+  assert.deepEqual(codes.map(code => code.code), ['57'], 'the pairing code is surfaced as on the older page');
+  assert.deepEqual(state.clicked, ['[data-graphyard-target="gy-2"]'], 'the rendered anchor is clicked, never the hidden button of the same label');
+  assert.deepEqual(state.opened, [], 'a click that works needs no navigation');
+});
+
+test('unit:sudo-passkey-page-reaches-mobile — when the link click fails the sudo step navigates to its href, still surfaces the code, and records agent-browser\'s own error', async () => {
+  const directory = await temporaryDirectory('passkey-record');
+  try {
+    const { page, state, mobileHref } = passkeyFirstPage({ linkClickFails: true });
+    const steps: RecordedStep[] = [];
+    const recorded = recordingPage(page, { directory, steps, now: () => new Date(0) });
+    const codes: SudoState[] = [];
+    const result = await passSudo(recorded, { flow: 'app-permissions', record: 'r', onCode: code => { codes.push(code); }, sleep: noSleep, pollMs: 10, timeoutMs: 10_000 });
+    assert.deepEqual(result, { passed: true, attempts: 1, code: '57' });
+    assert.deepEqual(codes.map(code => code.code), ['57']);
+    assert.deepEqual(state.opened, [mobileHref], 'the failed click falls back to the link\'s href');
+    const clicks = steps.filter(step => step.action === 'click');
+    assert.equal(clicks.length, 1, 'the hidden button is never clicked once the link was followed');
+    assert.equal(clicks[0].args[0], '[data-graphyard-target="gy-2"]');
+    assert.equal(clicks[0].error, 'agent-browser click failed: Element is outside of the viewport: [data-graphyard-target="gy-2"]', 'the record carries agent-browser\'s error, not the command line');
+    assert.ok(steps.every(step => !/Command failed|--session/.test(step.error ?? '')), 'no recorded error is the truncated command text');
+    assert.ok(steps.some(step => step.action === 'open' && step.args[0] === mobileHref && step.screenshot), 'the navigation is recorded with its screenshot');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('unit:sudo-passkey-page-reaches-mobile — a GitHub Mobile control that cannot be activated at all is refused with every agent-browser error', async () => {
+  const failure = (error: string) => Object.assign(new Error('Command failed: agent-browser --json --session s click x'), { stdout: JSON.stringify({ success: false, error }), stderr: '' });
+  assert.equal(agentBrowserError(failure('Element is not visible')), 'Element is not visible');
+  assert.equal(agentBrowserError(Object.assign(new Error('Command failed: agent-browser click'), { stdout: '', stderr: Buffer.from('Error: browser closed\n') })), 'Error: browser closed');
+  assert.equal(agentBrowserError(new Error('spawn agent-browser ENOENT')), 'spawn agent-browser ENOENT');
+  const page: BrowserPage = {
+    open() {}, url: () => 'https://github.com/sessions/sudo', text: () => 'Confirm access\nUse passkey\nHaving problems?\nUse GitHub Mobile', meta: () => null,
+    locate: kind => kind === 'button' ? { selector: '#hidden', tag: 'button', checked: null, value: '', text: 'use github mobile', href: null, visible: false } : null,
+    click: selector => { throw new Error(`agent-browser click failed: Element is not visible: ${selector}`); }, setChecked() {}, select() {}, screenshot() {}, wait() {}, close() {},
+  };
+  await assert.rejects(passSudo(page, { flow: 'protection', record: 'r', onCode: () => assert.fail('no code expected'), sleep: noSleep }), /"Use GitHub Mobile" could not be activated \(agent-browser click failed: Element is not visible: #hidden\).*master browser protection/);
+});
+
+test('sudo step falls back to the same-label link when a visible "Use GitHub Mobile" button cannot be clicked', async () => {
+  for (const linkClickFails of [false, true]) {
+    const mobileHref = 'https://github.com/sessions/sudo?type=github_mobile';
+    const state = { mobile: false, polls: 0, clicked: [] as string[], opened: [] as string[] };
+    const page: BrowserPage = {
+      open(url) { state.opened.push(url); if (url === mobileHref) state.mobile = true; },
+      url: () => state.mobile && ++state.polls > 2 ? 'https://github.com/settings/apps/x/permissions' : 'https://github.com/sessions/sudo',
+      text: () => state.polls > 2 ? 'Permissions & events' : state.mobile ? 'Confirm access\n\nApprove on GitHub Mobile\n\n63\n' : 'Confirm access\nUse GitHub Mobile\nUse your password',
+      meta: () => null,
+      locate: (kind, text) => state.mobile || text !== 'Use GitHub Mobile' ? null
+        : kind === 'button' ? { selector: '#button', tag: 'button', checked: null, value: '', text: 'use github mobile', href: null, visible: true }
+        : kind === 'link' ? { selector: '#link', tag: 'a', checked: null, value: null, text: 'use github mobile', href: mobileHref, visible: true } : null,
+      click: selector => { state.clicked.push(selector); if (selector === '#button' || linkClickFails) throw new Error(`agent-browser click failed: ${selector}`); state.mobile = true; },
+      setChecked() {}, select() {}, screenshot() {}, wait() {}, close() {},
+    };
+    const result = await passSudo(page, { flow: 'protection', record: 'r', onCode: () => {}, sleep: noSleep, pollMs: 10, timeoutMs: 10_000 });
+    assert.deepEqual(result, { passed: true, attempts: 1, code: '63' });
+    assert.deepEqual(state.clicked, ['#button', '#link'], 'the visible button is tried first, then the link of the same label');
+    assert.deepEqual(state.opened, linkClickFails ? [mobileHref] : [], 'a failed link click is followed through its href');
+  }
+});
+
 test('the agent-browser page drives one headless session on the operator profile and never touches its cookies', () => {
   const calls: string[][] = [];
   const responses: Record<string, unknown> = { open: {}, get: { url: 'https://github.com/sessions/sudo', text: 'Confirm access' }, eval: { result: JSON.stringify({ selector: '[data-graphyard-target="gy-1"]', tag: 'button', checked: null, value: null, text: 'save changes' }) }, click: {}, check: {}, uncheck: {}, select: {}, screenshot: {}, wait: {} };
@@ -387,14 +490,14 @@ test('master harness writes the allow rules the browser flows need, each with a 
     assert.match(plan.note, /classifier otherwise refuses/);
     assert.ok(plan.allow.filter(entry => entry.rule.includes('gh api')).every(entry => /classifier|verify|audit|before and after/.test(entry.why)), 'each gh api rule states why the classifier would otherwise refuse it or what it verifies');
     for (const rule of allow) assert.doesNotMatch(rule, /merge|access_tokens|reviews|graphql|\.pem|\.token|credential|cookies/i, `allow rule ${rule} must not reach a merge, a verdict, or a credential`);
-    for (const rule of ['Bash(gh pr merge:*)', 'Bash(gh pr review:*)', 'Bash(gh api *merge*)', 'Bash(gh api *pulls/*/reviews*)', 'Bash(gh api *access_tokens*)', 'Bash(gh api graphql*)', 'Bash(gh api *DELETE*)', 'Bash(gh api *PUT*)', 'Bash(gh api *POST*)', 'Bash(agent-browser *)', 'Bash(git push:*)', 'Read(**/*.pem)', 'Read(**/*.token)']) assert.ok(deny.includes(rule), `${rule} must be denied`);
+    for (const rule of ['Bash(gh pr merge:*)', 'Bash(gh pr review:*)', 'Bash(gh api *pulls/*/merge*)', 'Bash(gh api *repos/*/merges*)', 'Bash(gh api *pulls/*/reviews*)', 'Bash(gh api *access_tokens*)', 'Bash(gh api graphql*mutation*)', 'Bash(gh api *DELETE*)', 'Bash(gh api *PUT*)', 'Bash(gh api *POST*)', 'Bash(agent-browser *)', 'Bash(git push:*)', 'Read(**/*.pem)', 'Read(**/*.token)']) assert.ok(deny.includes(rule), `${rule} must be denied`);
     assert.ok(!deny.includes('Bash(gh api:*)'), 'the blanket gh api deny would override every allow above');
     const plain = masterHarnessPlan({ harness: 'claude', root, cliPath: config.cliPath, repository: 'org/repo', baseBranch: 'release/2026', credentialHome: '/home/x/.config/graphyard' });
     assert.ok(plain.allow.some(entry => entry.rule === 'Bash(gh api repos/org/repo/branches/release%2F2026/protection*)'), 'the base branch is encoded exactly as the CLI requests it');
     const written = await writeHarnessPermissions(root, plan, true);
     assert.equal(written.applied, true);
     const settings = JSON.parse(await readFile(join(root, '.claude/settings.local.json'), 'utf8'));
-    assert.ok(settings.permissions.deny.includes('Bash(agent-browser *)')); assert.ok(settings.permissions.deny.includes('Bash(gh api *merge*)'));
+    assert.ok(settings.permissions.deny.includes('Bash(agent-browser *)')); assert.ok(settings.permissions.deny.includes('Bash(gh api *pulls/*/merge*)'));
     assert.deepEqual((await writeHarnessPermissions(root, plan, true)).added, []);
   } finally { await cleanup(); }
 });

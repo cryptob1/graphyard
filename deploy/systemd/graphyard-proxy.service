@@ -1,0 +1,20 @@
+# TLS in front of the Graphyard server on a self-contained host (GY-717): Caddy with the
+# Caddyfile the installer wrote (an automatic certificate for --domain, an internal one otherwise).
+[Unit]
+Description=Graphyard TLS proxy (@INSTALL@)
+Requires=docker.service graphyard-server.service
+After=docker.service graphyard-server.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=@WORKDIR@
+ExecStart=/usr/bin/docker compose --project-directory @WORKDIR@ -f @WORKDIR@/compose.yaml up --no-log-prefix proxy
+ExecStop=/usr/bin/docker compose --project-directory @WORKDIR@ -f @WORKDIR@/compose.yaml stop proxy
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

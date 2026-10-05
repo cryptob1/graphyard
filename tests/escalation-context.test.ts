@@ -337,11 +337,14 @@ console.log(JSON.stringify({ result, reads }));
   };
   const launched = await launchEscalationHandler(masterRoot, config, before, 'claude', [], herdr);
   assert.equal(launched.delivery, 'request');
-  // GY-121: the typed line references the request file in the master's own checkout; the shell hands the runtime its text.
+  // GY-121: the typed line references the request file in the session's own checkout (GY-866: the managed
+  // checkout its tab opens in, never the master's); the shell hands the runtime its text.
   const typed = herdrCalls.find(call => call[0] === 'pane' && call[1] === 'run')!;
   assert.equal(typed[2], 'pane-escalation');
   const start = expandTypedCommand(typed[3]);
-  assert.equal(start.kind, 'claude'); assert.equal(start.stem, join(masterRoot, '.graphyard/launch', launched.agentName));
+  const tabCreate = herdrCalls.find(call => call[0] === 'tab' && call[1] === 'create')!, sessionDirectory = tabCreate[tabCreate.indexOf('--cwd') + 1];
+  assert.ok(sessionDirectory !== masterRoot && !sessionDirectory.startsWith(`${masterRoot}/`), 'the handler starts outside the master\'s checkout');
+  assert.equal(start.kind, 'claude'); assert.equal(start.stem, join(sessionDirectory, '.graphyard/launch', launched.agentName));
   assert.deepEqual(herdrCalls.find(call => call[0] === 'agent' && call[1] === 'rename')?.slice(2), ['pane-escalation', launched.agentName], 'the started runtime takes the session name');
   const request = start.args.at(-1)!;
   assert.ok(start.args.length > 1 && start.args.slice(0, -1).every(word => word.startsWith('--') || word === 'bypassPermissions' || word === `${start.stem}.role`), 'the request follows the runtime arguments');

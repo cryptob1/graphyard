@@ -139,8 +139,11 @@ acceptance, a sudo prompt — run `graphyard master browser app-permissions`,
 Each drives the operator's own authenticated browser profile headless, records every
 step and screenshot under `.graphyard/master-actions/`, verifies the result through
 the API, and appends an attributable audit entry. On a Confirm-access page the flow
-triggers GitHub Mobile and reports the two-digit code in `master status`; approving
-that prompt on their device, and the three human-only decisions above, are the only
+triggers GitHub Mobile (on a passkey-first page, through the "Use GitHub Mobile" link
+under "Having problems?", following its href if the click fails; a failed click is
+recorded with agent-browser's own error) and reports the two-digit code in
+`master status`; approving that prompt on their device, and the three human-only
+decisions above, are the only
 operator interactions left. Never store, export, or reuse the profile's cookies
 outside those flows.
 
@@ -171,8 +174,6 @@ requested it for, and `graphyard master merge` refuses a candidate the approver 
 has not approved. Otherwise opted-out items may also use `graphyard master merge --all`. The guarded merge rechecks the exact current
 candidate, every configured gate, and GitHub state immediately before merging. Unapproved decisions, stale observations, failures, and
 changed commits remain blocking. Never use an administrative merge bypass, edit a candidate, or read a
-worker credential. The one sanctioned exception is the audited repair lane: the Graphyard App's own
-ruleset bypass merges a `"repair": "merge-path"` item whose normal merge has stalled, after an
-approved `repair-merge` decision naming the fault. Read `docs/master-agent.md`
+worker credential. Read `docs/master-agent.md`
 in Graphyard or run `graphyard master guide` for the complete operating loop.
 <!-- /graphyard-master -->
