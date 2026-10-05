@@ -122,9 +122,8 @@ export async function blockerStep(cycle: Cycle) {
     }
 
     let result: BlockerProbeResult | null = null;
-    if (classification.class === 'dispatch-failure') result = launchableProbe(cycle);
-    else if (environmentalBlockerClasses.includes(classification.class)) {
-      result = await probe(item, classification);
+    if (environmentalBlockerClasses.includes(classification.class)) {
+      result = classification.class === 'dispatch-failure' ? launchableProbe(cycle) : await probe(item, classification);
       if (!result) return;
       // A cause that keeps failing its probe is reported to the master once it has failed for
       // `blockerEscalateMs`; the loop keeps probing it, and clears it if the cause goes.

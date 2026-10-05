@@ -98,13 +98,13 @@ const uuidToken = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const dispatchFailureBlocker = /^Dispatch failed \d+ consecutive times with the same cause since \S+, so the master loop stopped redispatching /;
 /**
  * Whether a dispatch failure's cause is the fleet's, not the item's (GY-1322): no worker profile
- * could take it, or a profile's name was held by a Herdr session that was idle, done or still
+ * could take it, or a profile's name was held by a runtime session that was idle, done or still
  * launching. It clears as sessions finish or are closed: it never counts toward the dispatch-failure
  * bound, and a blocker recorded on it before is cleared once a profile can launch. An item's own
  * cause (a worktree that holds its branch) is not one, and its blocker stands for the operator.
  */
 export const fleetIdleCause = (failure: string) =>
-  /\bno worker profile can take\b|\bagent name \S+ is already visible in Herdr\b|\bHerdr agent \S+ is (?:idle|done)\b|\bis reserved by another dispatch\b/i.test(failure);
+  /\bno worker profile can take\b|\bagent name \S+ is already visible in \w+\b|\b\w+ agent \S+ is (?:idle|done)\b|\bis reserved by another dispatch\b/i.test(failure);
 
 /** The first path the text says could not be written: an explicit environment blocker's path, a quoted path, or the first path-shaped token. */
 function refusedPath(text: string): string | null {

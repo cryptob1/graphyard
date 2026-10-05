@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import * as master from '../src/master.js';
 import { dispatchReserved, dispatchWork, masterConfigSchema, setupMaster, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { blockerEscalateMs } from '../src/daemon/cycle-blockers.js';
 import { profileHealth } from '../src/daemon/sessions.js';
 import * as failures from '../src/daemon/dispatch-failures.js';
 import { dispatchFailureBlockAfter, dispatchFailureBlocker, noteDispatchFailure } from '../src/daemon/dispatch-failures.js';
@@ -195,19 +196,26 @@ test('unit:dispatch-blocker-clears-on-fleet-recovery — fleet-idle failures nev
   const probes: { result: string; detail: string }[] = [];
   let agents: HerdrAgent[] = drained().map(agent => ({ ...agent, agent_status: 'working' }));
   const blocked = work('GY-1310', { blocker, epoch: 3 });
+  // The cycle reads its clock from the snapshot, so a later cycle is a later snapshot.
+  let elapsed = 0;
+  const cycle = (ms: number) => { elapsed = ms; return runCycle(config(fleet), state, effects, () => clock + ms); };
   const effects: DaemonEffects = {
     agents: async () => agents, herdr: () => ({ agents, available: true }), stopSupervisor: () => {},
-    credentials: async configured => available(configured), snapshot: async () => ({ work: [blocked], now: observedAt }),
+    credentials: async configured => available(configured), snapshot: async () => ({ work: [blocked], now: new Date(clock + elapsed).toISOString() }),
     closeSession: () => {}, dispatch: async () => ({}), requestProof: () => {}, recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
     recordBlockerProbe: async (item, probe) => { probes.push(probe); return item; },
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: observedAt, reason: 'not configured', deployed: [], pending: [] }),
   };
   const state = emptyDaemonState(config(fleet));
-  await runCycle(config(fleet), state, effects, () => clock);
+  await cycle(0);
   assert.equal(probes.at(-1)?.result, 'fail', 'no profile can take a launch while every session works');
   assert.match(probes.at(-1)!.detail, /one \(Herdr agent agent-one is working\)/);
+  // A fleet that stays busy past the escalation bound is reported to the master once, like every environmental class.
+  await cycle(blockerEscalateMs);
+  await cycle(blockerEscalateMs + 20_000);
+  assert.equal(Object.values(state.actions).filter(action => /GY-1310 is blocked \(dispatch-failure\) and its probe has failed since .*reported to the master/.test(action.detail ?? '')).length, 1);
   agents = drained();
-  await runCycle(config(fleet), state, effects, () => clock + 20_000);
+  await cycle(blockerEscalateMs + 40_000);
   assert.deepEqual([probes.at(-1)?.result, probes.at(-1)?.detail], ['pass', 'profile one is launchable'], 'the fleet drained into launchable profiles, so the blocker clears without graphyard unblock');
   assert.ok(Object.values(state.actions).some(action => /Cleared GY-1310's dispatch-failure blocker/.test(action.detail ?? '')));
 });

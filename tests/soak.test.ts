@@ -16,7 +16,7 @@ import { GitHubCacheStore } from '../src/github-cache.js';
 import { GitHubChargeLedger } from '../src/github-charges.js';
 import { createHash } from 'node:crypto';
 import { Refusal, type Principal, type Work } from '../src/model.js';
-import { approverSessionName, assessContainment, atomicPrivateWrite, automaticReviewerConcurrency, containmentPhase, containmentQuarantines, decisionInput, dispatchWork, loadMasterConfig, masterConfigSchema, profileConcurrency, setupMaster, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { approverSessionName, assessContainment, atomicPrivateWrite, automaticReviewerConcurrency, containmentPhase, containmentQuarantines, decisionInput, dispatchWork, DispatchReservedError, loadMasterConfig, masterConfigSchema, profileConcurrency, reclaimableAgent, setupMaster, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { readAccountStartFailures, readProfileLaunchRecords, workerLaunchStatus, worktreeFailure } from '../src/master/dispatch.js';
 import { readControlPlaneClock, unmeasured } from '../src/master/containment.js';
 import { containmentRefusalCause } from '../src/daemon/cycle-reclaim.js';
@@ -69,7 +69,7 @@ import { queuePlacement } from '../src/merge-queue.js';
 import { ChildProcessError } from '../src/child-runner.js';
 import { probeBlocker } from '../src/daemon/blocker-probes.js';
 import { blockerEscalateMs } from '../src/daemon/cycle-blockers.js';
-import { classifyBlocker, itemSpecificPlaneError, maxAutomaticClears, type BlockerClass } from '../src/model/blocker-class.js';
+import { classifyBlocker, fleetIdleCause, itemSpecificPlaneError, maxAutomaticClears, type BlockerClass } from '../src/model/blocker-class.js';
 import { SimulatedGitHub, SimulatedHerdr, SimulatedPi, blockedMergeMs, brokenBaseTest, clock, protectionOnlyCheck, statusContext, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 import { mergeStallAttention } from '../src/cli/master-status.js';
 import { laneApprover } from '../src/server/decisions.js';
@@ -568,6 +568,13 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   staleDiagnosis?: boolean;
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
   failover?: Failover;
+  /**
+   * GY-1322: every profile's agent name starts held by a session no item owns, working until
+   * `finishAt` and then finished (idle or done), while the day's items wait ready; each attempt's
+   * session is left finished in its pane on submit. Item `seeded` carries a dispatch-failure
+   * blocker recorded on the fleet-idle cause before the loop could reclaim.
+   */
+  drained?: { finishAt: number; seeded: number };
   /** GY-1302: wire the loop's promotion drive over the day's moving main, with a stubbed ledger, run list and dispatch. */
   promotion?: boolean }) {
   const dayStart = clock.now();
@@ -933,6 +940,14 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     return done;
   };
   const attempts = new Map<string, number>();
+  // GY-1322: the finished sessions dispatches closed to launch over, the most live panes any one
+  // profile name had at once, the dispatch blocks the loop asked for, and the seeded blocker's life.
+  const drain = { reclaimed: [] as { key: string; profile: string; pane: string; status: string; at: number }[], peakPerName: 0, blocks: [] as string[],
+    seededAt: null as number | null, clearedAt: null as number | null, finishedAt: null as number | null, holders: [] as string[],
+    // Sessions that finish inside the next cycle, after its first Herdr read (the close step's) and
+    // before the dispatch step reads Herdr again: the race the dispatch's own reclaim answers.
+    finishing: [] as { pane: string; status: string }[], reads: 0 };
+  const finishDuringCycle = () => { if (options.drained && ++drain.reads >= 2) for (const { pane, status } of drain.finishing.splice(0)) herdr.status(pane, status); };
   // GY-860: the claims whose worktree the host could not build, and any cycle that cooled a profile off for one.
   const workspaceFailures: { key: string; epoch: number; profile: string; at: number }[] = [], workspaceCooled: string[] = [];
   const principalOf = (profile: WorkerProfile): Principal => ({ id: profile.principal, role: 'worker' });
@@ -983,7 +998,15 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       scopeAt: null, misreadAt: null, misread: false, credentialAt: null, blockAt: null, retryingAt: null });
     return { key: work.key, epoch, pane: result.pane!, agentName: profile.agentName };
   } : (work, profile, free, snapshot) => simulatedDispatch(work, profile, free, snapshot);
-  async function simulatedDispatch(...[work, profile]: Parameters<DaemonEffects['dispatch']>) {
+  async function simulatedDispatch(...[work, profile, , snapshot]: Parameters<DaemonEffects['dispatch']>) {
+    // As `dispatchWork` does under its reservation (GY-1322): a session holding the profile's agent
+    // name is closed and launched over only when it is finished and no live assignment owns it;
+    // any other holder refuses the launch before anything is claimed.
+    for (const holder of herdr.list().filter(agent => agent.name === profile.agentName)) {
+      if (!reclaimableAgent(profile, holder, snapshot.work, clock.now())) throw new DispatchReservedError('profile', profile.name, `Launch profile agent name ${profile.agentName} is already visible in Herdr; pick another profile`);
+      herdr.close(holder.pane_id!);
+      drain.reclaimed.push({ key: work.key, profile: profile.name, pane: holder.pane_id!, status: holder.agent_status ?? '', at: clock.now() - dayStart });
+    }
     launches.push(clock.now());
     const principal = principalOf(profile);
     const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
@@ -1076,6 +1099,29 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     // The pane is the session's own coordinate: the loop records it on the implementation handle.
     return { key, epoch, pane, agentName: profile.agentName };
   }
+  // GY-1322: the drained fleet. At the day's start every launch profile's name is held by a session
+  // no item owns, working; at `finishAt` each finishes and sits at its prompt (idle, then done,
+  // alternating) inside the next cycle, after the close step read it working, so that cycle's
+  // launches go only by the dispatch closing one. The seeded item's blocker is the one a loop
+  // before GY-1322 recorded on that drain.
+  const drainTick = async (now: number) => {
+    const drained = options.drained!, launchProfiles = config.workers.filter(profile => profile.mode === 'launch');
+    if (!drain.holders.length) for (const profile of launchProfiles) drain.holders.push(herdr.open(profile.agentName, 'working', `/tmp/soak/drained-${profile.name}`));
+    if (drain.finishedAt === null && now - dayStart >= drained.finishAt) { drain.finishing.push(...drain.holders.map((pane, index) => ({ pane, status: index % 2 ? 'done' : 'idle' }))); drain.finishedAt = now - dayStart; }
+    drain.reads = 0;
+    const seeded = items[drained.seeded - 1];
+    if (drain.seededAt === null && (await store.list()).some(item => item.id === seeded.id && item.ready)) {
+      const principal = principalOf(launchProfiles[0]);
+      const { epoch } = await engine.execute(principal, 'claim', seeded.id, {}, id());
+      const cause = `Worker launch failed: No worker profile can take ${seeded.key}: ${launchProfiles.map(profile => `${profile.name} (Herdr agent ${profile.agentName} is working)`).join('; ')}`;
+      await engine.execute(principal, 'blocked', seeded.id, { epoch, reason: `Dispatch failed 3 consecutive times with the same cause since ${new Date(now).toISOString()}, so the master loop stopped redispatching ${seeded.key}: ${cause}` }, id());
+      drain.seededAt = now - dayStart;
+    }
+    if (drain.seededAt !== null && drain.clearedAt === null && !(await store.list()).find(item => item.id === seeded.id)!.blocker) drain.clearedAt = now - dayStart;
+    const live = new Map<string, number>();
+    for (const agent of herdr.agents.values()) if (agent.name) live.set(agent.name, (live.get(agent.name) ?? 0) + 1);
+    drain.peakPerName = Math.max(drain.peakPerName, ...launchProfiles.map(profile => live.get(profile.agentName) ?? 0));
+  };
   const lowerFence = async (session: Session) => {
     if (session.settlementToken) await engine.execute(principalOf(session.profile), 'settle', session.work, { epoch: session.epoch, settlementToken: session.settlementToken }, id());
   };
@@ -1189,8 +1235,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       session.state = 'submitted';
       await lowerFence(session);
       // Its work done, the runtime exits and leaves the pane behind (GY-842); the loop's session
-      // end closes it in the same step, or the sweep reclaims it as the backstop.
-      herdr.kill(session.pane);
+      // end closes it in the same step, or the sweep reclaims it as the backstop. On the drained
+      // day the runtime instead sits finished at its prompt, holding the profile's name.
+      if (options.drained) drain.finishing.push({ pane: session.pane, status: 'done' }); else herdr.kill(session.pane);
     }
     // GY-839: a worker whose candidate was refused on landing does what that refusal asks —
     // graphyard sync, restore what the base changed, push again. Under a fault window long enough
@@ -1467,7 +1514,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   // containment day (GY-811) runs last and reads only its own items too, so its cycles do not pay
   // for every earlier day's delivered work; the failover day (GY-417) reads only its own as well. The mechanical day (GY-971) starts a plane of its own
   // and keeps the filter so it does not depend on where it falls in the file.
-  const ownItems = options.reassigned || options.headless || options.blockers || options.credentialBlocked || options.dispatchFailing || options.containment || options.mechanical || failover ? new Set(items.map(item => item.id)) : null;
+  const ownItems = options.reassigned || options.headless || options.blockers || options.credentialBlocked || options.dispatchFailing || options.drained || options.containment || options.mechanical || failover ? new Set(items.map(item => item.id)) : null;
   const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: ownItems ? read.work.filter(item => ownItems.has(item.id)) : read.work, now: read.now, jobs: read.jobs }; };
   // ---- Host memory (GY-612): below its floor the loop launches nothing, recording the crossing once each way. ----
   const dip = plan.memoryDip;
@@ -1581,7 +1628,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   } : undefined;
   const effects: DaemonEffects = {
     ...(promotionEffect ? { promotion: promotionEffect } : {}),
-    agents: () => headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(),
+    agents: () => { finishDuringCycle(); return headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(); },
     herdr: () => ({ agents: headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(), available: true }),
     ...(headless ? { adoptRuns: () => adoptRuns(headless.root, { approver: async owner => ({ options: approverRunOptions('', String(owner.context.decision), {}, 30 * minute),
       apply: applyVerdict(String(owner.context.workId), String(owner.context.run)) }) }, { runner: headless.pi }) } : {}),
@@ -1694,6 +1741,12 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         });
       },
       recordBlockerProbe: (work: Work, body: unknown) => api(principals.coordinator, 'POST', `work/${work.id}/blocker-probe`, body),
+    } : {}),
+    // GY-1322: the drained day's loop probes and clears its dispatch-failure blocker through the
+    // real route, and any dispatch block it asks for is recorded and refused.
+    ...(options.drained ? {
+      recordBlockerProbe: (work: Work, body: unknown) => api(principals.coordinator, 'POST', `work/${work.id}/blocker-probe`, body),
+      blockDispatch: async (_work: Work, reason: string) => { drain.blocks.push(reason); throw new Error('soak: the drained day records no dispatch block'); },
     } : {}),
     // GY-1078: the loop records a repeated dispatch failure's cause through the real `dispatchblock`
     // command; the control plane refuses the first `refuseBlocks` of those requests.
@@ -2236,6 +2289,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     // rework accounting and windows would only absorb a base move this day must hold.
     if (!options.queued && !options.headless && !options.scope && !options.handApprovers && !options.stranded && !options.capacityWait && !options.refuseReworkOf?.length && !options.containment && !failover && !docs) docsTick();
     await workersTick(now);
+    if (options.drained) await drainTick(now);
     docsSyncTick(now);
     await producersTick(now);
     // GY-1078: every blocker the day's failing items carry is sighted; the operator clears the
@@ -2609,7 +2663,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, staleMerges, restartLog, guardDay, budgetDay, decompositionDay: decompositionHistory, diagnosisRaces, transientRefused, lateReads };
+    wakes, staleMerges, restartLog, guardDay, budgetDay, decompositionDay: decompositionHistory, diagnosisRaces, transientRefused, lateReads, drain };
 }
 
 /**
@@ -4375,6 +4429,46 @@ test('unit:soak-invariants-hold — launches that keep failing for one cause are
   assert.deepEqual(failing.blocks.filter(entry => entry.key === varied.key), [], 'and no block was ever asked for it');
   assert.equal(Object.keys(state.actions).filter(key => key.startsWith(`escalation:dispatch-failures:${varied.id}:`)).length, 0);
   assert.deepEqual(state.dispatchFailures, {}, 'every failure run was retired: by the blocker, or by the launch that landed');
+});
+
+test('unit:soak-invariants-hold — a fleet drained into finished sessions holding every profile name still dispatches: each launch closes the finished session it takes the name from, no profile name ever has two live panes, no dispatch block is recorded on the fleet-idle cause, a fleet-idle dispatch-failure blocker clears once a profile is launchable, and every invariant holds', { timeout: 300_000 }, async () => {
+  // GY-1322: the pane close a dispatch makes over a finished, unowned session repeats per item
+  // dispatched, and the dispatch-failure blocker probe repeats per cycle per blocked item, so both
+  // live here. Every attempt's session is also left finished in its pane, so the fleet drains
+  // again after every submission and the next dispatch onto that profile reclaims it.
+  const finishAt = 20 * minute, seeded = 1;
+  const { final, violations, failures, lost, state, drain, items, launches, dayStart, herdr } = await simulateDay({
+    hours: 4, drained: { finishAt, seeded },
+    plan: { items: 5, releaseEveryMs: 3 * minute, leftovers: 0, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 4, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 4 } },
+  });
+  assert.deepEqual(violations, [], 'every system invariant holds across the drain, the reclaims and the cleared blocker');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no lease was lost');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'every item is delivered, the seeded one included');
+  assert.ok(launches.length >= items.length, 'every item was dispatched');
+
+  // Nothing launched while every profile's holder was working; the first launches closed the finished holders.
+  assert.ok(launches.every(at => at - dayStart >= finishAt), 'nothing launched while every profile name was held by a working session');
+  assert.ok(drain.reclaimed.length > 0 && drain.reclaimed.every(entry => entry.at >= finishAt), `every reclaim came after the fleet finished: ${drain.reclaimed.map(entry => `${entry.key}@${entry.at / minute}m`).join(', ')}`);
+  assert.ok(drain.reclaimed.every(entry => entry.status === 'idle' || entry.status === 'done'), 'only finished sessions were closed');
+  assert.ok(drain.holders.every(pane => drain.reclaimed.some(entry => entry.pane === pane)), `every drained holder was closed by the dispatch that took its name: ${drain.reclaimed.map(entry => entry.pane).join(', ')}`);
+  assert.equal(herdr.agents.size, 0, 'no finished session outlived the day');
+  assert.equal(new Set(drain.reclaimed.map(entry => entry.pane)).size, drain.reclaimed.length, 'each finished session was closed once');
+  assert.ok(drain.peakPerName <= 1, `no profile name ever had two live panes (peak ${drain.peakPerName})`);
+
+  // No dispatch block on the fleet-idle cause, and the seeded blocker cleared through the loop's probe.
+  assert.deepEqual(drain.blocks, [], 'the loop never asked to block an item on the drain');
+  assert.deepEqual(state.dispatchFailures, {}, 'no dispatch-failure run was kept');
+  assert.ok(drain.seededAt !== null && drain.clearedAt !== null, 'the seeded blocker was recorded and cleared');
+  // The drain's own cycle hands every reclaimed profile to a waiting item, so the next profile free
+  // is the first one a submission leaves: the launch onto it shows when one was.
+  const freed = launches.map(at => at - dayStart).find(at => at > finishAt + minute)!;
+  assert.ok(drain.clearedAt! > finishAt, `the blocker stood while no profile could launch (cleared at ${drain.clearedAt! / minute} min)`);
+  assert.ok(drain.clearedAt! - freed <= 3 * minute, `and cleared within a few cycles of a profile coming free at ${freed / minute} min (${drain.clearedAt! / minute} min)`);
+  const seededItem = final.find(item => item.id === items[seeded - 1].id)!;
+  assert.ok((seededItem.blockerProbe?.clears ?? 0) <= maxAutomaticClears, 'cleared within the automatic-clear bound');
+  assert.equal(seededItem.blockerProbe?.class, 'dispatch-failure', 'the probe that cleared it was the dispatch-failure class');
+  assert.ok(fleetIdleCause(seededItem.blockerProbe!.blocker), 'and the blocker it cleared was on the fleet-idle cause');
 });
 
 test('unit:soak-invariants-hold — a slow control plane carries the decisions step past its budget for an hour and a half: every cycle stays within the interval, every item put off is reached within a few cycles, attestations included, none has its standing decision withdrawn while put off, nothing is left put off once the plane is fast, and every invariant holds', { timeout: 600_000 }, async () => {
