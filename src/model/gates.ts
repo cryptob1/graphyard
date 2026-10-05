@@ -10,6 +10,7 @@ import { carriedApproval } from './carry.js';
 import { placeInQueue, type MergeQueueSettings } from './queue.js';
 import { evaluateLandability, landabilityAudit, landabilityRefusals } from './landability.js';
 import { itemLane, laneRequirements, laneSpeedTargets, type Lane } from './policy.js';
+import { githubDelivery, githubDeliveryGate } from './delivery-mode.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
 declare module './work.js' {
@@ -43,8 +44,8 @@ export function settleTestGate(test: Gate, validating: string[] | null): void {
 }
 
 /**
- * `mergeQueue` names the settings the queue evaluates by: `batchSize`, the parallel-tip `parallelTips`
- * window (GY-498) and `optimistic` (GY-500). Without it the queue is validated batch by batch (GY-330),
+ * `mergeQueue` names the settings the queue evaluates by: `batchSize` and the parallel-tip
+ * `parallelTips` window (GY-498). Without it the queue is validated batch by batch (GY-330),
  * as every caller that names no settings expects.
  */
 export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[], mergeQueue?: number | MergeQueueSettings): { stage: Stage; gates: Gate[]; violations: string[]; lane: Lane; speedTarget: number; queue: QueueEntry | null; queueSequence: number; queueEjection: QueueEjection | null; queueHistory: QueueHistoryEntry[] } {
@@ -101,7 +102,9 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
       : ciCheckRefusal(check.name, current ? checkRerunStatus(work, check.name) : '')];
   });
   gates.push({ name: 'test', ciAppIds: [...ciAppIds], reasons: checkReasons, passed: checkReasons.length === 0 });
-  family('acceptance');
+  // Under GitHub delivery, proofs are not a merge gate: unit tests run in CI and end-to-end in UAT.
+  const github = githubDelivery();
+  if (!github) family('acceptance');
   // The merge queue owns the last hop. A candidate that has proven itself enters the queue,
   // is validated against the speculative tip it will actually land, and merges in order.
   // A standing escalation or lead hold is a refusal to deliver, so such an item never
@@ -110,11 +113,11 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   // configured reviewer's verdict on this exact head. Only a branch whose protection still requires
   // conversation resolution — drift from the desired protection — makes a merge GitHub will
   // refuse; that is named here, thread by thread, and kept out of the queue until the protection
-  // is reconciled. An entry eligible for optimistic merge (GY-500, `mergeQueue.optimistic`) never
-  // joins: its merge gate carries no queue reason and it merges head-bound on its own head.
+  // is reconciled.
   const delivery = [...escalationRefusals(work), ...(leadHoldRefusal(work) ? [leadHoldRefusal(work)!] : [])];
   const threads = current ? conversationProtectionRefusal(work) : null;
-  const queueState = placeInQueue(work, all, now, ciAppIds, gates.every(g => g.passed) && !work.violations.length && !delivery.length && !threads && !!candidate && !obs?.merged, mergeQueue, verdict);
+  const queueState = github ? { queue: null, queueSequence: work.queueSequence ?? 0, ejection: null, history: work.queueHistory ?? [], reasons: [] as string[] }
+    : placeInQueue(work, all, now, ciAppIds, gates.every(g => g.passed) && !work.violations.length && !delivery.length && !threads && !!candidate && !obs?.merged, mergeQueue, verdict);
   // CI on a queued entry's own speculative tip is the merge step validating the combined result,
   // not the change going back to Test because the base moved (GY-292): its checks refuse the merge
   // gate, and the test gate, which judges the candidate's own change, stands. A batch member the
@@ -136,7 +139,8 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[],
   const mergeability = obs?.mergeable || obs?.merged ? null
     : obs?.mergeabilityUnknown ? (queueState.queue ? null : mergeabilityComputingRefusal)
       : 'Pull request is not mergeable against the current base';
-  add('merge', [...(!fresh ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected ? ['Required Graphyard check and merge-queue branch protection have not been verified'] : []), ...(mergeability ? [mergeability] : []), ...(threads ? [threads] : []), ...delivery, ...queueState.reasons, ...(validating ?? [])]);
+  add('merge', [...(!fresh && !github ? ['GitHub observation missing or older than two minutes'] : []), ...(!obs?.protected && !github ? ['Required Graphyard check and merge-queue branch protection have not been verified'] : []), ...(github && !current ? ['GitHub has not been observed at the current candidate'] : []), ...(mergeability ? [mergeability] : []), ...(threads ? [threads] : []), ...delivery, ...queueState.reasons, ...(validating ?? [])]);
+  if (github) gates.push({ name: githubDeliveryGate, passed: true, reasons: [] });
   const first = gates.find(g => !g.passed);
   const violations = [...work.violations];
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');

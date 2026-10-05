@@ -7,7 +7,6 @@ import { defaultChildRun } from '../child-runner.js';
 import { pathScopeContains } from '../model/scope.js';
 import { temporaryDirectories, underTestRunner } from '../supervisor.js';
 import { defaultMergeBatchSize, defaultParallelTips, maxMergeBatchSize, maxParallelTips, mergeQueueInsights } from '../merge-queue.js';
-import { defaultOptimisticMerge, defaultOptimisticExclude } from '../optimistic-merge.js';
 import type { Work } from '../model/work.js';
 import { diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
@@ -343,33 +342,29 @@ export const masterConfigSchema = z.object({
   // entry on its own tip, an entry whose tip and every tip ahead of it passed merging as soon as it
   // heads the queue (default 4). Since every entry has its own tip, `batchSize` (GY-330) no longer
   // batches validation; it only widens the observation band and the delivery/ejection wake depth.
-  // `optimistic` (GY-500, default on): an entry whose files are disjoint from everything merged since
-  // its base, touching no shared infrastructure, merges at once past the queue, and main is guarded
-  // after the merge with automatic revert. false sends every entry through the queue.
-  // The loop publishes all of these to the control plane on every change.
-  // `optimisticExclude` (GY-503): the repository's own shared-infrastructure globs, master init
-  // written with the product defaults; a change to an excluded path never merges optimistically.
+  // The loop publishes these to the control plane on every change.
+  // `optimistic` and `optimisticExclude` are retired (GY-1233): GitHub delivery merges every
+  // passing candidate, so optimistic merge and its main guard are gone. Both keys are still
+  // accepted so an existing master.json loads, and neither is read.
   // `ciConcurrency` (GY-501): the repository's concurrent Actions job limit as the operator declares
   // it (GitHub does not report it); master protection compares it with parallelTips × jobs per run.
   mergeQueue: z.object({
     batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional(),
-    optimistic: z.boolean().optional(),
+    optimistic: z.unknown().optional(),
     parallelTips: z.number().int().min(1).max(maxParallelTips).optional(),
     ciConcurrency: z.number().int().min(1).max(10000).optional(),
     rerunFailedChecks: z.number().int().min(0).max(maxRerunFailedChecks).optional(),
-    optimisticExclude: z.array(z.string().trim().min(1).max(200)
-      .refine(glob => !glob.startsWith('/') && !/[\s\u0000-\u001f]/.test(glob) && !glob.split('/').some(segment => segment === '.' || segment === '..'),
-        'Exclude globs are repository-relative, without . or .. segments, whitespace or control characters')).max(100).optional(),
+    optimisticExclude: z.unknown().optional(),
   }).strict().optional(),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
-  // The master's own operator-agent identity, and the separate approver identity whose session
-  // approves the master's two-party decisions (master autonomy). Paths only, never tokens.
+  // The master's operator-agent identity and the approver identity for its two-party decisions. Paths only, never tokens.
   operatorAgent: agentIdentitySchema.optional(),
   approver: agentIdentitySchema.optional(),
-  // The system invariants' thresholds (GY-404, src/model/invariants.ts): every field optional,
-  // each defaulting to the bound the loop checks every cycle.
+  // The system invariants' thresholds (GY-404, src/model/invariants.ts), each defaulting to the loop's bound.
   invariants: invariantThresholdsSchema.optional(),
+  // Delivery-speed p90 targets master status judges (GY-1232); unset keeps 2h ready→merged, 8h merged→production.
+  deliverySpeed: z.object({ readyToMergedP90Ms: z.number().int().positive().max(30 * 86_400_000).optional(), mergedToProductionP90Ms: z.number().int().positive().max(30 * 86_400_000).optional() }).strict().optional(),
 }).strict();
 export type MasterConfig = z.infer<typeof masterConfigSchema>;
 /**
@@ -396,11 +391,6 @@ export function withReviewerDefaults<T extends Pick<MasterConfig, 'reviewers' | 
 export function mergeBatchSize(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.batchSize ?? defaultMergeBatchSize;
 }
-/** Whether optimistic merge is on under this master config: `mergeQueue.optimistic`, on by default (GY-500). */
-export function optimisticMergeEnabled(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): boolean {
-  return config?.mergeQueue?.optimistic ?? defaultOptimisticMerge;
-}
-
 /** The parallel-tip window under this master config: `mergeQueue.parallelTips`, or the default of 4 (GY-498). */
 export function mergeParallelTips(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.parallelTips ?? defaultParallelTips;
@@ -428,11 +418,6 @@ export function mergeQueueStatus(master: MasterConfig, snapshot: { work: Work[];
 /** Reruns of a failed required check per sha under this master config: `mergeQueue.rerunFailedChecks`, or the product default of 1. */
 export function rerunFailedChecks(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.rerunFailedChecks ?? defaultRerunFailedChecks;
-}
-
-/** The repository's shared-infrastructure globs under this master config: `mergeQueue.optimisticExclude`, or the product defaults (GY-503). */
-export function optimisticExcludeGlobs(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): string[] {
-  return config?.mergeQueue?.optimisticExclude ?? [...defaultOptimisticExclude];
 }
 
 export function assertMasterBinding(config: MasterConfig, status: any) {

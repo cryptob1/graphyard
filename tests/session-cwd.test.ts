@@ -256,34 +256,33 @@ test('unit:session-cwd-own-checkout — an escalation handler opens its pane and
   } finally { await fixture.cleanup(); }
 });
 
-test('unit:session-cwd-own-checkout — a docs-sync session opens its pane, starts its runtime and adds its worktree in a managed checkout of its own, never in the coordinator checkout', async () => {
+test('unit:session-cwd-own-checkout — a docs-sync session opens its pane and starts its runtime in the worktree its launcher created inside a managed checkout of its own, never in the coordinator checkout', async () => {
   const fixture = await installed();
   try {
     const { root, cleanup } = fixture;
     const stub = herdr();
+    // The launcher itself creates the worktree of the reviewed head (GY-1205): git runs for real.
+    const run = (command: string, args: string[], options?: unknown) => command === 'git' ? execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }) : stub.run(command, args);
     const home = await temporaryDirectory('session-cwd-claude-home');
     await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', environment: { CLAUDE_CONFIG_DIR: home } });
-    const plan: DocsSyncPlan = { key: 'GY-866', pr: 866, branch: 'graphyard/gy-866-7', baseBranch: 'main', head: H, base: B, paths: ['docs/master-agent.md'] };
-    await launchDocsSync(root, work(), plan, { agents: [], available: true }, stub.run);
+    const plan: DocsSyncPlan = { key: 'GY-866', pr: 866, branch: 'graphyard/gy-866-7', baseBranch: 'main', head: fixture.head, base: fixture.head, paths: ['docs/master-agent.md'] };
+    await launchDocsSync(root, work(), plan, { agents: [], available: true }, run as never);
     assert.equal(stub.tabs.length, 1, 'one Herdr tab is created for the docs-sync session');
     const pane = paneCwd(stub.tabs[0]);
     assert.ok(pane, 'the docs-sync pane is created with an explicit --cwd');
     assert.ok(!resolve(pane!).startsWith(`${resolve(root)}${sep}`) && resolve(pane!) !== resolve(root), `the docs-sync pane opens outside the coordinator checkout, not ${pane}`);
-    assert.equal(dirname(resolve(pane!)), resolve(worktreeRoot(root, fixture.config)), 'the docs-sync pane opens in a checkout under the managed worktree root');
-    assert.equal(existsSync(pane!), true, 'the docs-sync pane opens in a checkout that exists');
+    const checkout = dirname(resolve(pane!));
+    assert.equal(dirname(checkout), resolve(worktreeRoot(root, fixture.config)), 'the docs-sync pane opens in a checkout under the managed worktree root');
+    assert.equal(existsSync(join(pane!, 'src', 'loop.ts')), true, 'the launcher created the worktree of the reviewed head the pane opens in');
     assert.equal(resolve(checkoutOfStem(stub.typed[0].stem)!), resolve(pane!), 'the runtime starts, and reads its request, exactly where the pane opens');
     assert.equal(stub.pasted.length, 0, 'the instruction is the session\'s own first request, never pasted');
-    // Its request adds the worktree it merges in under that same checkout: confined, the session
-    // cannot write the coordinator checkout, `.graphyard/docs-sync` included.
     const request = stub.typed[0].args.at(-1)!;
-    const worktree = join(pane!, 'checkout');
-    assert.ok(request.includes(`worktree add --detach ${worktree} ${H}`), 'the request names a worktree inside the session\'s own checkout');
+    assert.ok(request.includes(`You start in ${pane}`), 'the request names the worktree inside the session\'s own checkout');
     assert.ok(!request.includes(join(root, '.graphyard', 'docs-sync')), 'the request names no worktree under the coordinator checkout');
     assert.equal(tabEnv(stub.tabs[0], 'GRAPHYARD_REPOSITORY_ROOT'), root, 'the docs-sync tab hands the session the coordinator root');
-    assert.ok(obtainsCode(pane!, worktree, fixture.head, root), 'git worktree add from where the docs-sync session starts reaches the repository');
     // No ledger owns the directory: the launching process holds it for the session's bounded life.
     assert.ok(docsSyncMaxMs > orphanGraceMs, 'a docs-sync session may outlive the orphan grace, so its checkout must be held');
-    assert.ok(await survivesReclaim(root, fixture.config, pane!), 'a reclaim pass past the orphan grace leaves the docs-sync checkout');
+    assert.ok(await survivesReclaim(root, fixture.config, checkout), 'a reclaim pass past the orphan grace leaves the docs-sync checkout');
     await rm(home, { recursive: true, force: true });
     await cleanup();
   } finally { await fixture.cleanup(); }

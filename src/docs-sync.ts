@@ -1,11 +1,12 @@
-import { execFileSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { existsSync, readFileSync, symlinkSync } from 'node:fs';
+import { access, constants, readdir, rm } from 'node:fs/promises';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { Work } from './model.js';
-import type { ChildRun } from './child-runner.js';
-import type { MasterConfig } from './master/profiles.js';
+import { runChild, type ChildRun } from './child-runner.js';
+import type { CoordinatorConfinement, MasterConfig } from './master/profiles.js';
 import { loadMasterConfig } from './master/config.js';
 import { accountLaunch, sharedGitDirectory } from './master/environments.js';
-import { closeFailedLaunch, launchStartMs, startAgentSession } from './master/launch.js';
+import { closeFailedLaunch, launchStartMs, sessionConfinement, startAgentSession } from './master/launch.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson, observeHerdrAgents } from './master/herdr.js';
 import { autonomousSession, destructivePromptGuidance, herdrAttach } from './master/dispatch.js';
 import { selectApproverAccount, type SessionRegistrar } from './master/autonomy.js';
@@ -18,18 +19,18 @@ import { holdCheckout } from './producer.js';
 // GY-566: the docs-sync session the loop launches for a docs-only conflict; the routing and carry
 // rules it serves are in model/docs-sync.ts.
 
-type Run = (command: string, args: string[]) => string;
-const gitRun: Run = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 });
 /**
  * The paths git itself reports conflicting when `head` is merged with `base`, from an in-memory
  * `git merge-tree` over this checkout's object store after fetching both; null when either commit
- * cannot be had or the probe fails, and [] for a clean merge.
+ * cannot be had or the probe fails, and [] for a clean merge. Every git call goes through `run`,
+ * the loop's asynchronous child runner, so a slow fetch never blocks the loop's event loop.
  */
-export function localConflictPaths(root: string, branch: string, head: string, base: string, run: Run = gitRun): string[] | null {
-  try { run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]); } catch { /* a head fetched earlier still serves */ }
-  try { run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', base]); } catch { /* likewise */ }
-  try { run('git', ['-C', root, 'cat-file', '-e', `${head}^{commit}`]); run('git', ['-C', root, 'cat-file', '-e', `${base}^{commit}`]); } catch { return null; }
-  try { run('git', ['-C', root, 'merge-tree', '--write-tree', '--name-only', '--no-messages', '-z', head, base]); return []; }
+export async function localConflictPaths(root: string, branch: string, head: string, base: string, run: ChildRun): Promise<string[] | null> {
+  const git = async (...args: string[]) => run('git', ['-C', root, ...args], { timeoutMs: 60_000 });
+  try { await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`); } catch { /* a head fetched earlier still serves */ }
+  try { await git('fetch', '--quiet', '--no-tags', 'origin', base); } catch { /* likewise */ }
+  try { await git('cat-file', '-e', `${head}^{commit}`); await git('cat-file', '-e', `${base}^{commit}`); } catch { return null; }
+  try { await git('merge-tree', '--write-tree', '--name-only', '--no-messages', '-z', head, base); return []; }
   catch (error: any) {
     if (error?.status !== 1 || typeof error.stdout !== 'string') return null;
     return [...new Set<string>(error.stdout.split('\0').slice(1).filter(Boolean))].sort();
@@ -48,17 +49,73 @@ export const docsSyncCheckout = (root: string, plan: Pick<DocsSyncPlan, 'key' | 
 
 /**
  * The docs-sync session's whole instruction: narrow by design, it resolves prose and nothing else.
- * `worktree` is where it adds its worktree of the reviewed head: the path its launch allocated in
- * the session's own managed checkout (GY-866), `docsSyncCheckout` for a prompt built without one.
+ * `worktree` is where the launcher created its worktree of the reviewed head: inside the session's
+ * own managed checkout (GY-866), `docsSyncCheckout` for a prompt built without one.
  */
 export function docsSyncPrompt(config: Pick<MasterConfig, 'repository' | 'cliPath'>, plan: DocsSyncPlan, root: string, worktree = docsSyncCheckout(root, plan)) {
   return `You are a Graphyard docs-sync session for ${config.repository}. Work item ${plan.key} (pull request #${plan.pr}, branch ${plan.branch}) was reviewed at head ${plan.head}, and it conflicts with base branch tip ${plan.base} only in documentation: ${plan.paths.join(', ')}. Resolve exactly that, nothing else. `
-    + `Create a detached worktree of the reviewed head: git -C ${root} fetch origin ${plan.branch} ${plan.baseBranch} && git -C ${root} worktree add --detach ${worktree} ${plan.head}; if ${root}/package-lock.json and ${worktree}/package-lock.json are identical, link ${root}/node_modules into ${worktree}, otherwise run npm ci there. `
+    + `You start in ${worktree}, a detached worktree of the reviewed head the launcher created for you, with both commits already fetched; it is the only checkout you can write. If ${worktree}/node_modules is missing, run npm ci there. `
     + `In it run git merge --no-ff ${plan.base}. Resolve each conflicted paragraph so both sides' meaning survives — keep what the base added and what this item added, merging sentences rather than choosing a side — and stay within the documentation word budget. Touch only the conflicted paragraphs of the conflicted docs pages: never edit a file outside docs/, never change a line that did not conflict, and never rewrite, reword or drop anything else. If a conflicted path is not a docs page, or the conflict cannot be resolved while keeping both meanings, abort the merge (git merge --abort) and stop: the control plane then returns the item to a worker. `
     + `Then rerun the docs obligation check and the word-budget test: npm test -- tests/docs-budget.test.ts tests/docs-obligation.test.ts. If either fails, shorten or fix only the paragraphs you resolved until both pass. Commit the merge with the message "Graphyard docs-sync of ${plan.key} onto ${plan.base.slice(0, 12)}" and push it: git push origin HEAD:refs/heads/${plan.branch} — a plain push, never forced; a refused push means the branch moved, and you stop. `
-    + `Do not run graphyard complete, claim work, review, approve, submit evidence or merge: the control plane observes the pushed head, keeps the approval when the diff outside docs/ is unchanged, and runs the proofs again. When done, remove the worktree with git -C ${root} worktree remove --force ${worktree}, print one line naming the pushed head, and stop. `
+    + `Do not run graphyard complete, claim work, review, approve, submit evidence or merge: the control plane observes the pushed head, keeps the approval when the diff outside docs/ is unchanged, and runs the proofs again. Leave the worktree in place — the launcher reclaims it once this session is gone. When done, print one line naming the pushed head, and stop. `
     + destructivePromptGuidance
     + autonomousSession('resolve the docs conflict and push, or abort and stop', 'abort the merge and stop');
+}
+
+// ---- The docs-sync checkout (GY-1205) -------------------------------------------------------
+// Every session runs with the coordinator checkout bind-mounted read-only (GY-888), so a session
+// cannot create its own worktree under it: the launcher, which is not confined, creates the
+// detached worktree first and starts the session in it, and the confinement re-exposes exactly
+// that directory (and the shared Git paths) writable.
+
+const covers = (outer: string, path: string) => { const from = relative(outer, path); return from === '' || (from !== '..' && !from.startsWith(`..${sep}`) && !isAbsolute(from)); };
+
+/** Remove every docs-sync checkout no visible docs-sync session owns, so a finished or failed one does not hold disk. */
+export async function reclaimDocsSyncCheckouts(root: string, visible: readonly string[], run: ChildRun = runChild): Promise<string[]> {
+  const parent = resolve(root, '.graphyard', 'docs-sync');
+  let entries: string[];
+  try { entries = await readdir(parent); } catch { return []; }
+  const removed: string[] = [];
+  for (const entry of entries) {
+    const at = entry.lastIndexOf('-');
+    if (at <= 0 || visible.includes(docsSyncSessionName({ key: entry.slice(0, at), head: entry.slice(at + 1) }))) continue;
+    const path = resolve(parent, entry);
+    try { await run('git', ['-C', root, 'worktree', 'remove', '--force', path], { timeoutMs: 60_000 }); } catch { /* not a registered worktree any more */ }
+    await rm(path, { recursive: true, force: true });
+    removed.push(path);
+  }
+  if (removed.length) { try { await run('git', ['-C', root, 'worktree', 'prune'], { timeoutMs: 60_000 }); } catch { /* the next add prunes too */ } }
+  return removed;
+}
+
+/** Create the detached worktree of the reviewed head the session starts in, with the base tip fetched beside it and node_modules linked when the lockfiles match. */
+export async function prepareDocsSyncCheckout(root: string, plan: DocsSyncPlan, run: ChildRun = runChild, checkout = docsSyncCheckout(root, plan)): Promise<string> {
+  try { await run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', plan.branch, plan.baseBranch], { timeoutMs: 60_000 }); } catch { /* commits fetched earlier still serve */ }
+  try { await run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', plan.base], { timeoutMs: 60_000 }); } catch { /* likewise */ }
+  await run('git', ['-C', root, 'worktree', 'add', '--detach', checkout, plan.head], { timeoutMs: 60_000 });
+  const lock = (directory: string) => { try { return readFileSync(resolve(directory, 'package-lock.json'), 'utf8'); } catch { return null; } };
+  const own = lock(root);
+  if (own !== null && own === lock(checkout) && existsSync(resolve(root, 'node_modules')) && !existsSync(resolve(checkout, 'node_modules')))
+    symlinkSync(resolve(root, 'node_modules'), resolve(checkout, 'node_modules'), 'dir');
+  return checkout;
+}
+
+/**
+ * Why a docs-sync session would be unable to write its checkout, or null: the directory is not
+ * writable on the host, or the confinement the session carries leaves it read-only — the last
+ * bind covering it must be a writable `--bind`, after the read-only bind of the coordinator.
+ * The launch is refused on it before the session starts, so the loop routes the conflict to a
+ * rework in the same cycle instead of after docsSyncMaxMs.
+ */
+export async function docsSyncCheckoutRefusal(checkout: string, confinement: CoordinatorConfinement | null): Promise<string | null> {
+  const head = `The docs-sync checkout ${checkout} is not writable`;
+  try { await access(checkout, constants.W_OK); } catch (error: any) { return `${head} (${error?.code ?? 'unknown error'}), so no docs-sync session is started in it`; }
+  if (confinement?.mechanism !== 'read-only-mount') return null;
+  const words = confinement.wrapper;
+  let last: string | null = null;
+  for (let index = 0; index + 1 < words.length && words[index] !== '--'; index++)
+    if (['--bind', '--ro-bind', '--dev-bind'].includes(words[index]) && words[index + 1] === words[index + 2] && covers(words[index + 1], checkout)) { last = words[index]; index += 2; }
+  return last === '--bind' || last === '--dev-bind' ? null : `${head} under the session's confinement: no writable bind re-exposes it after the read-only bind of the coordinator checkout, so no docs-sync session is started in it`;
 }
 
 /**
@@ -75,31 +132,41 @@ export async function launchDocsSync(root: string, work: Work, plan: DocsSyncPla
   const kind = chosen.account?.kind ?? config.reviewers[0]?.kind ?? config.workers[0]?.kind;
   const release = (why: string) => chosen.fleet?.release(why).catch(() => false);
   if (!kind) { await release(`docs-sync launch for ${work.key} found no runtime`); throw new Error('No runtime is configured for a docs-sync session: name reviewer profiles or approver accounts'); }
-  // GY-866: the session starts in a managed checkout of its own, never in the coordinator checkout,
-  // and adds its worktree of the reviewed head there: confined, it cannot write the coordinator
-  // checkout at all. No ledger record owns the directory, so this process holds it against the
-  // reclaim pass for the session's bounded life and settles it after; a loop that dies first
-  // leaves it to the orphan reclaim.
-  let pane: string | undefined, tab: string | undefined, checkout: Awaited<ReturnType<typeof coordinationCheckout>> | undefined, unhold = () => {};
+  // GY-866: the worktree lies in a managed checkout of the session's own under the managed
+  // worktree root, never in the coordinator checkout. No ledger record owns that directory, so
+  // this process holds it against the reclaim pass for the session's bounded life and settles it
+  // after; a loop that dies first leaves it to the orphan reclaim. `.graphyard/docs-sync` is only
+  // swept, for checkouts launches before GY-866 left there.
+  let checkout: string, launch: ReturnType<typeof accountLaunch>, managed: Awaited<ReturnType<typeof coordinationCheckout>> | undefined, unhold = () => {};
+  const unwind = async () => { unhold(); if (managed) await settleCheckout(root, managed.directory); };
   try {
-    checkout = await coordinationCheckout(root, config, work.key, plan.head);
-    unhold = holdCheckout(checkout.directory);
-    const directory = checkout.directory;
-    const launch = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, chosen.account ?? null, { writable: [directory, await sharedGitDirectory(root)].filter((path): path is string => !!path) });
-    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', directory, '--label', `Docs sync · ${work.key}`, '--env', `GRAPHYARD_REPOSITORY_ROOT=${root}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
+    await reclaimDocsSyncCheckouts(root, herdr.agents.map(agent => agent.name ?? ''), run);
+    managed = await coordinationCheckout(root, config, work.key, plan.head);
+    unhold = holdCheckout(managed.directory);
+    checkout = await prepareDocsSyncCheckout(root, plan, run, managed.worktree);
+    launch = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, chosen.account ?? null, { writable: [checkout, await sharedGitDirectory(root)].filter((path): path is string => !!path) });
+    const refusal = await docsSyncCheckoutRefusal(checkout, await sessionConfinement(kind, launch.args, { directory: checkout }));
+    if (refusal) throw new Error(refusal);
+  } catch (error) {
+    await unwind();
+    await release(`docs-sync launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
+    throw error;
+  }
+  let pane: string | undefined, tab: string | undefined;
+  try {
+    const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout, '--label', `Docs sync · ${work.key}`, '--env', `GRAPHYARD_REPOSITORY_ROOT=${root}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tab = created.tab;
     await registeredLaunch(register, { id: `docs-sync:${plan.head}:${plan.base}`, kind: 'coordination', role: 'docs-sync', runtime: kind, host: config.hostId, head: plan.head,
       agentName: name, pane: created.pane, attach: herdrAttach(created.pane, config.herdrWorkspace), ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
       subject: `${work.key}: docs-sync onto ${plan.base.slice(0, 12)}`, state: 'running' },
-    () => startAgentSession(name, kind, created.pane, launch.args, docsSyncPrompt(config, plan, root, checkout!.worktree), run, { directory, cwd: directory, retry: `docs-sync of ${work.key}`, contract: launch.contract, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined);
+    () => startAgentSession(name, kind, created.pane, launch.args, docsSyncPrompt(config, plan, root, checkout), run, { directory: checkout, retry: `docs-sync of ${work.key}`, contract: launch.contract, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined);
   } catch (error) {
     if (pane || tab) await closeFailedLaunch(pane, tab, run).catch(() => undefined);
-    unhold(); if (checkout) await settleCheckout(root, checkout.directory);
+    await unwind();
     await release(`docs-sync launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`);
     throw error;
   }
-  const settled = checkout.directory;
-  setTimeout(() => { unhold(); void settleCheckout(root, settled); }, docsSyncMaxMs + 60_000).unref();
+  setTimeout(() => { void unwind(); }, docsSyncMaxMs + 60_000).unref();
   return { agentName: name, pane: pane ?? null, account: chosen.account?.name ?? null, runtime: kind, session: chosen.fleet?.account.fleet.session ?? null };
 }
 
@@ -114,5 +181,5 @@ export interface DocsSyncEffects {
 
 export const docsSyncEffects = (root: string, run: ChildRun, register: (work: Work) => SessionRegistrar): DocsSyncEffects => ({
   docsSync: async (work, plan) => launchDocsSync(root, work, plan, await observeHerdrAgents(run), run, register(work)),
-  conflictPaths: async (work, head, base) => work.candidate ? localConflictPaths(root, work.candidate.branch, head, base) : null,
+  conflictPaths: async (work, head, base) => work.candidate ? localConflictPaths(root, work.candidate.branch, head, base, run) : null,
 });

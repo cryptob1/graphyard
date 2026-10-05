@@ -266,6 +266,18 @@ test('unit:host-install-live-receives-producer-env every Hetzner live-install pr
     assert.equal(needsProducerEnv([proof]), false, proof);
 });
 
+// GY-1204: the match is keyed to Hetzner and fails closed, so a live install for another provider
+// is neither refused for want of HCLOUD_TOKEN nor handed Hetzner credentials or instructions.
+test('unit:host-install-live-receives-producer-env a live-install proof for a provider other than Hetzner needs no Hetzner credential', () => {
+  for (const proof of ['manual:install-docker-host-live', 'manual:install-compose-live', 'manual:compose-install-live', 'manual:install-railway-live', 'manual:install-hetznerish-live']) {
+    assert.equal(liveInstallProof(proof), false, proof);
+    assert.equal(needsProducerEnv([proof]), false, proof);
+    assert.deepEqual(missingProducerEnv([proof], {}), [], proof);
+  }
+  for (const proof of ['manual:hetzner-install-live', 'manual:install-hetzner-arm-live'])
+    assert.equal(liveInstallProof(proof), true, proof);
+});
+
 test('unit:host-install-live-receives-producer-env a manual:host-install-live session gets the secrets through its 0600 env file and the instructions naming them', async () => {
   const { root, cleanup } = await installation();
   try {

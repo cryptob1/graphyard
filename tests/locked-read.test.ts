@@ -29,18 +29,36 @@ const sources = (dir: string): string[] => readdirSync(dir).flatMap(name => {
   return statSync(path).isDirectory() ? sources(path) : path.endsWith('.ts') ? [path] : [];
 });
 
+/**
+ * The whole-board readers, which read outside any coordination transaction (`Store.list`,
+ * `Store.workSnapshot`), by file and the start of their SQL; the case below refuses them inside one.
+ */
+const readers = new Set(['store/store.ts:SELECT document FROM work_items ORDER BY number', "store/store.ts:SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::j"]);
+/** Each query's SQL text in `text`: a string literal passed to any `.query(`, or a module `const` named as its first argument. */
+function queryTexts(text: string): { sql: string; index: number }[] {
+  const constants = new Map<string, string>();
+  for (const match of text.matchAll(/\bconst\s+(\w+)\s*=\s*([`'"])([\s\S]*?)\2/g)) constants.set(match[1], match[3]);
+  const found: { sql: string; index: number }[] = [];
+  for (const match of text.matchAll(/\.query\(\s*(?:([`'"])([\s\S]*?)\1|(\w+)\s*[,)])/g)) {
+    const sql = match[2] ?? constants.get(match[3]!);
+    if (sql !== undefined) found.push({ sql, index: match.index! });
+  }
+  return found;
+}
+
 test('unit:locked-transactions-read-bounded — no transaction client reads every work item\'s document; each former call site reads whole only the item, its overlapping open items and its dependencies', async () => {
   const offenders: string[] = [];
   for (const file of sources(src)) {
     const text = readFileSync(file, 'utf8');
-    // Every query on a transaction client (`db` / `client`) whose text reads work_items' document
-    // with no WHERE: with or without ORDER BY, LIMIT-less, FOR UPDATE or not.
-    for (const match of text.matchAll(/\b(db|client)\.query\(\s*([`'"])([\s\S]*?)\2/g)) {
-      const sql = match[3];
+    // Every query, on any receiver, whose text reads work_items' document with no WHERE or LIMIT
+    // bounding the rows: with or without ORDER BY or a JOIN, FOR UPDATE or not. The text is the
+    // literal passed, or the module constant named in its place (GY-1042).
+    for (const { sql, index } of queryTexts(text)) {
       if (!/\bFROM\s+work_items\b/i.test(sql) || !/\bdocument\b/.test(sql.split(/\bFROM\s+work_items\b/i)[0])) continue;
       const after = sql.split(/\bFROM\s+work_items\b/i)[1];
-      if (/\bWHERE\b|\bLIMIT\b|\bJOIN\b/i.test(after)) continue;
-      offenders.push(`${relative(src, file)}:${text.slice(0, match.index).split('\n').length}: ${sql.slice(0, 80)}`);
+      if (/\bWHERE\b|\bLIMIT\b/i.test(after)) continue;
+      if (readers.has(`${relative(src, file)}:${sql.replace(/\s+/g, ' ').slice(0, 60)}`)) continue;
+      offenders.push(`${relative(src, file)}:${text.slice(0, index).split('\n').length}: ${sql.replace(/\s+/g, ' ').slice(0, 60)}`);
     }
     // A key lookup on the document scans and detoasts every document: it goes through the work index.
     for (const match of text.matchAll(/FROM work_items[^`'"]*WHERE[^`'"]*document->>\\?'key'/g)) offenders.push(`${relative(src, file)}:${text.slice(0, match.index).split('\n').length}: key lookup on the document`);
@@ -58,6 +76,10 @@ test('unit:locked-transactions-read-bounded — no transaction client reads ever
     }
   }
   assert.deepEqual(offenders, [], `unbounded work_items reads on a transaction client:\n${offenders.join('\n')}`);
+  // The scan sees the forms GY-1042's review named: a JOIN, another receiver, and a SQL constant.
+  const probe = 'const wholeSql = `SELECT w.document FROM work_items w JOIN work_index i ON i.id = w.id`;\n'
+    + 'await this.store.leasePool.query(`SELECT document FROM work_items w JOIN work_index i ON i.id = w.id ORDER BY w.number`);\nawait db.query(wholeSql, []);';
+  assert.deepEqual(queryTexts(probe).map(({ sql }) => /\bWHERE\b|\bLIMIT\b/i.test(sql.split(/\bFROM\s+work_items\b/i)[1])), [false, false], 'a JOIN, another receiver or a constant does not exempt a whole-board read');
   // Each former call site reads through lockedWork, naming the item it acts on.
   const engineSource = readFileSync(join(src, 'engine.ts'), 'utf8');
   assert.ok((engineSource.match(/lockedWork\(db, \[(id|work!?\.id)\]\)/g) ?? []).length >= 10, 'the engine\'s commands read through the bounded read, naming their item');
@@ -287,6 +309,9 @@ test('unit:reconcile-lock-hold-bounded — a full reconciliation pass over 1000 
   // A slow host spends each batch's budget before its rows are done (CI on 2026-10-01: 35 batches
   // read 1082 open documents whole for 407 open items). The next batch reads only as many rows as
   // that one finished, so the pass still reads each open document whole about once.
+  // A pass evaluates only what moved since the last (GY-1124), so the slow pass starts from a reset
+  // view: a full pass that reads every open document again, as a restarted server's first pass does.
+  engine.resetReconcileView();
   const budget = engine.reconcileBatchMs, slow = holds.length;
   engine.reconcileBatchMs = 1; label = 'reconcile';
   try { await engine.reconcile(); } finally { engine.reconcileBatchMs = budget; label = 'other'; }
