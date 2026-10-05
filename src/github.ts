@@ -14,7 +14,7 @@ import { changedTestFiles, judgeTimingCompanion, timingBaselineCompanion, timing
 import type { GitHubCacheStore } from './github-cache.js';
 import type { GitHubChargeLedger } from './github-charges.js';
 import { nextAction } from './model/next-action.js';
-import { applyMainGuardRevert, runMainGuard, type CommitVerdict, type MainCommit, type MainGuardRevert, type MainGuardTick } from './main-guard.js';
+import { applyMainGuardRevert, runMainGuard, type CommitVerdict, type FileChange, type MainCommit, type MainGuardRevert, type MainGuardTick } from './main-guard.js';
 import { githubDelivery } from './model/delivery-mode.js';
 import { lockedWork } from './store/locked-read.js';
 import { save } from './store/store.js';
@@ -562,7 +562,12 @@ export function tightBudgetDecision(band: CadenceBand, budget: Pick<GitHubBudget
 export function dismissedReviewIds(reviews: readonly { id?: unknown; state?: unknown }[]): number[] {
   return reviews.flatMap(review => review.state === 'DISMISSED' && Number.isSafeInteger(review.id) && (review.id as number) > 0 ? [review.id as number] : []);
 }
-export interface GitHubConfig { repository: string; base: string; appId: number; installationId: number; privateKey: string; reviewerApps?: ReviewerApp[] }
+export interface GitHubConfig {
+  repository: string; base: string; appId: number; installationId: number; privateKey: string; reviewerApps?: ReviewerApp[];
+  /** The independent App that approves the main guard's exact-inverse reverts (GY-1291); never the control-plane App. */
+  revertApprover?: RevertApprover;
+}
+export interface RevertApprover { appId: number; installationId: number; privateKey: string }
 /**
  * A 401 or a non-rate-limit 403. Retrying it does not help: the credentials or the installed
  * permissions have to change. It is classified apart from rate limiting so it never pauses the
@@ -2462,6 +2467,53 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     demand(typeof pull?.head?.sha === 'string', `GitHub did not return pull request #${pr}`, 502);
     return { merged: !!pull.merged, mergeSha: typeof pull.merge_commit_sha === 'string' ? pull.merge_commit_sha : null, open: pull.state === 'open', mergeable: typeof pull.mergeable === 'boolean' ? pull.mergeable : null, head: pull.head.sha };
   }
+  /** The files a merge commit changed against its first parent, with their patches (GY-1291). */
+  async mergeChanges(mergeSha: string): Promise<FileChange[]> {
+    const merge = await this.request(`/commits/${mergeSha}`);
+    const parent = merge?.parents?.[0]?.sha;
+    demand(typeof parent === 'string' && /^[a-f0-9]{40}$/.test(parent), `GitHub did not return the first parent of ${mergeSha}`, 502);
+    const compare = await this.request(`/compare/${parent}...${mergeSha}`);
+    demand(Array.isArray(compare?.files), `GitHub did not compare ${mergeSha} with its parent`, 502);
+    // A compare lists at most 300 files; a longer list may be incomplete, so it cannot verify a revert.
+    demand(compare.files.length < 300, `merge ${mergeSha.slice(0, 12)} changes 300 or more files, more than GitHub's compare lists`, 502);
+    return compare.files.map(fileChange);
+  }
+  /** The files a revert pull request changes against main, with their patches (GY-1291). */
+  async revertChanges(pr: number): Promise<FileChange[]> {
+    return (await this.pages(`/pulls/${pr}/files`)).map(fileChange);
+  }
+  /**
+   * Approves a main guard revert at exactly `head` as the independent revert approver App (GY-1291):
+   * branch protection requires an approval from someone other than the last pusher, and the
+   * control-plane App pushed the revert. The guard calls this only for a revert it verified is
+   * exactly the inverse of the merge it names. An approval already standing on `head` is not posted again.
+   */
+  async approveRevert(pr: number, head: string, body: string): Promise<'approved' | 'unconfigured'> {
+    const approver = this.config.revertApprover;
+    if (!approver) return 'unconfigured';
+    demand(approver.appId !== this.config.appId, 'The revert approver must be an App other than the control-plane App that pushed the revert');
+    const minted = await this.fetch(`https://api.github.com/app/installations/${approver.installationId}/access_tokens`, {
+      method: 'POST', signal: AbortSignal.timeout(15_000),
+      headers: { Authorization: `Bearer ${appJwt(approver.appId, approver.privateKey)}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
+      body: JSON.stringify({ repositories: [this.config.repository.split('/')[1]], permissions: { pull_requests: 'write' } }),
+    });
+    demand(minted.ok, `the revert approver App ${approver.appId} could not mint an installation token (${minted.status})`, 502);
+    const token = ((await minted.json()) as any)?.token;
+    demand(typeof token === 'string' && token.length >= 20, `GitHub returned no token for the revert approver App ${approver.appId}`, 502);
+    const call = async (path: string, method = 'GET', payload?: unknown) => {
+      const response = await this.fetch(`https://api.github.com/repos/${this.config.repository}${path}`, {
+        method, signal: AbortSignal.timeout(15_000), body: payload === undefined ? undefined : JSON.stringify(payload),
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
+      });
+      demand(response.ok, `GitHub refused the revert approver's ${method} ${path} (${response.status})`, 502);
+      return response.json() as Promise<any>;
+    };
+    const reviews = await call(`/pulls/${pr}/reviews?per_page=100`);
+    if (Array.isArray(reviews) && reviews.some((review: any) => review?.state === 'APPROVED' && review.commit_id === head && review.performed_via_github_app?.id === approver.appId)) return 'approved';
+    const review = await call(`/pulls/${pr}/reviews`, 'POST', { commit_id: head, event: 'APPROVE', body });
+    demand(review?.state === 'APPROVED' && review.commit_id === head, `GitHub did not record the revert approver's approval of PR #${pr} at ${head.slice(0, 12)}`, 502);
+    return 'approved';
+  }
   /** Closes a revert pull request the main guard gave up on, saying why, and deletes its branch. */
   async closeRevert(pr: number, reason: string): Promise<void> {
     await this.request(`/issues/${pr}/comments`, 'POST', { body: reason });
@@ -2834,6 +2886,8 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
   } catch (error) { return { action: { kind: 'hold', reason: `GitHub refused to ${action.kind} ${work.key}: ${error instanceof Error ? error.message : String(error)}` }, state }; }
   return { action, state };
 }
+/** A file of a GitHub compare or pull request file list, as the main guard compares them. */
+const fileChange = (file: any): FileChange => ({ filename: String(file?.filename ?? ''), status: String(file?.status ?? ''), previousFilename: typeof file?.previous_filename === 'string' ? file.previous_filename : null, patch: typeof file?.patch === 'string' ? file.patch : null });
 /** How often the job loop runs the main guard (see guardGitHubMain). */
 export const mainGuardIntervalMs = 30_000;
 /**
@@ -2842,7 +2896,7 @@ export const mainGuardIntervalMs = 30_000;
  * one whose delivery is the merge that broke main — and records each revert step on that item under
  * `main-guard.revert.<state>`, reopening it for rework when its revert merged.
  */
-export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'evaluate'>, github: Pick<GitHub, 'mainHistory' | 'commitChecks' | 'openMainRevert' | 'revertPull' | 'mergeRevert' | 'closeRevert'>, now = new Date(), verdicts = new Map<string, CommitVerdict>()): Promise<MainGuardTick> {
+export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'evaluate'>, github: Pick<GitHub, 'mainHistory' | 'commitChecks' | 'openMainRevert' | 'revertPull' | 'mergeChanges' | 'revertChanges' | 'approveRevert' | 'mergeRevert' | 'closeRevert'>, now = new Date(), verdicts = new Map<string, CommitVerdict>(), approved = new Set<string>()): Promise<MainGuardTick> {
   const pool = engine.store.pool;
   const required: string[] = (await pool.query("SELECT document->'policy'->'checks' AS checks FROM work_items WHERE document->>'stage'='done' AND document ? 'delivery' ORDER BY number DESC LIMIT 1")).rows[0]?.checks ?? [];
   return runMainGuard({
@@ -2852,6 +2906,9 @@ export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' 
     checks: sha => github.commitChecks(sha),
     openRevert: (work, mergeSha, reason) => github.openMainRevert(work, mergeSha, reason),
     pull: pr => github.revertPull(pr),
+    mergeChanges: mergeSha => github.mergeChanges(mergeSha),
+    revertChanges: pr => github.revertChanges(pr),
+    approveRevert: (pr, head, body) => github.approveRevert(pr, head, body),
     mergeRevert: (work, revert) => github.mergeRevert(work, revert),
     closeRevert: (pr, reason) => github.closeRevert(pr, reason),
     record: (snapshot, revert: MainGuardRevert) => engine.store.transaction(async (db, at) => {
@@ -2861,14 +2918,23 @@ export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' 
       if (reopened) engine.evaluate(work, (await lockedWork(db, [work.id])).map(item => item.id === work.id ? work : item), at);
       await save(db, work, 'graphyard', `main-guard.revert.${revert.state}`, at, { revert, reopened });
     }),
-  }, { required, ciAppIds: engine.ciAppIds, now, verdicts });
+  }, { required, ciAppIds: engine.ciAppIds, now, verdicts, approved });
 }
-const mainGuardRead = new WeakMap<Engine, number>(), mainGuardVerdicts = new WeakMap<Engine, Map<string, CommitVerdict>>(), mainGuardFailure = new WeakMap<Engine, string>();
+const mainGuardRead = new WeakMap<Engine, number>(), mainGuardVerdicts = new WeakMap<Engine, Map<string, CommitVerdict>>(), mainGuardApproved = new WeakMap<Engine, Set<string>>(), mainGuardFailure = new WeakMap<Engine, string>();
+/** The revert approver App from `GRAPHYARD_REVERT_APPROVER_APP_ID`/`_INSTALLATION_ID`/`_PRIVATE_KEY` (or `_FILE`); undefined when unset. */
+export async function revertApproverFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<RevertApprover | undefined> {
+  if (!env.GRAPHYARD_REVERT_APPROVER_APP_ID) return undefined;
+  const appId = Number(env.GRAPHYARD_REVERT_APPROVER_APP_ID), installationId = Number(env.GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID);
+  demand(Number.isSafeInteger(appId) && appId > 0 && Number.isSafeInteger(installationId) && installationId > 0, 'GRAPHYARD_REVERT_APPROVER_APP_ID and GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID must be GitHub App and installation ids');
+  const privateKey = env.GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY ?? (env.GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY_FILE ? await readFile(env.GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY_FILE, 'utf8') : '');
+  demand(/^-----BEGIN (RSA )?PRIVATE KEY-----/m.test(privateKey), 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY (or _FILE) must be the PEM GitHub issued for the revert approver App');
+  return { appId, installationId, privateKey };
+}
 export async function githubFromEnv() {
   if (!process.env.GITHUB_APP_ID || !process.env.GITHUB_REPOSITORY) return null;
   const privateKey = process.env.GITHUB_PRIVATE_KEY ?? await readFile(process.env.GITHUB_PRIVATE_KEY_FILE!, 'utf8');
   const reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
-  return new GitHub({ repository: process.env.GITHUB_REPOSITORY, base: process.env.GITHUB_BASE_BRANCH ?? 'main', appId: Number(process.env.GITHUB_APP_ID), installationId: Number(process.env.GITHUB_INSTALLATION_ID), privateKey, reviewerApps }, processTokenBudgets);
+  return new GitHub({ repository: process.env.GITHUB_REPOSITORY, base: process.env.GITHUB_BASE_BRANCH ?? 'main', appId: Number(process.env.GITHUB_APP_ID), installationId: Number(process.env.GITHUB_INSTALLATION_ID), privateKey, reviewerApps, revertApprover: await revertApproverFromEnv() }, processTokenBudgets);
 }
 /**
  * Moves one queued candidate onto the tip it is predicted to land. Entries publish head-first:
@@ -3053,7 +3119,10 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     if (!mainGuardVerdicts.has(engine)) mainGuardVerdicts.set(engine, new Map());
     const verdicts = mainGuardVerdicts.get(engine)!;
     if (verdicts.size > historyEntries) verdicts.clear();
-    const failed = await guardGitHubMain(engine, github, new Date(), verdicts).then(tick => tick.errors.join('; '), error => error instanceof Error ? error.message : String(error));
+    if (!mainGuardApproved.has(engine)) mainGuardApproved.set(engine, new Set());
+    const approved = mainGuardApproved.get(engine)!;
+    if (approved.size > historyEntries) approved.clear();
+    const failed = await guardGitHubMain(engine, github, new Date(), verdicts, approved).then(tick => tick.errors.join('; '), error => error instanceof Error ? error.message : String(error));
     if (failed && mainGuardFailure.get(engine) !== failed) await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', 'main-guard.failed', JSON.stringify({ details: { error: failed, at: new Date().toISOString() } })]).catch(() => {});
     mainGuardFailure.set(engine, failed);
   }

@@ -110,6 +110,7 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   if (!Number.isFinite(now)) throw new Error('Dispatch requires a valid Graphyard snapshot clock');
   if (parkedOnHuman(work)) throw new Error(`Dispatch waits on a human-only decision (${humanDecisionLabel[work.humanRequest!.kind]}); ${answerCommand(work.key, work.humanRequest!)} resumes it`);
   if (!work.ready || work.blocker) throw new Error('Dispatch requires released work without a blocker');
+  if (work.children?.length) throw new Error(`${work.key} was split into ${work.children.join(', ')} before dispatch; it is delivered when they are and is never dispatched itself`);
   const fenced = containmentHold(work, now);
   if (fenced) throw new Error(fenced);
   const unfinished = work.dependencies.map(id => allWork.find(item => item.id === id)).filter(dependency => !dependency || dependency.stage !== 'done');
@@ -357,7 +358,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
       // A worker never reaches the operator's keyring, minted credential or not (GY-999, GY-1039): one
       // launched without a minter has no GitHub credential at all, never the host's login.
       const started = await startAgentSession(profile.agentName, launch.kind!, pane, [...args, ...sessionHarness.args], prompt, run,
-        { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs ?? launchStartMs(config), directory: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment, ownGitHubCredential: true, ...(coordinatorRoot ? { coordinatorRoot } : {}), onRun: () => { ran = true; } });
+        { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs ?? launchStartMs(config), directory: prepared.path, cwd: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment, ownGitHubCredential: true, ...(coordinatorRoot ? { coordinatorRoot } : {}), onRun: () => { ran = true; } });
       // A worker stopped on a prompt the launcher does not answer is held for a human rather than
       // closed: its record beside the launch files is what master status raises and what the watch
       // supervisor bounds, releasing the slot once `consentHoldMs` passes with the prompt unanswered.

@@ -3,9 +3,10 @@
 
 All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)); mutations an `Idempotency-Key`, reused only for identical retries. Errors: `{ "error": "reason" }`; a `409` refusal is read, not retried.
 
-`POST /api/work` ([example](../../examples/work.json)): `title`, `criteria`; optionally `dependencies`, `exclusiveResources`, `plannedFiles`, `producerProofs` (producer-runnable `manual:` proofs). Others: `POST /api/work/KEY/COMMAND`:
+`POST /api/work` ([example](../../examples/work.json)): `title`, `criteria`; optionally `dependencies`, `exclusiveResources`, `plannedFiles`, `split` ([decomposition](#splitting-an-item) opt-out/in), `producerProofs` (producer-runnable `manual:` proofs); `parent`/`children` are set only by a split. Others: `POST /api/work/KEY/COMMAND`:
 
-- `requirements`: document, `expectedPolicyRevision`, `reason`; `admin` (operator agents additively).
+- `requirements`: document, `expectedPolicyRevision`, `reason`; `admin` (operator agents additively); `split` kept when omitted.
+- `decomposition` (coordinator): `{event:"started"|"decided"|"failed",…}`; `decided` with `payload.children` makes the [split](#splitting-an-item).
 - `ready`, `unblock`: `{"reason":…}` (operator agents add `expectedRevision`); `master unblock` retries a stale-revision refusal (≤3 writes) while the same blocker stands.
 - `resolve`: `{"trigger":…, "expectedRevision":…, "reason":…}`; human `admin`, or any `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` explaining a `lease-loss`.
 - `rework`, `recover` (delivered quarantine): `admin`, `{"reason":…, "previousWorkerStopped":true}`.
@@ -16,6 +17,10 @@ All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#th
 - `POST /api/retro/synthesize` (coordinator/admin) drafts [retro artefacts](../operations-reference.md#retro-synthesis) as caller; `POST /api/retro/ID/approve|refuse` `{reason}` by its rules (`403`; `409` once judged).
 
 No endpoint sets lifecycle state.
+
+## Splitting an item
+
+Before first dispatch the loop judges an item against `run.decomposition` bounds (defaults: 4 criteria, 2 root directories, 12 paths, ~1,500 lines). Over them, a read-only Pi session (`run.research` account; `concurrency` 4, `timeoutMinutes` 10) proposes 2–10 children; within bounds, `"split": false` or a failed run, the item is dispatched unchanged. `master status` shows `split` on rows and a `splits` list. Splitting lets the merge queue land small PRs instead of colliding large ones. A split is one transaction: every parent criterion goes to exactly one child (text and proofs copied), each child's `plannedFiles` sits strictly inside the parent's, and `after` orders children as dependencies. Children are ordinary `GY-N` items keeping the parent's release, dependencies, `exclusiveResources`, policy and documentation criterion. The parent is never claimed or dispatched; requirements revisions on it are refused in favour of the children's, which may add criteria but not rewrite or retire inherited ones; its last child's delivery delivers it (`decomposition.parent-delivered`). A keep-whole answer or refused split dispatches it unchanged; `"split": true` runs the session within the bounds too.
 
 ## Other commands and routes
 

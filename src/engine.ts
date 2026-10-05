@@ -42,6 +42,7 @@ import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordInt
 import { dispatchFailureBlockAfter } from './daemon/dispatch-failures.js';
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
+import { deliverSplitParent, splitChildRevisionRefusal } from './decomposition.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
 import { coordinationProjection, isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type SavedVersion } from './store/locked-read.js';
 
@@ -73,7 +74,7 @@ export const containmentScopeSchema = z.object({ unit: z.string().trim().min(1).
 const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional() }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
-  requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs,
+  requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs, split: createSchema.shape.split,
     answers: z.object({ epoch: z.number().int().positive(), at: z.string().datetime(), sha: z.string().regex(/^[0-9a-f]{40}$/).nullable().optional() }).strict().optional() }).strict(),
   reviewpolicy: z.object({ provider: z.enum(reviewProviders), reviewerProfiles: z.array(reviewerProfileSchema).min(1).max(10).optional(), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
@@ -172,6 +173,8 @@ const actionClaimSchema = z.object({
   leaseSeconds: z.number().int().min(10).max(900).optional(),
   work: z.string().min(1).max(200).optional(),
 }).strict();
+/** A presence-only poll (GY-1288): who is asking, where, and what it runs — a claim's own fields, claiming nothing. */
+export const executorPresenceSchema = actionClaimSchema.pick({ executor: true, host: true, kinds: true }).strict();
 const actionSettleSchema = z.object({ executor: executorName.optional(), result: z.enum(['done', 'failed']), reason: z.string().trim().min(1).max(2000) }).strict();
 // A renewal carries no result: it says only that the executor named on the claim is still
 // inside the handler, and asks for the lease it already holds to run on.
@@ -1004,6 +1007,7 @@ export class Engine {
         work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
       }
       if (command === 'requirements') {
+        demand(!work.children?.length, `${work.key} was split into child items; revise the child items directly rather than the parent`);
         if (actor.role !== 'operator-agent') admin(actor);
         const flag = flagPathRefusal(data.plannedFiles, 'plannedFiles'); demand(!flag, flag!, 422);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
@@ -1032,6 +1036,11 @@ export class Engine {
           if (data.answers.sha !== undefined) demand((work.candidate?.sha ?? null) === data.answers.sha, `The findings this widening rests on were read for ${data.answers.sha?.slice(0, 12) ?? 'no head'}, which is no longer the item's head`);
         }
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
+        if (work.parent) {
+          const parent: Work | undefined = (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [work.parent])).rows[0]?.document;
+          const refusal = parent ? splitChildRevisionRefusal(work, parent, data.criteria) : null;
+          demand(!refusal, refusal!);
+        }
         if (actor.role === 'operator-agent') {
           demand(work.criteria.every(previous => data.criteria.some((next: typeof previous) => next.id === previous.id && next.text === previous.text && JSON.stringify(next.proofs) === JSON.stringify(previous.proofs))), 'Operator agents may add requirements but cannot weaken or rewrite existing criteria');
           demand(work.dependencies.every(dependency => data.dependencies.includes(dependency)), 'Operator agents cannot remove dependencies');
@@ -1064,6 +1073,8 @@ export class Engine {
         work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
         work.criteria = revised;
         work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources; work.producerProofs = data.producerProofs;
+        // Opting in or out of splitting before first dispatch (GY-1126); a revision that omits it keeps the item's setting.
+        if (data.split !== undefined) work.split = data.split;
         work.scenarioRequirements = pins; work.policyRevision++;
         this.refuseRenewedDeferral(work, all);
         work.proofGaps = await unauthorizedProofs(db, this.principals, [...proofs, ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])], work.producerProofs);
@@ -1162,6 +1173,7 @@ export class Engine {
       }
       if (command === 'claim') {
         demand(actor.role === 'worker' || actor.role === 'admin', 'Worker permission required', 403);
+        demand(!work.children?.length, `${work.key} was split into ${work.children?.join(', ')} before dispatch; it is delivered when they are and is never claimed directly`);
         demand(work.ready && !work.blocker, 'Task is not ready or has a blocker');
         demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}`);
         demand(work.dependencies.every(dep => all.find(w => w.id === dep)?.stage === 'done'), 'Unfinished dependencies');
@@ -2902,6 +2914,8 @@ export class Engine {
           // Delivered in this transaction: what it still owes is recomputed now, its leftover rows
           // retired and its queue entry cleared, so nothing retries against the delivery (GY-185).
           settleDelivered(work, all, now);
+          // The last child of a split parent delivers the parent in the same transaction (GY-1126).
+          await deliverSplitParent(db, work, all, now);
           // The queue shifted. The entries that can land next (the head and its batch) are woken now; the rest are observed on
           // their own schedule and re-predict their base when they near the head.
           for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize, this.parallelTips))) await wakeJob(db, behind.id);
