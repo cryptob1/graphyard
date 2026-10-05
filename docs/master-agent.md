@@ -46,7 +46,7 @@ Every `run.doctor.intervalMinutes` (default 10) the loop's [doctor](onboarding.m
 
 ## Research and diagnosis
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); quota refusals read `waiting` in `daemon.diagnoses` until `retryAt`, then one probe; its `stale`/`withdrawn` decisions are re-requested (≤3), then escalated; stale backlog releases stay owed. Branch restores, base conflicts under 30m and restart-resumed merges aren't `merge` faults.
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); quota refusals wait in `daemon.diagnoses` until `retryAt`, then probe once; its `stale`/`withdrawn` decisions and stale backlog releases are re-requested (≤3), then escalated, faulting after 30m. Branch restores, base conflicts under 30m, restart-resumed merges aren't `merge` faults.
 
 ## Machine-filed backlog
 
