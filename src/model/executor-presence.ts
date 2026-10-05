@@ -55,8 +55,10 @@ import type { Work } from './work.js';
  * started: on 5 October 2026 the production deploy's switchover answered the loop's read with an
  * empty registry 34s after the fleet's last durable claim, and reported it dead for dispatch,
  * approve-scope and request-review at once (GY-1288). An empty fleet is judged only on evidence —
- * a poll this process heard, or a durable reading holding nothing inside the window — never on how
- * long the process has been up.
+ * a poll this process heard, or durable presence older than one window — never on how long the
+ * process has been up. An empty table is no evidence: a deploy creates it empty and a restore leaves
+ * it so. The table therefore carries a marker of when it began recording, and an empty table proves
+ * a silent fleet only once that marker is a window old.
  */
 
 export interface ExecutorPresence { executor: string; host: string; principal: string; kinds: NextActionKind[]; seenAt: string; claims: number }
@@ -191,6 +193,14 @@ export const presenceQuery = (engine: { store?: { pool?: { query: Query } } }): 
 };
 /** Rows older than this are pruned by the next write: an executor silent for a week is not a fleet member worth naming. */
 export const durablePresenceRetainedMs = 7 * 24 * 3_600_000;
+/**
+ * The marker row's key (principal and executor both empty; a principal never is): when
+ * `executor_presence` began recording. Written by the first read of a table without one and never
+ * pruned, so the window an empty table must outlast starts when recording did, not when a process did.
+ */
+const isMarker = `principal = '' AND executor = ''`;
+/** What the durable store holds: every executor's last poll or renewal, and when recording began. */
+export interface DurablePresence { executors: ExecutorPresence[]; since: string }
 
 /**
  * Record one poll or renewal durably (GY-1289): one upsert of the executor's row, never an event
@@ -202,7 +212,7 @@ export const durablePresenceRetainedMs = 7 * 24 * 3_600_000;
 export async function recordPresence(query: Query | null, presence: { executor: string; host: string; principal: string; kinds: NextActionKind[] }, now: Date, options: { claimed?: boolean; renewal?: boolean } = {}): Promise<void> {
   if (!query) return;
   try {
-    await query(`WITH pruned AS (DELETE FROM executor_presence WHERE seen_at < $7)
+    await query(`WITH pruned AS (DELETE FROM executor_presence WHERE seen_at < $7 AND NOT (${isMarker}) AND NOT (principal = $1 AND executor = $2))
 INSERT INTO executor_presence(principal, executor, host, kinds, seen_at, claims) VALUES($1, $2, $3, $4::jsonb, $5, $6)
 ON CONFLICT(principal, executor) DO UPDATE SET seen_at=GREATEST(executor_presence.seen_at, EXCLUDED.seen_at), claims=executor_presence.claims + EXCLUDED.claims,
   host=CASE WHEN $8 THEN executor_presence.host ELSE EXCLUDED.host END, kinds=CASE WHEN $8 THEN executor_presence.kinds ELSE EXCLUDED.kinds END`,
@@ -211,15 +221,19 @@ ON CONFLICT(principal, executor) DO UPDATE SET seen_at=GREATEST(executor_presenc
 }
 
 /**
- * The durable presence every process has recorded, most recently seen first; null when it cannot
- * be read — a reading that failed is no evidence either way, so the report then judges nothing an
- * empty fleet would have to explain.
+ * The durable presence every process has recorded, most recently seen first, and when recording
+ * began; null when it cannot be read — a reading that failed is no evidence either way, so the
+ * report then judges nothing an empty fleet would have to explain. A table without its marker
+ * (created by this deploy, or emptied by a restore) gets one at this read: recording begins now.
  */
-export async function durablePresence(query: Query | null): Promise<ExecutorPresence[] | null> {
+export async function durablePresence(query: Query | null, now = new Date()): Promise<DurablePresence | null> {
   if (!query) return null;
   try {
-    const { rows } = await query('SELECT principal, executor, host, kinds, seen_at, claims FROM executor_presence ORDER BY seen_at DESC LIMIT $1', [retainedExecutors]);
-    return rows.map(row => ({ executor: row.executor, host: row.host, principal: row.principal, kinds: row.kinds, seenAt: new Date(row.seen_at).toISOString(), claims: row.claims }));
+    const { rows } = await query(`SELECT principal, executor, host, kinds, seen_at, claims, (${isMarker}) AS marker FROM executor_presence ORDER BY (${isMarker}) DESC, seen_at DESC LIMIT $1`, [retainedExecutors + 1]);
+    const since = rows[0]?.marker ? rows[0].seen_at : (await query(`INSERT INTO executor_presence(principal, executor, host, kinds, seen_at) VALUES('', '', '', '[]'::jsonb, $1)
+ON CONFLICT(principal, executor) DO UPDATE SET seen_at=executor_presence.seen_at RETURNING seen_at`, [now])).rows[0].seen_at;
+    const executors = rows.filter(row => !row.marker).map(row => ({ executor: row.executor, host: row.host, principal: row.principal, kinds: row.kinds, seenAt: new Date(row.seen_at).toISOString(), claims: row.claims }));
+    return { executors, since: new Date(since).toISOString() };
   } catch { return null; }
 }
 
@@ -228,9 +242,9 @@ export async function durablePresence(query: Query | null): Promise<ExecutorPres
  * seen, serving every kind either view heard it name inside the window — a restarted process that
  * has heard only a renewal knows the one kind being run, while the durable row keeps the poll's.
  */
-function mergedLive(registry: ExecutorRegistry, durable: ExecutorPresence[] | null | undefined, now: Date, liveMs: number): ExecutorPresence[] {
+function mergedLive(registry: ExecutorRegistry, durable: DurablePresence | null | undefined, now: Date, liveMs: number): ExecutorPresence[] {
   const merged = new Map<string, ExecutorPresence>();
-  for (const entry of [...registry.live(now, liveMs), ...(durable ?? []).filter(entry => now.getTime() - Date.parse(entry.seenAt) <= liveMs)]) {
+  for (const entry of [...registry.live(now, liveMs), ...(durable?.executors ?? []).filter(entry => now.getTime() - Date.parse(entry.seenAt) <= liveMs)]) {
     const key = `${entry.principal}\0${entry.executor}`, previous = merged.get(key);
     if (!previous) { merged.set(key, entry); continue; }
     const newer = Date.parse(entry.seenAt) > Date.parse(previous.seenAt) ? entry : previous;
@@ -271,19 +285,21 @@ export const startExecutorFor = (kind: NextActionKind) => `start an executor tha
  *
  * Live is the in-memory registry and the durable reading (`durablePresence`) together, so a fleet
  * polling before this process started is live on its first read (GY-1289). An empty fleet is judged
- * only on evidence that it is silent: a poll this process heard and saw lapse, or a durable reading
- * that holds nothing inside the window. With neither — no poll heard and the durable reading
- * unavailable (`null`) — it judges nothing, however long the process has been up. A caller with no
+ * only on evidence that it is silent: a poll this process heard and saw lapse, or durable presence
+ * older than one window — executor rows that have all lapsed, or an empty table whose recording
+ * marker is a window old. With neither — no poll heard, and a durable reading that is unavailable
+ * (`null`) or empty since less than a window — it judges nothing, however long the process has been up. A caller with no
  * durable store at all (`durable` omitted) keeps the in-memory rule: one liveness window of
  * listening from the registry's birth.
  */
-export function executorReport(all: Work[], registry: ExecutorRegistry, now: Date, liveMs = executorLiveMs, loop: ReportedLoopMerger | null = null, durable?: ExecutorPresence[] | null): ExecutorReport {
+export function executorReport(all: Work[], registry: ExecutorRegistry, now: Date, liveMs = executorLiveMs, loop: ReportedLoopMerger | null = null, durable?: DurablePresence | null): ExecutorReport {
   const live = mergedLive(registry, durable, now, liveMs);
   const served = [...new Set(live.flatMap(entry => entry.kinds))].sort() as NextActionKind[];
   const age = now.getTime() - registry.since.getTime();
-  const silenceUnproven = durable === undefined ? age >= 0 && age < liveMs : registry.heardAt === null && durable === null;
-  if (!live.length && silenceUnproven) return { live, liveMs, served, unserved: [], listening: true };
+  const durableSilence = !!durable && (durable.executors.length > 0 || now.getTime() - Date.parse(durable.since) >= liveMs);
+  const silenceUnproven = durable === undefined ? age >= 0 && age < liveMs : registry.heardAt === null && !durableSilence;
   const merging = loop?.live ? loop : null;
+  if (!live.length && silenceUnproven) return { live, liveMs, served, unserved: [], listening: true, ...(merging ? { loop: merging } : {}) };
   const unserved = openActions(all, now)
     .filter(({ row }) => (executorRunnableKinds as readonly NextActionKind[]).includes(row.kind) && !served.includes(row.kind) && !(merging && row.kind === 'merge'))
     .map(({ row }) => ({ key: row.key, work: row.work, id: row.id, kind: row.kind, reason: row.reason, waitedMs: Math.max(0, now.getTime() - Date.parse(row.requestedAt)), since: row.requestedAt, start: startExecutorFor(row.kind) }))

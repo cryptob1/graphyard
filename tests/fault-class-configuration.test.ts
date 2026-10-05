@@ -17,7 +17,7 @@ import type { NextActionKind } from '../src/model/next-action.js';
 import { classifyAttention } from '../src/model/fault-classes.js';
 import { actionRoutes } from '../src/server/routes/actions.js';
 import { matchRoute, type RouteContext } from '../src/server/routes.js';
-import { describeUnserved, durablePresence, ExecutorRegistry, executorLiveMs, executorRegistry, executorReport, ledgerLoopMerger, LoopRegistry, loopPresenceInterval, loopPresenceLiveMs, presenceQuery, reportedLoopMerger, startExecutorFor } from '../src/model/executor-presence.js';
+import { describeUnserved, durablePresence, ExecutorRegistry, type ExecutorPresence, executorLiveMs, executorRegistry, executorReport, ledgerLoopMerger, LoopRegistry, loopPresenceInterval, loopPresenceLiveMs, presenceQuery, reportedLoopMerger, startExecutorFor } from '../src/model/executor-presence.js';
 import { executorFleet } from '../src/cli/executor-report.js';
 import { deploymentObservationSchema, emptyDaemonState, noteWatchdog, runDaemon, watchdogPlan, writeDaemonState, type DaemonState } from '../src/master-daemon.js';
 import type { DaemonEffects } from '../src/daemon/effects.js';
@@ -518,16 +518,16 @@ test('unit:executor-presence-idle-poll-no-event — a claim poll that takes no a
   const first = await route(engine, 'POST', '/api/actions/claim', { executor: fleetSlot(1), host: 'vishrog', kinds: fleetKinds });
   assert.equal(first.action, null, 'nothing to claim: an idle poll');
   const recorded = await durablePresence(presenceQuery(engine));
-  assert.deepEqual(recorded?.map(entry => [entry.principal, entry.executor, entry.host, entry.kinds, entry.claims]), [[coordinatorActor.id, fleetSlot(1), 'vishrog', fleetKinds, 0]]);
+  assert.deepEqual(recorded?.executors.map(entry => [entry.principal, entry.executor, entry.host, entry.kinds, entry.claims]), [[coordinatorActor.id, fleetSlot(1), 'vishrog', fleetKinds, 0]]);
   await delay(5);
   const second = await route(engine, 'POST', '/api/actions/claim', { executor: fleetSlot(1), host: 'vishrog', kinds: fleetKinds });
   assert.equal(second.action, null);
   const refreshed = await durablePresence(presenceQuery(engine));
-  assert.equal(refreshed?.length, 1, 'one row per executor, overwritten by each poll');
-  assert.ok(Date.parse(refreshed![0].seenAt) > Date.parse(recorded![0].seenAt), 'the second poll moved the executor\'s seenAt forward');
+  assert.equal(refreshed?.executors.length, 1, 'one row per executor, overwritten by each poll');
+  assert.ok(Date.parse(refreshed!.executors[0].seenAt) > Date.parse(recorded!.executors[0].seenAt), 'the second poll moved the executor\'s seenAt forward');
   // A presence-only poll (a fenced executor) is the same upsert.
   await route(engine, 'POST', '/api/actions/presence', { executor: fleetSlot(2), host: 'vishrog', kinds: ['dispatch'] });
-  assert.equal((await durablePresence(presenceQuery(engine)))?.length, 2);
+  assert.equal((await durablePresence(presenceQuery(engine)))?.executors.length, 2);
   assert.deepEqual(await ledgerCounts(store), before, 'no event row and no receipt for any poll that claimed nothing (GY-185)');
 });
 
@@ -560,21 +560,25 @@ test('unit:executor-presence-renewal-live — an executor renewing its claim ins
     assert.deepEqual(afterRestart.live.map(entry => [entry.executor, entry.kinds.length]), [[fleetSlot(1), fleetKinds.length]]);
     assert.deepEqual(afterRestart.unserved, []);
     // Without the renewals the same executor would have lapsed: the window is still 120s.
-    assert.equal(durable![0].seenAt, new Date(start + 180_000).toISOString());
-    assert.deepEqual(executorReport(queue, new ExecutorRegistry(new Date(start)), now, undefined, null, [{ ...durable![0], seenAt: new Date(start).toISOString() }]).live, []);
+    assert.equal(durable!.executors[0].seenAt, new Date(start + 180_000).toISOString());
+    assert.deepEqual(executorReport(queue, new ExecutorRegistry(new Date(start)), now, undefined, null, { ...durable!, executors: [{ ...durable!.executors[0], seenAt: new Date(start).toISOString() }] }).live, []);
   } finally { mock.timers.reset(); }
 });
 
-test('unit:executor-listening-keyed-to-evidence — an empty fleet is judged once a poll was heard or durable presence was read, never on how long the process has been up', () => {
+test('unit:executor-listening-keyed-to-evidence — an empty fleet is judged once a poll was heard or durable presence older than one window was read, never on how long the process has been up', async () => {
   const now = new Date(clock);
   const work = [item('GY-1301', [row('1'.repeat(32), 'GY-1301', 'dispatch', iso(-180_000))])];
+  const recording = (sinceMs: number, executors = [] as ExecutorPresence[]) => ({ executors, since: iso(sinceMs) });
   const stale = [{ executor: fleetSlot(1), host: 'vishrog', principal: coordinatorActor.id, kinds: fleetKinds, seenAt: iso(-executorLiveMs - 1), claims: 3 }];
-  // A process born this instant that reads durable presence older than one window judges at once.
-  const young = executorReport(work, new ExecutorRegistry(now), now, undefined, null, stale);
+  // A process born this instant that reads executor presence older than one window judges at once.
+  const young = executorReport(work, new ExecutorRegistry(now), now, undefined, null, recording(-1000, stale));
   assert.equal(young.listening, undefined);
   assert.deepEqual(young.unserved.map(entry => entry.key), ['GY-1301']);
-  // An empty durable reading is evidence too: nothing durable heard from inside the window.
-  assert.deepEqual(executorReport(work, new ExecutorRegistry(now), now, undefined, null, []).unserved.map(entry => entry.key), ['GY-1301']);
+  // An empty table is no evidence while it has recorded for less than a window — however old the process.
+  const fresh = executorReport(work, new ExecutorRegistry(new Date(clock - 3_600_000)), now, undefined, null, recording(-1000));
+  assert.deepEqual([fresh.listening, fresh.unserved], [true, []]);
+  // Recording for a window with nothing heard is: a fleet that was never started still gets its remedy.
+  assert.deepEqual(executorReport(work, new ExecutorRegistry(now), now, undefined, null, recording(-executorLiveMs)).unserved.map(entry => entry.key), ['GY-1301']);
   // A process up for an hour that has heard nothing and cannot read durable presence judges nothing.
   const old = executorReport(work, new ExecutorRegistry(new Date(clock - 3_600_000)), now, undefined, null, null);
   assert.equal(old.listening, true);
@@ -583,10 +587,35 @@ test('unit:executor-listening-keyed-to-evidence — an empty fleet is judged onc
   const heard = new ExecutorRegistry(new Date(clock - 3_600_000));
   heard.observe({ executor: fleetSlot(1), host: 'vishrog', principal: coordinatorActor.id, kinds: fleetKinds }, new Date(clock - executorLiveMs - 1));
   assert.deepEqual(executorReport(work, heard, now, undefined, null, null).unserved.map(entry => entry.key), ['GY-1301']);
+  assert.deepEqual(executorReport(work, heard, now, undefined, null, recording(-1000)).unserved.map(entry => entry.key), ['GY-1301']);
   // And durable presence inside the window is live, however young or unheard the process.
-  const fresh = [{ ...stale[0], seenAt: iso(-1000) }];
-  const live = executorReport(work, new ExecutorRegistry(now), now, undefined, null, fresh);
+  const live = executorReport(work, new ExecutorRegistry(now), now, undefined, null, recording(-3_600_000, [{ ...stale[0], seenAt: iso(-1000) }]));
   assert.deepEqual([live.live.map(entry => entry.executor), live.unserved, live.listening], [[fleetSlot(1)], [], undefined]);
+
+  // Through the real table: the deploy that creates it, or a restore that empties it, starts recording at the first read.
+  const store = await presenceStore();
+  const engine = servingProcess(store);
+  const created = new Date();
+  const first = await durablePresence(presenceQuery(engine), created);
+  assert.deepEqual(first, { executors: [], since: created.toISOString() });
+  const queue = [item('GY-1301', [row('1'.repeat(32), 'GY-1301', 'dispatch', new Date(created.getTime() - 180_000).toISOString())])];
+  const onDeploy = executorReport(queue, new ExecutorRegistry(new Date(created.getTime() - 3_600_000)), created, undefined, null, first);
+  assert.deepEqual([onDeploy.listening, describeUnserved(onDeploy)], [true, []], 'the deploy that ships the table reports no fault on its first read');
+  // The marker is written once: a later read, from any process, keeps the original start.
+  const later = new Date(created.getTime() + executorLiveMs);
+  const second = await durablePresence(presenceQuery(servingProcess(store)), later);
+  assert.equal(second?.since, created.toISOString());
+  assert.deepEqual(executorReport(queue, new ExecutorRegistry(later), later, undefined, null, second).unserved.map(entry => entry.key), ['GY-1301'], 'a window of recording with no executor heard judges, whatever the process age');
+  // A poll prunes nothing it should keep: the marker survives an executor's write.
+  await route(engine, 'POST', '/api/actions/presence', { executor: fleetSlot(1), host: 'vishrog', kinds: ['dispatch'] });
+  const third = await durablePresence(presenceQuery(engine));
+  assert.deepEqual([third?.since, third?.executors.map(entry => entry.executor)], [created.toISOString(), [fleetSlot(1)]]);
+  // A restore leaves the cache empty: recording starts again at the next read, and the fleet is unjudged until a window passes.
+  await store.pool.query('TRUNCATE executor_presence');
+  const restored = new Date(created.getTime() + 600_000);
+  const afterRestore = await durablePresence(presenceQuery(engine), restored);
+  assert.equal(afterRestore?.since, restored.toISOString());
+  assert.equal(executorReport(queue, new ExecutorRegistry(new Date(0)), restored, undefined, null, afterRestore).listening, true);
 });
 
 const switchoverInstances = [
