@@ -151,13 +151,6 @@ export function observationBandLag(all: Work[], now: number, skipHead: string | 
   return { bands: report, attention };
 }
 
-declare module './model/work.js' {
-  interface Observation {
-    /** GitHub's `mergeable_state` for the pull request as last read (clean, unstable, blocked, behind, dirty, unknown, has_hooks, draft); unset on readings before GY-1231. */
-    mergeableState?: string;
-  }
-}
-
 /**
  * What a move of the base branch re-observes (GY-1231). Under GitHub delivery merges land minutes
  * apart, and every one woke every open item's observation job: on 2026-10-05 four merges in four
