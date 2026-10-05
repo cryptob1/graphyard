@@ -244,7 +244,12 @@ export async function readReviewLedger(root: string): Promise<ReviewLedger> {
   try { await privateFile(file); return reviewLedgerSchema.parse(JSON.parse(await readFile(file, 'utf8'))); }
   catch (error: any) { if (error.code !== 'ENOENT') throw error; return { version: 1, reviews: [] }; }
 }
-export const saveReviewLedger = async (root: string, ledger: ReviewLedger) => atomicPrivateWrite(ledgerFile(root), reviewLedgerSchema.parse({ ...ledger, reviews: boundSessionLedger(ledger.reviews, reviewLedgerSpec) }));
+export async function saveReviewLedger(root: string, ledger: ReviewLedger) {
+  const file = ledgerFile(root);
+  // The lock no longer creates the ledger's directory (GY-1303); a directory that cannot be made fails the write itself, which names why.
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 }).catch(() => {});
+  return atomicPrivateWrite(file, reviewLedgerSchema.parse({ ...ledger, reviews: boundSessionLedger(ledger.reviews, reviewLedgerSpec) }));
+}
 
 /**
  * Every launcher runs in its own process — the loop's dispatch tick, a stateless executor's
@@ -254,49 +259,80 @@ export const saveReviewLedger = async (root: string, ledger: ReviewLedger) => at
  * later write dropped the earlier record (GY-124). Every read-modify-write of the ledger now holds
  * this lock, so the check that a request has no session and the record that reserves it are one
  * step no other launcher can interleave with.
+ *
+ * The lock is kept under the installation's managed data root, keyed by the checkout, rather than
+ * beside the ledger (GY-1303): the coordinator checkout may be mounted read-only, and a lock that
+ * had to be written there failed every reconcile pass with EROFS. A lock location this process
+ * cannot write still never fails the read-modify-write: it runs without the lock, as the single
+ * writer it then is.
  */
-const ledgerLockFile = (root: string) => `${ledgerFile(root)}.lock`;
+const ledgerLockFile = (root: string, environment: Record<string, string | undefined> = process.env) =>
+  resolve(dataDirectory(environment), 'review-ledger', `${createHash('sha256').update(resolve(root)).digest('hex').slice(0, 12)}.lock`);
 /** A holder that has not released the lock in this long is dead or wedged; its lock is broken. */
 export const reviewLedgerLockStaleMs = 60_000;
 const lockWaitMs = 30_000;
-async function acquireLedgerLock(root: string) {
-  const file = ledgerLockFile(root);
-  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-  const { open, readFile: read, unlink } = await import('node:fs/promises');
-  const deadline = Date.now() + lockWaitMs;
+export interface ReviewLedgerLockOptions {
+  environment?: Record<string, string | undefined>;
+  /** The filesystem calls the lock makes; node:fs/promises by default. */
+  fs?: Pick<typeof import('node:fs/promises'), 'mkdir' | 'open' | 'readFile' | 'unlink' | 'rm'>;
+  /** How long a held lock is waited for before the write is refused; 30 seconds by default. */
+  waitMs?: number;
+  /** Told why a read-modify-write runs without the lock, when its location cannot be written. */
+  onLockless?: (reason: string) => void;
+}
+/** Takes the ledger lock, waiting out a live holder: its release, which `lockless` marks when the lock location could not be written. */
+async function acquireLedgerLock(root: string, options: ReviewLedgerLockOptions = {}): Promise<FollowUpLockRelease> {
+  const fs = options.fs ?? await import('node:fs/promises');
+  const file = ledgerLockFile(root, options.environment);
+  const lockless = (error: any): FollowUpLockRelease => {
+    const reason = `the review ledger lock ${file} cannot be written (${error.code}: ${String(error.message ?? '').split('\n')[0]!.slice(0, 200)})`;
+    options.onLockless?.(reason);
+    return Object.assign(async () => {}, { lockless: reason });
+  };
+  try { await fs.mkdir(dirname(file), { recursive: true, mode: 0o700 }); }
+  catch (error: any) { if (unwritableLockCodes.has(error.code)) return lockless(error); throw error; }
+  const deadline = Date.now() + (options.waitMs ?? lockWaitMs);
   for (;;) {
-    try { const handle = await open(file, 'wx', 0o600); await handle.writeFile(`${process.pid} ${Date.now()}`); await handle.close(); return; }
-    catch (error: any) { if (error.code !== 'EEXIST') throw error; }
-    const [pid, at] = (await read(file, 'utf8').catch(() => '')).split(' ').map(Number);
+    try {
+      const handle = await fs.open(file, 'wx', 0o600);
+      try { await handle.writeFile(`${process.pid} ${Date.now()}`); }
+      catch (error: any) { await handle.close().catch(() => {}); await fs.rm(file, { force: true }).catch(() => {}); if (unwritableLockCodes.has(error.code)) return lockless(error); throw error; }
+      await handle.close();
+      return async () => { await fs.rm(file, { force: true }); };
+    } catch (error: any) {
+      if (unwritableLockCodes.has(error.code)) return lockless(error);
+      if (error.code !== 'EEXIST') throw error;
+    }
+    const [pid, at] = (await fs.readFile(file, 'utf8').catch(() => '')).split(' ').map(Number);
     let alive = true;
     try { if (pid) process.kill(pid, 0); } catch (error: any) { alive = error.code !== 'ESRCH'; }
-    if (!alive || Number.isFinite(at) && Date.now() - at > reviewLedgerLockStaleMs) { await unlink(file).catch(() => {}); continue; }
+    if (!alive || Number.isFinite(at) && Date.now() - at > reviewLedgerLockStaleMs) { await fs.unlink(file).catch(() => {}); continue; }
     if (Date.now() > deadline) throw new Error(`The review ledger lock ${file} is held by process ${pid || 'unknown'}; another reviewer launch or reconciliation is in progress`);
     await new Promise(done => setTimeout(done, 20 + Math.random() * 30));
   }
 }
 /** Read the ledger under the lock, apply one change, and write it back before the lock is released. */
-export async function updateReviewLedger<T>(root: string, change: (ledger: ReviewLedger) => T | Promise<T>): Promise<T> {
-  await acquireLedgerLock(root);
+export async function updateReviewLedger<T>(root: string, change: (ledger: ReviewLedger) => T | Promise<T>, options: ReviewLedgerLockOptions = {}): Promise<T> {
+  const release = await acquireLedgerLock(root, options);
   try {
     const ledger = await readReviewLedger(root);
     const result = await change(ledger);
     await saveReviewLedger(root, ledger);
     return result;
-  } finally { await rm(ledgerLockFile(root), { force: true }); }
+  } finally { await release(); }
 }
 /**
  * Write back the records one pass changed, onto the ledger as it stands now. A pass that read the
  * ledger, spent seconds on GitHub and Herdr, and saved its whole copy would drop every record a
  * launcher reserved in the meantime; only what this pass changed is taken from its copy.
  */
-async function saveChangedRecords(root: string, mine: ReviewRecord[], before: Map<string, string>) {
+async function saveChangedRecords(root: string, mine: ReviewRecord[], before: Map<string, string>, lock?: ReviewLedgerLockOptions) {
   const changed = new Map(mine.filter(record => JSON.stringify(record) !== before.get(record.id)).map(record => [record.id, record]));
   if (!changed.size) return;
   // A follow-up filing this pass left as it read it is taken from the ledger as it stands: another pass
   // may have filed it since, under the approval's lock (fileApprovedFollowUps), and saved it at once.
   const unchangedFiling = (record: ReviewRecord) => { const was = before.get(record.id); return was !== undefined && JSON.stringify(JSON.parse(was).followUps) === JSON.stringify(record.followUps); };
-  await updateReviewLedger(root, ledger => { ledger.reviews = ledger.reviews.map(record => { const mineRecord = changed.get(record.id); return !mineRecord ? record : unchangedFiling(mineRecord) ? { ...mineRecord, followUps: record.followUps } : mineRecord; }); });
+  await updateReviewLedger(root, ledger => { ledger.reviews = ledger.reviews.map(record => { const mineRecord = changed.get(record.id); return !mineRecord ? record : unchangedFiling(mineRecord) ? { ...mineRecord, followUps: record.followUps } : mineRecord; }); }, lock);
 }
 
 /** A reservation whose launcher never confirmed the runtime within this long died mid-launch. */
@@ -1029,6 +1065,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   dismiss?: (record: ReviewRecord, reviewId: number, message: string) => Promise<void>;
   /** Takes one approval's follow-up lock; tryFollowUpLock by default. */
   followUpLock?: typeof tryFollowUpLock;
+  /** How the pass takes the review ledger lock; the managed data root and node:fs/promises by default. */
+  ledgerLock?: ReviewLedgerLockOptions;
 } = {}) {
   const ledger = await readReviewLedger(root);
   if (!config.reviewer) return { reviews: ledger.reviews, changed: 0, threads: [] as string[], released: [] as { pane: string; agentName: string }[] };
@@ -1190,12 +1228,18 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   changed += threads.changed;
   // The threads the approval judged FOLLOW-UP are nits: each is answered with a reply and resolved,
   // so conversation resolution no longer holds the merge on them; nothing is filed (GY-1249).
-  const followUps = await resolveApprovedFollowUps(root, ledger.reviews, reviewer, config.repository, dependencies.work, threadsRun, now, dependencies.followUpLock);
+  const followUps = await resolveApprovedFollowUps(root, ledger.reviews, reviewer, config.repository, dependencies.work, threadsRun, now, dependencies.followUpLock, dependencies.ledgerLock);
   changed += followUps.changed;
   // A request the control plane no longer holds open releases its records to the retention window.
   if (dependencies.work) changed += releaseClosedRequests(ledger.reviews, dependencies.work, now);
-  if (changed) await saveChangedRecords(root, ledger.reviews, before);
-  return { reviews: changed ? (await readReviewLedger(root)).reviews : ledger.reviews, changed, threads: [...threads.events, ...followUps.events], released };
+  // A ledger this process cannot write (the checkout mounted read-only) never fails the pass: its
+  // records are returned as reconciled, `unsaved` says why, and a pass that can write saves them (GY-1303).
+  let unsaved = followUps.unsaved;
+  if (changed) {
+    try { await saveChangedRecords(root, ledger.reviews, before, dependencies.ledgerLock); }
+    catch (error) { if (!unwritableLedger(error)) throw error; unsaved = unwritableLedger(error); }
+  }
+  return { reviews: changed && !unsaved ? (await readReviewLedger(root)).reviews : ledger.reviews, changed, threads: [...threads.events, ...followUps.events], released, ...(unsaved ? { unsaved } : {}) };
 }
 
 /**
@@ -1267,6 +1311,10 @@ const followUpLockFile = (root: string, key: string, environment?: Record<string
 export const followUpLockStaleMs = 15 * 60_000;
 /** The errors of a lock location this process may not write: a read-only mount, or one it lacks permission on. */
 const unwritableLockCodes = new Set(['EROFS', 'EACCES', 'EPERM']);
+/** Why the review ledger could not be written, when the error is its location refusing writes; undefined for any other error. */
+const unwritableLedger = (error: unknown) => unwritableLockCodes.has((error as { code?: string } | null)?.code ?? '')
+  ? `the review ledger ${reviewLedgerSpec.path} cannot be written (${(error as { code: string }).code}: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 200)}), so this pass's changes are left for a pass that can write it`
+  : undefined;
 /** A held lock's release; `lockless` names why the pass runs without one, when the lock location could not be written. */
 export type FollowUpLockRelease = (() => Promise<void>) & { lockless?: string };
 export interface FollowUpLockOptions {
@@ -1307,10 +1355,10 @@ export async function tryFollowUpLock(root: string, key: string, options: Follow
 }
 
 /** The approved records whose follow-up (nit) threads the loop answers and resolves on this pass; each outcome is kept on the record. */
-async function resolveApprovedFollowUps(root: string, records: ReviewRecord[], reviewer: string, repository: string, work: Work[] | undefined, run: ChildRun | undefined, now: Date, lock: typeof tryFollowUpLock = tryFollowUpLock) {
+async function resolveApprovedFollowUps(root: string, records: ReviewRecord[], reviewer: string, repository: string, work: Work[] | undefined, run: ChildRun | undefined, now: Date, lock: typeof tryFollowUpLock = tryFollowUpLock, ledgerLock?: ReviewLedgerLockOptions) {
   const events: string[] = [];
-  let changed = 0;
-  if (!run || !work) return { events, changed };
+  let changed = 0, unsaved: string | undefined;
+  if (!run || !work) return { events, changed, unsaved };
   for (const record of records) {
     const verdict = record.verdict;
     // The approval of the head that landed still answers its threads: the daemon may merge before the dispatcher's first pass.
@@ -1325,10 +1373,11 @@ async function resolveApprovedFollowUps(root: string, records: ReviewRecord[], r
       await resolveApprovedFollowUp(record, verdict, reviewer, repository, work, run, now, events);
       if (JSON.stringify(record.followUps) === before) continue;
       changed++;
-      await updateReviewLedger(root, ledger => { const entry = ledger.reviews.find(candidate => candidate.id === record.id); if (entry) entry.followUps = record.followUps; });
+      try { await updateReviewLedger(root, ledger => { const entry = ledger.reviews.find(candidate => candidate.id === record.id); if (entry) entry.followUps = record.followUps; }, ledgerLock); }
+      catch (error) { if (!unwritableLedger(error)) throw error; unsaved = unwritableLedger(error); }
     } finally { await release(); }
   }
-  return { events, changed };
+  return { events, changed, unsaved };
 }
 
 /** One approval's nit threads answered and resolved, or its reopen check once done; the outcome is left on `record.followUps`. */
