@@ -58,7 +58,7 @@ function midReview(base: Work): Work {
         'AC-1: unit:item-page-sections needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
         'AC-2: unit:item-page-technical-collapsed needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
       ] },
-      { name: 'merge', passed: false, reasons: ['GitHub observation missing or older than two minutes', 'Pull request is not mergeable against the current base'] },
+      { name: 'merge', passed: false, reasons: ['GitHub has not been observed at the current candidate', 'Pull request is not mergeable against the current base'] },
     ],
     sessions: [{ id: 'graphyard-cursor-1:1', tab: null, head: null, host: 'vishrog', kind: 'implementation', pane: 'w1V:p32M', role: null, epoch: null, state: 'running', attach: 'herdr pane attach w1V:p32M --workspace w1V',
       endedAt: null, outcome: null, runtime: 'claude', subject: 'GY-171: item page hierarchy', agentName: null, principal: 'graphyard-cursor-1', startedAt: at(-20 * minute), updatedAt: at(-20 * minute), workspace: 'w1V', transcript: null }],
@@ -132,7 +132,7 @@ test('unit:item-page-sections — below the summary the item page shows What is 
     assert.ok(!above.includes(escape(reason)) && !above.includes(reason), `raw reason outside Technical details: ${reason}`);
     assert.ok(html.slice(technical).includes(escape(reason)), `raw reason kept under Technical details: ${reason}`);
   }
-  for (const fragment of ['needs trusted passing evidence', 'executed &gt; 0', 'older than two minutes', 'not mergeable against the current base', 'Independent approval of the current commit']) assert.ok(!above.includes(fragment), fragment);
+  for (const fragment of ['needs trusted passing evidence', 'executed &gt; 0', 'not been observed at the current candidate', 'not mergeable against the current base', 'Independent approval of the current commit']) assert.ok(!above.includes(fragment), fragment);
 });
 
 test('unit:item-page-technical-collapsed — gate internals, sessions with attach commands, review provider, next action and executors and agent requests sit in one collapsed Technical details section; four overlapping items make exactly one overlap line', () => {
@@ -206,7 +206,7 @@ test('What is left names who clears each step from the refusal itself: exhausted
   const base = midReview(all.find(entry => entry.key === 'GY-15')!);
   const gate = (name: string, reasons: string[]) => ({ name, passed: reasons.length === 0, reasons });
   // Every reviewer profile exhausted, current step Review: the panel and "Who acts next" agree on the master agent.
-  const exhausted = { ...base, gates: [gate('ready', []), gate('build', []), gate('test', []), gate('acceptance', []), gate('merge', ['GitHub observation missing or older than two minutes']),
+  const exhausted = { ...base, gates: [gate('ready', []), gate('build', []), gate('test', []), gate('acceptance', []), gate('merge', ['GitHub has not been observed at the current candidate']),
     gate('review', ['Every configured reviewer profile is exhausted for this candidate (reviewer-a); add reviewer capacity or select another review provider'])] } as unknown as Work;
   const work = [...all, exhausted];
   const [current] = whatIsLeft(exhausted, NOW);
@@ -240,7 +240,7 @@ test('What is left names who clears each step from the refusal itself: exhausted
   const blocker = 'Needs the staging database credentials';
   const blocked = { ...base, submission: null, candidate: null, observation: null, reworkRequested: false, blocker, lease: { owner: 'graphyard-codex-1', epoch: 1, expiresAt: at(30 * minute) },
     gates: [gate('ready', [blocker]), gate('build', ['Worker has not submitted implementation for this attempt', 'Pull request has not been independently observed']),
-      gate('review', ['Independent approval of the current commit is required']), gate('test', []), gate('acceptance', []), gate('merge', ['GitHub observation missing or older than two minutes'])] } as unknown as Work;
+      gate('review', ['Independent approval of the current commit is required']), gate('test', []), gate('acceptance', []), gate('merge', ['GitHub has not been observed at the current candidate'])] } as unknown as Work;
   const blockedAll = [...all, blocked];
   const [held] = whatIsLeft(blocked, NOW);
   assert.deepEqual([held.label, held.who], ['Build', 'Master agent']);

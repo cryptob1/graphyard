@@ -35,7 +35,7 @@ Worker tokens carry `contents`, `pull_requests` and `workflows` write ([push cre
 
 Require `Graphyard / merge` and `graphyard/landable` ([landability](coordination.md)) from this App on the base branch: `strict` **off**, admin-enforced, no force pushes or deletion; `master protection --apply` and `master browser protection` reconcile both, ruleset included.
 
-The gate requires `GITHUB_CI_APP_IDS` and protection-required checks, current-head approval, trusted passing evidence, a mergeable non-draft PR at the queue head.
+The gate requires `GITHUB_CI_APP_IDS` and protection-required checks, current-head approval and a mergeable non-draft PR; GitHub merges a head that passes them ([one delivery path](delivery.md#one-delivery-path)).
 
 ## Merge queue
 
@@ -47,7 +47,7 @@ Once gated, the candidate's speculative tip, pushed onto the candidate branch on
 
 Reviews and proofs bind one head, base and policy revision. On moved bases all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, disjoint-`scopeFiles` proofs. A republication reads the PR's reviews before force-pushing: the replaced tip's approval carries onto a Graphyard-authored tip over the same author head and patch, the App's own dismissal restoring when observed; never a person's, a moved head or a changed patch.
 
-Before merging, the reviewer App re-posts a carried approval onto the tip: a carried review missing from the PR re-posts the bound reviewer's latest approval of the tip's reviewed head, a newer approval of that head re-binding the carry once observed (`review.carry-refreshed`). With none usable the merge reports `mergerefused`: the control plane clears the carried approval (`mergeRefusal.action: rereview`), the review gate requests a fresh review at once, and the entry yields the head to the next until a fresh approval re-enters. The same refusal past 10 minutes raises an attention; the loop acts itself, clearing a carried approval or requesting the rework decision (`mergeRefusal.action: rework`), which an approver judges in the high [risk lane](how-graphyard-works.md#risk-lanes) and which is applied as requested in low or medium. An approver refusing that rework lifts the refusal for that candidate and base (`merge.refusal.lifted`). Each action fires once per recovery phase, a re-bound carry a phase of its own: never retried for good.
+GitHub merges: Graphyard re-posts no carried approval and requests no merge, so branch protection alone decides whether the approvals on the tip suffice.
 
 ### Parallel tips
 

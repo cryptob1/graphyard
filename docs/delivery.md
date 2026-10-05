@@ -7,7 +7,7 @@ Graphyard records which release each environment should run, verified only by se
 
 Graphyard's own deployment runs main → frozen candidate → uat → that exact SHA in production. Neither Railway environment deploys main; `.railway/railway.ts` points the `uat` service at `release/uat` and production at `release/production`; only `graphyard release` moves them, always to a candidate's exact SHA.
 
-- `release cut [--trigger schedule|manual]` tags main's tip as `rc/ID`, recording the SHA and the items delivered since the last promoted candidate. It only writes a tag, so merges never pause. `.github/workflows/release-candidate.yml` cuts every two hours or on demand, then runs the [long suites](#pre-merge-gate-and-release-candidate-validation) on that SHA before UAT.
+- `release cut [--trigger schedule|manual]` tags main's tip as `rc/ID`, recording the SHA and the items delivered since the last promoted candidate. It only writes a tag. `.github/workflows/release-candidate.yml` cuts every two hours or on demand, then runs the [long suites](#pre-merge-gate-and-release-candidate-validation) on that SHA before UAT.
 - `release uat ID` deploys the candidate to `uat`, which has its own Postgres and no `GITHUB_*` variable: it holds no credential that can write to the production repository and never merges, dispatches or spends the App's budget. It refuses while UAT serves an unjudged candidate cut within four hours, so a manual deploy never moves UAT under a running validation; its push is leased on the tip it observed.
 - `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` waits until `/healthz` on UAT reports the candidate SHA as `commit`, runs the suites against that deployment, confirms it still serves that SHA, and records `rc-uat/ID`. `endpoints` probes `/healthz?strict` and `/`; `--api` drives UAT's API with `GRAPHYARD_UAT_TOKEN`: a work item's create, replay and list, the board and status. The workflow runs both and a `browser` suite (Chromium signs in to UAT's dashboard and opens the Work view), plus one `--suite` per container and chart job carrying that job's verdict, so a failed container or chart run fails the candidate; the soak and timing-budget suites are advisory. A `--suite` command gets `GRAPHYARD_UAT_URL` but never `GRAPHYARD_TOKEN`.
 - `release promote ID` refuses unless that record passed on the candidate SHA, then deploys the SHA to production (leased on the last promoted SHA, so a hand-moved `release/production` is refused) and records `rc-production/ID`. `release verify --url URL` confirms production serves a promoted candidate; `master verify-deployment` then records that SHA on each delivery it carries.
@@ -21,10 +21,10 @@ The required pre-merge set is `typecheck` and `test` (`.github/workflows/ci.yml`
 
 ### One delivery path
 
-1. **CI and review.** A pull request's required checks run in CI, and the independent reviewer approves its exact head.
-2. **GitHub merges into main.** Once build, review and required checks pass on that head, the observation that saw it enables auto-merge; GitHub merges on its branch protection, and the merged observation records the delivery. No merge authorization, execution, proof, queue or observation age stands in between; a merge of a head whose gates had not passed is held as a violation.
-3. **UAT end-to-end.** Each [release candidate](#release-candidates) is deployed to UAT and validated end to end.
-4. **Promotion.** Only a validated candidate is promoted to production.
+1. **CI and review** of the exact head.
+2. **GitHub merges into main** once build, review and required checks pass on that head, and that merge is the delivery: no authorization, execution, proof, queue or observation age intervenes. A failing head's merge is a held violation.
+3. **UAT end-to-end** per [candidate](#release-candidates).
+4. **Promotion** of validated candidates.
 
 To keep main green, every 30 s the main guard reverts a merge commit failing a required check its parent passed via a `graphyard-revert/` pull request the App merges once its checks pass, and reopens the item naming the check and commit. A revert that conflicts, fails or stalls an hour is closed after one attempt with one attention line naming merge, check and revert PR; nothing waits on it: fix main forward.
 

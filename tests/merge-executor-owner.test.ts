@@ -1,37 +1,32 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine, unauthorizedMergeViolation } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { assertMergeCandidate, buildMasterStatus, masterConfigSchema, mergeExecutor, mergedWithoutAuthorization, type MasterConfig, type MergeExecutor } from '../src/master.js';
+import { buildMasterStatus, masterConfigSchema, mergedWithoutAuthorization, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
-import { Refusal, type Observation, type Principal, type Work } from '../src/model.js';
+import { type Observation, type Principal, type Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
- * GY-92: a merge execution is owned by the executor instance that acquired it, a losing executor
- * stands down without cancelling, and an observed merge no execution authorized is recoverable by
- * a two-party decision. Each test is named for the proof it produces. Every integration test runs
- * the real engine on a disposable Postgres; GitHub is a stub that answers the broker's `gh` calls.
+ * GY-92, as GitHub delivers (GY-1235): an observed merge of a head whose gates had not passed is a
+ * violation, held out of done and recoverable only by a two-party decision the history supports.
+ * Each test is named for the proof it produces. Every integration test runs the real engine on a
+ * disposable Postgres.
  */
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'ai' };
 const approver: Principal = { id: 'approver-agent', role: 'admin', sessionKind: 'ai' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
-// The one coordinator credential both executors run under: the durable loop and `master merge`.
-const coordinator: Principal = { id: 'graphyard-master', role: 'coordinator' };
 const producer: Principal = { id: 'proof-runner', role: 'producer', proofs: ['integration:claim-safety'] };
-const principals = [operator, approver, worker, coordinator, producer];
+const principals = [operator, approver, worker, producer];
 const credentials = principals.map(principal => ({ ...principal, token: `${principal.id}-token-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 const head = 'a'.repeat(40), base = 'b'.repeat(40), mergeSha = 'c'.repeat(40);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-const validProtection = { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true }, required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
 const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project' });
 let pg: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 let serial = 0;
@@ -67,147 +62,52 @@ async function mergeDecision(work: Work, reason: string) {
   return { id: decision.id as string, approve: () => call(token(approver), `work/${work.key}/approve`, { decision: decision.id, reason: `Approved: ${reason}` }) };
 }
 
-/** A candidate at the merge stage with every gate passed and its queue tip published: what the broker acquires. */
-async function candidate(proven = true) {
+/** A submitted candidate observed at its head: every gate passes, or with `reviewed` false the review gate does not. */
+async function candidate(reviewed = true) {
   const n = ++serial;
   let w = await engine.execute(operator, 'create', null, { title: `Merge executor ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/merge-executor-${n}`, branch: `graphyard/gy-92-${n}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 900 + n }, id());
-  // One item at a time is under test; the rest never occupy the queue ahead of it.
-  await store.pool.query("UPDATE work_items SET document=document-'queue' WHERE id<>$1 AND document->>'stage'<>'done'", [w.id]);
-  w = await engine.observe(w.id, w.revision, observation(w));
-  if (proven) w = await engine.execute(producer, 'evidence', w.id, { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
-  const speculation: QueueSpeculation = { ref: queueRef(w.key), tip: head, base, baseTree: '7e'.repeat(20), predecessors: [], policyRevision: w.policyRevision, publishedAt: new Date().toISOString() };
-  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{queue,speculation}',$2::jsonb) WHERE id=$1", [w.id, JSON.stringify(speculation)]);
-  w = await engine.observe(w.id, (await reload(w.id)).revision, observation(w));
-  if (proven) { assert.equal(w.stage, 'merge'); assert.ok(w.gates.every(gate => gate.passed), w.gates.flatMap(gate => gate.reasons).join('; ')); }
+  w = await engine.observe(w.id, w.revision, observation(w, reviewed ? {} : { reviews: [] }));
+  if (reviewed) { assert.equal(w.stage, 'merge'); assert.ok(w.gates.every(gate => gate.passed), w.gates.flatMap(gate => gate.reasons).join('; ')); }
+  else assert.equal(w.stage, 'review');
   return w;
 }
-/**
- * The broker's transport, in process: every path `mergeExecutor` posts maps onto the engine call
- * the server route makes, and every refusal comes back the way the CLI transport reports one —
- * a confirmed refusal carrying the server's error document.
- */
-const transport = (actor: Principal) => async (path: string, data: any, key: string = randomUUID()) => {
-  const match = /^work\/([^/]+)\/merge-(acquire)$/.exec(path);
-  if (!match) throw new Error(`Unexpected mutation ${path}`);
-  const [, workId, step] = match;
-  try {
-    return await engine.requestEnqueue(actor, workId, data, key);
-  } catch (error) {
-    if (error instanceof Refusal) throw Object.assign(new Error(JSON.stringify({ error: error.message })), { confirmedRefusal: error.status >= 400 && error.status < 500 });
-    throw error;
-  }
-};
-/** GitHub as the broker sees it through `gh`: an open pull request at the candidate head on a base at its bound tip, protected, and a merge that succeeds. */
-const github = (calls: string[][] = []) => (_command: string, args: string[]) => {
-  calls.push(args);
-  if (args[0] === 'pr' && args[1] === 'view') return JSON.stringify({ headRefOid: head, baseRefName: 'main', state: 'OPEN', isDraft: false });
-  if (args[1]?.includes('/git/ref/heads/')) return JSON.stringify({ ref: 'refs/heads/main', object: { type: 'commit', sha: base } });
-  if (args.includes('--include')) return `Date: ${new Date().toUTCString()}\n\n{}`;
-  if (args[1]?.includes('/check-runs')) return JSON.stringify([{ check_runs: [{ name: 'Graphyard / merge', status: 'completed', conclusion: 'success', app: { id: 1234 } }] }]);
-  if (args[1] === '--method') return JSON.stringify({ merged: true, sha: mergeSha });
-  return JSON.stringify(validProtection);
-};
-const snapshot = async () => ({ work: await store.list(), now: await dbNow() });
-/** The durable loop's effects, with the guarded merge wired to one executor instance exactly as `master run` wires it. */
-function daemon(executor: MergeExecutor, calls: string[][] = [], mutate = transport(coordinator)): DaemonEffects & { merges: string[] } {
-  const merges: string[] = [];
-  const guarded = mergeExecutor(config, snapshot, mutate, executor, randomUUID(), github(calls));
-  return { merges, agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot, closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
-    merge: async item => { merges.push(item.key); return guarded(item); },
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'none', deployed: [], pending: [] }), recordDeployment: async () => ({}), requestSmoke: () => {}, persist: async () => {} };
-}
 
-test('GitHub executes the merge (GY-258): the daemon loop and an interactive merge under one coordinator credential each request it, no execution is acquired, and the ledger holds exactly one request', async () => {
-  const work = await candidate();
-  const loop: MergeExecutor = { principal: coordinator.id, instance: `daemon-${randomUUID()}` };
-  const interactive: MergeExecutor = { principal: coordinator.id, instance: randomUUID() };
-  const calls: string[][] = [];
-  const [first, second] = await Promise.all([
-    mergeExecutor(config, snapshot, transport(coordinator), loop, randomUUID(), github(calls))(work),
-    mergeExecutor(config, snapshot, transport(coordinator), interactive, randomUUID(), github(calls))(work),
-  ]);
-  for (const outcome of [first, second]) { assert.equal(outcome.pending, true); assert.equal(outcome.enqueued, true); }
-  assert.equal(calls.some(args => args[1] === '--method'), false, 'no executor calls the provider merge');
-  assert.equal((await reload(work.id)).mergeExecution ?? null, null, 'no merge execution is acquired');
-  assert.equal((await events(work.id, 'merge.enqueue.requested')).length, 1, 'one request stands for the candidate');
-  assert.equal((await events(work.id, 'merge.execution.acquired')).length, 0);
-  assert.equal((await engine.enqueueRequest(work.id))?.sha, head);
-  // GitHub merges; the delivery is recorded from the merged observation.
+test('integration:merged-without-authorization-recovery — an observed merge of a head whose gates had not passed records the violation, stays out of done, and a two-party merge decision the history refuses is recorded once and delivers nothing; GitHub merging a passing head needs no decision', async () => {
+  // GitHub merges a passing head: that merge is the delivery, with no decision and no violation.
+  const passing = await candidate();
   await delay(5);
-  const delivered = await engine.observe(work.id, (await reload(work.id)).revision, await merged(work));
-  assert.equal(delivered.stage, 'done', delivered.violations.join('; '));
-  assert.equal(delivered.delivery?.mergeSha, mergeSha);
-});
+  const delivered = await engine.observe(passing.id, (await reload(passing.id)).revision, await merged(passing));
+  assert.equal(delivered.stage, 'done', delivered.violations.join('; ')); assert.deepEqual(delivered.violations, []);
+  assert.equal(delivered.delivery?.mergeSha, mergeSha); assert.equal(delivered.delivery?.authorizationRevision, passing.revision);
+  assert.equal((await events(passing.id, 'merge.reconciled')).length, 0);
 
-test('integration:merged-without-authorization-recovery — an observed merge that no merge request authorized records the violation, stays out of done, and reaches done only through a two-party merge decision re-checked at the merge cutoff, with authorizationRevision and evidenceAsOf from the historical snapshot', async () => {
-  // GY-81's ledger, as GitHub now executes merges (GY-258): merged with no coordinator request before the cutoff.
-  const work = await candidate();
+  // GitHub merges a head whose review gate had not passed: the violation, held at the stage its first failing gate names.
+  const unreviewed = await candidate(false);
   await delay(5);
-  const mergedObservation = await merged(work);
-  let current = await engine.observe(work.id, (await reload(work.id)).revision, mergedObservation);
-  assert.equal(current.stage, 'merge', 'the item stays out of done'); assert.ok(current.violations.includes(unauthorizedMergeViolation)); assert.equal(current.delivery, undefined);
+  const mergedObservation = { ...await merged(unreviewed), reviews: [] };
+  let current = await engine.observe(unreviewed.id, (await reload(unreviewed.id)).revision, mergedObservation);
+  assert.notEqual(current.stage, 'done', 'the item stays out of done'); assert.ok(current.violations.includes(unauthorizedMergeViolation)); assert.equal(current.delivery, undefined);
   assert.equal(mergedWithoutAuthorization(current), true);
   // Every later observation re-derives the same verdict from immutable history.
-  current = await engine.observe(work.id, current.revision, mergedObservation);
-  assert.equal(current.stage, 'merge'); assert.deepEqual(current.violations, [unauthorizedMergeViolation]);
-  // A merge decision requested before the merge is not a judgement of it: an item merged under a
-  // pre-merge approval stays a violation.
-  const early = await candidate();
-  const earlyDecision = await mergeDecision(early, 'Pre-merge approval');
-  await earlyDecision.approve();
-  await delay(5);
-  let earlyState = await engine.observe(early.id, (await reload(early.id)).revision, await merged(early));
-  assert.equal(earlyState.stage, 'merge'); assert.ok(earlyState.violations.includes(unauthorizedMergeViolation), 'a decision requested before the merge reconciles nothing');
-  // The recovery: request the decision now, after the merge. Requested alone it changes nothing.
-  const decision = await mergeDecision(current, `Reconcile ${current.key}: GitHub merged ${mergeSha.slice(0, 12)} with no merge request recorded before it`);
-  current = await engine.observe(work.id, (await reload(work.id)).revision, mergedObservation);
-  assert.equal(current.stage, 'merge', 'a requested but unapproved decision does not deliver');
-  assert.deepEqual(current.violations, [unauthorizedMergeViolation]);
-  // Approved by the independent approver, the next observation re-checks the record at the cutoff and delivers.
-  await decision.approve();
-  const delivered = await engine.observe(work.id, current.revision, mergedObservation);
-  assert.equal(delivered.stage, 'done');
-  assert.deepEqual(delivered.violations, [], 'the reconciled violation leaves the record; the ledger keeps it');
-  const delivery = delivered.delivery as NonNullable<Work['delivery']> & { reconciliation: any };
-  assert.equal(delivery.mergeSha, mergeSha); assert.equal(delivery.mergedAt, mergedObservation.mergedAt);
-  assert.equal(delivery.authorizationRevision, delivery.reconciliation.snapshotRevision, 'authorizationRevision comes from the historical snapshot, not the observation that delivered');
-  assert.ok(delivery.authorizationRevision < delivered.revision - 2);
-  // The merge instant on the repository clock, the instant the historical evidence was judged at: a
-  // millisecond timestamp under a zero offset makes the cutoff the merge instant plus one, so the
-  // evidence instant is the merge instant itself.
-  assert.equal(delivery.evidenceAsOf, mergedObservation.mergedAt);
-  assert.equal(delivery.reconciliation.decision, decision.id);
-  assert.equal(delivery.reconciliation.requestedBy, operator.id); assert.equal(delivery.reconciliation.approvedBy, approver.id);
-  assert.match(delivery.reconciliation.reason, /Reconcile/); assert.match(delivery.reconciliation.approvalReason, /Approved/);
-  assert.match(delivery.reconciliation.judgement, /every required proof was live/);
-  assert.deepEqual(delivery.reconciliation.proofs, ['integration:claim-safety']); assert.equal(delivery.reconciliation.violation, unauthorizedMergeViolation);
-  const reconciled = await events(work.id, 'merge.reconciled');
-  assert.equal(reconciled.length, 1); assert.equal(reconciled[0].actor, operator.id); assert.equal(reconciled[0].payload.details.decision, decision.id); assert.equal(reconciled[0].payload.details.evidenceAsOf, delivery.evidenceAsOf);
-  // A later decision on the early item, requested after its merge, recovers it the same way.
-  const lateDecision = await mergeDecision(earlyState, 'Reconcile after the merge'); await lateDecision.approve();
-  earlyState = await engine.observe(early.id, (await reload(early.id)).revision, { ...earlyState.observation!, at: new Date().toISOString() });
-  assert.equal(earlyState.stage, 'done'); assert.equal((earlyState.delivery as any).reconciliation.decision, lateDecision.id);
-  // A merge the history refuses — no proof was ever live, so the acceptance gate never passed —
-  // is not reconciled by any decision: the item records why, once, and stays where it is.
-  const unproven = await candidate(false);
-  await delay(5);
-  let refused = await engine.observe(unproven.id, (await reload(unproven.id)).revision, await merged(unproven));
-  assert.ok(refused.violations.includes(unauthorizedMergeViolation));
-  const hopeless = await mergeDecision(refused, 'Try to reconcile an unproven merge'); await hopeless.approve();
-  refused = await engine.observe(unproven.id, (await reload(unproven.id)).revision, { ...refused.observation!, at: new Date().toISOString() });
-  assert.equal(refused.stage, 'acceptance', 'the stage still reads from the first failing gate');
-  const reason = refused.violations.find(entry => entry.startsWith(`Reconciliation by decision ${hopeless.id} refused: `))!;
-  assert.ok(reason, refused.violations.join(' | ')); assert.match(reason, /gate acceptance had not passed/); assert.match(reason, /integration:claim-safety had no live trusted evidence/);
-  refused = await engine.observe(unproven.id, refused.revision, { ...refused.observation!, at: new Date().toISOString() });
-  assert.equal(refused.violations.filter(entry => entry.startsWith('Reconciliation by decision ')).length, 1, 'the refusal is recorded once');
-  assert.equal((await events(unproven.id, 'merge.reconciliation.refused')).length, 1);
-  assert.equal(mergedWithoutAuthorization(refused), true);
+  current = await engine.observe(unreviewed.id, current.revision, mergedObservation);
+  assert.notEqual(current.stage, 'done'); assert.deepEqual(current.violations, [unauthorizedMergeViolation]);
+  // A decision requested after the merge reconciles only what the history supports: the review gate
+  // had not passed on the merged head, so the refusal is recorded once and nothing is delivered.
+  const hopeless = await mergeDecision(current, `Reconcile ${current.key}: GitHub merged ${mergeSha.slice(0, 12)} before its review`); await hopeless.approve();
+  current = await engine.observe(unreviewed.id, (await reload(unreviewed.id)).revision, { ...mergedObservation, at: new Date().toISOString() });
+  assert.notEqual(current.stage, 'done');
+  const reason = current.violations.find(entry => entry.startsWith(`Reconciliation by decision ${hopeless.id} refused: `))!;
+  assert.ok(reason, current.violations.join(' | ')); assert.match(reason, /gate review had not passed/);
+  current = await engine.observe(unreviewed.id, current.revision, { ...mergedObservation, at: new Date().toISOString() });
+  assert.equal(current.violations.filter(entry => entry.startsWith('Reconciliation by decision ')).length, 1, 'the refusal is recorded once');
+  assert.equal((await events(unreviewed.id, 'merge.reconciliation.refused')).length, 1);
+  assert.equal(mergedWithoutAuthorization(current), true);
 });
 
-test('unit:stuck-merge-attention — master status names an item held at the merge stage by an observed unauthorized merge as the violation with its recovery command, apart from a candidate waiting for its queue tip, and the loop asks the guarded merge for the waiting candidate only', async () => {
+test('unit:stuck-merge-attention — master status names an item held at the merge stage by an observed unauthorized merge as the violation with its recovery command, apart from a candidate GitHub has yet to merge, and the loop names the violation once', async () => {
   const at = new Date().toISOString();
   const shape = (key: string, overrides: Partial<Work>): Work => ({ id: `id-${key}`, key, title: key, description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:x'] }],
     policy: { checks: ['test'], review: true }, stage: 'merge', revision: 12, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: new Date(Date.now() - 7_200_000).toISOString(), ready: true, epoch: 1, lease: null,
@@ -220,7 +120,7 @@ test('unit:stuck-merge-attention — master status names an item held at the mer
   const waiting = shape('GY-82', {});
   const status = buildMasterStatus({ work: [stuck, waiting], now: at }, [], []);
   const row = status.work.find(entry => entry.key === 'GY-81')!;
-  assert.match(row.attention!, /GY-81 was merged on GitHub \(cccccccccccc at 2026-09-20T19:50:22Z\) without a valid merge execution: Merge observed without a prior authorization/);
+  assert.match(row.attention!, /GY-81 was merged on GitHub \(cccccccccccc at 2026-09-20T19:50:22Z\) though its gates had not passed on that head: Merge observed without a prior authorization/);
   assert.match(row.attention!, /held at the merge stage, not waiting for its queue tip/);
   assert.equal(row.attentionOwner?.role, 'master'); assert.equal(row.attentionOwner?.approvedBy, 'approver');
   assert.match(row.attentionOwner!.next, /^graphyard master decide GY-81 merge REASON, then graphyard master approver GY-81 DECISION/);
@@ -235,18 +135,14 @@ test('unit:stuck-merge-attention — master status names an item held at the mer
   const refusedRow = buildMasterStatus({ work: [{ ...stuck, violations: [unauthorizedMergeViolation, 'Reconciliation by decision d1 refused: gate acceptance had not passed: proof missing'] }], now: at }, [], []).work[0];
   assert.match(refusedRow.attention!, /the last reconciliation was refused — Reconciliation by decision d1 refused: gate acceptance had not passed/);
   assert.equal(refusedRow.merged?.refusal, 'Reconciliation by decision d1 refused: gate acceptance had not passed: proof missing');
-  // The durable loop: the stuck item is named once as an escalation and never offered to the
-  // guarded merge; the waiting candidate is offered as before.
-  const merges: string[] = [];
+  // The durable loop names the stuck item once as an escalation; GitHub merges, so nothing is offered a merge.
   const effects: DaemonEffects = { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [stuck, waiting], now: at }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at, reason: 'none', deployed: [], pending: [] }), recordDeployment: async () => ({}), requestSmoke: () => {}, persist: async () => {} };
   const state = emptyDaemonState(config);
   const cycle = await runCycle(config, state, effects);
-  assert.deepEqual(merges, ['GY-82']);
   const escalation = cycle.actions.find(action => action.kind === 'escalation' && action.work === 'GY-81')!;
-  assert.match(escalation.detail, /merged on GitHub \(cccccccccccc at 2026-09-20T19:50:22Z\) without a valid merge execution/);
+  assert.match(escalation.detail, /merged on GitHub \(cccccccccccc at 2026-09-20T19:50:22Z\) though its gates had not passed on that head/);
   assert.match(escalation.detail, /graphyard master decide GY-81 merge REASON, then graphyard master approver GY-81 DECISION/);
   const again = await runCycle(config, state, effects);
-  assert.equal(merges.includes('GY-81'), false, 'the stuck item is never offered to the guarded merge');
   assert.equal(again.actions.some(action => action.kind === 'escalation' && action.work === 'GY-81'), false, 'the escalation is recorded once');
 });

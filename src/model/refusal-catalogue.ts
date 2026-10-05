@@ -48,8 +48,6 @@ export const gateRefusalCatalogue: RefusalShape[] = [
   { gate: 'build', id: 'diff-not-compared', match: /^Candidate diff has not been compared against the base branch tip/, kinds: ['resync'],
     example: 'Candidate diff has not been compared against the base branch tip; a fresh GitHub observation is required' },
   // A stale speculative tip waits for the control plane's restore, and files another item's tip carried are that item's (GY-568).
-  { gate: 'build', id: 'restoring-after-ejection', match: /^Restoring after predecessor ejection: /, kinds: ['resync'],
-    example: 'Restoring after predecessor ejection: candidate aaaaaaaaaaaa is a speculative tip built behind GY-1, which left the merge queue without landing, so its tree holds their unlanded work; Graphyard restores the branch to its own reviewed head bbbbbbbbbbbb brought onto the base before its tree is judged, and no worker is asked to change it' },
   { gate: 'build', id: 'carried-from-tip', match: /^Carried from another item's tip: /, kinds: ['resync'],
     example: "Carried from another item's tip: 2 files the candidate would change belong to GY-1, whose unlanded commits this head carries (src/a.ts: deleted; that commit still holds it (carried from GY-1)); they are not this change's, so no worker is asked to revert them: the control plane restores the branch to the item's own reviewed head" },
   { gate: 'build', id: 'out-of-scope-count', match: /^Candidate changes \d+ files? outside its planned files/, kinds: ['request-rework'],
@@ -83,36 +81,16 @@ export const gateRefusalCatalogue: RefusalShape[] = [
     example: 'Required CI check test has not passed on the current candidate' },
   { gate: 'test', id: 'required-check-failed', match: requiredCheckFailurePattern, kinds: ['request-rework'],
     example: 'Required check secrets failed on the current candidate' },
-  // acceptance
-  { gate: 'acceptance', id: 'criterion-unproven', match: /^AC-\d+: .+ needs trusted passing evidence/, kinds: ['dispatch', 'escalate'],
-    example: 'AC-1: integration:example needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy' },
-  { gate: 'acceptance', id: 'bootstrap-obligation', match: /^Bootstrap obligation inherited from .+ needs trusted passing evidence/, kinds: ['dispatch', 'escalate'],
-    example: 'Bootstrap obligation inherited from GY-2 AC-3: unit:example needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy' },
-  { gate: 'acceptance', id: 'evidence-not-independent', match: /is no longer independent:/, kinds: ['escalate'],
-    example: 'Trusted integration:example evidence from agent-a is no longer independent: agent-a has since held an assignment on GY-1' },
   // merge
   { gate: 'merge', id: 'github-unobserved', match: /^GitHub has not been observed at the current candidate$/, example: 'GitHub has not been observed at the current candidate', kinds: ['resync'] },
-  { gate: 'merge', id: 'unprotected', match: /branch protection have not been verified$/, kinds: ['escalate'],
-    example: 'Required Graphyard check and merge-queue branch protection have not been verified' },
   // The same shape covers GitHub's not-yet-computed mergeability (GY-548), worded apart from a refusal.
   { gate: 'merge', id: 'not-mergeable', match: /^(Pull request is not mergeable against the current base$|GitHub is computing mergeability against the current base)/, example: 'Pull request is not mergeable against the current base', kinds: ['resync'] },
   { gate: 'merge', id: 'escalation', match: /^Unresolved .+ escalation requires operator resolution: /, kinds: ['escalate'],
     example: 'Unresolved security-concern escalation requires operator resolution: the candidate ships a credential' },
   { gate: 'merge', id: 'lead-hold', match: /^Slice lead .+ ruled .+ under rule .+; delivery is blocked until the authorized recovery: /, kinds: ['escalate'],
     example: 'Slice lead lead-a ruled send-back under rule R-1; delivery is blocked until the authorized recovery: the slice is frozen for the release' },
-  { gate: 'merge', id: 'queue-position', match: /^Merge queue position \d+ of \d+: .+ is ahead$/, example: 'Merge queue position 2 of 3: GY-1 is ahead', kinds: ['merge'] },
-  { gate: 'merge', id: 'tip-unpublished', match: /^Speculative tip on predicted base [0-9a-f]+ has not been published and validated for this candidate$/, kinds: ['merge'],
-    example: 'Speculative tip on predicted base bbbbbbbbbbbb has not been published and validated for this candidate' },
-  { gate: 'merge', id: 'tip-validating', match: new RegExp(`^Merge queue is validating speculative tip [0-9a-f]+: ${ciCheckRefusalSource}`), kinds: ['merge'],
-    example: 'Merge queue is validating speculative tip aaaaaaaaaaaa: Required CI check test has not passed on the current candidate' },
-  { gate: 'merge', id: 'tip-awaited', match: /^Waiting for \S+ to publish its speculative tip$/, example: 'Waiting for GY-1 to publish its speculative tip', kinds: ['merge'] },
-  { gate: 'merge', id: 'predecessor-wait', match: /^Waiting for \S+(?:, \S+)* to land or leave the merge queue: /, kinds: ['merge'],
-    example: 'Waiting for GY-1 to land or leave the merge queue: candidate 0123456789ab was ejected because its speculative merge behind it conflicts (Speculative merge of 0123456789ab into graphyard/gy-2-1 conflicts and cannot be resolved by Graphyard); no sync with the base resolves that, so the same head re-enters at the back of the queue once it has landed or left' },
-  { gate: 'merge', id: 'ejected', match: /^Ejected from the merge queue: /, kinds: ['request-rework'],
-    example: 'Ejected from the merge queue: Pull request was closed without merging; a new candidate re-enters at the back of the queue' },
   { gate: 'merge', id: 'conversation-protection', match: /^Branch protection still requires conversation resolution, which Graphyard's review gate does not use: /, kinds: ['escalate'],
     example: "Branch protection still requires conversation resolution, which Graphyard's review gate does not use: GitHub refuses the merge of 0123456789ab while 1 thread stays open (chatgpt-codex-connector on docs/a.md:1). graphyard master protection --apply removes the requirement; the reviewer's approval of the head is the review gate" },
-  { gate: 'merge', id: 'not-entered', match: /^Candidate has not entered the merge queue$/, example: 'Candidate has not entered the merge queue', kinds: ['merge'] },
 ];
 
 /** The shape that claims a refusal of this gate, most specific first; null when none does. */

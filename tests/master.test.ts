@@ -33,7 +33,7 @@ test('master instructions are managed idempotently without replacing repository 
   const bootstrap = "The initial MVP is a single-agent bootstrap under the operator's supervision. Do not launch other agents for bootstrap work.";
   const original = `# Local rules\n${bootstrap}\nKeep this text.\n`; const first = managedMasterInstructions(original);
   assert.ok(first.startsWith(original)); assert.match(first, /dedicated, visible master-agent session/);
-  assert.match(first, /Keep cycling: status, dispatch ready work, shepherd review and proof collection,\nguarded merge, then deployment verification/);
+  assert.match(first, /Keep cycling: status, dispatch ready work, shepherd review, reconcile what GitHub\nmerged, then deployment verification/);
   assert.match(first, /both conditions hold:\n\(1\) every in-scope item is Done or has a genuinely external blocker recorded in\nGraphyard; and \(2\) every merged change is deployed and live-verified against the exact\ndeployed release, or a genuinely external deployment blocker is recorded in Graphyard/);
   assert.match(first, /Delivered work is immutable, so a deployment blocker is recorded as a follow-up work\nitem naming the delivered item, its merge commit, and the external cause/);
   assert.match(first, /An observed merge alone does not end the loop/);
@@ -306,7 +306,7 @@ test('master start creates a visible non-focused coordinator session with no cre
     await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, autoMerge: false }, coordinatorStatus as typeof fetch);
     const manualCalls: string[][] = [];
     await startMaster(root, 'codex', [], [], (_command, args) => { manualCalls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'manual-master' } : {} }); });
-    assert.match(expandTypedCommand(manualCalls[1][3]).args.at(-1)!, /Automatic merging is disabled.*explicit operator approval/);
+    assert.doesNotMatch(expandTypedCommand(manualCalls[1][3]).args.at(-1)!, /Automatic merging is disabled/, 'autoMerge off asks for no merge approval: GitHub merges');
     const failedCalls: string[][] = [];
     await assert.rejects(startMaster(root, 'codex', [], [], (_command, args) => {
       failedCalls.push(args); if (args[0] === 'pane' && args[1] === 'run') throw new Error('start refused');

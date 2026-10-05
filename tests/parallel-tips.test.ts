@@ -7,13 +7,13 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { observationBand } from '../src/github.js';
-import { defaultParallelTips, describeTipWindow, maxParallelTips, mergeParallelTipsEvent, mergeQueueInsights, predictQueue, queueRef, tipValidationPrefix, windowBatchView } from '../src/merge-queue.js';
+import { defaultParallelTips, describeTipWindow, maxParallelTips, mergeParallelTipsEvent, mergeQueueInsights, predictQueue, queueRef, windowBatchView } from '../src/merge-queue.js';
 import { server } from '../src/server.js';
 import { daemonEffects } from '../src/master-daemon.js';
 import { buildMasterStatus, masterConfigSchema } from '../src/master.js';
 import { mergeParallelTips, mergeQueueStatus } from '../src/master/profiles.js';
 import { computeFlow, queueWait, type FlowDataset, type FlowFact } from '../src/flow-analytics.js';
-import { evaluate, type Work } from '../src/model.js';
+import type { Work } from '../src/model.js';
 import { prSteps } from '../src/model/pr-steps.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -26,165 +26,9 @@ const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f'
 const keys = ['GY-1', 'GY-2', 'GY-3', 'GY-4', 'GY-5', 'GY-6'];
 const CI_APP = 15368;
 
-/**
- * The live queue driven through the control plane's own gate evaluation — `evaluate` under the
- * parallel-tip window exactly as the engine runs it — against a fake CI of a fixed
- * virtual duration. Every round publishes the tips the queue asks for (publishing never waits for
- * CI), evaluates every entry, lands the entries whose gates all pass in queue order, starts CI on
- * every tip the merge gates name, and advances the virtual clock to the next completion. A tip's
- * tree is named by the entries it holds, so a rebuilt tip holding the same entries binds the
- * entries behind it unchanged, as GY-100 binds them.
- */
-function driveParallelTips(parallelTips: number, failing: string | null, count = keys.length, durationOf: (holding: string[]) => number = () => 100) {
-  const duration = 100, start = Date.parse('2026-09-25T09:00:00.000Z'), at = '2026-09-25T08:00:00.000Z';
-  let clock = start, published = 0;
-  const trees = new Map<string, string>(), holds = new Map<string, string[]>();
-  const base = { sha: sha40('b0'), tree: sha40('e0') };
-  trees.set(base.sha, base.tree); holds.set(base.sha, []);
-  const items: Work[] = keys.slice(0, count).map((key, index) => {
-    const own = sha40(`a${index + 1}`), candidate = { sha: own, baseSha: base.sha, pr: 100 + index, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' };
-    return { id: `id-${key}`, key, title: key, description: '', type: 'feature', priority: 0, dependencies: [], plannedFiles: [`src/${key}/`], criteria: [],
-      policy: { checks: ['test'], review: false }, stage: 'merge', revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null,
-      workspaces: [{ host: 'machine', path: `/tmp/${key}`, branch: candidate.branch, epoch: 1, owner: 'agent' }], candidate, submission: { epoch: 1, pr: 100 + index }, reworkRequested: false,
-      scenarioRequirements: [], evidence: [], blocker: null, violations: [], gates: [],
-      observation: { clockOffset: { min: 0, max: 0 }, candidate, baseTip: base.sha, baseTree: base.tree, checks: [], reviews: [], protected: true, mergeable: true, merged: false, mergeSha: null, files: [], scopeFiles: [], at: new Date(start).toISOString() },
-      queue: { sequence: index + 1, enqueuedAt: at, policyRevision: 1, speculation: null }, queueSequence: index + 1 } as unknown as Work;
-  });
-  const queued = () => items.filter(item => !!item.queue && item.stage !== 'done').sort((a, b) => a.queue!.sequence - b.queue!.sequence);
-  const observe = (item: Work, checks: Work['observation'] extends infer O ? O extends { checks: infer C } ? C : never : never) => {
-    item.observation = { ...item.observation!, candidate: item.candidate!, baseTip: base.sha, baseTree: trees.get(base.sha)!, checks, at: new Date(clock).toISOString() };
-  };
-  const windowed = (item: Work) => evaluate(item, items, new Date(clock), [CI_APP], { batchSize: 1, parallelTips });
-  // The control plane publishing each tip the queue asks for: the entry's own head merged onto its
-  // predicted base. Publishing never waits for CI, so the whole chain builds at once.
-  const publish = () => {
-    for (let moved = true; moved;) {
-      moved = false;
-      for (const placement of predictQueue(items, clock)) {
-        if (placement.current || !placement.publishable) continue;
-        const item = items.find(entry => entry.id === placement.id)!, predicted = placement.predictedBase!;
-        const holding = [...holds.get(predicted)!, item.key], tip = sha40(`c${++published}`), tree = sha40(`e${holding.map(key => key.slice(3)).join('')}`);
-        trees.set(tip, tree); holds.set(tip, holding);
-        item.candidate = { ...item.candidate!, sha: tip, baseSha: predicted };
-        item.queue = { ...item.queue!, speculation: { ref: queueRef(item.key), tip, base: predicted, baseTree: trees.get(predicted)!, tipTree: tree, predecessors: placement.predecessors, policyRevision: 1, publishedAt: at, reviewedHead: sha40(`a${keys.indexOf(item.key) + 1}`) } };
-        predictions.push({ key: item.key, predecessors: placement.predecessors, holding });
-        observe(item, []);
-        moved = true;
-        break;
-      }
-    }
-  };
-  const runs: { tip: string; holding: string[]; startedAt: number; endsAt: number }[] = [], merged: { key: string; at: number }[] = [], ejected: { key: string; reason: string }[] = [], predictions: { key: string; predecessors: string[]; holding: string[] }[] = [];
-  for (let round = 0; queued().length && round < 200; round++) {
-    const ejectedBefore = ejected.length;
-    publish();
-    for (const item of queued()) Object.assign(item, windowed(item));
-    for (const item of items) if (!item.queue && item.queueEjection && item.stage !== 'done' && !ejected.some(entry => entry.key === item.key)) ejected.push({ key: item.key, reason: item.queueEjection!.reason });
-    // Entries whose every gate passed land in queue order; each landing moves the base and frees a window position.
-    const landedBefore = merged.length;
-    for (let landed = true; landed;) {
-      landed = false;
-      for (const item of queued()) {
-        Object.assign(item, windowed(item));
-        if (item.gates.every(gate => gate.passed)) {
-          merged.push({ key: item.key, at: clock });
-          base.sha = item.candidate!.sha; trees.set(base.sha, trees.get(item.candidate!.sha)!); holds.set(base.sha, holds.get(item.candidate!.sha)!);
-          item.stage = 'done'; item.queue = null;
-          for (const other of queued()) observe(other, other.observation!.checks);
-          landed = true;
-          break;
-        }
-      }
-    }
-    if (!queued().length) break;
-    // CI runs on exactly the tips the merge gates name as under validation, one duration each.
-    const named = new Set(queued().flatMap(item => item.gates.find(gate => gate.name === 'merge')!.reasons)
-      .filter(reason => reason.startsWith(tipValidationPrefix)).map(reason => reason.slice(tipValidationPrefix.length, tipValidationPrefix.length + 12)));
-    let next = Infinity, started = 0;
-    for (const prefix of named) {
-      const item = queued().find(entry => entry.candidate!.sha.startsWith(prefix))!;
-      const known = runs.find(run => item.candidate!.sha.startsWith(run.tip));
-      if (known) { next = Math.min(next, known.endsAt); continue; }
-      const holding = holds.get(item.candidate!.sha)!;
-      runs.push({ tip: prefix, holding, startedAt: clock, endsAt: clock + durationOf(holding) });
-      next = Math.min(next, runs.at(-1)!.endsAt);
-      started++;
-    }
-    // A landing or an ejection moved the queue: republish and re-read it before judging progress.
-    if (!Number.isFinite(next)) {
-      if (started === 0 && merged.length === landedBefore && ejected.length === ejectedBefore) break;
-      continue;
-    }
-    clock = next;
-    for (const run of runs.filter(run => run.endsAt === clock)) {
-      const item = queued().find(entry => entry.candidate!.sha.startsWith(run.tip));
-      if (item) observe(item, [{ name: 'test', result: failing && run.holding.includes(failing) ? 'failure' : 'success', appId: CI_APP }]);
-    }
-  }
-  return { runs, merged, ejected, items, trees, holds, duration, predictions };
-}
-
-test('unit:parallel-speculative-tips — six entries with parallelTips 4 merge in about two CI durations, all four window tips validated at once; parallelTips 1 takes six', () => {
-  const fast = driveParallelTips(4, null);
-  const relative = (key: string) => fast.merged.find(entry => entry.key === key)!.at - start();
-  assert.deepEqual(fast.merged.map(entry => entry.key), keys, 'all six merge, in queue order');
-  assert.ok(relative('GY-4') <= fast.duration * 1.5, `the first four merge inside the first CI duration (at +${relative('GY-4')}ms of ${fast.duration}ms)`);
-  assert.ok(relative('GY-6') <= fast.duration * 2.5, `all six merge in about two CI durations (last at +${relative('GY-6')}ms)`);
-  // The window validated four tips at once: four runs started before the first one finished.
-  const firstDone = Math.min(...fast.runs.map(run => run.startedAt)) + fast.duration;
-  assert.equal(fast.runs.filter(run => run.startedAt < firstDone).length, 4, `four tips ran concurrently: ${JSON.stringify(fast.runs)}`);
-  assert.ok(fast.runs.length <= 6, `no tip ran twice: ${JSON.stringify(fast.runs.map(run => run.holding))}`);
-
-  // One tip at a time restores one CI duration per entry.
-  const slow = driveParallelTips(1, null);
-  assert.deepEqual(slow.merged.map(entry => entry.key), keys);
-  const last = slow.merged.find(entry => entry.key === 'GY-6')!.at - start();
-  assert.ok(last >= slow.duration * 5.5 && last <= slow.duration * 6.5, `six entries take about six durations with parallelTips 1 (last at +${last}ms)`);
-  const concurrent = Math.max(...Array.from({ length: slow.runs.length }, (_, index) => slow.runs.filter(run => run.startedAt <= slow.runs[index].startedAt && run.startedAt + slow.duration > slow.runs[index].startedAt).length));
-  assert.equal(concurrent, 1, 'only one tip is validated at a time');
-
-  function start() { return Date.parse('2026-09-25T09:00:00.000Z'); }
-});
-
-test('unit:parallel-tips-failure-rebuild — tip 2 of 4 fails: entry 1 merges, entry 2 is ejected as the cause, tips 3-4 rebuild without entry 2 and merge', () => {
-  const driven = driveParallelTips(4, 'GY-2', 4);
-  assert.deepEqual(driven.merged.map(entry => entry.key), ['GY-1', 'GY-3', 'GY-4'], 'entries before the failure merge, and the rest merge after the rebuild, in queue order');
-  assert.deepEqual(driven.ejected.map(entry => entry.key), ['GY-2'], 'exactly the attributed entry is ejected');
-  assert.match(driven.ejected[0].reason, /^Required CI check test did not pass on speculative tip [0-9a-f]{12}, attributed to this entry: speculative tip [0-9a-f]{12} ahead of it passed test$/, `the failing tip is attributed by the passing prefix: ${driven.ejected[0].reason}`);
-  const predictionsFor = (key: string) => driven.predictions.filter(prediction => prediction.key === key);
-  assert.ok(predictionsFor('GY-3').length >= 2, 'the entry behind the failure had its tip rebuilt');
-  assert.deepEqual(predictionsFor('GY-3').at(-1)!.holding, ['GY-1', 'GY-3'], `the rebuilt tip 3 holds entry 1 and itself only, not the ejected entry 2: ${JSON.stringify(predictionsFor('GY-3'))}`);
-  assert.deepEqual(predictionsFor('GY-4').at(-1)!.holding, ['GY-1', 'GY-3', 'GY-4'], `the rebuilt tip 4 is built on the rebuilt tip 3: ${JSON.stringify(predictionsFor('GY-4'))}`);
-  const firstEnd = Math.min(...driven.runs.map(run => run.startedAt)) + driven.duration;
-  assert.deepEqual(driven.runs.filter(run => run.startedAt >= firstEnd).map(run => run.holding), [['GY-1', 'GY-3'], ['GY-1', 'GY-3', 'GY-4']], 'only the tips after the failure were rebuilt and re-run');
-  // The rebuilt tips passed and merged within one further CI duration of the first merge.
-  const at = (key: string) => driven.merged.find(entry => entry.key === key)!.at;
-  assert.ok(at('GY-4') - at('GY-1') <= driven.duration * 1.5, `only the tips after the failure were rebuilt: +${at('GY-4') - at('GY-1')}ms`);
-});
-
-test('unit:parallel-tips-failure-rebuild — a later tip failing while the tip ahead still runs ejects nobody until that tip resolves: the entry that caused it is ejected, the innocent entry behind it merges', () => {
-  // Entry 1 breaks the build and later tips finish first, so tip 2 (entries 1 and 2) fails while
-  // tip 1 is still running. Entry 2 must not be attributed the failure it inherits from entry 1.
-  const driven = driveParallelTips(4, 'GY-1', 4, holding => 100 - 20 * (holding.length - 1));
-  const firstVerdict = Math.min(...driven.runs.map(run => run.endsAt)), tip1 = driven.runs.find(run => run.holding.length === 1)!;
-  assert.ok(firstVerdict < tip1.endsAt, `a later tip reports before tip 1 does: ${JSON.stringify(driven.runs)}`);
-  assert.deepEqual(driven.ejected.map(entry => entry.key), ['GY-1'], `only the entry that caused the failure is ejected: ${JSON.stringify(driven.ejected)}`);
-  assert.match(driven.ejected[0].reason, /^Required CI check test did not pass on speculative tip [0-9a-f]{12}$/, 'the head is attributed on its own tip, with no claim about a tip ahead');
-  assert.deepEqual(driven.merged.map(entry => entry.key), ['GY-2', 'GY-3', 'GY-4'], 'the entries behind it stay queued, are rebuilt without it, and merge in queue order');
-  assert.deepEqual(driven.predictions.filter(prediction => prediction.key === 'GY-2').at(-1)!.holding, ['GY-2'], 'tip 2 is rebuilt without entry 1');
-
-  // Evaluated directly: tip 2 failed while tip 1 runs, so entry 2 stays queued and its merge gate
-  // names tip 1 as still being validated; once tip 1 passes, entry 2's failure is its own.
-  const head = entry(0, [running]), second = entry(1, [failing]);
-  const held = evaluate(second, [head, second], new Date(now), [CI_APP], { batchSize: 1, parallelTips: 4 });
-  assert.ok(held.queue && !held.queueEjection, `entry 2 stays queued while tip 1 runs: ${JSON.stringify(held.queueEjection)}`);
-  const reasons = held.gates.find(gate => gate.name === 'merge')!.reasons;
-  assert.ok(reasons.some(reason => reason.startsWith(`${tipValidationPrefix}${tip(0).slice(0, 12)}: speculative tip ${tip(1).slice(0, 12)} of GY-2 failed test`)), `the merge gate waits on tip 1: ${JSON.stringify(reasons)}`);
-  assert.equal(held.queue!.batch!.state, 'waiting', 'the Merge step shows the entry waiting on the tip ahead, not ejecting');
-  const judged = evaluate(second, [entry(0, [pass]), second], new Date(now), [CI_APP], { batchSize: 1, parallelTips: 4 });
-  assert.match(judged.queueEjection?.reason ?? '', /attributed to this entry: speculative tip [0-9a-f]{12} ahead of it passed test$/, 'with tip 1 passed, entry 2 is ejected as the cause');
-});
-
+// GitHub delivery is the only delivery (GY-1235): evaluate places no candidate in a Graphyard merge
+// queue, so the queue simulations that validated speculative tips through it are gone; what remains
+// is the window's reporting, configuration and observation band over a recorded tip chain.
 // A four-entry validated chain, tips published on the one ahead, with CI states per tip.
 const now = Date.parse('2026-09-25T09:00:00.000Z'), at = '2026-09-25T08:00:00.000Z';
 const B0 = sha40('b0'), tip = (index: number) => sha40(`c${index + 1}`);
@@ -367,9 +211,6 @@ test('unit:parallel-tips-failure-rebuild — a failed check held for rerun is ru
   assert.equal(view.own!.ci, 'running');
   assert.equal(view.firstFailure, null);
   assert.equal(view.validated, false);
-  const held = evaluate(second, all, new Date(now), [CI_APP], { batchSize: 1, parallelTips: 4 });
-  assert.ok(held.queue);
-  assert.equal(held.queueEjection, null);
   second.checkReruns![0].state = 'failed';
-  assert.match(evaluate(second, all, new Date(now), [CI_APP], { batchSize: 1, parallelTips: 4 }).queueEjection?.reason ?? '', /attributed to this entry/);
+  assert.equal(describeTipWindow(all, predictQueue(all, now), 4, [CI_APP]).get(second.key)!.own!.ci, 'fail', 'once the rerun failed, the failure is the tip\'s own');
 });

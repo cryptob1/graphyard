@@ -170,6 +170,7 @@ GitHub merges: a pull request whose build, review and required checks pass on it
 is merged by GitHub on its branch protection, and the loop only records the delivery.
 There is no Graphyard merge to run. A merge of a head whose gates had not passed is held
 as a violation until a two-party `graphyard master decide GY-N merge` reconciles it.
-Never use an administrative merge bypass, edit a candidate, or read a worker credential. Read `docs/master-agent.md`
+Never use an administrative merge bypass, edit a candidate, or read a
+worker credential. Read `docs/master-agent.md`
 in Graphyard or run `graphyard master guide` for the complete operating loop.
 <!-- /graphyard-master -->

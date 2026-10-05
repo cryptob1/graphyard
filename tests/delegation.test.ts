@@ -10,10 +10,11 @@ import {
   routineIntakeOrigins, sessionKind, slices, validateDelegationPrincipals,
 } from '../src/delegation.js';
 import { mergeAuthorized } from '../src/merge-queue.js';
+import { evidenceProves } from '../src/model/mechanical-proofs.js';
 import { queueRef, type QueueSpeculation } from '../src/merge-queue.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { sliceIds, standingEscalations, type Observation, type Principal, type SliceId, type Work } from '../src/model.js';
+import { currentEvidence, sliceIds, standingEscalations, type Observation, type Principal, type SliceId, type Work } from '../src/model.js';
 import { Store } from '../src/store.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -224,25 +225,12 @@ test('integration:lead-enforcement — violating lead actions are refused server
   assert.equal(unscoped.payload.slice, 'product');
   assert.equal(unscoped.payload.targetSlice, 'infrastructure');
   assert.match(unscoped.payload.reason, /targets another slice/);
-  // The merge route matches above the generic work route. Routing order decides
-  // which handler answers a forbidden request; it must never decide whether the
-  // attempt reaches the ledger, so each one records its own refusal.
   const asLead = (path: string, payload: unknown) => fetch(`${url}${path}`, { method: 'POST',
     headers: { Authorization: `Bearer ${credentials.find(c => c.id === lead.id)!.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, body: JSON.stringify(payload) });
-  for (const [route, payload] of [
-    ['merge-acquire', { enqueue: true, expectedRevision: item.revision, sha: head, baseSha: base, policyRevision: 1 }],
-  ] as const) {
-    const refused = await asLead(`/api/work/${item.id}/${route}`, payload);
-    assert.equal(refused.status, 403, route);
-    assert.match((await refused.json()).error, /Slice leads cannot perform lifecycle mutations/, route);
-    const recorded = (await store.events(item.id)).filter(event => event.kind === 'lead.action.refused' && event.payload.attemptedAction === route);
-    assert.equal(recorded.length, 1, `${route} is refused and recorded exactly once`);
-    assert.equal(recorded[0].actor, lead.id);
-    assert.equal(recorded[0].payload.slice, 'product');
-    assert.equal(recorded[0].payload.targetKey, item.key);
-    assert.equal(recorded[0].payload.targetSlice, 'product');
-  }
-  assert.equal((await reload(item)).mergeExecution ?? null, null, 'no refused merge call left execution state behind');
+  // GitHub merges (GY-1235): Graphyard serves no merge route a lead could try.
+  const mergeRoute = await asLead(`/api/work/${item.id}/merge-acquire`, { enqueue: true });
+  assert.equal(mergeRoute.status, 404, 'the guarded merge route is gone');
+  assert.equal((await reload(item)).mergeExecution ?? null, null, 'no merge call left execution state behind');
   // Creating work names no existing item, so there is no ledger to append to.
   // The attempt is still history: it is recorded unscoped, with a null target.
   const creation = await asLead('/api/work', input('lead-creates-work', 'product'));
@@ -263,7 +251,7 @@ test('integration:lead-enforcement — violating lead actions are refused server
   let ready = await candidate(workerA, 'lead-blocks-delivery', 'product');
   ready = await proven(ready);
   assert.equal(ready.stage, 'merge');
-  assert.ok(ready.mergeAuthorization);
+  assert.ok(mergeAuthorized(ready));
   const observedAt = ready.observation!.at;
   assert.deepEqual(currentMergeCandidates([ready], observedAt).map(w => w.key), [ready.key]);
   const sentBack = (await recordLeadRuling(store, lead, ready.id, { action: 'send-back', ruleId: 'rules/plan-v1#coverage', reason: 'Negative coverage is missing' }, id())).work;
@@ -271,20 +259,20 @@ test('integration:lead-enforcement — violating lead actions are refused server
   assert.equal(sentBack.leadHold!.ruleId, 'rules/plan-v1#coverage');
   assert.equal(sentBack.leadHold!.leadId, lead.id);
   assert.equal(sentBack.leadHold!.slice, 'product');
-  assert.equal(sentBack.mergeAuthorization, null, 'the ruling transaction revokes merge authorization');
+  assert.equal(mergeAuthorized(sentBack), false, 'the ruling transaction revokes merge authorization');
   assert.equal(sentBack.gates.find(gate => gate.name === 'merge')!.passed, false);
   assert.match(sentBack.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /delivery is blocked until the authorized recovery/);
   assert.deepEqual(currentMergeCandidates([sentBack], observedAt), [], 'the guarded broker cannot select a sent-back item');
   assert.throws(() => assertMergeCandidate(sentBack, observedAt), /does not pass every gate/);
-  assert.equal((await reload(ready)).mergeAuthorization, null);
+  assert.equal(mergeAuthorized(await reload(ready)), false);
   // Re-evaluation never quietly reissues authorization while the hold stands.
   let held = await reload(ready);
   held = await engine.observe(ready.id, held.revision, observation(held));
-  assert.equal(held.mergeAuthorization, null);
+  assert.equal(mergeAuthorized(held), false);
   assert.equal(held.leadHold!.action, 'send-back');
   await engine.reconcile();
   held = await reload(ready);
-  assert.equal(held.mergeAuthorization, null);
+  assert.equal(mergeAuthorized(held), false);
   assert.equal(held.leadHold!.action, 'send-back');
   // No further ruling clears a send-back, and the broker refuses to acquire past it.
   for (const action of ['approve-plan', 'classify-failure', 'request-rerun'] as const)
@@ -300,15 +288,14 @@ test('integration:lead-enforcement — violating lead actions are refused server
   held = await engine.execute(admin, 'rework', ready.id, { reason: 'Send-back accepted; reopening implementation', previousWorkerStopped: true }, id());
   assert.equal(held.leadHold ?? null, null);
   assert.equal(held.gates.find(gate => gate.name === 'build')!.passed, false);
-  assert.equal(held.mergeAuthorization, null);
+  assert.equal(mergeAuthorized(held), false);
   held = await engine.execute(workerA, 'claim', ready.id, {}, id());
   held = await engine.execute(workerA, 'workspace', ready.id, { epoch: held.epoch, host: 'delegation-host', path: `/tmp/delegation/${ready.id}-redo`, branch: held.workspaces[0].branch }, id());
   held = await engine.execute(workerA, 'submit', ready.id, { epoch: held.epoch, pr: held.submission!.pr }, id());
-  // The redone implementation is a new commit, and it is proved afresh: a
-  // candidate ejected from the merge queue never re-enters on the same head.
+  // The redone implementation is a new commit, observed and proved afresh.
   held = await proven(held, redone);
   assert.equal(held.stage, 'merge');
-  assert.ok(held.mergeAuthorization, 'authorization is reissued only after the authorized recovery');
+  assert.ok(mergeAuthorized(held), 'authorization is reissued only after the authorized recovery');
   assert.deepEqual(currentMergeCandidates([held], held.observation!.at).map(w => w.key), [held.key]);
   assert.equal(held.lease, null, 'resubmission ended the rework lease');
 
@@ -316,10 +303,10 @@ test('integration:lead-enforcement — violating lead actions are refused server
   // approval of the revised plan, which is the one lead-side recovery.
   let planned = await candidate(workerB, 'lead-plan-rejection', 'product');
   planned = await proven(planned);
-  assert.ok(planned.mergeAuthorization);
+  assert.ok(mergeAuthorized(planned));
   planned = (await recordLeadRuling(store, lead, planned.id, { action: 'reject-plan', ruleId: 'rules/plan-v1#scope', reason: 'Plan exceeds the written scope' }, id())).work;
   assert.equal(planned.leadHold!.action, 'reject-plan');
-  assert.equal(planned.mergeAuthorization, null);
+  assert.equal(mergeAuthorized(planned), false);
   assert.deepEqual(currentMergeCandidates([planned], planned.observation!.at), []);
   // A replacement lead for the same slice cannot take ownership of or clear
   // the originating lead's rejection, including by issuing an equal-rank hold.
@@ -335,14 +322,13 @@ test('integration:lead-enforcement — violating lead actions are refused server
   planned = (await recordLeadRuling(store, lead, planned.id, { action: 'approve-plan', ruleId: 'rules/plan-v1#approval', reason: 'Revised plan is inside scope', supersedes: planned.leadHold!.rulingId }, id())).work;
   assert.equal(planned.leadHold ?? null, null);
   assert.equal(planned.gates.find(gate => gate.name === 'build')!.passed, false, 'plan approval does not revive the previous implementation attempt');
-  assert.equal(planned.mergeAuthorization, null);
+  assert.equal(mergeAuthorized(planned), false);
   planned = await engine.execute(workerB, 'claim', planned.id, {}, id());
   planned = await engine.execute(workerB, 'workspace', planned.id, { epoch: planned.epoch, host: 'delegation-host', path: `/tmp/delegation/${planned.id}-revised-plan`, branch: planned.workspaces[0].branch }, id());
   planned = await engine.execute(workerB, 'submit', planned.id, { epoch: planned.epoch, pr: planned.submission!.pr }, id());
-  // The revised implementation is a new commit, proved afresh, because reopening
-  // implementation ejected the previous head from the merge queue.
+  // The revised implementation is a new commit, observed and proved afresh.
   planned = await proven(planned, redone);
-  assert.ok(planned.mergeAuthorization, 'authorization returns only through a full gate evaluation');
+  assert.ok(mergeAuthorized(planned), 'authorization returns only through a full gate evaluation');
   assert.deepEqual(currentMergeCandidates([planned], planned.observation!.at).map(w => w.key), [planned.key]);
   assert.equal(planned.lease, null, 'resubmission ended the rework lease');
 
@@ -393,8 +379,10 @@ test('integration:ownership-and-delivery-invariants — Graphyard owns leases, w
   await assert.rejects(engine.execute(workerB, 'workspace', other.id, { ...workspace, epoch: other.epoch }, id()), /reserved or overlaps/);
   item = await engine.execute(workerA, 'submit', item.id, { epoch: item.epoch, pr: ++pr }, id());
   item = await engine.observe(item.id, item.revision, observation(item));
-  // Delivery stays behind the guarded broker: gates refuse, and only a coordinator may acquire.
-  assert.equal(item.gates.find(gate => gate.name === 'acceptance')!.passed, false);
+  // GitHub merges the head whose gates pass (GY-1235): no proof gate stands in between and
+  // Graphyard issues no merge authorization of its own.
+  assert.equal(item.gates.find(gate => gate.name === 'acceptance'), undefined);
+  assert.equal(item.mergeAuthorization ?? null, null);
   // Control-plane truth never depends on the session runtime.
   for (const module of ['model.ts', 'engine.ts', 'store.ts', 'delegation.ts', 'server.ts'])
     assert.doesNotMatch(await readFile(new URL(`../src/${module}`, import.meta.url), 'utf8'), /herdr/i, module);
@@ -466,8 +454,10 @@ test('integration:ownership-and-delivery-invariants — Graphyard owns leases, w
 
 test('integration:exact-candidate-validation — trusted evidence binds the exact candidate and an independent producer', async () => {
   let item = await candidate(workerA, 'exact-candidate', 'docs-experience');
-  const acceptance = (work: Work) => work.gates.find(gate => gate.name === 'acceptance')!.passed;
-  // Same proof, wrong candidate or policy: never acceptance evidence.
+  // Whether trusted evidence for the item's proof binds the candidate as it stands now. Proofs gate
+  // nothing under GitHub delivery, but which evidence is applicable is still decided this way.
+  const acceptance = (work: Work) => { const applicable = currentEvidence(work, 'unit:works'); return !!applicable && evidenceProves('unit:works', applicable); };
+  // Same proof, wrong candidate or policy: never applicable evidence.
   for (const mismatch of [{ sha: 'c'.repeat(40) }, { baseSha: 'd'.repeat(40) }, { policyRevision: 2 }, { executed: 0 }, { skipped: 1 }, { result: 'fail' }]) {
     item = await engine.execute(reviewer, 'evidence', item.id, proof(mismatch), id());
     assert.equal(acceptance(item), false, JSON.stringify(mismatch));
@@ -518,37 +508,27 @@ test('integration:exact-candidate-validation — trusted evidence binds the exac
   let revoked = await candidate(workerC, 'independence-revoked', 'infrastructure');
   revoked = await proven(revoked);
   assert.equal(acceptance(revoked), true);
-  assert.ok(revoked.mergeAuthorization);
+  assert.ok(mergeAuthorized(revoked));
   assert.deepEqual(currentMergeCandidates([revoked], revoked.observation!.at).map(w => w.key), [revoked.key]);
   const evidenceBefore = structuredClone(revoked.evidence);
   const producerWorker: Principal = { id: reviewer.id, role: 'worker' };
   revoked = await engine.execute(admin, 'rework', revoked.id, { reason: 'Producer takes over the implementation', previousWorkerStopped: true }, id());
   revoked = await engine.execute(producerWorker, 'claim', revoked.id, {}, id());
   assert.ok(implementerIdentities(revoked).includes(reviewer.id));
-  assert.equal(acceptance(revoked), false, 'acceptance recomputes independence against the current implementer set');
-  assert.match(revoked.gates.find(gate => gate.name === 'acceptance')!.reasons.join(' '), new RegExp(`Trusted unit:works evidence from ${reviewer.id} is no longer independent`));
-  assert.equal(revoked.mergeAuthorization, null, 'merge authorization is revoked by the same evaluation');
+  assert.equal(acceptance(revoked), false, 'applicability recomputes independence against the current implementer set');
+  assert.equal(mergeAuthorized(revoked), false, 'reopened implementation is not GitHub\'s to merge');
   assert.deepEqual(revoked.evidence, evidenceBefore, 'history is recomputed against, never mutated');
   // Resubmitting the unchanged candidate does not revive the superseded evidence.
   revoked = await engine.execute(producerWorker, 'workspace', revoked.id, { epoch: revoked.epoch, host: 'delegation-host', path: `/tmp/delegation/${revoked.id}-producer`, branch: revoked.workspaces[0].branch }, id());
   revoked = await engine.execute(producerWorker, 'submit', revoked.id, { epoch: revoked.epoch, pr: revoked.submission!.pr }, id());
   revoked = await engine.observe(revoked.id, revoked.revision, observation(revoked));
   assert.equal(revoked.candidate!.sha, head, 'the candidate head is unchanged');
-  assert.equal(acceptance(revoked), false);
-  assert.equal(revoked.mergeAuthorization, null);
-  assert.notEqual(revoked.stage, 'merge');
-  assert.deepEqual(currentMergeCandidates([revoked], revoked.observation!.at), [], 'the guarded broker refuses it independently');
-  assert.throws(() => assertMergeCandidate(revoked, revoked.observation!.at), /does not pass every gate/);
+  assert.equal(acceptance(revoked), false, 'the superseded evidence is not revived');
   // Re-proving it requires a producer still independent of every implementer.
   await assert.rejects(engine.execute({ ...reviewer, role: 'producer', proofs: ['unit:works'] }, 'evidence', revoked.id, proof(), id()), /distinct from its implementers/);
   revoked = await engine.execute({ id: 'second-proof-runner', role: 'producer', proofs: ['unit:works'], sessionKind: 'ai' }, 'evidence', revoked.id, proof(), id());
   assert.equal(revoked.candidate!.sha, head, 'the candidate head is still unchanged');
-  assert.equal(acceptance(revoked), true, 'a still-independent producer restores acceptance without any new commit');
-  assert.equal(revoked.gates.find(gate => gate.name === 'acceptance')!.reasons.join(' '), '');
-  // Delivery itself waits for a new candidate: reopening implementation ejected
-  // this head from the merge queue, and an ejected head never re-enters.
-  assert.match(revoked.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Ejected from the merge queue/);
-  assert.deepEqual(currentMergeCandidates([revoked], revoked.observation!.at), []);
+  assert.equal(acceptance(revoked), true, 'a still-independent producer restores applicable evidence without any new commit');
   assert.equal(revoked.lease, null, 'resubmission ended the rework lease');
 });
 
@@ -749,7 +729,7 @@ test('unit:dynamic-merge-ordering — order follows dependencies and current con
   const observedAt = new Date().toISOString();
   const mergeable = (key: string, overrides: Partial<Work> = {}) => work(key, {
     candidate: { sha: head, baseSha: base, pr: 1, branch: `graphyard/${key}`, author: 'implementer' },
-    mergeAuthorization: { sha: head, baseSha: base, policyRevision: 1, at: observedAt }, policyRevision: 1,
+    policyRevision: 1,
     observation: { at: observedAt } as Observation, ...overrides,
   } as Partial<Work>);
   const first = mergeable('GY-11', { plannedFiles: ['src/shared/'] });
@@ -877,15 +857,15 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   let ready = await candidate(workerB, 'escalation-blocks-merge', 'product');
   ready = await proven(ready);
   assert.equal(ready.stage, 'merge');
-  assert.ok(ready.mergeAuthorization);
+  assert.ok(mergeAuthorized(ready));
   const observedAt = ready.observation!.at;
   assert.deepEqual(currentMergeCandidates([ready], observedAt).map(item => item.key), [ready.key]);
   const escalated = (await recordLeadRuling(store, lead, ready.id, { action: 'escalate', ruleId: 'rules/safety-v2#supply-chain', reason: 'Unreviewed dependency change', trigger: 'security-concern' }, id())).work;
-  assert.equal(escalated.mergeAuthorization, null, 'merge authorization is invalidated in the escalating transaction');
+  assert.equal(mergeAuthorized(escalated), false, 'merge authorization is invalidated in the escalating transaction');
   assert.equal(escalated.gates.find(gate => gate.name === 'merge')!.passed, false);
   assert.match(escalated.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Unresolved security-concern escalation/);
   assert.deepEqual(currentMergeCandidates([escalated], observedAt), [], 'the guarded broker cannot select an escalated item');
-  assert.equal(await reload(ready).then(item => item.mergeAuthorization), null);
+  assert.equal(mergeAuthorized(await reload(ready)), false);
   // Nobody but the operator resolves it, and never a stale or mismatched trigger.
   await assert.rejects(engine.execute(workerA, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Clearing the block', expectedRevision: escalated.revision }, id()), /Operator permission required/);
   await assert.rejects(engine.execute(lead, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Clearing my own escalation', expectedRevision: escalated.revision }, id()), /Slice leads cannot perform lifecycle mutations/);
@@ -902,7 +882,7 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   let resolved = await engine.execute(admin, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Dependency change reviewed and accepted', expectedRevision: escalated.revision }, id());
   assert.equal(resolved.escalation, null);
   assert.equal(resolved.gates.find(gate => gate.name === 'merge')!.passed, true);
-  assert.ok(resolved.mergeAuthorization, 'authorization is reissued only after the human resolution');
+  assert.ok(mergeAuthorized(resolved), 'authorization is reissued only after the human resolution');
   assert.deepEqual(currentMergeCandidates([resolved], resolved.observation!.at).map(item => item.key), [resolved.key]);
   await assert.rejects(engine.execute(admin, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Again', expectedRevision: resolved.revision }, id()), /no escalation to resolve/);
   // A concern raised after the merge was requested must still stop the delivery it refuses.
@@ -911,10 +891,10 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   let pending = await candidate(workerB, 'escalation-withdraws-requested-merge', 'product');
   pending = await proven(pending);
   const heldBack = (await recordLeadRuling(store, lead, pending.id, { action: 'send-back', ruleId: 'rules/plan-v1#scope', reason: 'Out of agreed scope' }, id())).work;
-  assert.equal(heldBack.mergeAuthorization, null, 'a blocking ruling withdraws the authorization in its own transaction');
+  assert.equal(mergeAuthorized(heldBack), false, 'a blocking ruling withdraws the authorization in its own transaction');
   assert.equal(heldBack.mergeExecution ?? null, null, 'no merge execution exists to fence');
   const fenced = (await recordLeadRuling(store, lead, pending.id, { action: 'escalate', ruleId: 'rules/safety-v2#supply-chain', reason: 'Dependency review reopened', trigger: 'security-concern' }, id())).work;
-  assert.equal(fenced.mergeAuthorization, null);
+  assert.equal(mergeAuthorized(fenced), false);
   assert.deepEqual(currentMergeCandidates([fenced], fenced.observation!.at), [], 'the withdrawn item is never selected again');
 
   // The resolution itself is append-only history with its audit reason.
@@ -963,11 +943,11 @@ test('integration:bootstrap-compatibility — the single-agent bootstrap flow is
   // The worker's own assertion is recorded, never trusted.
   item = await bootstrap.execute(workerA, 'evidence', item.id, proof(), id());
   assert.equal(item.evidence.at(-1)!.trusted, false);
-  assert.equal(item.gates.find(gate => gate.name === 'acceptance')!.passed, false);
+  assert.equal(currentEvidence(item, 'unit:works'), undefined);
   item = await bootstrap.observe(item.id, item.revision, observation(item));
   item = await bootstrap.execute(reviewer, 'evidence', item.id, proof(), id());
   assert.equal(item.evidence.at(-1)!.trusted, true);
-  assert.equal(item.gates.find(gate => gate.name === 'acceptance')!.passed, true);
+  assert.ok(currentEvidence(item, 'unit:works'));
   assert.equal(item.stage, 'merge');
   // Unsliced work is never constrained by per-lead engineer capacity.
   const peers: Work[] = [];

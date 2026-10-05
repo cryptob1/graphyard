@@ -60,7 +60,7 @@ export function handDecision(work: Work, action: string | undefined, input: unkn
 }
 /**
  * Why a hand merge decision is the one the loop sends the master to, or null while the loop
- * requests it itself. Two cases: a merge GitHub already made without a valid execution, which
+ * requests it itself. Two cases: a merge GitHub already made though its gates had not passed, which
  * only a two-party decision reconciles and the loop names rather than requests; and a loop with
  * no operator-agent identity (`requestsDecisions: false`), whose merge step says the master puts
  * the decision to the approver by hand.

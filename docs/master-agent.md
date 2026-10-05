@@ -90,6 +90,6 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ## GitHub merges
 
-A candidate whose build, review and required checks pass on its head is GitHub's to merge on its branch protection; the merged observation records the delivery ([one delivery path](delivery.md#one-delivery-path)). The loop runs no merge: its merge step only reconciles merged items, and `master merge` says so. A merge of a head whose gates had not passed is held as a violation until a two-party `master decide GY-N merge` reconciles it.
+A candidate whose build, review and required checks pass on its head is GitHub's to merge; its merged observation is the delivery ([one delivery path](delivery.md#one-delivery-path)). The loop's merge step only reconciles merged items, and `master merge` says so. Merging a head whose gates had not passed is held as a violation until a two-party `master decide GY-N merge` reconciles it. Protocol skew shows in `master status` (`… deploy main first`).
 
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).

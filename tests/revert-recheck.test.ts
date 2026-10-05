@@ -292,7 +292,7 @@ test('unit:reverted-delivery-visible — a merged item whose content is not on t
   assert.match(row.attentionOwner!.next, /graphyard master create FILE for a follow-up item that restores src\/a\.ts, tests\/a\.test\.ts to the base branch as GY-A shipped them, naming merge [a-f0-9]{12} of GY-B/);
   assert.match(row.attentionOwner!.next, /request no merge decision for GY-A until the base branch holds its content/);
   const plain = status.work.find(entry => entry.key === 'GY-B')!;
-  assert.match(plain.attention!, /without a valid merge execution/); assert.equal(plain.merged!.reverted, undefined);
+  assert.match(plain.attention!, /though its gates had not passed on that head/); assert.equal(plain.merged!.reverted, undefined);
   assert.deepEqual([status.counts.revertedDeliveries, status.counts.mergedUnreconciled], [1, 1], 'the two are counted apart');
   assert.ok(status.attentionItems.some(entry => entry.subject === 'GY-A' && /reverted delivery/.test(entry.text)));
   // Reported even when the merge itself was authorized: the content is gone either way.

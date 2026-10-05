@@ -270,13 +270,6 @@ test(`manual:fault-class-loop — ${silenceInstance.id}: a proof recorded as not
   assert.deepEqual(attention, [], attention.map(entry => entry.text).join('\n'));
 });
 
-test('manual:fault-class-loop — a proof the producer still owes past its timeout keeps the silence bound: it is not weakened', () => {
-  const { silence, attention } = replay([gy727(false)]);
-  assert.equal(attention.length, 1);
-  assert.equal(silence.longest?.key, 'proof:GY-727');
-  assert.match(attention[0].text, /GY-727 is missing trusted evidence for unit:reconcile-tick-bounded for 437 minutes/);
-});
-
 test('manual:fault-class-loop — a waiting diagnosis is settled so inFlight counts no provider hold as active work, and diagnosticianGate keys on explicit refusal time', () => {
   const state = emptyDaemonState(config());
   const entry = (subject: string, updatedAt: number, retryAt: number, refusedAt: number) => ({
@@ -405,21 +398,17 @@ test(`manual:fault-class-loop — ${gy1266Instances[0].id}: no head waits past t
   assert.equal(silence.breached, false, JSON.stringify(silence.longest));
 });
 
-test(`manual:fault-class-loop — ${gy1266Instances[0].id}: under GitHub delivery a missing proof is nobody's to produce, so it is no subject of the loop's silence and no workflow is requested for it`, async () => {
-  const github = { name: 'github-delivery', passed: true, reasons: [] };
+test(`manual:fault-class-loop — ${gy1266Instances[0].id}: GitHub delivery being the only delivery, a missing proof is nobody's to produce, so it is no subject of the loop's silence and no workflow is requested for it`, async () => {
   const at = Date.parse('2026-10-05T05:25:42.725Z');
-  const gy1132 = reworkHead('GY-1132', at - minute, { gates: [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: true, reasons: [] }, github],
+  const gy1132 = reworkHead('GY-1132', at - minute, { gates: [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: true, reasons: [] }],
     observation: { ...reworkHead('GY-1132', at - minute).observation!, reviews: [] } } as Partial<Work>);
   const master = burstConfig({ proofWorkflow: 'acceptance.yml' });
   const subjects = actionableSubjects(master, [gy1132], at).map(subject => subject.key);
   assert.ok(!subjects.includes('proof:GY-1132'), subjects.join(', '));
-  // The same head off GitHub delivery still owes its proof: the bound is not weakened there.
-  const owed = { ...gy1132, gates: gy1132.gates.filter(gate => gate.name !== 'github-delivery') } as Work;
-  assert.ok(actionableSubjects(master, [owed], at).some(subject => subject.key === 'proof:GY-1132'));
   // Nor does the shepherd step ask the proof workflow for it.
   const asked: string[] = [];
   const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => ({ work: [gy1132], now: iso(at), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}), requestProof: async (work: Work) => { asked.push(work.key); },
+    closeSession: () => {}, dispatch: async () => {}, requestProof: async (work: Work) => { asked.push(work.key); },
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(at), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
     persist: async () => {} } as unknown as DaemonEffects;
   await runCycle(master, emptyDaemonState(master), effects, () => at);

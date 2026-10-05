@@ -112,10 +112,9 @@ test('unit:system-invariants-checked — each invariant driven over its threshol
   // A source that could not be read is not observed, never violated.
   const blind = checkInvariants(emptyInvariantRecord(), { work: [delivered('GY-5', 2 * hour, [session('reviewer-5')])], now: clock, agents: null });
   assert.equal(verdict(blind, 'lingering-sessions').observed, false); assert.deepEqual(invariantFaults(blind), []);
-  // A refused guarded merge, and a gate still failing, are recorded refusals: the stall bound does not apply.
+  // A gate still failing is a recorded refusal: the stall bound does not apply.
   const refusal = emptyInvariantRecord(), stalled = mergeable('GY-10');
   checkInvariants(refusal, { work: [stalled], now: clock });
-  assert.equal(verdict(checkInvariants(refusal, { work: [stalled], now: clock + 20 * minute, refusedMerges: new Set([stalled.id]) }), 'merge-stall').holds, true);
   assert.equal(verdict(checkInvariants(refusal, { work: [{ ...stalled, gates: [{ name: 'merge', passed: false, reasons: ['GitHub reports the pull request behind'] }] } as Work], now: clock + 40 * minute }), 'merge-stall').holds, true);
   // Once GitHub was asked to merge, its own merge state decides: BLOCKED is GitHub not able to merge yet, and a
   // refusal it answered the request with is recorded; CLEAN or UNSTABLE with nothing refusing is the stall (GY-344).
@@ -158,18 +157,17 @@ test('unit:system-invariants-checked — the loop checks every invariant each cy
   const world = () => {
     const now = clock + cycle * 3 * minute;
     return { now, work: [parent, followUp('GY-2', parent), followUp('GY-3', parent), delivered('GY-5', 31 * minute + cycle * 3 * minute, [session('reviewer-5')]), refreshed('GY-8', cycle),
-      // A merge refused by the gate is a recorded refusal; this one is mergeable and nothing refuses it, but the guarded merge is left pending.
+      // A merge refused by the gate is a recorded refusal; this one is mergeable and nothing refuses it, but GitHub never merges it.
       mergeable('GY-10'), untriaged('GY-12', 25 * hour), ...(cycle >= 2 ? [leaseLost('GY-14', 5 * minute)] : []), ...standing] };
   };
   const filed: { title: string; origin: any }[] = [], standing: Work[] = [];
   const state = emptyDaemonState(config());
   state.metrics = metrics(31).map((metric, index) => ({ cycle: index, at: metric.at, durationMs: metric.durationMs, open: 0, actions: 0, stages: {}, lead: { count: 0, p50Ms: 0, p90Ms: 0 },
     production: { count: 0, p50Ms: 0, p90Ms: 0 }, postDeploy: { count: 0, p50Ms: 0, p90Ms: 0 }, postDeployFailures: 0 }));
-  const loop = (index: number, merge: DaemonEffects['merge'] = async () => ({ result: 'GitHub has not merged it yet', pending: true })) => effects({
+  const loop = (index: number) => effects({
     snapshot: async () => { const { now, work } = world(); return { work, now: new Date(now).toISOString() }; },
     agents: () => [{ name: 'reviewer-5', pane_id: 'pane-reviewer-5' }],
     herdr: () => ({ agents: [{ name: 'reviewer-5', pane_id: 'pane-reviewer-5' }], available: true }),
-    // The guarded merge is accepted but GitHub never merges: the stall the merge-stall invariant names.
     controlPlane: async () => ({ build: { commit: index < 2 ? 'build-1' : 'build-2', protocol: 1 } }) as any,
     faultClassPolicy: { threshold: 1, windowHours: 24 },
     fileFaultClass: async (input: any) => {
@@ -194,12 +192,6 @@ test('unit:system-invariants-checked — the loop checks every invariant each cy
   assert.equal(summary.invariants.lines.length, systemInvariants.length);
   for (const invariant of systemInvariants) assert.ok(summary.invariants.lines.some(line => line.startsWith(`${invariant}: VIOLATED`) && /threshold:/.test(line)), `${invariant}: ${summary.invariants.lines.join('\n')}`);
   assert.equal(summary.invariants.violated, systemInvariants.length);
-  // A recorded refusal of the guarded merge clears the merge stall on the next cycle.
-  const refusedState = structuredClone(state);
-  const stuck = world().work.find(entry => entry.key === 'GY-10')!;
-  refusedState.actions[candidateKey('merge', stuck)] = { kind: 'merge', work: 'GY-10', principal: null, state: 'failed', detail: 'Guarded merge refused for GY-10: behind its base', attempts: 1, epoch: null, cycle: refusedState.cycle, at: iso(cycle * 3 * minute) };
-  await runCycle(config(), refusedState, loop(cycle, async () => { throw new Error('Guarded merge refused: behind its base'); }), () => clock + cycle * 3 * minute);
-  assert.equal(refusedState.invariants.report.find(check => check.invariant === 'merge-stall')!.holds, true, refusedState.invariants.report.map(check => check.line).join('\n'));
 });
 
 test('unit:reviewer-repeat-question — the review of a change to the loop, master, merge queue, GitHub adapter or review threads asks what repetition does and requires soak coverage; docs/master-agent.md lists the invariants within the budget', async () => {

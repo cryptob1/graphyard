@@ -409,7 +409,7 @@ export function releaseGuardedEffects(effects: ExecutorEffects, guard: ReleaseGu
 }
 
 /**
- * Exactly one component merges (GY-245). The master loop runs the guarded merge on every cycle —
+ * Exactly one component serves merge rows (GY-245); since GY-1235 GitHub merges and the row only reconciles. Before, the master loop ran the guarded merge on every cycle —
  * routinely with automatic merging on, and for an approved decision with it off — and an executor
  * holding `merge` attempts the same candidate. Each claim writes the item, so the two defeat each
  * other's revision check and the merge is refused as "changed before GitHub verification" on every
@@ -485,10 +485,11 @@ export function installationMerger(input: { loop: { configured: boolean; running
   const declared = !!input.declaration && input.declaration.count > 0 && (input.declaration.kinds === null || input.declaration.kinds.includes('merge'));
   const executors = declared || input.served.includes('merge');
   const merger: 'loop' | 'executors' | 'both' | 'none' = loop && executors ? 'both' : loop ? 'loop' : executors ? 'executors' : 'none';
-  const detail = merger === 'both' ? 'the master loop and the executors both run the guarded merge'
-    : merger === 'loop' ? `the master loop runs the guarded merge${input.loop.autoMerge ? '' : ' for approved decisions'}; the executors do not`
-    : merger === 'executors' ? 'the executors run the guarded merge; no master loop is configured on this host'
-    : 'nothing runs the guarded merge: no master loop is configured and no executor serves merge';
+  // GitHub merges (GY-1235); `merge` names who reconciles what GitHub merged.
+  const detail = merger === 'both' ? 'the master loop and the executors both reconcile what GitHub merges'
+    : merger === 'loop' ? 'the master loop reconciles what GitHub merges; the executors do not'
+    : merger === 'executors' ? 'the executors reconcile what GitHub merges; no master loop is configured on this host'
+    : 'nothing reconciles what GitHub merges: no master loop is configured and no executor serves merge';
   const attention: AttentionItem[] = merger === 'both' ? [{ subject: 'installation',
     text: `Two components merge: the master loop${input.loop.running ? ' is running' : ' is installed'} and the executors serve merge${declared ? ` (this host declares ${input.declaration!.kinds ? input.declaration!.kinds.join(', ') : 'every kind'})` : ' (a live executor serves it)'}. Each one's claim writes the item and defeats the other's revision check, so merges are refused while every gate passes`,
     ...agentOwner('master', 'node scripts/graphyard-executor.mjs --install (writes the executor kinds without merge while the loop merges), then systemctl --user restart graphyard-executor@*.service') }] : [];

@@ -96,14 +96,13 @@ test('unit:authorized-head-enqueued — an authorized head gets Graphyard / merg
   assert.deepEqual(unauthorized.checks().map(body => [body.head_sha, body.conclusion]), [[head, 'failure']]);
   assert.equal(unauthorized.named('enqueuePullRequest').length + unauthorized.named('enablePullRequestAutoMerge').length, 0, 'an unauthorized head is never enqueued');
 
-  // Authorized but never requested (automatic merging off, no approved decision yet): not enqueued.
-  const unrequested = fakeGitHub();
-  assert.equal((await gateMerge(unrequested.github, item, null)).action.kind, 'hold');
-  assert.equal(unrequested.named('enqueuePullRequest').length, 0);
-  // A request for another head does not authorize this one.
-  const stale = fakeGitHub();
-  assert.equal((await gateMerge(stale.github, item, { ...requested(item), sha: moved })).action.kind, 'hold');
-  assert.equal(stale.named('enqueuePullRequest').length, 0);
+  // GitHub delivery is the only delivery (GY-1235): every passing gate is the whole authorization,
+  // so a head with no merge request recorded, or one recorded for another head, is enqueued all the same.
+  for (const request of [null, { ...requested(item), sha: moved }]) {
+    const unrequested = fakeGitHub();
+    assert.equal((await gateMerge(unrequested.github, item, request)).action.kind, 'enqueue');
+    assert.deepEqual(unrequested.named('enqueuePullRequest').map(entry => entry.variables), [{ id: pullRequestId, head }]);
+  }
 });
 
 test('unit:withdrawal-dequeues — a head change, a failing gate and a policy change each fail the check for that head and dequeue the pull request', async () => {

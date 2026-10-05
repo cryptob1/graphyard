@@ -605,7 +605,7 @@ export interface ExecutorSupervision {
   units: { slot: number; unit: string; active: string }[];
   /** Instances above the declared count that were disabled. */
   disabled: string[];
-  /** Which component runs the guarded merge on this host, and why the kinds are what they are. */
+  /** Which component reconciles what GitHub merges on this host, and why the kinds are what they are. */
   merger: string;
   next: string;
 }
@@ -644,7 +644,7 @@ export async function installExecutorSupervision(root: string, options: { count?
   const loop = options.loop !== undefined ? options.loop : await (await import('./executor.js')).detectLoopMerger(primary, { unitDirectory: options.unitDirectory });
   const kinds = executorMergeKinds(options.kinds !== undefined ? options.kinds : existing?.kinds ?? null, loop, options.kinds !== undefined);
   const declaration = executorDeclarationSchema.parse({ ...(existing ?? defaultExecutorDeclaration), ...(options.count !== undefined ? { count: options.count } : {}), kinds, ...(options.intervalSeconds !== undefined ? { intervalSeconds: options.intervalSeconds } : {}) });
-  const merger = loop ? `${loop.name} merges, so the executors serve ${declaration.kinds!.join(', ')} and never merge` : 'no master loop merges on this host, so the executors run the guarded merge';
+  const merger = loop ? `${loop.name} merges, so the executors serve ${declaration.kinds!.join(', ')} and never merge` : 'no master loop merges on this host, so the executors reconcile what GitHub merges';
   const written = await writeExecutorDeclaration(primary, declaration);
   const run = options.run ?? systemctl;
   const manager = systemdUserManager(run);

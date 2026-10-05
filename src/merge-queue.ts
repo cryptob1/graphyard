@@ -1190,7 +1190,7 @@ export function ejectionReason(work: Work, ciAppIds: number[], all: Work[] = [],
   // A refused reconciliation is a reported adverse conclusion about the entry itself (GY-94).
   if (work.observation?.merged) {
     const refusal = refusedReconciliation(work);
-    return refusal ? `Pull request was merged without a valid merge execution and can never publish a speculative tip; reconciliation by decision ${refusal.decision} was refused, so the entry leaves the queue undelivered` : null;
+    return refusal ? `Pull request was merged though its gates had not passed and can never publish a speculative tip; reconciliation by decision ${refusal.decision} was refused, so the entry leaves the queue undelivered` : null;
   }
   if (!work.submission || work.reworkRequested) return 'Implementation returned to the worker for a new attempt';
   if (work.policyRevision !== work.queue.policyRevision) return `Policy revision changed from ${work.queue.policyRevision} to ${work.policyRevision} after this entry was queued`;
