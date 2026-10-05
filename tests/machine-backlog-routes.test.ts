@@ -1,19 +1,16 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
-import { followUpItem } from '../src/review-threads.js';
-import { followUpEntries } from '../src/model/machine-backlog.js';
 import { isClosed, type Principal, type Work } from '../src/model.js';
 
-// GY-402 against a real Postgres and the real routes: a later approval's findings appended to the
-// parent's one follow-up item, the one-time migration recorded in history, and triage — a release
-// applied at once, a closure applied only once an independent approver approves it.
+// GY-402 against a real Postgres and the real routes: triage of the follow-up items filed before
+// GY-1249 retired the filing — a release applied at once, a closure applied only once an
+// independent approver approves it, and a merge that appends to an open follow-up item, filing none.
 const repository = 'owner/machine-backlog';
 const operator: Principal = { id: 'backlog-operator', role: 'admin', sessionKind: 'ai' };
 const approver: Principal = { id: 'backlog-approver', role: 'admin', sessionKind: 'ai' };
@@ -34,11 +31,15 @@ const ok = async (principal: Principal, path: string, body?: unknown, key?: stri
 };
 const reload = async (key: string) => (await store.list()).find(item => item.key === key)!;
 const events = async (work: Work) => (await store.pool.query('SELECT actor, kind, payload FROM events WHERE work_id=$1 ORDER BY seq', [work.id])).rows as { actor: string; kind: string; payload: any }[];
-/** A follow-up item as the loop files it: `withOrigin` false for one filed before GY-402. */
-async function followUp(parent: Work, reviewId: number, findings: string[], withOrigin = true) {
-  const item = followUpItem({ key: parent.key, workId: parent.id, pr: 7, sha: String(reviewId).padEnd(40, 'a'), reviewId }, [], findings.map(text => ({ path: text.split(' ')[0]!, line: null, text })));
-  const { origin, ...legacy } = item;
-  return ok(operator, 'work', { ...(withOrigin ? item : legacy), policy: { checks: ['test'], review: true } }) as Promise<Work>;
+/** A follow-up item as the loop filed it before GY-1249, created directly as a stored fixture. */
+async function followUp(parent: Work, reviewId: number, findings: string[]) {
+  const entries = findings.map(text => ({ path: text.split(' ')[0]!, text }));
+  return ok(operator, 'work', {
+    title: `Follow-ups from the approved review of ${parent.key} (PR #7)`, description: `Review ${reviewId}.\n\n${entries.map((entry, index) => `${index + 1}. Finding with no thread: ${entry.text}`).join('\n')}`,
+    type: 'chore', priority: 2, dependencies: [], plannedFiles: entries.map(entry => entry.path),
+    criteria: [{ id: 'AC-1', text: 'Each follow-up listed in the description is addressed in code, or declined with a recorded reason.', proofs: ['manual:review-followups-triaged'] }],
+    origin: { reviewFollowUps: { parent: parent.key, findings: entries } }, policy: { checks: ['test'], review: true },
+  }) as Promise<Work>;
 }
 
 before(async () => {
@@ -52,59 +53,6 @@ before(async () => {
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
 after(async () => { http?.close(); await store?.close(); await database?.stop(); });
-
-test('unit:one-followup-per-parent — the followups route appends only the findings the item lacks, is idempotent, and refuses an item that is not an open follow-up', async () => {
-  const parent = await ok(operator, 'work', { title: 'Parent A', plannedFiles: ['src/a.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:a'] }] }) as Work;
-  const item = await followUp(parent, 11, ['src/a.ts — the retry is unbounded']);
-  assert.equal(item.origin?.reviewFollowUps?.parent, parent.key);
-  const body = { findings: [{ path: 'src/a.ts', text: 'src/a.ts:30 — the retry is unbounded' }, { path: 'src/b.ts', text: 'src/b.ts — the cache never expires' }], reason: 'approval 12' };
-  const first = await ok(coordinator, `work/${item.key}/followups`, body, 'append-12');
-  assert.deepEqual({ key: first.key, added: first.added, findings: first.findings }, { key: item.key, added: 1, findings: 2 });
-  // The same approval retried returns the same answer; nothing is appended twice.
-  assert.deepEqual(await ok(coordinator, `work/${item.key}/followups`, body, 'append-12'), first);
-  const again = await ok(coordinator, `work/${item.key}/followups`, { ...body, reason: 'approval 13' });
-  assert.equal(again.added, 0, 'every finding of a later approval is already held');
-  const current = await reload(item.key);
-  assert.equal(followUpEntries(current).length, 2);
-  assert.equal(current.description.match(/the cache never expires/g)?.length, 1);
-  assert.deepEqual((await events(current)).filter(event => event.kind === 'followups.appended').map(event => event.payload.details?.added ?? event.payload.added), [1]);
-  // A worker may not append. An operator item is not a follow-up item: an approval's findings posted
-  // for it are recorded on its own record (GY-896). A closed follow-up item refuses the append.
-  assert.equal((await call(worker, `work/${item.key}/followups`, body)).status, 403);
-  assert.deepEqual(await ok(coordinator, `work/${parent.key}/followups`, body), { key: parent.key, added: 2, findings: 2 });
-  await ok(coordinator, `work/${item.key}/close`, { kind: 'obsolete', reason: 'Superseded in this test' });
-  const refused = await call(coordinator, `work/${item.key}/followups`, { ...body, reason: 'approval 14' });
-  assert.equal(refused.status, 409);
-  assert.match(refused.body.error, /not an open follow-up item/);
-});
-
-test('unit:followup-migration-merges — the one-time migration merges each parent\'s duplicates into its oldest open item, closes the rest naming it, records itself in history, and does not run twice', async () => {
-  const parent = await ok(operator, 'work', { title: 'Parent B', plannedFiles: ['src/b.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:b'] }] }) as Work;
-  const oldest = await followUp(parent, 21, ['src/b.ts — first finding'], false);
-  const middle = await followUp(parent, 22, ['src/b.ts — first finding', 'src/c.ts — second finding'], false);
-  const newest = await followUp(parent, 23, ['src/d.ts — third finding'], false);
-  const result = await ok(coordinator, 'followups/migrate', {});
-  assert.equal(result.merged, 2);
-  assert.deepEqual(result.survivors.find((entry: any) => entry.key === oldest.key), { key: oldest.key, absorbed: [middle.key, newest.key], added: 2 });
-  const survivor = await reload(oldest.key);
-  assert.equal(survivor.stage, 'backlog');
-  assert.deepEqual(followUpEntries(survivor).map(entry => entry.text), ['src/b.ts — first finding', 'src/c.ts — second finding', 'src/d.ts — third finding']);
-  for (const key of [middle.key, newest.key]) {
-    const closed = await reload(key);
-    assert.ok(isClosed(closed));
-    assert.equal(closed.closure?.ref, oldest.key);
-    assert.ok((await events(closed)).some(event => event.kind === 'work.closed'));
-  }
-  assert.ok((await events(survivor)).some(event => event.kind === 'followups.merged'));
-  const recorded = (await store.pool.query("SELECT payload FROM events WHERE kind='followups.migrated'")).rows;
-  assert.equal(recorded.length, 1);
-  assert.equal(recorded[0].payload.merged, result.merged);
-  // One-time: a second run changes nothing and says it already ran.
-  const repeat = await ok(coordinator, 'followups/migrate', {});
-  assert.equal(repeat.already, true);
-  assert.equal(repeat.merged, result.merged);
-  assert.equal((await store.list()).length, 6, 'nothing was deleted');
-});
 
 test('unit:machine-backlog-triaged — a triage release applies at once with its priority; a triage closure waits for an independent approver and a refusal returns the item to triage', async () => {
   const parent = await ok(operator, 'work', { title: 'Parent C', plannedFiles: ['src/e.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:c'] }] }) as Work;
@@ -144,4 +92,21 @@ test('unit:machine-backlog-triaged — a triage release applies at once with its
   assert.equal(closed.closure?.ref, shipped.key);
   assert.equal(closed.triage?.state, 'applied');
   assert.equal(closed.triage?.decision, decision.id);
+});
+
+test('unit:machine-backlog-triaged — a triage merge appends the merged item\'s findings to the open follow-up item it names, deduplicated, and creates no item', async () => {
+  const parent = await ok(operator, 'work', { title: 'Parent D', plannedFiles: ['src/g.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:d'] }] }) as Work;
+  const into = await followUp(parent, 41, ['src/g.ts — the bound is unchecked']);
+  const merging = await followUp(parent, 42, ['src/g.ts — the bound is unchecked', 'src/h.ts — the cache never expires']);
+  const before = (await store.list()).length;
+  const judged = await ok(coordinator, `work/${merging.key}/triage`, { judgement: { outcome: 'merge', into: into.key, reason: 'the same parent' } }) as Work;
+  const decision = await ok(operator, `work/${merging.key}/decide`, { action: 'close', input: { kind: 'duplicate', ref: into.key, reason: `Merged into ${into.key} by triage: the same parent`, triageAt: judged.triage!.at }, reason: 'triage judged it a duplicate' });
+  const approved = await ok(approver, `work/${merging.key}/approve`, { decision: decision.id, reason: 'Same parent, same findings' });
+  assert.equal(approved.state, 'applied', JSON.stringify(approved));
+  assert.ok(isClosed(await reload(merging.key)));
+  const merged = await reload(into.key);
+  assert.deepEqual(merged.origin?.reviewFollowUps?.findings.map(entry => entry.text), ['src/g.ts — the bound is unchecked', 'src/h.ts — the cache never expires']);
+  assert.match(merged.description ?? '', /merged from GY-\d+:\n\d+\. src\/h\.ts — the cache never expires/);
+  assert.ok((await events(merged)).some(event => event.kind === 'followups.appended'));
+  assert.equal((await store.list()).length, before, 'the merge created no item');
 });
