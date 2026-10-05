@@ -14,12 +14,12 @@ import { companionGround, itemDocumentationPaths, namedPaths, pathScope, pathSco
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
 import type { ResearchRecord } from '../research.js';
-import type { RepairAudit } from '../master/repair-lane.js';
+import type { DecompositionRecord } from '../decomposition.js';
 import type { Closure } from './closure.js';
 import type { PendingFollowUps, TriageRecord } from './machine-backlog.js';
 import { proofSchema } from './proof.js';
 import { closedQuestionsSchema } from './closed-question.js';
-import { workOriginSchema } from './interventions.js';
+import { workOriginSchema, type WorkOrigin } from './interventions.js';
 import { demand } from './refusal.js';
 
 export const CHECK_NAME = 'Graphyard / merge', LANDABLE_CHECK = 'graphyard/landable'; // GY-887: both are Graphyard's own, never CI inputs to the verdict
@@ -57,12 +57,8 @@ export const createSchema = z.object({
   // loop owns for it (src/cli/hand-actions.ts). New items take the shipped default; an item
   // created before the field existed carries none and is not system-driven.
   systemDriven: z.preprocess(value => value === undefined ? systemDrivenDefault : value, z.boolean().optional()),
-  // Research before build (GY-259): a feature item is researched unless this is false, and any
-  // other item only when it is true. See src/research.ts.
-  research: z.boolean().optional(),
-  // A repair to Graphyard's own merge path (GY-406): allowed only when every plannedFiles entry is
-  // inside the merge path, and it opens the audited repair lane (src/master/repair-lane.ts).
-  repair: z.literal('merge-path').optional(),
+  // `research` (GY-259, src/research.ts): false skips a feature's research, true researches any item. `split` (GY-1126, src/decomposition.ts): false never splits it before first dispatch, true splits it even within the size bounds.
+  research: z.boolean().optional(), split: z.boolean().optional(),
 }).strict();
 export type Create = z.infer<typeof createSchema>;
 // The `decision:*` capabilities request a two-party decision (see model/approval.ts); an agent
@@ -111,7 +107,7 @@ export interface Observation {
   prState?: 'open' | 'closed'; draft?: boolean; prCreatedAt?: string;
   candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number; source?: 'status' }[]; // `status`: a required context's commit status, app 0 (GY-1060)
   reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string; body?: string; blocking?: string[] }[]; // body: a change request's text, read past the review-round cap; blocking: its BLOCKING: findings, read from the whole body (GY-1118)
-  merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
+  merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean; mergeableState?: string; // GitHub's `mergeable_state` as last read (clean, unstable, blocked, behind, dirty, unknown, ...); unset before GY-1231
   // GitHub computed a merge conflict with the base (`pr.mergeable === false`), not merely still computing it;
   // a conflicting head is withheld and sent back (GY-191). `disproved` keeps GitHub's raw reading a test merge disproved (GY-390).
   conflicting?: boolean; disproved?: { mergeable: boolean; conflicting: boolean; reading: string };
@@ -173,10 +169,10 @@ export interface Work extends Create {
    * are kept in `humanRequests` (see model/human-request.ts).
    */
   humanRequest?: HumanRequest | null; humanRequests?: HumanRequest[]; /** The loop's last probe of the blocker's cause (GY-1008). */ blockerProbe?: import('./blocker-class.js').BlockerProbe | null;
-  /** What the research step found before build, and the product questions it asked (src/research.ts). */
-  researchBrief?: ResearchRecord | null;
+  /** What the research step found before build, and the product questions it asked (src/research.ts); the decomposition run before first dispatch and the split relation it recorded, set only by the control plane (src/decomposition.ts). */
+  researchBrief?: ResearchRecord | null; decomposition?: DecompositionRecord | null; parent?: string | null; children?: string[];
   /** Set when the item was closed without delivery (model/closure.ts); a closed item is `done` but never delivered. */
-  closure?: Closure | null; triage?: TriageRecord | null; pendingFollowUps?: PendingFollowUps | null; // triage: a machine-filed item's judgement (GY-402); pendingFollowUps: follow-ups held until it ships (GY-845), model/machine-backlog.ts
+  closure?: Closure | null; triage?: TriageRecord | null; pendingFollowUps?: PendingFollowUps | null; // triage: a machine-filed item's judgement (GY-402); pendingFollowUps: follow-ups held until it shipped (GY-845), stored before GY-1249 and never written now, model/machine-backlog.ts
   /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */
   capacity?: CapacityState | null;
   queue?: QueueEntry | null; queueSequence?: number; queueEjection?: QueueEjection | null; queueHistory?: QueueHistoryEntry[];
@@ -206,8 +202,9 @@ export interface Work extends Create {
   sessions?: SessionHandle[];
   mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; committingAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null } | null;
   delivery?: Delivery;
-  /** Set when the delivery was merged through the repair lane (GY-406): its audit entry. */
-  repairLane?: RepairAudit | null;
+  /** Retired repair lane (GY-406, removed by GY-1234): stored items keep loading; nothing reads these. */
+  repair?: 'merge-path';
+  repairLane?: Record<string, unknown> | null;
   /**
    * Independently observed production delivery, one record per environment: the first
    * release whose verified common interval covered the whole expected manifest while this
@@ -247,9 +244,7 @@ export function activeLease(work: Work, actor: Principal, epoch: number, now: Da
 // ---- plannedFiles derived from the criteria (GY-140) ---------------------------------------------
 
 interface CriterionText { id: string; text: string; proofs?: readonly string[] }
-const creationWords = /\b(new|creat\w*|add(?:s|ed|ing)?|introduc\w*)\b/i;
-const testPath = /(^|\/)tests?\/|\.test\.[A-Za-z]+$/;
-const sentences = (text: string) => text.split(/(?<=[.!?;])\s+/);
+const creationWords = /\b(new|creat\w*|add(?:s|ed|ing)?|introduc\w*)\b/i, testPath = /(^|\/)tests?\/|\.test\.[A-Za-z]+$/, sentences = (text: string) => text.split(/(?<=[.!?;])\s+/);
 /** True when the tree holds the planned scope: the file itself, or any file under a directory scope. */
 export function scopeExists(path: string, tree: ReadonlySet<string>) {
   const scope = pathScope(path);
@@ -264,8 +259,7 @@ export function scopeExists(path: string, tree: ReadonlySet<string>) {
  * test, since "a test asserts …" is a criterion describing the test it will be written in.
  */
 export function describedAsNew(path: string, criteria: readonly CriterionText[]) {
-  return criteria.find(criterion => sentences(criterion.text).some(sentence => creationWords.test(sentence) && namedPaths(sentence).some(named => pathScopeContains(named, path)))
-    || testPath.test(path) && /\btests?\b/i.test(criterion.text))?.id ?? null;
+  return criteria.find(c => sentences(c.text).some(s => creationWords.test(s) && namedPaths(s).some(n => pathScopeContains(n, path))) || testPath.test(path) && /\btests?\b/i.test(c.text))?.id ?? null;
 }
 export interface PlannedFilesDerivation {
   plannedFiles: string[];
@@ -281,15 +275,18 @@ export interface PlannedFilesDerivation {
  * description mentions in prose is not a requirement and adds nothing — and only exact files
  * are carried: a criterion naming a directory widens nothing on its own. So are a change's inevitable companions (GY-955, model/scope-companions.ts).
  */
-export function derivePlannedFiles(item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[]; documentation?: ItemDocumentation | null }, tree: ReadonlySet<string>): PlannedFilesDerivation {
-  const planned = [...new Set(item.plannedFiles ?? [])];
+export function derivePlannedFiles(
+  item: { plannedFiles?: readonly string[]; criteria: readonly CriterionText[]; documentation?: ItemDocumentation | null; origin?: WorkOrigin | null; description?: string | null },
+  tree: ReadonlySet<string>,
+): PlannedFilesDerivation {
+  const planned = [...new Set(item.plannedFiles ?? [])], added: PlannedFilesDerivation['added'] = [];
   const missing = planned.filter(path => !scopeExists(path, tree) && !describedAsNew(path, item.criteria));
-  const added: PlannedFilesDerivation['added'] = [];
   for (const criterion of item.criteria) for (const path of namedPaths(criterion.text)) {
-    if (!tree.has(path) || planned.some(entry => pathScopeContains(entry, path)) || added.some(entry => entry.path === path)) continue;
-    added.push({ path, criterion: criterion.id });
+    if (tree.has(path) && !planned.some(entry => pathScopeContains(entry, path)) && !added.some(entry => entry.path === path)) added.push({ path, criterion: criterion.id });
   }
-  for (const entry of plannedCompanions({ plannedFiles: [...planned, ...added.map(entry => entry.path)], criteria: item.criteria }, tree, itemDocumentationPaths(item))) added.push({ path: entry.path, criterion: entry.criterion ?? 'DOCS' });
+  for (const entry of plannedCompanions({ plannedFiles: [...planned, ...added.map(entry => entry.path)], criteria: item.criteria, origin: item.origin, description: item.description }, tree, itemDocumentationPaths(item))) {
+    if (!added.some(entry2 => entry2.path === entry.path) && !planned.some(entry2 => pathScopeContains(entry2, entry.path))) added.push({ path: entry.path, criterion: entry.criterion ?? 'DOCS' });
+  }
   return { plannedFiles: [...planned, ...added.map(entry => entry.path)], added, missing };
 }
 export function plannedFilesRefusal(missing: readonly string[], base: string) {

@@ -19,7 +19,7 @@ const skipWithoutDocker = await (async () => {
 
 const inputsFor = (provider: Provider) => ({ repository: 'owner/project', provider,
   ...(provider === 'railway' || provider === 'compose' ? {} : { sshHost: '203.0.113.10', sshUser: 'root', domain: 'graphyard.example.test' }),
-  ...(provider === 'hetzner' ? { sshKey: 'graphyard-key' } : {}) });
+  ...(provider === 'hetzner' ? { sshKey: 'graphyard-key', maxMonthly: 50 } : {}) });
 
 const bundle = (fixture: Harness, name: string) => {
   const stores = [fixture.transport.files, ...[...fixture.remotes.values()].map(remote => remote.files)];
@@ -34,6 +34,7 @@ async function apply(fixture: Harness, provider: Provider) {
 
 test('--apply provisions Postgres and the application, sets every variable, and reaches a healthy HTTPS URL on each adapter', async () => {
   const expectedUrl: Record<Provider, string> = {
+    host: 'https://graphyard.example.test',
     railway: 'https://graphyard-owner-project.up.railway.app',
     hetzner: 'https://graphyard.example.test',
     'docker-host': 'https://graphyard.example.test',
@@ -220,7 +221,8 @@ test('the App-bound merge check is required only once Graphyard has published it
   const published = await harness({ provider: 'compose', protection: { required_status_checks: { strict: false, checks: [{ context: CHECK_NAME, app_id: null }] }, enforce_admins: { enabled: false }, required_pull_request_reviews: { required_approving_review_count: 0 } } });
   try {
     const { summary } = await apply(published, 'compose');
-    const put = published.transport.commands.filter(command => command.args.includes('--method') && command.args.includes('PUT')).at(-1)!;
+    // The last protection write; the release pipeline's GitHub environments are PUTs of their own.
+    const put = published.transport.commands.filter(command => command.args.includes('--method') && command.args.includes('PUT') && command.args.some(arg => arg.endsWith('/protection'))).at(-1)!;
     const payload = JSON.parse(put.input!);
     const merge = payload.required_status_checks.checks.find((check: any) => check.context === CHECK_NAME);
     assert.equal(merge.app_id, GRAPHYARD_APP_ID, 'the merge check must be bound to the Graphyard App');
@@ -290,7 +292,8 @@ test('a uid-1000 container reads the key a real transport wrote, through a real 
     const context: AdapterContext = {
       provider: 'compose', repository: 'owner/project', installId: 'key-mount', service: 'graphyard-key-mount',
       domain: null, image: 'alpine:3', workdir, sourceRoot: workdir, sshHost: null, sshUser: 'root',
-      sshKey: null, workspace: null, serverType: '', location: '', databasePassword: 'database-password-for-the-key-mount-test',
+      sshKey: null, workspace: null, serverType: '', serverTypeExplicit: false, plannedAgents: 2, location: '', databasePassword: 'database-password-for-the-key-mount-test',
+      host: null, spend: { maxMonthly: null, confirmPrice: null },
       port: 4310, dataPath: null, railwayDir: `${workdir}/railway`, wait: async () => {}, transport: docker, ssh: () => docker, fetch, vault: new Vault(),
     };
     await composeAdapter.setEnv(context, [{ name: 'GITHUB_PRIVATE_KEY', value: appKey, secret: true }]);

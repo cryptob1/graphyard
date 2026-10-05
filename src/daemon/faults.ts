@@ -5,6 +5,7 @@ import type { Work } from '../model.js';
 import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, standingScopeRequest, statusFaults, trackFaults, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
 import { buildMasterStatus, diskThresholdBytes, type AttentionItem, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
+import { hostMemoryAttention } from '../master-resources.js';
 import { qualifyTimingFailures, type CheckAnnotations } from '../cli/timing-failures.js';
 import { type DaemonAction, type DaemonState, faultActionKey, message } from './state.js';
 import { readyToRetry } from './sessions.js';
@@ -18,8 +19,9 @@ import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { diagnosisStep, standingFaultClassItem } from './diagnosis.js';
 import { candidateKey } from './reconcile.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
-import { currentRestore } from '../merge-queue.js';
+import { baseRefreshConflict, currentRestore } from '../merge-queue.js';
 import { mergeBaseDismissal } from '../merge-base-ancestry.js';
+import { openAction } from '../model/next-action.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
 export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[];
@@ -75,11 +77,17 @@ export function cycleFaults(state: DaemonState, work: Work[], now: number, sourc
     for (const item of classifyAttention(sources.attribute ? sources.attribute(listed) : listed.attentionItems))
       if (item.kind !== 'gate' && item.kind !== 'containment-grace' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))
         && !(item.kind === 'contaminated' && restoreInMotion(byKey.get(item.subject), now))
-        && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now)))
+        && !(item.kind === 'base-conflict' && baseConflictInMotion(byKey.get(item.subject), now))
+        && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now))
+        && !(item.kind === 'owed-decision' && owedReworkLine(byKey.get(item.subject), item.text) && reworkDecisionInMotion(byKey.get(item.subject), now)))
         derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
     const reclaim = state.reclaim, below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
     if (reclaim && (below(reclaim.freeBytes, diskThresholdBytes(config)) || below(reclaim.rootFreeBytes, worktreeRootMinFreeBytes(config))))
       derived.push({ ...classified('disk-pressure'), subject: 'disk', text: `Free space below its configured bound at the last reclaim (${reclaim.at})` });
+    // A host below its memory floor defers every launch on it (GY-612): one instance for the whole dip. A fault is its
+    // wording, and the attention item's text names consumers whose ranking moves from cycle to cycle, so this wording
+    // carries none of it — the attention item keeps the moving detail, and the instance stands until memory recovers.
+    for (const item of hostMemoryAttention(state.memory)) derived.push({ ...classified('memory-pressure'), subject: item.subject, text: 'Host memory is below its floor: new session launches on this host are deferred until it recovers (the memory attention item names the current top consumers)' });
   }
   // The reported attention names each unserved executor kind on the item it holds, and master status already derived its installation
   // lines from the same status: the status's copy of those lines is not a second fault (distinct faults of one kind stay distinct).
@@ -109,6 +117,37 @@ export function restoreInMotion(work: Work | undefined, now: number): boolean {
   const since = restore ? restore.requested?.at ?? ejected?.at : ejected?.at;
   return !!since && now - Date.parse(since) <= restoreWaitBoundMs;
 }
+/**
+ * GY-1269. Whether an owed line names the item's rework decision: its open action is `request-rework`
+ * and the line carries that action's own owed decision (`needsHuman.decision`), the phrase
+ * `humanNeededActions` puts in the action's row and `humanNeededAttention` reports. The phrase is
+ * read from the item, not restated here, so rewording it in concerns.ts or the line around it in
+ * owed-report.ts cannot silently disarm the rework guard. A concern carried beside the action
+ * (a standing escalation) is owed under its own decision, so its line is not this one and counts at once.
+ */
+export function owedReworkLine(work: Work | undefined, text: string): boolean {
+  const action = work && openAction(work);
+  const decision = action?.kind === 'request-rework' ? action.needsHuman?.decision : undefined;
+  return !!decision && text.includes(decision);
+}
+/** How long a rework decision (a new head owed by `request-rework`) may stay owed before it counts as a decision fault (GY-1251). */
+export const reworkDecisionWaitBoundMs = 30 * 60_000;
+/**
+ * GY-1251. Whether the rework decision an item owes is still in motion: its open action is
+ * `request-rework` and the queue row for that action was requested within `reworkDecisionWaitBoundMs`.
+ * The loop requests that decision and supervises its approver session on its own (cycle-decisions
+ * step 4c), so a new head owed for minutes after a failed CI rerun or a reviewer's changes is the
+ * ordinary rework round, not a decision fault (GY-1168, GY-1244, GY-1238, GY-1062, GY-1124 on
+ * 5 October 2026: each counted 15s to 4m after the action was computed). A rework owed past the
+ * bound counts, as does one with no queue row to date it; an owed escalation is never in motion here.
+ */
+export function reworkDecisionInMotion(work: Work | undefined, now: number): boolean {
+  const action = work && openAction(work);
+  if (action?.kind !== 'request-rework') return false;
+  const row = (work!.actionQueue?.actions ?? []).find(entry => entry.kind === action.kind && entry.binding === action.binding);
+  const since = row?.requestedAt ? Date.parse(row.requestedAt) : Number.NaN;
+  return Number.isFinite(since) && now - since <= reworkDecisionWaitBoundMs;
+}
 /** How long an approval dismissed for a merge-base change may stay in motion before it counts as a review-convergence fault (GY-1140). */
 export const mergeBaseDismissalWaitBoundMs = 30 * 60_000;
 /**
@@ -125,6 +164,23 @@ export function mergeBaseDismissalInMotion(work: Work | undefined, now: number):
   if (!dismissal?.at) return false;
   const since = Date.parse(dismissal.at);
   return Number.isFinite(since) && now - since <= mergeBaseDismissalWaitBoundMs;
+}
+/**
+ * GY-1129. Whether a base refresh conflict is still in motion: the candidate has a confirmed conflict
+ * with the base branch, first found on this head within `restoreWaitBoundMs` (the time the loop takes
+ * to return the item and decide its rework). The control plane requests and approves that rework on
+ * its own, so a conflict that recent is a step it is already handling, not a merge fault (GY-501,
+ * GY-1073, GY-417 on 3 October 2026: each counted within minutes of the conflict). `reworkRequested`
+ * plays no part: a conflict still standing past the bound counts as a merge fault whether or not rework
+ * was requested. The bound runs from the first conflict on this head (`conflictSince`, GY-1200), not
+ * from the latest refresh: each refresh onto a new base tip re-records the conflict, and on a base that
+ * moves more often than the bound an unhandled conflict would otherwise never count.
+ */
+export function baseConflictInMotion(work: Work | undefined, now: number): boolean {
+  if (!work?.candidate) return false;
+  if (!baseRefreshConflict(work)) return false;
+  const since = work.baseRefresh?.conflictSince ?? work.baseRefresh?.at;
+  return !!since && now - Date.parse(since) <= restoreWaitBoundMs;
 }
 /**
  * The timing-dependent check failures `master status` names (qualifyTimingFailures), for the loop to
@@ -336,7 +392,7 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   endFailingRuns(state, policy, clock);
   // The system invariants (GY-404): properties of the running pipeline no per-item gate can see,
   // judged on each observation over the same snapshot; each violation is one fault of its class below.
-  const invariants = checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, approvals: state.approvals,
+  const invariants = checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, approvals: state.approvals, docsSyncs: state.docsSyncs,
     agents: herdrRead.available ? seen : null, build: controlPlane?.build?.commit ?? null,
     refusedMerges: new Set(snapshot.work.filter(item => item.candidate && state.actions[candidateKey('merge', item)]?.state === 'failed').map(item => item.id)) });
   trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available, scopeRoutes: !!effects.decide && !!effects.approver }), ...invariantFaults(invariants)],

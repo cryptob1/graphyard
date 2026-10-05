@@ -1,34 +1,22 @@
 <!-- page: Build integrations | 6 | E2E passes. -->
 # Evidence reuse and replay
 
-Reuse lets the newest compatible E2E pass stand for a new head.
-
-## Reuse policy
-
-Reuse is off until the operator defines a `reuse` policy with `graphyard validation define`:
+With an operator `reuse` policy (`graphyard validation define`), the newest compatible E2E pass stands for new heads:
 
 ```json
-{"kind":"reuse","id":"preview-reuse","expectedRevision":0,"environment":{"id":"preview","revision":1},"enabled":true,
- "freshnessSeconds":86400,"artifacts":"identical",
- "relevant":{"dependencies":["package.json","**/package.json"],"lockfiles":["package-lock.json","**/yarn.lock"],
-  "buildInputs":["Dockerfile","tsconfig.json",".github/workflows/**"],"configuration":["config/**",".env.example","compose.yaml"],
-  "migrations":["migrations/**"],"services":{"api":["src/**"]}},
- "ignorable":["docs/**","*.md"]}
+{"kind":"reuse","id":"preview-reuse","expectedRevision":0,"environment":{"id":"preview","revision":1},"enabled":true,"freshnessSeconds":86400,"artifacts":"identical","relevant":{"dependencies":["package.json","**/package.json"],"lockfiles":["package-lock.json","**/yarn.lock"],"buildInputs":["Dockerfile","tsconfig.json",".github/workflows/**"],"configuration":["config/**",".env.example","compose.yaml"],"migrations":["migrations/**"],"services":{"api":["src/**"]}},"ignorable":["docs/**","*.md"]}
 ```
 
-`relevant.services` names every environment service. A changed relevant path forbids reuse; a path matching neither list is **unknown, and unknown refuses**. `identical` requires the same artifact manifest; `scoped` allows another when build inputs are unchanged and every change is ignorable.
+`relevant.services` lists every service; changed relevant paths forbid reuse and paths in neither list are **unknown, and unknown refuses**. `artifacts`: `identical` or `scoped`.
 
-## Reuse decisions
-
-After a builder attests the new head, `graphyard validation reuse decision.json`:
+Per attested new head: `graphyard validation reuse decision.json`:
 
 ```json
-{"workId":"9a7d6b2f-4e1c-4c5a-9f3e-2b8d1c0a7e51","expectedWorkRevision":12,"proof":"e2e:confirmed-booking-sends-sms",
- "policy":{"id":"preview-reuse","revision":1},"buildAttestationId":"5c2e9a1b-7d3f-4a8e-b6c4-0f1d2e3a4b5c"}
+{"workId":"9a7d6b2f-4e1c-4c5a-9f3e-2b8d1c0a7e51","expectedWorkRevision":12,"proof":"e2e:confirmed-booking-sends-sms","policy":{"id":"preview-reuse","revision":1},"buildAttestationId":"5c2e9a1b-7d3f-4a8e-b6c4-0f1d2e3a4b5c"}
 ```
 
-Refused, with every reason, unless the newest attempt is a fresh settled pass with the same pinned revisions and base and no relevant or unknown change; a grant's `reuse` block expires at the freshness bound.
+Only a fresh, settled pass on the same pinned revisions and base qualifies.
 
-## Replay and analytics
+## Replay
 
-`graphyard validation replay REQUEST ATTEMPT` re-verifies retained artifacts, re-running the pinned report adapter; target, bundle and deployment health are always `not-covered`. A replay authorizes nothing; `liveVerification` is always `not-established`. `graphyard validation analytics` reports outcomes and cost per proof and runner.
+`graphyard validation replay REQUEST ATTEMPT` re-reads retained artifacts and authorizes nothing (`liveVerification`: `not-established`); `graphyard validation analytics` reports outcomes and cost.

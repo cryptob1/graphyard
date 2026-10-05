@@ -6,6 +6,7 @@ import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountLaunch, agentLaunchPlan, buildMasterStatus, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, masterSettingsFromArgs, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, saveMasterSettings, selectAccount, sessionHarnessFile, setupAgentEnvironments, setupMaster, sharedGitDirectory, startMaster, type EnvironmentProbe } from '../src/master.js';
+import { sessionSlotsGrant } from '../src/master/harness.js';
 import { expandTypedCommand, roleOf, startedAtOnce } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, readReviewLedger, saveReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/producer.js';
@@ -295,7 +296,7 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     const produceStart = expandTypedCommand(produceCrossCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
     assert.equal(produceStart.kind, 'codex', 'the session runs the account\'s runtime, not the profile\'s');
     const produceTail = produceStart.args;
-    assert.deepEqual(produceTail.slice(0, -1), ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '--add-dir', producedCross.checkout, '--add-dir', await sharedGitDirectory(root)]);
+    assert.deepEqual(produceTail.slice(0, -1), ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '--add-dir', producedCross.checkout, '--add-dir', await sharedGitDirectory(root), ...sessionSlotsGrant(root, config).flatMap(path => ['--add-dir', path])]);
     assert.ok(produceTail.at(-1)!.startsWith(`${autonomyContract} You are an independent Graphyard proof producer`), 'the request is the positional prompt (GY-93), led by the autonomy contract since Codex loads no role file (GY-184)');
     assert.equal(produceTail.includes('--setting-sources'), false, 'no Claude harness flags ride a Codex command line');
 
@@ -434,7 +435,7 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
     for (const rule of allow.filter(rule => rule.includes('master.json'))) assert.match(rule, /^Read\(/, `${rule} must not write the master's configuration file; the owned fields go through master config`);
     for (const rule of allow.filter(rule => /(^|[( ])curl /.test(rule))) assert.ok(!/\*/.test(rule), `${rule} would let curl take arbitrary arguments`);
     for (const rule of allow.filter(rule => /systemctl --user (restart|start|stop)/.test(rule))) assert.match(rule, /graphyard-master\.service\)$/, `${rule} must name the loop's unit exactly`);
-    for (const rule of ['Bash(gh pr merge:*)', 'Bash(gh pr review:*)', 'Bash(gh api *merge*)', 'Bash(git push:*)', 'Read(**/*.token)', 'Read(./.graphyard/connection.json)']) assert.ok(deny.includes(rule), `${rule} stays denied`);
+    for (const rule of ['Bash(gh pr merge:*)', 'Bash(gh pr review:*)', 'Bash(gh api *pulls/*/merge*)', 'Bash(gh api *repos/*/merges*)', 'Bash(gh api graphql*mutation*)', 'Bash(git push:*)', 'Read(**/*.token)', 'Read(./.graphyard/connection.json)']) assert.ok(deny.includes(rule), `${rule} stays denied`);
     assert.equal(new Set(allow).size, allow.length, 'no rule is listed twice');
     assert.match(masterHarness(root, config, 'codex').manual!, /--ask-for-approval never .*network_access=true/);
 

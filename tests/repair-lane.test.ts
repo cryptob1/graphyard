@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyProtection, mergeQueueRuleset, mergeQueueRulesetName, protectionPlan, repairBypassActor, withMergeSettings, withQueueRuleset } from '../src/protection.js';
-import { normalMergeState, repairLaneAttention, repairLaneVerdict, repairScopeRefusal, repairStallMs, type RepairAudit, type RepairDecision } from '../src/master/repair-lane.js';
-import { repairLaneStep } from '../src/github.js';
-import { decisionInputs, decisionPrecondition } from '../src/model/approval.js';
-import { createSchema, type Observation, type Work } from '../src/model.js';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { decisionActions, decisionInputs, decisionRequestSchema } from '../src/model/approval.js';
+import { createSchema, evaluate, type Observation, type Work } from '../src/model.js';
 
-// GY-406: when the merge path itself breaks, a fix to it cannot pass through it. The repair lane
-// lets the control-plane App merge a merge-path fix through one narrow, audited bypass.
+// GY-406 gave the control-plane App a ruleset bypass the main guard still lands its reverts with.
+// GY-1234 removed the repair lane built on it: under GitHub delivery GitHub merges on its own
+// branch protection, so there is no Graphyard merge path left to repair.
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 const config = { repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 };
@@ -61,125 +62,38 @@ test('unit:repair-bypass-ruleset — the queue ruleset has exactly one bypass ac
   assert.match(applied.result, /only bypass actor is App 1234 in pull-request mode/);
 });
 
-const decision = (overrides: Partial<RepairDecision> = {}): RepairDecision => ({ id: 'd-1', action: 'repair-merge', state: 'applied', input: { sha: head },
-  reason: 'The delegated merge in src/merge-queue.ts stalls every merge on UNSTABLE heads', requestedBy: 'graphyard-operator', approvedBy: 'graphyard-approver', ...overrides });
-function repairItem(overrides: Partial<Work> = {}): Work {
-  const candidate = { sha: head, baseSha: base, pr: 206, branch: 'graphyard/gy-9-1', author: 'worker' };
-  return { id: 'work-9', key: 'GY-9', title: 'Fix the merge path', description: '', type: 'bug', priority: 0, dependencies: [], criteria: [{ id: 'AC-1', text: 'Merges', proofs: ['unit:merges'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/merge-queue.ts', 'src/daemon/cycle-delivery.ts'], repair: 'merge-path', stage: 'merge', revision: 9, policyRevision: 1,
-    createdAt: '', updatedAt: '', stageEnteredAt: '2026-09-25T00:00:00.000Z', ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 206 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
-    observation: { at: new Date().toISOString(), candidate, reviews: [], checks: [{ name: 'test', result: 'success', appId: 1 }], protected: true, mergeable: true, merged: false, prState: 'open', draft: false } as unknown as Observation,
-    blocker: null, gates: [{ name: 'test', passed: true, reasons: [] }, { name: 'merge', passed: false, reasons: ['GitHub reports the pull request UNSTABLE'] }], violations: [], ...overrides } as Work;
+function sources(directory: string): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? sources(join(directory, entry.name)) : /\.(ts|tsx|mjs|js)$/.test(entry.name) ? [join(directory, entry.name)] : []);
 }
-const since = '2026-09-25T00:00:00.000Z', stalled = Date.parse(since) + repairStallMs;
-const stalledMerge = { state: 'refused' as const, since, detail: 'GitHub reports the pull request UNSTABLE' };
 
-test('unit:repair-lane-conditions — each missing condition is refused by name; the one allowed path merges the approved head', () => {
-  // Only an item whose plannedFiles stay within the merge path may carry "repair": "merge-path".
-  assert.equal(createSchema.safeParse({ title: 't', criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }], repair: 'merge-path' }).success, true);
-  assert.equal(createSchema.safeParse({ title: 't', criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }], repair: 'anything' }).success, false);
-  assert.equal(repairScopeRefusal({ repair: 'merge-path', plannedFiles: ['src/github.ts', 'src/merge-queue.ts', 'src/model/queue.ts', 'src/daemon/cycle.ts', '.github/workflows/ci.yml'] }), null);
-  assert.match(repairScopeRefusal({ repair: 'merge-path', plannedFiles: ['src/github.ts', 'src/engine.ts'] })!, /outside the merge path .*: src\/engine\.ts/);
-  assert.match(repairScopeRefusal({ repair: 'merge-path', plannedFiles: [] })!, /names no plannedFiles/);
-  assert.match(repairScopeRefusal({ repair: 'merge-path', plannedFiles: ['src/daemon/../engine.ts'] })!, /outside the merge path/);
-  assert.equal(repairScopeRefusal({ plannedFiles: ['src/engine.ts'] }), null, 'an ordinary item carries no repair');
+test('unit:repair-lane-removed — the module is gone and unimported, repair-merge is refused as unknown, and an item stored with "repair": "merge-path" still loads and evaluates', () => {
+  assert.equal(existsSync('src/master/repair-lane.ts'), false, 'src/master/repair-lane.ts is deleted');
+  const importers = ['src', 'bin', 'web'].filter(existsSync).flatMap(sources).filter(file => /repair-lane(\.js)?['"]/.test(readFileSync(file, 'utf8')));
+  assert.deepEqual(importers, [], 'no source file imports the repair lane');
 
-  // The decision is head-bound, requested only on a repair item for its current head.
-  assert.deepEqual(decisionInputs['repair-merge'].parse({ sha: head }), { sha: head });
-  assert.throws(() => decisionInputs['repair-merge'].parse({ sha: head, admin: true }));
-  assert.equal(decisionPrecondition('repair-merge', { sha: head }, repairItem()), null);
-  assert.match(decisionPrecondition('repair-merge', { sha: head }, repairItem({ repair: undefined }))!, /only a merge-path repair item/);
-  assert.match(decisionPrecondition('repair-merge', { sha: 'c'.repeat(40) }, repairItem())!, /current candidate is aaaaaaaaaaaa/);
+  // The decision action is unknown: not listed, carries no input schema, and the request is refused.
+  assert.equal((decisionActions as readonly string[]).includes('repair-merge'), false);
+  assert.equal('repair-merge' in decisionInputs, false);
+  const request = decisionRequestSchema.safeParse({ action: 'repair-merge', input: { sha: head }, reason: 'The merge path in src/merge-queue.ts stalls' });
+  assert.equal(request.success, false, 'a repair-merge decision request is refused');
+  assert.deepEqual(request.error!.issues.map(issue => [issue.code, issue.path.join('.')]), [['invalid_value', 'action']], 'refused as an unknown action');
+  assert.equal(decisionRequestSchema.safeParse({ action: 'merge', input: { sha: head }, reason: 'still known' }).success, true, 'other actions are unaffected');
+  // A new item cannot carry the retired field.
+  assert.equal(createSchema.safeParse({ title: 't', criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }], repair: 'merge-path' }).success, false);
 
-  const refused = (verdict: ReturnType<typeof repairLaneVerdict>, condition: string, pattern: RegExp) => {
-    assert.equal(verdict.allowed, false); assert.equal(!verdict.allowed && verdict.condition, condition);
-    assert.match(!verdict.allowed ? verdict.refusal : '', new RegExp(`^Repair lane refused \\(${condition}\\): `));
-    assert.match(!verdict.allowed ? verdict.refusal : '', pattern);
-  };
-  refused(repairLaneVerdict(repairItem({ repair: undefined }), [decision()], stalledMerge, stalled), 'repair-item', /merges nothing else/);
-  refused(repairLaneVerdict(repairItem({ plannedFiles: ['src/merge-queue.ts', 'README.md'] }), [decision()], stalledMerge, stalled), 'merge-path-scope', /README\.md/);
-  refused(repairLaneVerdict(repairItem({ submission: null }), [decision()], stalledMerge, stalled), 'candidate', /no submitted candidate/);
-  refused(repairLaneVerdict(repairItem({ gates: [{ name: 'test', passed: false, reasons: ['Required CI check test has not passed on the current candidate'] }] }), [decision()], stalledMerge, stalled), 'required-checks', /test has not passed/);
-  const moved = repairItem(); moved.observation = { ...moved.observation!, candidate: { ...moved.candidate!, sha: 'c'.repeat(40) } };
-  refused(repairLaneVerdict(moved, [decision()], stalledMerge, stalled), 'required-checks', /has not been observed at GY-9's head/);
-  refused(repairLaneVerdict(repairItem(), [], stalledMerge, stalled), 'decision', /graphyard master decide GY-9 repair-merge REASON/);
-  refused(repairLaneVerdict(repairItem(), [decision({ state: 'requested', approvedBy: null })], stalledMerge, stalled), 'decision', /d-1 is requested/);
-  refused(repairLaneVerdict(repairItem(), [decision({ approvedBy: 'graphyard-operator' })], stalledMerge, stalled), 'decision', /no independent approver/);
-  refused(repairLaneVerdict(repairItem(), [decision({ input: { sha: 'c'.repeat(40) } })], stalledMerge, stalled), 'decision', /no repair-merge decision names head/);
-  refused(repairLaneVerdict(repairItem(), [decision({ reason: 'please merge it' })], stalledMerge, stalled), 'fault-named', /does not name the merge-path fault/);
-  refused(repairLaneVerdict(repairItem(), [decision({ reason: 'the fault is in src/engine.ts' })], stalledMerge, stalled), 'fault-named', /merge-path fault/);
-  refused(repairLaneVerdict(repairItem(), [decision()], { state: 'none', since: null, detail: null }, stalled), 'normal-merge-stalled', /has not been refused or left pending/);
-  refused(repairLaneVerdict(repairItem(), [decision()], stalledMerge, stalled - 60_000), 'normal-merge-stalled', /refused for 14 minute\(s\).*waits 15/);
-
-  // The one allowed path: every condition holds, and the verdict binds the exact head and PR.
-  const allowed = repairLaneVerdict(repairItem(), [decision()], stalledMerge, stalled);
-  assert.equal(allowed.allowed, true);
-  if (allowed.allowed) { assert.equal(allowed.sha, head); assert.equal(allowed.pr, 206); assert.equal(allowed.decision.id, 'd-1'); assert.equal(allowed.fault, 'src/merge-queue.ts'); assert.deepEqual(allowed.bypassed, stalledMerge); }
-  // A pending merge the coordinator requested for this head counts from its request, the older of the two.
-  assert.deepEqual(normalMergeState(repairItem({ stage: 'test' }), { sha: head, at: since }).state, 'pending');
-  assert.equal(normalMergeState(repairItem(), { sha: head, at: '2026-09-25T00:05:00.000Z' }).since, since);
-  assert.equal(normalMergeState(repairItem({ stage: 'test' }), { sha: 'c'.repeat(40), at: since }).state, 'none', 'a request for another head is not this head\'s merge');
-});
-
-test('unit:repair-lane-audited — a repair-lane merge appends its audit entry before the head-bound merge, and stays on master status until a normal merge', async () => {
-  const events: { kind: string; payload: any }[] = [];
-  const ledger = [
-    { actor: 'graphyard-operator', kind: 'decision.requested', created_at: new Date(since), payload: { id: 'd-1', action: 'repair-merge', input: { sha: head }, reason: decision().reason } },
-    { actor: 'graphyard-approver', kind: 'decision.approved', created_at: new Date(since), payload: { id: 'd-1', reason: 'The merge-path fault is real' } },
-    { actor: 'graphyard-approver', kind: 'decision.applied', created_at: new Date(since), payload: { id: 'd-1', outcome: 'approved' } },
-  ];
-  const engine = { enqueueRequest: async () => null,
-    store: { pool: { query: async (text: string, values: unknown[]) => {
-      if (text.startsWith('INSERT INTO events')) { events.push({ kind: values[2] as string, payload: JSON.parse(values[3] as string) }); return { rows: [] }; }
-      if (text.includes("kind LIKE 'decision.%'")) return { rows: ledger };
-      if (text.includes("kind='repair.refused'")) return { rows: [] };
-      if (text.includes("payload->'details'->>'decision'=$4")) return { rows: events.filter(event => event.kind === values[1] && event.payload.details.head === values[2] && event.payload.details.decision === values[3]).map(event => ({ audit: event.payload.details })).slice(-1) };
-      throw new Error(`unexpected query ${text}`);
-    } } } } as any;
-  const merges: { work: string; audit: RepairAudit; recorded: number }[] = [];
-  const github = { repairMerge: async (work: Work, audit: RepairAudit) => { merges.push({ work: work.key, audit, recorded: events.length }); } };
-
-  // Too early: nothing is merged, and the refusal is named on the ledger once.
-  const early = await repairLaneStep(engine, github, repairItem(), new Date(stalled - 1000));
-  assert.equal(early.allowed, false); assert.equal(merges.length, 0);
-  assert.deepEqual(events.map(event => event.kind), ['repair.refused']);
-  assert.equal(events[0].payload.details.condition, 'normal-merge-stalled');
-
-  // Allowed: the audit entry is appended first, then the head-bound merge is asked for.
-  events.length = 0;
-  const verdict = await repairLaneStep(engine, github, repairItem(), new Date(stalled));
-  assert.equal(verdict.allowed, true);
-  assert.deepEqual(events.map(event => event.kind), ['repair.merged']);
-  const audit = events[0].payload.details as RepairAudit;
-  assert.deepEqual({ item: audit.item, pr: audit.pr, head: audit.head, decision: audit.decision, requestedBy: audit.requestedBy, approver: audit.approver, fault: audit.fault },
-    { item: 'GY-9', pr: 206, head, decision: 'd-1', requestedBy: 'graphyard-operator', approver: 'graphyard-approver', fault: 'src/merge-queue.ts' });
-  assert.deepEqual(audit.bypassed, { state: 'refused', since, detail: 'GitHub reports the pull request UNSTABLE' }, 'the refusal it bypassed');
-  assert.equal(merges.length, 1); assert.equal(merges[0].recorded, 1, 'the audit entry precedes the merge'); assert.equal(merges[0].audit.head, head);
-
-  // A refused GitHub merge is appended too, and surfaces.
-  events.length = 0;
-  await assert.rejects(repairLaneStep(engine, { repairMerge: async () => { throw new Error('head moved'); } }, repairItem(), new Date(stalled)), /head moved/);
-  assert.deepEqual(events.map(event => event.kind), ['repair.merged', 'repair.failed']);
-
-  // GY-428: the retry reuses the audit entry already appended for this head and decision.
-  merges.length = 0;
-  await repairLaneStep(engine, github, repairItem(), new Date(stalled + 60_000));
-  assert.deepEqual(events.map(event => event.kind), ['repair.merged', 'repair.failed'], 'no second repair.merged for the same head');
-  assert.equal(merges.length, 1); assert.deepEqual(merges[0].audit, events[0].payload.details, 'the merge is attributed to the first audit entry');
-
-  // GY-428: the bypass merge runs behind the job's fencing guard; a fenced-out job writes nothing.
-  events.length = 0; merges.length = 0;
-  await assert.rejects(repairLaneStep(engine, github, repairItem(), new Date(stalled), async () => { throw new Error('Work or job ownership changed before publication; retry'); }), /ownership changed/);
-  assert.deepEqual(events, [], 'no audit entry is appended'); assert.equal(merges.length, 0, 'GitHub is not asked to merge');
-
-  // Master status: the delivered repair raises an attention item until the next normal merge.
-  const delivered = (key: string, mergedAt: string, repairLane: RepairAudit | null) => ({ key, stage: 'done', delivery: { mergedAt, mergeSha: head, authorizationRevision: 1 }, repairLane }) as Work;
-  const earlierNormal = delivered('GY-8', '2026-09-25T00:10:00.000Z', null);
-  const repaired = delivered('GY-9', '2026-09-25T00:20:00.000Z', audit);
-  const attention = repairLaneAttention([earlierNormal, repaired, repairItem({ key: 'GY-10', stage: 'merge' })]);
-  assert.equal(attention.length, 1);
-  assert.equal(attention[0].subject, 'GY-9'); assert.equal(attention[0].role, 'master'); assert.equal(attention[0].human, false);
-  assert.match(attention[0].text, /merged through the repair lane .*bypassing a normal guarded merge refused since 2026-09-25T00:00:00\.000Z .*decision d-1 requested by graphyard-operator and approved by graphyard-approver .*src\/merge-queue\.ts.*unproven until the next normal merge/);
-  assert.deepEqual(repairLaneAttention([earlierNormal, repaired, delivered('GY-11', '2026-09-25T00:30:00.000Z', null)]), [], 'a later normal merge proves the merge path healthy');
-  assert.equal(repairLaneAttention([repaired, delivered('GY-12', '2026-09-25T00:30:00.000Z', { ...audit, item: 'GY-12' })]).length, 2, 'a second repair is no normal merge');
+  // An item stored before the removal — its document as work_items holds it — loads and evaluates.
+  const candidate = { sha: head, baseSha: base, pr: 206, branch: 'graphyard/gy-9-1', author: 'worker' };
+  const stored = JSON.stringify({ id: 'work-9', key: 'GY-9', title: 'Fix the merge path', description: '', type: 'bug', priority: 0, dependencies: [], criteria: [{ id: 'AC-1', text: 'Merges', proofs: ['unit:merges'] }],
+    policy: { checks: ['test'], review: true }, plannedFiles: ['src/merge-queue.ts'], repair: 'merge-path', stage: 'build', revision: 9, policyRevision: 1,
+    createdAt: '2026-09-25T00:00:00.000Z', updatedAt: '2026-09-25T00:00:00.000Z', stageEnteredAt: '2026-09-25T00:00:00.000Z', ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 206 },
+    reworkRequested: false, scenarioRequirements: [], evidence: [],
+    observation: { at: '2026-09-25T00:01:00.000Z', candidate, reviews: [], checks: [], protected: true, mergeable: true, merged: false, prState: 'open', draft: false } as unknown as Observation,
+    blocker: null, gates: [], violations: [] });
+  const loaded = JSON.parse(stored) as Work;
+  assert.equal(loaded.repair, 'merge-path');
+  const evaluated = evaluate(loaded, [loaded], new Date('2026-09-25T00:02:00.000Z'), [1]);
+  assert.deepEqual(evaluated.gates.map(gate => gate.name).slice(0, 2), ['ready', 'build']);
+  assert.equal(evaluated.gates.find(gate => gate.name === 'test')?.passed, false, 'judged by its gates like any other item');
+  const plain = JSON.parse(stored) as Work; delete plain.repair;
+  assert.deepEqual(evaluated, evaluate(plain, [plain], new Date('2026-09-25T00:02:00.000Z'), [1]), 'the retired field changes nothing');
 });

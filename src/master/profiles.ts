@@ -7,10 +7,10 @@ import { defaultChildRun } from '../child-runner.js';
 import { pathScopeContains } from '../model/scope.js';
 import { temporaryDirectories, underTestRunner } from '../supervisor.js';
 import { defaultMergeBatchSize, defaultParallelTips, maxMergeBatchSize, maxParallelTips, mergeQueueInsights } from '../merge-queue.js';
-import { defaultOptimisticMerge, defaultOptimisticExclude } from '../optimistic-merge.js';
 import type { Work } from '../model/work.js';
-import { diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
+import { decompositionSettingsSchema, diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
+import { doctorSettingsSchema } from './doctor-settings.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 import { invariantThresholdsSchema } from '../model/invariants.js';
 import { runtimeSandboxes } from '../worker-sandbox.js';
@@ -266,36 +266,32 @@ export const masterRunSchema = z.object({
   // How long a launched runtime has to come up in its pane before the launch fails and closes it
   // (GY-413); default 60. A loaded host echoes the launch command slowly, which is a slow start.
   launchStartSeconds: z.number().int().min(10).max(600).optional(),
-  // Worktree reclamation: how long an assignment worktree may sit untouched before its dependency
-  // directories count as disposable, and the free space below which `master status` raises disk
-  // pressure. Both are read from .graphyard/master.json on every cycle, so a host with a smaller
-  // volume raises the threshold without restarting the loop.
+  // Worktree reclamation: idle hours before dependencies count as disposable, and free space
+  // threshold for disk pressure. Both read from .graphyard/master.json on every cycle.
   reclaimIdleHours: z.number().min(0.25).max(720).optional(),
   diskThresholdGb: z.number().min(0.1).max(10_000).optional(),
   // How many finished assignment worktrees one reclaim pass removes outright (GY-360; default 50),
   // so a large backlog drains over a few cycles without stalling any one of them.
   worktreeRemovalLimit: z.number().int().min(1).max(1000).optional(),
-  // The managed worktree root every proof and review checkout is created under: an absolute path
-  // on durable storage outside every worktree (default: the installation's data directory), the
-  // free space setup and each launch require of its volume, and the size the root may reach before
-  // `master status` asks for a reclaim — a user quota is invisible in the volume's free space.
+  // Managed worktree root for proof and review checkouts: absolute path outside worktrees,
+  // required free space, and max size before master status asks for a reclaim.
   worktreeRoot: z.string().trim().min(1).max(1000).refine(isAbsolute, 'worktreeRoot must be an absolute path').optional(),
   worktreeRootMinFreeGb: z.number().min(0.1).max(10_000).optional(),
   worktreeRootBudgetGb: z.number().min(0.1).max(10_000).optional(),
-  // An account whose provider usage reached this percentage of any window is skipped at launch:
-  // a session started just below a hard limit would stall mid-task.
+  // An account whose usage reached this percentage of any window is skipped at launch: a session started just below a hard limit would stall mid-task.
   quotaCeilingPercent: z.number().int().min(50).max(100).optional(),
-  // The runtime of each narrow role (GY-169): `herdr`, a terminal session (what an absent setting
-  // means), or `pi`, the headless runner (src/runner) — the approver, and the producer for the
-  // unit proof group. `pi` names the environment wrapper and model those runs use.
+  // The runtime of each narrow role (GY-169): `herdr` terminal session, or `pi` headless runner
+  // (the approver and unit proof producer). `pi` names the wrapper and model those runs use.
   runtimes: narrowRoleRuntimeSchema.optional(),
   pi: piRuntimeSchema.optional(),
   // Research before build (GY-259): the cheap Pi session that briefs a feature before its worker
   // starts — its model (the Z.AI GLM flash model by default), time limit and token budget.
   research: researchSettingsSchema.optional(),
-  // The diagnostician (GY-439): the headless Pi session that turns each recurring-fault item into
-  // its root cause and a fix item — its model, stronger fallback model, time limit, the bound an
-  // invariant violation stands before it is diagnosed, and the commands that read its log excerpts.
+  decomposition: decompositionSettingsSchema.optional(), // splitting broad items before first dispatch (GY-1126): size bounds and run time limit; it runs on run.research's account
+  // The pipeline doctor (GY-711): headless Pi session fixing stuck work every intervalMinutes (10 by default).
+  doctor: doctorSettingsSchema.optional(),
+  // The diagnostician (GY-439): headless Pi session turning each recurring-fault item into its root
+  // cause and fix item — its model, fallback, time limit, bound and log-reading commands.
   diagnostician: diagnosticianSettingsSchema.optional(),
 }).strict();
 export type MasterRun = z.infer<typeof masterRunSchema>;
@@ -309,12 +305,9 @@ export const masterBrowserSchema = z.object({
 export type MasterBrowser = z.infer<typeof masterBrowserSchema>;
 
 export const agentIdentitySchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/), credentialFile: z.string().min(1).max(1000) }).strict();
-/**
- * GY-516: the product default for `mergeQueue.rerunFailedChecks`, so every installation reruns a
- * failed required check once on the same sha before the failure ejects the entry; 0 disables it.
- */
+// GY-516: default for mergeQueue.rerunFailedChecks (reruns failed check once on same sha; 0 disables).
 export const defaultRerunFailedChecks = 1;
-/** The most reruns per sha and check master config and the control plane accept. */
+// The most reruns per sha and check master config and the control plane accept.
 export const maxRerunFailedChecks = 3;
 export const masterConfigSchema = z.object({
   version: z.literal(1),
@@ -343,33 +336,31 @@ export const masterConfigSchema = z.object({
   // entry on its own tip, an entry whose tip and every tip ahead of it passed merging as soon as it
   // heads the queue (default 4). Since every entry has its own tip, `batchSize` (GY-330) no longer
   // batches validation; it only widens the observation band and the delivery/ejection wake depth.
-  // `optimistic` (GY-500, default on): an entry whose files are disjoint from everything merged since
-  // its base, touching no shared infrastructure, merges at once past the queue, and main is guarded
-  // after the merge with automatic revert. false sends every entry through the queue.
-  // The loop publishes all of these to the control plane on every change.
-  // `optimisticExclude` (GY-503): the repository's own shared-infrastructure globs, master init
-  // written with the product defaults; a change to an excluded path never merges optimistically.
+  // The loop publishes these to the control plane on every change.
+  // `optimistic` and `optimisticExclude` are retired (GY-1233): GitHub delivery merges every
+  // passing candidate, so optimistic merge and its main guard are gone. Both keys are still
+  // accepted so an existing master.json loads, but parsing drops them (GY-1264): nothing reads
+  // them, and every writer re-parses before it saves, so the next master init or profile change
+  // removes them from the file instead of leaving inert settings an operator would trust.
   // `ciConcurrency` (GY-501): the repository's concurrent Actions job limit as the operator declares
   // it (GitHub does not report it); master protection compares it with parallelTips × jobs per run.
   mergeQueue: z.object({
     batchSize: z.number().int().min(1).max(maxMergeBatchSize).optional(),
-    optimistic: z.boolean().optional(),
+    optimistic: z.unknown().optional(),
     parallelTips: z.number().int().min(1).max(maxParallelTips).optional(),
     ciConcurrency: z.number().int().min(1).max(10000).optional(),
     rerunFailedChecks: z.number().int().min(0).max(maxRerunFailedChecks).optional(),
-    optimisticExclude: z.array(z.string().trim().min(1).max(200)
-      .refine(glob => !glob.startsWith('/') && !/[\s\u0000-\u001f]/.test(glob) && !glob.split('/').some(segment => segment === '.' || segment === '..'),
-        'Exclude globs are repository-relative, without . or .. segments, whitespace or control characters')).max(100).optional(),
-  }).strict().optional(),
+    optimisticExclude: z.unknown().optional(),
+  }).strict().transform(({ optimistic: _optimistic, optimisticExclude: _optimisticExclude, ...kept }) => kept).optional(),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
-  // The master's own operator-agent identity, and the separate approver identity whose session
-  // approves the master's two-party decisions (master autonomy). Paths only, never tokens.
+  // The master's operator-agent identity and the approver identity for its two-party decisions. Paths only, never tokens.
   operatorAgent: agentIdentitySchema.optional(),
   approver: agentIdentitySchema.optional(),
-  // The system invariants' thresholds (GY-404, src/model/invariants.ts): every field optional,
-  // each defaulting to the bound the loop checks every cycle.
+  // The system invariants' thresholds (GY-404, src/model/invariants.ts), each defaulting to the loop's bound.
   invariants: invariantThresholdsSchema.optional(),
+  // Delivery-speed p90 targets master status judges (GY-1232); unset keeps 2h ready→merged, 8h merged→production.
+  deliverySpeed: z.object({ readyToMergedP90Ms: z.number().int().positive().max(30 * 86_400_000).optional(), mergedToProductionP90Ms: z.number().int().positive().max(30 * 86_400_000).optional() }).strict().optional(),
 }).strict();
 export type MasterConfig = z.infer<typeof masterConfigSchema>;
 /**
@@ -396,11 +387,6 @@ export function withReviewerDefaults<T extends Pick<MasterConfig, 'reviewers' | 
 export function mergeBatchSize(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.batchSize ?? defaultMergeBatchSize;
 }
-/** Whether optimistic merge is on under this master config: `mergeQueue.optimistic`, on by default (GY-500). */
-export function optimisticMergeEnabled(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): boolean {
-  return config?.mergeQueue?.optimistic ?? defaultOptimisticMerge;
-}
-
 /** The parallel-tip window under this master config: `mergeQueue.parallelTips`, or the default of 4 (GY-498). */
 export function mergeParallelTips(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.parallelTips ?? defaultParallelTips;
@@ -428,11 +414,6 @@ export function mergeQueueStatus(master: MasterConfig, snapshot: { work: Work[];
 /** Reruns of a failed required check per sha under this master config: `mergeQueue.rerunFailedChecks`, or the product default of 1. */
 export function rerunFailedChecks(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.rerunFailedChecks ?? defaultRerunFailedChecks;
-}
-
-/** The repository's shared-infrastructure globs under this master config: `mergeQueue.optimisticExclude`, or the product defaults (GY-503). */
-export function optimisticExcludeGlobs(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): string[] {
-  return config?.mergeQueue?.optimisticExclude ?? [...defaultOptimisticExclude];
 }
 
 export function assertMasterBinding(config: MasterConfig, status: any) {
@@ -574,6 +555,8 @@ export interface ConfinementInput {
   bwrap?: string | null;
   /** Overrides the availability probe (tests); when absent, the probe runs once and is cached. */
   mountNamespaceWorks?: boolean;
+  /** The session pushes and calls GitHub with a short-lived credential of its own (a worker's, GY-999; a reviewer's), so its session bus stays `/dev/null` instead of the keyring-only proxy that reaches the operator's login (GY-1039). */
+  ownGitHubCredential?: boolean;
 }
 const withinCheckout = (path: string, root: string) => { const from = relative(root, path); return from !== '' && from !== '..' && !from.startsWith(`..${sep}`) && !isAbsolute(from); };
 /** Whether `path` is a directory (or nothing); symlinks to directories count, as bwrap binds resolve them. */
@@ -666,10 +649,8 @@ export const sessionGitAdminDirectory = (sessionDirectory: string, root: string)
  * that pair to one mask, and hiding the real directory hides every symlink to it.
  *
  * When `secretsBus` names a live socket, each session-bus socket is replaced by it instead of by
- * `/dev/null`. That socket is an `xdg-dbus-proxy --filter --talk=org.freedesktop.secrets` proxy
- * (`graphyard-secrets-bus.service`): a session reaches the keyring that holds the operator's
- * GitHub login, so `git push` through `gh auth git-credential` works, while systemd1 and every
- * other bus name stay unreachable, so `systemd-run --user` is still refused.
+ * `/dev/null`: the keyring-only proxy (`graphyard-secrets-bus.socket`, filtered in `graphyard-secrets-bus-filter.service`) reaches only the
+ * keyring's read methods, so `gh auth git-credential` works while systemd1 and every other bus name stay unreachable. A session with a GitHub credential of its own gets no `secretsBus` (GY-1039).
  */
 export const processLaunchMaskWords = (
   targets: { directories?: readonly string[]; busSockets?: readonly string[]; secretsBus?: string | null },
@@ -682,8 +663,8 @@ export const processLaunchMaskWords = (
   const proxy = targets.secretsBus && isAbsolute(targets.secretsBus) && isSocketPath(targets.secretsBus) ? canonical(targets.secretsBus) : '/dev/null';
   return [...directories.flatMap(path => ['--tmpfs', path]), ...sockets.flatMap(path => ['--ro-bind', proxy, path])];
 };
-const isSocketPath = (path: string) => { try { return statSync(path).isSocket(); } catch { return false; } };
-/** Where `graphyard-secrets-bus.service` listens: `$GRAPHYARD_SECRETS_BUS`, else `graphyard-secrets-bus` in the user's runtime directory. */
+export const isSocketPath = (path: string) => { try { return statSync(path).isSocket(); } catch { return false; } };
+/** Where `graphyard-secrets-bus.socket` listens: `$GRAPHYARD_SECRETS_BUS`, else `graphyard-secrets-bus` in the user's runtime directory. */
 export const secretsBusPath = (uid: number | undefined = process.getuid?.(), env: NodeJS.ProcessEnv = process.env): string | null =>
   env.GRAPHYARD_SECRETS_BUS || (env.XDG_RUNTIME_DIR ? join(env.XDG_RUNTIME_DIR, 'graphyard-secrets-bus') : uid === undefined ? null : `/run/user/${uid}/graphyard-secrets-bus`);
 /**
@@ -713,7 +694,7 @@ export const hostProcessLaunchTargets = (uid: number | undefined = process.getui
  * namespace; a session keeps the network and its own process tree. The wrapper ends with `--`, so
  * the runtime command follows it.
  */
-export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null }): readonly string[] {
+export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean }): readonly string[] {
   const root = resolve(input.coordinatorRoot), directory = resolve(input.sessionDirectory);
   const gitDir = checkoutGitDirectory(root);
   const adminDirectory = sessionGitAdminDirectory(directory, root);
@@ -725,7 +706,7 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const shared = [...sharedDirectories, ...(existsSync(fetchHead) && !isDirectoryPath(fetchHead) ? [fetchHead] : [])];
   const own = withinCheckout(directory, root) ? [directory] : [];
   const bwrap = input.bwrap ?? 'bwrap';
-  const masks = processLaunchMaskWords(hostProcessLaunchTargets(), [root, directory]);
+  const masks = processLaunchMaskWords({ ...hostProcessLaunchTargets(), ...(input.ownGitHubCredential ? { secretsBus: null } : {}) }, [root, directory]);
   const externalGitDir = gitDir !== root && !withinCheckout(gitDir, root) && isDirectoryPath(gitDir) ? [gitDir] : [];
   // A session with no admin of its own re-exposes the whole worktrees area; when the coordinator is
   // itself a linked worktree its own admin (HEAD, index) lies there, so it is bound read-only again
@@ -792,7 +773,7 @@ export async function coordinatorConfinement(input: ConfinementInput): Promise<C
   const refusal = await coordinatorConfinementRefusal(input);
   if (refusal) throw new Error(refusal);
   const root = resolve(input.coordinatorRoot), directory = resolve(input.allocatedDirectory ?? input.sessionDirectory);
-  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, bwrap: input.bwrap ?? undefined });
+  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, bwrap: input.bwrap ?? undefined, ownGitHubCredential: input.ownGitHubCredential });
   const reexposed = wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
   return { mechanism: 'read-only-mount', wrapper,
     detail: `the coordinator checkout at ${root} is bind-mounted read-only for the session in a bubblewrap namespace whose /proc shows only the session's own processes; only ${reexposed.join(', ') || 'nothing'} are re-exposed writable, so no shell command can write, commit in or switch the checkout` };
