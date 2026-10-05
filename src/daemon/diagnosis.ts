@@ -122,6 +122,15 @@ export function diagnosticianGate(state: Pick<DaemonState, 'diagnoses'>, clock: 
   if (since.some(entry => entry.state !== 'running')) return 'open';
   return since.length ? 'held' : 'probe';
 }
+/**
+ * The one subject a probe runs: the waiting subject refused longest ago, so the retry order is
+ * fair and deterministic, else the first subject listed when none of them is waiting (GY-1245).
+ */
+export function probeSubject<T extends { id: string }>(state: Pick<DaemonState, 'diagnoses'>, subjects: readonly T[]): T[] {
+  const refusedAt = (subject: T) => { const entry = state.diagnoses[subject.id]; return entry?.state === 'waiting' ? Date.parse(entry.refusedAt ?? entry.updatedAt) : Infinity; };
+  const oldest = [...subjects].sort((a, b) => refusedAt(a) - refusedAt(b))[0];
+  return oldest ? [oldest] : [];
+}
 /** A waiting diagnosis whose retry time has come. */
 const retryDue = (entry: DiagnosisRecord | undefined, clock: number) => entry?.state === 'waiting' && (!entry.retryAt || Date.parse(entry.retryAt) <= clock);
 const live = new Map<string, Promise<void>>();
@@ -286,7 +295,7 @@ export async function diagnosisStep(cycle: Cycle) {
     if (outcome && !outcome.diagnosis && outcome.limit) await cycle.isolate('diagnosis', snapshot.work.find(candidate => candidate.key === entry.work) ?? null, `the diagnosis of ${entry.subject}`, () => advance(cycle, diagnostician, entry, note));
   }
   const gate = diagnosticianGate(state, clock);
-  for (const subject of gate === 'held' ? [] : gate === 'probe' ? subjects.slice(0, 1) : subjects) {
+  for (const subject of gate === 'held' ? [] : gate === 'probe' ? probeSubject(state, subjects) : subjects) {
     await cycle.isolate('diagnosis', subject.work, `the diagnosis of ${subject.id}`, () => launch(cycle, diagnostician, subject, note));
   }
   for (const entry of Object.values(state.diagnoses)) {
