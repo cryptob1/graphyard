@@ -1,3 +1,4 @@
+import { readDaemonState } from './daemon/state.js';
 import { agentOwner, buildMasterStatus, concurrencyAttention, inventoryWorktrees, roleConcurrency, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import type { ActionRow } from './model/actions.js';
 import { classified, classifyAttention, groupFaults } from './model/fault-classes.js';
@@ -21,7 +22,7 @@ import { consentHoldItems } from './cli/consent-holds.js';
 import { untriagedAttention } from './triage.js';
 import { backlogCounts } from './model/machine-backlog.js';
 import { setupHealth } from './cli/master-setup.js';
-import { attributionFor, describeReading, loadedRevision, readDisk, readPlaneResources, readReclaimReports, readResources, readTmpInodes, resourceAttention, type ResourceReading } from './master-resources.js';
+import { attributionFor, describeReading, loadedRevision, owedUpgrade, readDisk, readPlaneResources, readReclaimState, readResources, readTmpInodes, resourceAttention, type ResourceReading } from './master-resources.js';
 
 /**
  * A launch refused by a full session ledger is attributed to that ledger (GY-131).
@@ -122,15 +123,19 @@ function attentionLaunchKind(text: string): LedgerKind | null {
 export async function resourceStatus(root: string, master: MasterConfig, observed: {
   reviews: ReviewRecord[] | null; producers: ProducerRecord[] | null; agents: HerdrAgent[] | null; work: Work[];
   loop: { lagMs: number | null; stalledAfterMs: number; detail: string; lock: { pid: number; host: string } | null } | null;
-}, deps: { fetcher?: typeof fetch; run?: (command: string, args: string[]) => string; now?: number } = {}) {
+}, deps: { fetcher?: typeof fetch; run?: (command: string, args: string[]) => string; now?: number; cursor?: () => Promise<Parameters<typeof owedUpgrade>[0]> } = {}) {
   const now = deps.now ?? Date.now();
   const lock = observed.loop?.lock;
   const revision = lock && lock.host === master.hostId ? loadedRevision(root, lock.pid, deps.run, now) : null;
+  // The remediation still in flight (GY-1198): the restart the self-upgrade owes, from the loop's
+  // cursor, and the panes the reclaim pass has seen unowned, from its own record.
+  const upgrade = owedUpgrade(await (deps.cursor ?? (() => readDaemonState(root, master)))().catch(() => null));
+  const reclaim = await readReclaimState(root);
   const readings = readResources({ now, reviews: observed.reviews, producers: observed.producers, agents: observed.agents, work: observed.work,
     profiles: { workers: master.workers, reviewers: master.reviewers, producers: master.producers },
-    plane: await readPlaneResources(master.url, deps.fetcher), loop: observed.loop, revision, disk: await readDisk(root, master), tmp: await readTmpInodes(root) });
+    plane: await readPlaneResources(master.url, deps.fetcher), loop: observed.loop, revision, upgrade, reclaimSeen: reclaim.seen, disk: await readDisk(root, master), tmp: await readTmpInodes(root) });
   const attention = resourceAttention(readings);
-  return { readings, attention, report: resourceReport(readings, (await readReclaimReports(root)).at(-1) ?? null) };
+  return { readings, attention, report: resourceReport(readings, reclaim.reports.at(-1) ?? null) };
 }
 
 /** The `resources` block of `master status`: one row per reading, with a one-line summary. */
