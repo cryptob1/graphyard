@@ -60,7 +60,7 @@ About ten requests uncached; unchanged, none.
 
 ### What a pause means for gates
 
-A rate-limit `403`/`429` pause stops requests; gates read stale until it lifts; nothing merges on an observation over two minutes old. A merge stalled only on freshness gets a [prioritized wake](protocol/github-webhook.md#prioritized-wakes), not rework. The pause is remediation, counted once as an observation fault: `/healthz` stays healthy, dispatch continues and the `github-budget` resource reads unread until the reset; only a budget `GET /rate_limit` reads spent once the pause ends is at its bound.
+A rate-limit `403`/`429` pause stops requests; gates read stale until it lifts; nothing merges on an observation over two minutes old. A merge stalled only on freshness gets a [prioritized wake](protocol/github-webhook.md#prioritized-wakes), not rework.
 
 ### Reading the budget
 
@@ -72,7 +72,7 @@ A silent hour: `master status` points to `https://github.com/settings/apps/APP-S
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default 10 GiB); `tmp-inodes`: free `/tmp` inodes; `loaded-revision` counts code moves.
+Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default 10 GiB); `tmp-inodes`: free `/tmp` inodes; `loaded-revision` counts code moves. Neither faults on a reclaim under way: `loaded-revision` while the self-upgrade's owed restart was retried within its bound, `agent-names` until the reclaim pass has seen the pane unowned 10 minutes.
 
 ## Storage retention
 
