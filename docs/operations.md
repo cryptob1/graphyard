@@ -51,3 +51,7 @@ The filter admits only the Secret Service methods a credential read needs, but b
 ## Deeper references
 
 - [Operations reference](operations-reference.md), [master agent](master-agent.md), [coordination](coordination.md), [delegation](delegation.md)
+
+## Resources and disk
+
+`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). Each cycle the loop removes finished worktrees (`run.reclaimIdleHours`, at most `run.worktreeRemovalLimit`, never dirty or unpushed; logged to `.graphyard/worktree-reclaim.jsonl`), stale [test temp entries](operations-reference.md#control-plane-resources) and `/tmp/tsx-<uid>` (dead owner or 2h/6h idle, unheld, ≤100, one pass in flight), and raises `disk` attention below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`). Agentless panes Graphyard launched are swept each cycle ([panes](master-agent-sessions.md#panes-are-closed-and-reclaimed)); the reclaim closes any unowned, non-`working` pane on a profile's name, `unknown` or recordless included, once two passes 60 s apart saw it.
