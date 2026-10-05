@@ -474,12 +474,13 @@ const requestTimeoutMs = 30_000;
  * waits for a wake, and twelve observed moments ago, whose decision requests each time out after 30s. The server answers a wake at once when it asks for no tick, and after a 30s tick wait
  * otherwise, as it did that morning.
  */
-async function replaySlowServer(cycles: number) {
+async function replaySlowServer(cycles: number, attesting = 0) {
   const config = burstConfig(), state = emptyDaemonState(config);
   const fresh = Array.from({ length: 12 }, (_, index) => `GY-${3000 + index}`), stale = Array.from({ length: 12 }, (_, index) => `GY-${3100 + index}`);
-  const decided: { key: string; cycle: number }[] = [], woken: { key: string; cycle: number; body: Record<string, unknown> }[] = [];
+  const attested = Array.from({ length: attesting }, (_, index) => `GY-${3200 + index}`);
+  const decided: { key: string; cycle: number; action: string }[] = [], woken: { key: string; cycle: number; body: Record<string, unknown> }[] = [];
   let now = burstClock, cycle = 0;
-  const snapshot = () => ({ work: [...stale.map(key => reworkHead(key, burstClock - 3 * minute)), ...fresh.map(key => reworkHead(key, now - 30_000))], now: iso(now), jobs: [] });
+  const snapshot = () => ({ work: [...stale.map(key => reworkHead(key, burstClock - 3 * minute)), ...fresh.map(key => reworkHead(key, now - 30_000)), ...attested.map(key => attestHead(key, now - 30_000))], now: iso(now), jobs: [] });
   const effects: DaemonEffects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => snapshot(),
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
@@ -489,7 +490,7 @@ async function replaySlowServer(cycles: number) {
       woken.push({ key: work.key, cycle, body });
       now += body.wait === false ? 500 : requestTimeoutMs;
     },
-    decide: async work => { decided.push({ key: work.key, cycle }); now += requestTimeoutMs; throw new Error('The operation was aborted due to timeout'); },
+    decide: async (work, action) => { decided.push({ key: work.key, cycle, action }); now += requestTimeoutMs; throw new Error('The operation was aborted due to timeout'); },
     decisions: async () => ({ decisions: [] }) as never,
     approver: async work => ({ agentName: `graphyard-approver-${work.key.toLowerCase()}`, pane: `pane-${work.key}` }),
     persist: async () => {},
@@ -500,7 +501,13 @@ async function replaySlowServer(cycles: number) {
     results.push(await runCycle(config, state, effects, () => now));
     deferred.push([...state.decisionsDeferred]);
   }
-  return { results, decided, woken, deferred, fresh, stale };
+  return { results, decided, woken, deferred, fresh, stale, attested };
+}
+/** A head whose only refusal left is a `manual:` proof no producer may run: the loop's attestation pass requests it. */
+function attestHead(key: string, observedAt: number): Work {
+  return reworkHead(key, observedAt, { stage: 'acceptance', reworkRequested: false, criteria: [{ id: 'AC-1', text: 'Attested', proofs: ['manual:attested'] }],
+    observation: { ...reworkHead(key, observedAt).observation!, reviews: [{ reviewer: 'independent-reviewer', sha: head1266, state: 'APPROVED' }] },
+    gates: [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: true, reasons: [] }, { name: 'acceptance', passed: false, reasons: ['AC-1: manual:attested needs trusted passing evidence on the current candidate'] }] } as Partial<Work>);
 }
 
 test('manual:fault-class-loop — GY-1286 lists three instances, and every one is replayed', () => {
@@ -523,6 +530,16 @@ test(`manual:fault-class-loop — ${gy1286Instances[0].id}: what the step puts o
   assert.deepEqual([...new Set(decided.map(entry => entry.key))].sort(), [...fresh].sort(), 'every fresh head has its rework requested within four cycles');
   const note = results[0].actions.find(action => action.detail.startsWith('The decisions step spent its'));
   assert.match(note?.detail ?? '', /120s budget; \d+ item\(s\) wait for the next cycle/);
+});
+
+test(`manual:fault-class-loop — ${gy1286Instances[0].id}: attestations reached only after the rework pass spent the budget are still requested, the oldest put off first`, async () => {
+  // The review of the first fix: the attestation pass ran after the rework pass on the same clock,
+  // in snapshot order, so under a sustained slow server it found the budget spent every cycle and
+  // put every attestation off for good. Each pass now reaches the oldest item it put off first.
+  const { decided, deferred, attested } = await replaySlowServer(4, 3);
+  assert.deepEqual(deferred[0].filter(key => attested.includes(key)), attested.slice(1), `past the budget the pass reaches its first attestation and puts the rest off: ${JSON.stringify(deferred[0])}`);
+  const first = attested.map(key => decided.find(entry => entry.action === 'attest' && entry.key === key));
+  assert.deepEqual(first.map(entry => entry?.cycle), [0, 1, 2], `each cycle requests the oldest attestation put off, so none waits for good: ${JSON.stringify(decided.filter(entry => entry.action === 'attest'))}`);
 });
 
 test(`manual:fault-class-loop — ${gy1286Instances[0].id}: an observation wake asks for no reconcile tick, so it costs the step no tick wait`, async () => {
