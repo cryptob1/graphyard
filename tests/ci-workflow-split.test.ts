@@ -135,7 +135,8 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
   assert.match(jobs.get('long-suites')!.text, /npm test -- --files-from "\$RUNNER_TEMP\/release-candidate-tests\.txt"/);
   assert.match(jobs.get('long-suites')!.text, /apt-get install -y -q bubblewrap/, 'the soak confines its launches in real namespaces');
   assert.match(jobs.get('container-acceptance')!.text, /scripts\/run-acceptance\.mjs "\$RUNNER_TEMP\/candidate\.json" graphyard-ci "\$RUNNER_TEMP\/acceptance\.json"/);
-  assert.match(jobs.get('container-acceptance')!.text, /integration:merge-authorization/);
+  // GitHub merges under branch protection (GY-1235): Graphyard has no merge authorization left to exercise.
+  assert.doesNotMatch(jobs.get('container-acceptance')!.text, /integration:merge-authorization/);
   assert.match(jobs.get('container-acceptance')!.text, /scripts\/verify-image-release\.mjs graphyard-ci .* "\$CANDIDATE_SHA"/);
   assert.match(jobs.get('container-recovery')!.text, /integration:herdr-recovery/);
   assert.match(jobs.get('chart')!.text, /helm lint deploy\/helm\/graphyard --strict/);

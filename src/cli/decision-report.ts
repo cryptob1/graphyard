@@ -2,6 +2,7 @@ import { agentOwner, approverSessionName, type AttentionItem, type HerdrAgent } 
 import { standingCapacity, type CapacityState } from '../model/capacity.js';
 import { elapsed } from '../model/sessions.js';
 import { mapBounded, readConcurrency } from '../master/timings.js';
+import { staleReleaseAttention } from './owed-report.js';
 
 type DecisionRow = { id: string; action: string; state: string; requestedAt: string; outcome?: string | null; race?: unknown; refusal?: { approver: string; reason: string; at: string } | null };
 type ApprovalWatch = { work: string; decision: string; agentName: string | null; settledAt?: string | null; ended?: string[] };
@@ -42,7 +43,7 @@ export function unansweredDecisions(items: { key: string; decisions: DecisionRow
  * never raises attention. A refusal is answered, never retried: the server refuses an identical
  * request, so the next step is a request that cites the refused decision with what it lacked.
  */
-export async function terminalDecisions(masterApi: (path: string) => Promise<any>, work: { id: string; key: string; stage: string; capacity?: CapacityState | null }[],
+export async function terminalDecisions(masterApi: (path: string) => Promise<any>, work: { id: string; key: string; stage: string; ready?: boolean; capacity?: CapacityState | null }[],
   sessions: { approvals: ApprovalWatch[]; runtime: { available: boolean; agents: HerdrAgent[] }; now: number }) {
   const listed: { work: string; id: string; action: string; state: string; reason: string | null; race?: unknown; refusedBy?: string; refusedAt?: string }[] = [];
   const attentionItems: AttentionItem[] = [];
@@ -70,8 +71,11 @@ export async function terminalDecisions(masterApi: (path: string) => Promise<any
       }
       if (decision.state !== 'stale' && decision.state !== 'withdrawn') continue;
       listed.push({ work: item.key, id: decision.id, action: decision.action, state: decision.state, reason: decision.outcome ?? null, ...(decision.race ? { race: decision.race } : {}) });
-      if (decision.state === 'stale' && latest.get(decision.action) === decision.id)
-        attentionItems.push({ subject: item.key, text: `Decision ${decision.id} (${decision.action}) is stale: ${decision.outcome ?? 'the item moved past it'}; request it again, the stale decision no longer blocks`,
+      if (decision.state !== 'stale' || latest.get(decision.action) !== decision.id) continue;
+      // A stale release of an item in backlog is owed: nothing else shows that it waits (GY-1294).
+      const owed = decision.action === 'release' ? staleReleaseAttention(item, decisions, sessions.now) : null;
+      if (owed) attentionItems.push(owed);
+      else attentionItems.push({ subject: item.key, text: `Decision ${decision.id} (${decision.action}) is stale: ${decision.outcome ?? 'the item moved past it'}; request it again, the stale decision no longer blocks`,
           ...agentOwner('master', `graphyard master decide ${item.key} ${decision.action} [JSON|@FILE] REASON, then graphyard master approver ${item.key} DECISION`, 'approver') });
     }
   }
