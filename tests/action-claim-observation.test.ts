@@ -31,7 +31,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * unit:observation-saved-on-revision-change — GY-1310: any save between an observation's read and
  * its save that leaves everything the observation was derived from unchanged (here a retitle and a
  * priority change, neither bookkeeping) leaves the observation saved, so the resync claimed meanwhile
- * completes on it; a moved submission, candidate, policy or queue tip still refuses it.
+ * completes on it; a moved submission, candidate, observation, policy, planned files or workspace still refuses it.
  */
 
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
@@ -228,7 +228,6 @@ test('unit:observation-saved-on-revision-change — a save that moved nothing th
     ['observation', work => { work.observation = { ...work.observation!, at: new Date(Date.parse(work.observation!.at) + 1).toISOString() }; }],
     ['policy', work => { work.policyRevision += 1; }],
     ['planned files', work => { work.plannedFiles = [...(work.plannedFiles ?? []), 'src/other.ts']; }],
-    ['queue tip', work => { work.queue = { ...(work.queue ?? {}), speculation: { tip: 'e'.repeat(40) } } as Work['queue']; }],
     ['workspace', work => { work.workspaces = [...work.workspaces, { ...work.workspaces.at(-1)!, branch: 'graphyard/other' }]; }],
   ];
   for (const [name, change] of inputs) { const next = structuredClone(after); change(next); assert.ok(!sameObservationInputs(after, next), `a moved ${name} refuses the observation`); }

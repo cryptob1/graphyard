@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { rmSync, writeFileSync } from 'node:fs';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { rmSync, statSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 
 /**
  * What a worker session must be able to write, and how each runtime's sandbox is made to allow it.
@@ -12,6 +12,14 @@ import { isAbsolute, relative, resolve } from 'node:path';
  * finds under a writable root, following a worktree's `gitdir:` pointer too, so granting the
  * common directory alone leaves the worktree's own admin directory read-only; only an explicit
  * grant of that exact path lifts it (GY-134).
+ *
+ * The common Git directory itself is never a granted root (GY-1321): a worker session runs inside
+ * the coordinator confinement (master/profiles.ts readOnlyMountWrapper), which binds the checkout —
+ * `.git` included — read-only and re-exposes writable only the shared paths below, and Codex's bwrap
+ * sandbox creates mount points under each granted root (`<root>/.git`), which a read-only `.git`
+ * refuses before any command runs. So exactly the shared paths the confinement re-exposes are
+ * granted, each where it exists: objects, and the remote-tracking and `graphyard/` branch refs and
+ * their reflogs. A linked worktree's FETCH_HEAD, index and HEAD live in its own admin directory.
  */
 export interface WorkerPaths { worktree: string; gitDir: string | null; commonDir: string | null }
 
@@ -22,7 +30,14 @@ export function workerPaths(worktree: string, run: Git = git): WorkerPaths {
   const ask = (...args: string[]) => { try { return run(worktree, args) || null; } catch { return null; } };
   return { worktree, gitDir: ask('rev-parse', '--absolute-git-dir'), commonDir: ask('rev-parse', '--path-format=absolute', '--git-common-dir') };
 }
-export const writablePaths = (paths: WorkerPaths) => [...new Set([paths.worktree, paths.gitDir, paths.commonDir].filter((path): path is string => !!path))];
+/** The shared Git paths under `commonDir` a worker writes, as the coordinator confinement re-exposes them. */
+export const sharedGitPaths = (commonDir: string) => [['objects'], ['refs', 'remotes'], ['logs', 'refs', 'remotes'], ['refs', 'heads', 'graphyard'], ['logs', 'refs', 'heads', 'graphyard']].map(parts => join(commonDir, ...parts));
+const isDirectory = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
+export const writablePaths = (paths: WorkerPaths) => {
+  // A checkout that is not a linked worktree writes through the common directory as its own.
+  const shared = paths.commonDir && paths.commonDir !== paths.gitDir ? sharedGitPaths(paths.commonDir).filter(isDirectory) : [];
+  return [...new Set([paths.worktree, paths.gitDir, ...shared].filter((path): path is string => !!path))];
+};
 
 /** A runtime whose launch arguments carry a filesystem sandbox, and how that sandbox is granted and probed. */
 export interface RuntimeSandbox {
@@ -96,13 +111,18 @@ const probeScript = 'for p do f="$p/.graphyard-sandbox-probe-$$"; if err=$( { : 
 
 /**
  * Proves, before the worker is reported started, that the sandbox its launch arguments describe
- * lets it write every path it needs. A runtime without a write-restricting sandbox is probed
- * from the launcher itself. Throws WorkerSandboxError naming the first path it cannot write.
+ * lets it write every path it needs, in the environment the session runs in: behind the
+ * coordinator confinement words the launch carries (`confinement`, GY-1321), so a runtime sandbox
+ * that cannot even start inside that read-only mount fails here, not at the worker's first command.
+ * A runtime without a write-restricting sandbox and without confinement words is probed from the
+ * launcher itself. Throws WorkerSandboxError naming the first path it cannot write, or the path
+ * the sandbox could not start on.
  */
-export function verifyWorkerSandbox(launch: { kind?: string; args: string[]; environment?: Record<string, string> }, cwd: string, paths: string[], run: SandboxExec = exec) {
+export function verifyWorkerSandbox(launch: { kind?: string; args: string[]; environment?: Record<string, string>; confinement?: readonly string[] }, cwd: string, paths: string[], run: SandboxExec = exec) {
   const kind = launch.kind ?? 'unknown';
   const sandbox = runtimeSandboxes[kind];
-  if (!sandbox || sandbox.mode(launch.args) === null) {
+  const wrapper = launch.confinement ?? [];
+  if ((!sandbox || sandbox.mode(launch.args) === null) && !wrapper.length) {
     for (const path of paths) {
       const file = resolve(path, `.graphyard-sandbox-probe-${process.pid}`);
       try { writeFileSync(file, ''); rmSync(file, { force: true }); }
@@ -110,14 +130,25 @@ export function verifyWorkerSandbox(launch: { kind?: string; args: string[]; env
     }
     return { runtime: kind, sandbox: null, verified: paths };
   }
-  const probe = sandbox.probe(launch.args, cwd, ['/bin/sh', '-c', probeScript, 'sh', ...paths]);
+  const script = ['/bin/sh', '-c', probeScript, 'sh', ...paths];
+  const inner = sandbox && sandbox.mode(launch.args) !== null ? sandbox.probe(launch.args, cwd, script) : { command: script[0], args: script.slice(1) };
+  const probe = wrapper.length ? { command: wrapper[0], args: [...wrapper.slice(1), inner.command, ...inner.args] } : inner;
+  const where = wrapper.length ? ` inside the coordinator confinement (${wrapper[0]})` : '';
   let output: string;
   try { output = run(probe.command, probe.args, { cwd, env: { ...process.env, ...launch.environment } }); }
-  catch (error: any) { output = `${error?.stdout ?? ''}`; if (!/unwritable\t/.test(output)) throw new WorkerSandboxError(kind, paths.join(', '), `the sandbox probe \`${probe.command} ${probe.args.slice(0, 1).join(' ')}\` did not run: ${`${error?.stderr ?? ''}`.trim() || (error instanceof Error ? error.message : String(error))}`.slice(0, 400)); }
+  catch (error: any) {
+    output = `${error?.stdout ?? ''}`;
+    if (!/unwritable\t/.test(output)) {
+      // A sandbox that could not start names the path it refused on (`bwrap: Can't create file
+      // <path>: Read-only file system`): that path, not the list, is what the launch failed on.
+      const stderr = `${error?.stderr ?? ''}`.trim(), refused = environmentFailure({ message: stderr }, cwd);
+      throw new WorkerSandboxError(kind, refused && stderr ? refused.path : paths.join(', '), `the sandbox probe \`${inner.command} ${inner.args.slice(0, 1).join(' ')}\`${where} did not run: ${stderr || (error instanceof Error ? error.message : String(error))}`.slice(0, 400));
+    }
+  }
   const denied = /^unwritable\t([^\t]*)\t(.*)$/m.exec(output);
   if (denied) throw new WorkerSandboxError(kind, denied[1], denied[2].trim() || 'write refused');
   if (!/^writable$/m.test(output)) throw new WorkerSandboxError(kind, paths.join(', '), `the sandbox probe reported nothing: ${output.trim().slice(0, 200) || 'no output'}`);
-  return { runtime: kind, sandbox: sandbox.mode(launch.args), verified: paths };
+  return { runtime: kind, sandbox: sandbox?.mode(launch.args) ?? null, verified: paths };
 }
 
 /**

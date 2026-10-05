@@ -310,7 +310,7 @@ test('unit:environment-blocker-auto-cleared — each cycle the loop probes an en
   assert.equal((await linkedProbe())?.passed, true, 'it passes once the shared directory is writable');
 
   // The loop builds the launch as dispatch does: the account the attempt ran on, with the
-  // worktree, its own Git admin directory and the shared one granted to the sandbox.
+  // worktree, its own Git admin directory and the shared paths the confinement re-exposes granted.
   const scratch = await temporaryDirectory('blocker-unblock-loop');
   const linkedWork = { ...work, lease: null, lastAssignment: { epoch: work.epoch, owner: implementer.id, claimedAt: new Date().toISOString() }, workspaces: [{ epoch: work.epoch, host: 'loop-host', path: linked, branch: 'graphyard/gy-941-1' }] } as unknown as Work;
   const accountConfig = (kind: string) => masterConfigSchema.parse({ ...loopConfig(), credentialFile: join(scratch, `${kind}-coordinator.token`), environments: [{ name: 'codex-a', kind: 'codex', home: '/homes/codex-a' }],
@@ -324,7 +324,9 @@ test('unit:environment-blocker-auto-cleared — each cycle the loop probes an en
   assert.equal(sandboxed.command, 'codex', 'the profile\'s codex account runs the probe in the codex sandbox');
   assert.equal(sandboxed.env.CODEX_HOME, '/homes/codex-a', 'under the account\'s own home');
   const filesystem = sandboxed.args.find(arg => arg.includes('.filesystem='))!;
-  for (const path of [git(linked, 'rev-parse', '--absolute-git-dir'), git(linked, 'rev-parse', '--path-format=absolute', '--git-common-dir')]) assert.ok(filesystem.includes(`${JSON.stringify(path)}="write"`), `the probe sandbox grants ${path}, as the worker's launch does`);
+  const common = git(linked, 'rev-parse', '--path-format=absolute', '--git-common-dir');
+  for (const path of [git(linked, 'rev-parse', '--absolute-git-dir'), join(common, 'objects')]) assert.ok(filesystem.includes(`${JSON.stringify(path)}="write"`), `the probe sandbox grants ${path}, as the worker's launch does`);
+  assert.ok(!filesystem.includes(`${JSON.stringify(common)}="write"`), 'never the common Git directory itself, which the confinement keeps read-only (GY-1321)');
   assert.ok(sandboxed.args.includes('permissions.graphyard-launch-probe.network.enabled=true'), 'with the launch\'s network access, so the remote is reachable');
   assert.match(sandboxed.args.join(' '), /git push --dry-run/, 'a read-only token fails the push dry run');
 

@@ -50,7 +50,9 @@ export const idleLeaseMs = 25 * 60_000;
  * How long after the loop first saw it idle a still-inactive worker's item goes to a new attempt,
  * and the least time its re-prompt has to answer (GY-1319). The bound runs from the idle mark, not
  * from the re-prompt, so cycle cadence is not paid twice: with the loop observing sessions about
- * every five minutes the attempt ends under 60 minutes after the session's last activity.
+ * every five minutes the attempt ends under 60 minutes after the session's last activity. A brief
+ * turn answering the re-prompt that goes quiet again within the grace is not resumed work and
+ * starts no fresh window: both bounds keep running from the first idle mark (GY-1321).
  */
 export const idleReclaimMs = 45 * 60_000, idleRepromptGraceMs = 10 * 60_000;
 /** Whether an idle attempt marked at `idleAt` and re-prompted at `repromptedAt` is past its reclaim bound. */
@@ -343,6 +345,18 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
     if (!idle) { await entry(keys.idle, 'waiting', `${item.key} epoch ${epoch}: ${profile.agentName} in pane ${pane} holds a live lease with no open blocker or scope request and has shown no activity since this cycle`); return; }
     const quietMs = now() - Date.parse(idle.at), minutes = Math.round(quietMs / 60_000);
     const repromptKey = `resume:idle:${item.id}:${epoch}:${idle.at}`, reprompted = state.actions[repromptKey];
+    // The one re-prompt of this attempt, answered by a turn that went quiet again within its grace:
+    // that turn is not resumed work, so the reclaim stands on the first idle mark and the re-prompt's
+    // own clock (GY-1321).
+    const prefix = `resume:idle:${item.id}:${epoch}:`;
+    const [answeredKey, answered] = reprompted ? [] : Object.entries(state.actions).find(([key, action]) => key.startsWith(prefix) && action.state === 'done'
+      && Date.parse(idle.at) - Date.parse(action.at) <= idleRepromptGraceMs) ?? [];
+    if (answeredKey && answered) {
+      if (!idleReclaimDue(now(), answeredKey.slice(prefix.length), answered.at)) return;
+      const paneReason = checkPaneStillBelongs(item, handleId, pane);
+      await reclaimIdle(`idle with a live lease: no activity in pane ${pane} after its re-prompt at ${answered.at} but a turn that ended by ${idle.at}, and none in the ${Math.round((now() - Date.parse(answered.at)) / 60_000)} minutes since the re-prompt${paneReason ? `; its pane no longer verifies (${paneReason})` : ''}`, paneReason ? null : pane);
+      return;
+    }
     if (!reprompted || reprompted.state === 'failed') {
       if (quietMs <= idleLeaseMs || !effects.promptSession || !readyToRetry(reprompted, state.cycle)) return;
       // The pane the name resolved — only before this attempt's own pane was recorded — must still
