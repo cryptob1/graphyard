@@ -359,7 +359,8 @@ export async function doctorStep(cycle: Cycle) {
     if (live || clock - Date.parse(inFlight.at) < 2 * doctor.settings.timeoutMinutes * 60_000 + lostRunGraceMs) return;
     inFlight.state = 'failed';
     inFlight.detail = `The doctor run started ${inFlight.at} never ended in this process; it is recorded as lost`.slice(0, 1000);
-    await record(state, `doctor:${inFlight.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: inFlight.detail, attempts: 1, cycle: state.cycle }, now(), effects.persist);
+    // Lost to the loop's own restart, as a run with no report is (GY-1318): failed, but no loop fault.
+    await record(state, `doctor:${inFlight.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: inFlight.detail, attempts: 1, cycle: state.cycle }, now(), effects.persist, null);
     await postRun(cycle, doctor, inFlight, now);
     return;
   }
@@ -396,7 +397,10 @@ export async function doctorStep(cycle: Cycle) {
         // Queued for posting before the fallible record, as the apply-failure path below does: a
         // failed run is never reaped as lost, so the marker is what keeps it retryable.
         state.doctor.unposted = [...new Set([...state.doctor.unposted, current.at])].slice(-40);
-        await record(state, `doctor:${current.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `The doctor run returned no report: ${current.detail}`, attempts: 1, cycle: state.cycle }, now(), effects.persist);
+        // GY-1318: its models died or the loop's own shutdown cancelled it — the run is still failed,
+        // posted and retried, and the next interval's run re-covers, but the loop did not fail to
+        // cycle: no fault kind, so no loop fault instance (as GY-1295 did for allowlist refusals).
+        await record(state, `doctor:${current.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `The doctor run returned no report: ${current.detail}`, attempts: 1, cycle: state.cycle }, now(), effects.persist, null);
         await postRun(cycle, doctor, current, now);
         return;
       }

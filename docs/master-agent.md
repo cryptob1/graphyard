@@ -28,13 +28,13 @@ that host's loop. `dispatch.sessionReconcile` reports each closure:
   way as any other. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
-A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
+A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) is flagged, not closed.
 
 **So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
 that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
 another session's handle finished to free a slot.
 
-`blocked` frees the slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) `github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch`, `outside-scope-test-failure`, `planned-file-scope`, `needs-decision` self-clear; `genuine`/`human-only` escalate.
+`blocked` frees the slot; [classes](protocol/leases.md#blocked-work-unblocks-itself) `github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch`, `outside-scope-test-failure`, `dispatch-failure`, `planned-file-scope`, `needs-decision` self-clear; `genuine`/`human-only` escalate.
 
 ### System invariants
 
@@ -46,11 +46,11 @@ Every `run.doctor.intervalMinutes` (default 10) the loop's [doctor](onboarding.m
 
 ## Research and diagnosis
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); quota refusals read `waiting` in `daemon.diagnoses` until `retryAt`, then one probe; its `stale`/`withdrawn` decisions are re-requested (≤3), then escalated; stale backlog releases stay owed. Branch restores, base conflicts under 30m and restart-resumed merges aren't `merge` faults.
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); quota refusals read `waiting` in `daemon.diagnoses` until `retryAt`, then one probe; its `stale`/`withdrawn` decisions are re-requested (≤3), then escalated, revision-raced requests retried; restart-lost diagnoses file no `loop` fault; stale backlog releases stay owed. Branch restores, base conflicts under 30m and restart-resumed merges aren't `merge` faults.
 
 ## Machine-filed backlog
 
-Review follow-ups are never filed: worth-fixing findings are fixed on the same pull request. Pi (`run.research`) triages follow-up and fault items (closure needs approval; `triageConcurrency` 2).
+Review follow-ups are never filed: worth-fixing findings are fixed in-PR. Pi (`run.research`) triages follow-up and fault items (closure needs approval; `triageConcurrency` 2).
 
 ## Automatic dispatch at submit
 
@@ -64,7 +64,7 @@ The master never launches reviews or producers by hand, except `master review GY
 
 ### Proofs must exercise their criterion
 
-A passing producer records `"exercise"`: rerun without the criterion's behaviour, the proof must fail with a case executed, else the pass is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`). Then the next action is `request-rework` naming proof, criterion and surviving mutation. Unexercised `manual:` proofs re-attest, never rework.
+A passing producer records `"exercise"`: rerun without the criterion's behaviour, the proof must fail with a case executed, else the pass is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`). Next: `request-rework` naming proof, criterion, surviving mutation. Unexercised `manual:` proofs re-attest, never rework.
 
 ## GitHub merges
 
