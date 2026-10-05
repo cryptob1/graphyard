@@ -508,13 +508,23 @@ export function contentionView(work: Work, now: Date) {
 interface ReconcileEntry { number: number; work: Work; version: string; settled: boolean; face: string }
 /**
  * What other items' evaluations can read of an item (GY-1124): its document without the fields a
- * lease renewal moves — the revision, the update time and the lease's expiry. A heartbeat leaves
- * the face unchanged, so the pass after it evaluates only the renewed item; any other write
- * changes it, and the pass evaluates every live item against it.
+ * renewal moves — the revision, the update time, the lease's expiry, and an action claim's expiry
+ * and renewal count (GY-1276). A heartbeat or an executor's claim renewal leaves the face
+ * unchanged, so the pass after it evaluates only the renewed item; any other write changes it, and
+ * the pass evaluates every live item against it. A claim expiring is a move of the clock alone,
+ * which the bounded full evaluation (`reconcileFullEvaluationMs`) catches up.
  */
 function fleetFace(work: Work) {
-  const { revision: _revision, updatedAt: _updatedAt, lease, ...rest } = work;
-  return stableJson({ ...rest, lease: lease ? { owner: lease.owner, epoch: lease.epoch } : null });
+  const { revision: _revision, updatedAt: _updatedAt, lease, actionQueue, ...rest } = work;
+  const actions = actionQueue && {
+    ...actionQueue,
+    actions: actionQueue.actions.map(row => {
+      if (!row.claim) return row;
+      const { expiresAt: _expiresAt, renewedAt: _renewedAt, renewals: _renewals, ...claim } = row.claim;
+      return { ...row, claim };
+    }),
+  };
+  return stableJson({ ...rest, actionQueue: actions, lease: lease ? { owner: lease.owner, epoch: lease.epoch } : null });
 }
 /** The longest reconciliation goes between full evaluations: `GRAPHYARD_RECONCILE_FULL_MS`, 2000..300000 ms, default 10000 (GY-1124). */
 export function configuredReconcileFullMs(value = process.env.GRAPHYARD_RECONCILE_FULL_MS, fallback = 10_000): number {
@@ -827,7 +837,9 @@ export class Engine {
     // Provider I/O stays outside the coordination transaction.
     // A renewal changes one item's lease and reads nothing else of the fleet (GY-1124): it takes that
     // item's lock alone, so renewals of different items never wait for each other or for a fleet
-    // command. The item is re-evaluated by the next reconciliation pass, which sees its row move.
+    // command. It neither evaluates the item nor records a dispatch: both are left to the next
+    // reconciliation pass, which sees the row move, so a gate change that waited on this renewal
+    // lands one reconcile tick after it rather than in the renewal's own response.
     if (command === 'heartbeat' && actor.role !== 'operator-agent') return this.store.transaction(async (db, now) => {
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
       if (receipt) {
@@ -847,10 +859,14 @@ export class Engine {
       return work;
     }, { lane: 'lease', fleetLock: false, itemLock: id });
     const observation = command === 'submit' ? context.observation ?? await this.observeSubmission(actor, id, data, key) : null;
+    // The transaction reruns this closure on a stale write: each run authorizes the principal as the
+    // caller presented it, never the one an earlier run already resolved (GY-1276).
+    const caller = actor;
     return this.store.transaction(async (db, now) => {
+      actor = caller;
       if (actor.role === 'operator-agent') {
         demand(this.operatorAuthorizer, 'Operator-agent authorization is unavailable', 503);
-        actor = await this.operatorAuthorizer(db, now, actor);
+        actor = await this.operatorAuthorizer(db, now, caller);
       }
       const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
       if (receipt) {
@@ -1557,8 +1573,10 @@ export class Engine {
   }
 
   /** The one item holding action row `id`, found by containment rather than by loading every document. */
-  private async actionOwner(db: { query: (text: string, values: unknown[]) => Promise<{ rows: { document: Work }[] }> }, id: string): Promise<Work | undefined> {
-    return (await db.query(`SELECT document FROM work_items w WHERE w.id IN (SELECT id FROM work_index WHERE NOT settled) AND document->'actionQueue'->'actions' @> jsonb_build_array(jsonb_build_object('id', $1::text)) ORDER BY number LIMIT 1`, [id])).rows[0]?.document;
+  private async actionOwner(db: { query: (text: string, values: unknown[]) => Promise<{ rows: { document: Work }[] }> }, id: string, item?: string): Promise<Work | undefined> {
+    // Given the owning item's id, the owner is read again by its primary key instead of found by a scan (GY-1276).
+    const scope = item === undefined ? 'w.id IN (SELECT id FROM work_index WHERE NOT settled)' : 'w.id=$2::uuid AND w.id IN (SELECT id FROM work_index WHERE NOT settled)';
+    return (await db.query(`SELECT document FROM work_items w WHERE ${scope} AND document->'actionQueue'->'actions' @> jsonb_build_array(jsonb_build_object('id', $1::text)) ORDER BY number LIMIT 1`, item === undefined ? [id] : [id, item])).rows[0]?.document;
   }
   /**
    * Claim the next action for a stateless executor.
@@ -1643,9 +1661,10 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       const owner = await this.actionOwner(db, id);
       demand(owner, 'Action is not open on any work item', 404);
-      // The item's lock, which a heartbeat takes alone (GY-1124), then the item as it stands under it.
+      // The item's lock, which a heartbeat takes alone (GY-1124), then the item as it stands under it,
+      // read again by its id: the action can only have left it, never moved to another item.
       await lockItem(db, owner!.id);
-      const work = await this.actionOwner(db, id);
+      const work = await this.actionOwner(db, id, owner!.id);
       demand(work, 'Action is not open on any work item', 404);
       const row = renewClaim(work!, id, { executor: data.executor ?? actor.id, principal: actor.id }, now, data.leaseSeconds ? data.leaseSeconds * 1000 : undefined);
       // A renewal is a fact about a claim, not a decision: it is persisted without re-evaluating
