@@ -26,7 +26,7 @@ import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js'
 import { setupHealth } from './master-setup.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import { nameUnresolvedThreads } from '../merge-queue.js';
-import { deliverySpeed, deliverySpeedBreaches, productionEnvironmentFromEnv, readReadyInstants, reworkRoundsWithOwnCauses } from '../flow-analytics.js';
+import { speedSections } from '../flow-analytics.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 import { attributeAttention, derivedAttention, faulted, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
@@ -125,18 +125,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // A check failed on the clock says so, against its budget; a routed scope request, its approver.
   const status = routedScopeStatus(await timedStep('timing failures', () => qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository))), snapshot.work, cycling?.approvals, master);
   for (const worker of status.workers) Object.assign(worker, launches.rows[worker.profile] ?? {});
-  // Rework rounds by cause (GY-643), out-of-item causes removed, cached beside the worktree
-  // inventory (GY-725); a failed read marks the section.
-  try { status.speed.reworkRounds = await reworkRoundsWithOwnCauses(status.speed.reworkRounds, masterApi, snapshot, 100, { root }); }
-  catch (error) { sections.mark('rework causes', 'GET /api/events?kind=rework', error); }
-  // Delivery speed on the GitHub path (GY-1232): ready→merged into main and merged→promoted to
-  // production, p50/p90 over 24 hours and 7 days, each p90 judged against its master.json target.
-  // Ready instants come from a bounded read of `ready` events; a failed read measures from creation.
-  const readyRead = await readReadyInstants(masterApi, new Date((Date.parse(snapshot.now) || Date.now()) - 37 * 86_400_000).toISOString())
-    .catch(error => { sections.mark('delivery speed', 'GET /api/events?kind=ready', error); return { readyAt: new Map<string, string>(), complete: false }; });
-  const delivery = { ...deliverySpeed(snapshot.work, { now: Date.parse(snapshot.now) || Date.now(), readyAt: readyRead.readyAt, targets: master.deliverySpeed, productionEnvironment: (() => { try { return productionEnvironmentFromEnv(); } catch { return undefined; } })() }), readyEventsComplete: readyRead.complete };
-  const deliveryItems: AttentionItem[] = deliverySpeedBreaches(delivery).map(breach => ({ subject: 'delivery speed', text: breach.text,
-    ...agentOwner('master', `Find what held the slowest items (graphyard status GY-N) and file the fix that removes it; the targets are deliverySpeed in master.json`) }));
+  // Rework rounds by cause (GY-643, GY-725) onto `speed`, delivery speed on the GitHub path with its
+  // breach attention (GY-1232); a failed read marks its section.
+  const delivery = await speedSections(status.speed, masterApi, snapshot, { root, targets: master.deliverySpeed, sections });
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device.
   const sudo = administration.sudo;
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
@@ -168,7 +159,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   attentionItems.unshift(...ahead);
   // Setup that stops every launch, or leaves the loop unsupervised, is the master's to repair.
   attentionItems.push(...setupItems);
-  attentionItems.push(...generatedFiles, ...overflow, ...deliveryItems); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []));
+  attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...delivery.attention);
   attentionItems.splice(loopItems.length + dispatchItems.length, 0, ...resources.attention);
   // Everything the control plane takes from the operator's own credential alone, from the
   // human-only rule table, answered on the dashboard's Needs you page (GY-102).
@@ -181,14 +172,13 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
       ...backlog,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + triage.length + ahead.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length + deliveryItems.length } }, snapshot.work);
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + triage.length + ahead.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length + delivery.attention.length } }, snapshot.work);
   return { ...directMergeLine(coordinator), ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
     // The board (GY-200): what the master owes first, with commands, then the rest.
     board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator, decisions.unanswered)),
     unavailable: sections.unavailable,
     docsBudget: docs,
-    // Ready→merged and merged→production on the GitHub path (GY-1232).
-    delivery,
+    delivery: delivery.report,
     humanOnly: humanOnly.map(humanOnlyStatusRow),
     // Every open item the control plane names no action for, with the account it names and how
     // long it has held its failing gate.

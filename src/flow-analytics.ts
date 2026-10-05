@@ -5,6 +5,7 @@ import { stages, type Stage, type Work } from './model.js';
 import { queueSequencingReason } from './merge-queue.js';
 import { conflictHotspots, conflictHotspotWindowMs, ledgerConflicts, type ConflictOccurrence } from './model/conflict-hotspots.js';
 import { eventHistoryLimits } from './events-history.js';
+import { agentOwner } from './master/attention.js';
 
 // Delivery-flow analytics.
 //
@@ -2075,3 +2076,28 @@ export async function readReadyInstants(readEvents: (path: string) => Promise<an
   }
   return { readyAt, complete };
 }
+/**
+ * The speed measures `master status` adds beside the snapshot's own: rework rounds split by cause
+ * (GY-643), written onto `speed`, and delivery speed on the GitHub path (GY-1232) with one attention
+ * line per breached target. Ready instants come from a bounded read of `ready` events since the
+ * oldest creation the 7-day window can hold; a failed read marks its section and measures from creation.
+ */
+export async function speedSections(speed: Record<string, any>, masterApi: (path: string) => Promise<any>, snapshot: { work: Work[]; now: string },
+  options: { root: string; targets?: Partial<DeliverySpeedTargets>; sections: { mark(section: string, route: string | null, error: unknown): void } }) {
+  const { sections } = options, now = Date.parse(snapshot.now) || Date.now();
+  try { speed.reworkRounds = await reworkRoundsWithOwnCauses(speed.reworkRounds, masterApi, snapshot, 100, { root: options.root }); }
+  catch (error) { sections.mark('rework causes', 'GET /api/events?kind=rework', error); }
+  const window = merged7d(snapshot.work, now), since = window.reduce((oldest, work) => Math.min(oldest, time(work.createdAt) ?? oldest), now);
+  const read = window.length ? await readReadyInstants(masterApi, new Date(since).toISOString())
+    .catch(error => { sections.mark('delivery speed', 'GET /api/events?kind=ready', error); return { readyAt: new Map<string, string>(), complete: false }; }) : { readyAt: new Map<string, string>(), complete: true };
+  let productionEnvironment: string | undefined;
+  try { productionEnvironment = productionEnvironmentFromEnv(); } catch { /* an invalid name falls back to the default */ }
+  const report = { ...deliverySpeed(snapshot.work, { now, readyAt: read.readyAt, targets: options.targets, productionEnvironment }), readyEventsComplete: read.complete };
+  const attention = deliverySpeedBreaches(report).map(breach => ({ subject: 'delivery speed', text: breach.text,
+    ...agentOwner('master', 'Find what held the slowest items (graphyard status GY-N) and file the fix that removes it; the targets are deliverySpeed in master.json') }));
+  return { report, attention };
+}
+const merged7d = (items: readonly Work[], now: number) => items.filter(work => {
+  const mergedAt = work.stage === 'done' && !work.closure && work.delivery ? time(work.delivery.mergedAtRepository ?? work.delivery.mergedAt) : null;
+  return mergedAt !== null && mergedAt <= now && mergedAt > now - 7 * day;
+});
