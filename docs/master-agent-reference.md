@@ -23,7 +23,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 **A merge-base dismissal is not a reviewer withdrawing a verdict.** An approval dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); no other dismissal is. Re-post is no new verdict (`observation.dismissedReviewIds`). Merge-base dismissals in motion (tips republishing, approvals restoring) are review-convergence faults only past 30 min (`mergeBaseDismissalWaitBoundMs`).
 
-**A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejected branches restore onto the base tip in one push (`baseRefresh.restore`): `restored` once GitHub shows it, else `unpublished` (`failure`); a second, candidate unchanged, escalates (`escalated`, `master status`). A tip behind an unlanded departed entry waits (`Restoring after predecessor ejection`) for its restored head; another item's carried files (`Carried from another item's tip`) are neither rework nor ejection. Git decides landing (`landing.landed`); landed peers deliver immediately.
+**A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejected branches restore onto the base tip in one push (`baseRefresh.restore`): `restored` once GitHub shows it, else `unpublished` (`failure`); a second, candidate unchanged, escalates (`escalated`, `master status`). A tip behind an unlanded departed entry waits for its restored head (`Restoring after predecessor ejection`); carried files (`Carried from another item's tip`) are neither rework nor ejection. Git decides landing (`landing.landed`); landed peers deliver immediately.
 
 #### A contaminated branch
 
@@ -33,7 +33,7 @@ A worker restores its own: `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-
 
 ## GitHub administration through the browser
 
-Protection reconciles via `master protection --apply`; where only a page exists, `master browser FLOW` drives the `master init --browser-profile` profile: `master browser app-permissions`, `master browser installation-accept` or `master browser protection`.
+Protection reconciles via `master protection --apply`; where only a page exists, `master browser FLOW` drives the `master init --browser-profile` profile.
 
 | Flow | Effect |
 | --- | --- |
@@ -41,7 +41,7 @@ Protection reconciles via `master protection --apply`; where only a page exists,
 | `installation-accept` | Accepts pending requests |
 | `protection` | Reconciles branch protection |
 
-Permission flows read `GET /api/github/installation` (App credential, not gh). Each flow records `.graphyard/master-actions/` `record.json`, appending to `ledger.json`. Approving its *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, uses a merge bypass, pushes code or reads a worker credential.
+Permission flows read `GET /api/github/installation` (App credential, not gh). Flows record `.graphyard/master-actions/` `record.json` and append `ledger.json`; approving GitHub Mobile *Confirm access* is human-only. The master never stores the profile's cookies, uses a merge bypass, pushes code or reads a worker credential.
 
 ## Harness permissions
 
@@ -49,17 +49,17 @@ A harness classifier refuses routine administration; `master harness claude --ap
 
 ## Typed actions and executors
 
-Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release. After a verified deployment the loop moves a clean detached checkout to the base tip (else `upgrade` attention); `src/`, `scripts/`, `bin/` or `package.json` changes restart executors, then the loop. `releaseLag` flags >1-delivery lag past 10 minutes. A moved checkout exits the executor 0 for systemd; one killed mid-action is named in `master status`. `Nothing can run KIND` skips `merge` beside a merging loop, empty fleets ≤120 s post-restart, `deactivating` units.
+Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release. After a verified deployment the loop moves a clean detached checkout to the base tip (else `upgrade` attention); `src/`, `scripts/`, `bin/` or `package.json` changes restart executors, then the loop. `releaseLag` flags >1-delivery lag past 10 minutes. A moved checkout exits the executor 0; one killed mid-action shows in `master status`. `Nothing can run KIND` skips `merge` beside a merging loop, empty fleets ≤120 s post-restart, `deactivating` units.
 
-A `resync` needs a fresh observation: `POST /api/work/:id/resync` with `{ since }` (claim time) wakes the item's observation job, answering `observed`, `observedAt` and its `job`; `wake: false` only reads. Unobserved, the claim fails at once (`no observation newer than the claim was saved`, plus its condition). Failures against a scheduled job with no hold or error stall after thirty minutes; held, failed or missing, after three. Row bookkeeping never refuses a prior observation read.
+A `resync` needs a fresh observation: `POST /api/work/:id/resync` with `{ since }` (claim time) wakes the observation job (answer: `observed`, `observedAt`, `job`); `wake: false` only reads. Unobserved, the claim fails at once (`no observation newer than the claim was saved`, plus its condition). Failures against a scheduled job with no hold or error stall after thirty minutes; held, failed or missing, after three. Row bookkeeping never refuses a prior observation read.
 
-A `dispatch` or `request-review` finding a session already answering the requested head completes on it; a settled standing verdict blocks a second reviewer until dismissed; busy or reserved worker profiles wait thirty minutes before stalling. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): in no count and no list, it shows in `actions.stalled` and on the item's own card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
+A `dispatch` or `request-review` finding a session already answering the requested head completes on it; a settled standing verdict blocks a second reviewer until dismissed; busy or reserved worker profiles wait thirty minutes before stalling. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): it shows only in `actions.stalled` and on the item's card; backoff, doubling from one minute, never outlives it. Eight escalate it (half-hourly); ticks requeue ownerless items (`liveness.violations`).
 
-A failed snapshot read retries once (0.5–1.5 s); a failed cycle waits min(interval, 30 s), doubling. One item's throw fails only its `isolated:KIND:ITEM-ID` action.
+A failed snapshot read retries once (0.5–1.5 s); a failed cycle waits min(interval, 30 s), doubling; one item's throw fails only `isolated:KIND:ITEM-ID`.
 
 ## Resources and disk
 
-`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees (`run.reclaimIdleHours`; never dirty/unpushed), `run.worktreeRemovalLimit`/cycle, logging `.graphyard/worktree-reclaim.jsonl`, stale [test temp entries](operations-reference.md#control-plane-resources) and `tsx-<uid>` in `/tmp` (dead owner or 2h/6h idle; unheld; ≤100/cycle, one pass in flight); `disk` attention below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`). Agentless panes Graphyard launched are swept each cycle ([panes](master-agent-sessions.md#panes-are-closed-and-reclaimed)). The resource reclaim closes any unowned, non-`working` pane on a profile's name — `unknown` status or a recordless reviewer/producer included — once two passes 60 s apart saw it.
+`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop `git worktree remove`s finished worktrees (`run.reclaimIdleHours`; never dirty/unpushed), `run.worktreeRemovalLimit`/cycle, logging `.graphyard/worktree-reclaim.jsonl`, stale [test temp entries](operations-reference.md#control-plane-resources) and `tsx-<uid>` in `/tmp` (dead owner or 2h/6h idle; unheld; ≤100/cycle, one pass in flight); `disk` attention below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`). Agentless Graphyard panes are swept each cycle; any unowned, non-`working` pane on a profile's name (`unknown` or a recordless reviewer/producer included) closes once two passes 60 s apart saw it ([panes](master-agent-sessions.md#panes-are-closed-and-reclaimed)).
 
 ## Recovery
 
@@ -69,19 +69,19 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and
 
 ### Producer-runtime faults
 
-A producer request spent with no attempt acting (`never started`, run could not start, launch refused, exited at launch) requests no rework: attention names the attempts and their profiles, and the request relaunches on an independent, credentialed profile none of them ran on.
+A producer request spent with no attempt acting (`never started`, unstartable, refused or exited at launch) requests no rework: attention names the attempts and profiles; it relaunches on an independent credentialed profile none ran on.
 
 `master escalation GY-N` spawns a handler answering with `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
 ## Research and diagnosis
 
-With `run.research`, features (or `"research": true`) get one read-only Pi briefing per revision; build follows it, failure never blocks; product questions need humans.
+With `run.research`, features (or `"research": true`) get one read-only Pi briefing per revision; failure never blocks.
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approvals release its fix or close-as-duplicate; recurrences re-file. Branch restores or base conflicts under 30m, restart-resumed merges are not `merge` faults.
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approvals release its fix or close-as-duplicate; recurrences re-file. Branch restores, base conflicts under 30m and restart-resumed merges are no `merge` faults.
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen, nor pruning retire, a standing fault. Full roles are slot waits; workless sessions raise `fleet-capacity` (capacity); unnamed master roles are no `configuration` fault. Scope requests count past 15 minutes open, or refused with no approver left. A failed section is listed only in `unavailable`. Sandbox or `workflows`-permission refusal blockers are `configuration`.
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); hashes moving or pruned never reopen or retire a standing fault. Full roles are slot waits; workless sessions raise `fleet-capacity` (capacity); unnamed master roles are no `configuration` fault. Scope requests count past 15 minutes open, or refused with no approver left. A failed section is listed only in `unavailable`. Sandbox or `workflows`-permission refusal blockers are `configuration`.
 
 ## Pipeline speed
 
