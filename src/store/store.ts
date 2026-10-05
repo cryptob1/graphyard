@@ -3,9 +3,11 @@ import { randomUUID } from 'node:crypto';
 import type { Work } from '../model.js';
 import type { IntegrationJob } from '../coordination.js';
 import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
-import { assertSavable } from './locked-read.js';
+import { noteSaved } from './locked-read.js';
 import { advisoryLocks } from './locks.js';
 import { StaleWrite, lockItem, staleWriteAttempts, type StoreTransactionOptions } from './item-lock.js';
+import { saveDocument } from './document-write.js';
+export { saveDocument, rewriteDocument } from './document-write.js';
 import { runStartupMigration } from './migration-locks.js';
 // The startup migration's engine lives beside its locks and its recorded state (migration-locks.ts);
 // the lock budget stays exported here with the store that applies it.
@@ -90,6 +92,11 @@ export class Store {
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
   /** Resolves once every connection of all three pools has closed (GY-483), so the database may be stopped right after. */
   async close() { await Promise.all([closePool(this.pool, 'main'), closePool(this.leasePool, 'lease'), closePool(this.reportPool, 'report')]); }
+  /**
+   * Run `fn` in one transaction under the locks `options` name. A `StaleWrite` reruns the whole of
+   * `fn` on a fresh transaction (up to `staleWriteAttempts` runs), so `fn` must keep its effects in
+   * the database: an external call or in-memory change it makes is repeated by each rerun.
+   */
   async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, options: StoreTransactionOptions = {}): Promise<T> {
     for (let attempt = 1; ; attempt++) {
       try { return await this.transactionOnce(fn, options); } catch (error) {
@@ -302,33 +309,9 @@ export async function wakeJobs(db: Pick<pg.PoolClient, 'query'>, ids: string[], 
     [[...new Set(ids)].sort(), [...new Set(prioritized)], String(webhookWakeTtlMs)]);
 }
 
-export async function saveDocument(db: pg.PoolClient, work: Work, now: Date): Promise<string> {
-  assertSavable(work);
-  const read = work.revision;
-  work.revision++;
-  work.updatedAt = now.toISOString();
-  // Written only over the revision it was read at (GY-1124): a heartbeat commits under its item lock
-  // alone, so a fleet command holding a copy read before that renewal must not overwrite it.
-  const text = JSON.stringify(work);
-  const written = await db.query("UPDATE work_items SET document=$2 WHERE id=$1 AND (document->>'revision')::numeric IS NOT DISTINCT FROM $3::numeric", [work.id, text, read ?? null]);
-  if (!written.rowCount && (await db.query('SELECT 1 FROM work_items WHERE id=$1', [work.id])).rowCount) throw new StaleWrite(work.id, read);
-  return text;
-}
-
-/**
- * Write bookkeeping onto an item in place (GY-1124): no new revision and no ledger entry, so a
- * reader resolving an older revision from the ledger (`onlyActionsMovedSince`) still counts saves
- * exactly. Only for a caller holding the item's lock — the lock a heartbeat takes alone — so no
- * renewal can commit between its read and this write; the revision guard refuses one that did.
- */
-export async function rewriteDocument(db: pg.PoolClient, work: Work) {
-  assertSavable(work);
-  const written = await db.query("UPDATE work_items SET document=$2 WHERE id=$1 AND (document->>'revision')::numeric IS NOT DISTINCT FROM $3::numeric", [work.id, JSON.stringify(work), work.revision ?? null]);
-  if (!written.rowCount && (await db.query('SELECT 1 FROM work_items WHERE id=$1', [work.id])).rowCount) throw new StaleWrite(work.id, work.revision);
-}
-
 export async function save(db: pg.PoolClient, work: Work, actor: string, kind: string, now: Date, details?: unknown) {
   const text = await saveDocument(db, work, now);
+  noteSaved(work, text);
   // Stored as a delta on the item's last full snapshot when that is small (snapshot-delta.ts).
   await appendSave(db, work, actor, kind, details, text);
 }

@@ -252,6 +252,26 @@ test('unit:host-seal-key-without-hard-links-keeps-first-key — concurrent first
   const recovered = await hostSealKey('stale-host', home, noLinks);
   assert.equal(await unsealOnHost(sealToHost(recovered, secret), 'stale-host', home), secret);
   assert.deepEqual((await readdir(join(home, 'seal'))).filter(name => name.startsWith('stale-host')).sort(), ['stale-host.pem', 'stale-host.pem.pub']);
+  // Concurrent first uses behind one stale lock still take turns: none removes a lock another took (GY-1219).
+  const raced = join(home, 'seal', 'raced-host.pem.lock');
+  await writeFile(raced, '1\n');
+  await utimes(raced, old, old);
+  const racedKeys = await Promise.all(Array.from({ length: 6 }, () => hostSealKey('raced-host', home, noLinks)));
+  assert.equal(new Set(racedKeys).size, 1, 'every first use behind a stale lock returns the same public half');
+  assert.equal(await unsealOnHost(sealToHost(racedKeys[0], secret), 'raced-host', home), secret);
+  assert.deepEqual((await readdir(join(home, 'seal'))).filter(name => name.startsWith('raced-host')).sort(), ['raced-host.pem', 'raced-host.pem.pub']);
+  // The turn after a stale lock is a lock of its own: while another first use holds it, a waiter
+  // neither publishes a key nor removes either lock, and it takes its turn once the holder lets go.
+  const passed = join(home, 'seal', 'turn-host.pem.lock'), turn = `${passed}.1`;
+  await writeFile(passed, '1\n');
+  await utimes(passed, old, old);
+  await writeFile(turn, '2\n');
+  const waiting = hostSealKey('turn-host', home, noLinks);
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.deepEqual((await readdir(join(home, 'seal'))).filter(name => name.startsWith('turn-host.pem') && !name.endsWith('.tmp')).sort(), ['turn-host.pem.lock', 'turn-host.pem.lock.1'], 'the waiter publishes nothing and removes no lock while the turn is held');
+  await rm(turn);
+  assert.equal(await unsealOnHost(sealToHost(await waiting, secret), 'turn-host', home), secret);
+  assert.deepEqual((await readdir(join(home, 'seal'))).filter(name => name.startsWith('turn-host')).sort(), ['turn-host.pem', 'turn-host.pem.pub']);
 });
 
 test('unit:operator-principal-declared-human — the install plan declares its operator principal a human session and no agent principal; a roster rotation keeps it so', async () => {

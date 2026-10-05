@@ -15,7 +15,7 @@ import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, nextQueueEntries, disprovedConflict, withDisprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, defaultParallelTips, mergeParallelTipsEvent, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, tipReplacesHead, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, conflictSince, nextQueueEntries, disprovedConflict, withDisprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, defaultParallelTips, mergeParallelTipsEvent, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, tipReplacesHead, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { docsSyncCarry } from './model/docs-sync.js';
 import { liftedEjection, queueEjectionRecord } from './model/queue.js';
 import { githubFromEnv, mergeBandQueueDepth } from './github.js';
@@ -45,7 +45,7 @@ import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMer
 import { repairAuditEvent, repairScopeRefusal, type RepairAudit } from './master/repair-lane.js';
 import { applyPostMerge, applyRevert, currentLane, defaultOptimisticExclude, defaultOptimisticMerge, optimisticEligibility, optimisticExcludeEvent, optimisticMergeEvent, parseOptimisticExclude, type OptimisticRevert, type PostMergeVerdict } from './optimistic-merge.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
-import { coordinationProjection, isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, workIdByRef, type SavedVersion } from './store/locked-read.js';
+import { coordinationProjection, isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type SavedVersion } from './store/locked-read.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -290,8 +290,29 @@ export function applyScopeDecision(work: Work, request: NonNullable<Work['scopeR
   return decision;
 }
 
+/**
+ * The lease a worker submitted under ended at that submission. A supervisor that keeps renewing it
+ * (or releases it) is told so, rather than left to read the loss as a superseded epoch.
+ */
+function endedBySubmission(work: Work, epoch: number) {
+  if (!work.lease && submittedEpoch(work, epoch))
+    demand(false, `Implementation lease for epoch ${epoch} ended when ${work.key} was submitted; stop heartbeating after complete`);
+}
+
 /** The violation an observed merge records when no valid execution covered it. */
 export const unauthorizedMergeViolation = 'Merge observed without a prior authorization for this candidate';
+/**
+ * The refresh record a stale mergeability reading (GY-375) leaves for its head: the reading over
+ * whatever the record for that same head carried onto it. `conflictSince` and `conflictPaths` are
+ * kept only beside a conflict (GY-1230), so what an earlier conflict on the head recorded never
+ * survives on a record whose conflict the stale reading cleared.
+ */
+export function staleRefreshRecord(previous: BaseRefresh | null | undefined, refresh: BaseRefresh): BaseRefresh {
+  const kept = previous?.head === refresh.from.sha ? previous : null;
+  const record: BaseRefresh = { ...(kept ?? {}), ...refresh, merge: kept?.merge ?? null, carry: kept?.carry ?? null, ...(kept?.restoredApproval ? { restoredApproval: kept.restoredApproval } : {}) };
+  if (!record.conflict) { delete record.conflictSince; delete record.conflictPaths; }
+  return record;
+}
 /**
  * Whether two readings of one item differ only in action-queue bookkeeping (GY-607). Claiming,
  * renewing, completing or failing a row moves the item's rows, its revision and its `updatedAt`,
@@ -520,6 +541,8 @@ export class Engine {
    * disables the pre-check, and every later observation still re-derives the refusal.
    */
   submissionObserver: ((work: Work, peers?: Work[]) => Promise<Observation>) | null | undefined = undefined;
+  /** Whether this process has warmed the locked read's stand-in cache (`warmLockedReads`). */
+  private lockedReadsWarm = false;
   // Auto-dispatch transitions the last evaluation of a document produced, written to the ledger
   // by the transaction that persists it. Keyed by the object, so a probe clone records nothing.
   private dispatchTransitions = new WeakMap<Work, DispatchTransition[]>();
@@ -662,7 +685,9 @@ export class Engine {
     // A replayed submission returns its receipt; it must not depend on the provider again.
     // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
     if ((await this.store.leasePool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
-    const all = await lockedWork(this.store.leasePool, [id]);
+    // The landing check reads each open submitted peer's observation scope, which a projection leaves
+    // out (GY-1042): those peers are read whole. This read holds no coordination lock.
+    const all = await withWhole(this.store.leasePool, await lockedWork(this.store.leasePool, [id]), peer => peer.stage !== 'done' && !!peer.submission && !!peer.candidate);
     const work = all.find(w => w.id === id || w.key === id);
     if (!work || work.stage === 'done' || !work.workspaces.some(w => w.epoch === data.epoch)) return null;
     // Every item goes with it: the landing check reads other items' unlanded candidates (GY-97).
@@ -835,13 +860,7 @@ export class Engine {
       await this.renewalGrace(db, work, now);
       preserveAssignment(work); retainQuarantineFence(work);
       demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
-      // The lease a worker submitted under ended at that submission. A supervisor that keeps
-      // renewing it is told so, rather than left to read the loss as a superseded epoch.
-      if (!work.lease && submittedEpoch(work, data.epoch))
-        demand(false, `Implementation lease for epoch ${data.epoch} ended when ${work.key} was submitted; stop heartbeating after complete`);
-      activeLease(work, actor, data.epoch, now);
-      work.lease!.expiresAt = new Date(now.getTime() + this.leaseSeconds * 1000).toISOString();
-      delete (work.lease as GracedLease).renewalFault;
+      this.renewLease(work, actor, data.epoch, now);
       await save(db, work, actor.id, command, now, data);
       // A renewal's replay needs only the lease, not a whole document per renewal.
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(compactHeartbeatReceipt(work))]);
@@ -1185,12 +1204,11 @@ export class Engine {
         work.lease = { owner: actor.id, epoch: work.epoch, expiresAt: new Date(now.getTime() + this.leaseSeconds * 1000).toISOString() };
         beginAttempt(work, work.lease, now);
       }
-      // The lease a worker submitted under ended at that submission. A supervisor that keeps
-      // renewing it is told so, rather than left to read the loss as a superseded epoch.
-      if ((command === 'heartbeat' || command === 'release') && !work.lease && submittedEpoch(work, data.epoch))
-        demand(false, `Implementation lease for epoch ${data.epoch} ended when ${work.key} was submitted; stop heartbeating after complete`);
-      if (['heartbeat', 'release', 'workspace', 'submit', 'blocked', 'scope', 'quarantine', 'launch'].includes(command)) activeLease(work, actor, data.epoch, now);
-      if (command === 'heartbeat') { work.lease!.expiresAt = new Date(now.getTime() + this.leaseSeconds * 1000).toISOString(); delete (work.lease as GracedLease).renewalFault; }
+      if (command === 'heartbeat') this.renewLease(work, actor, data.epoch, now);
+      else {
+        if (command === 'release') endedBySubmission(work, data.epoch);
+        if (['release', 'workspace', 'submit', 'blocked', 'scope', 'quarantine', 'launch'].includes(command)) activeLease(work, actor, data.epoch, now);
+      }
       if (command === 'quarantine') {
         demand(!work.containmentQuarantine || work.containmentQuarantine.owner === actor.id && work.containmentQuarantine.epoch === data.epoch
           && work.containmentQuarantine.settlementHash === data.settlementHash, 'Containment quarantine already exists and cannot be replaced');
@@ -2023,8 +2041,7 @@ export class Engine {
         // GitHub's conflict reading was stale (GY-375): the test merge was clean and nothing was
         // written. The reading replaces the refresh record for this head, keeping what it carried
         // onto the head, and the stored observation has its conflict disproved.
-        const kept = work.baseRefresh?.head === refresh.from.sha ? work.baseRefresh : null;
-        work.baseRefresh = { ...(kept ?? {}), ...refresh, merge: kept?.merge ?? null, carry: kept?.carry ?? null, ...(kept?.restoredApproval ? { restoredApproval: kept.restoredApproval } : {}) };
+        work.baseRefresh = staleRefreshRecord(work.baseRefresh, refresh);
         const disproved = work.observation?.conflicting ? disprovedConflict(work, work.observation) : null;
         if (disproved) work.observation = withDisprovedConflict(work.observation!, disproved);
         this.evaluate(work, all, now);
@@ -2038,7 +2055,8 @@ export class Engine {
       const carry = refresh.docsSync && refresh.head ? docsSyncCarry({ from: refresh.from, base: refresh.base, at: now.toISOString(), policyRevision: work.policyRevision, merge: refresh.merge ?? null, docsSync: refresh.docsSync,
         reviewedFiles: work.observation?.candidate.sha === refresh.from.sha ? work.observation.files : [], approval: bindingApproval(work), proofs: requiredProofs(work, all).map(proof => ({ proof, evidence: currentEvidence(work, proof, now) })) })
         : refresh.head && refresh.head !== refresh.from.sha ? this.decideBaseRefreshCarry(work, all, refresh, now) : null;
-      work.baseRefresh = { ...refresh, carry };
+      // A conflict re-recorded on a moved base keeps when it was first found on this head (GY-1200).
+      work.baseRefresh = { ...refresh, carry, ...(refresh.conflict ? { conflictSince: conflictSince(work.baseRefresh, refresh) } : {}) };
       this.evaluate(work, all, now);
       if (carry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'base.carry', JSON.stringify({ details: { ...carry, merge: refresh.merge ?? null } })]);
       await this.recordDispatch(db, work, now);
@@ -2343,6 +2361,18 @@ export class Engine {
     return this.reconcileTrailing ??= this.reconcileRunning.catch(() => {}).then(() => { this.reconcileTrailing = null; return this.reconcile(); });
   }
   /**
+   * Renew `work`'s lease for `epoch` (GY-1124): the lease checks every heartbeat passes, shared by
+   * the item-locked fast path and the operator-agent heartbeat through `executeCommand`, so a lease
+   * check added for renewals is added once and reaches both.
+   */
+  private renewLease(work: Work, actor: Principal, epoch: number, now: Date) {
+    endedBySubmission(work, epoch);
+    activeLease(work, actor, epoch, now);
+    work.lease!.expiresAt = new Date(now.getTime() + this.leaseSeconds * 1000).toISOString();
+    delete (work.lease as GracedLease).renewalFault;
+  }
+
+  /**
    * One reconciliation tick, in batches. The pass opens with one short coordination transaction
    * that reads every row's version (`xmin`) and settled flag — never a document — and compares
    * them with the view the previous pass kept (GY-1124): only the rows that moved since are read
@@ -2385,6 +2415,9 @@ export class Engine {
    */
   private async reconcileTick() {
     const tickStarted = performance.now();
+    // A process's first pass would otherwise open on a cold stand-in cache and project every open
+    // document while it holds the coordination lock: warm it first, outside the lock (GY-1042).
+    if (!this.lockedReadsWarm) { await warmLockedReads(this.store.pool); this.lockedReadsWarm = true; }
     const fleet = this.reconcileView;
     let all: Work[] = [], candidates: string[] = [], next = 0, contended = 0, cap = Infinity, documentsRead = 0, full = false, wroteFace = false;
     // The candidates in the order the pass visits them, then once more the ones a writer held when the pass reached them.
