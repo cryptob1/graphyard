@@ -5,7 +5,7 @@ import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
 import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
-import { extractProducerAccountsOrRuntimes, isUnactedProducerAttempt, unexercisedFindings } from '../auto-dispatch.js';
+import { extractProducerAccountsOrRuntimes, unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js';
@@ -433,7 +433,7 @@ const groupName = (entry: ExhaustedProof) => `the ${entry.group ?? 'producer'} p
 const quoteAttempts = (entry: ExhaustedProof, limit = 1600) => { const text = entry.attempts.map(attempt => `"${attempt}"`).join('; '); return text.length > limit ? `${text.slice(0, limit - 1)}…` : text || 'no attempt recorded'; };
 /** The attention the loop raises the cycle it first sees the request spent: group, every attempt's outcome, and the next step's owner. */
 export function exhaustedProofEscalation(entry: ExhaustedProof) {
-  const unacted = entry.attempts.length > 0 && entry.attempts.every(isUnactedProducerAttempt);
+  const unacted = unactedProducerAttempts(entry.attempts);
   if (unacted) {
     const runtimesOrAccounts = extractProducerAccountsOrRuntimes(entry.attempts);
     const target = runtimesOrAccounts.length ? runtimesOrAccounts.join(', ') : 'producer runtime or account';
@@ -450,8 +450,9 @@ export function exhaustedProofRework(work: Work, exhausted: readonly ExhaustedPr
   // GY-1153: When every spent producer attempt on a head ended without the session acting (never
   // started, profile busy, account exhausted or launch refused), the loop requests no rework for the head.
   // A head whose producer attempts include at least one session that acted and failed to produce
-  // evidence still gets the GY-496 rework.
-  const acted = spent.filter(entry => entry.attempts.some(attempt => !isUnactedProducerAttempt(attempt)));
+  // evidence still gets the GY-496 rework, and so does a spent entry with no recorded attempt
+  // (GY-1227), exactly as `exhaustedProofEscalation` announced it.
+  const acted = spent.filter(entry => !unactedProducerAttempts(entry.attempts));
   if (!acted.length) return null;
   const each = Math.max(200, Math.floor(1600 / acted.length));
   return { reason: `${work.key}: the producer attempts for ${acted.map(entry => `${groupName(entry)} on ${candidate.sha.slice(0, 12)} ended without trusted evidence — ${quoteAttempts(entry, each)}`).join('. And ')}. No producer is launched for this head again, so it cannot pass its proofs; the item returns to a worker to fix what the attempts name and push a fresh head the producers are requested for.`,

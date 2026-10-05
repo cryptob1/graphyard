@@ -12,7 +12,7 @@ import { runtimeEndedStates } from './harness.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { actionRenewIntervalMs, type ActionRow } from './model/actions.js';
 import { nextActionKinds, type NextActionKind } from './model/next-action.js';
-import { agentOwner, assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
+import { agentOwner, assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, neverStarted, neverStartedReason, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { capacityRefusal } from './fleet.js';
 import { answeredByPendingReview, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, type ReviewRecord } from './reviewer.js';
@@ -166,23 +166,63 @@ export { unexercisedFindings };
 /** A session record as the dispatcher reads it from either ledger. */
 type DispatchedSession = { requestId?: string; state: string; requestedAt: string; closedAt?: string; resolution?: string; profile?: string; attempt?: number; acknowledgedAt?: string; verdict?: { state: string } };
 const requestSessions = (records: DispatchedSession[], requestId: string) => records.filter(record => record.requestId === requestId);
+/**
+ * GY-1227. The resolution `describeAttempts` gives a failed or expired session that recorded none and
+ * was never acknowledged: it never took up its request, so it acted on nothing.
+ */
+export const unacknowledgedReason = 'never acknowledged';
+const retriedSession = (record: Pick<DispatchedSession, 'state'>) => record.state === 'failed' || record.state === 'expired';
+const sessionResolution = (record: DispatchedSession) => record.resolution
+  ?? (retriedSession(record) && !record.acknowledgedAt ? `${unacknowledgedReason}: the session ended without a recorded resolution before it took up its request` : undefined);
 /** Every attempt a request had, as the attention item names them. */
 export const describeAttempts = (records: DispatchedSession[], requestId: string) => requestSessions(records, requestId).slice(-30)
-  .map((record, index) => bounded(`attempt ${record.attempt ?? index + 1}${record.profile ? ` on ${record.profile}` : ''}: ${record.state}${record.resolution ? ` — ${record.resolution}` : ''}`, 300));
+  .map((record, index) => { const resolution = sessionResolution(record); return bounded(`attempt ${record.attempt ?? index + 1}${record.profile ? ` on ${record.profile}` : ''}: ${record.state}${resolution ? ` — ${resolution}` : ''}`, 300); });
+/** GY-120. The start of the refusal a session that exited at launch on its provider's limit notice carries (`InstantExitError`). */
+export const instantExitReason = 'the session exited within seconds of its launch';
+const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /**
  * GY-1153. The resolutions of producer attempts that ended before the session acted on its request:
- * it never started (no prompt taken up, a trust prompt it sat on, a pane gone before acting), the
- * headless run could not start, the launch was refused, or the session exited at launch on its
- * account's limit notice. Such attempts judged nothing about the candidate. Matched on the start of
- * the resolution only: a session that acted and later quoted a quota or rate limit in its last words
- * acted, and still earns the GY-496 rework.
+ * it never started (no prompt taken up, a trust prompt it sat on, a pane gone before acting), it was
+ * never acknowledged, the headless run could not start, the launch was refused, or the session
+ * exited at launch on its account's limit notice. Such attempts judged nothing about the candidate.
+ * Matched on the start of the resolution only: a session that acted and later quoted a quota or rate
+ * limit in its last words acted, and still earns the GY-496 rework. GY-1227: the wordings the
+ * launcher and this dispatcher write are their exported constants, so a reword moves both at once;
+ * the rest are producer.ts's headless-run and registry refusals and this file's own wait reasons.
  */
-const unactedResolution = /^(?:never started\b|the headless run could not start\b|launch refused\b|refused before it started\b|failed before it started\b|the session exited within seconds of its launch\b|exited at launch\b|(?:every (?:independent )?producer )?profile(?: is)? busy\b|reserved by another dispatch\b)/i;
+const unactedResolution = new RegExp(`^(?:${[neverStartedReason, unacknowledgedReason, instantExitReason, 'exited at launch', 'the headless run could not start',
+  'launch refused', 'refused before it started', 'failed before it started', 'reserved by another dispatch'].map(literal).join('|')}|(?:every (?:independent )?producer )?profile(?: is)? busy)\\b`, 'i');
 /** The `attempt N on PROFILE: STATE — ` prefix `describeAttempts` puts before each resolution. */
 const attemptLine = /^attempt \d+(?: on ([^:]+))?: [\w-]+(?: — |$)/;
 /** GY-1153. Whether a producer attempt (a resolution, or a line `describeAttempts` wrote) ended without the session acting. */
 export function isUnactedProducerAttempt(text: string): boolean {
   return !!text && unactedResolution.test(text.replace(attemptLine, ''));
+}
+/**
+ * GY-1227. Whether a session record ended without acting, read from the record itself: a session
+ * `neverStarted` judged so, or a failed or expired one that recorded no resolution and was never
+ * acknowledged, as well as any resolution `isUnactedProducerAttempt` reads as unacted.
+ */
+export const unactedProducerSession = (record: DispatchedSession) => neverStarted(record) || isUnactedProducerAttempt(sessionResolution(record) ?? '');
+/**
+ * GY-1227. Whether a spent request's attempts all ended without the session acting. No recorded
+ * attempt is not evidence of a runtime fault, so an empty list counts as acted, the same in the
+ * escalation, the rework and the attention.
+ */
+export const unactedProducerAttempts = (attempts: readonly string[]) => attempts.length > 0 && attempts.every(isUnactedProducerAttempt);
+/** GY-1227. Whether a session ended at launch on its account's limit notice, the account held until its reset. */
+const limitNoticeResolution = new RegExp(`^(?:${[instantExitReason, 'exited at launch'].map(literal).join('|')})\\b`, 'i');
+const limitNoticeExit = (record: DispatchedSession | undefined) => !!record && limitNoticeResolution.test(sessionResolution(record) ?? '');
+/**
+ * GY-1227. How many of a request's sessions came before it was first spent: those after are runtime
+ * relaunches (GY-1153), each on a profile `runtimeProfiles` named. The whole list when it never was.
+ */
+export function requestSpentAt(sessions: DispatchedSession[], now: number) {
+  for (let count = 1; count <= sessions.length; count++) {
+    const retry = sessionRetry(sessions.slice(0, count), sessions[0].requestId ?? '', now);
+    if (retry.exhausted || retry.attempts >= dispatchFailureLimit) return count;
+  }
+  return sessions.length;
 }
 /** GY-1153. The producer profiles (each one runtime and its accounts) the described attempts ran on, as the attention names them. */
 export function extractProducerAccountsOrRuntimes(attempts: readonly string[]): string[] {
@@ -391,7 +431,7 @@ export interface DispatchEffects {
 export interface InstantExit { pane: string; words: string; notice: ExhaustionSignal }
 export class InstantExitError extends Error {
   constructor(readonly instantExit: InstantExit, override readonly cause: unknown) {
-    super(`the session exited within seconds of its launch on its provider's limit notice: ${instantExit.notice.reason}`);
+    super(`${instantExitReason} on its provider's limit notice: ${instantExit.notice.reason}`);
   }
 }
 /** How many times one profile launches again on its next account within a single tick after such exits. */
@@ -797,15 +837,23 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   // GY-1153. A producer request whose every attempt ended without the session acting judged nothing
   // about the candidate, so spending its attempts is a producer-runtime fault, not the head's: once
   // the request is spent it relaunches on an independent profile whose credential is available and
-  // which none of its attempts ran on. A profile it already tried is not relaunched on automatically:
-  // a trust prompt or a broken runtime looks healthy to the credential check and would spend a
-  // session every cycle. Null when the request has any attempt that acted.
+  // which none of its attempts ran on. A profile it already tried is not relaunched on for a trust
+  // prompt or a broken runtime, which look healthy to the credential check and would spend a session
+  // every cycle. GY-1227: a profile whose last attempt exited at launch on its account's limit notice
+  // was held until the reset; once its credential reads available again it has recovered, and the
+  // request relaunches on it once, which a sole producer profile needs to recover without an
+  // operator. Null when the request has any attempt that acted.
   const runtimeProfiles = (item: Work, request: DispatchRequest, records: DispatchedSession[]) => {
     const sessions = requestSessions(records, request.id);
-    if (!sessions.length || !sessions.every(record => isUnactedProducerAttempt(record.resolution ?? ''))) return null;
+    if (!sessions.length || !sessions.every(unactedProducerSession)) return null;
+    const spentAt = requestSpentAt(sessions, now()), before = sessions.slice(0, spentAt), after = sessions.slice(spentAt);
     const tried = new Set(sessions.map(record => record.profile).filter((name): name is string => !!name));
-    return independentProducerProfiles(item, config.producers).filter(profile => credentials[profile.name]?.available !== false && !tried.has(profile.name));
+    const recovered = (name: string) => !after.some(record => record.profile === name) && limitNoticeExit(before.filter(record => record.profile === name).at(-1));
+    return independentProducerProfiles(item, config.producers).filter(profile => credentials[profile.name]?.available !== false && (!tried.has(profile.name) || recovered(profile.name)));
   };
+  // A spent request: its sessions are exhausted, or settled at the limit (GY-1227: the settled path
+  // relaunches as the exhausted one does, so the launch restricts it to the same profiles).
+  const spentRequest = (records: DispatchedSession[], request: DispatchRequest) => { const retry = sessionRetry(records, request.id, now()); return retry.exhausted || retry.settled && retry.attempts >= dispatchFailureLimit; };
   const runtimeRelaunch = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, records: DispatchedSession[]) => {
     if (kind !== 'producer' || !runtimeProfiles(item, request, records)?.some(profile => room(profile, producers).free > 0)) return false;
     delete cursor.abandoned[request.id];
@@ -1022,7 +1070,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
           const available = independent.filter(profile => credentials[profile.name]?.available !== false);
           // A spent request relaunching for a producer-runtime fault (GY-1153) launches only on the
           // profiles `runtimeProfiles` names; any other request on every available profile, freshest first.
-          const relaunch = sessionRetry(producers, request.id, now()).exhausted ? runtimeProfiles(item, request, producers) : null;
+          const relaunch = spentRequest(producers, request) ? runtimeProfiles(item, request, producers) ?? [] : null;
           const eligible = (profile: ProducerProfile) => (!relaunch || relaunch.some(entry => entry.name === profile.name)) && room(profile, producers).free > 0;
           const usable = () => preferFreshProfiles(available.filter(eligible), producers, request.id);
           const busy = () => wait('producer', item, request, !config.producers.length ? 'no producer profile is configured; add one with master producer add'
@@ -1357,7 +1405,7 @@ export function dispatchFailureAttention(dispatch: { consecutiveFailures?: numbe
 export function abandonedAttention(entry: AbandonedRequest & { requestId: string }): AttentionItem {
   const role = entry.kind === 'review' ? 'reviewer' : 'producer';
   const group = entry.kind === 'producer' && entry.group ? ` for the ${entry.group} proof group${entry.proofs?.length ? ` (${entry.proofs.join(', ')})` : ''}` : '';
-  const unacted = entry.kind === 'producer' && entry.attempts.length > 0 && entry.attempts.every(isUnactedProducerAttempt);
+  const unacted = entry.kind === 'producer' && unactedProducerAttempts(entry.attempts);
   if (unacted) {
     const runtimesOrAccounts = extractProducerAccountsOrRuntimes(entry.attempts);
     const target = runtimesOrAccounts.length ? runtimesOrAccounts.join(', ') : 'producer runtime or account';
