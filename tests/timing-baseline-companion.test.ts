@@ -138,6 +138,12 @@ test('unit:timing-baseline-scope-request-granted — scope-request for the basel
       assert.equal(verdict.state, 'refused', `${tested}: ${verdict.reason}`);
       assert.equal(impliedScopeRequests([{ key: 'GY-1', stage: 'build', criteria, plannedFiles: ['src/thing.ts', ...plan], scopeRequest: { epoch: 1, paths: [timingBaselinePath], reason: 'r', requestedBy: 'worker', at: '2026-10-04T00:00:00Z' } }] as never).count, 0, tested);
     }
+  // GY-1263: every spelling `timingBaseline` recognises is held to the same rule; the gate judges lines
+  // only at timingBaselinePath, so a baseline elsewhere is no companion, even beside a timed test.
+  for (const foreign of ['test/timing_baseline.json', 'tests/timing-baseline.json']) {
+    const verdict = decideScopeRequest({ plannedFiles: ['src/thing.ts', 'tests/new-thing.test.ts'], criteria }, { paths: [foreign] });
+    assert.equal(verdict.state, 'refused', `${foreign}: ${verdict.reason}`);
+  }
   const asked = decideScopeRequest({ plannedFiles: ['src/thing.ts'], criteria: [{ ...criteria[0], proofs: ['unit:new-thing'] }] }, { paths: ['tests/new-thing.test.ts', timingBaselinePath] });
   assert.equal(asked.state, 'approved', asked.reason);
   assert.match(asked.reason, /test-duration baseline a change to tests\/new-thing\.test\.ts must keep covering/);
