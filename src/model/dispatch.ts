@@ -97,7 +97,8 @@ export function reviewNeed(work: Work, all: Work[] = [work], now = new Date()): 
   // Mechanical verification precedes judgment, for every provider: no reviewer is asked about a
   // head whose unit and integration proofs have not run, and a head that fails one goes back to
   // its worker (the build gate names the criterion) instead of consuming a reviewer session.
-  const held = mechanicalHold(work, all, now);
+  // Under GitHub delivery CI runs the unit tests and no producer is requested, so review is never held for proofs.
+  const held = githubDelivery() ? null : mechanicalHold(work, all, now);
   if (held) return held;
   // No reviewer identity is left to ask: the roster is spent for this candidate, and adding
   // capacity or selecting another provider is the operator's judgment, not a step anyone runs.
