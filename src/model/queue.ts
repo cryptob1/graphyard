@@ -7,27 +7,21 @@ import { currentEvidence } from './evidence.js';
 import { evaluateLandability, landabilityAudit, landabilityEjections, landabilityFamily, type LandabilityVerdict } from './landability.js';
 import { exactApproval } from './review.js';
 import { requiredProofs } from './bootstrap.js';
-import { defaultOptimisticMerge, defaultOptimisticExclude, optimisticEligibility, type OptimisticEligibility } from '../optimistic-merge.js';
 
-/** The master's merge-queue settings as the control plane applies them: `mergeQueue.batchSize`, `mergeQueue.parallelTips` (GY-498), `mergeQueue.optimistic` and `mergeQueue.optimisticExclude`. */
-export interface MergeQueueSettings { batchSize?: number; optimistic?: boolean; optimisticExclude?: readonly string[]; parallelTips?: number }
+/** The master's merge-queue settings as the control plane applies them: `mergeQueue.batchSize` and `mergeQueue.parallelTips` (GY-498). */
+export interface MergeQueueSettings { batchSize?: number; parallelTips?: number }
 export const queueSettings = (settings: number | MergeQueueSettings | undefined) => typeof settings === 'object'
-  ? { batchSize: settings.batchSize ?? defaultMergeBatchSize, optimistic: settings.optimistic ?? defaultOptimisticMerge, optimisticExclude: settings.optimisticExclude ?? defaultOptimisticExclude, parallelTips: settings.parallelTips }
-  : { batchSize: settings ?? defaultMergeBatchSize, optimistic: defaultOptimisticMerge, optimisticExclude: defaultOptimisticExclude, parallelTips: undefined };
+  ? { batchSize: settings.batchSize ?? defaultMergeBatchSize, parallelTips: settings.parallelTips }
+  : { batchSize: settings ?? defaultMergeBatchSize, parallelTips: undefined };
 
 /**
  * Queue membership is derived, never asserted: no command, operator, or administrator can
  * place, reorder, or hold a position. An entry leaves only by merging or by an explicit,
  * observed validation failure, and a re-entry always starts a new sequence at the back — except
  * a CI ejection a passing rerun on the same tip lifts (GY-1095), which returns to the place it held.
- *
- * The one entry that never joins is an optimistic one (GY-500): not queued, every gate passing on
- * its own head, and its files disjoint from everything the base changed since its bound base (see
- * optimisticEligibility). It merges head-bound at once, with no queue reason on its merge gate;
- * main is guarded after the merge instead. An entry that stops being eligible joins as any other.
  */
 export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: number[], eligible: boolean, settings: number | MergeQueueSettings = defaultMergeBatchSize, landability?: LandabilityVerdict) {
-  const { batchSize, optimistic: optimisticMode, optimisticExclude, parallelTips } = queueSettings(settings);
+  const { batchSize, parallelTips } = queueSettings(settings);
   const history = [...(work.queueHistory ?? [])];
   const candidate = work.candidate;
   let queue = work.queue ?? null, queueSequence = work.queueSequence ?? 0, ejection = work.queueEjection ?? null;
@@ -47,8 +41,6 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
   const batchOf = (subject: Work) => queueBatch(subject, peersOf(subject), now.getTime(), batchSize, ciAppIds);
   const windowOf = (subject: Work) => parallelTips ? describeTipWindow(peersOf(subject), predictQueue(peersOf(subject), now.getTime()), parallelTips, ciAppIds).get(subject.key) ?? null : null;
   const reason = queue ? ejectionReason(probe, ciAppIds, all, parallelTips ? null : batchOf(probe), windowOf(probe), now, verdict()) : null;
-  const optimistic: OptimisticEligibility | null = !queue && eligible ? optimisticEligibility(work, all, { enabled: optimisticMode, gatesPass: eligible, exclude: optimisticExclude }) : null;
-  if (optimistic?.eligible) return { queue: null, queueSequence, ejection, history, reasons: [] as string[], placement: null, optimistic };
   const lift = !queue && eligible && ejection?.check ? ejectedCheckLift(work, all, ciAppIds) : null;
   if (queue && reason) {
     // A landability ejection is typed as one and records the verdict version and inputs it was
@@ -150,7 +142,7 @@ export function placeInQueue(work: Work, all: Work[], now: Date, ciAppIds: numbe
     : waiting?.length ? [predecessorWaitText(work, waiting)]
     : ejection ? [`Ejected from the merge queue: ${ejection.reason}; ${ejection.check ? `a passing rerun of ${ejection.check.name} on this tip lifts the ejection, or ` : ''}a new candidate re-enters at the back of the queue`]
     : eligible ? ['Candidate has not entered the merge queue'] : [];
-  return { queue, queueSequence, ejection, history, reasons, placement, optimistic };
+  return { queue, queueSequence, ejection, history, reasons, placement };
 }
 
 /**

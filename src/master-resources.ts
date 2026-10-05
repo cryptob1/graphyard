@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { lstat, readdir, readFile, statfs } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { lstat, mkdir, readdir, readFile, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isProfileSession, neverStartedReason, privateFile, profileConcurrency, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
@@ -131,6 +132,12 @@ export const unownedPaneConfirmMs = 120_000;
  * fifteen minutes, so the bound gives the upgrade two of them.
  */
 export const selfUpgradeBoundMs = 30 * 60_000;
+/**
+ * The upgrade's bound for this loop (GY-1255): the upgrade runs between cycles, so a loop whose
+ * `run` config spaces cycles further apart than the fixed bound allows gets its own stalled bound
+ * (two intervals and any backoff) instead; it is never shorter than `selfUpgradeBoundMs`.
+ */
+export const upgradeBoundMs = (loop: ResourceInputs['loop']) => Math.max(selfUpgradeBoundMs, loop?.stalledAfterMs ?? 0);
 /** The plane's database bound when GRAPHYARD_DATABASE_MAX_BYTES is unset. */
 export const defaultDatabaseMaxBytes = 10 * 1024 ** 3;
 /** The default warning line: a tenth of the bound, and at least one unit. */
@@ -319,9 +326,10 @@ export const resourceRegistry: ResourceDefinition[] = [
     read: input => {
       const revision = input.revision;
       if (!revision) return [{ id: '', used: null, bound: 0, detail: 'no running loop process, or its start could not be read', reclaimable: 0 }];
-      const pending = revision.behind > 0 && revision.movedAt !== undefined && input.now - revision.movedAt < selfUpgradeBoundMs;
+      const bound = upgradeBoundMs(input.loop);
+      const pending = revision.behind > 0 && revision.movedAt !== undefined && input.now - revision.movedAt < bound;
       return [{ id: '', used: pending ? 0 : revision.behind, bound: 0, reclaimable: 0,
-        detail: `the loop loaded ${revision.loaded.slice(0, 12)}; the checkout is at ${revision.checkout.slice(0, 12)}${pending ? ` (${revision.behind} commits behind since ${new Date(revision.movedAt!).toISOString()}; the self-upgrade has until ${new Date(revision.movedAt! + selfUpgradeBoundMs).toISOString()})` : ''}` }];
+        detail: `the loop loaded ${revision.loaded.slice(0, 12)}; the checkout is at ${revision.checkout.slice(0, 12)}${pending ? ` (${revision.behind} commits behind since ${new Date(revision.movedAt!).toISOString()}; the self-upgrade has until ${new Date(revision.movedAt! + bound).toISOString()})` : ''}` }];
     },
   },
   {
@@ -515,7 +523,16 @@ export async function readPlaneResources(url: string, fetcher: typeof fetch = fe
  * started (from the times of the checkout's reflog entries) against HEAD now. Null when the process is gone or the
  * reflog does not reach back to its start.
  */
-export function loadedRevision(root: string, pid: number, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }), now = Date.now()) {
+type Run = (command: string, args: string[]) => string;
+const runCommand: Run = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 });
+/**
+ * Whether a move touches loaded code, per runner and by `root loaded..sha`: both ends are commits,
+ * so the answer never changes, and a long-lived loop's readings diff only the moves new since the
+ * last one rather than every move since it started (GY-1255). Each runner's cache is bounded.
+ */
+const touchesCodeCache = new WeakMap<Run, Map<string, boolean>>();
+const touchesCodeCacheBound = 1_000;
+export function loadedRevision(root: string, pid: number, run: Run = runCommand, now = Date.now()) {
   try {
     const elapsed = Number(run('ps', ['-o', 'etimes=', '-p', String(pid)]).trim());
     if (!Number.isFinite(elapsed)) return null;
@@ -530,7 +547,17 @@ export function loadedRevision(root: string, pid: number, run: (command: string,
     if (loaded === checkout) return { loaded, checkout, behind: 0 };
     // A move that touches no code the loop loads leaves it running the checkout's code (GY-1089):
     // the self-upgrade restarts nothing for it, so it is never behind on it.
-    const touchesCode = (to: string) => upgradeTouchesCode(run('git', ['-C', root, 'diff', '--name-only', loaded, to]).split('\n').map(path => path.trim()).filter(Boolean));
+    const cache = touchesCodeCache.get(run) ?? new Map<string, boolean>();
+    touchesCodeCache.set(run, cache);
+    const touchesCode = (to: string) => {
+      const key = `${root}\0${loaded}\0${to}`;
+      const known = cache.get(key);
+      if (known !== undefined) return known;
+      const touches = upgradeTouchesCode(run('git', ['-C', root, 'diff', '--name-only', loaded, to]).split('\n').map(path => path.trim()).filter(Boolean));
+      if (cache.size >= touchesCodeCacheBound) cache.delete(cache.keys().next().value!);
+      cache.set(key, touches);
+      return touches;
+    };
     if (!touchesCode(checkout)) return { loaded, checkout, behind: 0 };
     // When the checkout first moved onto code the loop has not loaded: the oldest move since the
     // start whose revision differs from the loaded one in loaded code (GY-1196).
@@ -603,6 +630,67 @@ interface ReclaimFile { version: 1; reports: ResourceReclaimReport[]; seen: Reco
 async function readReclaimFile(root: string): Promise<ReclaimFile> {
   try { await privateFile(resourceReportFile(root)); const body = JSON.parse(await readFile(resourceReportFile(root), 'utf8')); return { version: 1, reports: body.reports ?? [], seen: body.seen ?? {}, tmpLatest: body.tmpLatest ?? null }; }
   catch { return { version: 1, reports: [], seen: {} }; }
+}
+/** A holder that has not released the reclaim file's lock in this long is dead or wedged; its lock is taken over. */
+export const reclaimLockStaleMs = 60_000;
+/**
+ * The dispatcher tick's name pass and the cycle's full pass each read-modify-write the reclaim
+ * file (GY-1255): the write happens under this lock (`FILE.lock`, a directory) from a fresh read,
+ * so one pass never drops a sighting, a stuck-session clock or a report the other recorded.
+ *
+ * Each holder writes its own token into the lock (GY-1270). A stale lock is taken over by renaming
+ * it aside — atomic, so of two waiters that both saw it stale only one moves it — and only when the
+ * lock moved aside still carries the token seen stale; a fresh lock moved aside by mistake is put
+ * back. A holder removes the lock on release only while it still carries its own token.
+ */
+const lockOwner = 'owner';
+const lockToken = (lock: string) => readFile(resolve(lock, lockOwner), 'utf8').catch(() => null);
+/** Moves the lock aside and removes it, while it still carries `token`; a lock moved aside that does not is put back. */
+async function removeLock(lock: string, token: string | null) {
+  const aside = `${lock}.${randomUUID()}`;
+  try { await rename(lock, aside); } catch { return; }
+  if (await lockToken(aside) === token) { await rm(aside, { recursive: true, force: true }); return; }
+  // Another waiter took the lock over and acquired it between this look and this move: put the
+  // live lock back. Where a newer lock already stands, the moved one's holder has lost it.
+  await rename(aside, lock).catch(() => rm(aside, { recursive: true, force: true }));
+}
+export async function withReclaimLock<T>(root: string, body: () => Promise<T>, waitMs = 30_000, staleMs = reclaimLockStaleMs): Promise<T> {
+  const lock = `${resourceReportFile(root)}.lock`, deadline = Date.now() + waitMs, token = randomUUID();
+  await mkdir(dirname(lock), { recursive: true, mode: 0o700 });
+  for (;;) {
+    try { await mkdir(lock, { mode: 0o700 }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const held = await stat(lock).then(entry => Date.now() - entry.mtimeMs, () => 0);
+      if (held > staleMs) { await removeLock(lock, await lockToken(lock)); continue; }
+      if (Date.now() > deadline) throw new Error(`another reclaim pass has held ${lock} for ${Math.round(held / 1000)}s`);
+      await new Promise(done => setTimeout(done, 20 + Math.random() * 30));
+      continue;
+    }
+    // Exclusive: a lock put back over this one's empty directory already carries its holder's token.
+    try { await writeFile(resolve(lock, lockOwner), token, { mode: 0o600, flag: 'wx' }); break; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue; await rm(lock, { recursive: true, force: true }); throw error; }
+  }
+  try { return await body(); } finally { if (await lockToken(lock) === token) await removeLock(lock, token); }
+}
+/**
+ * The clocks one pass leaves, merged onto the file as it stands now. A key this pass read and
+ * dropped (its pane closed, its session failed or back) goes, unless another pass has set it since;
+ * a key this pass read and carried stands as the file has it when another pass changed or dropped
+ * it since the read — that pass saw the condition clear after this one read, so the older time is
+ * never brought back (GY-1270) — and is kept otherwise; a key this pass set new keeps the earlier
+ * of its time and one another pass set meanwhile; a key this pass does not own — the `missing:`
+ * clocks, for the name pass — and any key another pass added are kept as they stand.
+ */
+export function mergeReclaimSeen(fresh: Record<string, string>, read: Record<string, string>, mine: Record<string, string>, owns: (key: string) => boolean) {
+  const merged = { ...fresh };
+  for (const [key, at] of Object.entries(read)) if (owns(key) && !(key in mine) && merged[key] === at) delete merged[key];
+  for (const [key, at] of Object.entries(mine)) {
+    if (!owns(key)) continue;
+    if (key in read && at === read[key]) continue;
+    merged[key] = merged[key] !== undefined && Date.parse(merged[key]) < Date.parse(at) ? merged[key] : at;
+  }
+  return merged;
 }
 export async function readReclaimReports(root: string): Promise<ResourceReclaimReport[]> { return (await readReclaimFile(root)).reports; }
 
@@ -800,7 +888,13 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   // A finished pass is recorded as the latest even when it removed nothing, so status never shows an old count as current.
   const tmpLatest = tmp ? { removed: tmp.removed.length, at: report.at } : file.tmpLatest ?? null;
   if (took || tmp || JSON.stringify(seen) !== JSON.stringify(file.seen)) {
-    try { await atomicPrivateWrite(resourceReportFile(root), { version: 1, reports: (took ? [...file.reports, report] : file.reports).slice(-retainedReports), seen, tmpLatest }); }
+    try {
+      await withReclaimLock(root, async () => {
+        const fresh = await readReclaimFile(root);
+        const merged = mergeReclaimSeen(fresh.seen, file.seen, seen, key => !namesOnly || !key.startsWith('missing:'));
+        await atomicPrivateWrite(resourceReportFile(root), { version: 1, reports: (took ? [...fresh.reports, report] : fresh.reports).slice(-retainedReports), seen: merged, tmpLatest: tmp ? tmpLatest : fresh.tmpLatest ?? null });
+      });
+    }
     catch (error) { report.errors.push(`Recording the reclaim: ${error instanceof Error ? error.message : String(error)}`); }
   }
   return report;

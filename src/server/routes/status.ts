@@ -1,11 +1,10 @@
-import { optimisticExcludeEvent, optimisticMergeEvent, parseOptimisticExclude } from '../../optimistic-merge.js';
 import { z } from 'zod';
 import { demand, type Work } from '../../model.js';
 import type { IntegrationJob } from '../../coordination.js';
 import { parseEventHistoryQuery, readEventHistory } from '../../events-history.js';
 import { catchUpPipelineTimelines, pipelineBackfillState } from '../../pipeline-backfill.js';
 import { delegationSnapshot } from '../../delegation.js';
-import { describeUnserved, executorRegistry, executorReport } from '../../model/executor-presence.js';
+import { describeUnserved, executorRegistry, executorReport, loopPresenceHeader, loopPresenceInterval, loopRegistry, reportedLoopMerger } from '../../model/executor-presence.js';
 import { installationSettingsUrl } from '../../github.js';
 import { controlPlanePermissions, requiredPermissions } from '../../github-permissions.js';
 import { releaseInfo, schemaVersion } from '../../release.js';
@@ -59,14 +58,15 @@ export const statusRoutes = defineRoutes('status', [
         openPullRequests: work.filter(item => item.stage !== 'done' && !!item.submission && !!item.observation && !item.observation.merged && item.observation.prState !== 'closed').length };
       // The fleet as the dashboard needs it (GY-105): how many executors are alive, and each kind
       // of pending action none of them serves, with its wait and what to start.
-      const executors = executorReport(visibleWork, executorRegistry(engine), observedAt);
+      // A pending merge row waits on a loop that merges, never on an executor (GY-916).
+      const executors = executorReport(visibleWork, executorRegistry(engine), observedAt, undefined, await reportedLoopMerger(loopRegistry(engine), (text, values) => engine.store.pool.query(text, values), observedAt));
       return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
         executors: { live: executors.live.length, liveMs: executors.liveMs, served: executors.served, unserved: executors.unserved, attention: describeUnserved(executors) }, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, appPermissions, heldJobs, starvedJobs, jobs, githubBudget, webhooks,
         // The installation facts the master and doctor raise as attention: capacity variables
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
         // items across the repository, so a scoped operator agent does not see it.
-        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment, ciAppIds: engine.ciAppIds, mergeQueue: { batchSize: engine.mergeBatchSize, optimistic: engine.optimisticMerge, optimisticExclude: engine.optimisticExclude, parallelTips: engine.parallelTips, rerunFailedChecks: engine.rerunFailedChecks },
+        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment, ciAppIds: engine.ciAppIds, mergeQueue: { batchSize: engine.mergeBatchSize, parallelTips: engine.parallelTips, rerunFailedChecks: engine.rerunFailedChecks },
         // The documentation policy this control plane stamps on new items, which doctor compares
         // with the checkout's committed graphyard.json (GY-293).
         documentation: engine.documentation,
@@ -126,32 +126,28 @@ export const statusRoutes = defineRoutes('status', [
     },
   },
   {
-    // The master loop publishes `mergeQueue.batchSize` (GY-330), `mergeQueue.parallelTips` (GY-498)
-    // and `mergeQueue.optimistic` (GY-500) from its own configuration, which lives only on the
-    // master's host: how many consecutive queue entries one combined tip validates, how many queue
-    // positions are validated at once, and which eligible entries merge past the queue. Each is
+    // The master loop publishes `mergeQueue.batchSize` (GY-330) and `mergeQueue.parallelTips` (GY-498)
+    // from its own configuration, which lives only on the master's host: how many consecutive queue
+    // entries one combined tip validates and how many queue positions are validated at once. Each is
     // recorded once per change in the installation ledger and applied to every evaluation from then
     // on; a restarted server reads it back from there. `rerunFailedChecks` (GY-516), how many times
-    // a failed required check is rerun on its sha, travels the same way, as does `optimisticExclude`
-    // (GY-503), the repository's own shared-infrastructure globs.
+    // a failed required check is rerun on its sha, travels the same way. The retired `optimistic`
+    // and `optimisticExclude` (GY-1233) an older master may still send are ignored.
     method: 'POST', path: '/api/merge-queue',
     async handle(context) {
       const { actor, services: { engine } } = context;
       demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
       const body = await parseJson(context, 16384, '{}');
-      const { batchSize, optimistic, optimisticExclude, parallelTips, rerunFailedChecks } = body ?? {};
-      demand(batchSize !== undefined || optimistic !== undefined || optimisticExclude !== undefined || parallelTips !== undefined || rerunFailedChecks !== undefined, 'batchSize, optimistic, optimisticExclude, parallelTips or rerunFailedChecks is required', 400);
+      const { batchSize, parallelTips, rerunFailedChecks } = body ?? {};
+      demand(batchSize !== undefined || parallelTips !== undefined || rerunFailedChecks !== undefined, 'batchSize, parallelTips or rerunFailedChecks is required', 400);
       if (batchSize !== undefined) demand(Number.isSafeInteger(batchSize) && batchSize >= 1 && batchSize <= maxMergeBatchSize, `batchSize must be an integer from 1 to ${maxMergeBatchSize}`, 400);
       if (rerunFailedChecks !== undefined) demand(Number.isSafeInteger(rerunFailedChecks) && rerunFailedChecks >= 0 && rerunFailedChecks <= maxRerunFailedChecks, `rerunFailedChecks must be an integer from 0 to ${maxRerunFailedChecks}`, 400);
-      demand(optimistic === undefined || typeof optimistic === 'boolean', 'optimistic must be true or false', 400);
-      const exclude = optimisticExclude === undefined ? undefined : parseOptimisticExclude(optimisticExclude) ?? undefined;
-      demand(optimisticExclude === undefined || exclude !== undefined, 'optimisticExclude must be at most 100 repository-relative globs (no whitespace, . or .. segments)', 400);
       if (parallelTips !== undefined) demand(Number.isSafeInteger(parallelTips) && parallelTips >= 1 && parallelTips <= maxParallelTips, `parallelTips must be an integer from 1 to ${maxParallelTips}`, 400);
       await engine.loadMergeBatchSize();
       let recorded = false;
       // Each value is applied only once the ledger holds it (GY-384): a failed INSERT leaves the
       // evaluation on the recorded value and the master unpublished, so its next cycle retries.
-      const record = async (kind: string, field: string, value: number | boolean | readonly string[], previous: number | boolean | readonly string[], apply: () => void) => {
+      const record = async (kind: string, field: string, value: number, previous: number, apply: () => void) => {
         const latest = (await engine.store.pool.query('SELECT 1 FROM events WHERE work_id IS NULL AND kind=$1 LIMIT 1', [kind])).rowCount;
         if (latest && JSON.stringify(previous) === JSON.stringify(value)) return apply();
         await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, kind, JSON.stringify({ [field]: value, previous: latest ? previous : null })]);
@@ -161,9 +157,7 @@ export const statusRoutes = defineRoutes('status', [
       if (batchSize !== undefined) await record(mergeBatchSizeEvent, 'batchSize', batchSize, await engine.loadMergeBatchSize(), () => { engine.mergeBatchSize = batchSize; });
       if (parallelTips !== undefined) await record(mergeParallelTipsEvent, 'parallelTips', parallelTips, await engine.loadParallelTips(), () => { engine.parallelTips = parallelTips; });
       if (rerunFailedChecks !== undefined) await record(rerunFailedChecksEvent, 'rerunFailedChecks', rerunFailedChecks, await engine.loadRerunFailedChecks(), () => { engine.rerunFailedChecks = rerunFailedChecks; });
-      if (optimistic !== undefined) await record(optimisticMergeEvent, 'optimistic', optimistic, engine.optimisticMerge, () => { engine.optimisticMerge = optimistic; });
-      if (exclude !== undefined) await record(optimisticExcludeEvent, 'optimisticExclude', exclude, engine.optimisticExclude, () => { engine.optimisticExclude = exclude; });
-      return { mergeQueue: { batchSize: engine.mergeBatchSize, optimistic: engine.optimisticMerge, optimisticExclude: engine.optimisticExclude, parallelTips: engine.parallelTips, rerunFailedChecks: engine.rerunFailedChecks }, recorded };
+      return { mergeQueue: { batchSize: engine.mergeBatchSize, parallelTips: engine.parallelTips, rerunFailedChecks: engine.rerunFailedChecks }, recorded };
     },
   },
   {
@@ -176,6 +170,9 @@ export const statusRoutes = defineRoutes('status', [
       // export; no product reader asks for it, as it grows with the ledger.
       const requested = url.searchParams.get('view') ?? req.headers[coordinationViewHeader.toLowerCase()];
       const view = z.enum(['bounded', 'full', 'coordination']).parse(Array.isArray(requested) ? requested[0] : requested ?? 'bounded');
+      // The loop's own read is its presence (GY-916): it merges while it lives, however long nothing is mergeable.
+      const loopInterval = actor.role === 'coordinator' ? loopPresenceInterval(req.headers[loopPresenceHeader.toLowerCase()]) : null;
+      if (loopInterval !== null) loopRegistry(services.engine).observe({ principal: actor.id, intervalSeconds: loopInterval }, new Date());
       // Bounded catch-up: items that predate the per-item timeline gain one from their own
       // ledger before the snapshot every speed report is derived from is read. The ledger is read
       // outside the coordination lock, one run at a time; it converges and then costs one small

@@ -19,7 +19,7 @@ Graphyard's own deployment runs one moving main, a frozen candidate, UAT, then t
 
 The required pre-merge set is `typecheck` and `test` (`.github/workflows/ci.yml`): the build, the docs check and the Node and browser suites, every job bounded so the set finishes in under ten minutes. The soak and timing-budget test files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container acceptance, container recovery and the Helm chart never run on a pull request: `.github/workflows/release-candidate.yml` runs them against one pinned SHA: each [release candidate](#release-candidates), or a dispatched `sha` or `rc-*` tag alone.
 
-With `GRAPHYARD_DELIVERY=github` on the server, GitHub merges: once a candidate's build, review and required checks pass, the observation that saw it enables auto-merge on that head. No proof, queue or observation age gates the merge, the loop skips its guarded merge, and proofs are not requested; UAT validates before promotion.
+With `GRAPHYARD_DELIVERY=github` on the server, GitHub merges: once a candidate's build, review and required checks pass, the observation that saw it enables auto-merge on that head. No proof, queue or observation age gates the merge, the loop skips its guarded merge, and proofs are neither requested nor counted against the loop's silence; UAT validates before promotion.
 
 ## Managed repositories
 
@@ -93,6 +93,10 @@ The observer submits measurements through `POST /api/delivery/observe`:
 ```
 
 Only complete `provider` or `host-attestation` listings can verify; a repeated `snapshotId` returns the original receipt; `POST /api/delivery/notify` is only a hint. A two-second sweep (`graphyard delivery sweep` drains sooner) verifies a generation once every service shares a common interval within the freshness bound, adding `releaseDeliveries` to each included item. Otherwise status reads `unobserved`, `mismatched`, `unknown`, `unhealthy`, `incomplete`, `no-common-interval`, `stale` or `degraded`. `graphyard delivery` shows the state.
+
+## Delivery speed
+
+`master status` `delivery` measures items merged into main: `readyToMerged`, first `ready` event (or creation) to GitHub's merge, and `mergedToProduction`, merge to the first production promotion serving that commit. Each has `count`, `p50Ms` and `p90Ms` for `24h` and `7d`; unpromoted merges count as `pending`. Targets: p90 ≤ 2 hours and ≤ 8 hours, set by master.json `deliverySpeed` (`readyToMergedP90Ms`, `mergedToProductionP90Ms`). A 7-day p90 over target raises one attention line naming the slowest items.
 
 ## Attribution
 

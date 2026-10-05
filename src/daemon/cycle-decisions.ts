@@ -596,7 +596,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // Rework waits for an observation that still describes the item (GY-144). A request already
     // standing is left as it is — neither supervised into a second request nor withdrawn — until
     // GitHub is observed again and the item says whether it still needs the round.
-    const wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause) : null;
+    const woken = state.actions[`wake:observation:${item.id}`];
+    const wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause, woken?.state === 'done' ? woken.at : null) : null;
     if (wait) {
       const waitKey = `wait:rework:${item.id}`;
       if (detailChanged(state.actions[waitKey], wait)) await note(waitKey, item, 'decision', 'done', wait);

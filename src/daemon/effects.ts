@@ -12,7 +12,7 @@ import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type ResourceReclaimReport, reclaimResources, dispatchRefusal } from '../master-resources.js';
 import { RefusedResponse } from '../model/refusal.js';
-import { mergeBatchSize, mergeParallelTips, optimisticExcludeGlobs, optimisticMergeEnabled, rerunFailedChecks } from '../master/profiles.js';
+import { mergeBatchSize, mergeParallelTips, rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, launchProducer, reclaimCheckouts } from '../producer.js';
 import { dismissApproval, followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
@@ -38,7 +38,7 @@ import { withReviewerDefaults } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment } from './deployment.js';
-import { detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
+import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
@@ -80,7 +80,7 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
    * without it never decides one, and every request waits for the operator as before.
    */
   decideScope?: (work: Work) => Promise<Work>;
-  wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: `resync` now, for a step refused on a stale observation
+  wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: a prioritized `resync` now (GY-1266), for a step refused on a stale observation
   /**
    * The review findings standing against the item's head — its unresolved threads and its
    * reviewer's latest change request (review-scope.ts) — read outside every transaction.
@@ -136,9 +136,8 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
   publishProductionEnvironment?: () => Promise<unknown>;
   /**
    * Publishes `mergeQueue.batchSize` (GY-330), `mergeQueue.parallelTips` (GY-498),
-   * `mergeQueue.rerunFailedChecks`, `mergeQueue.optimistic` (GY-500) and `mergeQueue.optimisticExclude`
-   * (GY-503) to the control plane, whose merge queue batches and validates its window by the first
-   * two, lets disjoint entries past it by the third and judges shared infrastructure by the last;
+   * and `mergeQueue.rerunFailedChecks` to the control plane, whose merge queue batches and
+   * validates its window by the first two and reruns a failed required check by the last;
    * sent only on a change, and read at the start of every cycle so a reconfiguration applies
    * before the next merge.
    */
@@ -165,7 +164,8 @@ export interface DaemonEffects extends Partial<DocsSyncEffects> {
    * loop through its own supervisor. A loop wired without it keeps cycling exactly as before, on
    * the release it loaded.
    */
-  selfUpgrade?: (state: DaemonState) => Promise<SelfUpgradeOutcome>;
+  /** `keepAlive` feeds the supervisor's watchdog while the upgrade waits on the executors. */
+  selfUpgrade?: (state: DaemonState, keepAlive?: () => Promise<void>) => Promise<SelfUpgradeOutcome>;
   /**
    * GY-437: the release this process loaded, read from its checkout when the effects are built at
    * startup, before anything can move the checkout. The loop records it on the cursor over whatever
@@ -653,7 +653,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     probeBlocker: (work, classification) => loopBlockerProbe(current(), root, run, () => dispatchRefusal(current().url, fetcher))(work, classification), recordBlockerProbe: (work, body) => mutate(`work/${work.id}/blocker-probe`, body) as Promise<Work>,
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
-    decideScope: work => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }), wakeObservation: work => mutate(`work/${work.id}/resync`, {}),
+    decideScope: work => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch }), wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true }),
     // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.
     // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.
     reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null,
@@ -702,7 +702,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       publishedEnvironment = environment;
     },
     publishMergeBatchSize: async () => {
-      const config = { batchSize: mergeBatchSize(current()), optimistic: optimisticMergeEnabled(current()), parallelTips: mergeParallelTips(current()), rerunFailedChecks: rerunFailedChecks(current()), optimisticExclude: optimisticExcludeGlobs(current()) };
+      const config = { batchSize: mergeBatchSize(current()), parallelTips: mergeParallelTips(current()), rerunFailedChecks: rerunFailedChecks(current()) };
       const published = JSON.stringify(config);
       if (published === publishedMergeQueue) return;
       await mutate('merge-queue', config);
@@ -779,16 +779,16 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // re-executes itself only through the supervisor unit it actually runs under, detected from
     // its own cgroup like an executor's.
     loadedRelease: readRelease(root),
-    selfUpgrade: state => performSelfUpgrade(current(), state, {
+    selfUpgrade: (state, keepAlive) => performSelfUpgrade(current(), state, {
       root, run,
-      restartExecutors: to => restartExecutors(current(), { actions: () => asCoordinator('actions'), coordinatorCommit: to }),
+      restartExecutors: to => restartExecutors(current(), { actions: () => asCoordinator('actions'), coordinatorCommit: to, onWait: keepAlive }),
       restartSelf: async () => {
         const unit = detectLoopSupervisorUnit();
         if (!unit) throw new Error('this loop runs under no graphyard-master supervisor unit, so it cannot re-execute itself; run it under the packaged unit (examples/master/graphyard-master.service), or restart it by hand with systemctl --user restart graphyard-master');
-        // --no-block queues the restart and returns: the hand-off is systemd's stop signal, which
-        // the loop takes during its wait, not a call this process must survive.
-        await run('systemctl', ['--user', '--no-block', 'restart', unit]);
+        // --no-block queues the restart; systemd's stop then ends this wait, and reaches this process too (upgrade.ts restartEndedBySupervisorStop).
+        await awaitSupervisorRestart(() => run('systemctl', ['--user', '--no-block', 'restart', unit]));
       },
+      alignUnit: () => alignRunningLoopUnit(root, current()),
       persist: persistLoop,
     }),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
