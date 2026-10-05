@@ -35,7 +35,7 @@ Worker tokens carry `contents`, `pull_requests` and `workflows` write ([push cre
 
 Require `Graphyard / merge` and `graphyard/landable` ([landability](coordination.md)) from this App on the base branch: `strict` **off**, admin-enforced, no force pushes or deletion; `master protection --apply` and `master browser protection` reconcile both, ruleset included.
 
-The gate requires `GITHUB_CI_APP_IDS` and protection-required checks, current-head approval, trusted passing evidence, a mergeable non-draft PR, the queue head or the [optimistic lane](#optimistic-merges).
+The gate requires `GITHUB_CI_APP_IDS` and protection-required checks, current-head approval, trusted passing evidence, a mergeable non-draft PR at the queue head.
 
 ## Merge queue
 
@@ -52,10 +52,6 @@ Before merging, the reviewer App re-posts a carried approval onto the tip: a car
 ### Parallel tips
 
 `mergeQueue.parallelTips` (master config, default 4, `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes, each publication waking successors, re-reading in-flight verdicts. Each entry validates on its own tip, costing concurrent CI and a discarded suffix on failure; `parallelTips: 1` restores batching. A failing tip ejects its entry once those ahead pass; later tips rebuild. A tip failing only `unit:docs-word-budget` ejects the entry whose docs change took the running total over budget, naming words over and pages that grew; entries ahead merge. A total the base carries, no page grown, is attributed to nobody. The word budget never gates merges ([development](development.md#documentation)): an overage only warns.
-
-### Optimistic merges
-
-`mergeQueue.optimistic` (default on): a green entry disjoint from base changes and shared infrastructure lands head-bound, unqueued; a main guard [reverts](master-agent.md#repair-lane) and reopens culprits (`master status`: `optimisticMerge`). Shared infrastructure is the master config's `mergeQueue.optimisticExclude` globs, product defaults (manifests, lockfiles, CI config, test helpers, migrations), so an excluded path never merges optimistically, nor anything whose base changed one since its run; `optimistic: false` turns the lane off.
 
 ### Proofs in CI
 
