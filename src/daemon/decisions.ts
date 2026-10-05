@@ -8,8 +8,7 @@ import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualF
 import { extractProducerAccountsOrRuntimes, unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
-import { researchRework } from '../research.js';
-import { baseBreakHold } from '../master/base-break-refresh.js';
+import { researchRework } from '../research.js'; import { baseBreakHold } from '../master/base-break-refresh.js';
 import { unproducedManualProofs } from '../model/unproduced-attestation.js';
 import { triageClosure } from '../model/machine-backlog.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
@@ -397,21 +396,14 @@ export function overtakenDecision(work: Work, decision: RoutineDecision, standin
 /**
  * The rework a required CI check that failed on exactly the current head calls for, or null. The
  * next action for such a head is already `request-rework` (refusal-mapping.ts), but nothing asked
- * for the round: on 2026-09-25 GY-245's worker had completed, a base refresh produced
- * a3b75653db55, its `test` check failed, and the item sat in Test for over four hours with its
- * next step named for no one. The latest attempt of each check decides, so a rerun that is still
- * going or passed asks for nothing; the binding names the head and the failed checks.
+ * for the round: GY-245 sat in Test for four hours after its refreshed head's `test` failed. The latest attempt of each check decides, so a rerun that is still
+ * going or passed asks for nothing; the binding names the head and the failed checks. A candidate
+ * failed only on what the base broke and its tip fixed is refreshed onto that tip instead (GY-793).
  */
 export function failedCheckRework(work: Work): { reason: string; binding: string } | null {
   const candidate = work.candidate, observation = work.observation;
   if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
-  if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return null;
-  // Failed only on tests the base branch broke and its tip fixed (GY-793): the observation job
-  // refreshes the candidate onto that tip, and no worker is sent back for what it did not break.
-  // Guarded after the GY-516 rerun is spent too: once the rerun has failed again nothing else
-  // stands this rework down, so the hold is the only thing keeping the worker out of a round
-  // the base breakage answers.
-  if (baseBreakHold(work)) return null;
+  if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed' || baseBreakHold(work)) return null;
   // The policy's checks and the base branch's other required checks alike (GY-430): PR #221's
   // `secrets` scan failed, GitHub blocked the merge, and nothing asked for the round. A policy
   // check's run is read through the test gate's trust boundary (GY-731); a protection-only
