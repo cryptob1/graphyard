@@ -1,7 +1,7 @@
 // Concern: disk pressure, worktree dependency reclamation, managed checkouts and shared installs.
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { statfs, readdir, lstat, realpath, rm, mkdir, symlink, writeFile, readFile, rename, appendFile, unlink, rmdir } from 'node:fs/promises';
+import { statfs, readdir, lstat, realpath, rm, mkdir, symlink, writeFile, readFile, rename, appendFile, unlink, rmdir, open, cp } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import type { Work } from '../model.js';
@@ -10,7 +10,6 @@ import { reclaimCommand, type CheckoutReclaimReport, type WorktreeRootHealth, wo
 import type { MasterConfig, MasterRun } from './profiles.js';
 import { assertOutsideWorktrees } from './config.js';
 import { agentOwner, type AttentionItem } from './attention.js';
-import { type PreservedWorktree, type BranchGit, inProgressOperation, rebaseHeadName, trackedDiff, untrackedContents, moveAside } from './preserved-record.js';
 
 /*
  * Disk is a shared resource of the host, and assignment worktrees are the loop's largest consumer
@@ -556,7 +555,96 @@ async function compatibleInstall(installed: string, worktree: string): Promise<t
 
 // ---- Stale attempt worktrees hold the item's branch (GY-860) -------------------------------------
 
-export { type PreservedWorktree, type BranchGit, preservedDiffCaptureBytes } from './preserved-record.js';
+/** What an earlier attempt's worktree held when an allocation released its branch: where it was, what it pointed at, the operation it was mid-way through, and the uncommitted diff it carried. */
+export interface PreservedWorktree { path: string; head: string; branchTip: string; op: 'rebase' | 'merge' | 'cherry-pick' | null; refs: string; diff: string; at: string }
+
+/** The git a branch release runs: the asynchronous runner, so a launcher on this loop never blocks on a child. */
+export type BranchGit = (cwd: string, ...args: string[]) => Promise<string>;
+
+/** An operation a holder can be stopped inside; the ledger's record names the first three, and the diff's first line names the rest. */
+type HolderOperation = NonNullable<PreservedWorktree['op']> | 'revert' | 'merge --squash';
+
+/** The in-progress operation a worktree is stopped inside, or null; each state lives in that worktree's own git dir. */
+async function inProgressOperation(git: BranchGit, path: string): Promise<HolderOperation | null> {
+  const gitPath = async (name: string) => resolve(path, (await git(path, 'rev-parse', '--git-path', name)).trim());
+  if (existsSync(await gitPath('rebase-merge')) || existsSync(await gitPath('rebase-apply'))) return 'rebase';
+  if (existsSync(await gitPath('MERGE_HEAD'))) return 'merge';
+  if (existsSync(await gitPath('CHERRY_PICK_HEAD'))) return 'cherry-pick';
+  if (existsSync(await gitPath('REVERT_HEAD'))) return 'revert';
+  // `merge --squash` writes no MERGE_HEAD; its message file is what marks it.
+  if (existsSync(await gitPath('SQUASH_MSG'))) return 'merge --squash';
+  return null;
+}
+
+/** The branch a stopped rebase is rewriting, read from its own state, or empty. */
+async function rebaseHeadName(git: BranchGit, path: string): Promise<string> {
+  for (const state of ['rebase-merge', 'rebase-apply']) {
+    const directory = resolve(path, (await git(path, 'rev-parse', '--git-path', state)).trim());
+    if (!existsSync(directory)) continue;
+    try { return (await readFile(resolve(directory, 'head-name'), 'utf8')).trim(); } catch { return ''; }
+  }
+  return '';
+}
+
+/** The most `git diff` output a release buffers (GY-1059): far above the ledger's limit, far below the runner's. */
+export const preservedDiffCaptureBytes = 1024 * 1024;
+
+/**
+ * The holder's uncommitted tracked changes, bounded before they are buffered: a diff larger than
+ * the capture limit (or one git cannot produce) is recorded as its stat instead, saying so.
+ */
+async function trackedDiff(run: ChildRun, path: string): Promise<string> {
+  try { return String(await run('git', ['-C', path, 'diff', 'HEAD'], { maxBuffer: preservedDiffCaptureBytes })); }
+  catch (error) {
+    let stat = '';
+    try { stat = String(await run('git', ['-C', path, 'diff', 'HEAD', '--stat=200'], { maxBuffer: preservedDiffCaptureBytes })); } catch {}
+    return `-- the full diff could not be captured (${failureText(error).split('\n')[0]}); its stat follows --\n${stat}`;
+  }
+}
+
+/**
+ * Each untracked file by path and content, within `budget` characters: the record alone can then
+ * restore it, not only name it. A binary file, a symlink or anything past the budget is named only
+ * and returned in `unrecorded` (GY-1215), for whoever cleans the worktree to keep.
+ */
+async function untrackedContents(git: BranchGit, path: string, budget: number): Promise<{ text: string; unrecorded: string[] }> {
+  const paths = (await git(path, 'ls-files', '--others', '--exclude-standard', '-z')).split('\0').filter(Boolean);
+  const sections: string[] = [], unrecorded: string[] = [];
+  let used = 0;
+  for (const name of paths) {
+    const file = resolve(path, name), info = await lstat(file).catch(() => null);
+    let section = `-- untracked file ${name} --`, whole = false;
+    if (info?.isSymbolicLink()) section = `-- untracked symlink ${name} --`;
+    else if (info?.isFile() && used + section.length < budget) {
+      const handle = await open(file, 'r');
+      try {
+        const room = Math.min(info.size, budget - used - section.length - 1);
+        const { buffer, bytesRead } = await handle.read(Buffer.alloc(room), 0, room, 0);
+        const bytes = buffer.subarray(0, bytesRead), text = bytes.toString('utf8');
+        if (bytes.includes(0)) section = `-- untracked binary file ${name} (${info.size} bytes) --`;
+        else {
+          section += `\n${text}${bytesRead < info.size ? `\n… ${info.size - bytesRead} more bytes not recorded` : ''}`;
+          // Bytes that are not UTF-8 do not survive the record either.
+          whole = bytesRead === info.size && Buffer.from(text, 'utf8').equals(bytes);
+        }
+      } finally { await handle.close(); }
+    }
+    if (!whole) unrecorded.push(name);
+    sections.push(section); used += section.length + 1;
+  }
+  return { text: sections.join('\n'), unrecorded };
+}
+
+/** Move the untracked files a record names but does not hold into `aside`, keeping their relative paths (GY-1215); a file that cannot be kept rejects, so the clean that would delete it never runs. */
+async function moveAside(path: string, names: string[], aside: string) {
+  for (const name of names) {
+    const from = resolve(path, name), to = resolve(aside, name);
+    if (!await lstat(from).catch(() => null)) continue;
+    await mkdir(dirname(to), { recursive: true });
+    try { await rename(from, to); }
+    catch { await cp(from, to, { recursive: true, verbatimSymlinks: true }); }
+  }
+}
 
 /**
  * Free the item's branch for a new attempt's worktree (GY-860 AC-1). When a session worktree
@@ -566,18 +654,17 @@ export { type PreservedWorktree, type BranchGit, preservedDiffCaptureBytes } fro
  * succeeds. A checkout anywhere else (the coordinator's own, or an operator's) is never touched
  * here (GY-1059): `reserveReleasingHold` names it on a first attempt, and a rework leaves it to
  * the GY-1078 reclaim, which detaches a clean one as rework always did. The branch ref itself
- * never moves: a cherry-pick or revert sequence is quit where it stands rather than aborted
- * back to where it began. A stopped `git am` is left to the GY-1078 reclaim. A locked record whose directory is gone, which `worktree prune` keeps,
- * is unlocked and pruned. A holder that is the new attempt's own path (the same epoch allocated
- * again after a failed attempt) keeps its worktree: it is forced back onto the branch, with what a
- * failed preparation left there cleaned away, and returned with `reused`, so the caller skips
- * creation instead of failing on the existing path. That clean deletes only what the record holds
- * in full (GY-1215): an untracked file the record merely names — binary, a symlink, or past the
- * record's limit — is first moved into `graphyard-preserved/` in that worktree's git dir, a
- * directory the record names. `register` receives the captured state (or
- * null when nothing holds the branch) before anything is changed, so a refused registration
- * leaves the holder as it was and nothing is released unrecorded. Probes answer empty on a
- * refusal; a step that changes the holder and fails rejects the release.
+ * never moves: a cherry-pick or revert sequence is quit where it stands rather than aborted back
+ * to where it began. A stopped `git am` is left to the GY-1078 reclaim. A locked record whose
+ * directory is gone, which `worktree prune` keeps, is unlocked and pruned. A holder that is the new
+ * attempt's own path (the same epoch allocated again after a failed attempt) keeps its worktree: it
+ * is forced back onto the branch, with what a failed preparation left there cleaned away, and
+ * returned with `reused`, so the caller skips creation instead of failing on the existing path.
+ * That clean deletes only what the record holds in full (GY-1215): an untracked file it merely
+ * names is first moved into `graphyard-preserved/` in that worktree's git dir, which it names.
+ * `register` receives the captured state (or null when nothing holds the branch) before anything
+ * is changed, so a refused registration leaves the holder as it was and nothing is released
+ * unrecorded. Probes answer empty on a refusal; a step that changes the holder and fails rejects.
  */
 export async function releaseHeldBranch(root: string, branch: string, targetPath: string, run: ChildRun,
   register: (preserved: PreservedWorktree | null) => Promise<unknown> = async () => {}): Promise<{ preserved: PreservedWorktree; reused: boolean } | null> {
@@ -622,16 +709,10 @@ export async function releaseHeldBranch(root: string, branch: string, targetPath
     const untracked = await untrackedContents(git, holderPath, diffLimit - tracked.length - heading.length - (reused ? keptNote.length : 0));
     const note = reused && untracked.unrecorded.length ? keptNote : '', room = diffLimit - note.length;
     const fullDiff = tracked + (untracked.text && tracked.length < diffLimit ? `${heading}${untracked.text}` : '');
-    const preserved: PreservedWorktree = {
-      path: holderPath,
-      head: (await git(holderPath, 'rev-parse', 'HEAD')).trim(),
-      branchTip,
-      op: recorded,
-      refs: (await git(holderPath, 'show-ref')).trim().slice(0, 20_000),
-      // The suffix and the note count toward the limit, so a truncated diff still fits the ledger's schema.
-      diff: `${fullDiff.length > room ? `${fullDiff.slice(0, room - truncated.length)}${truncated}` : fullDiff}${note}`,
-      at,
-    };
+    const head = (await git(holderPath, 'rev-parse', 'HEAD')).trim(), refs = (await git(holderPath, 'show-ref')).trim().slice(0, 20_000);
+    // The suffix and the note count toward the limit, so a truncated diff still fits the ledger's schema.
+    const diff = `${fullDiff.length > room ? `${fullDiff.slice(0, room - truncated.length)}${truncated}` : fullDiff}${note}`;
+    const preserved: PreservedWorktree = { path: holderPath, head, branchTip, op: recorded, refs, diff, at };
     await register(preserved);
     const letGo = async (args: string[]) => { await run('git', ['-C', holderPath, ...args]); };
     if (op === 'rebase') await letGo(['rebase', '--abort']);
