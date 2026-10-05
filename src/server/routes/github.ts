@@ -3,8 +3,7 @@ import { demand } from '../../model.js';
 import { defineRoutes } from '../routes.js';
 import { observationEvents } from '../../github.js';
 import { wakeFromWebhook } from '../../store/store.js';
-import { baseChangeFiles, baseMoveWakes } from '../../observation-priority.js';
-import type { Work } from '../../model.js';
+import { baseChangeFiles, baseMoveWakes, type BaseMoveItem } from '../../observation-priority.js';
 
 /**
  * GitHub webhook: HMAC-verified, deduplicated in Postgres, wakes the durable jobs. Observation
@@ -35,7 +34,13 @@ export const githubRoutes = defineRoutes('github', [
         // Wake only the items the event is about; a move of the base branch or a queue ref touches them all.
         let subjects = webhookSubjects(payload, github?.config.base ?? 'main');
         if (subjects.all && payload?.ref === `refs/heads/${github?.config.base ?? 'main'}`) {
-          const open = (await db.query("SELECT document FROM work_items WHERE document->>'stage' <> 'done'")).rows.map(row => row.document as Work);
+          // Only what the selection reads, of the open items the work index names: never every document whole.
+          const open = (await db.query(`SELECT w.id::text AS id, i.stage, w.document->'submission' AS submission,
+            jsonb_build_object('files', w.document->'observation'->'files', 'mergeableState', w.document->'observation'->'mergeableState',
+              'conflicting', w.document->'observation'->'conflicting', 'mergeabilityUnknown', w.document->'observation'->'mergeabilityUnknown') AS observation,
+            jsonb_typeof(w.document->'observation') = 'object' AS observed
+            FROM work_items w JOIN work_index i ON i.id = w.id WHERE i.stage <> 'done' AND w.document->'submission'->'pr' IS NOT NULL`)).rows
+            .map(row => ({ id: row.id, stage: row.stage, submission: row.submission, observation: row.observed ? { ...row.observation, files: row.observation.files ?? [] } : null }) as BaseMoveItem);
           subjects = baseMoveSubjects(subjects, open, baseChangeFiles(payload));
         }
         if (!subjects.all && !subjects.prs.length && !subjects.shas.length && !subjects.branches.length) return [];
@@ -54,7 +59,7 @@ export const githubRoutes = defineRoutes('github', [
  * pull requests of the open items `baseMoveWakes` selects, alongside whatever else the push named;
  * with them unknown, every job as before.
  */
-export function baseMoveSubjects(subjects: ReturnType<typeof webhookSubjects>, open: Work[], baseFiles: string[] | null): ReturnType<typeof webhookSubjects> {
+export function baseMoveSubjects(subjects: ReturnType<typeof webhookSubjects>, open: readonly BaseMoveItem[], baseFiles: string[] | null): ReturnType<typeof webhookSubjects> {
   if (!baseFiles) return subjects;
   const woken = new Set(baseMoveWakes(open, baseFiles));
   const prs = open.filter(work => woken.has(work.id)).map(work => work.submission!.pr);

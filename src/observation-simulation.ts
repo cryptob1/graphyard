@@ -44,9 +44,11 @@ export interface ObservationSimulation {
   baseMoves?: { atMs: number; files: string[] | null }[];
   /**
    * The charged requests of one reading: of an unchanged item, of a changed one, and of the first
-   * reading of an item after the base moved under it (a new base SHA re-reads its pull request and compare).
+   * reading of an item after the base moved under it (a new base SHA re-reads its pull request and compare);
+   * `baseMoveShared`, what the first reading after a move pays once for every reading of that cycle (the
+   * base ref and branch rules, read once per observation cycle and ended early by the push, GY-806).
    */
-  requestCost?: { unchanged: number; changed: number; baseMoved: number };
+  requestCost?: { unchanged: number; changed: number; baseMoved: number; baseMoveShared?: number };
 }
 export function simulateObservationScheduler(options: ObservationSimulation) {
   const { all, workers, steadyMs, jobMs, durationMs, batchSize = 1, stepMs = 1000, changedShare = 0 } = options;
@@ -76,7 +78,7 @@ export function simulateObservationScheduler(options: ObservationSimulation) {
   const byId = new Map(items.map(entry => [entry.id, entry]));
   const busy: { until: number; id: string | null; idleUntil: number }[] = Array.from({ length: Math.max(1, Math.floor(workers)) }, () => ({ until: start, id: null, idleUntil: start }));
   const worst = new Map<FreshnessBand, { lagMs: number; key: string | null }>((['merge', 'review', 'steady'] as FreshnessBand[]).map(band => [band, { lagMs: 0, key: null }]));
-  let claims = 0, changedReadings = 0, bandChanges = 0, requests = 0, baseMovedAt = -Infinity;
+  let claims = 0, changedReadings = 0, bandChanges = 0, requests = 0, baseMovedAt = -Infinity, sharedPaidAt = -Infinity;
   const moves = [...options.baseMoves ?? []].sort((a, b) => a.atMs - b.atMs), woken: string[][] = [];
   for (let now = start; now <= start + durationMs; now += stepMs) {
     while (moves.length && start + moves[0].atMs <= now) {
@@ -90,6 +92,7 @@ export function simulateObservationScheduler(options: ObservationSimulation) {
         if (changed) changedReadings++;
         // The first reading that starts after a base move the item's last reading did not see pays for the new base.
         if (options.requestCost) requests += entry.baseReadAt < baseMovedAt && entry.claimedAt >= baseMovedAt ? options.requestCost.baseMoved : changed ? options.requestCost.changed : options.requestCost.unchanged;
+        if (options.requestCost?.baseMoveShared && entry.claimedAt >= baseMovedAt && sharedPaidAt < baseMovedAt) { requests += options.requestCost.baseMoveShared; sharedPaidAt = baseMovedAt; }
         entry.baseReadAt = entry.claimedAt;
         const moved = changed && options.advance ? options.advance(fleet.find(work => work.id === entry.id)!, fleet, worker.until) : null;
         if (moved) {
