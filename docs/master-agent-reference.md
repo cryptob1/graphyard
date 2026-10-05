@@ -75,7 +75,7 @@ A producer request spent with no attempt acting (`never started`, run could not 
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen, nor pruning retire, a standing fault. Full roles are slot waits; workless sessions raise `fleet-capacity` (capacity); unnamed master roles are no `configuration` fault. Scope requests count past 15 minutes open, or refused with no approver left. Settled requests turn `unanswered-request` past `settledAnswerGraceMs` (5 minutes), naming the owed relaunch or `request-remedy` decision. A failed section is listed only in `unavailable`. Sandbox or `workflows`-permission refusal blockers are `configuration`.
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen, nor pruning retire, a standing fault. Full roles are slot waits; workless sessions raise `fleet-capacity` (capacity); unnamed master roles are no `configuration` fault. Scope requests count past 15 minutes open, or refused with no approver left. Settled requests turn `unanswered-request` past `settledAnswerGraceMs` (5 minutes), naming the owed relaunch or `request-remedy` decision. Failed sections list only in `unavailable`. Sandbox or `workflows`-permission refusal blockers are `configuration`.
 
 ## Pipeline speed
 
