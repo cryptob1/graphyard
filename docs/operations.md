@@ -3,58 +3,52 @@
 
 ## Daily checklist
 
-- `/healthz` healthy at the expected `commit`; `/api/status` without job errors, `delegationLimits.attention` or `production.incidents`.
-- `graphyard master status`: `daemon.liveness` `running`, every attention item owned.
-- A recent `graphyard db backup` verified.
+- `/healthz` healthy at the expected `commit`; `/api/status` without job errors, `delegationLimits.attention`, `production.incidents`.
+- `graphyard master status`: `daemon.liveness` `running`, attention owned.
+- Recent verified `graphyard db backup`.
 
 ## Incident decision tree
 
 - **Item not moving**: fix the refusal's cause. Never weaken requirements.
-  - Escalation: a declared human session runs `graphyard resolve GY-N TRIGGER "reason"`; an explained `lease-loss` is settleable by `admin --attestation` alone.
-  - Lease expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission). Another attempt: [rework](operations-reference.md#submitted-implementation-needs-rework). Fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
-  - A new head owed by `request-rework` is a rework round the loop decides itself; it counts as an `owed-decision` fault only after 30 minutes (`reworkDecisionWaitBoundMs`). An owed escalation counts at once.
+  - Escalation: declared human session runs `graphyard resolve GY-N TRIGGER "reason"`; explained `lease-loss` needs only `admin --attestation` ([who](delegation.md#who-may-settle-what)).
+  - Expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission); another attempt: [rework](operations-reference.md#submitted-implementation-needs-rework); fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
+  - An owed `request-rework` head counts as an `owed-decision` fault only after 30 minutes (`reworkDecisionWaitBoundMs`).
   - A failed manual proof a producer may run returns to a worker, never to an operator escalation; one no producer may run needs an operator witness, an unexecuted one an attestation.
-- **Merge refused**: wait or repair the cause; never bypass. Auto-merge `BLOCKED` past ten minutes with every gate passing is asked of GitHub as a head-bound merge; GitHub's refusal is the item's merge refusal in `master status`, and after 30 minutes one `merge-blocked` attention item names the pull request and GitHub's last answer.
-- **Merged outside Graphyard**: [merge bypass](operations-reference.md#merge-bypass).
-- **Wrong accepted evidence**: [revoke it](operations-reference.md#accepted-evidence-turns-out-to-be-wrong).
-- **GitHub paused or webhook silent**: [request budget](operations-reference.md#github-request-budget).
-- **Smoke proof failed**: [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
-- **Main ahead of production**: a [deployment incident](operations-reference.md#merged-but-not-deployed). An up-to-date release starts without taking coordination locks; a migrating release fails fast within the health check, and live traffic migrates safely: it touches only the tables whose DDL changed since it recorded a digest per table (unchanged tables are skipped without any lock), locks each table before rebuilding its trigger, and retries a deadlock or expired lock wait with backoff inside one 30-second lock budget, failed locks release at once; each attempt waits at most 3 seconds for a lock, so live writes never queue behind it longer; migrations and backups lock separately. First `work_index` rebuild briefly locks `work_items`.
-- **Diagnosis `waiting`**: a provider quota hold, not a fault or `inFlight`; see [diagnosis](master-agent.md#research-and-diagnosis).
-- **Loop down**: [master coordination loop](operations-reference.md#master-coordination-loop).
-- **A change must prove itself**: [bootstrap mode](operations-reference.md#bootstrap-mode-for-a-self-proving-change).
+- **Merge refused**: wait or repair; never bypass. Auto-merge `BLOCKED` 10m with every gate passing is retried as a head-bound merge; after 30m one `merge-blocked` attention item names GitHub's answer. **Merged outside Graphyard**: [bypass](operations-reference.md#merge-bypass). **Wrong accepted evidence**: [revoke](operations-reference.md#accepted-evidence-turns-out-to-be-wrong). **GitHub paused or webhook silent**: [budget](operations-reference.md#github-request-budget). **Smoke proof failed**: [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
+- **Main ahead of production**: a [deployment incident](operations-reference.md#merged-but-not-deployed). An up-to-date release starts without taking coordination locks; a migrating release fails fast within the health check: it touches only the tables whose DDL changed since it recorded a digest per table (unchanged tables are skipped without any lock), and retries a deadlock or expired lock wait with backoff inside one 30-second lock budget; each attempt waits at most 3 seconds for a lock, so live writes never queue behind it longer.
+- **Diagnosis `waiting`**: a provider quota hold, not a fault; see [diagnosis](master-agent.md#research-and-diagnosis). **Loop down**: [loop](operations-reference.md#master-coordination-loop). **A change must prove itself**: [bootstrap](operations-reference.md#bootstrap-mode-for-a-self-proving-change).
 
 ## Recovery recipes
 
 ```sh
-graphyard rework GY-N --previous-worker-stopped "reason"                     # stopped worker
-graphyard master settle-containment GY-N "reason"                            # when settleable
-graphyard recover-containment GY-N --previous-worker-stopped "reason"        # delivered, stop confirmed
-graphyard unblock GY-N "reason"                                              # unowned blocker
+graphyard rework GY-N --previous-worker-stopped "reason"                # worker stopped
+graphyard master settle-containment GY-N "reason"                       # settleable
+graphyard recover-containment GY-N --previous-worker-stopped "reason"   # delivered, stop confirmed
+graphyard unblock GY-N "reason"                                         # unowned blocker
 ```
 
-Never attest a stop you have not confirmed. Merged work changes only through a follow-up item.
+Never attest a stop you have not confirmed; merged work changes only via follow-up items.
 
 ## Worker host keyring proxy
 
-A confined master, approver or proof producer reads its GitHub login with `gh auth git-credential` through a keyring-only D-Bus proxy; workers and reviewers carry their own credential and never get it. Install it once per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service` and `graphyard-secrets-bus-filter.service` to `~/.config/systemd/user/`, then `systemctl --user daemon-reload && systemctl --user enable --now graphyard-secrets-bus.socket` (an earlier install that enabled `graphyard-secrets-bus.service` itself disables it first). The socket listens at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` (else `/run/user/<uid>/graphyard-secrets-bus`); `GRAPHYARD_SECRETS_BUS` in the launcher's environment names another socket. Without a live socket the session bus is masked by `/dev/null`, and a session pushes with `GH_TOKEN` from its environment.
+A confined master, approver or proof producer reads its GitHub login (`gh auth git-credential`) through a keyring-only D-Bus proxy; workers and reviewers use their own credential. Install once per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service` and `graphyard-secrets-bus-filter.service` to `~/.config/systemd/user/`, then `systemctl --user daemon-reload && systemctl --user enable --now graphyard-secrets-bus.socket` (disable an earlier-enabled `graphyard-secrets-bus.service` first). It listens at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` unless `GRAPHYARD_SECRETS_BUS` names another; without it the bus is masked and sessions push with `GH_TOKEN`.
 
-The filter admits only the Secret Service methods a credential read needs, but by method and path, not by item: a session can read every unlocked item, not only the GitHub login. On such a host keep other secrets out of that keyring, or leave the proxy uninstalled and use `GH_TOKEN`.
+The filter cannot select keyring items: keep other secrets out of that keyring, or skip the proxy and use `GH_TOKEN`.
 
 ## Safety facts that never change
 
-- Workers never hold `admin`, `coordinator` or `producer` tokens. No AI principal can hold `admin`.
+- Workers never hold `admin`/`coordinator`/`producer` tokens; No AI principal can hold `admin`.
 - Proof authority is a live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs.
 - Operator agents add requirements, never remove.
 - Only guarded merges: no bypass, no lifecycle-state endpoint.
 - Non-master sessions run in their own checkout, never the coordinator's.
-- Under the coordination lock a write reads whole only its item, overlapping open items and dependencies; the rest are cached projections or `work_index` summaries, so at 1,000 items claims, operator-agent heartbeats, submissions and registry selects hold it under 500 ms and a reconcile pass under 5 s. A worker's heartbeat takes only its item's lock.
-- History is append-only; only routine rows past their retention window are [compacted](operations-reference.md#storage-retention), each batch audited.
+- Coordination-lock writes read whole only their item, overlaps and dependencies: under 500 ms at 1,000 items; a worker's heartbeat takes only its item's lock.
+- History is append-only; only routine rows past retention are [compacted](operations-reference.md#storage-retention), each batch audited.
 
 ## Deeper references
 
-- [Operations reference](operations-reference.md), [master agent](master-agent.md), [coordination](coordination.md), [delegation](delegation.md)
+- [Operations reference](operations-reference.md), [delegation](delegation.md)
 
 ## Resources and disk
 
-`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). Each cycle the loop removes finished worktrees (`run.reclaimIdleHours`, at most `run.worktreeRemovalLimit`, never dirty or unpushed; logged to `.graphyard/worktree-reclaim.jsonl`), stale [test temp entries](operations-reference.md#control-plane-resources) and `/tmp/tsx-<uid>` (dead owner or 2h/6h idle, unheld, ≤100, one pass in flight), and raises `disk` attention below `run.diskThresholdGb`. Every non-master session's checkout lives under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`). Approver, handler and docs-sync tabs set `GRAPHYARD_REPOSITORY_ROOT` for `master` commands. Each cycle a dirty coordinator checkout, or a HEAD other than the commit the loop runs (including its self-upgrade's recorded target, even after a failed restart), raises `escalation:dirty-checkout` naming the paths, HEAD and sessions pointing at it, and blocks self-upgrade until clean. Agentless panes Graphyard launched are swept each cycle ([panes](master-agent-sessions.md#panes-are-closed-and-reclaimed)); the reclaim closes any unowned (no pending record, no live lease), non-`working` pane on a profile's name once two passes saw it: 60 s apart when finished, 120 s when its status is `unknown` or missing (never a worker launch under way), and for a recordless pane 60 s if idle or done, 10 min if blocked or unknown (closed as never started). The newest record on a name a pane still holds outlives retention until that close.
+`resourceRegistry` declares bounded resources, reported in `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop removes finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed), stale test temp entries and idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen by two passes. `disk` attention below `run.diskThresholdGb`. Every non-master session's checkout lives under `run.worktreeRoot`. Each cycle a dirty coordinator checkout, or a HEAD other than the commit the loop runs, raises `escalation:dirty-checkout` naming the paths, HEAD and sessions pointing at it, and blocks self-upgrade until clean.
