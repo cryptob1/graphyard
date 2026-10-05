@@ -780,6 +780,8 @@ export function repeatedMergeRefusal(work: Pick<Work, 'mergeRefusal' | 'candidat
   return refusal && refusal.action === 'rework' && candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha && refusal.policyRevision === work.policyRevision ? refusal : null;
 }
 
+
+
 /** The launcher key of the approver launch for a decision (GY-616). */
 export const approverLaunchKey = (decision: string) => `launch:approver:${decision}`;
 /** The approval-watch key of an approver session no request of the loop's launched (GY-403). */
