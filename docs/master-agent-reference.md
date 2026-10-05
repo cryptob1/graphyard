@@ -69,6 +69,8 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator` and
 
 `master escalation GY-N` spawns a handler answering with `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
+A [main guard](github.md#optimistic-merges) hold (revert open or refused) ends once the base tip passes, however main was fixed; a conflicted or closed revert PR is refused with its reason. Held past 30 minutes, it is attention naming culprit, revert PR, time off and candidates refused.
+
 ## Fault classes
 
 Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); moving hashes never reopen, nor pruning retire, a standing fault. Full roles are slot waits; workless sessions raise `fleet-capacity` (capacity); unnamed master roles are no `configuration` fault. Scope requests count past 15 minutes open, or refused with no approver left. A failed section is listed only in `unavailable`. Sandbox or `workflows`-permission refusal blockers are `configuration`.

@@ -248,7 +248,7 @@ export interface OptimisticRevert {
   /** Where the revert stands: opened as a pull request, merged, or refused (with the reason; a human-free follow-up is filed by the master). */
   state: 'opened' | 'merged' | 'refused';
   pr: number | null; head: string | null; mergeSha: string | null; refusal: string | null;
-  /** For a refused revert: the base branch commit whose required suite passed again, which ends the hold on optimistic merges. */
+  /** For a refused or still-open revert: the base branch commit whose required suite passed again, which ends the hold on optimistic merges. */
   resolvedBy?: { sha: string; at: string } | null;
 }
 

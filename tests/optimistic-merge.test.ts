@@ -8,7 +8,7 @@ import { GitHub, guardMain } from '../src/github.js';
 import { masterConfigSchema, mergeWork, type MasterConfig } from '../src/master.js';
 import { optimisticMergeEnabled } from '../src/master/profiles.js';
 import { optimisticGuardAttention, optimisticStatus } from '../src/master/optimistic-attention.js';
-import { applyPostMerge, applyRevert, bisectCulprit, optimisticEligibility, optimisticMetrics, postMergeVerdict, revertRefusal, sharedInfrastructure, type GuardState, type OptimisticMerge, type OptimisticRevert, type PostMergeVerdict } from '../src/optimistic-merge.js';
+import { applyPostMerge, applyRevert, bisectCulprit, describeGuard, optimisticEligibility, optimisticMetrics, postMergeVerdict, revertRefusal, sharedInfrastructure, type GuardState, type OptimisticMerge, type OptimisticRevert, type PostMergeVerdict } from '../src/optimistic-merge.js';
 import OptimisticMerges from '../web/optimistic-merges.js';
 
 // GY-500: a green entry whose files are disjoint from everything merged since its base lands at
@@ -305,6 +305,88 @@ test('unit:optimistic-auto-revert a culprit a later merge built on is not revert
   world.checks[sha40('f9')] = 'success';
   assert.equal((await guardMain(world.engine, world.github, now)).state, 'green');
   assert.equal(optimisticEligibility(next, [culprit, next], { enabled: true, gatesPass: true }).eligible, true);
+});
+
+// ---------------------------------------------------------------------------
+// GY-1221: a hold in `reverting` ends like `refused` does, and a revert that can never merge is refused.
+// ---------------------------------------------------------------------------
+test('unit:reverting-guard-released-on-green-tip a revert that never merges stops holding main once its tip passes', async () => {
+  const culprit = delivered('GY-61', ['src/culprit.ts'], '2026-09-25T08:10:00.000Z');
+  const world = harness([culprit], { [sha40('d61')]: 'failure' });
+  const attempts: number[] = [];
+  // GitHub never merges it: a required merge queue that never lands, then a merge that throws.
+  (world.github as any).mergeRevert = async (_: Work, revert: { pr: number }) => { attempts.push(revert.pr); return null; };
+  let guard = await guardMain(world.engine, world.github, now);
+  assert.equal(guard.state, 'reverting');
+  guard = await guardMain(world.engine, world.github, now);
+  assert.equal(guard.state, 'reverting', 'a red tip keeps the hold');
+  const next = item('GY-62', ['src/next.ts'], []);
+  assert.match((optimisticEligibility(next, [culprit, next], { enabled: true, gatesPass: true }) as { reasons: string[] }).reasons.join('; '), /Main is red after an optimistic merge/);
+  // Main was fixed some other way: its tip passes the culprit's required checks.
+  (world.github as any).mergeRevert = async () => { throw new Error('GitHub refused the merge'); };
+  world.checks[sha40('f9')] = 'success';
+  guard = await guardMain(world.engine, world.github, now);
+  assert.equal(guard.state, 'green');
+  assert.deepEqual(culprit.optimisticMerges![0].revert!.resolvedBy, { sha: sha40('f9'), at: now.toISOString() });
+  assert.equal(culprit.optimisticMerges![0].revert!.state, 'opened');
+  assert.equal(optimisticEligibility(next, [culprit, next], { enabled: true, gatesPass: true }).eligible, true, 'an eligible candidate is no longer refused');
+  assert.deepEqual(optimisticGuardAttention([culprit, next]), []);
+  assert.equal(attempts.length, 2);
+});
+
+test('unit:conflicted-revert-refused a revert GitHub reports DIRTY or closed moves the guard to refused with the reason', async () => {
+  const culprit = delivered('GY-63', ['src/culprit.ts'], '2026-09-25T08:10:00.000Z');
+  const world = harness([culprit], { [sha40('d63')]: 'failure' });
+  (world.github as any).mergeRevert = async () => null;
+  assert.equal((await guardMain(world.engine, world.github, now)).state, 'reverting');
+  // The real adapter reads the conflict off the pull request before any write.
+  const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 1, privateKey: '' });
+  const writes: string[] = [];
+  let pull: any = { merged: false, state: 'open', mergeable_state: 'dirty' };
+  (github as any).request = async (path: string, method = 'GET') => { if (method !== 'GET') writes.push(path); return path === '/pulls/901' ? pull : {}; };
+  (github as any).graphql = async (query: string) => { writes.push('graphql'); return /mergeQueue/.test(query) ? { repository: { mergeQueue: null, pullRequest: { id: 'PR_901', headRefOid: sha40('c1'), mergeStateStatus: 'DIRTY', mergeQueueEntry: null, autoMergeRequest: null } } } : {}; };
+  const revert = { pr: 901, head: sha40('c1'), failing: ['test (failure)'] };
+  assert.deepEqual(await github.mergeRevert(culprit, revert), { refusal: 'Revert pull request #901 conflicts with the base branch (GitHub reports it DIRTY)' });
+  pull = { merged: false, state: 'open', mergeable_state: 'unknown' };
+  assert.deepEqual(await github.mergeRevert(culprit, revert), { refusal: 'Revert pull request #901 conflicts with the base branch (GitHub reports it DIRTY)' }, 'GraphQL DIRTY counts too');
+  pull = { merged: false, state: 'closed' };
+  assert.deepEqual(await github.mergeRevert(culprit, revert), { refusal: 'Revert pull request #901 was closed without merging' });
+  assert.deepEqual(writes.filter(path => path !== 'graphql'), [], 'nothing is written for a revert that cannot merge');
+  // The guard records the transition with the reason and stops retrying.
+  pull = { merged: false, state: 'open', mergeable_state: 'dirty' };
+  (world.github as any).mergeRevert = (work: Work, entry: typeof revert) => github.mergeRevert(work, entry);
+  const guard = await guardMain(world.engine, world.github, now);
+  assert.equal(guard.state, 'refused');
+  assert.equal(culprit.optimisticMerges![0].revert!.state, 'refused');
+  assert.equal(culprit.optimisticMerges![0].revert!.refusal, 'Revert pull request #901 conflicts with the base branch (GitHub reports it DIRTY)');
+  assert.equal(culprit.optimisticMerges![0].revert!.pr, 901);
+  assert.match(describeGuard(guard), /cannot be reverted automatically: Revert pull request #901 conflicts/);
+  assert.deepEqual(world.events.filter(event => event.kind.startsWith('optimistic.revert.')).map(event => event.kind), ['optimistic.revert.opened', 'optimistic.revert.pending', 'optimistic.revert.refused']);
+  (world.github as any).mergeRevert = async () => { throw new Error('a refused revert is never retried'); };
+  assert.equal((await guardMain(world.engine, world.github, now)).state, 'refused');
+  assert.equal(culprit.stage, 'done', 'nothing is reopened without a revert');
+});
+
+test('unit:held-guard-attention master status reports a guard held over 30 minutes with its culprit, revert, time off and refused candidates', () => {
+  const culprit = delivered('GY-65', ['src/culprit.ts'], '2026-09-25T08:10:00.000Z');
+  const opened = '2026-09-25T08:20:00.000Z';
+  applyRevert(culprit, sha40('d65'), { at: opened, failing: ['test (failure)'], probes: [], kept: [], state: 'opened', pr: 443, head: sha40('c4'), mergeSha: null, refusal: null }, now);
+  const queued = (key: string, enqueuedAt: string) => Object.assign(item(key, ['src/q.ts'], null), { queueHistory: [{ at: enqueuedAt, event: 'enqueued', sequence: 1 }] }) as Work;
+  const all = [culprit, queued('GY-66', '2026-09-25T08:25:00.000Z'), queued('GY-67', '2026-09-25T08:40:00.000Z'), queued('GY-68', '2026-09-25T08:00:00.000Z')];
+  // Within 30 minutes the control plane still owns it.
+  const [early] = optimisticGuardAttention(all, new Date(Date.parse(opened) + 30 * 60_000));
+  assert.equal(early.role, 'control plane');
+  assert.match(early.text, /^Main guard: reverting GY-65/);
+  // Held 31 minutes: the line names the culprit, the revert PR, how long optimistic merging was off and how many candidates it refused.
+  const [held] = optimisticGuardAttention(all, new Date(Date.parse(opened) + 31 * 60_000));
+  assert.equal(held.subject, 'GY-65');
+  assert.equal(held.role, 'master');
+  assert.match(held.text, new RegExp(`^Main guard held reverting for 31m: culprit GY-65's merge ${sha40('d65').slice(0, 12)}, revert PR #443; optimistic merging has been off for 31m and refused 2 candidates meanwhile`));
+  // A refused hold is reported the same way, from when the revert first held main.
+  culprit.optimisticMerges![0].revert = { ...culprit.optimisticMerges![0].revert!, state: 'refused', refusal: 'Revert pull request #443 conflicts with the base branch (GitHub reports it DIRTY)' };
+  const [refused] = optimisticGuardAttention(all, new Date(Date.parse(opened) + 31 * 60_000));
+  assert.match(refused.text, /^Main guard held refused for 31m: culprit GY-65's merge [0-9a-f]{12}, revert PR #443; optimistic merging has been off for 31m and refused 2 candidates meanwhile \(.*conflicts with the base branch/);
+  assert.match(refused.next, /graphyard master create FILE REASON files the fix for GY-65/);
 });
 
 // ---------------------------------------------------------------------------

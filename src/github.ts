@@ -2442,12 +2442,17 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * Lands a revert the main guard opened, exactly at `head`, with the repair lane's bypass (GY-406):
    * the App publishes its `Graphyard / merge` verdict naming the revert and merges head-bound, so
    * main is restored within one CI duration instead of after another queue round. Returns the
-   * merge commit once GitHub reports the pull request merged, else null.
+   * merge commit once GitHub reports the pull request merged, else null; a revert that can never
+   * merge — closed unmerged, or conflicted with the base branch — returns its refusal (GY-1221),
+   * so the guard stops retrying it.
    */
-  async mergeRevert(work: Work, revert: Pick<OptimisticRevert, 'pr' | 'head' | 'failing'>): Promise<string | null> {
+  async mergeRevert(work: Work, revert: Pick<OptimisticRevert, 'pr' | 'head' | 'failing'>): Promise<string | null | { refusal: string }> {
     const pull = await this.request(`/pulls/${revert.pr}`);
     if (pull?.merged) return typeof pull.merge_commit_sha === 'string' ? pull.merge_commit_sha : null;
+    if (pull?.state === 'closed') return { refusal: `Revert pull request #${revert.pr} was closed without merging` };
+    if (pull?.mergeable_state === 'dirty') return { refusal: `Revert pull request #${revert.pr} conflicts with the base branch (GitHub reports it DIRTY)` };
     const state = await this.mergeQueueState(revert.pr!);
+    if (state.mergeStateStatus === 'DIRTY') return { refusal: `Revert pull request #${revert.pr} conflicts with the base branch (GitHub reports it DIRTY)` };
     requireCurrent(state.head === revert.head, `Revert pull request #${revert.pr} head moved from ${revert.head!.slice(0, 12)} to ${state.head.slice(0, 12)}; the guard merges only the head it built`);
     if (state.mode !== 'none') await this.dequeuePullRequest(state);
     const existing = (await this.pages(`/commits/${revert.head}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=latest`, 'check_runs')).find(c => c.app.id === this.config.appId);
@@ -2843,7 +2848,9 @@ export async function repairLaneStep(engine: Pick<Engine, 'store' | 'enqueueRequ
  * item for a rework round. Every step is on the ledger: each verdict (`optimistic.post-merge`),
  * each guard state (`optimistic.guard`, once per state, culprit and probe) and each revert step
  * (`optimistic.revert.*`). A revert it cannot make cleanly is recorded as refused, holds further
- * optimistic merges, and is released once the base branch tip passes the required suite again.
+ * optimistic merges, and is released once the base branch tip passes the required suite again; so
+ * is an open revert, however main was fixed, and one GitHub reports closed or conflicted is
+ * refused with that reason rather than retried (GY-1221).
  */
 export const mainGuardIntervalMs = 30_000;
 /**
@@ -2899,20 +2906,32 @@ export async function guardMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'rec
     all = await engine.store.list(); guard = mainGuard(all);
   }
   const held = guard;
+  // Main is released once its tip passes again, however it was fixed: a hold, reverting or refused, ends there (GY-1221).
+  const release = async (culprit: Extract<GuardState, { state: 'reverting' | 'refused' }>['culprit'], revert: OptimisticRevert) => {
+    const tip = (await github.baseBranch()).tip;
+    const verdict = postMergeVerdict(await github.commitChecks(tip), required(all.find(item => item.id === culprit.id)!), engine.ciAppIds);
+    if (verdict.verdict !== 'pass') return false;
+    await engine.recordOptimisticRevert(culprit.id, culprit.mergeSha, { ...revert, resolvedBy: { sha: tip, at: now.toISOString() } });
+    return true;
+  };
   if (held.state === 'reverting') {
     const work = all.find(item => item.id === held.culprit.id)!, revert = held.revert;
-    const merged = await github.mergeRevert(work, revert);
-    if (merged) {
+    let merged: Awaited<ReturnType<GitHub['mergeRevert']>>;
+    // A revert GitHub will not merge must not hold main once its tip passes by other means.
+    try { merged = await github.mergeRevert(work, revert); }
+    catch (error) { if (await release(held.culprit, revert)) return mainGuard(await engine.store.list()); throw error; }
+    if (typeof merged === 'string') {
       await engine.recordOptimisticRevert(work.id, held.culprit.mergeSha, { ...revert, state: 'merged', mergeSha: merged });
       // The merges that landed after the culprit failed on commits that held it: each is re-tested on the revert.
       for (const merge of retestAfterRevert(held)) await engine.recordPostMerge(merge.id, merge.mergeSha, { verdict: 'pending' }, merged);
-    } else await recordRevertPending(engine, held, now);
-  } else if (held.state === 'refused') {
-    // Main is released once its tip passes again, however it was fixed.
-    const tip = (await github.baseBranch()).tip;
-    const verdict = postMergeVerdict(await github.commitChecks(tip), required(all.find(item => item.id === held.culprit.id)!), engine.ciAppIds);
-    if (verdict.verdict === 'pass') await engine.recordOptimisticRevert(held.culprit.id, held.culprit.mergeSha, { ...held.revert, resolvedBy: { sha: tip, at: now.toISOString() } });
-  } else return held;
+    } else if (merged) {
+      // Closed or conflicted: it can never merge, so it is refused with the reason instead of retried every tick.
+      const refused: OptimisticRevert = { ...revert, state: 'refused', refusal: merged.refusal };
+      await engine.recordOptimisticRevert(work.id, held.culprit.mergeSha, refused);
+      await release(held.culprit, refused);
+    } else if (!await release(held.culprit, revert)) await recordRevertPending(engine, held, now);
+  } else if (held.state === 'refused') await release(held.culprit, held.revert);
+  else return held;
   return mainGuard(await engine.store.list());
 }
 export async function githubFromEnv() {
