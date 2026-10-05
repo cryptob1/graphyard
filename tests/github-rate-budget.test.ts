@@ -584,15 +584,10 @@ test('unit:merge-burst-request-budget — ten merges in ten minutes over 80 open
   for (const candidate of candidates) { const measured = await github.measured(() => github.observe(candidate, candidates)); first.push(measured.uncached); all.push(evaluated(candidate, candidates, measured.value)); }
   const read = async () => { const costs: number[] = []; for (const candidate of [...all]) { const measured = await github.measured(() => github.observe(candidate, all)); costs.push(measured.uncached); all = all.map(entry => entry.id === candidate.id ? evaluated(candidate, all, measured.value) : entry); } return costs; };
   await read();
-  const mark0 = api.requests.length;
   const unchanged = await read();
-  if (process.env.GRAPHYARD_BUDGET_DEBUG) console.log('UNCH', api.requests.slice(mark0).filter(r => r.status === 200).map(r => r.path.replace(/[a-f0-9]{40}/g, 'SHA')).slice(0, 12));
-  const mark1 = api.requests.length;
   // Main moves, and its push webhook ends the client's shared read of the base ref, as in production.
   api.main = sha('main-2'); github.noteWebhook('push', { ref: 'refs/heads/main' });
   const moved = await read();
-  if (process.env.GRAPHYARD_BUDGET_DEBUG) console.log('MOVED', api.requests.slice(mark1).filter(r => r.status === 200).map(r => r.path.replace(/[a-f0-9]{40}/g, 'SHA')).slice(-12));
-  if (process.env.GRAPHYARD_BUDGET_DEBUG) console.log({ first, unchanged, moved });
   // Each reading is charged the worst any candidate paid for it: the bound holds for the costliest readings.
   // The first reading after the move also paid the cycle's shared base reads, which every later one is
   // served: those are charged once per move, and each base-moved reading the worst of the rest.
