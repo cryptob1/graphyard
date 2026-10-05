@@ -341,7 +341,14 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
   const subjectItem = entry.work ? snapshot.work.find(item => item.key === entry.work) ?? null : null;
   if (entry.state === 'diagnosed') {
     const diagnosis = entry.diagnosis!;
-    if (entry.kind === 'recurring' && (!subjectItem || subjectItem.stage === 'done')) { entry.state = 'failed'; await note(entry, 'failed', `${entry.work} is no longer open, so its diagnosis is not acted on`); return; }
+    // GY-1266: a recurring item closed while it was diagnosed — delivered, or closed by the master —
+    // needs nothing from its diagnosis. That is the subject moving on, not the loop failing: recorded
+    // as a failed action it opened a loop fault for every such closure.
+    if (entry.kind === 'recurring' && (!subjectItem || subjectItem.stage === 'done')) {
+      entry.state = 'answered'; entry.answeredBy = subjectItem ? answeringItem(subjectItem) : null;
+      await note(entry, 'done', `${entry.work} is no longer open, so its diagnosis is not acted on${entry.answeredBy ? `; it was closed as answered by ${entry.answeredBy}` : ''}`, null);
+      return;
+    }
     if (diagnosis.covering) {
       const covering = snapshot.work.find(item => item.key === diagnosis.covering);
       if (!covering || covering.stage === 'done' || covering.key === entry.work) { entry.state = 'failed'; await note(entry, 'failed', `The diagnosis names ${diagnosis.covering} as covering ${entry.subject}, but it is not another open item`); return; }

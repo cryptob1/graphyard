@@ -100,6 +100,11 @@ export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'rev
  * moved past. The loop waits for a fresh observation and decides from that.
  */
 export const reworkObservationMaxAgeMs = 120_000;
+/**
+ * GY-1266. How old the observation the loop's own wake brought in may be when the rework is decided
+ * from it: the longest configurable interval (900s), so the reading survives one whole cycle gap.
+ */
+export const reworkWokenObservationMaxAgeMs = 15 * 60_000;
 export interface GitHubPause { until: string }
 /**
  * Whether the control plane's GitHub client is paused, read from the observation jobs it refused:
@@ -123,12 +128,19 @@ export const observedFrom = (work: Work) => work.observation
  * decided from. The reason names the stale observation — its time and head — and never its age,
  * so it reads the same on every cycle it stands.
  */
-export function reworkObservationWait(work: Work, now: number, pause: GitHubPause | null): string | null {
+export function reworkObservationWait(work: Work, now: number, pause: GitHubPause | null, wokenAt?: string | null): string | null {
   const observation = work.observation;
   if (!observation) return `${work.key}: rework waits for a GitHub observation of the item; there is none to decide from`;
   const seen = `the last GitHub observation (taken at ${observation.at} of head ${observation.candidate.sha.slice(0, 12)})`;
   if (pause) return `${work.key}: rework waits for a fresh GitHub observation — GitHub requests are paused until ${pause.until}, so ${seen} is a stale observation that may describe a head the branch has moved past`;
   const age = now - Date.parse(observation.at);
+  // GY-1266. The observation the loop's own wake brought in, of the head the item still submits, is
+  // the fresh reading it waited for. The wake lands within a cycle, but the next cycle reads it one
+  // interval later — past two minutes at any interval over that — so judged on the two-minute bound
+  // alone every landed observation was stale again, the wake was sent again, and no rework was ever
+  // requested while each wake's server reconcile lengthened the cycle.
+  const woken = wokenAt ? Date.parse(wokenAt) : Number.NaN;
+  if (Number.isFinite(woken) && Date.parse(observation.at) > woken && observation.candidate.sha === work.candidate?.sha && age < reworkWokenObservationMaxAgeMs) return null;
   if (!(Number.isFinite(age) && age < reworkObservationMaxAgeMs)) return `${work.key}: rework waits for a fresh GitHub observation — ${seen} is a stale observation, older than two minutes, and the branch may have moved past that head`;
   return null;
 }
