@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-Restart `graphyard master run` freely; it never double-dispatches. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95), `metrics.timings` (steps over 1 s); a cycle over 60 s raises `loop`, naming three slowest. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3); failures log route and SQL.
+Restarting `graphyard master run` never double-dispatches. `master status` → `daemon`: health, `cycleTime` (30-minute p50/p95), `metrics.timings` (steps over 1 s); a cycle over 60 s raises `loop`, naming three slowest. Log: `journalctl --user -u graphyard-master`. Launches run beside cycles (`run.launchConcurrency`, default 3); failures log route and SQL.
 
 ### Perpetual master loop
 
@@ -74,7 +74,7 @@ A silent hour: `master status` points to `https://github.com/settings/apps/APP-S
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (warns under 25%) and loop-removed 2h-idle temporary files. Database bound: `GRAPHYARD_DATABASE_MAX_BYTES`, else readable same-host `data_directory` volume, else advisory, silent 10 GiB. `agent-names` flags holders 10m past settling (reclaimed each dispatcher tick); `loaded-revision` counts code moves after a 30m self-upgrade window.
+Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES`. `tmp-inodes`: free `/tmp` inodes (warns under 25%) and loop-removed 2h-idle files. Database bound: `GRAPHYARD_DATABASE_MAX_BYTES`, else the `data_directory` volume, else silent 10 GiB. `agent-names` flags holders 10m past settling, reclaimed each tick; `loaded-revision` counts code moves after 30m self-upgrade.
 
 ## Storage retention
 
