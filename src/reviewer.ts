@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, loadStoredMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, loadMasterConfig, loadStoredMasterConfig, markReprompted, neverStarted, onSelectedSession, readCredentialFile, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import { sessionSlotsGrant } from './master/harness.js';
 import { withVerificationPath } from './master/verification-slots.js';
 import { clientErrorStatus, retryStopAttention } from './retry-stop.js';
@@ -19,6 +19,8 @@ import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
 import { documentationReviewSection, type DocumentationObligation } from './model/documentation.js';
 import { researchReviewSection } from './research.js';
 import { paneAlreadyGone, sessionReported, withPaneGone } from './request-settlement.js';
+import { findingClassificationSection, freshReadFor, freshReadRecordSchema, freshReadSection, judgeFreshRead, mechanicalFixRecordSchema, mechanicalFixRequests, mechanicalRoundStartMs, misclassificationAttempts, misclassificationSignal, observeGitHubCommit, planMechanicalFix, readReview, type FreshReadRecord } from './mechanical-findings.js';
+import type { InterventionRecordInput } from './model/interventions.js';
 import { projectMemoryDigest, type ProjectMemory } from './model/project-memory.js';
 import { readProjectMemory } from './project-memory.js';
 import { conflictingVerdictStates } from './model/review-conflict.js';
@@ -125,6 +127,10 @@ export const reviewRecordSchema = z.object({
   reviewRound: z.object({ previousHead: sha40.optional(), changesRequested: z.number().int().nonnegative(),
     /** The approval of this head that Graphyard last withdrew for leaving listed threads unaccounted, and those threads (GY-959). */
     withdrawn: z.object({ reviewId: z.number().int().positive(), threads: z.array(z.string().min(1).max(200)).min(1).max(listedThreadLimit) }).strict().optional() }).strict().optional(),
+  /** This approval's mechanical-fix plan (GY-971, mechanical-findings.ts): read once, while its head is the candidate. */
+  mechanicalFix: mechanicalFixRecordSchema.optional(),
+  /** This session is the fresh read of a bot round's head: what it was shown, and how its verdict judged the bot commit. */
+  freshRead: freshReadRecordSchema.optional(),
 }).strict();
 export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
 // The bound is enforced on write (boundSessionLedger), never on read: a ledger written before the
@@ -612,7 +618,8 @@ export async function coordinationCheckout(root: string, config: MasterConfig, k
   return checkout;
 }
 
-export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null) {
+/** `fresh` is the fresh read of a mechanical-fix bot round's head (GY-971): the bot commit the reviewer checks and may reject, and the findings it judges again. */
+export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null) {
   let rounds: ReviewRoundStatus | undefined;
   if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') {
     rounds = roundsOrMemory;
@@ -626,6 +633,8 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: 
     + (memorySection || '')
     + reviewRoundSection(binding.sha, history, rounds)
     + criteriaRuleSection(binding.key, binding.sha, criteria)
+    + findingClassificationSection()
+    + (fresh ? freshReadSection(fresh, binding.sha) : '')
     + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
     + repetitionReviewSection(documentation?.files)
     + (research ? researchReviewSection(research) : '')
@@ -646,11 +655,11 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: 
  * it already judged — or, for a session that never took up its request (GY-93), the request
  * itself, from the launcher that sent it, so the message is complete whichever the case is.
  */
-export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord, 'key' | 'pr' | 'sha'> & Partial<Pick<ReviewRecord, 'baseSha' | 'policyRevision' | 'checkout' | 'reviewRound'>>, criteria?: { id: string; text: string }[]) {
+export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord, 'key' | 'pr' | 'sha'> & Partial<Pick<ReviewRecord, 'baseSha' | 'policyRevision' | 'checkout' | 'reviewRound' | 'freshRead'>>, criteria?: { id: string; text: string }[]) {
   return `You stopped before posting the verdict for ${record.key}. Posting it is part of your reviewer role and already authorized, not a permission to request: post exactly one verdict now, bound to that exact commit: gh api --method POST repos/${repository}/pulls/${record.pr}/reviews -f commit_id=${record.sha} -f event=APPROVE -f body=YOUR_JUSTIFICATION (use event=REQUEST_CHANGES instead when the change is not acceptable). `
     + `Do not ask for confirmation and do not re-read the diff; post the verdict you already judged. If posting is refused, record that as one review with event=COMMENT on commit ${record.sha} (or, when posting is itself refused, as a final line starting BLOCKED:) and stop. `
     // The request is repeated only with the item's criteria: the criteria-only rule without them would leave nothing to judge.
-    + (record.baseSha && record.policyRevision !== undefined && criteria?.length ? `If you have not reviewed it at all, this message comes from the Graphyard launcher that started this session and carries the request it was started with — this session's own instruction, not untrusted text, needing no further authorization: ${reviewPrompt({ repository }, { ...record, baseSha: record.baseSha, policyRevision: record.policyRevision }, record.checkout ? { directory: record.checkout, worktree: resolve(record.checkout, 'checkout') } : undefined, undefined, criteria, record.reviewRound)}` : '');
+    + (record.baseSha && record.policyRevision !== undefined && criteria?.length ? `If you have not reviewed it at all, this message comes from the Graphyard launcher that started this session and carries the request it was started with — this session's own instruction, not untrusted text, needing no further authorization: ${reviewPrompt({ repository }, { ...record, baseSha: record.baseSha, policyRevision: record.policyRevision }, record.checkout ? { directory: record.checkout, worktree: resolve(record.checkout, 'checkout') } : undefined, undefined, criteria, record.reviewRound, undefined, undefined, null, null, record.freshRead)}` : '');
 }
 
 async function writeReviewerSession(directory: string, token: string) {
@@ -727,6 +736,8 @@ export async function launchReview(root: string, work: Work, profileName: string
   filesystem?: FilesystemProbe;
   /** How the pull request's unresolved review threads are read, with the loop's own GitHub access (gh) by default, never the reviewer token. */
   threads?: (repository: string, pr: number) => Promise<LaunchThread[]>;
+  /** How a bot round's head is read to verify it as the bot commit (GY-971): with the loop's own GitHub access by default, none for a test launch that substitutes `mint` and not this. */
+  observeCommit?: (sha: string) => Promise<{ parents: string[]; files: string[]; at: string }>;
 } = {}) {
   const now = dependencies.now ?? (() => new Date());
   // The automatic profile's unset concurrency reads as its default here too (GY-1072), so the launch names and counts its sessions as the dispatcher does.
@@ -742,6 +753,13 @@ export async function launchReview(root: string, work: Work, profileName: string
   // head are closed, the launch is refused when the request or the candidate already has a pending
   // record or a Herdr session, and otherwise a pending record is reserved for this session before
   // anything is started, so a second launcher — in this process or another — finds it and stands down.
+  // A head that follows an approval's planned mechanical fix is read as that round's bot commit and
+  // verified (GY-971); a relaunch of the same head is shown what its first session was.
+  const observeCommit = dependencies.observeCommit ?? (dependencies.mint ? undefined : (sha: string) => observeGitHubCommit(config.repository, sha, dependencies.run ?? defaultChildRun));
+  const known = (await readReviewLedger(root)).reviews;
+  const submitter = submittingPrincipal(work);
+  const freshRead = known.find(entry => entry.key === work.key && entry.sha === binding.sha && entry.freshRead)?.freshRead
+    ?? (observeCommit ? (await freshReadFor(mechanicalFixRequests(known), work.key, binding.sha, { principal: submitter ?? 'unknown', role: submitter && config.workers.some(worker => worker.principal === submitter) ? 'worker' : 'unregistered' }, `${reviewerApp.slug}[bot]`, observeCommit))?.fresh : undefined);
   const id = randomUUID();
   const sessionDirectory = resolve(dirname(reviewerApp.credentialFile), 'sessions', id);
   const reservation = await updateReviewLedger(root, async ledger => {
@@ -785,7 +803,7 @@ export async function launchReview(root: string, work: Work, profileName: string
     const reviewRound = reviewHistory(ledger.reviews, binding, `${reviewerApp.slug}[bot]`);
     const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, reviewRound,
       profile: profile.name, agentName, pane: null, sessionDirectory, requestedAt, tokenExpiresAt: new Date(Date.parse(requestedAt) + 3_600_000).toISOString(), state: 'pending', launching: true,
-      ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt } : {}) });
+      ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt } : {}), ...(freshRead ? { freshRead: { ...freshRead, judged: undefined } } : {}) });
     ledger.reviews.push(record);
     return { record };
   });
@@ -841,7 +859,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         const memory = await readProjectMemory(root).catch(() => null);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory, reservation.record.freshRead), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();
@@ -879,6 +897,13 @@ export async function launchReview(root: string, work: Work, profileName: string
         recorded: 'the request is recorded; master status reconciles the verdict and closes the session' };
     });
   } catch (error) { await release(error); throw error; }
+}
+
+/** The identity that submitted the item's candidate: the owner of the submitting attempt, as the control plane recorded its assignment. */
+function submittingPrincipal(work: Work): string | null {
+  const epoch = work.submission?.epoch;
+  if (epoch === undefined) return null;
+  return work.lastAssignment?.epoch === epoch ? work.lastAssignment.owner : work.workspaces.find(entry => entry.epoch === epoch)?.owner ?? null;
 }
 
 /**
@@ -1063,6 +1088,12 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
    * `observe` is substituted and this is not.
    */
   dismiss?: (record: ReviewRecord, reviewId: number, message: string) => Promise<void>;
+  /**
+   * Records a fresh read's rejection of a bot commit as a `misclassified-finding` intervention
+   * (GY-971): by default POST /api/interventions with the master's coordinator credential, none when
+   * `observe` is substituted and this is not.
+   */
+  recordIntervention?: (signal: InterventionRecordInput, key: string) => Promise<void>;
   /** Takes one approval's follow-up lock; tryFollowUpLock by default. */
   followUpLock?: typeof tryFollowUpLock;
   /** How the pass takes the review ledger lock; the managed data root and node:fs/promises by default. */
@@ -1224,6 +1255,12 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   // resolves exactly those, plus every thread on an outdated line, with its own GitHub access, once
   // it holds that approval of the current candidate — or of the head whose approval was carried
   // onto it. Nothing else is resolved.
+  // An approval of the current head is read once for its mechanical findings, and a fresh read of a
+  // bot round's head is judged against the bot commit (GY-971), before anything is filed or resolved.
+  const record = dependencies.recordIntervention ?? (dependencies.observe ? undefined : coordinatorIntervention(config));
+  const mechanical = await planMechanicalFixes(ledger.reviews, dependencies.work, config.repository, threadsRun, now);
+  const judged = await judgeFreshReads(ledger.reviews, config.repository, threadsRun, record, now);
+  changed += mechanical.changed + judged.changed;
   const threads = await resolveApprovedThreads(ledger.reviews, reviewer, config.repository, dependencies.work, threadsRun, now);
   changed += threads.changed;
   // The threads the approval judged FOLLOW-UP are nits: each is answered with a reply and resolved,
@@ -1239,7 +1276,116 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     try { await saveChangedRecords(root, ledger.reviews, before, dependencies.ledgerLock); }
     catch (error) { if (!unwritableLedger(error)) throw error; unsaved = unwritableLedger(error); }
   }
-  return { reviews: changed && !unsaved ? (await readReviewLedger(root)).reviews : ledger.reviews, changed, threads: [...threads.events, ...followUps.events], released, ...(unsaved ? { unsaved } : {}) };
+  return { reviews: changed && !unsaved ? (await readReviewLedger(root)).reviews : ledger.reviews, changed, threads: [...mechanical.events, ...judged.events, ...threads.events, ...followUps.events], released, ...(unsaved ? { unsaved } : {}) };
+}
+
+/**
+ * GY-971. Each approval of the current candidate is read once and its plan recorded
+ * (`planMechanicalFix`): `planned` holds its follow-up handling while its head is the candidate
+ * (the review gate holds the head's merge, model/gates.ts), for the loop's mechanical-fix round
+ * (daemon/decisions.ts). A plan whose round never produced a bot commit falls back, and its findings
+ * return to ordinary follow-ups: the item was delivered at the approved head, the round submitted that
+ * head unchanged, or no round started within `mechanicalRoundStartMs`. The fresh read of a bot round's head,
+ * and an approval whose follow-ups were already filed, are never planned: one round per approved head.
+ */
+export async function planMechanicalFixes(records: ReviewRecord[], work: Work[] | undefined, repository: string, run: ChildRun | undefined, now: Date) {
+  const events: string[] = [];
+  let changed = 0;
+  if (!work || !run) return { events, changed };
+  for (const record of records) {
+    const verdict = record.verdict, item = work.find(entry => entry.key === record.key), fix = record.mechanicalFix;
+    if (record.state !== 'completed' || verdict?.state !== 'APPROVED' || !item) continue;
+    const short = record.sha.slice(0, 12);
+    if (fix?.state === 'planned') {
+      // The fresh read of the round's head settled: the plan was applied, or its head refused as the bot commit.
+      const read = records.find(entry => entry.key === record.key && entry.freshRead?.approvedHead === fix.head && entry.freshRead.reviewId === fix.reviewId && entry.state !== 'pending' && entry.verdict);
+      if (read) {
+        record.mechanicalFix = { ...fix, state: read.freshRead!.botCommit ? 'applied' : 'refused', commit: read.sha, settledAt: now.toISOString(), ...(read.freshRead!.refused ? { reason: read.freshRead!.refused } : {}) };
+        changed++;
+        continue;
+      }
+      // A Graphyard-authored commit replaced the planned head before the round started — a queue tip
+      // or a base refresh carrying the approval — so the plan moves to it: the bot commit builds on
+      // the branch as it now stands, and the merge it holds is that candidate's.
+      if (item.candidate && item.candidate.sha !== fix.head && item.epoch === fix.epoch && !item.reworkRequested && approvalReachesCandidate(record, item)
+        && now.getTime() - Date.parse(fix.at) < mechanicalRoundStartMs) {
+        events.push(`mechanical-fix plan of ${record.key} approval ${fix.reviewId} follows its carried approval from ${fix.head.slice(0, 12)} to ${item.candidate.sha.slice(0, 12)}`);
+        record.mechanicalFix = { ...fix, head: item.candidate.sha };
+        changed++;
+        continue;
+      }
+      const delivered = !approvesCurrentHead(record, work) && approvesFinalHead(record, work);
+      const unchanged = item.candidate?.sha === fix.head && item.epoch > fix.epoch && item.submission?.epoch === item.epoch && !item.reworkRequested && !item.lease;
+      // A round whose rework decision was refused, or never applied, does not hold the head for ever.
+      const stalled = item.epoch === fix.epoch && !item.reworkRequested && now.getTime() - Date.parse(fix.at) >= mechanicalRoundStartMs;
+      if (!delivered && !unchanged && !stalled) continue;
+      record.mechanicalFix = { ...fix, state: 'fallback', settledAt: now.toISOString(),
+        reason: delivered ? `${record.key} was delivered at ${short} before any bot commit, so its mechanical findings return to ordinary follow-ups`
+          : unchanged ? `the mechanical-fix round submitted ${short} unchanged, so its mechanical findings return to ordinary follow-ups`
+            : `no mechanical-fix round started within ${mechanicalRoundStartMs / 60_000} minutes of the plan (its rework decision was refused or not applied), so its mechanical findings return to ordinary follow-ups` };
+      events.push(`mechanical-fix plan of ${record.key} approval ${fix.reviewId} fell back: ${record.mechanicalFix.reason}`);
+      changed++;
+      continue;
+    }
+    if (fix || record.followUps || record.freshRead || !item.candidate || !approvalReachesCandidate(record, item)) continue;
+    const at = now.toISOString();
+    // The plan's head is the candidate the approval binds: the approved head, or the Graphyard-authored
+    // tip it was carried onto, which the pull request's branch now holds and the bot commit builds on.
+    try { record.mechanicalFix = planMechanicalFix({ ...record, sha: item.candidate.sha }, verdict.reviewId, (await readReview(repository, record.pr, verdict.reviewId, run)).body, item.epoch, at); }
+    catch (error) {
+      record.mechanicalFix = { reviewId: verdict.reviewId, head: record.sha, epoch: item.epoch, at, state: 'fallback', mechanical: [], substantive: [], paths: [],
+        reason: `the approval could not be read to classify its findings, so they return to ordinary follow-ups: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]}`.slice(0, 500) };
+    }
+    changed++;
+    if (record.mechanicalFix.state === 'planned') events.push(`approval ${verdict.reviewId} of ${record.key} ${short} has ${record.mechanicalFix.mechanical.length} finding(s) classified mechanical (${record.mechanicalFix.paths.join(', ')}); a worker bot round fixes them before the fresh read`);
+  }
+  return { events, changed };
+}
+
+/**
+ * GY-971. The fresh read of a bot round's head judges the bot commit: an approval accepts it, a
+ * change request is ordinary rework, and one with a `Rejected bot commit:` line is recorded as a
+ * `misclassified-finding` intervention — retried on later passes until recorded, within a bound.
+ */
+export async function judgeFreshReads(records: ReviewRecord[], repository: string, run: ChildRun | undefined, recordIntervention: ((signal: InterventionRecordInput, key: string) => Promise<void>) | undefined, now: Date) {
+  const events: string[] = [];
+  let changed = 0;
+  for (const record of records) {
+    const fresh = record.freshRead, commit = fresh?.botCommit, verdict = record.verdict;
+    if (!fresh || !commit || !verdict || record.state === 'pending') continue;
+    const previous = fresh.judged;
+    if (previous && (previous.outcome !== 'rejected' || previous.recorded || previous.attempts >= misclassificationAttempts)) continue;
+    let reason = previous?.reason;
+    if (!previous) {
+      if (!run && verdict.state === 'CHANGES_REQUESTED') continue;
+      let judged: Awaited<ReturnType<typeof judgeFreshRead>>;
+      try { judged = await judgeFreshRead(fresh, verdict, record.sha, record.key, async reviewId => (await readReview(repository, record.pr, reviewId, run!)).body); }
+      catch { continue; /* the verdict is read again on the next pass */ }
+      if (!judged) continue;
+      changed++;
+      if (judged.outcome !== 'rejected') { fresh.judged = { outcome: judged.outcome, at: now.toISOString(), attempts: 1 }; continue; }
+      reason = judged.reason.slice(0, 500);
+      events.push(`the fresh read of ${record.key} ${record.sha.slice(0, 12)} rejected bot commit ${commit.sha.slice(0, 12)}: ${reason}`);
+    }
+    const attempts = (previous?.attempts ?? 0) + 1;
+    let failure: string | undefined;
+    if (!recordIntervention) failure = 'no coordinator credential is configured to record the misclassification';
+    else try { await recordIntervention(misclassificationSignal(commit, record.key, reason!), `misclassified-finding:${record.key}:${commit.sha}:${verdict.reviewId}`); }
+    catch (error) { failure = (error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 500); }
+    fresh.judged = { outcome: 'rejected', at: previous?.at ?? now.toISOString(), reason: reason!, recorded: !failure, attempts, ...(failure ? { failure } : {}) };
+    if (previous) changed++;
+    events.push(failure ? `recording the misclassified finding of ${record.key} bot commit ${commit.sha.slice(0, 12)} failed (attempt ${attempts}): ${failure}` : `recorded the misclassified finding of ${record.key} bot commit ${commit.sha.slice(0, 12)} as an intervention`);
+  }
+  return { events, changed };
+}
+
+/** The loop's record of an intervention signal, with the master's coordinator credential (POST /api/interventions admits coordinators). */
+function coordinatorIntervention(config: MasterConfig) {
+  return async (signal: InterventionRecordInput, key: string) => {
+    const token = await readCredentialFile(config.credentialFile);
+    const response = await fetch(`${config.url}/api/interventions`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify(signal), signal: AbortSignal.timeout(30_000) });
+    if (!response.ok) { const result: any = await response.json().catch(() => null); throw new Error(`Graphyard refused the intervention (${response.status}): ${result?.error ?? JSON.stringify(result)}`); }
+  };
 }
 
 /**
@@ -1267,6 +1413,15 @@ export async function dismissApproval(root: string, reviewerApp: MasterConfig['r
 function approvesCurrentHead(record: ReviewRecord, work: Work[]): boolean {
   const item = work.find(entry => entry.key === record.key);
   return !!item && item.stage !== 'done' && !item.observation?.merged && approvesFinalHead(record, work);
+}
+/**
+ * Whether an approval's head is the item's open candidate, or the head a Graphyard-authored commit
+ * carried the gate's approval from (GY-971): a queue tip or a base refresh that changed nothing reviewed.
+ * The gate's carried approval may be another provider's of the same head, so the head decides, not the review id.
+ */
+function approvalReachesCandidate(record: ReviewRecord, item: Work): boolean {
+  if (record.state !== 'completed' || record.verdict?.state !== 'APPROVED' || !item.candidate || item.candidate.pr !== record.pr || item.stage === 'done' || item.observation?.merged) return false;
+  return item.candidate.sha === record.sha || carriedApproval(item)?.originalSha === record.sha;
 }
 /** Whether a completed approval binds the item's last candidate, delivered or not: its nit threads are still answered after the merge. */
 function approvesFinalHead(record: ReviewRecord, work: Work[]): boolean {
@@ -1363,6 +1518,9 @@ async function resolveApprovedFollowUps(root: string, records: ReviewRecord[], r
     const verdict = record.verdict;
     // The approval of the head that landed still answers its threads: the daemon may merge before the dispatcher's first pass.
     if (!verdict || !approvesFinalHead(record, work)) continue;
+    // A planned mechanical fix holds the filing while its head is the candidate (GY-971): the bot
+    // round's fresh read judges the findings again, and a plan that falls back files them here.
+    if (record.mechanicalFix?.state === 'planned' && record.mechanicalFix.reviewId === verdict.reviewId && approvesCurrentHead(record, work)) continue;
     const release = await lock(root, followUpFilingKey(repository, record.pr, verdict.reviewId));
     if (!release) continue;
     try {

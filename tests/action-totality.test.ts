@@ -194,6 +194,7 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
     { name: 'no approval', work: { ...unproven, observation: { ...unproven.observation!, reviews: [] } } as Work },
     { name: 'requirement-review baseline', work: { ...unproven, formalReviewResetRequired: true, observation: { ...unproven.observation!, reviews: [] } } as Work },
     { name: 'changes requested', work: { ...unproven, observation: { ...unproven.observation!, reviews: [{ reviewer: 'reviewer', sha: head, state: 'CHANGES_REQUESTED' }] } } as Work },
+    { name: 'approval naming mechanical nits', work: { ...unproven, observation: { ...unproven.observation!, reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED', id: 901, submittedAt: now.toISOString(), mechanical: 2 }] } } as Work },
     { name: 'codex provider', work: { ...unproven, policy: { ...unproven.policy, reviewProvider: 'codex' }, observation: { ...unproven.observation!, reviews: [] } } as Work },
     { name: 'codex reason of its own', work: { ...unproven, policy: { ...unproven.policy, reviewProvider: 'codex' },
       observation: { ...unproven.observation!, reviews: [], agentReview: { provider: 'codex', sha: head, approved: false, reason: 'Pull request is draft; mark it ready to request code review' } } } as Work },

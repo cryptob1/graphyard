@@ -10,6 +10,7 @@ import { decisionBindingMax, type DecisionSituation } from '../model/approval.js
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js'; import { baseBreakHold } from '../master/base-break-refresh.js';
 import { unproducedManualProofs } from '../model/unproduced-attestation.js';
+import { mechanicalRework, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { triageClosure } from '../model/machine-backlog.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf } from '../review-cap.js';
@@ -228,8 +229,8 @@ export function blockerScopeDecision(work: Work): RoutineDecision | null {
  * Recovery releases a delivered item whose supervisor is still quarantined. A merge decision is
  * needed only where automatic merging is off, and then for the exact candidate that is mergeable.
  */
-export function routineDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
-  const needed = neededDecision(work, config, baseFailed, exhausted);
+export function routineDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = []): RoutineDecision | null {
+  const needed = neededDecision(work, config, baseFailed, exhausted, mechanical);
   if (!needed) return null;
   // None attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item,
   // and an attestation's approver judges the proof.
@@ -254,7 +255,7 @@ export function awaitingEjectionRestore(work: Pick<Work, 'gates'>): boolean {
  * What the item calls for, before asking whether the loop may attest that its worker is stopped.
  * `baseFailed` names required checks the base head fails too (GY-528); `exhausted`, spent producer requests (GY-496).
  */
-export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = []): RoutineDecision | null {
+export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = []): RoutineDecision | null {
   if (work.stage === 'done') {
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
@@ -325,6 +326,10 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   // settling it is a routine two-party decision, not a wait on a human master session (GY-161,
   // 2026-09-24: its first worker exited five minutes in, a new attempt took the item, and the
   // standing escalation would have refused the merge until somebody asked for the resolution).
+  // An otherwise-approved head whose approval raised findings classified mechanical (GY-971) returns
+  // to a worker-class bot round for one commit that fixes exactly those, before the fresh read.
+  const fix = mechanicalRework(work, mechanical);
+  if (fix) return { action: 'rework', ...fix };
   const lost = leaseLossDecision(work);
   if (lost) return lost;
   return null;
