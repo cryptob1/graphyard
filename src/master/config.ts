@@ -294,18 +294,18 @@ export async function saveProducerProfile(root: string, profileInput: unknown, v
  * The settings the master may tune on its own: the loop and dispatch cadence, the workflows the
  * provider runs with its own secret, the deployment the loop verifies, which reviewer profile
  * answers first, the producer session budget, how long a reviewer launch waits for bot reviews,
- * the quota ceiling, how often the loop promotes to production, and a profile's account order.
+ * the quota ceiling, and a profile's account order.
  * Everything else — autoMerge, the merge method, server and repository binding, credential and
  * identity paths, the environment inventory — is onboarding's or the operator's: no CLI path
  * writes it, and the master's harness grants no direct edit of master.json, so flipping autoMerge
  * or re-pointing a credential can never be a routine master action.
  */
-export const masterOwnedRunFields = ['intervalSeconds', 'dispatchIntervalSeconds', 'proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'deploymentShaField', 'productionEnvironment', 'reviewerProfile', 'producerTimeoutMinutes', 'awaitReviewersMinutes', 'acknowledgementSeconds', 'quotaCeilingPercent', 'masterSessionMinutes', 'masterHeartbeatMinutes', 'promoteEveryMinutes'] as const;
-const masterClearableRunFields = ['proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'productionEnvironment', 'reviewerProfile', 'awaitReviewersMinutes', 'quotaCeilingPercent', 'masterSessionMinutes', 'masterHeartbeatMinutes', 'promoteEveryMinutes'] as const;
+export const masterOwnedRunFields = ['intervalSeconds', 'dispatchIntervalSeconds', 'proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'deploymentShaField', 'productionEnvironment', 'reviewerProfile', 'producerTimeoutMinutes', 'awaitReviewersMinutes', 'acknowledgementSeconds', 'quotaCeilingPercent', 'masterSessionMinutes', 'masterHeartbeatMinutes'] as const;
+const masterClearableRunFields = ['proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'productionEnvironment', 'reviewerProfile', 'awaitReviewersMinutes', 'quotaCeilingPercent', 'masterSessionMinutes', 'masterHeartbeatMinutes'] as const;
 export interface MasterOwnedSettings {
   intervalSeconds?: number | null; dispatchIntervalSeconds?: number | null; proofWorkflow?: string | null; smokeWorkflow?: string | null;
   deploymentUrl?: string | null; deploymentShaField?: string | null; productionEnvironment?: string | null; reviewerProfile?: string | null; producerTimeoutMinutes?: number | null; awaitReviewersMinutes?: number | null; acknowledgementSeconds?: number | null; quotaCeilingPercent?: number | null;
-  masterSessionMinutes?: number | null; masterHeartbeatMinutes?: number | null; promoteEveryMinutes?: number | null;
+  masterSessionMinutes?: number | null; masterHeartbeatMinutes?: number | null;
   accounts?: { profile: string; accounts: string[] }[];
 }
 
