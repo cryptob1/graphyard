@@ -138,8 +138,10 @@ export async function settleQuarantine(cycle: Cycle, item: Work, assessment: Con
   }
 }
 
-/** How long the loop waits, in the action that ended an attempt, for the supervisor it stopped to be verified gone (GY-1155). */
+/** How long the loop waits, across the actions of one cycle that ended attempts, for the supervisors it stopped to be verified gone (GY-1155). */
 export const endedFenceWaitMs = 10_000;
+/** The deadline each cycle's ended-attempt waits share, so a cycle ending several fenced attempts stalls one bound, not one per attempt. */
+const endedFenceDeadlines = new WeakMap<Cycle, number>();
 /** How the loop ended an attempt: the preserve it recorded (the reason its exhaustion reads), or its close of a submitted attempt's session (the outcome). */
 export type AttemptEnding = { epoch: number; owner: string; preserved?: string; closed?: string };
 /**
@@ -164,7 +166,7 @@ export function endedRecord(item: Work, ending: AttemptEnding, at: string): Work
 /**
  * Settle the fence of an attempt the loop has just ended, in that same action (GY-1155), judged on
  * the record the ending wrote. The host is probed until the stopped supervisor is verified gone,
- * within a bound; a fence still held at the bound, or refused, is left to the reclaim step, which
+ * within a bound the cycle's endings share; a fence still held at the bound, or refused, is left to the reclaim step, which
  * retries it on later cycles without the grace window.
  */
 export async function settleEndedAttemptFence(cycle: Cycle, item: Work, ending: AttemptEnding, wait: { boundMs: number; pollMs: number } = { boundMs: endedFenceWaitMs, pollMs: 500 }) {
@@ -175,7 +177,9 @@ export async function settleEndedAttemptFence(cycle: Cycle, item: Work, ending: 
   const ended = endedRecord(item, ending, new Date(now()).toISOString());
   const measured = await containmentClock(clockOffset, effects.controlPlaneClock);
   const observed: ContainmentObservation = { now: snapshot.now, clockOffset: measured.clockOffset, clockRoundTripMs: measured.roundTripMs, clockSource: measured.source };
-  for (const deadline = Date.now() + wait.boundMs; ;) {
+  const deadline = endedFenceDeadlines.get(cycle) ?? Date.now() + wait.boundMs;
+  endedFenceDeadlines.set(cycle, deadline);
+  for (;;) {
     let assessment: ContainmentAssessment | undefined;
     try { assessment = (await effects.containment([ended], observed))[item.id]; } catch { return false; }
     if (assessment?.settleable) {

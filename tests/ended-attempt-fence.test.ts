@@ -9,7 +9,7 @@ import { containmentFailureNote, supervise, type ContainmentShutdownFailure } fr
 import { agentRequestSchema, leaseHeldRequestTypes } from '../src/model/agent-requests.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema, leaseLapsedEnding, type ContainmentVerification } from '../src/quarantine.js';
 import { endWorkerAttempt } from '../src/daemon/cycle-resume.js';
-import { settleDue, transientSettlementRefusal } from '../src/daemon/cycle-reclaim.js';
+import { settleDue, settleEndedAttemptFence, transientSettlementRefusal } from '../src/daemon/cycle-reclaim.js';
 import { workFaults } from '../src/model/fault-classes.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { SupervisorProbeReport } from '../src/containment-probe.js';
@@ -165,6 +165,28 @@ test('unit:ended-attempt-fence-settled-at-once — an attempt the loop ends has 
     assert.equal(orphaned.state.actions['settle:work-1155:3']?.state, 'done');
     assert.deepEqual(containmentFaults(orphaned.state, 'GY-1155'), [], 'the faults pass of that cycle saw no fence');
   } finally { await orphaned.cleanup(); }
+});
+
+test('the endings of one cycle share its wait for the stopped supervisors, so several held fences stall the cycle one bound, not one each', async () => {
+  // Neither supervisor ever goes, so each wait runs to the bound; the second ending still probes once.
+  const { supervisor, effects } = world(attempt());
+  const harness = await loop(effects, () => []);
+  try {
+    const first = attempt(), second = attempt({ id: 'work-1156', key: 'GY-1156' });
+    const cycle = cycleFor(harness.state, harness.config, effects, first);
+    const wait = { boundMs: 300, pollMs: 25 };
+    const ending = { epoch: 3, owner: 'worker-a', preserved: 'ended without submitting: idle past its bound with a live lease' };
+    const started = Date.now();
+    assert.equal(await settleEndedAttemptFence(cycle, first, ending, wait), false, 'a supervisor still held at the bound leaves the fence to the reclaim step');
+    assert.ok(Date.now() - started >= 250, 'the first ending waited out the bound');
+    const probes = supervisor.probes, resumed = Date.now();
+    assert.equal(await settleEndedAttemptFence(cycle, second, ending, wait), false);
+    assert.ok(Date.now() - resumed < 150, 'the second ending found the cycle\'s bound spent');
+    assert.equal(supervisor.probes, probes + 1, 'and still probed its supervisor once');
+    const next = cycleFor(harness.state, harness.config, effects, second), fresh = Date.now();
+    await settleEndedAttemptFence(next, second, ending, { boundMs: 100, pollMs: 25 });
+    assert.ok(Date.now() - fresh >= 75, 'a new cycle has its own bound');
+  } finally { await harness.cleanup(); }
 });
 
 function verification(overrides: Partial<ContainmentVerification> = {}): ContainmentVerification {

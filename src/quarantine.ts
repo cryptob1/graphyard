@@ -454,8 +454,8 @@ export const leaseLapsedEnding = 'ended without submitting: its lease lapsed';
 const loopClosedSession = /^closed (?:by the loop|as failed): /;
 /**
  * Whether the item's record shows the loop itself ended the quarantined attempt (GY-1155), not
- * its lease running out: a worker exhaustion for that epoch — which only a coordinator or an admin
- * records, and which ends the lease — other than the reclaim of a lapsed lease, or a submission of
+ * its lease running out: a worker exhaustion for that epoch — the loop's preserve, or the worker's
+ * own `blocked` report, either of which ends the lease — other than the reclaim of a lapsed lease, or a submission of
  * that epoch whose session handle the loop closed. Either way the attempt's authority ended on the
  * record, so the grace window, which waits out a lease nobody ended, has nothing left to wait for.
  */
