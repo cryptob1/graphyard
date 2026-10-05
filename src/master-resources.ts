@@ -8,6 +8,7 @@ import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedg
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
 import { describeTmpReclaim, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
 import { upgradeTouchesCode } from './daemon/upgrade.js';
+import type { LoopState } from './daemon/liveness.js';
 import type { Work } from './model.js';
 import { runChild } from './child-runner.js';
 
@@ -64,7 +65,8 @@ export interface ResourceInputs {
   agents: HerdrAgent[] | null;
   work: Work[];
   plane: PlaneResources | null;
-  loop: { lagMs: number | null; stalledAfterMs: number; detail: string } | null;
+  /** The loop's liveness, with its own verdict (`state`): the executor-liveness reading faults only on a lag the verdict does not vouch for (GY-1317). */
+  loop: { state: LoopState; lagMs: number | null; stalledAfterMs: number; detail: string } | null;
   /** `movedAt`: when the checkout first moved onto code the loop has not loaded (epoch ms), absent when it has not. */
   revision: { behind: number; loaded: string; checkout: string; movedAt?: number } | null;
   /**
@@ -110,7 +112,8 @@ export interface ResourceDefinition {
   symptoms: RegExp[];
   /** The ledger schema whose array cap this resource is, when it is a ledger. */
   ledgerSchema?: string;
-  read: (input: ResourceInputs) => Omit<ResourceReading, 'resource' | 'title' | 'unit' | 'owner' | 'reclaim' | 'remedy' | 'headroom' | 'state' | 'warnBelow'>[];
+  /** A part's own `warnBelow` replaces the definition's line for that reading: a lag the loop's liveness verdict vouches for warns at none (GY-1317). */
+  read: (input: ResourceInputs) => (Omit<ResourceReading, 'resource' | 'title' | 'unit' | 'owner' | 'reclaim' | 'remedy' | 'headroom' | 'state' | 'warnBelow'> & { warnBelow?: number })[];
 }
 
 /** Terminal ledger records are kept this long after they settle, then reaped. */
@@ -145,6 +148,8 @@ export const selfUpgradeBoundMs = 30 * 60_000;
  * `run` config spaces cycles further apart than the fixed bound allows gets its own stalled bound
  * (two intervals and any backoff) instead; it is never shorter than `selfUpgradeBoundMs`.
  */
+/** Whether the loop's own liveness verdict vouches for its lag (GY-1317): running, with a lag inside the stall bound. */
+export const vouchedLag = (loop: NonNullable<ResourceInputs['loop']>) => loop.state === 'running' && loop.lagMs !== null && loop.lagMs < loop.stalledAfterMs;
 export const upgradeBoundMs = (loop: ResourceInputs['loop']) => Math.max(selfUpgradeBoundMs, loop?.stalledAfterMs ?? 0);
 /** The plane's database bound when GRAPHYARD_DATABASE_MAX_BYTES is unset. */
 export const defaultDatabaseMaxBytes = 10 * 1024 ** 3;
@@ -331,7 +336,17 @@ export const resourceRegistry: ResourceDefinition[] = [
     reclaim: 'the supervisor restarts a loop whose watchdog stops hearing from it; graphyard master restart does the same by hand',
     remedy: 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)',
     warnBelow: bound => Math.ceil(bound / 2), symptoms: [],
-    read: input => [{ id: '', used: input.loop?.lagMs ?? null, bound: input.loop?.stalledAfterMs ?? null, detail: input.loop?.detail ?? 'the daemon cursor could not be read', reclaimable: 0 }],
+    // The loop's idle cadence waits a full interval between cycles by design, so its next reading
+    // always lands just past the one-interval warn line (GY-1317). A lag the loop's own verdict
+    // vouches for — running, within the stall bound — is within its bound; the detail keeps the true
+    // lag and the verdict. A slow, stalled or absent verdict, or a lag past the bound, still warns.
+    read: input => {
+      const loop = input.loop;
+      if (!loop) return [{ id: '', used: null, bound: null, detail: 'the daemon cursor could not be read', reclaimable: 0 }];
+      const vouched = vouchedLag(loop);
+      return [{ id: '', used: loop.lagMs, bound: loop.stalledAfterMs, reclaimable: 0, ...(vouched ? { warnBelow: 0 } : {}),
+        detail: `${loop.detail}; the loop's liveness verdict is ${loop.state}${vouched ? ', which vouches for the lag within the stall bound' : ''}` }];
+    },
   },
   {
     id: 'loaded-revision', title: 'Loop loaded-code revision', unit: 'commits behind',
@@ -428,7 +443,7 @@ const disk = new Set<ResourceId>(['worktree-disk', 'database-capacity']);
 export function readResources(input: ResourceInputs, registry = resourceRegistry): ResourceReading[] {
   return registry.flatMap(definition => definition.read(input).map(part => {
     const headroom = part.used === null || part.bound === null ? null : part.bound - part.used;
-    const warnBelow = definition.id === 'worktree-disk' && input.disk ? input.disk.thresholdBytes : part.bound === null ? 0 : definition.warnBelow(part.bound);
+    const warnBelow = part.warnBelow ?? (definition.id === 'worktree-disk' && input.disk ? input.disk.thresholdBytes : part.bound === null ? 0 : definition.warnBelow(part.bound));
     const exhausted = headroom !== null && (headroom < 0 || (headroom === 0 && (part.bound ?? 0) > 0));
     const state: ResourceState = headroom === null ? 'unknown' : exhausted ? 'exhausted' : headroom < warnBelow ? 'low' : 'ok';
     return { ...part, id: part.id ? `${definition.id}:${part.id}` : definition.id, resource: definition.id, title: definition.title, unit: definition.unit, headroom, warnBelow, state,
