@@ -181,7 +181,7 @@ test('integration:uat-deploys-candidate — the candidate SHA is deployed to Rai
   const uatService = await serviceOf('uat'), production = await serviceOf('production');
   assert.equal(uatService.source.branch, releaseBranches.uat);
   assert.deepEqual(Object.keys(uatService.variables).filter(name => name.startsWith('GITHUB_')), [], 'UAT holds no GitHub credential that could write to the production repository');
-  assert.ok('DATABASE_URL' in uatService.variables && (await program('uat')).resources.some((resource: any) => resource.address === 'database.Postgres'), 'UAT runs on its environment\'s own Postgres');
+  assert.ok('DATABASE_URL' in uatService.variables && (await program('uat')).resources.some((resource: any) => /^database\.Postgres(-\w+)?$/.test(resource.address)), 'UAT runs on its environment\'s own Postgres');
   assert.ok('GITHUB_APP_ID' in production.variables, 'production keeps its App');
 });
 

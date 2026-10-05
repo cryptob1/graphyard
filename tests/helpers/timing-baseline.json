@@ -383,6 +383,7 @@
     "tests/live-throughput.test.ts": 7399,
     "tests/liveness-invariant.test.ts": 4845,
     "tests/locked-read.test.ts": 8600,
+    "tests/loop-faults.test.ts": 1200,
     "tests/loop-self-upgrade.test.ts": 2098,
     "tests/loop-silence-owner.test.ts": 1282,
     "tests/machine-backlog-routes.test.ts": 2271,
@@ -448,6 +449,7 @@
     "tests/reblocked-attempt.test.ts": 1636,
     "tests/receipt-retention.test.ts": 2396,
     "tests/reconcile-batch-setting.test.ts": 1027,
+    "tests/reconcile-contention.test.ts": 22485,
     "tests/reconcile-scale.test.ts": 17577,
     "tests/reconciliation-snapshot.test.ts": 10034,
     "tests/recovery-docs.test.ts": 714,
@@ -501,6 +503,7 @@
     "tests/secrets-scan-scope.test.ts": 298,
     "tests/server-heap-bounded.test.ts": 10420,
     "tests/server-scale.test.ts": 10872,
+    "tests/server-startup-readiness.test.ts": 1200,
     "tests/session-liveness-model.test.ts": 1990,
     "tests/session-liveness.test.ts": 3801,
     "tests/session-reconcile.test.ts": 1901,
@@ -519,6 +522,7 @@
     "tests/successor-scope.test.ts": 1658,
     "tests/supervisor-renewal.test.ts": 83958,
     "tests/sync-restore.test.ts": 1800,
+    "tests/sync-workflow-push.test.ts": 900,
     "tests/system-invariants.test.ts": 1175,
     "tests/system.test.ts": 29095,
     "tests/test-isolation.test.ts": 5273,
@@ -543,6 +547,7 @@
     "tests/worker-sandbox.test.ts": 4037,
     "tests/workers-tab.test.ts": 961,
     "tests/workflow-lint.test.ts": 566,
+    "tests/worktree-branch-lock.test.ts": 1600,
     "tests/worktree-reclaim.test.ts": 3560,
     "tests/agents-page-status.test.ts": 488,
     "tests/approver-capacity.test.ts": 878,
@@ -550,6 +555,7 @@
     "tests/attestation-carry.test.ts": 612,
     "tests/automatic-review-concurrency.test.ts": 5000,
     "tests/coordinator-os-confinement.test.ts": 1100,
+    "tests/keyring-probe-backoff.test.ts": 300,
     "tests/delivery-causes.test.ts": 461,
     "tests/diagnostician.test.ts": 2769,
     "tests/dispatch-recovers-from-jam.test.ts": 1181,
@@ -576,6 +582,7 @@
     "tests/test-case-repository-ui.test.ts": 744,
     "tests/test-case-repository.test.ts": 4051,
     "tests/tmp-cleanup.test.ts": 13603,
-    "tests/unblock-stale-revision.test.ts": 4873
+    "tests/unblock-stale-revision.test.ts": 4873,
+    "tests/exhausted-proof-runtime.test.ts": 350
   }
 }

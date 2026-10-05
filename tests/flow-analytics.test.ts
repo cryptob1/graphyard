@@ -15,9 +15,9 @@ import {
   coveredUntil, mergeReadyGate, pooledFlowDrilldown, pooledFlowReport, projectFlow, readFlow, separateKinds, stepEntries, stepMoves, workSlices, type FlowDataset, type FlowFact, type FlowQuery, type FlowWindow, type ProjectionState,
 } from '../src/flow-analytics.js';
 import { attributionWindows } from '../src/attribution.js';
-import react, { createElement } from 'react';
+import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import InsightsFlow, { LandedPerDay, WhereTimeGoes, flowNow, readReplay } from '../web/pages/insights-flow.js';
+import InsightsFlow, { LandedPerDay, ReplayRead, WhereTimeGoes, flowNow, readReplay } from '../web/pages/insights-flow.js';
 import { readStepRows } from '../web/step-moves.js';
 import { readFile } from 'node:fs/promises';
 import { groupOf } from '../web/groups.js';
@@ -837,25 +837,10 @@ test('unit:steps-drilldown-reads-recent-moves — the steps drill-down reads onl
   assert.deepEqual([replay.frames.length, replay.truncated, replay.coverage], [0, true, short.coverage.statement]);
   const full = await readReplay(async () => ({ rows: [], truncated: false, next: null, coverage: { truncated: false, statement: null } }), asOf);
   assert.deepEqual([full.truncated, full.coverage], [false, null]);
-  // The Flow page is rendered with the truncated replay rather than inspected by regex (GY-1154).
-  const renderFlow = (replayData: { frames: any[]; truncated: boolean; coverage: string | null }) => {
-    const internals = (react as any).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
-    function Probe() {
-      const origUseState = internals.H.useState;
-      let call = 0;
-      internals.H.useState = function(initial: any) {
-        call++;
-        if (call === 2) return [replayData.frames, () => {}];
-        if (call === 3) return [replayData.truncated, () => {}];
-        if (call === 4) return [replayData.coverage, () => {}];
-        return origUseState(initial);
-      };
-      return createElement(InsightsFlow, {
-        work: [], status: null, api: async () => null, token: '', observedAt: asOf, setSelected: () => {}
-      } as any);
-    }
-    return renderToStaticMarkup(createElement(Probe));
-  };
+  // The Flow page's replay read is rendered with the truncated replay rather than inspected by regex
+  // (GY-1154), through the component InsightsPage renders it with, not by patching React's hooks (GY-1164).
+  const renderFlow = (replayData: { frames: any[]; truncated: boolean; coverage: string | null }) =>
+    renderToStaticMarkup(createElement(ReplayRead, { ...replayData, replayError: '' }));
   const truncatedPage = renderFlow(replay);
   assert.match(truncatedPage, /<p class="notice" role="status" data-flow="replay-truncated">The recorded step changes were read only in part: /);
   assert.ok(truncatedPage.includes(short.coverage.statement!), 'notice carries the coverage statement');
@@ -864,6 +849,11 @@ test('unit:steps-drilldown-reads-recent-moves — the steps drill-down reads onl
   const fullPage = renderFlow(full);
   assert.doesNotMatch(fullPage, /data-flow="replay-truncated"/);
   assert.match(fullPage, /<p class="muted flow-wait">No item changed step in the last 24 hours\.<\/p>/);
+  // InsightsPage itself renders that read from its own replay state: before the read answers, the
+  // page shows ReplayRead's waiting text and no truncation notice (GY-1164 review).
+  const page = renderToStaticMarkup(createElement(InsightsFlow, { work: [], status: null, api: async () => null, token: '', observedAt: asOf, setSelected: () => {} } as any));
+  assert.ok(page.includes('<p class="muted flow-wait">Reading the recorded step changes…</p>'), 'InsightsPage renders ReplayRead with its unread replay state');
+  assert.doesNotMatch(page, /data-flow="replay-truncated"/);
 });
 
 test('unit:flow-now-includes-rework — an unowned rework item with an open candidate is shown at Build in the Now view and counted in the flow', async () => {
@@ -1377,7 +1367,7 @@ test('manual:review-followups-triaged GY-1154.2 — narrowed drill-down totals a
   const leadTimeDrill = await pooledFlowDrilldown(store, query, { metric: 'lead-time' });
   assert.equal(leadTimeDrill.rows.length, 2, 'both delivered items have measurable lead times');
 
-  // 2. Merge-ready: reads gates.changed (in separateKinds), so intervals match report figures.
+  // 2. Merge-ready: reads gates.changed (in separateKinds), here within its own bound on both reads (GY-1164.1).
   const mergeReadyDrill = await pooledFlowDrilldown(store, query, { metric: 'merge-ready' });
   assert.ok(mergeReadyDrill.rows.length > 0, 'merge-ready interval returned');
 
@@ -1409,6 +1399,29 @@ test('manual:review-followups-triaged GY-1154.2 — narrowed drill-down totals a
   assert.equal(blockersDrill.coverage.truncated, false);
 });
 
+test('manual:review-followups-triaged GY-1164.1 — a separate-kind drill-down and the report reach different instants once that kind exhausts its own bound', async () => {
+  const slice = 'gy1164-merge-ready-reach';
+  const item = await released(slice);
+  const asOf = Math.floor(Date.now() / day) * day - 3600_000, from = asOf - 7 * day;
+  const gate = { stage: 'merge', unmet: ['merge'], hasCandidate: true, released: true, pr: 1164 };
+  // Gate facts G1..G8, one hour apart, with one check run between G2 and G3: on a 3-row bound the
+  // report's shared scan stops at the check run with two gate facts already spent inside it.
+  const at = (index: number) => from + day + index * 3600_000;
+  for (let index = 1; index <= 8; index++) {
+    await seedFact(item, 'gates.changed', at(index), gate, 'merge');
+    if (index === 2) await seedFact(item, 'check.observed', at(2) + 60_000, { name: 'test', result: 'success' }, 'merge');
+  }
+  const query: FlowQuery = { days: 7, slice, asOf: new Date(asOf).toISOString(), limit: 3 };
+  const { dataset } = await pooledFlowReport(store, query);
+  // Report: G1, G2 and the check run, then G3..G5 on the gate bound past the cutoff.
+  assert.equal(coveredUntil(dataset, 'gates.changed'), new Date(at(5)).toISOString());
+  // Merge-ready drill-down: G1..G3 on its kind-only scan, then G4..G6 past it.
+  const drill = await pooledFlowDrilldown(store, query, { metric: 'merge-ready' });
+  assert.equal(drill.coverage.truncated, true);
+  assert.equal(drill.coverage.toCovered, new Date(at(6)).toISOString(), 'the drill-down reaches a gate fact the report never read');
+  assert.notEqual(drill.coverage.toCovered, coveredUntil(dataset, 'gates.changed'), 'so its reach is its own, not the report\'s');
+});
+
 test('manual:review-followups-triaged GY-1154: each follow-up listed in the description is addressed in code, or declined with a recorded reason (AC-1)', () => {
   type TriageStatus = 'addressed' | 'declined';
   interface TriageEntry {
@@ -1425,7 +1438,7 @@ test('manual:review-followups-triaged GY-1154: each follow-up listed in the desc
       path: 'tests/flow-analytics.test.ts:306',
       description: "the Flow page's truncation notice is checked with a regex on the source text of web/pages/insights-flow.tsx, not by rendering InsightsPage with a truncated replay",
       status: 'addressed',
-      reasonOrResolution: 'unit:steps-drilldown-reads-recent-moves renders InsightsFlow (InsightsPage) with both truncated and full replays via renderToStaticMarkup, asserting data-flow="replay-truncated" and the coverage-dependent empty-state text.',
+      reasonOrResolution: 'unit:steps-drilldown-reads-recent-moves renders the Flow page\'s replay read (ReplayRead, as InsightsPage renders it since GY-1164) with both truncated and full replays via renderToStaticMarkup, asserting data-flow="replay-truncated" and the coverage-dependent empty-state text.',
     },
     {
       id: 2,
@@ -1441,4 +1454,29 @@ test('manual:review-followups-triaged GY-1154: each follow-up listed in the desc
     assert.ok(['addressed', 'declined'].includes(entry.status));
     assert.ok(entry.reasonOrResolution.length > 0);
   }
+});
+
+test('manual:review-followups-triaged GY-1164: each follow-up from the approved review of GY-1154 is addressed in code, or declined with a recorded reason (AC-1)', async () => {
+  const triage: { id: number; path: string; description: string; status: 'addressed' | 'declined'; reasonOrResolution: string }[] = [
+    {
+      id: 1,
+      path: 'src/flow-analytics.ts',
+      description: 'do not claim merge-ready drill-downs stay aligned after truncation: not true when gates.changed itself contributes rows before the shared scan',
+      status: 'addressed',
+      reasonOrResolution: 'The drilldownKinds and pooledFlowDrilldown comments no longer claim separateKinds drill-downs (throughput, lead-time, merge-ready) count the report\'s facts: they agree only while that kind\'s own bound is not exhausted, and each states its own reach in coverage. manual:review-followups-triaged GY-1164.1 shows a merge-ready drill-down reaching a gate fact the report never read.',
+    },
+    {
+      id: 2,
+      path: 'tests/flow-analytics.test.ts:844',
+      description: 'renderFlow patches private React client internals to seed hook state, brittle across React updates',
+      status: 'addressed',
+      reasonOrResolution: 'InsightsPage renders its replay read through the exported ReplayRead component; unit:steps-drilldown-reads-recent-moves renders ReplayRead with the truncated and full replays through public props, and no test touches React internals.',
+    },
+  ];
+  assert.equal(triage.length, 2);
+  for (const entry of triage) assert.ok(['addressed', 'declined'].includes(entry.status) && entry.reasonOrResolution.length > 0);
+  // The record is checked against the code it describes, so it cannot go stale silently.
+  const [analytics, tests] = await Promise.all([readFile(new URL('../src/flow-analytics.ts', import.meta.url), 'utf8'), readFile(new URL(import.meta.url), 'utf8')]);
+  assert.doesNotMatch(analytics, /align with report\s+(?:\*\s+)?figures|count the same delivered\/merged\/gate facts as the report/, 'finding 1: the alignment claim is gone');
+  assert.ok(!tests.includes('__CLIENT_' + 'INTERNALS'), 'finding 2: no test reaches into React internals');
 });

@@ -104,10 +104,11 @@ export async function sweepDirectMerges(db: pg.PoolClient, all: Work[], windows:
     work.releaseTrain = pendingRelease(work, work.delivery); // GY-1101: merged, pending a promoted release candidate
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, window.setBy, 'merge.operator-authorized',
       JSON.stringify({ details: { ...record, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision: work.revision, evidenceAsOf: null, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
-    await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
     // What the delivery still owes, in the same transaction: nothing retries against it (GY-185).
     settleDelivered(work, all, now);
     await save(db, work, 'graphyard', 'direct-merge.delivered', now, { window: record.decision });
+    // The job row after the item row (GY-1115), the order every transaction takes them in.
+    await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
     delivered.push(work);
   }
   if (delivered.length) for (const behind of all) if (behind.queue && behind.stage !== 'done') await wakeJob(db, behind.id);
