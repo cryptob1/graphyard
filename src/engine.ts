@@ -15,7 +15,7 @@ import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { branchContamination, conflictSince, nextQueueEntries, disprovedConflict, withDisprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, defaultParallelTips, mergeParallelTipsEvent, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, tipReplacesHead, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
+import { branchContamination, conflictSince, requestedBaseRefresh, nextQueueEntries, disprovedConflict, withDisprovedConflict, currentRestore, decideIdentityCarry, defaultMergeBatchSize, defaultParallelTips, mergeParallelTipsEvent, mergeBatchSizeEvent, dismissedApproval, keptTipCarry, onto, pendingRestore, reviewedFilesOf, queueHistoryLimit, queueSequencingReason, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, tipReplacesHead, checkRerunLimit, type BaseRefresh, type CheckRerun, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type QueueSpeculation, type RestoredApproval } from './merge-queue.js';
 import { docsSyncCarry } from './model/docs-sync.js';
 import { liftedEjection, queueEjectionRecord } from './model/queue.js';
 import { githubFromEnv, mergeBandQueueDepth } from './github.js';
@@ -158,6 +158,10 @@ const commands = {
   // unlanded commits (GY-127). It carries no head: the restore is decided from the record and the
   // observation, run by the reconciliation job, and recorded on `baseRefresh.restore`.
   repair: z.object({ reason: z.string().trim().min(1).max(2000) }).strict(),
+  // The coordinator — the master loop's operator-agent identity — asking the control plane to merge
+  // the base tip it names into a candidate a repaired base failure held (GY-528). The reconciliation
+  // job runs it and records it on `baseRefresh`, where the binding carry decides what the head keeps.
+  refresh: z.object({ reason: z.string().trim().min(1).max(2000), base: sha }).strict(),
   // The coordinator reporting that the guarded merge refused this exact candidate (GY-831): a
   // carried approval it could not re-post, or one reason repeated since `since`. The control plane
   // decides what follows from the record: a carried approval is cleared so the review gate asks
@@ -194,7 +198,7 @@ export const mergeExecutionOwner = (actor: Pick<Principal, 'id'>, executor?: str
 /** The refusal a replay of one idempotency key with different input earns; read back by the pull. */
 export const idempotencyMismatch = 'Idempotency key reused with different input';
 export type Command = keyof typeof commands;
-const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
+const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', refresh: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
 
 function authorizeOperatorCommand(actor: Principal, command: Command, data: any, work: Work | undefined, repository: string) {
   const capability = operatorCapabilitiesByCommand[command];
@@ -325,6 +329,18 @@ export function sameBesideActions(read: Work, current: Work): boolean {
   const rest = ({ actionQueue: _queue, revision: _revision, updatedAt: _updated, ...others }: Work) => stableJson(others);
   return rest(read) === rest(current);
 }
+/**
+ * Whether two readings of one item differ only in the loop's own bookkeeping (GY-1257): the action
+ * queue (`sameBesideActions`), plus what each save re-derives or the loop records about the item
+ * rather than the submitted work — its next action, gates and the lane they stamp, the sessions it
+ * reports, and the escalations it raises for attention. None of it is what a GitHub observation
+ * reads, and the observation's own save re-evaluates the gates, so it never stands on a stale one.
+ */
+export function sameBesideBookkeeping(read: Work, current: Work): boolean {
+  const rest = ({ actionQueue: _queue, revision: _revision, updatedAt: _updated, nextAction: _next, gates: _gates, lane: _lane, speedTarget: _target,
+    sessions: _sessions, escalation: _escalation, escalations: _escalations, ...others }: Work) => stableJson(others);
+  return rest(read) === rest(current);
+}
 /** How many saves behind a reader may be and still have its read resolved from the ledger. */
 export const actionOnlyLookback = 20;
 /**
@@ -332,11 +348,11 @@ export const actionOnlyLookback = 20;
  * ledger — differs from `work` only in action-queue bookkeeping. A writer that read the item at
  * that revision may then still write: what it read is what it would read now.
  */
-async function onlyActionsMovedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number): Promise<boolean> {
+async function onlyActionsMovedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number, same = sameBesideActions): Promise<boolean> {
   const behind = work.revision - revision;
   if (!Number.isInteger(behind) || behind <= 0 || behind > actionOnlyLookback) return false;
   const read = (await db.query(`SELECT ${eventWorkSql('saved')} AS work FROM (SELECT work_id, payload FROM events WHERE work_id=$1 AND (payload ? 'work' OR payload ? 'delta') ORDER BY seq DESC OFFSET $2 LIMIT 1) saved`, [work.id, behind])).rows[0]?.work as Work | undefined;
-  return !!read && read.revision === revision && sameBesideActions(read, work);
+  return !!read && read.revision === revision && same(read, work);
 }
 
 /**
@@ -970,6 +986,21 @@ export class Engine {
           head: null, conflict: null, merge: null, carry: null,
           restore: { contaminated: candidate.sha, foreign: contamination!.foreign, own: contamination!.own, cause: 'repair', requested: { by: actor.id, at: now.toISOString(), reason: data.reason },
             reason: `head ${candidate.sha.slice(0, 12)} carries the unlanded commits of ${contamination!.foreign.join(', ')} (${contamination!.source.join(' and ')})`, performedAt: null, outcome: null } };
+      }
+      if (command === 'refresh') {
+        if (actor.role !== 'operator-agent') demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        demand(work.submission && !work.observation?.merged && work.stage !== 'done' && !work.reworkRequested, 'Open submitted work is required');
+        const candidate = work.candidate, observation = work.observation;
+        demand(candidate && observation?.candidate.sha === candidate.sha && observation.prState === 'open' && observation.draft === false, 'An open pull request observed at the current head is required');
+        demand(!work.queue, `${work.key} is a live merge-queue entry; its tip is rebuilt on the base branch when the queue changes`);
+        demand(observation!.baseTip === data.base, `The base branch tip last observed for ${work.key} is ${observation!.baseTip?.slice(0, 12) ?? 'unknown'}, not ${data.base.slice(0, 12)}; retry once it is observed`, 409);
+        demand(observation!.baseTipContained === false, `${work.key} head ${candidate!.sha.slice(0, 12)} already contains base branch tip ${data.base.slice(0, 12)}; there is nothing to merge in`);
+        const refresh = work.baseRefresh;
+        demand(!(refresh && refresh.from.sha === candidate!.sha && refresh.base === data.base && refresh.policyRevision === work.policyRevision),
+          `A refresh of ${work.key} head ${candidate!.sha.slice(0, 12)} onto ${data.base.slice(0, 12)} is already recorded`);
+        demand(!requestedBaseRefresh(work), `A refresh of ${work.key} head ${candidate!.sha.slice(0, 12)} is already requested; the reconciliation job runs it`);
+        // Beside `baseRefresh`, not in it: an approval an earlier refresh carried onto this head still binds until the merge runs.
+        work.baseRefreshRequest = { head: candidate!.sha, base: data.base, policyRevision: work.policyRevision, by: actor.id, at: now.toISOString(), reason: data.reason };
       }
       if (command === 'mergerefused') {
         demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
@@ -2041,6 +2072,8 @@ export class Engine {
         : refresh.head && refresh.head !== refresh.from.sha ? this.decideBaseRefreshCarry(work, all, refresh, now) : null;
       // A conflict re-recorded on a moved base keeps when it was first found on this head (GY-1200).
       work.baseRefresh = { ...refresh, carry, ...(refresh.conflict ? { conflictSince: conflictSince(work.baseRefresh, refresh) } : {}) };
+      // A requested refresh (GY-528) is answered by the refresh of the head it named, merged or conflicting.
+      if (work.baseRefreshRequest?.head === refresh.from.sha) work.baseRefreshRequest = null;
       this.evaluate(work, all, now);
       if (carry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'base.carry', JSON.stringify({ details: { ...carry, merge: refresh.merge ?? null } })]);
       await this.recordDispatch(db, work, now);
@@ -2690,7 +2723,8 @@ export class Engine {
    * action-queue bookkeeping (`onlyActionsMovedSince`): an executor claiming or settling the item's
    * `resync` row saves the item, and refusing the observation over that write discarded the very
    * reading the row was waiting for, so the item stayed stale and the row was claimed again,
-   * forever (GY-607).
+   * forever (GY-607). The loop's own bookkeeping counts the same way (`sameBesideBookkeeping`,
+   * GY-1257): its per-cycle writes refused the very observation it had woken for a rework decision.
    */
   async observe(id: string, expectedRevision: number, observation: Observation, jobToken?: string) {
     return this.store.transaction(async (db, now) => {
@@ -2707,7 +2741,7 @@ export class Engine {
       }
       const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
-      requireCurrent(work && (work.revision === expectedRevision || await onlyActionsMovedSince(db, work, expectedRevision)), 'Task changed while GitHub was being observed; retry');
+      requireCurrent(work && (work.revision === expectedRevision || await onlyActionsMovedSince(db, work, expectedRevision, sameBesideBookkeeping)), 'Task changed while GitHub was being observed; retry');
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
