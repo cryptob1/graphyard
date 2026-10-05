@@ -1575,6 +1575,8 @@ export class GitHub {
         ...(r.state === 'DISMISSED' && dismissalOf(r.id) ? { dismissal: dismissalOf(r.id)! } : {}) })),
       prState: pr.state, draft: pr.draft, prCreatedAt: pr.created_at, merged: pr.merged, mergeSha: pr.merge_commit_sha, mergedAt: pr.merged_at, mergeable: pr.mergeable === true && !pr.draft && pr.state === 'open', conflicting: pr.mergeable === false && pr.state === 'open',
       ...(pr.mergeable === null && pr.state === 'open' && !pr.merged ? { mergeabilityUnknown: true } : {}),
+      // GitHub's merge state (clean, unstable, blocked, behind, dirty, unknown...), read from the same response: a base move wakes every item it is not clean or unstable for (GY-1231).
+      ...(typeof pr.mergeable_state === 'string' ? { mergeableState: pr.mergeable_state } : {}),
       protected: protection.protected, requiredChecks, conversations, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained, baseTipAncestor: contained, scopeFiles,
       ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}), ...(docsBudget ? { docsBudget } : {}),
