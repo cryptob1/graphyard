@@ -1,34 +1,36 @@
 <!-- page: Build integrations | 4 | the release API. -->
 # Releases and observed delivery
 
-Graphyard records which release each environment should run, verified only from what service-scoped observers measured. Rollback is in [recovery](recovery.md#rollback).
+Graphyard records which release each environment should run, verified only by service-scoped observers' measurements. Rollback is in [recovery](recovery.md#rollback).
 
 ## Release candidates
 
-Graphyard's own deployment runs one moving main, a frozen candidate, UAT, then that exact SHA in production: main → candidate → uat → production. Neither Railway environment deploys main; `.railway/railway.ts` points the `uat` service at `release/uat` and production at `release/production`, and only `graphyard release` moves them, always to a candidate's exact SHA.
+Graphyard's own deployment runs main → frozen candidate → uat → that exact SHA in production. Neither Railway environment deploys main; `.railway/railway.ts` points the `uat` service at `release/uat` and production at `release/production`; only `graphyard release` moves them, always to a candidate's exact SHA.
 
-- `release cut [--trigger schedule|manual]` tags main's tip as `rc/ID`, recording the SHA and the delivered items it carries since the last promoted candidate. It writes a tag and nothing else, so merges never pause. `.github/workflows/release-candidate.yml` cuts every two hours or on demand, then runs the [long suites](#pre-merge-gate-and-release-candidate-validation) on that SHA before UAT.
-- `release uat ID` deploys the candidate to `uat`, which has its own Postgres and no `GITHUB_*` variable: it holds no credential that can write to the production repository and never merges, dispatches or spends the App's budget. It refuses while UAT serves another candidate cut within the last four hours that has no verdict yet, so a manual deploy never moves UAT under a running validation, and its push is leased on the tip it observed.
-- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` waits until `/healthz` on UAT reports the candidate SHA as `commit`, runs the suites against that deployment, confirms it still serves that SHA, and records `rc-uat/ID`. `endpoints` probes `/healthz?strict` and `/`; `--api` drives UAT's own API with `GRAPHYARD_UAT_TOKEN`, creating, replaying and listing a work item and reading the board and status. The workflow runs both and a `browser` suite, which signs in to the dashboard UAT serves in Chromium and opens the Work view, plus one `--suite` per container and chart job carrying that job's verdict, so a failed container or chart run fails the candidate; the soak and timing-budget suites are advisory. A `--suite` command gets `GRAPHYARD_UAT_URL` but never `GRAPHYARD_TOKEN`.
+- `release cut [--trigger schedule|manual]` tags main's tip as `rc/ID`, recording the SHA and the items delivered since the last promoted candidate. It only writes a tag, so merges never pause. `.github/workflows/release-candidate.yml` cuts every two hours or on demand, then runs the [long suites](#pre-merge-gate-and-release-candidate-validation) on that SHA before UAT.
+- `release uat ID` deploys the candidate to `uat`, which has its own Postgres and no `GITHUB_*` variable: it holds no credential that can write to the production repository and never merges, dispatches or spends the App's budget. It refuses while UAT serves an unjudged candidate cut within four hours, so a manual deploy never moves UAT under a running validation; its push is leased on the tip it observed.
+- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` waits until `/healthz` on UAT reports the candidate SHA as `commit`, runs the suites against that deployment, confirms it still serves that SHA, and records `rc-uat/ID`. `endpoints` probes `/healthz?strict` and `/`; `--api` drives UAT's API with `GRAPHYARD_UAT_TOKEN`: a work item's create, replay and list, the board and status. The workflow runs both and a `browser` suite (Chromium signs in to UAT's dashboard and opens the Work view), plus one `--suite` per container and chart job carrying that job's verdict, so a failed container or chart run fails the candidate; the soak and timing-budget suites are advisory. A `--suite` command gets `GRAPHYARD_UAT_URL` but never `GRAPHYARD_TOKEN`.
 - `release promote ID` refuses unless that record passed on the candidate SHA, then deploys the SHA to production (leased on the last promoted SHA, so a hand-moved `release/production` is refused) and records `rc-production/ID`. `release verify --url URL` confirms production serves a promoted candidate; `master verify-deployment` then records that SHA on each delivery it carries.
 - A failed candidate files one follow-up item naming the failing suite and SHA (`release follow-up ID` retries a failed filing). Its deliveries stay delivered; fix forward, and the next cut carries both.
 
-`release status` lists every candidate with its UAT verdict and promotion. `release GY-N EPOCH`, naming a work item, still gives up that item's lease. The workflow needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, a `GRAPHYARD_UAT_TOKEN` for a principal in UAT's `GRAPHYARD_PRINCIPALS`, and a `GRAPHYARD_RELEASE_TOKEN` that may create work. Create `release/production` at production's current SHA before applying the Railway configuration.
+`release status` lists candidates with their UAT verdict and promotion. `release GY-N EPOCH` still gives up a work item's lease. The workflow needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, a `GRAPHYARD_UAT_TOKEN` for a principal in UAT's `GRAPHYARD_PRINCIPALS`, and a `GRAPHYARD_RELEASE_TOKEN` that may create work. Create `release/production` at production's current SHA before applying the Railway configuration.
 
 ### Pre-merge gate and release-candidate validation
 
-The required pre-merge set is `typecheck` and `test` (`.github/workflows/ci.yml`): the build, the docs check and the Node and browser suites, every job bounded so the set finishes in under ten minutes. The soak and timing-budget test files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container acceptance, container recovery and the Helm chart never run on a pull request: `.github/workflows/release-candidate.yml` runs them against one pinned SHA: each [release candidate](#release-candidates), or a dispatched `sha` or `rc-*` tag alone.
+The required pre-merge set is `typecheck` and `test` (`.github/workflows/ci.yml`): build, docs check, Node and browser suites, each bounded so the set finishes under ten minutes. The soak and timing-budget test files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container acceptance and recovery and the Helm chart never run on a pull request: `.github/workflows/release-candidate.yml` runs them against one pinned SHA: each [release candidate](#release-candidates), or a dispatched `sha` or `rc-*` tag alone.
 
-With `GRAPHYARD_DELIVERY=github` on the server, GitHub merges: once a candidate's build, review and required checks pass, the observation that saw it enables auto-merge on that head. No proof, queue or observation age gates the merge, the loop skips its guarded merge, and proofs are not requested; UAT validates before promotion.
+With `GRAPHYARD_DELIVERY=github` on the server, GitHub merges: once a candidate's build, review and required checks pass, the observation that saw it enables auto-merge on that head. No proof, queue or observation age gates the merge, the loop skips its guarded merge, and proofs are neither requested nor counted against the loop's silence; UAT validates before promotion.
+
+To keep main green, every 30 s the main guard reverts a merge commit failing a required check its parent passed via a `graphyard-revert/` pull request the App merges once its checks pass, and reopens the item naming the check and commit. A revert that conflicts, fails or stalls an hour is closed after one attempt with one attention line naming merge, check and revert PR; nothing waits on it: fix main forward.
 
 ## Managed repositories
 
-Installing Graphyard gives a repository the same model. `init --scan` classifies its checks into `delivery.mergeGate` and shows the split; `init --scan --apply` writes it as `delivery` in `graphyard.json` and renders two workflows from it (re-rendered on every apply, so edit `graphyard.json`, not them):
+Installed repositories get the same model. `init --scan` classifies its checks into `delivery.mergeGate` and shows the split; `init --scan --apply` writes it as `delivery` in `graphyard.json` and renders two workflows from it (re-rendered on every apply, so edit `graphyard.json`, not them):
 
 - `.github/workflows/graphyard-release-candidate.yml` runs `release cut` on `candidateSchedule` (`--candidate-cron`, default six hours; `null` is on demand), runs each `perCandidate` check that has a command at the candidate's exact SHA, moves `release/uat` with `release uat`, deploys through `deploy.adapter`, and records `release validate` with one `--suite` per check.
-- `.github/workflows/graphyard-promotion.yml` runs after a successful candidate run (or by dispatch) and calls `release promote`, which refuses any candidate without a passing UAT record on its exact SHA, then deploys that SHA to production and runs `release verify`.
+- `.github/workflows/graphyard-promotion.yml` runs after a successful candidate run (or by dispatch) and calls `release promote`, then `release verify`.
 
-Both run the Graphyard CLI pinned to the installing commit (`GRAPHYARD_BUILD_SHA` when the build stamps one). `deploy.adapter` is `railway` (services tracking `release/uat` and `release/production` in `deploy.project`) or `command` (`deploy.uat` and `deploy.production` run with `GRAPHYARD_CANDIDATE_SHA`; nothing is guessed, so an unset command leaves the workflows ungenerated and is reported). UAT must report the candidate SHA at `/healthz` as `commit` or `revision`.
+Both run the Graphyard CLI pinned to the installing commit (`GRAPHYARD_BUILD_SHA` when the build stamps one). `deploy.adapter` is `railway` (services tracking `release/uat` and `release/production` in `deploy.project`) or `command` (`deploy.uat` and `deploy.production` run with `GRAPHYARD_CANDIDATE_SHA`; an unset command is reported and leaves the workflows ungenerated). UAT must report the candidate SHA at `/healthz` as `commit` or `revision`.
 
 Branch protection requires only the `preMerge` set, or every check with `"mode": "per-pr"`, which also generates no workflow. `install --plan` lists the release branches, the `uat` and `production` GitHub environments and every resource the adapter creates; each that costs money or opens an account carries `human`, and `--apply` creates those only with `--create-environments`.
 
@@ -79,7 +81,7 @@ Approve with `POST /api/delivery/approve` `{"release": {...}, "environment": {..
 
 ## Observe and verify
 
-The observer submits measurements through `POST /api/delivery/observe`:
+The observer posts measurements to `POST /api/delivery/observe`:
 
 ```json
 {"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},
@@ -92,7 +94,7 @@ The observer submits measurements through `POST /api/delivery/observe`:
    "instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
-Only complete `provider` or `host-attestation` listings can verify; a repeated `snapshotId` returns the original receipt; `POST /api/delivery/notify` is only a hint. A two-second sweep (`graphyard delivery sweep` drains sooner) verifies a generation once every service shares a common interval within the freshness bound, adding `releaseDeliveries` to each included item. Otherwise status reads `unobserved`, `mismatched`, `unknown`, `unhealthy`, `incomplete`, `no-common-interval`, `stale` or `degraded`. `graphyard delivery` shows the state.
+Only complete `provider` or `host-attestation` listings verify; a repeated `snapshotId` returns the original receipt; `POST /api/delivery/notify` is a hint. A two-second sweep (`graphyard delivery sweep` drains sooner) verifies a generation once every service shares a common interval within the freshness bound, adding `releaseDeliveries` to each included item. Otherwise status reads `unobserved`, `mismatched`, `unknown`, `unhealthy`, `incomplete`, `no-common-interval`, `stale` or `degraded`. `graphyard delivery` shows the state.
 
 ## Delivery speed
 

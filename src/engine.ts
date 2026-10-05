@@ -4,7 +4,7 @@ import { jsonChanged, stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
 import { Store, StaleWrite, save, rewriteDocument, lockItem, wakeJob, documentBefore, eventWorkSql } from './store.js';
-import { reconcileCommitBlockingSql, reconcileItemLockSql, reconcileRereadSql, reconcileRowsSql, reconcileVersionsSql } from './store/coordination-sql.js';
+import { commitLockWaitMs, reconcileCommitBlockingSql, reconcileItemLockSql, reconcileRereadSql, reconcileRowsSql, reconcileVersionsSql } from './store/coordination-sql.js';
 import { advisoryLocks } from './store/locks.js';
 import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
@@ -42,7 +42,6 @@ import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordInt
 import { dispatchFailureBlockAfter } from './daemon/dispatch-failures.js';
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
-import { repairAuditEvent, repairScopeRefusal, type RepairAudit } from './master/repair-lane.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
 import { coordinationProjection, isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type SavedVersion } from './store/locked-read.js';
 
@@ -890,8 +889,6 @@ export class Engine {
         if (reviewProviderOf(data.policy) === 'agent') assertReviewerProfiles(data.policy.reviewerProfiles, this.reviewerApps, this.controlPlaneAppId);
         demand(data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown dependency');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
-        // A merge-path repair (GY-406) plans only files within the merge path.
-        const repairScope = repairScopeRefusal(data); demand(!repairScope, repairScope!, 422);
         const criteria = this.declareBootstrap(actor, data, [], 1, now);
         const scenarioRequirements: Work['scenarioRequirements'] = [];
         const proofNames: string[] = [...new Set<string>(data.criteria.flatMap((ac: { proofs: string[] }) => ac.proofs))];
@@ -1021,8 +1018,6 @@ export class Engine {
           demand(!leaseLive, 'Stop and release the active worker before revising requirements');
         }
         demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
-        // A merge-path repair (GY-406) keeps its plannedFiles within the merge path on every revision, not only at creation (GY-428).
-        const repairScope = repairScopeRefusal({ plannedFiles: data.plannedFiles, repair: work.repair, key: work.key }); demand(!repairScope, repairScope!, 422);
         // A widening that answers one attempt's scope request (the loop's, on a review finding)
         // holds only while that request is open, its attempt holds a live lease and the head the
         // findings were read for is still the candidate: a claim, a lease end or a push changes
@@ -1587,8 +1582,8 @@ export class Engine {
    * Claim the next action for a stateless executor.
    *
    * The executor names itself and its host, and the kinds it can actually run; the control plane
-   * hands back the oldest open row it can take, leased for a bounded time. Two executors on two
-   * hosts calling this at the same instant are serialized by the coordination lock, so the first
+   * hands back the first open row it can take in claim order, leased for a bounded time. Two
+   * executors on two hosts calling this at the same instant are serialized by the coordination lock, so the first
    * gets the row and the second gets the next one. Neither is configured with the other, and
    * neither reports to a master: the queue is the whole of their coordination.
    */
@@ -1617,6 +1612,8 @@ export class Engine {
       // asking every few seconds must not write a row per question it asked.
       if (claimed) {
         await save(db, claimed.work, actor.id, 'action.claimed', now, { id: claimed.row.id, kind: claimed.row.kind, executor: claimed.row.claim!.executor, host: claimed.row.claim!.host, principal: actor.id, attempt: claimed.row.attempts });
+        // A row this executor last failed on stepped aside for this claim; its mark makes that once (GY-1132).
+        for (const work of claimed.yielded) await save(db, work, actor.id, 'action.claimed', now, { id: claimed.row.id, kind: claimed.row.kind, executor: claimed.row.claim!.executor, yielded: work.actionQueue!.actions.filter(row => row.yielded === claimed.row.claim!.executor).map(row => row.id) });
         await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       }
       return result;
@@ -1751,7 +1748,12 @@ export class Engine {
     // without a submission would schedule a read of nothing.
     // `prioritized` claims the job ahead of the polled backlog, as a webhook wake is (GY-1099).
     if (wake && before!.submission) await this.store.transaction(async db => { await wakeJob(db, before!.id, data.prioritized === true); });
-    if (wake) await this.reconcile();
+    // A resync waits for the running tick and then the trailing one that serves it (GY-1115), at most two
+    // bounded ticks; reconciling only its own item instead would run a second writer against the tick's
+    // batches, the contention GY-1115 removed (GY-1212). A failed tick is a server fault, not this item's:
+    // every resync waiting on it would share the rejection, so the resync logs it and answers with the
+    // item as it stands, whose `changed`, `observed` and `job` say what the attempt achieved (GY-1212).
+    if (wake) await this.reconcile().catch(error => { console.warn(`reconciliation tick failed during the resync of ${before!.key}: ${error instanceof Error ? error.message : String(error)}`); });
     const work = (await this.store.list()).find(item => item.id === before!.id)!;
     // Without `since`, the claim of the item's own `resync` row is the instant a reading must beat.
     const since = data.since ?? work.actionQueue?.actions.find(row => row.kind === 'resync' && row.state === 'claimed')?.claim?.claimedAt ?? null;
@@ -2266,7 +2268,11 @@ export class Engine {
    * attempts per batch made a busy fleet's tick take 4-6 minutes.
    */
   reconcileMaxAttempts = 3;
-  /** How long a batch that wrote waits in line for the coordination lock at its commit (GY-1115); well under `deadlock_timeout`. */
+  /**
+   * How long a batch that wrote waits in line for the coordination lock at its commit (GY-1115);
+   * well under `deadlock_timeout`, and never more than half of it on a server where that is lower
+   * (GY-1212): see `coordinationLockWithin`.
+   */
   reconcileCommitLockWaitMs = 200;
   /** The last reconciliation ticks, newest last (GY-1115): what each evaluated, deferred and how many attempts its worst batch took. */
   readonly reconcileTicks: ReconcileTick[] = [];
@@ -2508,8 +2514,11 @@ export class Engine {
           next = batch; contended++;
           tick.maxAttempts = Math.max(tick.maxAttempts, contended);
           if (contended >= this.reconcileMaxAttempts) {
-            console.warn(`reconciliation deferred ${attemptedThrough - batch} item(s) after ${contended} contended attempts; retrying next tick`);
-            tick.deferred += attemptedThrough - batch;
+            // The rows a writer held in the last attempt keep their end-of-pass turn (GY-1212), counted there if still held.
+            const deferred = attemptedThrough - batch - held.length;
+            skipped.push(...held);
+            console.warn(`reconciliation deferred ${deferred} item(s) after ${contended} contended attempts; retrying next tick`);
+            tick.deferred += deferred;
             next = attemptedThrough;
             contended = 0; cap = Infinity;
             await new Promise(resolve => setImmediate(resolve));
@@ -2562,13 +2571,16 @@ export class Engine {
    * never committed. A mutation holding the lock may be waiting for one of the batch's rows, so the
    * batch queues only when no lock holder waits on it; one that starts waiting later has its
    * deadlock check (`deadlock_timeout`, 1 s by default) fire long after the batch's own `ms` wait
-   * gives up, so the batch, never the mutation, is the side that yields. A wait past `ms`, a holder
-   * blocked on the batch, or a deadlock reported all the same aborts the batch as contended.
+   * gives up, so the batch, never the mutation, is the side that yields. The check and the wait are
+   * not atomic, so that ordering is what resolves a holder that starts waiting between them; it is
+   * enforced, not assumed (GY-1212): the check reads the session's `deadlock_timeout`, and the wait
+   * never exceeds half of it. A wait past that, a holder blocked
+   * on the batch, or a deadlock reported all the same aborts the batch as contended.
    */
   private async coordinationLockWithin(db: PoolClient, ms: number) {
-    const blocking = (await db.query(reconcileCommitBlockingSql, [advisoryLocks.coordination])).rows[0].blocking;
+    const { blocking, deadlock_ms: deadlockMs } = (await db.query(reconcileCommitBlockingSql, [advisoryLocks.coordination])).rows[0];
     if (blocking) return false;
-    await db.query(`SET LOCAL lock_timeout = '${Math.max(1, Math.floor(ms))}ms'`);
+    await db.query(`SET LOCAL lock_timeout = '${commitLockWaitMs(ms, Number(deadlockMs))}ms'`);
     try { await db.query('SELECT pg_advisory_xact_lock($1)', [advisoryLocks.coordination]); }
     catch (error) { if (['55P03', '40P01'].includes((error as { code?: string }).code ?? '')) return false; throw error; }
     await db.query('SET LOCAL lock_timeout TO DEFAULT');
@@ -2665,6 +2677,11 @@ export class Engine {
     return this.store.transaction(async (db, now) => {
       if (jobToken) {
         // The item row before the job row (GY-1115): the order every transaction takes them in, so this never deadlocks a reconciliation batch.
+        // This job row is locked mid-transaction and the queue's wakes at COMMIT lock theirs after it, out of work-id order:
+        // the one exception to the job rows' stable order (GY-1212). Wakes never wait on a row out of order themselves, so a
+        // cycle needs two observations each holding its own job and each waking the other's, which only two deliveries of
+        // queued items observed at the same instant do (each still sees the other queued). Postgres then aborts one as a
+        // deadlock; its observation is refused, nothing is saved, and its job is claimed again once its lease lapses.
         await db.query('SELECT 1 FROM work_items WHERE id=$1 FOR UPDATE', [id]);
         const owned = await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>clock_timestamp() FOR UPDATE', [id, jobToken]);
         requireCurrent(owned.rowCount, 'Integration job lease expired or superseded; retry');
@@ -2693,7 +2710,6 @@ export class Engine {
       let mergedAtRepository: string | null = null; let repositoryClockOffsetMs: number | null = null;
       let reconciliation: MergeReconciliation | null = null; let refusedReconciliation: { decision: string; reasons: string[] } | null = null;
       let operatorAuthorization: OperatorAuthorizedDelivery | null = null;
-      let repairLane: RepairAudit | null = null;
       if (observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))) {
         const providerMergedTime = Date.parse(observation.mergedAt);
         // Never allow evidence from after the earliest possible merge instant.
@@ -2768,14 +2784,6 @@ export class Engine {
           const snapshot = past ?? structuredClone(work);
           authorizedSnapshot = snapshot; authorizationRevision = snapshot.revision;
           operatorAuthorization = directMergeAuthorization(directMerge, { sha: observation.mergeSha!, at: observation.mergedAt }, snapshot.revision, new Date(cutoff).toISOString(), historical);
-        }
-        // A merge the repair lane made (GY-406) is delivered on its audit entry, which the lane
-        // appended for exactly this head before it asked GitHub to merge (github.ts repairLaneStep).
-        const repaired = !authorizedSnapshot && observation.mergeSha ? (await db.query(`SELECT payload->'details' AS audit FROM events WHERE work_id=$1 AND kind=$2 AND payload->'details'->>'head'=$3 AND created_at<$4 ORDER BY seq DESC LIMIT 1`,
-          [id, repairAuditEvent, observation.candidate.sha, new Date(cutoff)])).rows[0]?.audit as RepairAudit | undefined : undefined;
-        if (repaired) {
-          const snapshot = past ?? structuredClone(work);
-          authorizedSnapshot = snapshot; authorizationRevision = snapshot.revision; repairLane = repaired;
         }
         if (!authorizedSnapshot && past && observation.mergeSha) {
           const decisions = await postMergeDecisions(db, work, observation, past.policyRevision, cutoff);
@@ -2880,13 +2888,12 @@ export class Engine {
           // recorded as a second violation.
           // An operator-authorized delivery is judged by the operator, not the gates: what the
           // record lacked is on the delivery, and the violation it owns leaves the record the same way.
-          if (reconciliation || operatorAuthorization || repairLane) work.violations = work.violations.filter(entry => entry !== violation && !entry.startsWith(reconciliationRefusalPrefix));
+          if (reconciliation || operatorAuthorization) work.violations = work.violations.filter(entry => entry !== violation && !entry.startsWith(reconciliationRefusalPrefix));
           else if (work.gates.some(g => !g.passed)) work.violations.push('Post-merge checks differ from the recorded authorization; follow-up required');
           work.stage = 'done'; work.stageEnteredAt = now.toISOString();
           const delivery: Work['delivery'] = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision!, ...(evidenceAsOf ? { evidenceAsOf } : {}),
             ...(mergedAtRepository ? { mergedAtRepository, repositoryClockOffsetMs: repositoryClockOffsetMs! } : {}) };
           work.delivery = reconciliation ? Object.assign(delivery, { reconciliation }) : operatorAuthorization ? Object.assign(delivery, { operatorAuthorization }) : delivery;
-          if (repairLane) work.repairLane = repairLane;
           if (reconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, reconciliation.requestedBy, 'merge.reconciled',
             JSON.stringify({ details: { ...reconciliation, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision, evidenceAsOf, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
           if (operatorAuthorization) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, operatorAuthorization.operator, 'merge.operator-authorized',
