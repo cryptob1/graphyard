@@ -117,8 +117,14 @@ Only `admin` grants or revokes, to `producer` principals: exact name, `kind:*` o
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace per token, merge path first (`observationThroughput`). Heartbeat, claim, `complete`, `blocked` own the lease pool (`leaseHealth` in `GET /api/status`). Reconcile evaluates moved rows (all every `GRAPHYARD_RECONCILE_FULL_MS`), skipping writer-held rows. Until startup validation finishes, `/healthz` reports `readiness: false` and `/healthz?ready` 503.
+`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace per token, merge path first (`observationThroughput`). Heartbeat, claim, `complete`, `blocked` own the lease pool (`leaseHealth` in `GET /api/status`). Reconcile evaluates moved rows (all every `GRAPHYARD_RECONCILE_FULL_MS`). Until startup validation finishes, `/healthz` reports `readiness: false` and `/healthz?ready` 503.
 
 ### Concurrent reconciliation
 
-Each pass locks its batch rows; contended batches defer a tick; stale observation snapshots retry after 2 s.
+A tick runs every 2 s and should finish within 5 s (slower logs `reconciliation tick took N ms`, with its writes and longest lock wait). Locks, in order:
+
+1. Opening: the coordination lock, briefly, to read row versions and sweep direct merges.
+2. Each batch evaluates up to 250 ms with no lock, writing nothing; renewals, observations and requests on any item proceed.
+3. Only if an item changes does the batch take the coordination lock (waiting at most 500 ms, holding no row), then each written item's row (`FOR NO KEY UPDATE`), re-evaluating it on the current fleet; at most 8 writes per batch. Job wakes follow at commit, in work-id order.
+
+A batch whose lock wait expires three times defers only its writes to the next tick. Renewals take only their item's lock, never waiting on evaluation. Stale observation snapshots retry after 2 s.

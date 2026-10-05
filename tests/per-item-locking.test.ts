@@ -5,7 +5,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store, StaleWrite, save } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { definiteRenewalRefusal } from '../src/supervisor.js';
-import type { Principal, Work } from '../src/model.js';
+import type { Observation, Principal, Work } from '../src/model.js';
 import { Refusal, unknownWorkCode } from '../src/model/refusal.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -18,6 +18,7 @@ const operator: Principal = { id: 'operator', role: 'admin' };
 const workers: Principal[] = Array.from({ length: 22 }, (_, i) => ({ id: `worker-${i}`, role: 'worker' }));
 
 let database: EmbeddedPostgres, store: Store, engine: Engine;
+let queryLatencyMs = 0;
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 124;
@@ -26,6 +27,13 @@ before(async () => {
   await database.start();
   await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
+  // Every statement on every connection waits `queryLatencyMs` first: the round trip to a hosted
+  // database, which a local one lacks. Registered before any connection opens; zero unless a test sets it.
+  for (const pool of [store.pool, store.leasePool]) pool.on('connect', client => {
+    const query = client.query.bind(client) as (...args: unknown[]) => unknown;
+    (client as unknown as { query: (...args: unknown[]) => unknown }).query = (...args: unknown[]) => !queryLatencyMs || typeof args.at(-1) === 'function'
+      ? query(...args) : sleep(queryLatencyMs).then(() => query(...args));
+  });
   await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
   engine.principals = [operator, ...workers];
@@ -221,6 +229,132 @@ test('unit:per-item-locking mixed fleet and item locks under concurrent load nev
     operations.push(engine.reconcile());
   }
   assert.equal(await within(Promise.all(operations), 30_000), 'settled', 'every operation committed');
+});
+
+
+const headSha = 'a'.repeat(40), baseSha = 'b'.repeat(40);
+/** An item submitted for review, whose observation job saves a fresh provider observation every poll. */
+async function submittedItem(worker: Principal) {
+  let item = await claimed(worker);
+  item = await engine.execute(worker, 'workspace', item.id, { epoch: item.epoch, host: 'machine-a', path: `/tmp/locking/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-${item.epoch}` }, randomUUID());
+  return engine.execute(worker, 'submit', item.id, { epoch: item.epoch, pr: Number(item.key.slice(3)) }, randomUUID());
+}
+const providerObservation = (item: Work): Observation => ({
+  clockOffset: { min: 0, max: 0 },
+  candidate: { sha: headSha, baseSha, pr: item.submission!.pr, branch: item.workspaces.at(-1)!.branch, author: 'implementer' },
+  checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
+  reviews: [], protected: true, mergeable: true, merged: false, mergeSha: null, files: [`src/locking-${item.key}.ts`], scopeFiles: [],
+  at: new Date().toISOString(), prState: 'open', draft: false, baseTip: baseSha, baseTree: 'c'.repeat(40), baseTipContained: true,
+});
+/** One observation job's save, as the observation worker makes it: read the item, observe, save over the revision read. */
+async function observeOnce(id: string) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const read = (await store.workItem(id))!;
+    try { return await engine.observe(id, read.revision, providerObservation(read)); }
+    catch (error) { if (!/changed while GitHub was being observed/.test((error as Error).message)) throw error; }
+  }
+}
+/** Hold the reconciliation batch's lock-free evaluation of `id` (GY-1290) until `release`; `reached` resolves once it is there. */
+function holdEvaluation(id: string) {
+  const internals = engine as unknown as { reconcileItem: (db: unknown, work: Work, all: Work[], now: Date, options?: { dryRun?: boolean }) => Promise<boolean> };
+  const original = internals.reconcileItem;
+  let release!: () => void, entered!: () => void, armed = true;
+  const released = new Promise<void>(resolve => { release = resolve; }), reached = new Promise<void>(resolve => { entered = resolve; });
+  internals.reconcileItem = async function (this: Engine, db, work, all, now, options) {
+    if (armed && options?.dryRun && work.id === id) { armed = false; entered(); await released; }
+    return original.call(this, db, work, all, now, options);
+  };
+  return { reached, release, restore: () => { internals.reconcileItem = original; } };
+}
+
+// GY-1290 AC-1: production's ticks took 22-53 s for 28 items and deferred some. Measured here, the
+// contention came from observation saves: each holds the coordination lock across its whole
+// evaluation, and moves the item it saves. A batch held its items' row locks while it raced them
+// for that lock at its commit with a 200 ms wait, and rolled back whenever any item moved; three
+// attempts and it deferred. Lease renewals (adopted) and snapshot reads (no lock) never contended.
+test('unit:reconcile-uncontended-under-load 30 items reconciled beside lease renewals, observation saves and snapshot reads at production rates: every tick within 5000 ms, none deferred', { timeout: 300_000 }, async () => {
+  const fleet = Array.from({ length: 30 }, (_, i) => ({ ...workers[i % workers.length], id: `fleet-${i}` }));
+  engine.principals = [operator, ...workers, ...fleet];
+  // Half the fleet is building under a live lease, half is submitted and observed, as production's 28 were.
+  const leased = await Promise.all(fleet.slice(0, 15).map(claimed));
+  const observed = await Promise.all(fleet.slice(15).map(submittedItem));
+  engine.resetReconcileView();
+  await engine.reconcile();
+  const ticksBefore = engine.reconcileTicks.length, ticks: number[] = [], failures: string[] = [];
+  const until = performance.now() + 20_000;
+  const loop = async (everyMs: number, run: () => Promise<unknown>, what: string) => {
+    await sleep(Math.random() * everyMs);
+    while (performance.now() < until) {
+      const started = performance.now();
+      await run().catch(error => { failures.push(`${what}: ${(error as Error).message}`); });
+      await sleep(Math.max(0, everyMs - (performance.now() - started)));
+    }
+  };
+  queryLatencyMs = 5;
+  try {
+    // Each at or above production's rate: a supervisor renews every 25 s (here 5 s), an observation
+    // job saves each submitted item every 20 s (here 3 s), the master loop and the status routes read
+    // the coordination snapshot (here every 250 ms), and the server ticks every 2 s. Each second an
+    // attempt's lease lapses on a submitted item, so the ticks have writes to make as production's did.
+    await Promise.all([
+      ...leased.map((work, i) => loop(5_000, () => heartbeat(fleet[i], work), 'renewal')),
+      ...observed.map(work => loop(3_000, () => observeOnce(work.id), 'observation')),
+      loop(250, () => store.coordinationSnapshot(), 'snapshot'),
+      loop(1_000, () => store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{lease}', $2::jsonb) WHERE id = $1`,
+        [observed[Math.floor(Math.random() * observed.length)].id, JSON.stringify({ owner: 'gone-worker', epoch: 1, expiresAt: new Date(Date.now() - 1000).toISOString() })]), 'lapse'),
+      loop(2_000, async () => { const started = performance.now(); await engine.reconcile(); ticks.push(performance.now() - started); }, 'tick'),
+    ]);
+  } finally { queryLatencyMs = 0; }
+  const recorded = engine.reconcileTicks.slice(ticksBefore);
+  assert.deepEqual(failures, [], 'every renewal, observation, snapshot read and tick succeeded');
+  assert.ok(ticks.length >= 8, `the server ticked ${ticks.length} times`);
+  assert.ok(recorded.every(tick => tick.candidates >= 30), 'every tick reconciled the 30 items');
+  assert.ok(recorded.reduce((sum, tick) => sum + tick.writes, 0) >= 5, `the ticks wrote (${JSON.stringify(recorded)})`);
+  assert.ok(Math.max(...ticks) < 5_000, `the slowest tick took ${Math.round(Math.max(...ticks))} ms (${ticks.map(Math.round).join(', ')})`);
+  assert.equal(recorded.reduce((sum, tick) => sum + tick.deferred, 0), 0, `no tick deferred an item (${JSON.stringify(recorded)})`);
+});
+
+// GY-1290 AC-2: three workers lost their leases while reconciliation contended.
+test('unit:renewal-independent-of-reconcile a lease renewal completes within 1000 ms while a reconciliation batch is held open on its item', { timeout: 60_000 }, async () => {
+  const worker = { ...workers[0], id: 'renewal-worker' };
+  engine.principals = [...engine.principals, worker];
+  const work = await claimed(worker);
+  // Its gates cleared, the item's next evaluation writes it: the batch evaluates it and then writes it.
+  const unevaluated = async () => store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{gates}', '[]'::jsonb) WHERE id = $1`, [work.id]);
+  const renewWithin = async (what: string) => {
+    const started = performance.now();
+    const renewed = await heartbeat(worker, work);
+    assert.ok(performance.now() - started < 1_000, `${what}: the renewal took ${Math.round(performance.now() - started)} ms`);
+    return renewed;
+  };
+  engine.reconcileBatchMs = 60_000;
+  try {
+    // Held open while it evaluates the item.
+    await unevaluated();
+    let evaluation = holdEvaluation(work.id);
+    let pass = engine.reconcile();
+    await evaluation.reached;
+    let renewed = await renewWithin('while the batch evaluates the item');
+    evaluation.release(); await pass; evaluation.restore();
+    let stored = (await store.workItem(work.id))!;
+    assert.equal(stored.lease!.expiresAt, renewed.lease!.expiresAt, 'the batch wrote over the renewal, not instead of it');
+    assert.ok(stored.gates.length > 0, 'and wrote the evaluation it held');
+
+    // Held open waiting for the coordination lock to write the item, which a fleet command holds.
+    await unevaluated();
+    evaluation = holdEvaluation(work.id);
+    pass = engine.reconcile();
+    await evaluation.reached;
+    const holder = hold({ fleetLock: true });
+    await holder.taken;
+    evaluation.release();
+    await sleep(50);
+    renewed = await renewWithin('while the batch waits for the coordination lock to write the item');
+    holder.release(); await holder.done; await pass; evaluation.restore();
+    stored = (await store.workItem(work.id))!;
+    assert.equal(stored.lease!.expiresAt, renewed.lease!.expiresAt, 'the renewal stands');
+    assert.ok(stored.gates.length > 0, 'and the batch wrote its evaluation');
+  } finally { engine.reconcileBatchMs = 250; }
 });
 
 test('unit:per-item-locking 100 items and 20 concurrent writers keep p95 request latency under 1 s', { timeout: 300_000 }, async () => {
