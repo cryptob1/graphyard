@@ -119,10 +119,10 @@ export function parallelTipsAdvisories(parallelTips: number, workflows: Workflow
 // writes by name and reads back through the branch's active rules.
 export const mergeQueueRulesetName = 'Graphyard merge queue';
 /**
- * The queue's one bypass actor (GY-406): the control-plane App, and nobody else, may merge a pull
+ * The repair lane's bypass (GY-406): the control-plane App, and nobody else, may merge a pull
  * request past this ruleset's queue — in pull-request mode only, so it never pushes to the base
  * branch. Classic protection (required checks, reviews, enforce_admins) is untouched and still
- * binds the App; no Graphyard lane uses the bypass since the repair lane was removed (GY-1234).
+ * binds the App; the lane decides when the App may use the bypass (src/master/repair-lane.ts).
  */
 export const repairBypassActor = (githubAppId: number) => ({ actor_id: githubAppId, actor_type: 'Integration' as const, bypass_mode: 'pull_request' as const });
 /**
@@ -131,7 +131,7 @@ export const repairBypassActor = (githubAppId: number) => ({ actor_id: githubApp
  * GitHub enforces what Graphyard decided beside the repository's own CI.
  */
 export const GRAPHYARD_CHECKS = [CHECK_NAME, LANDABLE_CHECK] as const;
-/** The ruleset Graphyard writes: a queue that builds and merges one entry at a time, the App-bound required check, and the App's one bypass actor. */
+/** The ruleset Graphyard writes: a queue that builds and merges one entry at a time, the App-bound required check, and the repair lane's one bypass actor. */
 export function mergeQueueRuleset(config: { baseBranch: string; githubAppId: number }) {
   return {
     name: mergeQueueRulesetName, target: 'branch', enforcement: 'active',
