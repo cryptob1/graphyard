@@ -17,7 +17,7 @@ import { type EscalationContext, contextFingerprint, escalationAction, handleEsc
 import { type AgentEnvironment, agentKindSchema, type EnvironmentKind, environmentKinds, type MasterConfig, masterConfigSchema, type WorkerProfile } from './profiles.js';
 import { assertOutsideWorktrees, atomicPrivateText, atomicPrivateWrite, externalCredential, loadMasterConfig, loadStoredMasterConfig, privateFile, readCredentialFile } from './config.js';
 import { type AccountSkip, accountLaunch, agentLaunchPlan, describeObservedExhaustion, type EnvironmentProbe, heldAwareProbe, inspectProfileAccounts, type LaunchRole, NoHealthyAccountError, observedExhaustions, ownLoginHold, type ProfileAccountHealth, recordEnvironmentLog, selectAccount, setupAgentEnvironments } from './environments.js';
-import { closeFailedLaunch, launchStartMs, type RequestDelivery, startAgentSession, withLaunchClose, withLaunchedRuntime } from './launch.js';
+import { closeFailedLaunch, launchStartMs, type RequestDelivery, startAgentSession, withLaunchClose } from './launch.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
 import { allocateManagedCheckout, failureText, settleCheckout } from './worktrees.js';
 import { herdrAttach } from './dispatch.js';
@@ -536,11 +536,9 @@ export async function registeredReview<T>(config: MasterConfig, args: string[], 
   // snapshot, which a concurrent `master review` or the loop's own reviewer launch shares. A running
   // handle with no token predates that rule and has nothing to hold it, so it is left alone here.
   if (work.sessions?.some(handle => handle.id === id && handle.state === 'running' && handle.head === sha && !handle.launch)) return launch();
-  const handle: SessionHandleInput = { id, kind: 'review', role: 'review', head: sha, runtime: profile.kind, host: config.hostId,
-    ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}), subject: `${work.key}: review ${sha.slice(0, 12)} (PR #${work.candidate.pr})`, state: 'running' };
-  // The coordinates carry the runtime the launch started, not the profile's (GY-1306).
-  return registeredLaunch(handle => mutate(`work/${work.id}/session`, handle), handle,
-    withLaunchedRuntime(handle, launch), launched => launched as { pane?: string | null; agentName?: string | null }, pane => herdrAttach(pane, config.herdrWorkspace));
+  return registeredLaunch(handle => mutate(`work/${work.id}/session`, handle), { id, kind: 'review', role: 'review', head: sha, runtime: profile.kind, host: config.hostId,
+    ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}), subject: `${work.key}: review ${sha.slice(0, 12)} (PR #${work.candidate.pr})`, state: 'running' },
+  launch, launched => launched as { pane?: string | null; agentName?: string | null }, pane => herdrAttach(pane, config.herdrWorkspace));
 }
 
 /**

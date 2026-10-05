@@ -12,7 +12,6 @@ import { registeredLaunch } from './model/session-state.js';
 import { answeredByPendingSession, independentProducerProfiles } from './producer.js';
 import { answeredByPendingReview } from './reviewer.js';
 import { daemonSummary, profileHealth, readDaemonState, type DaemonState, type DeploymentObservation } from './master-daemon.js';
-import { withLaunchedRuntime } from './master/launch.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
 import type { ExecutorRelease } from './executor-fleet.js';
 import { dispatchReserved, profileConcurrency, type HerdrAgent, type MasterConfig, type ProducerProfile, type WorkerProfile } from './master.js';
@@ -181,9 +180,8 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     const usable = independent.filter(profile => credentials[profile.name]?.available !== false && !agents.some(agent => agent.name === profile.agentName));
     if (!usable.length) throw new Error(`every independent producer profile is busy or unavailable (${independent.map(profile => `${profile.name}: ${credentials[profile.name]?.available === false ? credentials[profile.name].reason : 'busy'}`).join('; ')})`);
     try {
-      const handle = launchedSessionHandle('proof', request, `${work.key}: ${group} proofs on ${request.sha.slice(0, 12)} (${proofs.join(', ')})`, config().hostId, undefined, usable[0].kind, config().herdrWorkspace, usable[0].principal);
-      await registeredLaunch(record(work), handle,
-        withLaunchedRuntime(handle, () => effects.launchProducer(work, request, usable[0], agents, observedAt).catch(error => { throw attributeRefusal(error, agentNameReadings({ producers: [usable[0]] }, agents)); })), launched => launched, attachTo);
+      await registeredLaunch(record(work), launchedSessionHandle('proof', request, `${work.key}: ${group} proofs on ${request.sha.slice(0, 12)} (${proofs.join(', ')})`, config().hostId, undefined, usable[0].kind, config().herdrWorkspace, usable[0].principal),
+        () => effects.launchProducer(work, request, usable[0], agents, observedAt).catch(error => { throw attributeRefusal(error, agentNameReadings({ producers: [usable[0]] }, agents)); }), launched => launched, attachTo);
     } catch (error) {
       // The loop's tick launches producers beside the executors (GY-415): a session already pending
       // on this head is the request being answered, as a worker launch another dispatcher holds is
@@ -248,9 +246,8 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       if (profileConcurrency(profile) === 1 && agents.some(agent => agent.name === profile.agentName)) throw new Error(`reviewer agent ${profile.agentName} is busy in Herdr`);
       // A launch refused by a resource at its bound — the review ledger's cap — records that resource.
       try {
-        const handle = launchedSessionHandle('review', request, `${work.key}: review ${request.sha.slice(0, 12)} (PR #${request.pr})`, config().hostId, undefined, profile.kind, config().herdrWorkspace);
-        await registeredLaunch(record(work), handle,
-          withLaunchedRuntime(handle, () => effects.launchReview(work, request, agents, observedAt).catch(error => { throw attributeRefusal(error, agentNameReadings({ reviewers: [profile] }, agents)); })), launched => launched, attachTo);
+        await registeredLaunch(record(work), launchedSessionHandle('review', request, `${work.key}: review ${request.sha.slice(0, 12)} (PR #${request.pr})`, config().hostId, undefined, profile.kind, config().herdrWorkspace),
+          () => effects.launchReview(work, request, agents, observedAt).catch(error => { throw attributeRefusal(error, agentNameReadings({ reviewers: [profile] }, agents)); }), launched => launched, attachTo);
       } catch (error) {
         // The loop's tick launches reviewers beside the executors: a session already answering this
         // head is the request being answered, as a pending producer is for a proof dispatch (GY-415),

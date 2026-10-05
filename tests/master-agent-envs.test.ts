@@ -265,27 +265,40 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     assert.equal(produced.account!.environment, 'claude-c'); assert.deepEqual(produced.account!.skipped.map(entry => entry.environment), ['claude-b']);
     assert.equal(tabEnvironment(produceCalls[0]).GRAPHYARD_TOKEN_FILE, producerCredential);
 
-    // No cross-runtime failover for a reviewer (GY-1306): the Codex profile's only Codex account is
-    // exhausted, and the healthy Claude account it also lists is passed over with that reason, so the
-    // profile waits for its own runtime's reset rather than starting Claude in a checkout prepared for Codex.
+    // Cross-runtime failover for a reviewer: the Codex profile's only Codex account is exhausted, so
+    // the session runs on the Claude account — with the reviewer's role harness following the
+    // account's --kind, never the repository's master rules.
     const reviewLedger = await readReviewLedger(root);
     await saveReviewLedger(root, { ...reviewLedger, reviews: reviewLedger.reviews.filter(record => record.state !== 'pending') });
     const reviewCrossCalls: string[][] = [];
-    await assert.rejects(launchReview(root, work(), 'review-cross', [], new Date().toISOString(), { run: herdr(reviewCrossCalls), mint, probe }), (error: any) => error instanceof NoHealthyAccountError
-      && error.capacityExhausted && JSON.stringify(error.skipped.map((entry: any) => [entry.environment, entry.cause])) === JSON.stringify([['codex', 'exhausted'], ['claude-c', 'cross-runtime']])
-      && /claude-c runs claude, not codex: a reviewer launch of profile review-cross starts only on codex accounts/.test(error.message));
-    assert.deepEqual(reviewCrossCalls, [], 'no tab is created and no session started');
+    const reviewedCross = await launchReview(root, work(), 'review-cross', [], new Date().toISOString(), { run: herdr(reviewCrossCalls), mint, probe });
+    assert.equal(reviewedCross.account!.environment, 'claude-c');
+    assert.equal(tabEnvironment(reviewCrossCalls[0]).CLAUDE_CONFIG_DIR, homes.fresh);
+    const reviewStart = expandTypedCommand(reviewCrossCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
+    assert.equal(reviewStart.kind, 'claude', 'the session runs the account\'s runtime, not the profile\'s');
+    assert.deepEqual(reviewStart.args.slice(0, -1), ['--permission-mode', 'bypassPermissions', '--setting-sources', 'user', '--settings', sessionHarnessFile(root, 'reviewer', 'review-cross'), '--append-system-prompt-file', `${reviewStart.stem}.role`]);
+    assert.equal(roleOf(reviewStart.args), launchAuthorization.replace(/\s+/g, ' '));
+    assert.match(reviewStart.args.at(-1)!, /^You are the independent Graphyard reviewer/, 'the request is the positional prompt (GY-93)');
+    const roleFile = JSON.parse(await readFile(sessionHarnessFile(root, 'reviewer', 'review-cross'), 'utf8'));
+    assert.ok(roleFile.permissions.allow.includes('Bash(gh api --method POST repos/owner/project/pulls/68/reviews*)'), 'the failed-over reviewer keeps its one verdict allow');
+    assert.ok(roleFile.permissions.deny.includes('Bash(git push:*)'), 'the failed-over reviewer keeps its role denies');
+    assert.equal(JSON.stringify(roleFile).includes('master:*'), false, 'the master\'s own rules never ride a reviewer session');
 
-    // Nor for a producer: the Claude profile's Claude accounts are spent or logged out, and the
-    // healthy Codex account it lists is passed over rather than started.
+    // Cross-runtime failover for a producer: the Claude profile's Claude accounts are spent or
+    // logged out, so the session runs on the healthy Codex account with no Claude flags on its line.
     const produceLedger = await readProducerLedger(root);
     await saveProducerLedger(root, { ...produceLedger, producers: produceLedger.producers.filter(record => record.state !== 'pending') });
     const requestedCross = { ...requested, id: 'request-producer-cross', proofs: ['integration:prompt-delivery-confirmed'] };
     const producingCross = work({ autoDispatch: { review: null, producers: [requestedCross], history: [] } } as any);
     const produceCrossCalls: string[][] = [];
-    await assert.rejects(launchProducer(root, producingCross, requestedCross, config.producers.find(profile => profile.name === 'producer-cross')!, [], new Date().toISOString(), { run: herdr(produceCrossCalls), probe }),
-      (error: any) => error instanceof NoHealthyAccountError && JSON.stringify(error.skipped.map((entry: any) => [entry.environment, entry.cause])) === JSON.stringify([['claude-a', 'exhausted'], ['claude-b', 'logged-out'], ['codex-b', 'cross-runtime']]));
-    assert.deepEqual(produceCrossCalls, [], 'no tab is created and no session started');
+    const producedCross = await launchProducer(root, producingCross, requestedCross, config.producers.find(profile => profile.name === 'producer-cross')!, [], new Date().toISOString(), { run: herdr(produceCrossCalls), probe });
+    assert.equal(producedCross.account!.environment, 'codex-b'); assert.deepEqual(producedCross.account!.skipped.map(entry => entry.environment), ['claude-a', 'claude-b']);
+    const produceStart = expandTypedCommand(produceCrossCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
+    assert.equal(produceStart.kind, 'codex', 'the session runs the account\'s runtime, not the profile\'s');
+    const produceTail = produceStart.args;
+    assert.deepEqual(produceTail.slice(0, -1), ['--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'sandbox_workspace_write.network_access=true', '--add-dir', producedCross.checkout, '--add-dir', await sharedGitDirectory(root), ...sessionSlotsGrant(root, config).flatMap(path => ['--add-dir', path])]);
+    assert.ok(produceTail.at(-1)!.startsWith(`${autonomyContract} You are an independent Graphyard proof producer`), 'the request is the positional prompt (GY-93), led by the autonomy contract since Codex loads no role file (GY-184)');
+    assert.equal(produceTail.includes('--setting-sources'), false, 'no Claude harness flags ride a Codex command line');
 
     const review = { id: 'request-review', kind: 'review', provider: 'github', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 2, pr: 68, state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' } as any;
     const item = work({ autoDispatch: { review, producers: [], history: [] } } as any);

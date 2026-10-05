@@ -882,11 +882,7 @@ test('an approver failover whose capacity report fails after the hold retries th
 test('unit:exhaustion-shared-across-roles — an account a worker session exhausted is skipped by the approver, reviewer, producer and registry-chosen launches until its reset, and is eligible again after it', async () => {
   await fresh();
   const sharedHome = await temporaryDirectory('capacity-shared');
-  // A reviewer launches only on its own runtime's accounts (GY-1306), so its failover is a second claude account.
-  await mkdir(join(sharedHome, 'env-c'), { recursive: true });
-  await writeFile(join(sharedHome, 'env-c/.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'not-a-real-token', refreshToken: 'not-a-real-token' } }));
-  const base = loopConfig([profileOf('builder', workerA, ['env-a', 'env-b'])], { credentialFile: join(sharedHome, 'coordinator.token') });
-  const config = { ...base, environments: [...base.environments!, { name: 'env-c', kind: 'claude', home: join(sharedHome, 'env-c') }], reviewers: [reviewerOn(['env-a', 'env-b', 'env-c'])] } as MasterConfig;
+  const config = { ...loopConfig([profileOf('builder', workerA, ['env-a', 'env-b'])], { credentialFile: join(sharedHome, 'coordinator.token') }), reviewers: [reviewerOn(['env-a', 'env-b'])] } as MasterConfig;
   const at = Date.now(), resetsAt = new Date(at + 3 * 3_600_000).toISOString();
   // What the loop's worker failover holds when a worker stops on its notice.
   await recordObservedExhaustion(config, 'env-a', { at: new Date(at).toISOString(), resetsAt, reason: "You've hit your weekly limit", role: 'worker', profile: 'builder', work: 'GY-1' }, at);
@@ -900,7 +896,7 @@ test('unit:exhaustion-shared-across-roles — an account a worker session exhaus
     producer: (await selectAccount(config, 'producer', producerProfile, probe)).account?.name,
     'escalation-handler': (await selectAccount(config, 'escalation-handler', producerProfile, probe)).account?.name,
   });
-  assert.deepEqual(await launched(before), { worker: 'env-b', approver: 'env-b', reviewer: 'env-c', producer: 'env-b', 'escalation-handler': 'env-b' }, 'no role is handed the account another role saw spent');
+  assert.deepEqual(await launched(before), { worker: 'env-b', approver: 'env-b', reviewer: 'env-b', producer: 'env-b', 'escalation-handler': 'env-b' }, 'no role is handed the account another role saw spent');
   const skips = (await readEnvironmentLog(config)).skipped.filter(entry => entry.environment === 'env-a');
   assert.deepEqual([...new Set(skips.map(entry => entry.role))].sort(), ['approver', 'escalation-handler', 'producer', 'reviewer', 'worker']);
   assert.ok(skips.every(entry => entry.cause === 'exhausted' && /env-a exhausted its quota mid-session/.test(entry.reason)));
