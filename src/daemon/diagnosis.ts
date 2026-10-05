@@ -329,7 +329,9 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
     if (!outcome) {
       // A run this process is not running whose bound has passed was lost with a restart.
       const bound = Date.parse(entry.startedAt) + 2 * diagnostician.settings.timeoutMinutes * 60_000 + diagnosisLostGraceMs;
-      if (!live.has(entry.subject) && clock > bound) { entry.state = 'failed'; await note(entry, 'failed', `The diagnosis of ${entry.subject} started ${entry.startedAt} never ended in this process; the master diagnoses it by hand`); }
+      // GY-1318: the restart that lost it is the loop's own, and the handoff is the designed outcome:
+      // still failed, but no fault kind, so no loop fault instance (as GY-1092 and GY-1266 did).
+      if (!live.has(entry.subject) && clock > bound) { entry.state = 'failed'; await note(entry, 'failed', `The diagnosis of ${entry.subject} started ${entry.startedAt} never ended in this process; the master diagnoses it by hand`, null); }
       return;
     }
     outcomes.delete(entry.subject);
@@ -397,11 +399,43 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
 
 /** Request the decision as the master's operator-agent identity, then launch its independent approver. */
 async function request(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, work: Work, action: 'release' | 'close', input: Record<string, unknown>, reason: string, note: Note) {
-  const decision = await diagnostician.decide(work, action, clip(reason, 2000), input);
-  entry.decision = { id: decision.id, action, work: work.key, approver: null };
+  const requested = await decideFresh(cycle, diagnostician, entry, work, action, input, clip(reason, 2000), note);
+  if (!requested) return;
+  const { decision, target } = requested;
+  entry.decision = { id: decision.id, action, work: target.key, approver: null };
   entry.state = action === 'release' ? 'releasing' : 'closing';
-  await note(entry, 'done', `Requested ${action} decision ${decision.id} on ${work.key} for the diagnosis of ${entry.subject}`);
-  return launchApprover(cycle, entry, work, note);
+  await note(entry, 'done', `Requested ${action} decision ${decision.id} on ${target.key} for the diagnosis of ${entry.subject}`);
+  return launchApprover(cycle, entry, target, note);
+}
+const revisionRaced = (error: unknown) => /Task revision changed/.test(message(error));
+/**
+ * GY-1318: the request names the item's revision from the cycle's snapshot, and the loop's own next
+ * write can move the item before the request lands — the server refuses it "Task revision changed
+ * (now N); reload and request again" (GY-1304's instance). That is the request-time leg of the race
+ * GY-1296's rerequest answers after settlement, so it is answered the same way: the item is reloaded
+ * and asked again once against its current revision, bounded like rerequest (maxDecisionRequests,
+ * counted from the item's own decision history). A retry spent, raced again or no longer applicable
+ * is no failure of the loop: it records no fault, the entry keeps its state, and the next cycle
+ * decides afresh from the fresh snapshot. Any other refusal still throws.
+ */
+async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, work: Work, action: 'release' | 'close', input: Record<string, unknown>, reason: string, note: Note) {
+  try { return { decision: await diagnostician.decide(work, action, reason, input), target: work }; }
+  catch (error) {
+    if (!revisionRaced(error)) throw error;
+    const why = `The ${action} request on ${work.key} for the diagnosis of ${entry.subject} was refused: ${message(error)}`;
+    const fresh = (await cycle.effects.snapshot()).work.find(candidate => candidate.id === work.id);
+    const applicable = !!fresh && !isClosed(fresh) && fresh.stage !== 'done' && (action === 'close' || (fresh.stage === 'backlog' && !fresh.ready));
+    if (!applicable) { await note(entry, 'done', `${why}; ${work.key} no longer needs the ${action}, so it is not asked again and the next cycle decides afresh`, null); return null; }
+    const history = cycle.effects.decisions ? (await cycle.effects.decisions(fresh)).decisions : [];
+    const spent = history.filter(candidate => candidate.action === action && (candidate.state === 'stale' || candidate.state === 'withdrawn')).length;
+    if (spent >= maxDecisionRequests) { await note(entry, 'done', `${why}; ${spent} ${action} request(s) already settled without applying, so it is not asked again here and the next cycle decides afresh`, null); return null; }
+    try { return { decision: await diagnostician.decide(fresh, action, reason, input), target: fresh }; }
+    catch (again) {
+      if (!revisionRaced(again)) throw again;
+      await note(entry, 'done', `${why}; asked again against revision ${fresh.revision} and refused again (${message(again)}), so the next cycle decides afresh`, null);
+      return null;
+    }
+  }
 }
 /**
  * GY-1296: the server settled the entry's decision without applying it — 'stale' when the item's
