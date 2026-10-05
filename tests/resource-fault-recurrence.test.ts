@@ -11,10 +11,11 @@ import { launchAppearanceMs } from '../src/daemon/effects.js';
 import type { Work } from '../src/model.js';
 import type { ReviewRecord } from '../src/reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from '../src/producer.js';
-import { baseReclaimGates, describeReclaim, finishedSessionGraceMs, ledgerRetentionMs, loadedRevision, nameReclaimBoundMs, owedUpgrade, readReclaimReports, readResources, reclaimResources, resourceAttention, resourceReportFile, selfUpgradeBoundMs, stuckSessionMs, unownedPaneConfirmMs, type ResourceInputs } from '../src/master-resources.js';
+import { baseReclaimGates, describeReclaim, finishedSessionGraceMs, ledgerRetentionMs, loadedRevision, nameReclaimBoundMs, readReclaimReports, readResources, reclaimResources, resourceAttention, resourceReportFile, selfUpgradeBoundMs, stuckSessionMs, unownedPaneConfirmMs, type ResourceInputs } from '../src/master-resources.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { classifyAttention } from '../src/model/fault-classes.js';
 import { resourceStatus } from '../src/master-status.js';
+import * as masterResources from '../src/master-resources.js';
 import { writeFile } from 'node:fs/promises';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -917,8 +918,11 @@ test('unit:resource-fault-recurrence-reproduces-gy-1196-subjects — the three G
     : args.includes('diff') ? 'src/master.ts\n' : `${revision.behind}\n`;
   const master = { url: 'http://127.0.0.1:9', hostId: 'vishrog', workers: gy1198.names({}).profiles.workers, reviewers: [], producers: [], credentialFile: join(directory, 'graphyard.token') } as unknown as MasterConfig;
   const cursor = { upgrade: { pending: { from: revision.loaded, to: revision.checkout, code: true } }, actions: { [`upgrade:${sha('release')}`]: { at: new Date(now - cycleMs).toISOString() }, 'upgrade:refused': { at: new Date(now).toISOString() } } };
-  assert.deepEqual(owedUpgrade(cursor), { from: revision.loaded, to: revision.checkout, code: true, attemptedAt: now - cycleMs }, 'the latest attempt is the upgrade action, not its refusal record');
-  assert.equal(owedUpgrade({ upgrade: { pending: null }, actions: {} }), null);
+  // Looked up at run time, so the base (which has no such reader) fails here as a test case.
+  const owedUpgrade = (masterResources as Partial<typeof masterResources>).owedUpgrade;
+  assert.equal(typeof owedUpgrade, 'function', 'master status reads the owed restart from the cursor');
+  assert.deepEqual(owedUpgrade!(cursor), { from: revision.loaded, to: revision.checkout, code: true, attemptedAt: now - cycleMs }, 'the latest attempt is the upgrade action, not its refusal record');
+  assert.equal(owedUpgrade!({ upgrade: { pending: null }, actions: {} }), null);
   const loop = { lagMs: 0, stalledAfterMs: 120_000, detail: '', lock: { pid: 1, host: 'vishrog' } };
   const status = (withCursor: boolean) => resourceStatus(directory, master, { reviews: [], producers: [], agents: [gy1198.pane], work: gy1198.work, loop },
     { run, now: now + selfUpgradeBoundMs, fetcher: (async () => { throw new Error('no plane'); }) as unknown as typeof fetch, cursor: async () => withCursor ? cursor : { upgrade: { pending: null }, actions: {} } });
