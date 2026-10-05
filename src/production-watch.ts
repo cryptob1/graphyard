@@ -367,16 +367,17 @@ export class ProductionWatch {
       await this.raise(item, report, at, 'missing', null, `no ${this.options.provider ? `${this.options.provider.name} deployment` : 'deployment'} of ${mergeSha.slice(0, 12)} was observed within ${Math.round(this.grace / 60_000)} minutes of ${tip ? `its promotion to ${this.options.releaseBranch} (${tip.slice(0, 12)})` : 'the merge'}; production serves ${report.serving!.slice(0, 12)}, which does not contain it${this.options.provider ? '' : '. Configure RAILWAY_API_TOKEN (or RAILWAY_TOKEN) so the provider reports the failing deployment'}`);
       report.pending.push(item.key);
     }
+    if (report.serving) await this.recordPending(report.serving, at);
+    report.incidents = this.openIncidents();
     if (report.ahead && !tip) {
       // A merge→deploy rollout in flight is not a deployment fault: the lag stands as attention only
       // once a delivered merge has gone unserved past the grace (a failed rollout, a rollback, a stall).
+      // An open incident — a provider FAILED status inside the grace — is no rollout in flight.
       const latest = report.latest, servingCommit = report.serving?.toLowerCase();
       const attempting = !!latest && ['building', 'deploying', 'queued'].includes(latest.status) && !!latest.commit && latest.commit.toLowerCase() !== servingCommit && now - Date.parse(latest.createdAt) <= this.grace * 3;
       report.ahead.unservedSince = unservedSince === null ? null : new Date(unservedSince).toISOString();
-      report.ahead.rollingOut = report.ahead.by > 0 && unservedSince !== null && (now - unservedSince < this.grace || (attempting && now - unservedSince <= this.grace * 3));
+      report.ahead.rollingOut = report.ahead.by > 0 && unservedSince !== null && !report.incidents.length && (now - unservedSince < this.grace || (attempting && now - unservedSince <= this.grace * 3));
     }
-    if (report.serving) await this.recordPending(report.serving, at);
-    report.incidents = this.openIncidents();
     report.attention = attentionLines(report);
     this.report = report;
     return this.status();
