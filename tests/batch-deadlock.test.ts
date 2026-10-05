@@ -182,3 +182,51 @@ test('unit:no-observation-recorded — every claimed job that saves no observati
   assert.equal(diagnose(await reload(work), after.work, Date.parse(after.now), after.jobs).some(entry => entry.kind === 'observation-starved'), false);
   assert.deepEqual(await store.starvedJobs(), [], 'the saved observation clears the master-status item');
 });
+
+test('unit:observation-no-save-faults — a run that saves no observation names its cause and the bounded retry policy, and the run that reaches the limit escalates once instead of counting up', async () => {
+  // Imported here, so a checkout without the module fails this case rather than the whole file.
+  const { observationEscalatedRetryMs, observationNoSaveLimit, observationRetryMs } = await import('../src/model/observation-save.js');
+  await clearQueue();
+  const repo = new Repo(), github = repo.adapter();
+  const main = repo.commit([], 'main'); repo.refs.set('heads/main', main);
+  let work = await submitted(repo, 'Escalated observation', () => repo.change([main], 'feat: escalated', ['src/server/routes/escalated.ts']));
+  repo.approve(work.submission!.pr, repo.refs.get(`heads/${branchOf(work)}`)!);
+  work = await cycle(github, work);
+  assert.ok(work.observation, 'the item is observed once before every save is refused');
+  const cause = 'Task changed while GitHub was being observed; retry';
+  (github as any).observe = async () => { throw new ReconciliationRetry(cause, 409); };
+  const streak = async (runs: number) => {
+    for (let run = 1; run <= runs; run++) {
+      const started = Date.now();
+      work = await cycle(github, work);
+      const job = await jobRow(work);
+      const finishes = Math.min(run, observationNoSaveLimit);
+      assert.equal(job.unobserved, finishes, `run ${run} counts up to the limit and no further`);
+      assert.ok(String(job.deferred_reason).startsWith(cause), `run ${run} names the cause`);
+      assert.equal(job.error, null, 'a concurrency retry is not an operator error');
+      const delay = Date.parse(job.available_at) - started;
+      if (finishes < observationNoSaveLimit) {
+        assert.match(String(job.deferred_reason), new RegExp(`no observation saved ${finishes} of ${observationNoSaveLimit} times: retrying in ${observationRetryMs / 1000} s, escalating at ${observationNoSaveLimit}`));
+        assert.ok(delay <= observationRetryMs + 5000, `below the limit the retry is the short one (${delay} ms)`);
+      } else {
+        assert.match(String(job.deferred_reason), new RegExp(`no observation saved ${observationNoSaveLimit} times in a row: escalated, retrying every ${observationEscalatedRetryMs / 1000} s until one saves`));
+        assert.ok(delay >= observationEscalatedRetryMs - 5000, `at the limit the job stops retrying every two seconds (${delay} ms)`);
+      }
+    }
+  };
+  await streak(observationNoSaveLimit + 3);
+  const escalations = await events(work, 'observation.no-save-escalated');
+  assert.equal(escalations.length, 1, 'the run that reaches the limit records the fault once, not once per further run');
+  assert.deepEqual({ ...escalations[0].payload.details, reason: undefined }, { cause, finishes: observationNoSaveLimit, limit: observationNoSaveLimit, retryMs: observationEscalatedRetryMs, reason: undefined });
+  const snapshot = await store.workSnapshot();
+  const raised = buildMasterStatus(snapshot, [], [], {}, {}, undefined, 'main', { starvedJobs: await store.starvedJobs() }).attentionItems.find(item => item.subject === work.key && item.kind === 'integration-job');
+  assert.ok(raised, 'master status raises the escalated job as an observation fault');
+  assert.match(raised!.text, new RegExp(`finished ${observationNoSaveLimit} times in a row without saving an observation; last reschedule: ${cause.replace(/[.;]/g, '\\$&')} \\(no observation saved ${observationNoSaveLimit} times in a row: escalated`));
+  // A saved observation ends the streak; the next streak escalates again.
+  (github as any).observe = repo.adapter().observe;
+  work = await cycle(github, work);
+  assert.equal((await jobRow(work)).unobserved, 0);
+  (github as any).observe = async () => { throw new ReconciliationRetry(cause, 409); };
+  await streak(observationNoSaveLimit);
+  assert.equal((await events(work, 'observation.no-save-escalated')).length, 2, 'a new streak reaching the limit escalates again');
+});
