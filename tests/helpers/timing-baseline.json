@@ -320,6 +320,7 @@
     "tests/exited-worker-pane.test.ts": 1768,
     "tests/failed-launch-pane.test.ts": 1877,
     "tests/failed-manual-proof-rework.test.ts": 1485,
+    "tests/fault-class-capacity.test.ts": 480,
     "tests/fault-class-configuration.test.ts": 649,
     "tests/unproduced-manual-attestation.test.ts": 900,
     "tests/fault-class-decision.test.ts": 1200,
