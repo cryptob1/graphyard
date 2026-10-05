@@ -15,7 +15,11 @@
 
 ### The coordinator checkout is confined at the OS level
 
-Every launch but the master session's gets the checkout unwritable to shell commands: Codex by a confined `--sandbox workspace-write`, others by bubblewrap (checkout read-only, session bus a [keyring-only proxy](operations.md#worker-host-keyring-proxy)) re-exposing only the session worktree and shared Git areas. A launch that cannot be confined is refused with the reason. Every non-master session starts in its own checkout. Loop and executors never start, self-upgrade or restart on a dirty or moved checkout ([details](master-agent.md#operate)).
+Every launch but the master session's gets the checkout unwritable to shell commands: by bubblewrap (checkout read-only, session bus a [keyring-only proxy](operations.md#worker-host-keyring-proxy)) re-exposing only the session worktree and shared Git areas, or Codex's `--sandbox workspace-write` granting nothing inside. A launch that cannot be confined is refused with the reason. Every non-master session starts in its own checkout. Loop and executors never start, self-upgrade or restart on a dirty or moved checkout ([details](master-agent.md#operate)).
+
+#### Worker sandbox
+
+Codex workers get `--add-dir` for `.git/worktrees/NAME` (index, HEAD, FETCH_HEAD) and shared `objects`, `refs/remotes`, `refs/heads/graphyard` plus `logs/`, as bubblewrap re-exposes; never `.git`: its `.git/.git` mount point fails read-only, killing every command. Others: none. The write probe runs inside that bubblewrap; its failure fails the launch, naming the path.
 
 ## Accounts and failover
 
@@ -51,9 +55,9 @@ On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-
 
 Reviewers and producers are `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once if quiet past `run.acknowledgementSeconds` (default 90); settling resultless is **`never started`**: relaunched free a minute later, three at most (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
 
-**Idle-with-lease** (30 quiet minutes, nothing open): re-prompted once, after 30 more handed to a new attempt on its branch.
+**Idle-with-lease** (30 quiet minutes, nothing open): re-prompted once; not resumed 10 minutes later (a brief reply does not count), handed on, keeping its branch.
 
-**Blocked mid-session** (Herdr reports `blocked`): the loop reads the pane (by agent name, then pane id). A destructive-command prompt is declined; a folder-trust dialog is never answered: the session is closed and launched again at once, and the launch records the trust (a second dialog for the same request waits as unknown); any other prompt fails the session after **5 minutes**. A screen that cannot be read is no prompt: nothing is recorded or timed until a read shows one.
+**Blocked mid-session** (Herdr reports `blocked`): the loop reads the pane (by agent name, then pane id). A destructive-command prompt is declined; a folder-trust dialog is never answered: the session is closed and launched again at once, and the launch records the trust (a second dialog for the same request waits as unknown); any other prompt fails the session after **5 minutes**. An unreadable screen is no prompt and starts no timer.
 
 Headless Pi runs (`.graphyard/runs/`) survive restarts.
 
@@ -64,7 +68,7 @@ Ending a session closes its pane; each cycle closes ≤**6** more launched **on 
 ### The dispatcher's own state
 
 - **The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis.
-- **A cursor that fails its schema is repaired, not fatal**, logged once with the path that failed.
+- **A cursor failing its schema is repaired, not fatal**, logged once with the path that failed.
 - **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item: no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
 
 **A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for a runtime that exits **at launch**, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.

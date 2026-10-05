@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { idleLeaseMs } from '../src/daemon/cycle-sessions.js';
+import { idleRepromptGraceMs } from '../src/daemon/cycle-resume.js';
 import { launchAppearanceMs } from '../src/daemon/effects.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -158,11 +159,11 @@ test('unit:idle-lease-reclaimed — a worker idle with a live lease is re-prompt
     assert.ok(idle, 'master status reads the handle as idle-with-lease, naming the pane');
     assert.equal(idle.state, 'running');
 
-    await runCycle(master, state, effects, () => clock + minutes(50));
+    await runCycle(master, state, effects, () => clock + minutes(40));
     assert.equal(log.prompts.length, 1, 'one re-prompt only');
-    assert.equal(log.capacity.length, 0, 'nothing is handed on before a further thirty minutes');
+    assert.equal(log.capacity.length, 0, 'nothing is handed on before the re-prompt\'s grace has passed');
 
-    await runCycle(master, state, effects, () => clock + minutes(62));
+    await runCycle(master, state, effects, () => clock + minutes(42));
     assert.equal(log.prompts.length, 1);
     assert.deepEqual(log.preserved, [1], 'the attempt keeps what it left, on its branch');
     assert.equal(log.capacity.length, 1, 'the attempt ends on the record, which frees the item for a new attempt');
@@ -183,13 +184,48 @@ test('unit:idle-lease-reclaimed — a worker idle with a live lease is re-prompt
     await runCycle(master, fresh, run.effects, () => clock);
     await runCycle(master, fresh, run.effects, () => clock + minutes(31));
     active.agent_status = 'working';
-    await runCycle(master, fresh, run.effects, () => clock + minutes(40));
+    await runCycle(master, fresh, run.effects, () => clock + minutes(45));
     active.agent_status = 'idle';
-    await runCycle(master, fresh, run.effects, () => clock + minutes(41));
-    await runCycle(master, fresh, run.effects, () => clock + minutes(65));
+    await runCycle(master, fresh, run.effects, () => clock + minutes(46));
+    await runCycle(master, fresh, run.effects, () => clock + minutes(70));
     assert.equal(run.log.prompts.length, 1);
-    assert.equal(run.log.capacity.length, 0, 'activity after the re-prompt means it is not handed on');
+    assert.equal(run.log.capacity.length, 0, 'work resumed past the re-prompt\'s grace means it is not handed on');
     assert.ok(idleLeaseMs === minutes(30));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('unit:idle-lease-reclaim-inside-worker-bound — a session that answers its one re-prompt with a turn that runs nothing is handed on inside the 60-minute worker bound', async () => {
+  const { directory, master } = await setup();
+  try {
+    // GY-1321: a codex worker whose sandbox could not start answered its re-prompt in 18 s and went
+    // quiet again; the old cadence (30 minutes, re-prompt, 30 more) held each attempt 65-73 minutes.
+    assert.equal(idleLeaseMs, minutes(30));
+    assert.equal(idleRepromptGraceMs, minutes(10));
+    assert.ok(idleLeaseMs + idleRepromptGraceMs < minutes(60) - minutes(10), 'quiet from its first minutes, the attempt ends with room inside the bound');
+    const item = { current: [held({ id: 'work-260', key: 'GY-260', containmentQuarantine: null })] };
+    const agent: HerdrAgent = { name: 'agent-alpha', pane_id: 'w1:p4J1', agent_status: 'idle', agent: 'claude' };
+    const { log, effects } = harness(item, agent);
+    const state = emptyDaemonState(master);
+    await runCycle(master, state, effects, () => clock + minutes(7));
+    await runCycle(master, state, effects, () => clock + minutes(38));
+    assert.equal(log.prompts.length, 1, 'past thirty quiet minutes it is re-prompted once');
+    assert.match(log.prompts[0], /has not resumed work within 10 minutes/);
+    // The reminder is answered by one brief turn that runs nothing, which the loop sees as activity.
+    agent.agent_status = 'working';
+    await runCycle(master, state, effects, () => clock + minutes(39));
+    agent.agent_status = 'idle';
+    await runCycle(master, state, effects, () => clock + minutes(40));
+    await runCycle(master, state, effects, () => clock + minutes(47));
+    assert.equal(log.capacity.length, 0, 'inside the grace nothing is handed on');
+    assert.equal(log.prompts.length, 1, 'the brief turn starts no second re-prompt window');
+    await runCycle(master, state, effects, () => clock + minutes(49));
+    assert.equal(log.capacity.length, 1, 'ten minutes after the re-prompt the attempt ends, 49 minutes after launch');
+    assert.equal(log.capacity[0].cause, 'interrupted');
+    assert.match(String(log.capacity[0].reason), /after its re-prompt at .* but a turn that ended by/);
+    assert.deepEqual(log.closed, ['w1:p4J1']);
+    assert.deepEqual(log.preserved, [1], 'its branch is kept for the next attempt');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
