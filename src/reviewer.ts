@@ -1,7 +1,8 @@
 import { createHash, createSign, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rm, realpath } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, rm, realpath, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
@@ -533,6 +534,48 @@ export function repetitionReviewSection(files?: readonly string[] | null) {
  * candidate changes: the criterion is judged beside the item's own, with the repository's paths.
  */
 /** `research` is the item's recorded research brief (GY-259): the change is checked against its recommended approach and answered questions. */
+/**
+ * GY-866: a reviewer or producer session starts in its own session directory under the managed
+ * worktree root, never in the coordinator checkout, and its request runs `git fetch` and
+ * `git worktree add` from where it starts. The directory points at the repository's Git directory,
+ * so those commands reach the repository from there without the directory itself being a registered
+ * linked worktree (which would cause confinement to bind only its own admin directory and leave
+ * .git/worktrees read-only, breaking subsequent `git worktree add`).
+ * The anchor makes the directory a second work tree of the main repository: it shares the
+ * coordinator's HEAD and index, so `git status` there shows every tracked file deleted, and
+ * `git add`, `commit` or `checkout` there would write the coordinator's index and HEAD. Only the
+ * read-only confinement keeps those writes out; the session's own work belongs in the detached
+ * worktree its request adds under `checkout/`, never in the anchor directory itself.
+ */
+export async function anchorSessionCheckout(root: string, directory: string, run: ChildRun = defaultChildRun): Promise<void> {
+  try {
+    let gitDir: string | null = null;
+    try {
+      const output = (await run('git', ['-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
+      if (output && !output.startsWith('{')) gitDir = output;
+    } catch {}
+    if (!gitDir) gitDir = await sharedGitDirectory(root);
+    if (!gitDir && existsSync(join(root, '.git'))) gitDir = resolve(root, '.git');
+    if (gitDir) {
+      await mkdir(join(gitDir, 'worktrees'), { recursive: true });
+      await writeFile(join(directory, '.git'), `gitdir: ${gitDir}\n`);
+    }
+  } catch { /* the session still starts outside the coordinator checkout */ }
+}
+
+/**
+ * GY-866: an interactive approver's or escalation handler's own directory under the managed
+ * worktree root, never the coordinator checkout, anchored like a reviewer's so `gh` and `git`
+ * reads reach the repository from where it starts. Its launch hands it the coordinator root in
+ * GRAPHYARD_REPOSITORY_ROOT, which the CLI resolves the `graphyard master` commands its request
+ * runs from, since the directory holds no installation of its own.
+ */
+export async function coordinationCheckout(root: string, config: MasterConfig, key: string, sha: string | undefined, filesystem?: FilesystemProbe) {
+  const checkout = await allocateManagedCheckout(root, config, 'approval', key, sha ?? '0'.repeat(40), randomUUID(), filesystem);
+  await anchorSessionCheckout(root, checkout.directory);
+  return checkout;
+}
+
 export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null) {
   let rounds: ReviewRoundStatus | undefined;
   if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') {
@@ -734,6 +777,7 @@ export async function launchReview(root: string, work: Work, profileName: string
       // Before a token exists: the one place this session may check the head out, under the managed
       // worktree root — durable storage with room left, outside every worktree.
       const checkout = await allocateManagedCheckout(root, config, 'review', binding.key, binding.sha, id, dependencies.filesystem);
+      await anchorSessionCheckout(root, checkout.directory);
       const discard = () => removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
       let minted: { token: string; expiresAt: string };
       try { minted = await mint(credential, config.repository); await writeReviewerSession(sessionDirectory, minted.token); }
@@ -755,13 +799,13 @@ export async function launchReview(root: string, work: Work, profileName: string
         const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
         const environment = { ...withVerificationPath(harness.environment, launch.environment), GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}` };
         startedTab = true;
-        const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
+        const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory,
           '--label', `${binding.key} review · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
         pane = created.pane; tabId = created.tab;
         const memory = await readProjectMemory(root).catch(() => null);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: root, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();

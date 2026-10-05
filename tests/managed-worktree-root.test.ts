@@ -5,7 +5,7 @@ import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, readdir, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
@@ -139,8 +139,13 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     // Still outside every worktree, and still enforced by assertOutsideWorktrees: both allocated
     // directories pass it, and a root placed inside the repository, inside an assignment worktree
     // or inside a session's own registered checkout is refused before anything is created there.
-    await assertOutsideWorktrees(root, produced.checkout, 'An ephemeral checkout');
-    await assertOutsideWorktrees(root, reviewed.checkout, 'An ephemeral checkout');
+    // GY-866: each session directory points at the repository's Git directory so the git fetch
+    // and git worktree add its request runs from where it starts reach the repository; it is still
+    // outside every worktree, the coordinator checkout included, with nothing checked out.
+    for (const own of [produced.checkout, reviewed.checkout]) {
+      await assertOutsideWorktrees(root, own, 'An ephemeral checkout');
+      assert.deepEqual(await readdir(own).then(entries => entries.filter(entry => entry !== '.git' && entry !== '.graphyard')), [], `${own} has nothing checked out`);
+    }
     const assignment = join(root, '.graphyard/worktrees/GY-88-1');
     git('worktree', 'add', '-q', '-b', 'graphyard/gy-88-1', assignment, 'HEAD');
     await occupy(git, produced.checkout);
