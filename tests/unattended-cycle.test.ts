@@ -1025,7 +1025,7 @@ test('an agent or Codex review that has not approved is not a verdict: a head no
   assert.equal(standingVerdict(codexReview('Codex posted review findings/output for this request; fix them and request a fresh clean review', { verdict: 'changes-requested', requestId: 601, completedAt: '2031-03-01T09:25:00.000Z' }))?.reviewer, 'codex');
 });
 
-test('unit:review-rounds-capped — the real loop past an item\'s third review round: a change request naming no BLOCKING: finding is filed as one follow-up batch and withdrawn, and the item merges with no further rework; a blocking finding is escalated for an independent approver instead of reworked; and the cap is master.json reviewRoundCap', async t => {
+test('unit:review-rounds-capped — the real loop past an item\'s third review round: a change request naming no BLOCKING: finding is withdrawn with nothing filed, and the item merges with no further rework; a blocking finding is escalated for an independent approver instead of reworked; and the cap is master.json reviewRoundCap', async t => {
   const reviewerApp = { appId: 77, installationId: 78, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.pem', boundAt: '2031-01-01T00:00:00Z' };
   const host = await approverHost({ workers: [profile('claude-a')], reviewer: reviewerApp });
   t.after(host.cleanup);
@@ -1040,13 +1040,12 @@ test('unit:review-rounds-capped — the real loop past an item\'s third review r
     item.pipeline = { attempts: [], submittedAt: null, resubmittedAt: null, reworkRounds: 3, interventions: { blocked: 0, requirements: 0 } };
     // GitHub reports the review with its id and body, which the observation keeps for a change request.
     const observe = () => { for (const review of item.observation?.reviews ?? []) if (review.state === 'CHANGES_REQUESTED' && review.id === undefined) Object.assign(review, { id: 9001, ...observedReviewBody(body) }); };
-    const filed: { work: string; findings: { path: string | null; text: string }[]; reason: string; key: string }[] = [], withdrawn: { work: string; reviewId: number; message: string }[] = [];
+    const withdrawn: { work: string; reviewId: number; message: string }[] = [];
     const effects = simulation.effects({
-      fileReviewFollowUps: async (work, findings, reason, idempotency) => { filed.push({ work: work.key, findings, reason, key: idempotency }); return { key: work.key, added: findings.length }; },
       withdrawReview: async (work, reviewId, message) => {
         withdrawn.push({ work: work.key, reviewId, message });
         // GitHub dismisses it, the review request is answered afresh on the same head, and the
-        // reviewer approves it, its findings now follow-ups; CI has passed on the head meanwhile.
+        // reviewer approves it, its findings now nits; CI has passed on the head meanwhile.
         // A `rereview` body is instead the re-review requesting changes again on the same head.
         scripts[0].rounds = ['pass'];
         const target = simulation.find(work.id);
@@ -1056,7 +1055,7 @@ test('unit:review-rounds-capped — the real loop past an item\'s third review r
         simulation.recompute(target);
       },
     });
-    return { simulation, item, observe, filed, withdrawn, effects };
+    return { simulation, item, observe, withdrawn, effects };
   };
   const drive = async (run: ReturnType<typeof third>, config: MasterConfig, passes: number, until: () => boolean = () => false) => {
     const state = emptyDaemonState(config), performed: DaemonAction[] = [];
@@ -1064,19 +1063,17 @@ test('unit:review-rounds-capped — the real loop past an item\'s third review r
     return { state, performed };
   };
 
-  // Non-blocking findings in round 4: one follow-up batch, the change request withdrawn, no rework.
+  // Non-blocking findings in round 4: nothing filed, the change request withdrawn, no rework.
   const followUps = third('GY-1201', 'The helper could be named more clearly.\n\n- Consider a table-driven test for the edge cases.');
   const delivered = await drive(followUps, master, 30, () => followUps.item.stage === 'done');
   assert.equal(followUps.item.stage, 'done', steps(delivered.performed).join(', '));
   assert.equal(followUps.item.epoch, 1, 'the item proceeded toward merge on the same head: no rework round');
   assert.deepEqual(followUps.simulation.decisions.get(followUps.item.id) ?? [], [], 'no rework decision was ever requested');
-  assert.equal(followUps.filed.length, 1, 'the findings were filed once, as one follow-up batch');
-  assert.deepEqual(followUps.filed[0].findings, [{ path: null, text: 'The helper could be named more clearly.' }, { path: null, text: '- Consider a table-driven test for the edge cases.' }]);
-  assert.equal(followUps.filed[0].key, cappedFilingKey(followUps.item, { sha: followUps.item.candidate!.sha, reviewId: 9001 }));
-  assert.match(followUps.filed[0].reason, /Review round 4 of GY-1201 is past its cap of 3/);
+  assert.equal(delivered.state.actions[cappedFilingKey(followUps.item, { sha: followUps.item.candidate!.sha, reviewId: 9001 })]?.state, 'done', 'the withdrawal is recorded once, under its head and review');
+  assert.match(delivered.state.actions[cappedFilingKey(followUps.item, { sha: followUps.item.candidate!.sha, reviewId: 9001 })]!.detail, /Review round 4 of GY-1201 is past its cap of 3/);
   assert.deepEqual(followUps.withdrawn.map(entry => [entry.work, entry.reviewId]), [['GY-1201', 9001]]);
-  assert.match(followUps.withdrawn[0].message, /review round 4 is past the cap of 3, and it names no BLOCKING: finding/);
-  assert.ok(delivered.performed.some(action => action.kind === 'review' && action.state === 'done' && /2 findings recorded as follow-ups and the change request withdrawn/.test(action.detail)));
+  assert.match(followUps.withdrawn[0].message, /review round 4 is past the cap of 3, and it names no BLOCKING: finding\. Its findings are nits and are not filed/);
+  assert.ok(delivered.performed.some(action => action.kind === 'review' && action.state === 'done' && /2 findings left as nits, nothing filed, and the change request withdrawn/.test(action.detail)));
   assert.equal(delivered.performed.filter(action => action.kind === 'merge' && action.state === 'done').length, 1);
 
   // A blocking finding still open in round 4: escalated once for an approver, never reworked or withdrawn.
@@ -1084,33 +1081,33 @@ test('unit:review-rounds-capped — the real loop past an item\'s third review r
   const escalated = await drive(blocking, master, 8);
   assert.equal(blocking.item.epoch, 1);
   assert.deepEqual(blocking.simulation.decisions.get(blocking.item.id) ?? [], [], 'the blocking finding requested no rework');
-  assert.deepEqual([blocking.filed, blocking.withdrawn], [[], []], 'and was neither filed nor withdrawn');
+  assert.deepEqual(blocking.withdrawn, [], 'and was not withdrawn');
   const raised = escalated.performed.filter(action => action.kind === 'escalation' && action.work === 'GY-1202');
   assert.equal(raised.length, 1, `raised once across the cycles it stood: ${raised.map(action => action.detail).join('\n')}`);
   assert.equal(escalated.state.actions[cappedEscalationKey(blocking.item, blocking.item.candidate!.sha)]?.detail, raised[0].detail);
   assert.match(raised[0].detail, /GY-1202 is in review round 4, past its cap of 3, and graphyard-reviewer\[bot\] names a blocking finding on [0-9a-f]{12}: AC-1 is not met — the widget skips the last frob\./);
   assert.match(raised[0].detail, /requests no further rework for GY-1202: an independent approver decides .*graphyard master decide GY-1202 rework REASON/);
 
-  // A BLOCKING: line past the observation's body bound — after a long verdict — still escalates, never filed or withdrawn.
+  // A BLOCKING: line past the observation's body bound — after a long verdict — still escalates, never withdrawn.
   const late = third('GY-1204', `${'The judgement of each criterion, at length. '.repeat(60)}\n\nBLOCKING: AC-2 is not met — the escalation never fires.`);
   const lateRun = await drive(late, master, 8);
-  assert.deepEqual([late.filed, late.withdrawn, late.simulation.decisions.get(late.item.id) ?? []], [[], [], []]);
+  assert.deepEqual([late.withdrawn, late.simulation.decisions.get(late.item.id) ?? []], [[], []]);
   assert.match(lateRun.state.actions[cappedEscalationKey(late.item, late.item.candidate!.sha)]?.detail ?? '', /names a blocking finding on [0-9a-f]{12}: AC-2 is not met — the escalation never fires\./);
 
-  // A head is withdrawn once: when its re-review requests changes again, the second request is escalated, not filed and withdrawn again.
+  // A head is withdrawn once: when its re-review requests changes again, the second request is escalated, not withdrawn again.
   const repeat = third('GY-1205', 'The helper could be named more clearly.', {}, 'The helper could still be named more clearly.');
   const repeated = await drive(repeat, master, 12);
-  assert.deepEqual([repeat.filed.length, repeat.withdrawn.map(entry => entry.reviewId)], [1, [9001]], 'filed and withdrawn once only');
+  assert.deepEqual(repeat.withdrawn.map(entry => entry.reviewId), [9001], 'withdrawn once only');
   assert.equal(repeat.item.epoch, 1);
   assert.deepEqual(repeat.simulation.decisions.get(repeat.item.id) ?? [], [], 'and no rework requested');
   const again = repeated.performed.filter(action => action.kind === 'escalation' && action.work === 'GY-1205');
   assert.equal(again.length, 1, steps(repeated.performed).join(', '));
-  assert.match(again[0].detail, /change request 9002 on [0-9a-f]{12} names no BLOCKING: finding, after change request 9001 on the same head was already filed as follow-ups and withdrawn/);
+  assert.match(again[0].detail, /change request 9002 on [0-9a-f]{12} names no BLOCKING: finding, after change request 9001 on the same head was already withdrawn/);
 
   // The cap is configuration: at reviewRoundCap 4, round 4 is an ordinary round and the change request is reworked as before.
   const widened: MasterConfig = { ...master, reviewRoundCap: 4 };
   const ordinary = third('GY-1203', 'The helper could be named more clearly.', { host, judgements: ['hang'] });
   await drive(ordinary, widened, 8, () => !!(ordinary.simulation.decisions.get(ordinary.item.id) ?? []).length);
   assert.deepEqual((ordinary.simulation.decisions.get(ordinary.item.id) ?? []).map(decision => decision.action), ['rework']);
-  assert.deepEqual([ordinary.filed, ordinary.withdrawn], [[], []]);
+  assert.deepEqual(ordinary.withdrawn, []);
 });

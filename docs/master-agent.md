@@ -62,7 +62,7 @@ With `run.research` set, a feature (or `"research": true`) gets one read-only Pi
 
 ## Machine-filed backlog
 
-Follow-up findings wait on their item (`pendingFollowUps`) until it ships, then form or join its follow-up item; closing it unshipped drops them ([follow-ups](followups.md)). Triage skips unshipped parents. With `run.research`, Pi triages follow-up and fault items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; status counts `machineUntriaged`/`operatorBacklog`.
+Review follow-ups are never filed: worth-fixing findings are fixed on the same pull request; nit threads are replied to and resolved. Older follow-up items wait for their parent. With `run.research`, Pi triages follow-up and fault items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; status counts `machineUntriaged`/`operatorBacklog`.
 
 ## Automatic dispatch at submit
 
