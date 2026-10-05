@@ -15,19 +15,19 @@
 
 ### The coordinator checkout is confined at the OS level
 
-Every launch but the master session's gets the checkout unwritable to shell commands: by bubblewrap (checkout read-only, session bus a [keyring-only proxy](operations.md#worker-host-keyring-proxy)) re-exposing only the session worktree and shared Git areas, or Codex's `--sandbox workspace-write` granting nothing inside. A launch that cannot be confined is refused with the reason. Every non-master session starts in its own checkout. Loop and executors never start, self-upgrade or restart on a dirty or moved checkout ([details](master-agent.md#operate)).
+Every launch but the master session's gets the checkout unwritable to shell commands: Codex by a confined `--sandbox workspace-write`, others by bubblewrap (checkout read-only, session bus a [keyring-only proxy](operations.md#worker-host-keyring-proxy)) re-exposing the session worktree and shared Git areas. A launch that cannot be confined is refused with the reason. Every non-master session starts in its own checkout. Loop and executors never start, self-upgrade or restart on a dirty or moved checkout ([details](master-agent.md#operate)).
 
 #### Worker sandbox
 
-Codex workers get `--add-dir` for `.git/worktrees/NAME` (index, HEAD, FETCH_HEAD) and shared `objects`, `refs/remotes`, `refs/heads/graphyard` plus `logs/`, as bubblewrap re-exposes; never `.git`: its `.git/.git` mount point fails read-only, killing every command. Others: none. The write probe runs inside that bubblewrap; its failure fails the launch, naming the path.
+Codex workers' `--add-dir` roots: `.git/worktrees/NAME` (index, HEAD, FETCH_HEAD), `objects`, `refs/remotes`, `refs/heads/graphyard`, `logs/`; never `.git`, whose read-only `.git/.git` mount point kills every command. The write probe runs inside bubblewrap; failing, it fails the launch naming the path.
 
 ## Accounts and failover
 
-A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first account under `run.quotaCeilingPercent`, else **fail over** (`dispatch.accounts`), as does a runtime failing to start. A runtime's limit notice (never agent text; from a working session, master too, only beside its retry marker `[retrying in 4s]`) commits work as unpushed `WIP:`, sets `capacity.exhausted` and relaunches elsewhere or after reset (agy's `Individual quota reached`). Reviewers and producers launch only on accounts of their profile's `kind`: another runtime's account is skipped (`cross-runtime`) and the profile waits; their session handles name the runtime launched.
+A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first account under `run.quotaCeilingPercent`, else (or on a failed start) **fail over** (`dispatch.accounts`). A runtime's limit notice (never agent text; from a working session, master too, only beside its retry marker `[retrying in 4s]`) commits work as unpushed `WIP:`, sets `capacity.exhausted` and relaunches elsewhere or after reset (agy's `Individual quota reached`). Reviewers and producers use only their profile's `kind` of account (others skipped as `cross-runtime`; the profile waits).
 
 ## The loop's own master session
 
-Fleet role `master registry role set master ACCOUNTS …` (unset: none): one session; the loop and `master start` adopt a live `masterAgentName`. It starts on the master prompt plus a handover of standing judgement work and relaunches on exit, a limit notice or past `run.masterSessionMinutes` (240). Changed subjects wake it; after `run.masterHeartbeatMinutes` (30) of silence it gets a heartbeat (`master status` `daemon.master`).
+Fleet role `master registry role set master ACCOUNTS …` (unset: none): one session; the loop and `master start` adopt a live `masterAgentName`. It starts on the master prompt plus a handover of standing judgement and relaunches on exit, a limit notice or past `run.masterSessionMinutes` (240). Changed subjects wake it; after `run.masterHeartbeatMinutes` (30) of silence it gets a heartbeat (`master status` `daemon.master`).
 
 ### The request is the session's first message
 
@@ -49,7 +49,7 @@ OpenCode 1.18 is ready at `Ask anything…`/`tab agents` ([fixture](../tests/fix
 
 #### First-run consent prompts
 
-On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; anything else (e.g. **credential**, **payment**) escalates; workspace-trust prompts fail the launch. Trust records are read back just before the runtime starts; a dropped one refuses the launch naming the config. Held workers: `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops it; the item is dispatchable.
+On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; anything else (e.g. **credential**, **payment**) escalates; workspace-trust prompts fail the launch. Trust records are read back just before the runtime starts; a dropped one refuses the launch, naming the config. Held: `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops it; the item is dispatchable.
 
 ### Acknowledgement, resume and idle sessions
 
@@ -57,7 +57,7 @@ Reviewers and producers are `awaiting acknowledgement` until 30 s active (`count
 
 **Idle-with-lease** (25 quiet minutes, nothing open): re-prompted once; still quiet 45 minutes after first seen idle and 10 after the re-prompt (a brief reply to it does not count), handed to a new attempt on its branch, under 60 minutes from its last activity.
 
-**Blocked mid-session** (Herdr reports `blocked`): the loop reads the pane (by agent name, then pane id). A destructive-command prompt is declined; a folder-trust dialog is never answered: the session is closed and launched again at once, and the launch records the trust (a second dialog for the same request waits as unknown); any other prompt fails the session after **5 minutes**. An unreadable screen is no prompt and starts no timer.
+**Blocked mid-session** (Herdr reports `blocked`): the loop reads the pane (by agent name, then pane id). A destructive-command prompt is declined; a folder-trust dialog is never answered: the session is relaunched at once, recording the trust; any other prompt fails the session after **5 minutes**. An unreadable screen times nothing.
 
 Headless Pi runs (`.graphyard/runs/`) survive restarts.
 
@@ -71,4 +71,4 @@ Ending a session closes its pane. Each cycle closes ≤**12** more **on this hos
 - **A cursor failing its schema is repaired, not fatal**, logged once with the path that failed.
 - **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item: no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
 
-**A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for a runtime that exits **at launch**, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
+**A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for one that exits **at launch**, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
