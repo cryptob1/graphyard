@@ -1,26 +1,28 @@
 // Concern: the master status report — dispatch sessions, role concurrency, schedule, branches and deliveries.
 import { concurrentOverlap, scopeBreadth, inFlight, dispatchable, dispatchSort } from '../coordination.js';
+import { blockerView } from '../model/blocker-class.js';
 import { hotFileSet } from '../daemon/hotspots.js';
 import type { ConflictReport } from '../conflicts.js';
 import { standingCapacity, describeCapacity, quotaRoles } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
 import { type Work, carriedBindings, describeGround, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, describeQueueBinding, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance, type QueueBindingReport } from '../model.js';
 import { containmentAttestation, containmentGraceMs } from '../quarantine.js';
-import { defaultMergeBatchSize, describeMergeBatches, describeTipWindow, windowBatchView, type MergeBatchView, type TipView, predictQueue, describeGitHubQueue, pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, branchContamination, currentRestore, ejectedTipRestore, restoredApproval, unpublishableEntry, refusedReconciliation, type QueuePlacement } from '../merge-queue.js';
+import { defaultMergeBatchSize, describeMergeBatches, describeTipWindow, windowBatchView, type MergeBatchView, type TipView, predictQueue, describeGitHubQueue, pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, branchContamination, currentRestore, ejectedTipRestore, restoredApproval, unpublishableEntry, refusedReconciliation, blockedPastProbe, type QueuePlacement } from '../merge-queue.js';
 import { MERGE_PROTOCOL } from '../protocol-version.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention } from '../merge-base-ancestry.js';
 import { pipelineSpeed, pipelineSpeedSummary } from '../pipeline-speed.js';
 import { profileSessions, type WorkerProfile } from './profiles.js';
 import { sessionActivity } from './launch.js';
-import { sessionView } from '../model/session-state.js';
-import { mechanicalProof, unexercisedDetail, unexercisedFindings } from '../model/mechanical-proofs.js';
+import { launchingSession, sessionView } from '../model/session-state.js';
 import type { HerdrAgent } from './herdr.js';
 import { type ContainmentAssessment, containmentHold, containmentPhase } from './containment.js';
 import { agentOwner, type AttentionItem, controlPlaneAttention, type ControlPlaneStatus, fleetStatus, workAttentionOwner, type WorkAttentionCause } from './attention.js';
 import { classified } from '../model/fault-classes.js';
-import { pendingFollowUpsReport } from '../model/followups-held.js';
+import { mechanicalProof, unexercisedDetail, unexercisedFindings } from '../model/mechanical-proofs.js';
+import { requestRemedy } from '../model/dispatch.js';
 import { unrunnableRemedies } from './harness.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation } from './merge.js';
+import { splitRelation, splitReport } from '../decomposition.js';
 import type { ProjectMemory } from '../model/project-memory.js';
 
 // Reviewer failover is a capacity decision the operator must see, not a silent retry.
@@ -66,14 +68,16 @@ export function describeDispatch(work: Work, reviews: { pending: any[]; complete
     // it awaits acknowledgement, with the one re-prompt the loop sent on the record.
     return record ? { id: record.review ?? record.producer, profile: record.profile, agentName: record.agentName, state: record.state, attempt: record.attempt ?? 1, requestedAt: record.requestedAt, sinceMs: since(record.requestedAt),
       delivery: record.delivery ?? null, activity: record.state === 'pending' ? record.activity ?? sessionActivity(record) : null, acknowledgedAt: record.acknowledgedAt ?? null, repromptedAt: record.repromptedAt ?? null,
-      ...(record.verdict !== undefined ? { verdict: record.verdict } : {}), ...(record.outcome ? { outcome: record.outcome } : {}), resolution: record.resolution ?? null, attention: record.attention ?? null } : null;
+      ...(record.verdict !== undefined ? { verdict: record.verdict } : {}), ...(record.outcome ? { outcome: record.outcome } : {}), resolution: record.resolution ?? null, attention: record.attention ?? null,
+      // How long ago a session that is no longer pending settled (GY-533): its answer is still being read for a while after.
+      closedAt: record.closedAt ?? null, settledMs: record.state !== 'pending' && record.closedAt ? since(record.closedAt) : null } : null;
   };
   const failure = (requestId: string) => sessions.failures.find(entry => entry.requestId === requestId) ?? null;
   // A session that failed or expired is relaunched for the same request on a widening interval;
   // the attempts so far and when the next one is due are reported beside the request.
   const retry = (requestId: string) => sessions.retries?.find(entry => entry.requestId === requestId) ?? null;
   const describe = (request: NonNullable<typeof state.review>, records: any[]) => ({ requestId: request.id, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision, requestedAt: request.requestedAt, sinceMs: since(request.requestedAt), reason: request.reason,
-    ...(request.group ? { group: request.group, proofs: request.proofs } : {}), session: session(records, request.id), failure: failure(request.id), retry: retry(request.id),
+    ...(request.group ? { group: request.group, proofs: request.proofs } : {}), session: session(records, request.id), failure: failure(request.id), retry: retry(request.id), remedy: requestRemedy(work, request),
     // A proof the producer found does not exercise its criterion returns the head to its worker (GY-817).
     ...(request.group ? unexercisedOf(request) : {}) });
   const unexercisedOf = (request: NonNullable<typeof state.review>) => {
@@ -165,7 +169,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     // Herdr's reading of the profile answers only for a session no launcher registered.
     const handle = active ? (work.sessions ?? []).find(entry => entry.kind === 'implementation' && entry.id === `${work.lease!.owner}:${work.lease!.epoch}`) : undefined;
     const recorded = handle ? sessionView(handle, new Date(now)) : null;
-    const sessionState = handle && recorded ? recorded.live ? recorded.observed! : handle.state === 'running' ? `not seen since ${recorded.seenAt ?? handle.updatedAt}` : recorded.observed ?? 'finished' : session?.state ?? 'offline';
+    // A launch still preparing its session is `launching`, not unseen (GY-1287).
+    const sessionState = handle && recorded ? recorded.live ? recorded.observed! : handle.state === 'running' ? launchingSession(work, handle, now) ? 'launching' : `not seen since ${recorded.seenAt ?? handle.updatedAt}` : recorded.observed ?? 'finished' : session?.state ?? 'offline';
     const first = work.gates.find(gate => !gate.passed);
     const freshObservation = !!work.observation && now - Date.parse(work.observation.at) >= 0 && now - Date.parse(work.observation.at) < 120_000;
     const mergeable = freshObservation && work.stage === 'merge' && !!work.candidate && !!work.mergeAuthorization
@@ -243,7 +248,10 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       ...(dead && placement ? { queue: { sequence: dead.sequence, position: placement.position + 1, size: placement.size, unpublishable: true as const, behind: placements.filter(entry => entry.sequence > placement.sequence).map(entry => entry.key) } } : {}) } : null;
     const parked = parkedOnHuman(work) ? work.humanRequest! : null;
     const queueRefusal = work.observation?.merged ? null : work.observation?.githubQueue?.refused ?? null;
-    const mergeRefusal = queueRefusal && queueRefusal.head === work.candidate?.sha ? queueRefusal : null;
+    // A refusal on a head BLOCKED with every gate passing past its bound is named once, by master
+    // status's merge-blocked item with GitHub's answer in it (GY-1112), not a second time here.
+    const pastProbe = work.observation?.githubQueue && work.candidate ? blockedPastProbe(work, work.observation.githubQueue, now) : null;
+    const mergeRefusal = queueRefusal && queueRefusal.head === work.candidate?.sha && !pastProbe ? queueRefusal : null;
     const [attention, cause]: [string | null, WorkAttentionCause | null] = containmentAttention ? containmentAttention
       : parked ? [`${work.key} is parked on a human-only decision (${humanDecisionLabel[parked.kind]}) since ${parked.at}: ${parked.needed} — ${parked.reason}. It holds no lease and delays nothing else`, 'human-request']
       : merged?.reverted ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) and its content is not on the base branch: ${merged.reverted.files.length}${merged.reverted.partial ? ' or more' : ''} file${merged.reverted.files.length === 1 && !merged.reverted.partial ? '' : 's'} missing from base ${merged.reverted.base.slice(0, 12)} — ${merged.reverted.files.map(file => `${file.path} (${file.detail})`).join(', ')} — ${merged.reverted.removedBy
@@ -254,7 +262,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // (GY-127): the restore is the control plane's, and the row says whether it is owed, requested,
       // ran and published, or failed and escalated (GY-854).
       : contaminated && !(contamination?.restore && contamination.restore.performedAt && contamination.restore.outcome === 'restored' && contamination.restore.head !== contaminated.head) ? [`${work.key} branch head ${contaminated.head.slice(0, 12)} carries the unlanded commits of ${contaminated.foreign.join(', ')} (${contaminated.source.includes('ejection') ? `a speculative tip published behind ${contaminated.foreign.join(', ')} and ejected from the merge queue` : 'found in its history by GitHub'}): kept, it is refused as an out-of-scope regression; landed, it would record ${contaminated.foreign.join(', ')} merged without ${contaminated.foreign.length === 1 ? 'its' : 'their'} content. ${contamination?.restore?.outcome === 'unrepairable' ? 'A restore found no own reviewed head under it: the foreign commits sit under something the control plane cannot move' : contamination?.restore?.outcome === 'unpublished' ? contamination.restore.escalated ? `The restore failed twice without the candidate changing and stopped repeating, escalated: ${contamination.restore.failure}` : contamination.restore.retried ? `The restore could not publish its result and is retried once: ${contamination.restore.failure}` : `The restore could not publish its result and nothing retries it on its own: ${contamination.restore.failure}; graphyard master repair ${work.key} REASON requests it again` : contamination?.restore && !contamination.restore.performedAt ? `A restore is requested (${contamination.restore.cause}) and runs on the next reconciliation` : work.queueEjection?.sha === contaminated.head ? 'The control plane restores it to its own reviewed head merged onto the base on the next reconciliation' : `graphyard master repair ${work.key} REASON restores it to its own reviewed head merged onto the base`}`, 'contaminated']
-      : active && !['working', 'idle'].includes(sessionState) ? [`Assigned worker session is ${sessionState}`, 'session']
+      : active && !['working', 'idle', 'launching'].includes(sessionState) ? [`Assigned worker session is ${sessionState}`, 'session']
       : gaps.length ? [`No principal is authorized to produce ${gaps.join(', ')}; grant the proof name before dispatch`, 'proof-gap']
       : review?.exhausted ? [`Every configured reviewer profile is exhausted for the current candidate (${review.failedOver.map(entry => `${entry.profile}: ${entry.exhaustion}`).join(', ')})`, 'reviewer-exhausted']
       : stalledLaunch ? [`Automatic ${stalledLaunch.failure!.kind} launch for ${work.key} refused ${stalledLaunch.failure!.attempts} time(s): ${stalledLaunch.failure!.reason}`, stalledLaunch.failure!.kind === 'review' ? 'launch-review' : 'launch-producer']
@@ -293,6 +301,8 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // A branch carrying another item's unlanded commits and the restore for it (GY-127), and
       // an approval GitHub dismissed for a merge-base change that the control plane restored.
       contamination, restoredApproval: approvalRestored,
+      // The standing blocker's class, the loop's last probe of it and when it runs next (GY-1008).
+      blocker: blockerView(work),
       scope: scopeBreadth(work.plannedFiles), overlap: { concurrent }, conflicts,
       // Execution versus wait so far, rework rounds and hand-offs, from the item's own timeline.
       speed: pipelineSpeed(work, now),
@@ -302,7 +312,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       mergeStep: mergeStep(work, batches.get(work.key) ?? null),
       // The review and proofs held by carry across a Graphyard-authored merge, each with its ground:
       // the verdict given before that merge, shown as carried rather than as freshly passed.
-      carried: carriedBindings(work, snapshot.work, new Date(now)) };
+      carried: carriedBindings(work, snapshot.work, new Date(now)),
+      // The split relation (GY-1126): a child's parent, or a parent's children and the run that split it.
+      split: splitRelation(work) };
   });
   const delivered = snapshot.work.filter(work => work.stage === 'done' && work.delivery && deploySmokeRequired(work.policy)).map(work => deliveredRow(work, now, baseBranch));
   // Every delivery no valid execution authorized, apart by how it was judged: reconciled — the
@@ -360,9 +372,9 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     // and the blockers whose remedy no launched session may run.
     humanRequests, capacity, concurrency, effectiveConcurrency: fleet, unrunnableRemedies: remedies,
     closed: closedHistory(snapshot.work),
-    // Review follow-ups held on a parent until it ships (GY-845), apart from the backlog they have not joined yet.
-    pendingFollowUps: pendingFollowUpsReport(snapshot.work),
     workers: workerSessions, reviews, producers: sessions.producers, work: rows, queue: queueRows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation, fleet: registry.fleet,
+    // Every split parent and its children's progress (GY-1126): the parent is delivered when they all are.
+    splits: splitReport(snapshot.work),
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) },
     // The shared project memory the loop keeps (GY-1125), as its cursor holds it; null while the cursor is unreadable.
     projectMemory: loop && 'projectMemory' in loop ? loop.projectMemory ?? null : null };
@@ -436,7 +448,7 @@ function deliveredRow(work: Work, now: number, baseBranch: string) {
   return { key: work.key, title: work.title, mergedAt, mergeSha, state: deliveryState(work)!,
     deployment: deployment ? { sha: deployment.sha, covers: deployment.covers, source: deployment.source, observedAt: deployment.observedAt } : null,
     smoke: smoke ? { result: smoke.result, sha: smoke.sha, producer: smoke.producer, at: smoke.at, executed: smoke.executed, skipped: smoke.skipped, url: smoke.url ?? null } : null,
-    postDeployMs: postDeployMs(work, now), productionLatencyMs: productionLatencyMs(work), mergeToProductionMs: mergeToProductionMs(work), rollback: rollbackGuidance(work, baseBranch) };
+    postDeployMs: postDeployMs(work, now), productionLatencyMs: productionLatencyMs(work), mergeToProductionMs: mergeToProductionMs(work), rollback: rollbackGuidance(work, baseBranch), split: splitRelation(work) };
 }
 /** Time from the accepted merge to the observed deployment covering it: merge-to-production latency. */
 export function mergeToProductionMs(work: Work): number | null {

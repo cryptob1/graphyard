@@ -8,17 +8,16 @@ Start with the numbered path; the other pages are references to open when a task
 1. [Install Graphyard](install.md) — the one command and upgrades.
 2. [How Graphyard works](how-graphyard-works.md) — lifecycle and authority.
 3. [Glossary](glossary.md) — terms, roles, who decides.
-4. [Onboard a repository](onboarding.md) — machines, accounts, master, first PR.
+4. [Onboard a repository](onboarding.md) — machines, accounts, first PR.
 
 ## Operate Graphyard
 
 - [Deployment](deployment.md) — variables, observation, backups.
 - [GitHub enforcement](github.md) — App, protection, queue, proofs.
 - [Reading the dashboard](dashboard.md) — pages.
-- [Review follow-ups](followups.md) — review follow-ups: recorded on the item until it ships, retrieved, promoted on demand.
 - [Master-agent operating mode](master-agent.md) — loop, dispatch, merges.
 - [Master-agent sessions](master-agent-sessions.md) — profiles, accounts, launches.
-- [Master-agent reference](master-agent-reference.md) — scheduling, executors, GitHub administration.
+- [Master-agent reference](master-agent-reference.md) — executors, GitHub administration.
 - [Operations and recovery](operations.md) — checklist and incident tree.
 - [Operations reference](operations-reference.md) — recovery procedures and limits.
 - [Coordination](coordination.md) — criteria, overlap and scope.

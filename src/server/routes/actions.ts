@@ -1,6 +1,7 @@
 import { demand } from '../../model.js';
+import { executorPresenceSchema } from '../../engine.js';
 import { idleActionable, queueSnapshot, type ActionRow } from '../../model/actions.js';
-import { executorRegistry, executorReport } from '../../model/executor-presence.js';
+import { executorRegistry, executorReport, loopRegistry, reportedLoopMerger } from '../../model/executor-presence.js';
 import { mechanicalActionKinds, nextActionKinds } from '../../model/next-action.js';
 import { openAgentRequests } from '../../model/agent-requests.js';
 import { runningSessions } from '../../model/sessions.js';
@@ -36,7 +37,7 @@ export const actionRoutes = defineRoutes('actions', [
         idle: idleActionable(work, now),
         // Who is alive to claim, and every pending row whose kind none of them serves (GY-105):
         // an action nobody can run, reported apart from one waiting its turn.
-        executors: executorReport(work, executorRegistry(services.engine), now),
+        executors: executorReport(work, executorRegistry(services.engine), now, undefined, await reportedLoopMerger(loopRegistry(services.engine), (text, values) => services.engine.store.pool.query(text, values), now)),
         requests: work.flatMap(item => openAgentRequests(item, now).map(request => ({ ...request, key: item.key, work: item.id }))),
         sessions: runningSessions(work, now),
       };
@@ -54,10 +55,27 @@ export const actionRoutes = defineRoutes('actions', [
     },
   },
   {
+    // A poll that asks for nothing (GY-1288): an executor behind a fleet restart's fence may not
+    // claim, yet it is alive and claims again the moment the fence is lowered, so it says so here.
+    // It claims nothing and writes nothing; it is the presence half of a claim poll alone.
+    method: 'POST', path: '/api/actions/presence',
+    async handle(context) {
+      demand(context.actor.role === 'coordinator' || context.actor.role === 'admin', 'Coordinator permission required', 403);
+      const body = executorPresenceSchema.parse(await parseJson(context, undefined, '{}'));
+      const at = new Date();
+      executorRegistry(context.services.engine).observe({ executor: body.executor ?? context.actor.id, host: body.host, principal: context.actor.id, kinds: body.kinds ?? [...nextActionKinds] }, at);
+      return { observed: true, at: at.toISOString() };
+    },
+  },
+  {
     // An executor still inside a handler holds its claim by saying so; see Engine.renewClaimedAction.
+    // The renewal is also its presence: a long handler polls nothing until it ends (GY-1288).
     method: 'POST', path: /^\/api\/actions\/([0-9a-f]{32})\/renew$/,
     async handle(context, [id]) {
-      return context.services.engine.renewClaimedAction(context.actor, id, await parseJson(context, undefined, '{}'));
+      const result = await context.services.engine.renewClaimedAction(context.actor, id, await parseJson(context, undefined, '{}'));
+      const claim = result.action?.claim;
+      if (claim) executorRegistry(context.services.engine).renewed({ executor: claim.executor, host: claim.host, principal: context.actor.id, kind: result.action!.kind }, new Date());
+      return result;
     },
   },
   {

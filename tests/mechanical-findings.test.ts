@@ -103,12 +103,10 @@ const recordOf = (records: ReviewRecord[], sha: string) => records.find(record =
  */
 async function approvedThenBotRound(root: string, body: string, commit: { parents: string[]; files: string[] }) {
   const config = await loadMasterConfig(root);
-  const filed: string[] = [];
-  const create = async (payload: any) => { filed.push(payload.description); return { key: 'GY-70' }; };
   const first = herdr();
   await launch(root, item(H, 1), first.run);
   const approved = item(H, 1, [{ reviewer, sha: H, state: 'APPROVED', id: 901 }]);
-  const planned = await reconcileReviews(root, config, { run: first.run, observe: verdictOf(901, 'APPROVED'), work: [approved], threadsRun: github({ 901: { body, sha: H, state: 'APPROVED' } }), createFollowUpItem: create });
+  const planned = await reconcileReviews(root, config, { run: first.run, observe: verdictOf(901, 'APPROVED'), work: [approved], threadsRun: github({ 901: { body, sha: H, state: 'APPROVED' } }) });
   const requests = await readMechanicalFixRequests(root);
   const held = mechanicalMergeHold(approved, await readMechanicalFixState(root), Date.now());
   const decision = neededDecision(approved, { autoMerge: true }, [], requests);
@@ -119,7 +117,7 @@ async function approvedThenBotRound(root: string, body: string, commit: { parent
   const second = herdr();
   await launch(root, item(BOT, 2), second.run, commit);
   const fresh = recordOf((await readReviewLedger(root)).reviews, BOT);
-  return { config, filed, create, planned, requests, held, decision, reviewId, worker, fresh, prompt: second.requests[0]! };
+  return { config, planned, requests, held, decision, reviewId, worker, fresh, prompt: second.requests[0]! };
 }
 
 test('unit:mechanical-findings-auto-fixed — review findings are classified, and an approved head\'s mechanical ones are fixed by a worker bot commit before the fresh read, which is shown only substance', async () => {
@@ -163,8 +161,7 @@ test('unit:mechanical-findings-auto-fixed — review findings are classified, an
     assert.equal(approvalRecord.mechanicalFix?.state, 'planned');
     assert.deepEqual(approvalRecord.mechanicalFix?.paths, paths);
     assert.equal(approvalRecord.mechanicalFix?.mechanical.length, 4);
-    assert.equal(approvalRecord.followUps, undefined, 'nothing is filed while the bot round is owed');
-    assert.deepEqual(round.filed, []);
+    assert.equal(approvalRecord.followUps, undefined, 'the approval\'s follow-ups wait while the bot round is owed');
     assert.ok(round.planned.threads.some(line => /4 finding\(s\) classified mechanical/.test(line)), round.planned.threads.join('\n'));
     // The approved head is not merged ahead of its round: the loop's merge step holds it while the plan stands, within a bound.
     assert.match(round.held ?? '', /candidate aaaaaaaaaaaa is not merged while review 901's 4 findings classified mechanical wait/);
@@ -199,15 +196,13 @@ test('unit:mechanical-findings-auto-fixed — review findings are classified, an
       assert.ok(prompt.includes('retry loop is unbounded'), 'the substantive findings are judged again');
       for (const mechanical of ['recieve', 'frobCnt', 'trailing whitespace', 'belongs in docs/widget.md']) assert.ok(!prompt.includes(mechanical), `the fresh read is not shown the mechanical finding "${mechanical}"`);
     }
-    // 5. The fresh read approves: the bot commit is accepted, the plan applied, and the approval's own findings filed.
+    // 5. The fresh read approves: the bot commit is accepted, the plan applied, and the fresh read's own follow-ups handled.
     const done = await reconcileReviews(root, round.config, { run: herdr().run, observe: verdictOf(902, 'APPROVED'), work: [item(BOT, 2, [{ reviewer, sha: BOT, state: 'APPROVED', id: 902 }])],
-      threadsRun: github({ 902: { body: 'AC-1 met.\nFollow-up finding: src/widget.ts:55 — the retry loop is unbounded (substantive: behavior)\nResolved threads: none\nFollow-up threads: none', sha: BOT, state: 'APPROVED' } }), createFollowUpItem: round.create });
+      threadsRun: github({ 902: { body: 'AC-1 met.\nFollow-up finding: src/widget.ts:55 — the retry loop is unbounded (substantive: behavior)\nResolved threads: none\nFollow-up threads: none', sha: BOT, state: 'APPROVED' } }) });
     assert.equal(recordOf(done.reviews, BOT).freshRead?.judged?.outcome, 'accepted');
     assert.equal(recordOf(done.reviews, H).mechanicalFix?.state, 'applied');
     assert.equal(recordOf(done.reviews, H).mechanicalFix?.commit, BOT);
-    assert.equal(round.filed.length, 1);
-    const description = String(round.filed[0]);
-    assert.ok(description.includes('retry loop is unbounded') && !description.includes('recieve'), 'only substance reaches the follow-up item');
+    assert.equal(recordOf(done.reviews, BOT).followUps?.reviewId, 902, 'the fresh read\'s own follow-ups are handled as any approval\'s');
   } finally { await cleanup(); }
 
   // The bot commit is accepted only as planned: a worker identity other than the reviewer, on the approved head, within the findings' files.
@@ -231,40 +226,36 @@ test('unit:mechanical-findings-auto-fixed — review findings are classified, an
     assert.ok(round.prompt.includes('Graphyard refused it as one') && round.prompt.includes('"recieve" is a typo'), 'nothing is lost: the reviewer judges the mechanical findings again');
   } finally { await refusedRoot.cleanup(); }
 
-  // A plan whose round never produced a bot commit falls back: delivered at the approved head, its findings are all filed.
+  // A plan whose round never produced a bot commit falls back: delivered at the approved head, its findings all return to follow-up handling.
   const fallback = await boundMaster();
   try {
-    const config = await loadMasterConfig(fallback.root), filed: string[] = [];
+    const config = await loadMasterConfig(fallback.root);
     const first = herdr();
     await launch(fallback.root, item(H, 1), first.run);
     const gh = github({ 901: { body: verdict, sha: H, state: 'APPROVED' } });
-    const create = async (payload: any) => { filed.push(payload.description); return { key: 'GY-71' }; };
-    await reconcileReviews(fallback.root, config, { run: first.run, observe: verdictOf(901, 'APPROVED'), work: [item(H, 1, [{ reviewer, sha: H, state: 'APPROVED', id: 901 }])], threadsRun: gh, createFollowUpItem: create });
-    assert.deepEqual(filed, []);
+    const held = await reconcileReviews(fallback.root, config, { run: first.run, observe: verdictOf(901, 'APPROVED'), work: [item(H, 1, [{ reviewer, sha: H, state: 'APPROVED', id: 901 }])], threadsRun: gh });
+    assert.equal(recordOf(held.reviews, H).followUps, undefined);
     const delivered = item(H, 1, [{ reviewer, sha: H, state: 'APPROVED', id: 901 }], { stage: 'done' } as Partial<Work>);
-    const after = await reconcileReviews(fallback.root, config, { run: first.run, work: [delivered], threadsRun: gh, createFollowUpItem: create, observe: () => null });
+    const after = await reconcileReviews(fallback.root, config, { run: first.run, work: [delivered], threadsRun: gh, observe: () => null });
     assert.equal(recordOf(after.reviews, H).mechanicalFix?.state, 'fallback');
-    assert.equal(filed.length, 1);
-    const description = String(filed[0]);
-    assert.ok(description.includes('recieve') && description.includes('retry loop is unbounded'), 'the mechanical findings are filed as follow-ups too');
+    assert.equal(recordOf(after.reviews, H).followUps?.reviewId, 901, 'the mechanical findings return to ordinary follow-up handling');
   } finally { await fallback.cleanup(); }
 
   // A round that never starts — its rework decision refused, or never applied — falls back past the bound, and the merge it held is released.
   const stalled = await boundMaster();
   try {
-    const config = await loadMasterConfig(stalled.root), filed: string[] = [];
+    const config = await loadMasterConfig(stalled.root);
     const first = herdr();
     await launch(stalled.root, item(H, 1), first.run);
     const gh = github({ 901: { body: verdict, sha: H, state: 'APPROVED' } });
-    const create = async (payload: any) => { filed.push(payload.description); return { key: 'GY-72' }; };
     const approved = item(H, 1, [{ reviewer, sha: H, state: 'APPROVED', id: 901 }]);
-    await reconcileReviews(stalled.root, config, { run: first.run, observe: verdictOf(901, 'APPROVED'), work: [approved], threadsRun: gh, createFollowUpItem: create });
+    await reconcileReviews(stalled.root, config, { run: first.run, observe: verdictOf(901, 'APPROVED'), work: [approved], threadsRun: gh });
     assert.equal(recordOf((await readReviewLedger(stalled.root)).reviews, H).mechanicalFix?.state, 'planned');
     const late = new Date(Date.now() + mechanicalRoundStartMs + 60_000);
-    const after = await reconcileReviews(stalled.root, config, { run: first.run, work: [approved], threadsRun: gh, createFollowUpItem: create, observe: () => null, now: () => late });
+    const after = await reconcileReviews(stalled.root, config, { run: first.run, work: [approved], threadsRun: gh, observe: () => null, now: () => late });
     assert.equal(recordOf(after.reviews, H).mechanicalFix?.state, 'fallback');
     assert.match(recordOf(after.reviews, H).mechanicalFix?.reason ?? '', /no mechanical-fix round started within 60 minutes/);
-    assert.equal(filed.length, 1, 'its findings are filed');
+    assert.equal(recordOf(after.reviews, H).followUps?.reviewId, 901, 'its findings return to ordinary follow-up handling');
     assert.equal(mechanicalMergeHold(approved, await readMechanicalFixState(stalled.root), late.getTime()), null, 'nothing holds the merge any more');
   } finally { await stalled.cleanup(); }
 });
@@ -294,7 +285,7 @@ test('unit:mechanical-mislabel-caught — a substantive finding misclassified as
     let refuse = true;
     const recordIntervention = async (signal: InterventionRecordInput, key: string) => { if (refuse) { refuse = false; throw new Error('Graphyard refused the intervention (503): busy'); } recorded.push({ signal, key }); };
     const pass = () => reconcileReviews(root, round.config, { run: herdr().run, observe: verdictOf(903, 'CHANGES_REQUESTED'), work: [item(BOT, 2, [{ reviewer, sha: BOT, state: 'CHANGES_REQUESTED', id: 903 }])],
-      threadsRun: github({ 903: { body: rejection, sha: BOT, state: 'CHANGES_REQUESTED' } }), createFollowUpItem: round.create, recordIntervention });
+      threadsRun: github({ 903: { body: rejection, sha: BOT, state: 'CHANGES_REQUESTED' } }), recordIntervention });
     const failed = await pass();
     assert.deepEqual({ ...recordOf(failed.reviews, BOT).freshRead?.judged, at: undefined }, { outcome: 'rejected', at: undefined, reason: 'it raised MAX from 10 to 100, a behaviour change, not formatting', recorded: false, attempts: 1, failure: 'Graphyard refused the intervention (503): busy' });
     assert.ok(failed.threads.some(line => line.includes(`rejected bot commit ${BOT.slice(0, 12)}`)), failed.threads.join('\n'));

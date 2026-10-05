@@ -9,10 +9,11 @@ import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustion
 import { boundDetail } from './decisions.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 import { timingsSchema } from '../master/timings.js';
+import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake'] as const;
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake', 'blocker'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 /** A failed action is a pipeline fault; its kind in the fault catalogue (GY-173) follows the action's kind. */
 export const daemonActionFaultKind = (kind: DaemonActionKind) => `action:${kind}` as FaultKind;
@@ -156,6 +157,13 @@ export const reclaimSummarySchema = z.object({
 }).strict();
 export type ReclaimSummary = z.infer<typeof reclaimSummarySchema>;
 
+/** The host's memory at the last cycle (GY-612): below its floor, new launches on the host are deferred. */
+export const hostMemoryStateSchema = z.object({
+  host: z.string().max(200).nullable(), at: z.string(), totalBytes: z.number().min(0), availableBytes: z.number().min(0), floorBytes: z.number().min(0),
+  low: z.boolean(), since: z.string().nullable(),
+  consumers: z.array(z.object({ command: z.string().max(200), processes: z.number().int().min(0), rssBytes: z.number().min(0) }).strict()).max(10).default([]),
+}).strict();
+
 export const scopeMeasurementSchema = z.object({
   work: z.string().max(200), epoch: z.number().int().min(0), at: z.string(),
   waitedMs: z.number().int().min(0), state: z.enum(['approved', 'refused']),
@@ -292,6 +300,50 @@ export const cycleFailureSchema = z.object({
 }).strict();
 export type CycleFailures = z.infer<typeof cycleFailureSchema>;
 
+// ---- The pipeline doctor's run record (GY-711, src/daemon/doctor.ts) ---------------------------
+const doctorLine = (max: number) => z.string().trim().min(1).max(max);
+/** One finding of a doctor run: what was stuck, under which check bound, and whether it could act. */
+export const doctorFindingsSchema = z.object({
+  subject: doctorLine(200),
+  check: z.enum(['blocked', 'worker', 'ci', 'review-request', 'launch', 'proofs', 'mergeable', 'decision', 'containment', 'refusal', 'overdue']),
+  detail: doctorLine(2000),
+  unactionable: z.boolean().default(false),
+}).strict();
+/** One sanctioned command the doctor ran, with what became of it. */
+export const doctorActionSchema = z.object({
+  subject: doctorLine(200), command: doctorLine(500), outcome: z.enum(['applied', 'refused']), detail: doctorLine(1000),
+}).strict();
+/** The fault item a doctor run asks the loop to file, deduplicated against open items. */
+export const doctorFileEntrySchema = z.object({
+  faultClass: z.enum(faultClasses), title: z.string().max(200), work: z.string().max(50).nullable().default(null), deduplicated: z.boolean().default(false),
+}).strict();
+/** The full fault-filing request a doctor run makes (src/daemon/doctor.ts doctorFileItem): what the loop files when no open item covers the class. */
+export const doctorFiledSchema = z.object({
+  faultClass: z.enum(faultClasses), title: doctorLine(200), description: doctorLine(20000),
+  priority: z.number().int().min(0).max(1),
+  criteria: z.array(z.object({ id: z.string().trim().regex(/^[A-Z]+-\d+$/), text: doctorLine(4000), proofs: z.array(doctorLine(200)).min(1).max(10) }).strict()).min(1).max(20),
+  plannedFiles: z.array(doctorLine(500)).min(1).max(100),
+}).strict();
+/** A filing the control plane did not accept when its run applied, kept for the later cycles that file it again. */
+export const doctorPendingFileSchema = z.object({
+  /** The filing's stable idempotency key: the same key the refused filing was posted under. */
+  key: doctorLine(200), at: z.string().max(40), file: doctorFiledSchema,
+}).strict();
+export const doctorStates = ['running', 'reported', 'failed'] as const;
+export const doctorRunRecordSchema = z.object({
+  at: z.string().max(40), state: z.enum(doctorStates),
+  runs: z.array(z.object({ runtime: z.string().max(40), model: z.string().max(200), result: z.string().max(40), detail: z.string().max(500) }).strict()).max(4).default([]),
+  findings: z.array(doctorFindingsSchema).max(50).default([]),
+  actions: z.array(doctorActionSchema).max(50).default([]),
+  filed: z.array(doctorFileEntrySchema).max(20).default([]),
+  detail: z.string().max(1000).default(''),
+}).strict();
+export const retainedDoctorRuns = 20;
+export type DoctorRunRecord = z.infer<typeof doctorRunRecordSchema>;
+export type DoctorFinding = z.infer<typeof doctorFindingsSchema>;
+export type DoctorAction = z.infer<typeof doctorActionSchema>;
+export type DoctorFiled = z.infer<typeof doctorFiledSchema>;
+export type DoctorPendingFile = z.infer<typeof doctorPendingFileSchema>;
 /**
  * The release this loop's own process loaded, read once at its startup exactly as an executor reads
  * its (GY-437) and overwritten by every new process: what every action it takes runs, until its
@@ -388,6 +440,8 @@ export const daemonStateSchema = z.object({
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),
   /** The last worktree reclamation: what it removed and how much room the host has. */
   reclaim: reclaimSummarySchema.nullable().default(null),
+  /** The host's memory as the last cycle read it, and whether launches are deferred on it. */
+  memory: hostMemoryStateSchema.nullable().default(null),
   /** Per-item passage clocks and the samples they produced; the loop's own latency measurement. */
   clocks: z.record(z.string(), itemClockSchema).default({}),
   latency: z.array(latencySampleSchema).default([]),
@@ -399,6 +453,10 @@ export const daemonStateSchema = z.object({
   orphans: z.record(z.string(), orphanObservationSchema).default({}),
   /** Per decision action key, the request this loop put to an approver and what became of it. */
   approvals: z.record(z.string(), approvalWatchSchema).default({}),
+  /** Per item, head and base tip, the docs-sync session the loop launched for a docs-only conflict (GY-566). */
+  docsSyncs: z.record(z.string(), docsSyncWatchSchema).default({}),
+  /** Every confirmed conflict the loop routed, newest last: master status reads its hotspots from here (GY-566). */
+  conflicts: z.array(routedConflictSchema).default([]),
   /** Per work item, a live lease whose session Herdr no longer reports while no fence stands (see step 1d). */
   absences: z.record(z.string(), z.object({ epoch: z.number().int().min(0), owner: z.string().max(200), firstSeenAt: z.string(), cycle: z.number().int().min(0) }).strict()).default({}),
   /** How the loop itself has been failing, as distinct from the steps it runs (see `cycleFailureSchema`). */
@@ -412,6 +470,19 @@ export const daemonStateSchema = z.object({
    */
   faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}), observedAt: z.string().optional() }).strict()
     .default(() => ({ instances: [], open: {}, failing: {} })),
+  /**
+   * The pipeline doctor's last runs (GY-711, src/daemon/doctor.ts): each with what it found, did
+   * and filed, and the runs it took. The newest is kept whole; the list is bounded below.
+   */
+  doctor: z.object({
+    runs: z.array(doctorRunRecordSchema).default([]),
+    /** The runs (by `at`) the control plane has not yet accepted: posted again on later cycles until it does. */
+    unposted: z.array(z.string().max(40)).max(40).default([]),
+    /** Filings the control plane did not accept when their run applied: filed again on later cycles, under the same key, until one is. */
+    pendingFiles: z.array(doctorPendingFileSchema).max(40).default([]),
+    /** When the approver remedy last read each open item's decision history, by item id. */
+    decisionsCheckedAt: z.record(z.string(), z.string()).default({}),
+  }).strict().default(() => ({ runs: [], unposted: [], pendingFiles: [], decisionsCheckedAt: {} })),
   /**
    * Per recurring-fault item key or invariant-violation instance id, the diagnostician run the loop
    * launched for it and what became of the diagnosis (GY-439, src/daemon/diagnosis.ts).
@@ -499,8 +570,18 @@ export function pruneDaemonState(state: DaemonState) {
   // A watch is retired when its item moves on; this bound only catches items the loop stopped seeing.
   const watches = Object.entries(state.approvals).sort((a, b) => Date.parse(a[1].requestedAt) - Date.parse(b[1].requestedAt));
   if (watches.length > retainedClocks) for (const [key] of watches.slice(0, watches.length - retainedClocks)) delete state.approvals[key];
-  // A settled diagnosis is kept for the report; the oldest settled ones go past the bound, never one still in flight.
-  const settled = Object.entries(state.diagnoses).filter(([, entry]) => diagnosisSettled(entry)).sort((a, b) => Date.parse(a[1].updatedAt) - Date.parse(b[1].updatedAt));
+  // The doctor's runs are kept newest first from the report; the oldest go past the bound, never one still running.
+  if (state.doctor.runs.length > retainedDoctorRuns) {
+    const settled = state.doctor.runs.filter(entry => entry.state !== 'running');
+    const excess = state.doctor.runs.length - retainedDoctorRuns;
+    if (settled.length >= excess) {
+      const drop = new Set(settled.slice(0, excess).map(entry => entry.at));
+      state.doctor.runs = state.doctor.runs.filter(entry => !drop.has(entry.at));
+    }
+  }
+  // A settled diagnosis is kept for the report; the oldest settled ones go past the bound, never one still in flight
+  // and never one waiting on its provider: that record is the hold, and dropping it would relaunch its subject early (GY-1245).
+  const settled = Object.entries(state.diagnoses).filter(([, entry]) => diagnosisSettled(entry) && entry.state !== 'waiting').sort((a, b) => Date.parse(a[1].updatedAt) - Date.parse(b[1].updatedAt));
   const excess = Object.keys(state.diagnoses).length - retainedDiagnoses;
   if (excess > 0) for (const [key] of settled.slice(0, excess)) delete state.diagnoses[key];
   const runs = Object.entries(state.dispatchFailures).sort((a, b) => Date.parse(a[1].lastAt) - Date.parse(b[1].lastAt));
@@ -532,9 +613,23 @@ export function storeAction(state: DaemonState, key: string, action: Omit<Daemon
   const failed = faultKind !== null && (rest.state === 'failed' || rest.state === 'indeterminate');
   const fault = faultKind === null ? null : classified(faultKind);
   const entry = daemonActionSchema.parse({ ...rest, detail: boundDetail(rest.detail), attempts: clampCount(rest.attempts, 1000), ...(failed && fault ? { faultClass: fault.faultClass } : {}) });
-  if (fault) noteActionOutcome(state.faults, key, entry.state, { ...fault, subject: entry.work ?? key, text: entry.detail }, entry.at);
+  if (fault) { dispatchRun(state.faults.failing, key, entry.state); noteActionOutcome(state.faults, key, entry.state, { ...fault, subject: entry.work ?? key, text: entry.detail }, entry.at); }
   state.actions[key] = entry;
   return entry;
+}
+/**
+ * GY-1287: an item's dispatch row is keyed by the epoch it was offered at (`dispatch:ID:EPOCH`), and
+ * a launch that fails after its claim advances that epoch, so the item's next dispatch writes a new
+ * row. Its failures are still one run of one fault: a failure carries the item's failing run from
+ * the earlier row onto this one, and a success ends the run whichever row opened it. On 5 October
+ * 2026 GY-717's lapsed launch and the retry that met the control plane restarting counted as two.
+ */
+function dispatchRun(failing: Record<string, string>, key: string, outcome: DaemonAction['state']) {
+  const item = /^dispatch:([^:]+):\d+$/.exec(key)?.[1];
+  if (!item) return;
+  const earlier = Object.keys(failing).filter(other => other !== key && other.startsWith(`dispatch:${item}:`));
+  if (outcome === 'done') for (const other of earlier) delete failing[other];
+  else if ((outcome === 'failed' || outcome === 'indeterminate') && !failing[key] && earlier.length) { failing[key] = failing[earlier.at(-1)!]; for (const other of earlier) delete failing[other]; }
 }
 /**
  * A refusal that still stands, observed again with the same detail (GY-1086): its row is not

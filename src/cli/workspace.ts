@@ -1,56 +1,24 @@
-import { existsSync } from 'node:fs';
-import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
+// Concern: workspace commands — sync with the base branch tip, and the supervised worker watch under lease.
 import { randomUUID } from 'node:crypto';
+import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
-import { setupLine, supervise, systemdContainment } from '../supervisor.js';
-import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServerUrl, parseGeneratedManifest, regenerateManagedBlocks, type GeneratedManifest } from '../sync.js';
-import { managedInstructions } from '../repository-setup.js';
-import { managedMasterInstructions } from '../master.js';
-import { assertRepository, discover } from '../onboarding.js';
+import { containmentFailureNote, setupLine, supervise, systemdContainment } from '../supervisor.js';
+import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServerUrl, regenerateManagedBlocks } from '../sync.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
 import { superviseSessionCredential, type MintedPushCredential } from '../worker-credential.js';
 import type { CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
-import { gitOrThrow, reclaimBranchHolders, type ReclaimedHolder } from '../worktree-holders.js';
 import { restoreAndReport } from './sync-restore.js';
+import { pushViaControlPlane } from './sync-push.js';
 import { defineCommands, workMutation } from './registry.js';
+import { keepBlockedWork } from './lease.js';
+import { agentsRenderers, agentsTemplateSources, localGeneratedManifest, regenerateGenerated } from './workspace-generated.js';
+import { createWorktree, restoreBranchWork } from './workspace-worktree.js';
 
 export { installUnderLease };
-
-/**
- * The generated files a repository declares for sync: `scripts/check-docs.mjs --manifest` names
- * the paths its `--write` renders in full. A repository without the script declares none.
- */
-const generatedManifestScript = 'scripts/check-docs.mjs';
-async function localGeneratedManifest(cwd: string): Promise<GeneratedManifest | null> {
-  if (!existsSync(resolve(cwd, generatedManifestScript))) return null;
-  const result = spawnSync(process.execPath, [generatedManifestScript, '--manifest'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-  return result.status === 0 ? parseGeneratedManifest(result.stdout) : null;
-}
-// The renderer's own exit status is not consulted: with other files still conflicted its link
-// check fails, but the generated files are written first, and each is judged by its content.
-function regenerateGenerated(cwd: string, manifest: GeneratedManifest) {
-  const [command, ...args] = manifest.regenerate;
-  spawnSync(command === 'node' ? process.execPath : command, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-}
-/**
- * Graphyard's own repository renders the AGENTS.md blocks with the templates the merged tree
- * carries, so the result matches what its drift test expects; any other repository, and a tree
- * whose sources will not load, use the templates this CLI ships.
- */
-const agentsTemplateSources = ['src/repository-setup.ts', 'src/master.ts'];
-async function agentsRenderers(cwd: string) {
-  const [setupFile, masterFile] = agentsTemplateSources.map(file => resolve(cwd, file));
-  if (existsSync(setupFile) && existsSync(masterFile)) try {
-    const [setup, master] = await Promise.all([import(pathToFileURL(setupFile).href), import(pathToFileURL(masterFile).href)]);
-    if (typeof setup.managedInstructions === 'function' && typeof master.managedMasterInstructions === 'function') return { managedInstructions: setup.managedInstructions as typeof managedInstructions, managedMasterInstructions: master.managedMasterInstructions as typeof managedMasterInstructions, source: 'worktree' };
-  } catch {}
-  return { managedInstructions, managedMasterInstructions, source: 'cli' };
-}
 
 const quietBranch = () => spawnSync('git', ['symbolic-ref', '--short', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).stdout.trim();
 
@@ -153,17 +121,16 @@ export const workspaceCommands = defineCommands([
       '  sync GY-N --restore           The same, then restore every such file to the base in one new',
       '                                commit naming them; push it plainly. A force push is never',
       '                                needed or allowed',
+      '  sync GY-N --push-via-control-plane COMMIT  Control plane pushes a refused workflow base sync',
     ],
     async run(context, work) {
       // A write the worker's sandbox refused is recorded as that, naming the sandbox and the path,
       // so the item never presents as a ready-gate refusal or an unexplained lapse (GY-134).
-      try { await syncWork(context, work); }
-      catch (error) {
-        const failure = environmentFailure(error);
-        const epoch = work.workspaces.find((w: any) => w.branch === quietBranch())?.epoch ?? work.lease?.epoch;
+      try { await (context.args.includes('--push-via-control-plane') ? pushViaControlPlane : syncWork)(context, work); } catch (error) {
+        const failure = environmentFailure(error); const epoch = work.workspaces.find((w: any) => w.branch === quietBranch())?.epoch ?? work.lease?.epoch;
         if (!failure || epoch === undefined) throw error;
         const reason = environmentBlocker(`sync ${work.key}`, process.env.GRAPHYARD_HERDR_AGENT_KIND, failure);
-        await workMutation(context, work)('blocked', { epoch, reason });
+        const partialWork = keepBlockedWork(work, epoch); await workMutation(context, work)('blocked', { epoch, reason, ...(partialWork ? { partialWork } : {}) });
         throw new Error(`${reason} Recorded as the blocker on ${work.key}.`);
       }
     },
@@ -176,90 +143,26 @@ export const workspaceCommands = defineCommands([
       '                                ejected or contaminated tip: a lease push to that one branch,',
       '                                conditional on the tip just fetched; run after reset and sync',
     ],
-    async run(context, work) {
-      // The worker's one history rewrite (GY-128). Its harness denies every raw force push, the lease
-      // form included, because a glob cannot limit one to a single ref; this command can. The server
-      // confirms the caller holds this epoch's live lease, and the push names only the branch
-      // registered for that epoch, leased on the tip fetched here, so it replaces what it saw.
-      const epoch = Number(context.args[0]);
-      if (!Number.isInteger(epoch) || epoch < 1) throw new Error('Use restore-branch GY-N EPOCH');
-      await workMutation(context, work)('heartbeat', { epoch });
-      const branch = work.workspaces.find((w: any) => w.epoch === epoch)?.branch;
-      if (!branch) throw new Error(`No workspace branch is registered for ${work.key} epoch ${epoch}`);
-      const git = (...gitArgs: string[]) => execFileSync('git', gitArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();
-      const quietly = (...gitArgs: string[]) => spawnSync('git', gitArgs, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      const current = quietly('symbolic-ref', '--short', 'HEAD').stdout.trim();
-      if (current !== branch) throw new Error(`Run restore-branch on ${branch}, the branch of ${work.key} epoch ${epoch}; this worktree is on ${current || 'a detached HEAD'}`);
-      if (quietly('rev-parse', '-q', '--verify', 'MERGE_HEAD').status === 0) throw new Error(`A merge is in progress: finish sync ${work.key} before restoring the branch`);
-      if (quietly('diff', '--quiet', 'HEAD').status !== 0) throw new Error('The worktree has uncommitted changes: commit them or reset before restoring the branch');
-      git('fetch', '--quiet', 'origin');
-      const tip = quietly('rev-parse', '-q', '--verify', `refs/remotes/origin/${branch}`).stdout.trim();
-      const head = git('rev-parse', 'HEAD');
-      const push = quietly('push', `--force-with-lease=refs/heads/${branch}:${tip}`, 'origin', `HEAD:refs/heads/${branch}`);
-      if (push.status !== 0) throw new Error(`The lease push of ${branch} was refused${/stale info/.test(push.stderr) ? ': the branch moved after the fetch; fetch again and read the new tip before replacing it' : ''}: ${push.stderr.trim()}`);
-      context.print({ key: work.key, epoch, branch, replaced: tip || null, head,
-        next: `The branch holds ${head.slice(0, 12)}. Submit it with complete ${work.key} ${epoch} PR.` });
-    },
+    run: restoreBranchWork,
   },
   {
     name: 'worktree',
     scope: 'work',
-    help: ['  worktree GY-N EPOCH [BASE]    Reserve and create a local isolated worktree'],
-    async run(context, work) {
-      const { args, api, print } = context;
-      const mutate = workMutation(context, work);
-      const epoch = Number(args[0]); const root = context.repositoryRoot();
-      const status = await api('status');
-      assertRepository((await discover(root)).repository, status.repository);
-      const branch = work.submission ? work.workspaces.find((w: any) => w.epoch === work.submission.epoch)?.branch : `graphyard/${work.key.toLowerCase()}-${epoch}`;
-      if (!branch) throw new Error('Submitted workspace branch is missing');
-      const path = resolve(root, '.graphyard/worktrees', `${work.key}-${epoch}`);
-      let startPoint = args[1] ?? 'HEAD';
-      if (work.submission) {
-        const remoteBranch = `refs/remotes/origin/${branch}`;
-        execFileSync('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:${remoteBranch}`], { stdio: ['ignore', 'ignore', 'inherit'] });
-        const remoteSha = execFileSync('git', ['rev-parse', '--verify', remoteBranch], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();
-        if (!work.candidate?.sha || remoteSha !== work.candidate.sha) throw new Error('Submitted PR branch changed; wait for Graphyard to observe its current head before creating the rework workspace');
-        startPoint = remoteBranch;
-      }
-      const hostId = context.individualHostId();
-      await mutate('workspace', { epoch, host: hostId, path, branch });
-      await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
-      const exists = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0;
-      // GY-1078: an abandoned session worktree of this item still holding the branch — checked out
-      // on a rework, or stopped mid-rebase, mid-am or mid-bisect of it, which git lists as detached —
-      // is reclaimed first; one with a live lease or uncommitted changes is named and left alone.
-      // Every failure carries git's own stderr, so the loop's record says why.
-      let reclaimed: ReclaimedHolder[] = [];
-      try {
-        if (exists) reclaimed = reclaimBranchHolders(root, branch, path, work, Date.parse(status.now ?? '') || Date.now(), { checkouts: !!work.submission });
-        for (const entry of reclaimed) console.error(`Reclaimed ${entry.path}, which held ${branch}${entry.epoch !== null ? ` for ${entry.key} epoch ${entry.epoch}` : ''}: ${entry.action}`);
-        gitOrThrow(exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, startPoint]);
-        if (work.submission) gitOrThrow(['-C', path, 'reset', '--hard', startPoint]);
-      }
-      catch (error) { throw new Error(`Git worktree creation failed: ${error instanceof Error ? error.message : String(error)}. Reservation remains for safety; inspect the event and repair locally. Do not reuse the branch for another task.`); }
-      // A checkout whose lockfile the reachable install does not match gets its own install now,
-      // so the session never starts on the wrong dependency versions. The lease is kept alive
-      // while npm runs; the session's supervisor takes over heartbeats once it starts. A refused
-      // heartbeat means this epoch is no longer held: npm is stopped there and the command fails
-      // rather than reporting a worktree ready for work nobody may do.
-      const dependencies = await installUnderLease(path, () => mutate('heartbeat', { epoch }), `${work.key} epoch ${epoch}`);
-      return print({ path, branch, epoch, dependencies, ...(reclaimed.length ? { reclaimed } : {}) });
-    },
+    help: ['  worktree GY-N EPOCH [BASE]    Reserve and create a local isolated worktree; an earlier attempt\'s hold on the branch is preserved and released'],
+    run: createWorktree,
   },
   {
     name: 'watch',
     help: ['  watch GY-N EPOCH -- COMMAND   Run a worker, heartbeat, stop on lease loss'],
-    // Not work-scoped (GY-1033): the setup line comes from argv before any control-plane call, even the item lookup.
+    // Not work-scoped (GY-1033): the setup line comes from argv before any control-plane call, even the item lookup, once the epoch is checked (GY-1184).
     async run(context) {
       const { id, args, api, base } = context; const epoch = Number(args[0]); const separator = args.indexOf('--');
-      if (!id || separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
+      if (!id || !Number.isSafeInteger(epoch) || epoch <= 0 || separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
       console.error(setupLine(id, epoch));
       const work = (await api('work')).find((w: any) => w.id === id || w.key === id); if (!work) throw new Error(`Unknown work item ${id}`);
       const workspace = work.workspaces.find((w: any) => w.epoch === epoch); const hostId = context.individualHostId();
       if (!workspace || workspace.host !== hostId || await realpath(process.cwd()) !== await realpath(workspace.path)) throw new Error('Run watch from the assigned workspace on its registered host');
-      const workerStatus = await api('status');
-      if (workerStatus.actor?.role !== 'worker') throw new Error('watch requires a worker credential; never pass operator or producer credentials to implementation processes');
+      const workerStatus = await api('status'); if (workerStatus.actor?.role !== 'worker') throw new Error('watch requires a worker credential; never pass operator or producer credentials to implementation processes');
       const watchToken = await context.individualToken();
       process.env.GRAPHYARD_URL = base; process.env.GRAPHYARD_TOKEN = watchToken;
       process.env.GRAPHYARD_CLI = await context.activeCliPath(); process.env.GRAPHYARD_HOST_ID = hostId;
@@ -311,7 +214,7 @@ export const workspaceCommands = defineCommands([
             settle: () => settleContainment(
               (requestId, body) => api(`work/${work.id}/settle`, body, requestId),
               { epoch, settlementToken: containment!.settlementToken, settlementHash: containment!.settlementHash, exclusiveResources, requestId: settlementRequestId },
-            ),
+            ), report: failure => api(`work/${work.id}/request`, containmentFailureNote(epoch, failure), randomUUID()), // a fence it cannot lower goes on the record
           } : undefined,
         }));
     },

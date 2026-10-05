@@ -164,7 +164,7 @@ export class Reanchoring {
         await this.reanchor(db, r, c, w, environment, identity, { ...trigger, kind: 'delayed-observation' }, now);
       }
     }
-    const blocked = (await db.query(`SELECT w.document FROM work_items w WHERE w.document->>'stage'<>'done' AND EXISTS (SELECT 1 FROM jsonb_each(COALESCE(w.document->'validation','{}'::jsonb)) v WHERE v.value->'reanchor'->>'state'='blocked' AND v.value->'reanchor'->>'environmentId'=$1) ORDER BY w.number LIMIT 200`, [observation.environment.id])).rows.map(r => r.document as Work);
+    const blocked = (await db.query(`SELECT w.document FROM work_items w WHERE w.id IN (SELECT id FROM work_index WHERE stage <> 'done') AND EXISTS (SELECT 1 FROM jsonb_each(COALESCE(w.document->'validation','{}'::jsonb)) v WHERE v.value->'reanchor'->>'state'='blocked' AND v.value->'reanchor'->>'environmentId'=$1) ORDER BY w.number LIMIT 200`, [observation.environment.id])).rows.map(r => r.document as Work);
     for (const stale of blocked) {
       const w = (await db.query('SELECT document FROM work_items WHERE id=$1', [stale.id])).rows[0].document as Work;
       for (const [proof, binding] of Object.entries(w.validation ?? {})) {

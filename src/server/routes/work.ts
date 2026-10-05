@@ -9,10 +9,13 @@ import { listDecisions } from '../decision-ledger.js';
 import { answerHumanDecision, listHumanRequests, recordCapacity, requestHumanDecision } from '../waits.js';
 import { readEscalationContext } from '../escalation-context.js';
 import { judgeClosedQuestion } from '../closed-question.js';
+import { recordBlockerProbe } from '../blocker-probe.js';
 import { closeWork } from '../close.js';
-import { appendFollowUps, followUpsByPr, migrateFollowUps, promoteFollowUp, readFollowUps, recordTriage } from '../followups.js';
+import { recordTriage } from '../followups.js';
 import { answerResearch, recordResearch } from '../../research.js';
+import { recordDecomposition } from '../../decomposition.js';
 import { issuePushCredential } from '../push-credential.js';
+import { controlPlaneSyncPush } from '../../sync.js';
 
 /** Whether a request is a lease command (store/pools.ts `leaseCommands`), which authenticates and runs on the lease pool (GY-558). */
 export const leaseCommandRequest = (method: string | undefined, pathname: string) => {
@@ -63,13 +66,23 @@ export const workRoutes = defineRoutes('work', [
         : recordCapacity(context.services, context.actor, target, data, key);
     },
   },
-  // Research before build (GY-259): the loop records a run and its brief as the coordinator, and
-  // the operator answers the brief's product questions. Neither holds the item.
+  // The loop's probe of a standing blocker's cause (GY-1008): recorded, and on a pass the blocker cleared.
   {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/(research|research-answer)$/,
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/blocker-probe$/,
+    async handle(context, [id]) {
+      await refuseLead(context, id, 'blocker-probe');
+      return recordBlockerProbe(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
+    },
+  },
+  // Research before build (GY-259): the loop records a run and its brief as the coordinator, and
+  // the operator answers the brief's product questions. Neither holds the item. Splitting a broad
+  // item before dispatch (GY-1126): the loop records the run, and the split it decides is made here.
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/(research|research-answer|decomposition)$/,
     async handle(context, [id, action]) {
       await refuseLead(context, id, action);
       const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
+      if (action === 'decomposition') return recordDecomposition(context.services, context.actor, target, data, key);
       return action === 'research' ? recordResearch(context.services, context.actor, target, data, key) : answerResearch(context.services, context.actor, target, data, key);
     },
   },
@@ -81,32 +94,13 @@ export const workRoutes = defineRoutes('work', [
       return closeWork(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
     },
   },
-  // Review follow-ups (GY-402, GY-896): an approval's findings recorded on the approved item's own
-  // record (or appended to a legacy follow-up item), read back by item or by pull request, one
-  // finding promoted to a work item on an operator's demand, the one-time migration of the
-  // duplicate follow-up items, and the triage agent's judgement.
-  { method: 'GET', path: /^\/api\/work\/([^/]+)\/followups$/, handle: ({ services, operatorVisible }, [id]) => readFollowUps(services, operatorVisible, decodeURIComponent(id)) },
-  { method: 'GET', path: '/api/followups', handle: ({ services, operatorVisible, url }) => followUpsByPr(services, operatorVisible, url.searchParams) },
+  // The triage agent's judgement of a machine-filed item (GY-402). Review follow-ups are no longer
+  // recorded, filed or promoted (GY-1249): findings worth fixing are fixed on the same pull request.
   {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/promote$/,
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/triage$/,
     async handle(context, [id]) {
-      await refuseLead(context, id, 'promote');
-      return promoteFollowUp(context.services, context.actor, decodeURIComponent(id), await parseJson(context));
-    },
-  },
-  {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/(followups|triage)$/,
-    async handle(context, [id, action]) {
-      await refuseLead(context, id, action);
-      const target = decodeURIComponent(id), data = await parseJson(context), key = context.idempotencyKey();
-      return action === 'followups' ? appendFollowUps(context.services, context.actor, target, data, key) : recordTriage(context.services, context.actor, target, data, key);
-    },
-  },
-  {
-    method: 'POST', path: '/api/followups/migrate',
-    async handle(context) {
-      await refuseLead(context, null, 'followups-migrate');
-      return migrateFollowUps(context.services, context.actor, context.idempotencyKey());
+      await refuseLead(context, id, 'triage');
+      return recordTriage(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
     },
   },
   // A closed-question proof (GY-109): the control plane asks the configured responder against the
@@ -137,6 +131,14 @@ export const workRoutes = defineRoutes('work', [
     async handle(context, [id]) {
       await refuseLead(context, id, 'push-credential');
       return issuePushCredential(context.services, context.actor, decodeURIComponent(id), await parseJson(context));
+    },
+  },
+  // A base sync carrying the base branch's workflow changes, pushed by the control plane (GY-1098).
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/sync-push$/,
+    async handle(context, [id]) {
+      await refuseLead(context, id, 'sync-push');
+      return controlPlaneSyncPush(context.services, context.actor, decodeURIComponent(id), await parseJson(context, 64 * 1024 * 1024));
     },
   },
   {

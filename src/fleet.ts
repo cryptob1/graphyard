@@ -179,13 +179,16 @@ const builtinProbe = (runtime: FleetRuntime): EnvironmentKind | null =>
  * read a login and a quota from, the contract's login file for any other runtime, and nothing
  * (unknown, which is launchable) when the account names no home.
  */
-export async function observeAccount(account: FleetAccount, runtime: FleetRuntime, probe: EnvironmentProbe = {}): Promise<{ quota: QuotaObservation; health: EnvironmentHealth | null }> {
+export async function observeAccount(account: FleetAccount, runtime: FleetRuntime, probe: EnvironmentProbe = {}, allAccounts: readonly FleetAccount[] = [account]): Promise<{ quota: QuotaObservation; health: EnvironmentHealth | null }> {
   const home = account.credential.home, kind = builtinProbe(runtime);
   if (!home) return { quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null };
   if (kind) {
-    const planInfo = deriveAccountPlan(account, [account]);
-    const health = await checkAgentEnvironment({ name: account.name, kind, home, plan: planInfo.planId, keyFile: account.credential.key?.file } as any, probe);
+    const planInfo = deriveAccountPlan(account, allAccounts);
+    const health = await checkAgentEnvironment({ name: account.name, kind, home, plan: planInfo.planId, declaredPlan: account.plan ?? null, keyFile: account.credential.key?.file, keyVariable: account.credential.key?.variable }, probe);
     const resets = health.usage.map(entry => entry.resetsAt).filter((value): value is string => !!value).sort();
+    // No Z.AI credential found for a Pi account is not proof it is logged out: Pi may hold another provider's login,
+    // so the smoke test it gets before first selection decides, with Pi's own error (GY-515, GY-1158).
+    if (runtime.launch.kind === 'pi' && !health.loggedIn) return { health, quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null } };
     return { health, quota: { loggedIn: health.loggedIn, state: health.loggedIn ? health.quota : 'unknown', usage: health.usage.map(entry => ({ window: entry.window, percent: entry.percent, resetsAt: entry.resetsAt })),
       resetsAt: health.quota === 'exhausted' ? resets.at(-1) ?? null : null, reason: health.reason ? health.reason.slice(0, 500) : null } };
   }
@@ -221,7 +224,7 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
   const ceiling = probe.ceilingPercent ?? config.run?.quotaCeilingPercent;
   const observed = await Promise.all(local.map(async account => {
     const runtime = registry.runtimes.find(entry => entry.name === account.runtime);
-    return runtime ? { account: account.name, ...await observeAccount(account, runtime, { ...probe, ceilingPercent: ceiling }) } : null;
+    return runtime ? { account: account.name, ...await observeAccount(account, runtime, { ...probe, ceilingPercent: ceiling }, registry.accounts) } : null;
   }));
   const observations: { account: string; quota: QuotaObservation; health: EnvironmentHealth | null; smoke?: SmokeObservation }[] = observed.filter((entry): entry is NonNullable<typeof entry> => !!entry);
   // An account is smoke-tested before it is first chosen and again after any registry change to it
@@ -457,6 +460,8 @@ export interface ConnectProvider {
   authFile?: string;
   /** The provider's auth file content: what `key` becomes, laid over whatever the file already held. */
   authDocument?: (existing: Record<string, unknown>, key: string) => Record<string, unknown>;
+  /** A settings file the runtime needs beside the key, laid over whatever it held — no credential in it. */
+  settings?: { file: string; document: (existing: Record<string, unknown>) => Record<string, unknown> };
   /**
    * The provider's own login command for `subscription` providers, and the env variable that selects
    * the login home. `env` is laid over the host's environment (to keep a login from opening a
@@ -487,6 +492,16 @@ export const connectProviders: readonly ConnectProvider[] = [
     // The smoke pins the provider and model, so "healthy" means this key answered.
     smoke: { command: 'opencode', args: ['run', '--model', 'zai-coding-plan/glm-5.3-flash', smokePrompt], envVariable: 'XDG_DATA_HOME' },
     help: 'Your z.ai coding-plan key, wrapped by OpenCode. Cheap-model accounts join research, approval and proofs.',
+  },
+  {
+    id: 'pi-zai', label: 'Pi (z.ai key)', kind: 'api-key', runtime: 'pi', model: 'pi-default', tier: 'fast',
+    // Pi's own auth document under PI_CODING_AGENT_DIR: one entry per provider, a key as `api_key`.
+    authFile: 'auth.json',
+    authDocument: (existing, key) => ({ ...existing, zai: { type: 'api_key', key } }),
+    // A registry account launches `pi` with no provider flag, so the home names z.ai as its default.
+    settings: { file: 'settings.json', document: existing => ({ ...existing, defaultProvider: 'zai', defaultModel: 'glm-5.3' }) },
+    smoke: { command: 'pi', args: ['-p', '--no-session', '--provider', 'zai', '--model', 'glm-5.3', smokePrompt], envVariable: 'PI_CODING_AGENT_DIR' },
+    help: 'Your z.ai coding-plan key, run by the Pi coding agent. Pi accounts join approval and proofs.',
   },
   {
     id: 'anthropic-api', label: 'Anthropic API', kind: 'api-key', runtime: 'claude', model: 'claude-default', tier: 'strong',

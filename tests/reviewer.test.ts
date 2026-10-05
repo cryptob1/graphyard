@@ -362,7 +362,7 @@ test('master harness rules cover the master loop and grant no merge path or cred
     for (const rule of allow.filter(entry => entry.includes('gh api'))) assert.match(rule, /^Bash\(gh api (user|user\/installations\*|apps\/\*|repos\/owner\/project\/branches\/main\/protection\*|--method PATCH repos\/owner\/project\/branches\/main\/protection\/\*)\)$/, `gh api rule ${rule} must name one administration endpoint`);
     assert.ok(!allow.some(rule => rule.includes('agent-browser')), 'the operator browser profile is driven only through master browser');
     const deny = plan.deny.map(entry => entry.rule);
-    for (const rule of ['Bash(gh pr merge:*)', 'Bash(gh pr review:*)', 'Bash(gh api *merge*)', 'Bash(gh api *access_tokens*)', 'Bash(gh api graphql*)', 'Bash(gh api *PUT*)', 'Bash(gh api *DELETE*)', 'Bash(agent-browser *)', 'Bash(git push:*)', 'Read(**/*.pem)', 'Read(**/*.token)']) assert.ok(deny.includes(rule), `${rule} must be denied`);
+    for (const rule of ['Bash(gh pr merge:*)', 'Bash(gh pr review:*)', 'Bash(gh api *pulls/*/merge*)', 'Bash(gh api *repos/*/merges*)', 'Bash(gh api *access_tokens*)', 'Bash(gh api graphql*mutation*)', 'Bash(gh api *PUT*)', 'Bash(gh api *DELETE*)', 'Bash(agent-browser *)', 'Bash(git push:*)', 'Read(**/*.pem)', 'Read(**/*.token)']) assert.ok(deny.includes(rule), `${rule} must be denied`);
     assert.ok(deny.some(rule => rule.startsWith(`Read(//${join(config.credentialFile, '../..')}`)), 'the credential home is denied');
 
     const preview = await writeHarnessPermissions(root, plan, false);

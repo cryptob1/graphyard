@@ -15,7 +15,7 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import type { Principal, Work } from '../src/model.js';
 import { actionIdleMs, claimAction, renewClaim, settleAction, type ActionRow } from '../src/model/actions.js';
-import { describeUnserved, executorLiveMs, executorRegistry, executorReport } from '../src/model/executor-presence.js';
+import { describeUnserved, executorLiveMs, executorRegistry, executorReport, loopPresenceHeader, loopRegistry } from '../src/model/executor-presence.js';
 import { executorRunnableKinds } from '../src/model/action-kinds.js';
 import { executorEffects, runExecutor } from '../src/auto-dispatch.js';
 import { emptyDaemonState, preserveKey, launchAppearanceMs, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
@@ -566,10 +566,10 @@ test('integration:killed-worker-work-preserved: a worker killed outright keeps i
     assert.match(prompt, new RegExp(`The previous attempt \\(epoch 1\\) ended without submitting: its agent session agent-builder is gone from Herdr \\(first seen gone at [^)]+\\) and its supervisor has exited without releasing the lease; its work is kept as commit ${kept} on local branch graphyard/${work.key.toLowerCase()}-1 \\(worktree ${worktree}\\)\\. Read it with git log and git show`));
     assert.doesNotMatch(prompt, /ran out of quota/);
 
-    // The second attempt ends the ordinary way — a blocker for the operator, its lease released,
-    // its session gone — so the profile is free for the next item and the first is not re-offered.
+    // The second attempt ends the ordinary way — a blocker for the operator, which ends the attempt
+    // and releases its lease (GY-1008), its session gone — so the profile is free for the next item
+    // and the first is not re-offered.
     await ok(workerA, 'POST', `work/${work.id}/blocked`, { epoch: 2, reason: 'fixture: parked for the operator' });
-    await ok(workerA, 'POST', `work/${work.id}/release`, { epoch: 2 });
     process.kill(agents[1].pid, 'SIGKILL'); await until(() => !processAlive(agents[1].pid), 'the second worker process to die');
 
     // --- B. The agent dies but its supervisor keeps renewing the lease: the orphan step keeps the
@@ -608,4 +608,21 @@ test('integration:killed-worker-work-preserved: a worker killed outright keeps i
     for (const agent of agents) { try { process.kill(agent.pid, 'SIGKILL'); } catch { /* already gone */ } }
     for (const worktree of worktrees) await rm(worktree, { recursive: true, force: true });
   }
+});
+
+test('integration:loop-read-names-merger: the master loop\'s coordination read names it to the control plane, which then reports the live loop as the merger whatever its last merge request; no other principal\'s read does (GY-916)', async () => {
+  await fresh();
+  const read = (principal: Principal, interval: string) => fetch(`${url}/api/work-snapshot`, { headers: { Authorization: `Bearer ${token(principal)}`, 'X-Graphyard-View': 'coordination', [loopPresenceHeader]: interval } });
+  assert.equal((await read(workerA, '20')).status, 200);
+  assert.equal((await ok(coordinator, 'GET', 'actions')).executors.loop, undefined, 'a worker\'s read is not the loop');
+  assert.equal((await read(coordinator, 'not-an-interval')).status, 200);
+  assert.equal((await ok(coordinator, 'GET', 'actions')).executors.loop, undefined, 'a read naming no supported interval is not the loop');
+  assert.equal((await read(coordinator, '20')).status, 200);
+  const seen = (await ok(coordinator, 'GET', 'actions')).executors.loop;
+  assert.equal(seen.live, true);
+  assert.match(seen.name, /^the master loop \(master-loop, cycling every 20s, last read /);
+  assert.equal((await ok(coordinator, 'GET', 'status')).executors.unserved.some((entry: any) => entry.kind === 'merge'), false);
+  // Three of its cycles without a read and it is no longer assumed live.
+  assert.ok(loopRegistry(engine).live(new Date(Date.now() + 60_000)));
+  assert.equal(loopRegistry(engine).live(new Date(Date.now() + 121_000)), null);
 });

@@ -84,7 +84,8 @@ export function unseenSessions(all: Work[], now: Date) {
  * - no coordinate to match (its launcher never wrote the pane or name): missed like one not listed.
  * `ended` and `lost` close the record with the reason. A runtime that could not be read is a gap,
  * not a report: nothing is counted against any session. A handle nothing has observed yet is left
- * alone through `sessionLaunchGraceMs`, because a session is registered before its runtime starts.
+ * alone through `sessionLaunchGraceMs`, because a session is registered before its runtime starts,
+ * and so is a worker handle with no coordinate yet whose attempt's lease stands (`launchHeldByLease`).
  *
  * The loop computes a report on every tick and writes a handle when its observation changes, a
  * report missed it, or its last observation is older than `sessionObservationRefreshMs` — so the
@@ -119,6 +120,26 @@ export type ObserveOptions = LivenessOptions & { hostId?: string | null; launchG
   /** When each handle the previous report missed was first missed; a handle in it is missing for a second consecutive report. */
   firstMissed?: Record<string, string> };
 const handleKey = (workId: string, id: string) => `${workId}\u0000${id}`;
+/** The epoch a worker handle was registered for: its own, or the `PRINCIPAL:EPOCH` its id names. */
+const handleEpoch = (handle: Pick<SessionHandle, 'id' | 'epoch'>) => handle.epoch ?? Number(/:(\d+)$/.exec(handle.id)?.[1]);
+/**
+ * GY-1287: a worker handle its launcher has not yet given a pane or name, whose attempt's lease
+ * stands under the handle's principal, is a launch still preparing — the launch renews that lease
+ * until its supervisor's first heartbeat, and the supervisor after — never a vanished session.
+ * On 5 October 2026 GY-1235's launch took longer than the launch grace, and the report closed its
+ * handle as lost while the worker it was starting went on to hold and renew the lease.
+ */
+export function launchHeldByLease(work: Pick<Work, 'lease'>, handle: Pick<SessionHandle, 'id' | 'kind' | 'principal' | 'epoch' | 'pane' | 'agentName' | 'state' | 'observed'>, clock: number) {
+  const lease = work.lease;
+  return handle.kind === 'implementation' && handle.state === 'running' && !handle.observed && !handle.pane && !handle.agentName
+    && !!lease && !!handle.principal && lease.owner === handle.principal && handleEpoch(handle) === lease.epoch && Date.parse(lease.expiresAt) > clock;
+}
+/** A handle nothing has observed yet whose launch is still under way: inside the launch grace, or held by its attempt's lease. */
+export function launchingSession(work: Pick<Work, 'lease'>, handle: Pick<SessionHandle, 'id' | 'kind' | 'principal' | 'epoch' | 'pane' | 'agentName' | 'state' | 'observed' | 'startedAt'>, clock: number, grace = sessionLaunchGraceMs) {
+  if (handle.state !== 'running' || handle.observed) return false;
+  const started = Date.parse(handle.startedAt);
+  return (Number.isFinite(started) && clock - started < grace) || launchHeldByLease(work, handle, clock);
+}
 export function observeSessions(all: Work[], runtime: RuntimeSession[] | null, now: Date, options: ObserveOptions = {}): SessionReport {
   const entries: SessionReportEntry[] = [], missing: Record<string, string> = {};
   // A runtime that could not be read is a gap in the reports, not a report of absence.
@@ -150,7 +171,7 @@ export function observeSessions(all: Work[], runtime: RuntimeSession[] | null, n
       entries.push({ ...base, observed: state, observedAt: at, missedReports: 0, closed: state === 'ended' ? 'ended' : null, outcome, changed });
       continue;
     }
-    if (young) continue;
+    if (young || launchHeldByLease(work, handle, clock)) continue;
     const key = handleKey(work.id, handle.id);
     const first = Date.parse(options.firstMissed?.[key] ?? '');
     const firstMissedAt = Number.isFinite(first) ? Math.min(first, clock) : clock;
