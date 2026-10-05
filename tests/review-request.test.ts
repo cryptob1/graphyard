@@ -320,7 +320,7 @@ test('unit:docs-only-conflict-synced — a docs-only conflict leads to a docs-sy
   (github as any).request = async (path: string) => {
     if (path === `/commits/${synced}`) return { parents: [{ sha: reviewed }, { sha: tip }], author: { login: 'docs-sync-account' }, commit: { author: { email: 'sync@example.com' } } };
     if (path === `/commits/${tip}`) return { commit: { tree: { sha: 'f'.repeat(40) } } };
-    const range = path.replace(/^\/compare\//, '');
+    const range = path.replace(/^\/compare\//, '').split('?')[0];
     if (compare[range]) return { status: 'ahead', files: compare[range] };
     throw new Error(`unexpected request ${path}`);
   };
