@@ -98,6 +98,14 @@ const deploymentStatusHistory = 100;
 /** States of a deployment still on its way: it does not serve yet, so it supersedes nothing. */
 const inFlightStates = new Set(['pending', 'queued', 'in_progress', 'waiting']);
 /**
+ * How long a deployment may stay in flight and still not supersede the release behind it. A
+ * deployment that never concludes — abandoned, or a `waiting` one held by a protection rule nobody
+ * approves, or one with no status at all, which reads as `pending` — would otherwise keep an older
+ * inactive release asserted as served indefinitely. Past this age, from its `created_at`, it counts
+ * as a newer production record like any other; one whose age cannot be read never shadows.
+ */
+export const inFlightShadowBound = 60 * 60_000;
+/**
  * The latest status of each listed deployment, in listing order, in one GraphQL read: the REST API
  * has only a per-deployment status listing. A deployment whose status could not be read has no
  * entry (`undefined`); one with no status yet is `pending`. `succeeded` says whether any of its
@@ -127,6 +135,12 @@ async function deploymentStates(repository: string, deployments: any[], run: Chi
       && history.some((status: any) => typeof status?.state === 'string' && status.state.toLowerCase() === 'success'))),
   };
 }
+
+/** How long ago a listed deployment was created; never within the bound when GitHub gave no readable time. */
+const inFlightAge = (deployment: any, at: number) => {
+  const created = typeof deployment?.created_at === 'string' ? Date.parse(deployment.created_at) : Number.NaN;
+  return Number.isFinite(created) ? at - created : Number.POSITIVE_INFINITY;
+};
 
 export async function observeDeployment(config: MasterConfig, delivered: Work[], run: ChildRun, fetcher: typeof fetch = fetch, now = () => Date.now(),
   options: { root: string; retained?: ContainmentRetention | null }): Promise<DeploymentObservation> {
@@ -206,8 +220,11 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
       // GitHub deactivates it when a newer deployment succeeds. Behind any newer production record
       // — a successful one, a failed attempt, one whose status is unread or not a release — an
       // inactive deployment is never taken, so a superseded or rolled-back release is not served.
-      // A newer release still pending, queued or in progress is the exception: production keeps
-      // serving the release until it concludes, so a deploy window leaves no delivery pending.
+      // A newer release still pending, queued, in progress or waiting is the exception: production
+      // keeps serving the release until it concludes, so a deploy window leaves no delivery pending.
+      // The exception lasts `inFlightShadowBound` from the deployment's creation, so one that never
+      // concludes stops shadowing the supersession. A newer record that is not a release is not
+      // read, so it supersedes whatever its state: conservative, the delivery only stays pending.
       for (const { deployment, candidate } of records) {
         if (candidate) {
           const index = candidates.indexOf(deployment);
@@ -218,7 +235,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
             if (state === 'inactive') inactive = `${production} deployment ${deployment.id} reached success and was later marked inactive with no newer ${production} deployment, so it is the release production serves`;
             break;
           }
-          if (inFlightStates.has(state)) continue;
+          if (inFlightStates.has(state) && inFlightAge(deployment, now()) <= inFlightShadowBound) continue;
         }
         newerProduction = true;
       }
