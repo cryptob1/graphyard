@@ -1,4 +1,5 @@
 // Concern: cycle steps 5–7 — shepherd reviews and proofs, the guarded merge, deployment verification.
+import { deliveredByGitHub } from '../model/delivery-mode.js';
 import { carriedApproval, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, deploySmokeRequired, deliveryState, rollbackGuidance } from '../model.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation, approvedMerge, transientMergeRace } from '../master.js';
 import { type Work } from '../model.js';
@@ -243,7 +244,8 @@ export async function mergeStep(cycle: Cycle) {
   });
   //    A candidate waiting its turn in the merge queue is not attempted: the refusal would only
   //    restate its position, and each one would push its first real attempt further out (GY-192).
-  const mergeCandidates = open.filter(candidate => candidate.stage === 'merge' && !mergedWithoutAuthorization(candidate) && !waitingInMergeQueue(candidate));
+  //    Under GitHub delivery GitHub merges on its own branch protection; the loop never asks.
+  const mergeCandidates = open.filter(candidate => candidate.stage === 'merge' && !deliveredByGitHub(candidate) && !mergedWithoutAuthorization(candidate) && !waitingInMergeQueue(candidate));
   // The cycle snapshot is 30-45 s old by now, and observations and bookkeeping write to the item
   // throughout. The merge is invoked on the item as it stands immediately before the call, under
   // the same action key; one whose candidate or queue turn moved is left to the next cycle.
