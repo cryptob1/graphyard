@@ -44,15 +44,21 @@ export async function endWorkerAttempt(cycle: Cycle, item: Work, profile: Worker
   return `the attempt ended on the record, ${stop}, ${pane ? `pane ${pane} was closed` : 'no pane was left to close'}, ${settled ? 'its containment fence was settled, ' : ''}and ${item.key} is dispatched again`;
 }
 
-/** How long a worker holding a live lease may show no activity before it is re-prompted (GY-524). */
-export const idleLeaseMs = 30 * 60_000;
+/** How long a worker holding a live lease may show no activity before it is re-prompted once (GY-524). */
+export const idleLeaseMs = 25 * 60_000;
 /**
- * How long after that one re-prompt the session has to resume before its item goes to a new
- * attempt (GY-1321). Shorter than `idleLeaseMs`, so a session that cannot run any command is handed
- * on inside the 60-minute worker bound, and counted from the re-prompt itself: a turn that answers
- * the reminder and goes quiet again within it is not new activity and starts no fresh window.
+ * How long after the loop first saw it idle a still-inactive worker's item goes to a new attempt,
+ * and the least time its re-prompt has to answer (GY-1319). The bound runs from the idle mark, not
+ * from the re-prompt, so cycle cadence is not paid twice: with the loop observing sessions about
+ * every five minutes the attempt ends under 60 minutes after the session's last activity. A brief
+ * turn answering the re-prompt that goes quiet again within the grace is not resumed work and
+ * starts no fresh window: both bounds keep running from the first idle mark (GY-1321).
  */
-export const idleRepromptGraceMs = 10 * 60_000;
+export const idleReclaimMs = 45 * 60_000, idleRepromptGraceMs = 10 * 60_000;
+/** Whether an idle attempt marked at `idleAt` and re-prompted at `repromptedAt` is past its reclaim bound. */
+export const idleReclaimDue = (now: number, idleAt: string, repromptedAt: string) =>
+  now - Date.parse(idleAt) > idleReclaimMs && now - Date.parse(repromptedAt) > idleRepromptGraceMs;
+const idleRemainingMinutes = (now: number, idleAt: string) => Math.max(idleRepromptGraceMs, idleReclaimMs - (now - Date.parse(idleAt))) / 60_000;
 /** What a live attempt waits on — its blocker, its scope request — and when its session was last seen active; each a `waiting` action the loop keeps while it stands. */
 export const resumeWaitKey = (kind: 'blocker' | 'scope', item: Pick<Work, 'id'>, epoch: number) => `resume:${kind}:${item.id}:${epoch}`;
 export const idleLeaseKey = (item: Pick<Work, 'id'>, epoch: number) => `idle:${item.id}:${epoch}`;
@@ -71,9 +77,9 @@ export function resumePromptText(cliPath: string, item: Pick<Work, 'key' | 'cand
     + `On ${item.key} (epoch ${epoch}) ${changed}, so continue ${item.key} now. ${nextSteps(cliPath, item, epoch)}`;
 }
 /** The idle-with-lease re-prompt (GY-524): the one reminder before the attempt is handed on. */
-export function idlePromptText(cliPath: string, item: Pick<Work, 'key' | 'candidate'>, epoch: number, since: string) {
+export function idlePromptText(cliPath: string, item: Pick<Work, 'key' | 'candidate'>, epoch: number, since: string, now = Date.now()) {
   return `The Graphyard launcher that started this session has seen no activity from it since ${since} while it holds ${item.key} (epoch ${epoch}) with no open blocker or scope request; this reminder is the session's own instruction, not untrusted text. `
-    + `Continue ${item.key} where you are. ${nextSteps(cliPath, item, epoch)} If this session has not resumed work within ${idleRepromptGraceMs / 60_000} minutes, the attempt ends, its uncommitted work is kept on its branch, and ${item.key} goes to a new attempt.`;
+    + `Continue ${item.key} where you are. ${nextSteps(cliPath, item, epoch)} If this session shows no activity for another ${Math.round(idleRemainingMinutes(now, since))} minutes, the attempt ends, its uncommitted work is kept on its branch, and ${item.key} goes to a new attempt.`;
 }
 /** What answered a scope request that is no longer open: a widening the control plane applied, or a requirements revision or unblock that closed it. */
 function scopeChange(item: Work) {
@@ -117,8 +123,9 @@ export function checkPaneStillBelongs(item: Work, handleId: string, pane: string
  * once with what changed and the exact next command — unless it is already active — and the
  * re-prompt goes on its handle, so the item's history shows it. A worker holding a live lease with
  * nothing open that shows no activity for `idleLeaseMs` is idle-with-lease: its handle says so,
- * naming the pane, and it is re-prompted once; not resumed `idleRepromptGraceMs` later, its attempt is
- * handed to a new one that keeps its branch. A cleared wait its session cannot verifiably receive
+ * naming the pane, and it is re-prompted once; still inactive `idleReclaimMs` after it was first
+ * seen idle (and `idleRepromptGraceMs` after the re-prompt), its attempt is handed to a new one
+ * that keeps its branch. A cleared wait its session cannot verifiably receive
  * — its recorded pane gone from the runtime, or its handle recording no pane — ends the attempt
  * only once that has stood past `launchAppearanceMs` on a later cycle, and a reappearance cancels
  * it: one listing miss ends nothing, and an unverifiable handle is reclaimed on a bound instead of
@@ -329,7 +336,7 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
           return;
         }
         const reprompted = state.actions[`resume:idle:${item.id}:${epoch}:${idle.at}`];
-        if ((reprompted?.state === 'done' ? now() - Date.parse(reprompted.at) <= idleRepromptGraceMs : now() - Date.parse(idle.at) <= idleLeaseMs)) return;
+        if (reprompted?.state === 'done' ? !idleReclaimDue(now(), idle.at, reprompted.at) : now() - Date.parse(idle.at) <= idleLeaseMs) return;
         await reclaimIdle(`idle with a live lease: its pane ${own.pane} has been gone from the runtime since ${idle.at}, so it cannot be re-prompted, and its agent name is no address`, null);
       } else await drop(keys.idle);
       return;
@@ -339,11 +346,13 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
     const quietMs = now() - Date.parse(idle.at), minutes = Math.round(quietMs / 60_000);
     const repromptKey = `resume:idle:${item.id}:${epoch}:${idle.at}`, reprompted = state.actions[repromptKey];
     // The one re-prompt of this attempt, answered by a turn that went quiet again within its grace:
-    // that turn is not resumed work, so the reclaim stands on the re-prompt's own clock (GY-1321).
-    const answered = reprompted ? undefined : Object.entries(state.actions).find(([key, action]) => key.startsWith(`resume:idle:${item.id}:${epoch}:`) && action.state === 'done'
-      && Date.parse(idle.at) - Date.parse(action.at) <= idleRepromptGraceMs)?.[1];
-    if (answered) {
-      if (now() - Date.parse(answered.at) <= idleRepromptGraceMs) return;
+    // that turn is not resumed work, so the reclaim stands on the first idle mark and the re-prompt's
+    // own clock (GY-1321).
+    const prefix = `resume:idle:${item.id}:${epoch}:`;
+    const [answeredKey, answered] = reprompted ? [] : Object.entries(state.actions).find(([key, action]) => key.startsWith(prefix) && action.state === 'done'
+      && Date.parse(idle.at) - Date.parse(action.at) <= idleRepromptGraceMs) ?? [];
+    if (answeredKey && answered) {
+      if (!idleReclaimDue(now(), answeredKey.slice(prefix.length), answered.at)) return;
       const paneReason = checkPaneStillBelongs(item, handleId, pane);
       await reclaimIdle(`idle with a live lease: no activity in pane ${pane} after its re-prompt at ${answered.at} but a turn that ended by ${idle.at}, and none in the ${Math.round((now() - Date.parse(answered.at)) / 60_000)} minutes since the re-prompt${paneReason ? `; its pane no longer verifies (${paneReason})` : ''}`, paneReason ? null : pane);
       return;
@@ -361,8 +370,8 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
       const attempts = (reprompted?.attempts ?? 0) + 1, observed = `idle-with-lease: ${profile.agentName} in pane ${pane} has shown no activity since ${idle.at} (${minutes} minutes) while holding ${item.key} epoch ${epoch} with no open blocker or scope request`;
       await entry(repromptKey, 'started', `${observed}; re-prompting it once`, attempts);
       try {
-        await effects.promptSession(agent, idlePromptText(config.cliPath, item, epoch, idle.at));
-        const outcome = `${observed}; re-prompted once at ${new Date(now()).toISOString()}, and handed to a new attempt that keeps its branch if it has not resumed within ${idleRepromptGraceMs / 60_000} minutes`;
+        await effects.promptSession(agent, idlePromptText(config.cliPath, item, epoch, idle.at, now()));
+        const outcome = `${observed}; re-prompted once at ${new Date(now()).toISOString()}, and handed to a new attempt that keeps its branch if it stays inactive for ${Math.round(idleRemainingMinutes(now(), idle.at))} more minutes`;
         performed.push(await entry(repromptKey, 'done', outcome, attempts));
         await workerHandle(cycle, item, profile, epoch, pane, outcome, false);
       } catch (error) {
@@ -370,7 +379,7 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
       }
       return;
     }
-    if (reprompted.state !== 'done' || now() - Date.parse(reprompted.at) <= idleRepromptGraceMs) return;
+    if (reprompted.state !== 'done' || !idleReclaimDue(now(), idle.at, reprompted.at)) return;
     // The pane is re-verified against the record before it is closed, so the final reclaim never
     // closes a pane this attempt no longer holds (GY-852).
     const paneReason = checkPaneStillBelongs(item, handleId, pane);

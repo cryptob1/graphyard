@@ -55,7 +55,7 @@ On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-
 
 Reviewers and producers are `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once if quiet past `run.acknowledgementSeconds` (default 90); settling resultless is **`never started`**: relaunched free a minute later, three at most (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
 
-**Idle-with-lease** (30 quiet minutes, nothing open): re-prompted once; not resumed 10 minutes later (a brief reply does not count), handed on, keeping its branch.
+**Idle-with-lease** (25 quiet minutes, nothing open): re-prompted once; still quiet 45 minutes after first seen idle and 10 after the re-prompt (a brief reply to it does not count), handed to a new attempt on its branch, under 60 minutes from its last activity.
 
 **Blocked mid-session** (Herdr reports `blocked`): the loop reads the pane (by agent name, then pane id). A destructive-command prompt is declined; a folder-trust dialog is never answered: the session is closed and launched again at once, and the launch records the trust (a second dialog for the same request waits as unknown); any other prompt fails the session after **5 minutes**. An unreadable screen is no prompt and starts no timer.
 
@@ -63,7 +63,7 @@ Headless Pi runs (`.graphyard/runs/`) survive restarts.
 
 ### Panes are closed and reclaimed
 
-Ending a session closes its pane; each cycle closes ≤**6** more launched **on this host** whose session or worktree is gone and agentless past **120 s**; over **20** raise attention (`daemon.escalations`).
+Ending a session closes its pane. Each cycle closes ≤**12** more **on this host**, never one whose item and epoch holds a live lease: an agentless shell in `.graphyard/worktrees` **120 s** after first sight, recorded or not (never one elsewhere); an agent named for its ended session after **60 s**. Over **20** agentless raise attention (`daemon.escalations`).
 
 ### The dispatcher's own state
 

@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { capabilityTiers, fleetRoles, groupAccountsByPlan, looksLikeSecret, quotaStates, type FleetAccountView, type FleetView, type RolePolicy } from '../../src/model/registry';
 import { formatAge } from '../../src/model/duration';
 import { sealForHost } from '../seal';
 import type { Dashboard } from './dashboard';
-import { accountStatus, chipTones, countdown, localTime, roleLaunch, type AccountStatus } from '../agent-status';
+import { accountStatus, chipTones, countdown, launchFailure, localTime, roleLabels, roleLaunch, type AccountStatus } from '../agent-status';
 import { MoreDetails, PageHeader, PageSection } from '../components/page-layout';
 
 const when = (iso: string | null) => iso ? new Date(iso).toLocaleString() : '—';
@@ -118,86 +118,126 @@ export const policyText = (policy: RolePolicy | undefined) => {
 
 /** One account's status chip: its label, drawn in its tone, with the reason as its title. */
 export const StatusChip = ({ status }: { status: AccountStatus }) =>
-  <span className={`status-chip tone-${chipTones[status.chip]}`} data-chip={status.chip}>{status.label}</span>;
+  <span className={`status-chip tone-${chipTones[status.chip]}`} title={status.reason} data-chip={status.chip}>{status.label}</span>;
 
-/** Every registry account in one table, grouped under its provider plan with usage bars per window (GY-1121). */
+type FleetPlan = NonNullable<FleetView['plans']>[number];
+
+/** A plan's usage windows as compact bars, each window's reset in its title; unreported usage is a muted dash with the reason in its title (GY-1325). */
+export function UsageBars({ plan }: { plan: FleetPlan | null }) {
+  if (!plan || !plan.usage.reported || !plan.usage.windows.length)
+    return <span className="usage-not-reported" data-not-reported title={plan?.usage.reason || `usage not reported${plan ? ` by ${plan.name}` : ''}`}>—</span>;
+  return <span className="plan-usage" data-plan-usage={plan.name}>{plan.usage.windows.map(win =>
+    <span key={win.window} className="usage-bar-container" data-window={win.window} title={`${win.window}: ${win.percent}% used${win.resetsAt ? `, resets ${when(win.resetsAt)}` : ''}`}>
+      <span className="usage-window-label">{win.window}</span>
+      <span className="usage-bar-track" role="progressbar" aria-valuenow={win.percent} aria-valuemin={0} aria-valuemax={100} aria-label={`${win.window} usage`}>
+        <span className={`usage-bar-fill ${win.percent >= 90 ? 'danger' : win.percent >= 75 ? 'warn' : 'ok'}`} style={{ width: `${Math.min(100, Math.max(0, win.percent))}%` }}/>
+      </span>
+      <span className="usage-window-stats">{win.percent}%</span>
+    </span>)}</span>;
+}
+
+/**
+ * What the Why cell adds to the row (GY-1325): nothing for an idle account (its Roles cell says what
+ * it is ready for) or one spent until a known time (its Back and Usage cells say when and how much),
+ * the live work for a working account, and the refusal, smoke failure or ineligible reason otherwise.
+ */
+export function whyText(account: FleetAccountView, status: AccountStatus, fleet: Pick<FleetView, 'sessions'>, now: number): string {
+  if (status.chip === 'idle' || (status.chip === 'spent' && status.until)) return '';
+  if (status.chip === 'working') {
+    const full = account.maxSessions !== null && account.liveSessions.length >= account.maxSessions;
+    return `${account.liveSessions.map(session => `${session.role}${session.work ? ` on ${session.work}` : ''}`).join(', ')}${full ? ` (at its limit of ${account.maxSessions})` : ''}`;
+  }
+  // A launch failure's retry time is the Back cell's.
+  if (status.chip === 'launch-failing') return launchFailure(account, fleet, now)?.reason ?? status.reason;
+  return status.reason;
+}
+
+/** Accounts read working, then idle, then out of work: failing, unavailable, spent, role-less, disabled. */
+const statusOrder: AccountStatus['chip'][] = ['working', 'idle', 'launch-failing', 'unavailable', 'spent', 'no-role', 'disabled'];
+const spentDay = (iso: string) => new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+interface AccountRow { account: FleetAccountView; status: AccountStatus; plan: FleetPlan | null; shared: boolean }
+interface RowGroup { plan: FleetPlan | null; rows: AccountRow[] }
+
+/**
+ * Every registry account as one table row (GY-1121, GY-1325): its usage windows in its own row when
+ * its plan holds it alone, under one plan header row when a plan holds two or more. Rows read in
+ * status order, and spent accounts back on the same day collapse into one summary row that opens
+ * on click to their own rows.
+ */
 export function AccountsTable({ fleet, now }: { fleet: FleetView; now: number }) {
-  const plans = fleet.plans && fleet.plans.length > 0
-    ? fleet.plans
-    : groupAccountsByPlan({ accounts: fleet.accounts }, now);
+  const [opened, setOpened] = useState<string[]>([]);
+  const plans = fleet.plans && fleet.plans.length > 0 ? fleet.plans : groupAccountsByPlan({ accounts: fleet.accounts }, now);
+  const rank = (row: AccountRow) => statusOrder.indexOf(row.status.chip);
+  const row = (account: FleetAccountView, plan: FleetPlan | null, shared: boolean): AccountRow => ({ account, status: accountStatus(account, fleet, now), plan, shared });
   const seen = new Set<string>();
+  const groups: RowGroup[] = [];
+  for (const plan of plans) {
+    const accounts = plan.accounts.flatMap(name => fleet.accounts.find(entry => entry.name === name) ?? []);
+    accounts.forEach(account => seen.add(account.name));
+    if (accounts.length >= 2) groups.push({ plan, rows: accounts.map(account => row(account, plan, true)).sort((a, b) => rank(a) - rank(b)) });
+    else groups.push(...accounts.map(account => ({ plan: null, rows: [row(account, plan, false)] })));
+  }
+  groups.push(...fleet.accounts.filter(account => !seen.has(account.name)).map(account => ({ plan: null, rows: [row(account, null, false)] })));
+  groups.sort((a, b) => Math.min(...a.rows.map(rank)) - Math.min(...b.rows.map(rank)));
+  // Consecutive single-account plans share one body; a shared plan keeps its own, under its header.
+  const bodies: RowGroup[] = [];
+  for (const group of groups) {
+    const last = bodies.at(-1);
+    if (!group.plan && last && !last.plan) last.rows.push(...group.rows);
+    else bodies.push({ plan: group.plan, rows: [...group.rows] });
+  }
 
-  return <table className="flow-data agents-table" aria-label="Accounts at a glance"><thead><tr><th>Account</th><th>Status</th><th>Why</th><th>Back</th><th>Roles</th><th>Runs</th></tr></thead>
-    {plans.map(plan => <tbody key={plan.id || plan.name} data-plan-group={plan.name}>
-      <tr className="plan-header-row" data-plan={plan.name}>
-        <th colSpan={6} className="plan-header">
-          <div className="plan-header-content">
-            <span className="plan-name" data-plan-name={plan.name}>{plan.name}</span>
-            <div className="plan-usage" data-plan-usage={plan.name}>
-              {plan.usage.reported && plan.usage.windows.length > 0 ? (
-                plan.usage.windows.map(win => (
-                  <div
-                    key={win.window}
-                    className="usage-bar-container"
-                    data-window={win.window}
-                    title={`${win.window}: ${win.percent}% used${win.resetsAt ? `, resets ${when(win.resetsAt)}` : ''}`}
-                  >
-                    <span className="usage-window-label">{win.window}</span>
-                    <div className="usage-bar-track" role="progressbar" aria-valuenow={win.percent} aria-valuemin={0} aria-valuemax={100} aria-label={`${win.window} usage`}>
-                      <div
-                        className={`usage-bar-fill ${win.percent >= 90 ? 'danger' : win.percent >= 75 ? 'warn' : 'ok'}`}
-                        style={{ width: `${Math.min(100, Math.max(0, win.percent))}%` }}
-                      />
-                    </div>
-                    <span className="usage-window-stats">
-                      {win.percent}% used{win.resetsAt ? ` · resets ${countdown(win.resetsAt, now)}` : ''}
-                    </span>
-                  </div>
-                ))
-              ) : (
-                <span className="usage-not-reported" data-not-reported>
-                  {plan.usage.reason || `usage not reported by ${plan.name}`}
-                </span>
-              )}
-            </div>
-          </div>
-        </th>
-      </tr>
-      {plan.accounts.map(accountName => {
-        seen.add(accountName);
-        const account = fleet.accounts.find(entry => entry.name === accountName);
-        if (!account) return null;
-        const status = accountStatus(account, fleet, now);
-        return <tr key={account.name} data-account-row={account.name} data-status={status.chip}>
-          <th scope="row">{account.name}</th>
-          <td data-label="Status"><StatusChip status={status}/></td>
-          <td data-label="Why" className="why">{status.reason}</td>
-          <td data-label="Back">{status.until ? <time dateTime={status.until} title={status.until}>{localTime(status.until)} <small>{countdown(status.until, now)}</small></time> : '—'}</td>
-          <td data-label="Roles">{account.roles.map(entry => entry.role).join(', ') || '—'}</td>
-          <td data-label="Runs">{account.runtime} · {account.model}</td>
-        </tr>;
-      })}
+  const accountRow = ({ account, status, plan, shared }: AccountRow, hidden = false) =>
+    <tr key={account.name} data-account-row={account.name} data-status={status.chip} data-plan={plan?.name} hidden={hidden}>
+      <th scope="row">{account.name}</th>
+      <td data-label="Status"><StatusChip status={status}/></td>
+      <td data-label="Why" className="why">{whyText(account, status, fleet, now) || <span className="muted">—</span>}</td>
+      <td data-label="Back">{status.until ? <time dateTime={status.until} title={status.until}>{localTime(status.until)} <small>{countdown(status.until, now)}</small></time> : '—'}</td>
+      <td data-label="Usage">{shared ? <span className="muted" title={`shared with ${plan!.name}, shown above`}>plan</span> : <UsageBars plan={plan}/>}</td>
+      <td data-label="Roles">{account.roles.map(entry => entry.role).join(', ') || '—'}</td>
+      <td data-label="Runs">{account.runtime} · {account.model}</td>
+    </tr>;
+  // Spent accounts back on the same day: one summary row, then their own rows, hidden until it is opened.
+  const bodyRows = (rows: AccountRow[]) => {
+    const days = new Map<string, AccountRow[]>();
+    for (const entry of rows) if (entry.status.chip === 'spent' && entry.status.until) { const day = spentDay(entry.status.until); days.set(day, [...(days.get(day) ?? []), entry]); }
+    return rows.flatMap(entry => {
+      const day = entry.status.chip === 'spent' && entry.status.until ? spentDay(entry.status.until) : null;
+      const same = day ? days.get(day)! : [];
+      if (!day || same.length < 2) return [accountRow(entry)];
+      const open = opened.includes(day);
+      const summary = same[0] === entry ? [<tr key={`spent:${day}`} className="spent-summary" data-spent-summary={day}><td colSpan={7}>
+        <button type="button" aria-expanded={open} onClick={() => setOpened(list => open ? list.filter(entry => entry !== day) : [...list, day])}>
+          <span className="status-chip tone-wait">{same.length} spent until {day}</span> · {same.map(entry => entry.account.name).join(', ')}
+        </button></td></tr>] : [];
+      return [...summary, accountRow(entry, !open)];
+    });
+  };
+
+  return <table className="flow-data agents-table compact-table" aria-label="Accounts at a glance"><thead><tr><th>Account</th><th>Status</th><th>Why</th><th>Back</th><th>Usage</th><th>Roles</th><th>Runs</th></tr></thead>
+    {bodies.map((body, index) => <tbody key={body.plan?.id ?? `accounts-${index}`} data-plan-group={body.plan?.name}>
+      {body.plan && <tr className="plan-header-row" data-plan={body.plan.name}><th colSpan={7} className="plan-header">
+        <span className="plan-header-content"><span className="plan-name" data-plan-name={body.plan.name}>{body.plan.name}</span><UsageBars plan={body.plan}/></span>
+      </th></tr>}
+      {bodyRows(body.rows)}
     </tbody>)}
-    {fleet.accounts.filter(a => !seen.has(a.name)).length > 0 && <tbody>
-      {fleet.accounts.filter(a => !seen.has(a.name)).map(account => {
-        const status = accountStatus(account, fleet, now);
-        return <tr key={account.name} data-account-row={account.name} data-status={status.chip}>
-          <th scope="row">{account.name}</th>
-          <td data-label="Status"><StatusChip status={status}/></td>
-          <td data-label="Why" className="why">{status.reason}</td>
-          <td data-label="Back">{status.until ? <time dateTime={status.until} title={status.until}>{localTime(status.until)} <small>{countdown(status.until, now)}</small></time> : '—'}</td>
-          <td data-label="Roles">{account.roles.map(entry => entry.role).join(', ') || '—'}</td>
-          <td data-label="Runs">{account.runtime} · {account.model}</td>
-        </tr>;
-      })}
-    </tbody>}
   </table>;
 }
 
-/** Per role: can it launch now, and when it cannot, why and the earliest time it can (GY-978 AC-2). */
+/**
+ * Per role: can it launch now (GY-978 AC-2) — one line of role chips for every role that can, each
+ * naming its next account in its title, and one line per role that cannot, with why and the earliest
+ * time it can (GY-1325).
+ */
 export function RoleLaunches({ fleet, now }: { fleet: FleetView; now: number }) {
-  return <ul className="role-launches">{fleet.roles.map(role => { const launch = roleLaunch(role, fleet, now); return <li key={role.role} data-role-launch={role.role} data-can-launch={launch.canLaunch ? 'yes' : 'no'}>
-    <span className={`status-chip tone-${launch.canLaunch ? 'ok' : 'bad'}`}>{launch.canLaunch ? 'Can launch' : 'Cannot launch'}</span> {launch.text}</li>; })}</ul>;
+  const launches = fleet.roles.map(role => roleLaunch(role, fleet, now));
+  const ready = launches.filter(launch => launch.canLaunch), blocked = launches.filter(launch => !launch.canLaunch);
+  return <div className="role-launches">
+    {ready.length > 0 && <p className="role-launch-ready">{ready.map((launch, index) => <Fragment key={launch.role}>{index > 0 && ' · '}
+      <span className="role-chip" data-role-launch={launch.role} data-can-launch="yes" title={`next: ${launch.account} now`}><span aria-hidden="true">{roleLabels[launch.role] ?? launch.role}</span><span className="sr-only">{launch.text}</span></span></Fragment>)}: {blocked.length ? 'can launch' : 'all can launch'}</p>}
+    {blocked.length > 0 && <ul>{blocked.map(launch => <li key={launch.role} data-role-launch={launch.role} data-can-launch="no">
+      <span className="status-chip tone-bad">Cannot launch</span> {launch.text}</li>)}</ul>}
+  </div>;
 }
 
 /** The Agents page body, pure over the view so it renders the same in a test as in the browser. `now` pins the clock (tests); the page passes the dashboard's server snapshot clock (GY-952). */
@@ -219,14 +259,17 @@ export function FleetOverview({ fleet, connects = [], now = Date.now(), onChange
       </MoreDetails>}
     </PageSection>
     <PageSection title="Running sessions" count={running.length}>
-      {running.length > 0 && <table className="flow-data" aria-label="Running sessions by account"><thead><tr><th>Role</th><th>Work</th><th>Account</th><th>Runtime</th><th>Model</th><th>Host</th><th>Since</th></tr></thead>
+      {running.length > 0 && <table className="flow-data compact-table" aria-label="Running sessions by account"><thead><tr><th>Role</th><th>Work</th><th>Account</th><th>Runtime</th><th>Model</th><th>Host</th><th>Since</th></tr></thead>
         <tbody>{[...running].reverse().map(session => <tr key={session.id} data-session={session.id}><td>{session.role}</td><td>{session.work ?? '—'}</td><td>{session.account}</td><td>{session.runtime}</td><td>{session.model}</td><td>{session.host}</td><td>{when(session.selectedAt)}</td></tr>)}</tbody></table>}
       {!running.length && <p>No session launched from the registry is running.</p>}
     </PageSection>
-    <PageSection title="Roles" count={fleet.roles.length}>
-      {fleet.roles.map(role => <div className="criterion" key={role.role} data-role={role.role}><strong className={role.blocked ? 'amber' : undefined}>{role.role} · {role.live} of {role.concurrency} running · next: {role.next ?? 'none'}</strong><p>Preference order: {role.accounts.join(' → ') || 'no account'}</p><p>Launch policy: {policyText(role.policy)}</p>{role.blocked && <p className="amber">{role.blocked}</p>}</div>)}
-      {!fleet.roles.length && <p>No role is configured.</p>}
-    </PageSection>
+    {/* Each role's launch verdict reads above; its preference order and launch policy are one click away (GY-1325). */}
+    <MoreDetails summary={`Roles (${fleet.roles.length}): preference order and launch policy`}>
+      <PageSection title="Roles" count={fleet.roles.length}>
+        {fleet.roles.map(role => <div className="criterion" key={role.role} data-role={role.role}><strong className={role.blocked ? 'amber' : undefined}>{role.role} · {role.live} of {role.concurrency} running · next: {role.next ?? 'none'}</strong><p>Preference order: {role.accounts.join(' → ') || 'no account'}</p><p>Launch policy: {policyText(role.policy)}</p>{role.blocked && <p className="amber">{role.blocked}</p>}</div>)}
+        {!fleet.roles.length && <p>No role is configured.</p>}
+      </PageSection>
+    </MoreDetails>
     <MoreDetails summary={`Runtimes (${fleet.runtimes.length}) and recent selections (${fleet.sessions.length})`}>
       <PageSection title="Runtimes" count={fleet.runtimes.length}>
         {fleet.runtimes.map(runtime => <div className="criterion" key={runtime.name} data-runtime={runtime.name}><strong>{runtime.name}{runtime.description ? ` · ${runtime.description}` : ''}</strong><p>Launch contract: <code>{[runtime.launch.kind, ...runtime.launch.args].join(' ')}</code> · account home in <code>{runtime.launch.homeVariable ?? 'the default login'}</code> · model flag <code>{runtime.launch.modelFlag ?? 'none'}</code> · tools flag <code>{runtime.launch.toolsFlag ?? 'none'}</code></p>{runtime.launch.login && <p className="muted">Log in with: <code>{runtime.launch.login}</code></p>}</div>)}

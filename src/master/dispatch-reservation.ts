@@ -155,3 +155,35 @@ export function watchSupervisorRunning(target: { key: string; epoch: number }, r
     catch { return false; }
   });
 }
+
+/** The Herdr states of a launched session whose runtime sits at its prompt with nothing in hand. */
+export const finishedAgentStates: readonly string[] = ['idle', 'done'];
+type AssignmentView = Pick<Work, 'key' | 'stage' | 'lease'> & { sessions?: { pane?: string | null }[] | null };
+/** The live assignment that still owns a launch profile's agent: a lease its principal holds, or one whose session records its pane. */
+export function agentAssignment(profile: Pick<WorkerProfile, 'principal'>, agent: Pick<HerdrAgent, 'pane_id'>, work: readonly AssignmentView[], now: number) {
+  return work.find(item => item.stage !== 'done' && !!item.lease && Date.parse(item.lease.expiresAt) > now
+    && (item.lease.owner === profile.principal || (!!agent.pane_id && (item.sessions ?? []).some(session => session.pane === agent.pane_id)))) ?? null;
+}
+/**
+ * GY-1322. Whether the Herdr agent holding a launch profile's name is a finished session a dispatch
+ * bounded-closes and launches over, exactly as it launches on a profile with no agent: Herdr reports
+ * it idle or done, it has a pane to close, and no live assignment in the snapshot owns it. When the
+ * whole fleet drained, every profile's name was held this way and every dispatch was refused.
+ * A working, blocked or unclassified agent, or one a live lease still owns, is never reclaimed.
+ */
+export function reclaimableAgent(profile: Pick<WorkerProfile, 'mode' | 'principal'>, agent: HerdrAgent | undefined, work: readonly AssignmentView[], now: number): agent is HerdrAgent {
+  return profile.mode === 'launch' && !!agent?.pane_id && finishedAgentStates.includes(agent.agent_status ?? '') && !agentAssignment(profile, agent, work, now);
+}
+/**
+ * Whether a dispatch on this host may have launched the profile after the snapshot was read, so
+ * the snapshot cannot say whether that launch's lease owns the agent and the agent is not
+ * reclaimed on its word: the item it launched shows an older epoch than the one it claimed, or the
+ * snapshot does not show that item and the launch is younger than a reservation. The age is read
+ * on this host's own clock, the one the marker was written with (GY-356).
+ */
+export async function launchedSinceSnapshot(root: string, profile: Pick<WorkerProfile, 'name'>, work: readonly Pick<Work, 'key' | 'epoch'>[], now = Date.now()) {
+  const marker = await readFile(profileLaunchedFile(root, profile.name), 'utf8').then(text => JSON.parse(text) as { key?: string; epoch?: number; at?: string }).catch(() => null);
+  if (!marker?.key || typeof marker.epoch !== 'number') return false;
+  const item = work.find(entry => entry.key === marker.key);
+  return item ? item.epoch < marker.epoch : !(now - Date.parse(marker.at ?? '') >= dispatchReservationMs);
+}

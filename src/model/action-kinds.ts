@@ -160,7 +160,7 @@ export function workerSlotWait(reason: string): boolean {
   let busyLaunchProfiles = 0;
   for (const [, , r] of entries) {
     if (r === 'Existing sessions are observed only; Graphyard will not inject new work into an unsupervised process') continue;
-    const statusMatch = r.match(/^(\S+ )?agent \S+ is (\S+)$/);
+    const statusMatch = r.match(/^(\S+ )?agent \S+ is (\S+?)(?:[;,]? .*)?$/);
     if (statusMatch && !terminatedAgentStates.has(statusMatch[2])) {
       busyLaunchProfiles++;
       continue;
