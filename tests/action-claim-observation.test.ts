@@ -2,7 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
-import { Store, save } from '../src/store.js';
+import { Store } from '../src/store.js';
 import { Engine, sameBesideBookkeeping } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import type { ActionRow } from '../src/model/actions.js';
@@ -28,10 +28,6 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * session it reports, the next action, gates and escalations each save re-derives or raises)
  * between a woken observation's read and its save leave the observation saved; a change to the
  * submitted work still refuses it.
- * unit:observation-saved-on-revision-change — GY-1310: any save between an observation's read and
- * its save that leaves everything the observation was derived from unchanged (here a retitle and a
- * priority change, neither bookkeeping) leaves the observation saved, so the resync claimed meanwhile
- * completes on it; a moved submission, candidate, policy or queue tip still refuses it.
  */
 
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
@@ -190,50 +186,4 @@ test('unit:resync-completes-on-fresh-observation — a resync completes only on 
     assert.match(stalled[0].text, /its observation job is scheduled and records no error, yet saved no observation/);
   }
   assert.equal((await reload(stale.id)).observation ?? null, null, 'nothing was observed');
-});
-
-test('unit:observation-saved-on-revision-change — a save that moved nothing the observation read leaves the poll saved, and the resync claimed meanwhile completes on it', async () => {
-  // Imported here, so a checkout without the module fails this case rather than the whole file.
-  const { sameObservationInputs } = await import('../src/model/observation-save.js');
-  const item = await submitted();
-  await store.pool.query("UPDATE jobs SET available_at=now() + interval '1 hour' WHERE work_id=$1", [item.id]);
-  // The observation job reads the item...
-  const read = await reload(item.id);
-  // ...an executor claims the item's resync row, and another writer saves the item twice with
-  // changes that are not the loop's bookkeeping and that the observation never read.
-  const claimed = await claimResync(item.id);
-  for (const change of [(work: Work) => { work.title = `${work.title} (retitled)`; }, (work: Work) => { work.priority = 0; }]) await store.transaction(async db => {
-    const current: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [item.id])).rows[0].document;
-    change(current);
-    await save(db, current, operator.id, 'test.unrelated', new Date());
-  });
-  const moved = await reload(item.id);
-  assert.ok(moved.revision > read.revision + 1, 'the claim and the unrelated writes saved the item');
-  assert.ok(!sameBesideBookkeeping(read, moved), 'the moves are not bookkeeping: before GY-1310 the poll was discarded');
-  // ...and the poll that read the item before them is saved, not rescheduled.
-  const taken = observation(read);
-  const observed = await engine.observe(item.id, read.revision, taken);
-  assert.equal(observed.observation?.at, taken.at, 'the observation is saved');
-  const after = await reload(item.id);
-  assert.equal(after.title, moved.title, 'the unrelated write is kept, not overwritten by the read');
-  assert.equal(after.priority, 0);
-  // The resync claimed after the read completes on that observation within the poll that took it.
-  const done = await handlers().resync!(claimed, { id: executor.id, host: 'host-1' }) as string;
-  assert.match(done, new RegExp(`observed ${item.key} at ${taken.at}, after the claim at ${claimed.claim!.claimedAt}`), `the claim is answered by the saved observation, not '${resyncUnobservedPrefix}'`);
-
-  // What the observation was derived from still refuses it when it moved.
-  const inputs: [string, (work: Work) => void][] = [
-    ['submission', work => { work.submission = { ...work.submission!, pr: work.submission!.pr + 1 }; }],
-    ['candidate', work => { work.candidate = { ...work.candidate!, sha: 'f'.repeat(40) }; }],
-    ['observation', work => { work.observation = { ...work.observation!, at: new Date(Date.parse(work.observation!.at) + 1).toISOString() }; }],
-    ['policy', work => { work.policyRevision += 1; }],
-    ['planned files', work => { work.plannedFiles = [...(work.plannedFiles ?? []), 'src/other.ts']; }],
-    ['queue tip', work => { work.queue = { ...(work.queue ?? {}), speculation: { tip: 'e'.repeat(40) } } as Work['queue']; }],
-    ['workspace', work => { work.workspaces = [...work.workspaces, { ...work.workspaces.at(-1)!, branch: 'graphyard/other' }]; }],
-  ];
-  for (const [name, change] of inputs) { const next = structuredClone(after); change(next); assert.ok(!sameObservationInputs(after, next), `a moved ${name} refuses the observation`); }
-  const unrelated = structuredClone(after); unrelated.title = 'retitled again'; unrelated.priority = 3; unrelated.sessions = [];
-  assert.ok(sameObservationInputs(after, unrelated), 'a title, priority or session move does not');
-  // The saved observation itself moved the item, so the same read is refused now.
-  await assert.rejects(engine.observe(item.id, read.revision, observation(read)), /Task changed while GitHub was being observed; retry/);
 });

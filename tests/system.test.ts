@@ -4,7 +4,7 @@ import { rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
-import { Store, save } from '../src/store.js';
+import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { OperatorAgents } from '../src/operator-agent.js';
@@ -633,24 +633,9 @@ test('evidence arriving after the actual merge cannot retroactively authorize it
   assert.notEqual(w.stage, 'done'); assert.ok(w.violations.includes('Merge observed without a prior authorization for this candidate'));
 });
 test('delayed external observations cannot overwrite concurrent decisions', async () => {
-  // Evidence recorded while GitHub was read moves nothing the observation read (GY-1310): the
-  // observation is saved onto the item as it now stands, so the evidence is kept, not overwritten.
   const w = await submitted(); await engine.execute(worker, 'evidence', w.id, proof(), randomUUID());
-  const saved = await engine.observe(w.id, w.revision, observation(w));
-  assert.ok(saved.observation); assert.ok(saved.evidence.some(entry => entry.proof === proof().proof), 'the concurrent evidence stands');
-  // A change to what the observation read refuses it.
-  const read = (await store.list()).find(x => x.id === w.id)!;
-  await movePlannedFiles(w.id);
-  await assert.rejects(engine.observe(w.id, read.revision, observation(read)), /changed/);
+  await assert.rejects(engine.observe(w.id, w.revision, observation(w)), /changed/);
 });
-/** A save that moves what a GitHub observation reads (its planned files), as a scope change does. */
-async function movePlannedFiles(id: string) {
-  await store.transaction(async db => {
-    const current: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [id])).rows[0].document;
-    current.plannedFiles = [...(current.plannedFiles ?? []), `src/moved-${randomUUID()}.ts`];
-    await save(db, current, operator.id, 'test.scope', new Date());
-  });
-}
 test('outbox job leases prevent duplicate ownership and stale acknowledgments', async () => {
   const jobs = await Promise.all([store.takeJob(), store.takeJob()]); assert.notEqual(jobs[0]?.work_id, jobs[1]?.work_id);
   const job = jobs[0]!; await store.finishJob(job.work_id, randomUUID());
@@ -943,8 +928,8 @@ test('concurrent task changes schedule a prompt retry without an operator error'
   let publications = 0;
   const adapter = {
     async observe() {
-      // A change to what the observation read while GitHub is being read (GY-1310: any other move leaves it saved).
-      await movePlannedFiles(w.id);
+      // Any revision change while GitHub is being read; the worker's own untrusted assertion is one that needs no lease.
+      await engine.execute(worker, 'evidence', w.id, { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 1, skipped: 0 }, randomUUID());
       return observation(w);
     },
     async publish(_work: Work, reason: string, guard: () => Promise<void>) { assert.match(reason, /fresh verification/); await guard(); publications++; },
