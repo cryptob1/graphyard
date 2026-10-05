@@ -63,7 +63,7 @@ A producer request spent with no attempt acting (never started, launch refused, 
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`). Workless sessions raise `fleet-capacity`; settled requests unanswered past `settledAnswerGraceMs` (5 minutes) are `unanswered-request`; sandbox or `workflows`-permission refusals are `configuration`.
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`); a resource at its bound is one fault on `resource:ID`, however many subjects it holds. Workless sessions raise `fleet-capacity`; settled requests unanswered past `settledAnswerGraceMs` (5 minutes) are `unanswered-request`; sandbox or `workflows`-permission refusals are `configuration`.
 
 ## Pipeline speed
 

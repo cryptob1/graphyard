@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { CONTAINED_EVENT, PENDING_EVENT, ProductionWatch, startProductionWatch } from '../src/production-watch.js';
 import { startReconciliation } from '../src/server/main.js';
-import { GitHub } from '../src/github.js';
+import { GitHub, comparePage } from '../src/github.js';
 import { events as eventsTable } from '../src/store/tables/work.js';
 import { buildIdentity } from '../src/protocol-version.js';
 import type { Store } from '../src/store.js';
@@ -148,8 +148,8 @@ test('unit:ahead-by-minimal — the ahead-by read asks GitHub for the count only
   assert.deepEqual([...parameters.entries()], [['per_page', '1'], ['page', '2']], 'one commit per page, and never the first page, which carries the file list');
   assert.equal(ahead[0], `/compare/${sha(40)}...main?per_page=1&page=2`);
   assert.deepEqual(report.ahead, { by: 7, head: null, commits: [] }, 'only the count is read from the answer');
-  // The containment compare the adapter makes is the one-commit form too.
-  assert.ok(requests.filter(path => path.startsWith('/compare/')).every(path => new URL(path, 'https://api.github.com').searchParams.get('per_page') === '1'), requests.join(', '));
+  // The containment compare of two exact SHAs is the shared first page (GY-1272), asked once and kept: no other compare is read.
+  assert.deepEqual(requests.filter(path => path.startsWith('/compare/') && path !== ahead[0]), [`/compare/${sha(1)}...${sha(40)}${comparePage}`]);
 });
 
 test('unit:production-watch-off-tick — a GitHub fake that never answers holds only the production watch; engine.reconcile keeps running every tick', async () => {
