@@ -468,14 +468,14 @@ test('master harness writes the allow rules the browser flows need, each with a 
     assert.match(plan.note, /classifier otherwise refuses/);
     assert.ok(plan.allow.filter(entry => entry.rule.includes('gh api')).every(entry => /classifier|verify|audit|before and after/.test(entry.why)), 'each gh api rule states why the classifier would otherwise refuse it or what it verifies');
     for (const rule of allow) assert.doesNotMatch(rule, /merge|access_tokens|reviews|graphql|\.pem|\.token|credential|cookies/i, `allow rule ${rule} must not reach a merge, a verdict, or a credential`);
-    for (const rule of ['Bash(gh pr merge:*)', 'Bash(gh pr review:*)', 'Bash(gh api *merge*)', 'Bash(gh api *pulls/*/reviews*)', 'Bash(gh api *access_tokens*)', 'Bash(gh api graphql*)', 'Bash(gh api *DELETE*)', 'Bash(gh api *PUT*)', 'Bash(gh api *POST*)', 'Bash(agent-browser *)', 'Bash(git push:*)', 'Read(**/*.pem)', 'Read(**/*.token)']) assert.ok(deny.includes(rule), `${rule} must be denied`);
+    for (const rule of ['Bash(gh pr merge:*)', 'Bash(gh pr review:*)', 'Bash(gh api *pulls/*/merge*)', 'Bash(gh api *repos/*/merges*)', 'Bash(gh api *pulls/*/reviews*)', 'Bash(gh api *access_tokens*)', 'Bash(gh api graphql*mutation*)', 'Bash(gh api *DELETE*)', 'Bash(gh api *PUT*)', 'Bash(gh api *POST*)', 'Bash(agent-browser *)', 'Bash(git push:*)', 'Read(**/*.pem)', 'Read(**/*.token)']) assert.ok(deny.includes(rule), `${rule} must be denied`);
     assert.ok(!deny.includes('Bash(gh api:*)'), 'the blanket gh api deny would override every allow above');
     const plain = masterHarnessPlan({ harness: 'claude', root, cliPath: config.cliPath, repository: 'org/repo', baseBranch: 'release/2026', credentialHome: '/home/x/.config/graphyard' });
     assert.ok(plain.allow.some(entry => entry.rule === 'Bash(gh api repos/org/repo/branches/release%2F2026/protection*)'), 'the base branch is encoded exactly as the CLI requests it');
     const written = await writeHarnessPermissions(root, plan, true);
     assert.equal(written.applied, true);
     const settings = JSON.parse(await readFile(join(root, '.claude/settings.local.json'), 'utf8'));
-    assert.ok(settings.permissions.deny.includes('Bash(agent-browser *)')); assert.ok(settings.permissions.deny.includes('Bash(gh api *merge*)'));
+    assert.ok(settings.permissions.deny.includes('Bash(agent-browser *)')); assert.ok(settings.permissions.deny.includes('Bash(gh api *pulls/*/merge*)'));
     assert.deepEqual((await writeHarnessPermissions(root, plan, true)).added, []);
   } finally { await cleanup(); }
 });
