@@ -9,7 +9,6 @@ import type { Services } from './routes.js';
 import { refuseDecision, withdrawDecision } from './decision-refusal.js';
 import { precedentAvailability } from './escalation-context.js';
 import { applyTriageClosure } from './followups.js';
-import { mergePath, namedMergePathFault } from '../master/repair-lane.js';
 import { closeWork } from './close.js';
 import { lockedWork, workIdByRef } from '../store/locked-read.js';
 
@@ -105,12 +104,6 @@ async function recordRequest(services: Services, caller: Principal, id: string, 
     const work = await findWork(db, id); demand(work, 'Work item not found', 404);
     for (const capability of requiredDecisionCapabilities(data.action, input, work!)) assertDecisionAuthority(actor, capability, work!, services.repository);
     const precondition = decisionPrecondition(data.action, input, work!); demand(!precondition, precondition!, 409);
-    // The repair lane's decision names the fault it repairs (GY-406): a merge-path location. The
-    // name is not matched against a ledger record (GY-428, declined): a merge left pending records no
-    // refusal event, and a refusal names GitHub's reason, never the broken file. What the ledger must
-    // show is judged where the merge is made: repairLaneVerdict's `normal-merge-stalled` condition,
-    // whose recorded state the `repair.merged` audit carries as `bypassed`.
-    demand(data.action !== 'repair-merge' || namedMergePathFault(data.reason), `A repair-merge reason must name the merge-path fault: the broken location, one of ${mergePath.join(', ')}`, 422);
     const history = await readDecisions(db, work!);
     // A refused decision is answered, never retried unchanged (GY-141). A rework or recover
     // refusal judged the candidate and base it was requested against, and stands only for those (GY-229).
@@ -214,11 +207,9 @@ export async function approveDecision(services: Services, caller: Principal, id:
         demand(false, `${precondition}; the decision was not applied`, 409);
       }
       if (!resuming) await record(db, work!, actor.id, 'decision.approved', { id: decision!.id, action: decision!.action, reason: data.reason, requestedBy: decision!.requestedBy, approver: { id: actor.id, role: actor.role } });
-      if (decision!.action === 'resolve' || decision!.action === 'merge' || decision!.action === 'repair-merge') {
+      if (decision!.action === 'resolve' || decision!.action === 'merge') {
         const outcome = decision!.action === 'merge'
           ? `Merge of ${decision!.input.sha} onto ${decision!.input.baseSha} at policy revision ${decision!.input.policyRevision} approved; the guarded merge still rechecks every gate`
-          : decision!.action === 'repair-merge'
-          ? `Repair-lane merge of ${decision!.input.sha} approved; the loop merges it with the App's bypass only once its required checks passed on that head and the normal guarded merge has been refused or pending for 15 minutes`
           : await resolveInTransaction(services, db, now, work!, decision!, actor, data.reason);
         return finish(db, work!, actor, decision!.id, 'decision.applied', { outcome }, key, fingerprint);
       }
