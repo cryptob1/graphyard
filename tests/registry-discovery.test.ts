@@ -383,6 +383,33 @@ test('unit:registry-discovers-agent-environments — propose discovers every ~/.
     assert.equal(state.master.agentName, cfg.masterAgentName);
   });
 
+  test('unit:master-retrying-exhaustion-rotated — a master session Herdr still reports working, whose runtime retries on a limit banner, is failed over at once: the account is held and the role relaunches; a working master with a bare notice is left alone (GY-1223)', async () => {
+    const cfg = config({ masterSessionMinutes: 240 });
+    const state = emptyDaemonState(cfg);
+    const harness: Harness = { agents: [], launches: [], wakes: [], closed: [], ended: [], held: [], outputs: {} };
+    const at = { value: clock0 };
+    const loop = effects(cfg, { master: harness }, [item('GY-1')], at);
+    const cycle = (offsetMs: number) => { at.value = clock0 + offsetMs; return runCycle(cfg, state, loop, () => at.value); };
+    await cycle(0);
+    assert.equal(harness.launches.length, 1);
+    harness.agents = [sessionAgent(cfg, 'pane-1', 'working')];
+
+    // Working, with a notice its runtime is not retrying on: text the session printed, left alone.
+    harness.outputs[cfg.masterAgentName!] = '● Weekly usage limit reached is handled now\n';
+    await cycle(20_000);
+    assert.equal(harness.launches.length, 1, 'a working master without a retry marker is never rotated');
+    assert.equal(state.master.rotations, 1);
+
+    // OpenCode on a spent account: Herdr says working, the screen tail says retrying.
+    harness.outputs[cfg.masterAgentName!] = `  ■⬝⬝⬝⬝⬝⬝⬝  Weekly/Monthly Limit Exhausted. Your limit will reset at 2030-01-03 08:27:35 [retrying in 4s attempt #5]${' '.repeat(96)}esc interrupt • OpenCode 1.18.32  \n`;
+    await cycle(40_000);
+    assert.equal(state.master.lastEnd?.cause, 'exhausted');
+    assert.match(state.master.lastEnd!.detail, /is retrying on its provider's limit notice: Weekly\/Monthly Limit Exhausted/);
+    assert.deepEqual(harness.closed, ['pane-1'], 'the spinning pane is closed');
+    assert.deepEqual(harness.held.map(([account]) => account), ['claude-a'], 'the account it spent is held');
+    assert.equal(harness.launches.length, 2, 'the role relaunches without waiting for its budget');
+  });
+
   test('unit:master-wake-on-event — a material event produces exactly one wake naming its cause, an unchanged cycle none, a changed state one more, and the heartbeat is only the silence fallback', async () => {
     const cfg = config({ masterHeartbeatMinutes: 5 });
     const state = emptyDaemonState(cfg);

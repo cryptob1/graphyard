@@ -147,7 +147,11 @@ export function detectExhaustion(output: string, now: number): ExhaustionSignal 
 /**
  * Whether a session its host still reports as working is in fact stuck on a spent account: its
  * screen tail carries a limit notice together with its runtime's retry marker. A working
- * session's notice without that marker is only text it printed, and is left alone.
+ * session's notice without that marker is only text it printed, and is left alone. The notices are
+ * the generic ones, not the session's runtime catalog (GY-1223 kept this deliberately): a profile's
+ * `kind` need not be the runtime its selected account runs — a claude-kind profile may launch an
+ * OpenCode account — so a per-runtime catalog would miss the very banner this path exists for. The
+ * bracketed attempt counter, the tail, and the lead-of-line rule are the guards against agent prose.
  */
 export function detectRetryingExhaustion(output: string, now: number): ExhaustionSignal | null {
   return findExhaustion(output, now, true);
