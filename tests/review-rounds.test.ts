@@ -168,6 +168,9 @@ test('unit:review-rounds-capped — a change request past the cap is read for BL
   assert.deepEqual(blockingFindings('**BLOCKING: AC-2 is not met**\n- **BLOCKING:** the setting is named foo_\nBLOCKING: **the flag is --dry.**\n* BLOCKING finding: call `run:`\nBLOCKING: _private is read.\n**BLOCKING: none.**'),
     ['AC-2 is not met', 'the setting is named foo_', 'the flag is --dry.', 'call `run:`', '_private is read.']);
   assert.deepEqual(blockingFindings('Nothing here is BLOCKING: it is all follow-up material.'), [], 'the word in prose names no finding');
+  // GY-1220: the label's bold may close after `finding`, and a finding's own marker pairs or identifier are no wrapper.
+  assert.deepEqual(blockingFindings('**BLOCKING finding**: x\n**BLOCKING finding: y**\n**BLOCKING** finding: z\nBLOCKING: __init__\nBLOCKING: **a** and **b**\nBLOCKING: _the token leaks_\n- BLOCKING findings: none'),
+    ['x', 'y', 'z', '__init__', '**a** and **b**', 'the token leaks']);
   assert.deepEqual(followUpFindingsOf('BLOCKING: AC-1 is not met\n\nRename the helper.\n- Add a table test.\n- Trim the comment.'), ['Rename the helper.', '- Add a table test.', '- Trim the comment.']);
 
   // The verdict's own scaffolding — preamble, headings, per-criterion judgements, the classification and thread-summary lines — is no finding.

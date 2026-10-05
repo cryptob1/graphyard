@@ -153,6 +153,18 @@ export function detectRetryingExhaustion(output: string, now: number): Exhaustio
   return findExhaustion(output, now, true);
 }
 
+/**
+ * Whether the error a headless run ended on is its provider refusing for quota or rate (GY-1092):
+ * an HTTP 429, or any of the limit notices above. The text is the provider's own error — Pi's last
+ * `errorMessage` or a runtime's stderr, never the agent's prose — so the notice may sit anywhere in
+ * it (`429: {"message":"Weekly/Monthly Limit Exhausted. Your limit will reset at …"}`).
+ */
+export function providerLimit(error: string, now: number): ExhaustionSignal | null {
+  const text = error.replace(/\s+/g, ' ').trim();
+  if (!text || !(/(?:^|[^\d.])429(?:[^\d.]|$)/.test(text) || /\btoo many requests\b/i.test(text) || exhaustionNotices.some(notice => notice.test(text)))) return null;
+  return { reason: text.slice(0, 300), resetsAt: parseResetTime(text, now) };
+}
+
 /** How an interrupted attempt's uncommitted work was kept, or that there was none to keep. */
 export const partialWorkStates = ['committed', 'discarded', 'clean', 'not-applicable'] as const;
 export const partialWorkSchema = z.object({
