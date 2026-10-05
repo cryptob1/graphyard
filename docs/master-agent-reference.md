@@ -27,7 +27,7 @@ A worker restores its own: `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-
 
 ## GitHub administration through the browser
 
-`master protection --apply` reconciles protection; where only a page exists, `master browser FLOW` drives the `master init --browser-profile` profile:
+`master protection --apply` reconciles protection; where only a page exists, `master browser FLOW` drives the `master init --browser-profile` profile  (`master browser app-permissions`, `master browser installation-accept`, `master browser protection`):
 
 | Flow | Effect
 | --- | ---
@@ -41,7 +41,7 @@ If a harness classifier refuses routine administration, `master harness claude -
 
 Denied, by endpoint: `gh pr merge`/`review`, `gh api` `pulls/N/merge`, `repos/R/merges`, `merge-upstream`, `pulls/N/reviews`, `access_tokens`, `PUT`/`POST`/`DELETE`; `gh api graphql` with `mutation` (merge, enqueue, auto-merge, approval) or `=@`/`--input`.
 
-`master status` applies that write itself when rules are missing or retired (`gh api *merge*`, `gh api graphql*`), logs it to stderr, and reports `harness` drift only if it fails.
+Missing or retired rules (`gh api *merge*`, `gh api graphql*`) are `harness` drift; `master status` reapplies it and reports only unrepaired drift.
 
 ## Typed actions and executors
 
