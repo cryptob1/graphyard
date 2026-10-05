@@ -148,11 +148,14 @@ export interface MainGuardTick { main: MainState; steps: { key: string; mergeSha
 export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOptions): Promise<MainGuardTick> {
   const now = options.now ?? new Date(), at = now.toISOString(), verdicts = options.verdicts ?? new Map<string, CommitVerdict>();
   const tick: MainGuardTick = { main: { state: 'unknown' }, steps: [], errors: [] };
+  // A concluded verdict is kept across ticks; a pending one only for this tick, so a commit whose CI
+  // is still running is read once per tick, not once per look at it.
+  const pending = new Map<string, CommitVerdict>();
   const verdict = async (sha: string) => {
-    const known = verdicts.get(sha);
+    const known = verdicts.get(sha) ?? pending.get(sha);
     if (known) return known;
     const read = commitVerdict(await ports.checks(sha), options.required, options.ciAppIds);
-    if (read.verdict !== 'pending') verdicts.set(sha, read);
+    (read.verdict === 'pending' ? pending : verdicts).set(sha, read);
     return read;
   };
   const write = async (work: Work, revert: MainGuardRevert) => {
@@ -189,7 +192,9 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
     } catch (error) { tick.errors.push(`${work.key} revert of ${revert.mergeSha.slice(0, 12)}: ${message(error)}`); }
   }
 
-  // 2. Read main; when a merge broke it, revert exactly that merge, once.
+  // 2. Read main; when a merge broke it, revert exactly that merge, once. With no required check
+  //    known there is nothing to judge a commit by, so main is not read at all.
+  if (!options.required.length) return tick;
   try {
     tick.main = await readMain(await ports.history(), verdict);
   } catch (error) { tick.errors.push(`reading main: ${message(error)}`); return tick; }
