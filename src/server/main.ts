@@ -15,6 +15,7 @@ import { startRetroIndexWatch, synthesizeRetro } from '../retro-synthesis.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
 import { ProductionWatch, railwayProvider, startProductionWatch } from '../production-watch.js';
+import { productionBranch } from '../release-candidate.js';
 import { configuredGeneratedFiles } from '../generated-files.js';
 import { generatedFilesVariable } from '../install/generated-files.js';
 import { startDirectMerge } from '../direct-merge.js';
@@ -67,7 +68,8 @@ export async function main(options: MainOptions = {}) {
   const knownPrincipals = (await store.pool.query('SELECT principal_id FROM proof_grants')).rows.map(row => String(row.principal_id));
   const build = buildIdentity();
   const provider = railwayProvider();
-  const production = new ProductionWatch(store, { provider, github, build, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main' });
+  // Production deploys the release branch when the release pipeline owns it (GY-1207); GRAPHYARD_PRODUCTION_BRANCH names another.
+  const production = new ProductionWatch(store, { provider, github, build, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', releaseBranch: process.env.GRAPHYARD_PRODUCTION_BRANCH?.trim() || productionBranch });
   const http = server(engine, credentials, github, artifacts, { knownPrincipals, production });
   // The deployed-variables record the status route reports gains the generated-files variable the
   // installers set beside GRAPHYARD_PRINCIPALS, so master status can compare what the deployment
@@ -91,41 +93,34 @@ export async function main(options: MainOptions = {}) {
   let ready = false, validating = false, prepared = false, closing = false;
   let watching: ReturnType<typeof startProductionWatch> | null = null;
   let observing: ReturnType<typeof startObservationWorkers> | null = null;
-  let validationTask: Promise<void> | null = null;
-  const services: typeof http.services & { readiness?: boolean } = http.services;
-  services.readiness = false;
+  const services: typeof http.services & { readiness?: boolean } = http.services; services.readiness = false;
   const runStartupValidation = async () => {
     if (ready || validating || closing) return;
     validating = true;
-    const task = (async () => {
-      try {
-        if (!prepared) {
-          mark('production.load'); await production.load().catch(error => { if (!closing) console.error('production incidents could not be loaded', error instanceof Error ? error.message : 'unknown'); });
-          if (closing) return;
-          // One-time materialization of the deployment allowlist. Operators manage proof authority
-          // inside Graphyard from here on; a later environment edit no longer changes authority.
-          mark('proofGrants.seed'); const seeded = await new ProofGrants(store, credentials.map(({ token, ...actor }) => actor)).seed();
-          if (seeded.length) console.log(`Seeded proof grants for ${seeded.map(grant => grant.principalId).join(', ')}`);
-          if (closing) return;
-          mark('directMerge'); await startDirectMerge(store, engine.directMergeEnvironment);
-          prepared = true;
-        }
+    try {
+      if (!prepared) {
+        mark('production.load'); await production.load().catch(error => { if (!closing) console.error('production incidents could not be loaded', error instanceof Error ? error.message : 'unknown'); });
         if (closing) return;
-        mark('validation.expireArtifacts'); await validation.expireArtifacts();
+        // One-time materialization of the deployment allowlist. Operators manage proof authority
+        // inside Graphyard from here on; a later environment edit no longer changes authority.
+        mark('proofGrants.seed'); const seeded = await new ProofGrants(store, credentials.map(({ token, ...actor }) => actor)).seed();
+        if (seeded.length) console.log(`Seeded proof grants for ${seeded.map(grant => grant.principalId).join(', ')}`);
         if (closing) return;
-        mark('validation.reconcile'); await validation.reconcile(true); mark('startup done');
-        if (closing) return;
-        ready = true; services.readiness = true;
-        startBackground();
-      } catch (error) {
-        if (!closing) console.error('startup validation failed; the reconciliation tick retries it', error instanceof Error ? error.message : 'unknown');
-      } finally {
-        validating = false;
-        validationTask = null;
+        mark('directMerge'); await startDirectMerge(store, engine.directMergeEnvironment);
+        prepared = true;
       }
-    })();
-    validationTask = task;
-    await task;
+      if (closing) return;
+      mark('validation.expireArtifacts'); await validation.expireArtifacts();
+      if (closing) return;
+      mark('validation.reconcile'); await validation.reconcile(true); mark('startup done');
+      if (closing) return;
+      ready = true; services.readiness = true;
+      startBackground();
+    } catch (error) {
+      if (!closing) console.error('startup validation failed; the reconciliation tick retries it', error instanceof Error ? error.message : 'unknown');
+    } finally {
+      validating = false;
+    }
   };
   const startBackground = () => {
     if (closing) return;
@@ -206,9 +201,7 @@ export async function main(options: MainOptions = {}) {
     reconciliation.stop(); watching?.stop(); watching = null; retroIndex.stop();
     process.off('SIGTERM', shutdown); process.off('SIGINT', shutdown);
     await observing?.stop(); observing = null;
-    await closed;
-    await Promise.resolve(githubCache?.close());
-    await store.close();
+    await closed; await Promise.resolve(githubCache?.close()); await store.close();
   };
   const shutdown = () => { void close().then(() => process.exit(0)); setTimeout(() => process.exit(1), 10_000).unref(); };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
@@ -222,11 +215,9 @@ export const readinessHeader = 'x-graphyard-readiness';
 const startupLeaseRenewals = [/^\/api\/work\/[^/]+\/heartbeat$/, /^\/api\/validation\/heartbeat$/, /^\/api\/validation\/collection-heartbeat$/];
 
 /**
- * Whether a request is refused while startup validation runs (GY-1127): every mutation under /api
- * except a GitHub webhook delivery, which only wakes durable jobs, and the lease renewals — the work
- * lease heartbeat and the validation attempt and collection heartbeats (GY-1238) — which would
- * otherwise lapse their leases for the whole startup window. Reads stay open, marked with
- * `readinessHeader`, and /healthz answers liveness throughout.
+ * Whether a request is refused while startup validation runs (GY-1127): every /api mutation except a
+ * GitHub webhook delivery, which only wakes durable jobs, and the lease renewals (GY-1238), which would
+ * otherwise lapse for the whole startup window. Reads stay open, marked with `readinessHeader`.
  */
 export function refusedBeforeReady(method = 'GET', url = '/'): boolean {
   if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return false;

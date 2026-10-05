@@ -208,22 +208,33 @@ async function createSealKey(path: string, linkKey: typeof link): Promise<string
  * a rename is not atomic, so first uses take turns under `path.lock`, created exclusively: whoever
  * holds it checks and renames, and the others wait until it is released or a key has landed. A
  * later first use therefore never replaces a key an earlier one already returned. A lock left by a
- * process killed while holding it is cleared once it is older than any publication takes.
+ * process killed while holding it, older than any publication takes, is never removed while no key
+ * has landed: checking its age and then removing it is not atomic, in place or after a rename, and
+ * a waiter that judged the old lock could remove the fresh one another waiter just took, leaving
+ * two holders (GY-1219). A stale lock is superseded instead: the turn passes to the next name in
+ * the chain `path.lock`, `path.lock.1`, …, taken exclusively like the first, so every lock is only
+ * ever removed by its own holder. The holder removes the stale locks it passed once a key has
+ * landed, when a lock no longer decides anything: every later holder finds the key and keeps it.
  */
 async function renameUnlessLanded(scratch: string, path: string) {
-  const lock = `${path}.lock`, landed = () => stat(path).then(() => true, () => false);
+  const landed = () => stat(path).then(() => true, () => false);
+  const stale: string[] = [];
   for (const deadline = Date.now() + sealLockWaitMs; ;) {
+    const lock = `${path}.lock${stale.length ? `.${stale.length}` : ''}`;
     const held = await writeFile(lock, `${process.pid}\n`, { mode: 0o600, flag: 'wx' }).then(() => true, (error: NodeJS.ErrnoException) => {
       if (error.code === 'EEXIST') return false;
       throw error;
     });
     if (held) {
-      try { if (!await landed()) await rename(scratch, path); } finally { await rm(lock, { force: true }); }
+      try {
+        if (!await landed()) await rename(scratch, path);
+        for (const passed of stale) await rm(passed, { force: true });
+      } finally { await rm(lock, { force: true }); }
       return;
     }
     if (await landed()) return;
     const lockedAt = await stat(lock).then(info => info.mtimeMs, () => undefined);
-    if (lockedAt !== undefined && Date.now() - lockedAt > sealLockStaleMs) await rm(lock, { force: true });
+    if (lockedAt !== undefined && Date.now() - lockedAt > sealLockStaleMs) stale.push(lock);
     else if (Date.now() > deadline) throw new Error(`The sealing key lock ${lock} is still held`);
     else await delay(25);
   }
