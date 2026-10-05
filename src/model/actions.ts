@@ -3,7 +3,8 @@ import { demand } from './refusal.js';
 import { claimOrder, yieldsTo } from './action-candidates.js';
 import { actionRecordLimit, actionRetryAt, actionStall, claimable, claimLive, settling, type ActionStall } from './action-progress.js';
 import { nextAction, sameAction, type NextAction, type NextActionInputs, type NextActionKind } from './next-action.js';
-import { dropRetiredQueueFields, retiredQueueFields, type Work } from './work.js';
+import type { Work } from './work.js';
+import { dropRetiredQueueFields, retiredQueueFields } from './retired-queue.js';
 
 /**
  * The durable action queue.
