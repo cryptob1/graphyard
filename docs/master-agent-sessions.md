@@ -15,11 +15,11 @@
 
 ### The coordinator checkout is confined at the OS level
 
-Every launch but the master session's gets the checkout unwritable to shell commands: Codex by a confined `--sandbox workspace-write`, others by bubblewrap (checkout read-only, session bus a [keyring-only proxy](operations.md#worker-host-keyring-proxy)) re-exposing only the session worktree and shared Git areas. A launch that cannot be confined is refused with the reason. Loop and executors never start, self-upgrade or restart on dirty checkouts.
+Every launch but the master session's gets the checkout unwritable to shell commands: Codex by a confined `--sandbox workspace-write`, others by bubblewrap (checkout read-only, session bus a [keyring-only proxy](operations.md#worker-host-keyring-proxy)) re-exposing only the session worktree and shared Git areas. A launch that cannot be confined is refused with the reason. Every non-master session starts in its own checkout. Loop and executors never start, self-upgrade or restart on a dirty or moved checkout ([details](master-agent.md#operate)).
 
 ## Accounts and failover
 
-A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first account under `run.quotaCeilingPercent`, else **fail over** (`dispatch.accounts`), as does a runtime failing to start. A limit notice commits work as unpushed `WIP:`, sets `capacity.exhausted` and relaunches elsewhere or after reset (agy's `Individual quota reached`).
+A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first account under `run.quotaCeilingPercent`, else **fail over** (`dispatch.accounts`), as does a runtime failing to start. A runtime's limit notice (never agent text; from a working session, master too, only beside its retry marker `[retrying in 4s]`) commits work as unpushed `WIP:`, sets `capacity.exhausted` and relaunches elsewhere or after reset (agy's `Individual quota reached`).
 
 ## The loop's own master session
 

@@ -188,6 +188,8 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     // chains provider calls — so while one runs this says the claim is still held. Without it a
     // slow handler loses its row mid-flight and another executor runs the action beside it.
     renew: action => mutate(`actions/${action.id}/renew`, { ...(action.claim?.executor ? { executor: action.claim.executor } : {}) }),
+    // Behind a fleet restart's fence the executor claims nothing but still says it is alive (GY-1288).
+    present: body => mutate('actions/presence', body),
     handlers: options.kinds ? Object.fromEntries(options.kinds.filter(kind => handlers[kind]).map(kind => [kind, handlers[kind]])) : handlers,
     // A host below its memory floor launches no session (GY-612): dispatch and review rows wait in the queue until it recovers.
     launchHold: () => a.hostMemoryHold(config.hostId),

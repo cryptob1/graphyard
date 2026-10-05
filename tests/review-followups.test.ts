@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { nitReplyPrefix, parseFollowUpThreads, parseResolvedThreads, threadSection } from '../src/review-threads.js';
-import { bindReviewer, followUpFilingBoundMs, followUpThreadIds, launchReview, readReviewLedger, reconcileReviews, reviewPrompt, reviewRetryPrompt, saveReviewerProfile, threadResolutionAttempts } from '../src/reviewer.js';
+import { bindReviewer, followUpFilingBoundMs, followUpLockStaleMs, followUpThreadIds, launchReview, readReviewLedger, reconcileReviews, reviewPrompt, reviewRetryPrompt, saveReviewerProfile, threadResolutionAttempts, tryFollowUpLock } from '../src/reviewer.js';
 import { clientErrorStatus, nextClientErrorRun, repeatedClientErrorLimit, retryStopped } from '../src/retry-stop.js';
 import { evaluate } from '../src/model/gates.js';
 import { overdueTriage } from '../src/model/machine-backlog.js';
@@ -597,6 +597,68 @@ test('unit:review-followups-filed — the dispatcher and master status reconcili
     assert.equal(after.reviews[0].followUps?.failure, undefined);
     assert.deepEqual((await readReviewLedger(root)).reviews[0].followUps?.resolved, ['PRRT_follow001', 'PRRT_follow002'], 'the step is on the saved ledger');
   } finally { await cleanup(); }
+});
+
+/** node:fs/promises with every write to the lock directory refused as a read-only mount would. */
+async function readOnlyLockFs(at: 'mkdir' | 'open') {
+  const fs = await import('node:fs/promises');
+  const erofs = (path: unknown) => Object.assign(new Error(`EROFS: read-only file system, open '${String(path)}'`), { code: 'EROFS' });
+  return { ...fs, mkdir: (async (path: any, options: any) => { if (at === 'mkdir') throw erofs(path); return fs.mkdir(path, options); }) as typeof fs.mkdir,
+    open: (async (path: any, flags: any, mode: any) => { if (at === 'open') throw erofs(path); return fs.open(path, flags, mode); }) as typeof fs.open };
+}
+
+test('unit:review-followup-lock-erofs-degrades — a read-only lock location runs the pass without the lock, and verdicts still reconcile', async () => {
+  // The reported fault (GY-1301): mkdir finds the directory and the lock file's open fails EROFS; or the directory itself cannot be made.
+  for (const at of ['open', 'mkdir'] as const) {
+    const fs = await readOnlyLockFs(at);
+    const release = await tryFollowUpLock('/coordinator/checkout', 'owner/project#64:77', { fs });
+    assert.ok(release, `${at}: a read-only lock location never reads as a held lock`);
+    assert.match(release!.lockless ?? '', /EROFS/, `${at}: the release says the pass runs lockless`);
+    await release!();
+  }
+  const { root, cleanup } = await boundMaster();
+  try {
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => shown });
+    const gh = github(approvalBody), config = await loadMasterConfig(root), fs = await readOnlyLockFs('open');
+    const followUpLock = (lockRoot: string, key: string) => tryFollowUpLock(lockRoot, key, { fs });
+    const settled = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict(), work: [work()], threadsRun: gh.run, followUpLock });
+    assert.equal(settled.reviews[0].verdict?.state, 'APPROVED', 'the verdict reconciles');
+    assert.deepEqual(gh.replies.map(reply => reply.thread), ['PRRT_follow001', 'PRRT_follow002'], 'the nit threads are still answered');
+    assert.deepEqual(settled.reviews[0].followUps?.resolved, ['PRRT_follow001', 'PRRT_follow002']);
+    assert.deepEqual((await readReviewLedger(root)).reviews[0].followUps?.resolved, ['PRRT_follow001', 'PRRT_follow002'], 'the step is on the saved ledger');
+    // Any other lock failure is still a failure, not a silent lockless pass.
+    const broken = { ...fs, open: (async () => { throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' }); }) as typeof fs.open };
+    await assert.rejects(tryFollowUpLock(root, 'owner/project#64:78', { fs: broken }), /EIO/);
+  } finally { await cleanup(); }
+});
+
+test('unit:review-followup-lock-writable-root — the lock is taken under the managed data root, never the checkout, and a stale lock is still broken', async () => {
+  const dataHome = await temporaryDirectory('followup-lock-data'), root = '/coordinator/checkout-that-is-never-written';
+  const environment = { GRAPHYARD_DATA_HOME: dataHome };
+  const { readdir, readFile, writeFile } = await import('node:fs/promises');
+  const lockFiles = async () => (await readdir(join(dataHome, 'review-followups'), { recursive: true, withFileTypes: true })).filter(entry => entry.isFile()).map(entry => join(entry.parentPath, entry.name));
+  try {
+    const first = await tryFollowUpLock(root, 'owner/project#64:77', { environment });
+    assert.ok(first && !first.lockless, 'a writable root takes a real lock');
+    const [file] = await lockFiles();
+    assert.ok(file?.startsWith(join(dataHome, 'review-followups') + '/'), file);
+    assert.match(await readFile(file!, 'utf8'), new RegExp(`^${process.pid} \\d+$`));
+    // A concurrent pass (dispatcher and master status) finds it held and skips the approval.
+    assert.equal(await tryFollowUpLock(root, 'owner/project#64:77', { environment }), null);
+    // Another checkout on the same host keeps its own lock.
+    const other = await tryFollowUpLock('/another/checkout', 'owner/project#64:77', { environment });
+    assert.ok(other && !other.lockless);
+    await other!();
+    // A live holder's lock stands until it is older than the stale bound; then it is broken.
+    await writeFile(file!, `${process.pid} ${Date.now() - followUpLockStaleMs + 60_000}`);
+    assert.equal(await tryFollowUpLock(root, 'owner/project#64:77', { environment }), null, 'within the bound the lock stands');
+    await writeFile(file!, `${process.pid} ${Date.now() - followUpLockStaleMs - 1_000}`);
+    const broken = await tryFollowUpLock(root, 'owner/project#64:77', { environment });
+    assert.ok(broken && !broken.lockless, 'past the 15-minute bound the stale lock is broken and retaken');
+    await broken!();
+    assert.deepEqual(await lockFiles(), [], 'release removes the lock');
+    assert.equal(followUpLockStaleMs, 15 * 60_000);
+  } finally { await rm(dataHome, { recursive: true, force: true }); }
 });
 
 test('unit:repeated-4xx-retry-stops — only an unchanged 4xx counts toward the stop', () => {

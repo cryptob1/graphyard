@@ -7,7 +7,7 @@ The master (`coordinator`) routes and administers GitHub unasked; never implemen
 
 Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)); Close finished agent sessions. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
-`master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from a [dirty checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level). The loop launches, wakes and rotates the [master session](master-agent-sessions.md#the-loops-own-master-session). Railway: set `productionEnvironment`.
+`master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from a [dirty or moved checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level), which raises `escalation:dirty-checkout` ([operations](operations.md#resources-and-disk)). The loop launches, wakes and rotates the [master session](master-agent-sessions.md#the-loops-own-master-session). Railway: set `productionEnvironment`.
 
 ### System-driven items
 
@@ -46,7 +46,7 @@ Every `run.doctor.intervalMinutes` (default 10) the loop's [doctor](onboarding.m
 
 ## Research and diagnosis
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); a provider quota refusal reads `waiting` in `daemon.diagnoses` until `retryAt`, then one probe. Branch restores or base conflicts under 30m and restart-resumed merges are not `merge` faults.
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); a provider quota refusal reads `waiting` in `daemon.diagnoses` until `retryAt`, then one probe. Its `stale`/`withdrawn` decisions are re-requested (≤3), then escalated. Branch restores or base conflicts under 30m and restart-resumed merges are not `merge` faults.
 
 ## Machine-filed backlog
 
@@ -56,7 +56,7 @@ Review follow-ups are never filed: worth-fixing findings are fixed on the same p
 
 Past the build gate (`autoDispatch`): a producer request per proof group (`unit`, `integration`; `manual` with `producerProofs`), then, once they pass, a review request (`proofs-pending` until then). **The loop launches each request within 30 seconds**: every `dispatchIntervalSeconds` it starts the reviewer profile (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json); `.graphyard/reviews.json`, `.graphyard/producers.json`). Reviewer launches await the head's bot reviews (`run.awaitReviewers`) up to `awaitReviewersMinutes` (default 8, 0 disables), skipping a bot that posted a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`; `dispatch.botReviewers`).
 
-- **Concurrency is per role**: `concurrency` (1–20, default 1; above 1, each session takes a name unique to its request) applies without a restart (`run.reviewerProfile` defaults to 4 sessions); lowering it drains first (`longestWaitMs`); starved minutes count in `counts.concurrencyStarved`.
+- **Concurrency is per role**: `concurrency` (1–20, default 1; above 1, each session takes a name unique to its request) applies without a restart (`run.reviewerProfile` and producer profiles default to 4 sessions); lowering it drains first (`longestWaitMs`); starved minutes count in `counts.concurrencyStarved`.
 - Requests always settle: `pane_not_found` panes close. No request outlives its own token: expired and unreported by Herdr, it settles `expired` (`dispatch.sessionReconcile.stuck` counts pending ones). Unanswered sessions relaunch (12 per request, then `dispatch.abandoned`); exhausted producer runs raise `escalation:proof-exhausted`, then a quoting rework.
 - **Every role fails over on spent quota** or waits as one uncounted `capacity` line.
 
@@ -70,4 +70,5 @@ A passing producer records `"exercise"`: rerun without the criterion's behaviour
 
 `master merge GY-N|--all` asks [GitHub to merge](github.md#merge-queue) only when currently authorized for exact head, base and policy; protocol skew refuses (`… deploy main first`).
 
+A required check the base head fails too is a [base failure](development.md#base-failures): no rework, one P0 repair item, candidates refreshed once repaired.
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); approvals list each under `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).

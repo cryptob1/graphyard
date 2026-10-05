@@ -17,7 +17,7 @@ import { coordinatorConfinement } from '../src/master/profiles.js';
 import { prepareConfinedGitPaths } from '../src/master/launch.js';
 import { execFileSync } from 'node:child_process';
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { sessionNameRefusal } from '../src/session-name.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -463,17 +463,21 @@ test('unit:docs-sync-unwritable-checkout-refused — a docs-sync launch whose ch
     confinement,
   });
   const relocate = (plan: DocsSyncPlan): DocsSyncPlan => ({ ...plan, head, base: head });
-  const checkoutOf = (plan: DocsSyncPlan) => docsSyncCheckout(root, relocate(plan));
+  // GY-866: the checkout lies in a managed checkout of the session's own, at a path the launcher
+  // picks, so the confinement records the directory it is asked about and hides its parent.
+  let launched: string | null = null;
+  const hiding: DocsSyncLaunchSeams['confinement'] = async (_kind, _args, options) => { launched = options.directory; return hidden(dirname(options.directory)); };
 
   const docs = { decided: [] as string[], synced: [] as DocsSyncPlan[], agents: [] as string[] };
   const item = conflicted(['docs/master-agent.md']);
   const state = emptyDaemonState(docsConfig());
   const effects = loop(() => item, docs);
   let planned: DocsSyncPlan | null = null;
-  effects.docsSync = async (work, plan) => { planned = plan; return launchDocsSync(root, work, relocate(plan), { agents: [], available: true }, run, undefined, seams(async () => hidden(join(root, '.graphyard')))); };
+  effects.docsSync = async (work, plan) => { planned = plan; return launchDocsSync(root, work, relocate(plan), { agents: [], available: true }, run, undefined, seams(hiding)); };
   const cycle = await runCycle(docsConfig(), state, effects, () => clock);
   assert.ok(planned, 'the loop tried the docs-sync launch');
-  const refused = checkoutOf(planned!);
+  assert.ok(launched, 'the launch checked its checkout under the confinement');
+  const refused: string = launched;
   assert.ok(calls.some(call => call[0] === 'git' && call.includes('worktree') && call.includes('add')), 'the launcher created the checkout first');
   assert.ok(!calls.some(call => call[0] === 'herdr'), 'no herdr tab is created for a refused launch');
   assert.ok(!existsSync(refused), 'the refused checkout is removed at once, not at the next docs-sync launch');
@@ -485,10 +489,12 @@ test('unit:docs-sync-unwritable-checkout-refused — a docs-sync launch whose ch
 
   // The same launch, not refused, goes on to create the tab: the check sits between the two.
   calls.length = 0;
-  await assert.rejects(launchDocsSync(root, item, relocate(planned!), { agents: [], available: true }, run, undefined, seams(async () => null)), /no herdr in this test/);
+  await assert.rejects(launchDocsSync(root, item, relocate(planned!), { agents: [], available: true }, run, undefined, seams(async (_kind, _args, options) => { launched = options.directory; return null; })), /no herdr in this test/);
   assert.ok(calls.some(call => call[0] === 'herdr' && call.includes('tab') && call.includes('create')), 'an allowed launch reaches the herdr tab');
-  assert.ok(!existsSync(refused), 'a launch failing after the tab is created reclaims its checkout at once too');
-  assert.ok(!execFileSync('git', ['-C', root, 'worktree', 'list'], { encoding: 'utf8' }).includes(refused), 'and its worktree registration with it');
+  const allowed: string = launched;
+  assert.notEqual(allowed, refused, 'each launch allocates a checkout of its own');
+  assert.ok(!existsSync(allowed), 'a launch failing after the tab is created reclaims its checkout at once too');
+  assert.ok(!execFileSync('git', ['-C', root, 'worktree', 'list'], { encoding: 'utf8' }).includes(allowed), 'and its worktree registration with it');
 });
 
 test('unit:docs-sync-writable-grant-narrow — a docs-sync launch grants its runtime sandbox the checkout and the read-only mount\'s shared Git paths, never the whole common Git directory with the coordinator\'s HEAD and index', async () => {

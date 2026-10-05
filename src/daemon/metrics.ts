@@ -101,9 +101,17 @@ export function missingProofs(work: Work, now: Date) {
  * longest such wait is what `master status` reports and what the 20-minute bound is judged on.
  */
 export const silenceBudgetMs = 1_200_000;
+/** The fixed wording of a decision subject that waits on an approver session, which `approverWait` reads back. */
+export const approverWaitWording = { waiting: 'is requested and waiting for approver session', unjudged: 'is unjudged after' } as const;
+/**
+ * A silent subject that is a decision with an approver (GY-1295): the wait is the approver's to end, a
+ * decision fault, not the loop failing to cycle. Counted as loop silence, it filed loop items for it.
+ */
+export const approverWait = (entry: Pick<SilenceEntry, 'kind' | 'detail'>) => entry.kind === 'decision'
+  && (entry.detail.includes(approverWaitWording.waiting) || entry.detail.includes(approverWaitWording.unjudged));
 export interface ActionableSubject { key: string; kind: DaemonActionKind; work: string | null; detail: string }
 export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run'>, work: Work[], now: number,
-  context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals'] } = {}): ActionableSubject[] {
+  context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals']; baseFailed?: Map<string, Set<string>> } = {}): ActionableSubject[] {
   const subjects: ActionableSubject[] = [];
   // The silence record keeps each detail to 500 characters; a refusal or proof list quoted here is cut to fit.
   const add = (kind: DaemonActionKind, item: Work | null, detail: string) => subjects.push({ key: `${kind}:${item?.key ?? 'pipeline'}`, kind, work: item?.key ?? null, detail: boundDetail(detail, 500) });
@@ -117,12 +125,12 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     // It stays a subject until it is applied. A decision sitting with an approver is the pipeline
     // waiting on its own agent, and counting that as nothing to act on is how a dead approver used
     // to make an item disappear from the one measure built to notice it.
-    const decision = routineDecision(item, config, now, context.assessments?.[item.id]);
+    const decision = routineDecision(item, config, now, context.assessments?.[item.id], context.baseFailed?.get(item.id));
     const watch = decision ? context.approvals?.[decisionKey(item, decision)] : undefined;
     // A decision waiting for an approver account to reset is the one capacity line, not a stall per item (GY-182).
     if (decision && !watch?.settledAt && !(watch && standingCapacity(item, 'approver').length)) add('decision', item, !watch ? `${item.key} needs a ${decision.action} decision requested and approved`
-      : watch.exhaustedAt ? `${item.key}'s ${decision.action} decision ${watch.decision} is unjudged after ${watch.launches} approver session(s)`
-        : `${item.key}'s ${decision.action} decision ${watch.decision} is requested and waiting for approver session ${watch.agentName ?? '(not launched)'} to judge it`);
+      : watch.exhaustedAt ? `${item.key}'s ${decision.action} decision ${watch.decision} ${approverWaitWording.unjudged} ${watch.launches} approver session(s)`
+        : `${item.key}'s ${decision.action} decision ${watch.decision} ${approverWaitWording.waiting} ${watch.agentName ?? '(not launched)'} to judge it`);
     const withheld = decision ? null : withheldDecision(item, config, now, context.assessments?.[item.id]);
     if (withheld) add('decision', item, withheld.reason.slice(0, 500));
     if (item.stage === 'done') continue;

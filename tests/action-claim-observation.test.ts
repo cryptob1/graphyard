@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
-import { Engine } from '../src/engine.js';
+import { Engine, sameBesideBookkeeping } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import type { ActionRow } from '../src/model/actions.js';
 import { observationWaitBoundMs, resyncUnobservedPrefix } from '../src/model/action-kinds.js';
@@ -24,6 +24,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * than its claim is saved, never on a re-read that saves nothing, and three claims in a row without
  * one raise an attention item naming the item and its observation job's condition once they outlast
  * the bound a scheduled job's wait keeps (GY-1090).
+ * unit:waked-observation-survives-loop-bookkeeping — GY-1257: the loop's own per-cycle writes (a
+ * session it reports, the next action, gates and escalations each save re-derives or raises)
+ * between a woken observation's read and its save leave the observation saved; a change to the
+ * submitted work still refuses it.
  */
 
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
@@ -102,6 +106,31 @@ test('unit:action-claim-keeps-observation — an action claimed, renewed and set
     'the action state written meanwhile is kept, not overwritten by the read');
 
   // Any change beside action bookkeeping still refuses: the observation saved above moved the item.
+  await assert.rejects(engine.observe(item.id, read.revision, observation(read)), /Task changed while GitHub was being observed; retry/);
+});
+
+test('unit:waked-observation-survives-loop-bookkeeping — the loop\'s own bookkeeping saved between an observation\'s read and its save does not discard the observation', async () => {
+  const item = await submitted();
+  // The observation job reads the item...
+  const read = await reload(item.id);
+  // ...the loop records the approver session it launched for the item, twice (launch, then its report)...
+  const handle = { id: `approver:${randomUUID()}`, kind: 'coordination', runtime: 'claude', host: 'machine-a', role: 'approver', subject: `${item.key}: judge a rework decision`, state: 'running' };
+  await engine.execute(executor, 'session', item.id, handle, randomUUID());
+  await engine.execute(executor, 'session', item.id, { ...handle, observed: 'working', observedAt: new Date().toISOString() }, randomUUID());
+  const moved = await reload(item.id);
+  assert.ok(moved.revision > read.revision, 'the loop\'s session writes saved the item');
+  // ...and the observation the loop woke is saved, not rescheduled as "Task changed while GitHub was being observed; retry".
+  const taken = observation(read);
+  const observed = await engine.observe(item.id, read.revision, taken);
+  assert.equal(observed.observation?.at, taken.at, 'the woken observation lands');
+  assert.ok((await reload(item.id)).sessions?.some(entry => entry.id === handle.id), 'the session the loop wrote meanwhile is kept');
+
+  // Next action, gates and escalations are bookkeeping too; the submitted work is not.
+  const bookkeeping = { ...moved, revision: moved.revision + 1, nextAction: null, gates: [], lane: 'high', escalations: [{ trigger: 'owed-decision', reason: 'loop attention', at: new Date().toISOString(), actor: 'master' }] } as unknown as Work;
+  assert.ok(sameBesideBookkeeping(moved, bookkeeping), 'next action, gates and attention are the loop\'s bookkeeping');
+  assert.ok(!sameBesideBookkeeping(moved, { ...moved, submission: { epoch: moved.submission!.epoch, pr: moved.submission!.pr + 1 } }), 'a moved submission is not');
+  assert.ok(!sameBesideBookkeeping(moved, { ...moved, candidate: { ...moved.candidate!, sha: 'f'.repeat(40) } } as Work), 'a moved candidate is not');
+  // Any change to the work itself still refuses: the observation saved above moved the item.
   await assert.rejects(engine.observe(item.id, read.revision, observation(read)), /Task changed while GitHub was being observed; retry/);
 });
 

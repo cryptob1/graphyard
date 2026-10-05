@@ -13,6 +13,7 @@ import { recordBlockerProbe } from '../blocker-probe.js';
 import { closeWork } from '../close.js';
 import { recordTriage } from '../followups.js';
 import { answerResearch, recordResearch } from '../../research.js';
+import { recordDecomposition } from '../../decomposition.js';
 import { issuePushCredential } from '../push-credential.js';
 import { controlPlaneSyncPush } from '../../sync.js';
 
@@ -74,12 +75,14 @@ export const workRoutes = defineRoutes('work', [
     },
   },
   // Research before build (GY-259): the loop records a run and its brief as the coordinator, and
-  // the operator answers the brief's product questions. Neither holds the item.
+  // the operator answers the brief's product questions. Neither holds the item. Splitting a broad
+  // item before dispatch (GY-1126): the loop records the run, and the split it decides is made here.
   {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/(research|research-answer)$/,
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/(research|research-answer|decomposition)$/,
     async handle(context, [id, action]) {
       await refuseLead(context, id, action);
       const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
+      if (action === 'decomposition') return recordDecomposition(context.services, context.actor, target, data, key);
       return action === 'research' ? recordResearch(context.services, context.actor, target, data, key) : answerResearch(context.services, context.actor, target, data, key);
     },
   },

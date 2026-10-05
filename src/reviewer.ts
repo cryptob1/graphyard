@@ -1,7 +1,8 @@
 import { createHash, createSign, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rm, realpath } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, rm, realpath, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
@@ -13,7 +14,7 @@ import { defaultReviewRoundCap, pastReviewCap, reviewRoundCapOf, reviewRoundStat
 import { criteriaRuleSection, followUpFilingKey, listedThreadAliases, listedThreadLimit, readUnresolvedThreads, resolveFollowUpThreads, resolveNamedThreads, threadAliasLimit, threadReadFailureSection, threadSection, unaccountedThreads, type LaunchThread, type ThreadResolution } from './review-threads.js';
 import type { FleetProbe } from './fleet.js';
 import { carriedApproval, type Work } from './model.js';
-import { removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
+import { dataDirectory, removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
 import { documentationReviewSection, type DocumentationObligation } from './model/documentation.js';
 import { researchReviewSection } from './research.js';
@@ -533,6 +534,48 @@ export function repetitionReviewSection(files?: readonly string[] | null) {
  * candidate changes: the criterion is judged beside the item's own, with the repository's paths.
  */
 /** `research` is the item's recorded research brief (GY-259): the change is checked against its recommended approach and answered questions. */
+/**
+ * GY-866: a reviewer or producer session starts in its own session directory under the managed
+ * worktree root, never in the coordinator checkout, and its request runs `git fetch` and
+ * `git worktree add` from where it starts. The directory points at the repository's Git directory,
+ * so those commands reach the repository from there without the directory itself being a registered
+ * linked worktree (which would cause confinement to bind only its own admin directory and leave
+ * .git/worktrees read-only, breaking subsequent `git worktree add`).
+ * The anchor makes the directory a second work tree of the main repository: it shares the
+ * coordinator's HEAD and index, so `git status` there shows every tracked file deleted, and
+ * `git add`, `commit` or `checkout` there would write the coordinator's index and HEAD. Only the
+ * read-only confinement keeps those writes out; the session's own work belongs in the detached
+ * worktree its request adds under `checkout/`, never in the anchor directory itself.
+ */
+export async function anchorSessionCheckout(root: string, directory: string, run: ChildRun = defaultChildRun): Promise<void> {
+  try {
+    let gitDir: string | null = null;
+    try {
+      const output = (await run('git', ['-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
+      if (output && !output.startsWith('{')) gitDir = output;
+    } catch {}
+    if (!gitDir) gitDir = await sharedGitDirectory(root);
+    if (!gitDir && existsSync(join(root, '.git'))) gitDir = resolve(root, '.git');
+    if (gitDir) {
+      await mkdir(join(gitDir, 'worktrees'), { recursive: true });
+      await writeFile(join(directory, '.git'), `gitdir: ${gitDir}\n`);
+    }
+  } catch { /* the session still starts outside the coordinator checkout */ }
+}
+
+/**
+ * GY-866: an interactive approver's or escalation handler's own directory under the managed
+ * worktree root, never the coordinator checkout, anchored like a reviewer's so `gh` and `git`
+ * reads reach the repository from where it starts. Its launch hands it the coordinator root in
+ * GRAPHYARD_REPOSITORY_ROOT, which the CLI resolves the `graphyard master` commands its request
+ * runs from, since the directory holds no installation of its own.
+ */
+export async function coordinationCheckout(root: string, config: MasterConfig, key: string, sha: string | undefined, filesystem?: FilesystemProbe) {
+  const checkout = await allocateManagedCheckout(root, config, 'approval', key, sha ?? '0'.repeat(40), randomUUID(), filesystem);
+  await anchorSessionCheckout(root, checkout.directory);
+  return checkout;
+}
+
 export function reviewPrompt(config: Pick<MasterConfig, 'repository'>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: { id: string; text: string }[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null) {
   let rounds: ReviewRoundStatus | undefined;
   if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') {
@@ -734,6 +777,7 @@ export async function launchReview(root: string, work: Work, profileName: string
       // Before a token exists: the one place this session may check the head out, under the managed
       // worktree root — durable storage with room left, outside every worktree.
       const checkout = await allocateManagedCheckout(root, config, 'review', binding.key, binding.sha, id, dependencies.filesystem);
+      await anchorSessionCheckout(root, checkout.directory);
       const discard = () => removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
       let minted: { token: string; expiresAt: string };
       try { minted = await mint(credential, config.repository); await writeReviewerSession(sessionDirectory, minted.token); }
@@ -755,13 +799,13 @@ export async function launchReview(root: string, work: Work, profileName: string
         const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
         const environment = { ...withVerificationPath(harness.environment, launch.environment), GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}` };
         startedTab = true;
-        const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
+        const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory,
           '--label', `${binding.key} review · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
         pane = created.pane; tabId = created.tab;
         const memory = await readProjectMemory(root).catch(() => null);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: root, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();
@@ -983,6 +1027,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
    * `observe` is substituted and this is not.
    */
   dismiss?: (record: ReviewRecord, reviewId: number, message: string) => Promise<void>;
+  /** Takes one approval's follow-up lock; tryFollowUpLock by default. */
+  followUpLock?: typeof tryFollowUpLock;
 } = {}) {
   const ledger = await readReviewLedger(root);
   if (!config.reviewer) return { reviews: ledger.reviews, changed: 0, threads: [] as string[], released: [] as { pane: string; agentName: string }[] };
@@ -1144,7 +1190,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   changed += threads.changed;
   // The threads the approval judged FOLLOW-UP are nits: each is answered with a reply and resolved,
   // so conversation resolution no longer holds the merge on them; nothing is filed (GY-1249).
-  const followUps = await resolveApprovedFollowUps(root, ledger.reviews, reviewer, config.repository, dependencies.work, threadsRun, now);
+  const followUps = await resolveApprovedFollowUps(root, ledger.reviews, reviewer, config.repository, dependencies.work, threadsRun, now, dependencies.followUpLock);
   changed += followUps.changed;
   // A request the control plane no longer holds open releases its records to the retention window.
   if (dependencies.work) changed += releaseClosedRequests(ledger.reviews, dependencies.work, now);
@@ -1201,8 +1247,14 @@ function ledgerThread(thread: LaunchThread): LaunchThread {
     ...(createdAt && createdAt.length <= 40 ? { createdAt } : {}), ...(url && url.length <= 1000 ? { url } : {}) };
 }
 
-/** Where the follow-up locks are kept: one private file per approval. */
-const followUpCreateDirectory = (root: string) => resolve(root, '.graphyard/review-followups');
+/**
+ * Where the follow-up locks are kept: one private file per approval, under the installation's
+ * managed data root rather than the checkout (GY-1301). The coordinator checkout may be mounted
+ * read-only, and a lock that has to be written there aborted every reconcile pass. The directory is
+ * keyed by the checkout, so two installations on one host never share a lock.
+ */
+const followUpCreateDirectory = (root: string, environment: Record<string, string | undefined> = process.env) =>
+  resolve(dataDirectory(environment), 'review-followups', createHash('sha256').update(resolve(root)).digest('hex').slice(0, 12));
 /**
  * The lock one approval's nit-thread resolution holds (GY-166). The dispatcher and `master status` both
  * reconcile, and each would read the thread for an existing reply, find none, and post one: the
@@ -1210,29 +1262,52 @@ const followUpCreateDirectory = (root: string) => resolve(root, '.graphyard/revi
  * so a second pass sees the first one's replies instead of repeating them. A pass that finds the
  * lock held skips the approval; the holder is filing it, and the next pass retries.
  */
-const followUpLockFile = (root: string, key: string) => resolve(followUpCreateDirectory(root), `${createHash('sha256').update(key).digest('hex')}.lock`);
+const followUpLockFile = (root: string, key: string, environment?: Record<string, string | undefined>) => resolve(followUpCreateDirectory(root, environment), `${createHash('sha256').update(key).digest('hex')}.lock`);
 /** A filing holding its lock this long is wedged (each GitHub call is bounded well within it); its lock is broken. */
 export const followUpLockStaleMs = 15 * 60_000;
-export async function tryFollowUpLock(root: string, key: string): Promise<(() => Promise<void>) | null> {
-  const file = followUpLockFile(root, key);
-  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-  const { open, readFile: read, unlink } = await import('node:fs/promises');
+/** The errors of a lock location this process may not write: a read-only mount, or one it lacks permission on. */
+const unwritableLockCodes = new Set(['EROFS', 'EACCES', 'EPERM']);
+/** A held lock's release; `lockless` names why the pass runs without one, when the lock location could not be written. */
+export type FollowUpLockRelease = (() => Promise<void>) & { lockless?: string };
+export interface FollowUpLockOptions {
+  environment?: Record<string, string | undefined>;
+  /** The filesystem calls the lock makes; node:fs/promises by default. */
+  fs?: Pick<typeof import('node:fs/promises'), 'mkdir' | 'open' | 'readFile' | 'unlink' | 'rm'>;
+}
+/**
+ * Takes one approval's follow-up lock: its release, or null while another live pass holds it.
+ * A lock location this process cannot write (EROFS, EACCES, EPERM) never fails the reconcile: the
+ * pass runs without the lock (`lockless` on the release), as the single writer it then is, so
+ * reviewer verdicts still reconcile.
+ */
+export async function tryFollowUpLock(root: string, key: string, options: FollowUpLockOptions = {}): Promise<FollowUpLockRelease | null> {
+  const fs = options.fs ?? await import('node:fs/promises');
+  const file = followUpLockFile(root, key, options.environment);
+  const lockless = (error: any): FollowUpLockRelease => Object.assign(async () => {}, { lockless: `the follow-up lock ${file} cannot be written (${error.code}: ${String(error.message ?? '').split('\n')[0]!.slice(0, 200)})` });
+  try { await fs.mkdir(dirname(file), { recursive: true, mode: 0o700 }); }
+  catch (error: any) { if (unwritableLockCodes.has(error.code)) return lockless(error); throw error; }
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const handle = await open(file, 'wx', 0o600); await handle.writeFile(`${process.pid} ${Date.now()}`); await handle.close();
-      return async () => { await rm(file, { force: true }); };
-    } catch (error: any) { if (error.code !== 'EEXIST') throw error; }
-    const [pid, at] = (await read(file, 'utf8').catch(() => '')).split(' ').map(Number);
+      const handle = await fs.open(file, 'wx', 0o600);
+      try { await handle.writeFile(`${process.pid} ${Date.now()}`); }
+      catch (error: any) { await handle.close().catch(() => {}); await fs.rm(file, { force: true }).catch(() => {}); if (unwritableLockCodes.has(error.code)) return lockless(error); throw error; }
+      await handle.close();
+      return async () => { await fs.rm(file, { force: true }).catch(() => {}); };
+    } catch (error: any) {
+      if (unwritableLockCodes.has(error.code)) return lockless(error);
+      if (error.code !== 'EEXIST') throw error;
+    }
+    const [pid, at] = (await fs.readFile(file, 'utf8').catch(() => '')).split(' ').map(Number);
     let alive = true;
     try { if (pid) process.kill(pid, 0); } catch (error: any) { alive = error.code !== 'ESRCH'; }
     if (alive && !(Number.isFinite(at) && Date.now() - at > followUpLockStaleMs)) return null;
-    await unlink(file).catch(() => {});
+    await fs.unlink(file).catch(() => {});
   }
   return null;
 }
 
 /** The approved records whose follow-up (nit) threads the loop answers and resolves on this pass; each outcome is kept on the record. */
-async function resolveApprovedFollowUps(root: string, records: ReviewRecord[], reviewer: string, repository: string, work: Work[] | undefined, run: ChildRun | undefined, now: Date) {
+async function resolveApprovedFollowUps(root: string, records: ReviewRecord[], reviewer: string, repository: string, work: Work[] | undefined, run: ChildRun | undefined, now: Date, lock: typeof tryFollowUpLock = tryFollowUpLock) {
   const events: string[] = [];
   let changed = 0;
   if (!run || !work) return { events, changed };
@@ -1240,7 +1315,7 @@ async function resolveApprovedFollowUps(root: string, records: ReviewRecord[], r
     const verdict = record.verdict;
     // The approval of the head that landed still answers its threads: the daemon may merge before the dispatcher's first pass.
     if (!verdict || !approvesFinalHead(record, work)) continue;
-    const release = await tryFollowUpLock(root, followUpFilingKey(repository, record.pr, verdict.reviewId));
+    const release = await lock(root, followUpFilingKey(repository, record.pr, verdict.reviewId));
     if (!release) continue;
     try {
       // The step as last saved, which another pass may have advanced since this pass read the ledger.
