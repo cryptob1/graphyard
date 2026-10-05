@@ -715,6 +715,12 @@ export interface LoopSupervisorInstallOptions {
    * Never implied: without it such a unit is left as it is and the install is refused by name.
    */
   replace?: boolean;
+  /**
+   * Restart a running loop whose unit was rewritten (the default). The loop's own alignment
+   * passes false: it re-executes itself through `systemctl --no-block restart` right after, and a
+   * blocking restart issued from inside the unit would be ended by the very stop it requests.
+   */
+  restart?: boolean;
 }
 export interface LoopSupervision {
   supported: boolean;
@@ -982,7 +988,7 @@ export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupe
   // A rewritten unit takes effect only when the service starts from it: `enable --now` leaves a
   // running loop on the old ExecStart and watchdog window, so it is restarted, and resumes from
   // the cursors it persists before and after every action.
-  if (wrote === 'updated') { run('systemctl', ['--user', 'restart', loopUnitName]); performed.push(`systemctl --user restart ${loopUnitName}`); }
+  if (wrote === 'updated' && options.restart !== false) { run('systemctl', ['--user', 'restart', loopUnitName]); performed.push(`systemctl --user restart ${loopUnitName}`); }
   // An enabled unit still never runs if this user's manager stops at logout and does not start at
   // boot, so lingering is part of "comes back after a reboot". A host that refuses it is reported
   // rather than left looking supervised.
@@ -994,6 +1000,26 @@ export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupe
   return { supported: true, unit: loopUnitName, unitPath, installed: true, enabled: observed.enabled, active: observed.active, linger,
     wrote, refused: null, performed, instruction: null,
     reason: [unreadable ? `systemd did not report whether the unit is ${unreadable}` : null, lingerReason].filter(Boolean).join('; ') || null };
+}
+
+/**
+ * The loop's own re-application of its unit (GY-916). Only `master init` used to write the unit,
+ * so a hand-copied packaged example (WatchdogSec written for the 20s default) stayed installed
+ * under a 300s interval and its window was refused as a configuration fault at every process
+ * start, forever. The alignment step calls this before it re-executes the loop: an installed unit
+ * whose text no longer matches `loopUnitText` for the running configuration is rewritten through
+ * `installLoopSupervisor`'s idempotent path — with all of its refusals, and without its blocking
+ * restart — so the next process starts under the window `loopWatchdogSeconds` computes. A unit
+ * that is not installed is left to `master init`; one that already matches is not touched.
+ */
+export async function alignLoopUnit(input: LoopUnitInput, host: LoopSupervisorHost = {}): Promise<{ wrote: LoopSupervisorInstallation['wrote']; reason: string | null; unitPath: string }> {
+  const unitPath = join(loopUnitDirectory(host), loopUnitName);
+  let existing: string | null = null;
+  try { existing = await readFile(unitPath, 'utf8'); } catch { existing = null; }
+  if (existing === null) return { wrote: 'none', reason: `${unitPath} is not installed; graphyard master init installs it`, unitPath };
+  if (existing === loopUnitText(input)) return { wrote: 'unchanged', reason: null, unitPath };
+  const installed = await installLoopSupervisor(input, host, { restart: false });
+  return { wrote: installed.wrote, reason: installed.refused ?? installed.reason, unitPath };
 }
 
 /** The same facts, observed rather than installed: what `master status` reports about supervision. */

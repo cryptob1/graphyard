@@ -58,7 +58,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 With `run.research` set, a feature (or `"research": true`) gets one read-only Pi briefing a revision. Build follows it, a differing answer reworks, failure never blocks; product questions need a human.
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approvals release its fix or close-as-duplicate; recurrences re-file; a provider quota refusal (429 or limit notice) reads `waiting` in `daemon.diagnoses`, with `refusedAt` and `retryAt` (the reset, else an hour on); none launch before it, then one probe (oldest refusal), never pruned. Sub-30m branch restores, base conflicts and restart-resumed merges are self-handled, not `merge` faults.
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); approvals release its fix or close-as-duplicate; recurrences re-file; a recurring item closed mid-diagnosis answers it, no fault. A provider quota refusal (429 or limit notice) reads `waiting` in `daemon.diagnoses`, with `refusedAt` and `retryAt` (the reset, else an hour on); none launch before it, then one probe (oldest refusal), never pruned. Sub-30m branch restores, base conflicts and restart-resumed merges are self-handled, not `merge` faults.
 
 ## Machine-filed backlog
 
