@@ -23,7 +23,7 @@ Stop the worker, then `graphyard rework GY-N --previous-worker-stopped "reason"`
 
 ## Retro synthesis
 
-With `GRAPHYARD_INTERVENTION_PATTERNS=1`, a minutely scan groups refusal/rework interventions by cause: a declared refusal shape (`build/out-of-scope-count`), a loop refusal trigger, or a normalised rework reason. A cause reaching the threshold gets drafted artefacts (`retro.drafted`), never applied or filed: a standards/criteria wording update, a mechanical check, a producer-method correction, a fault-catalogue entry. An agent holding `decision:approve` (not a human, the drafter, or an instance's recorder) approves one, applying it at its registry's next revision (`requirements`, `checks`, `catalogue`) and recording the cause, fingerprint and instances it closes, or refuses it. In force: requirements show `retroStanding` in `graphyard status GY-N`; a check (`planned-files`, `merges-onto-base`, `checks-passed`) runs on every submission's observed candidate, refusing `complete` (`409`); a catalogue entry files later instances under its fault class (`catalogue` on interventions, `retroCatalogued` on gate refusals) and counts recurrences against itself. Drafted instances never count again; a recurrence after application is redrafted naming it (`recurredAfter`). Routes: [work commands](protocol/work-commands.md).
+With `GRAPHYARD_INTERVENTION_PATTERNS=1`, a minutely scan groups refusal/rework interventions by cause: declared refusal shape (`build/out-of-scope-count`), loop refusal trigger or normalised rework reason. A cause reaching the threshold gets drafted, never applied or filed, artefacts (`retro.drafted`): a standards/criteria wording update, mechanical check, producer-method correction or fault-catalogue entry. An agent holding `decision:approve` (not a human, the drafter, or an instance's recorder) approves one, applying it at its registry's next revision (`requirements`, `checks`, `catalogue`), recording cause, fingerprint and closed instances, or refuses it. In force: requirements show `retroStanding` in `graphyard status GY-N`; a check (`planned-files`, `merges-onto-base`, `checks-passed`) runs on each submission's candidate, refusing `complete` (`409`); a catalogue entry files later instances under its fault class (`catalogue` on interventions, `retroCatalogued` on gate refusals) and counts its recurrences. Drafted instances never count again; a recurrence after application is redrafted naming it (`recurredAfter`). Routes: [work commands](protocol/work-commands.md).
 
 ## Flaky CI check
 
@@ -79,14 +79,14 @@ Per `resources` entry: ledgers and `agent-names`, `graphyard master run --once`;
 ## Storage retention
 
 - **Receipts** answer a retried command for one day; pruned every 10 minutes, 5,000 rows a run.
-- **Routine ledger rows** (`github.observed`, `heartbeat`, `reconciled`, `action.claimed`, `action.failed`, `github.queue`, `session`) store only deltas unless they move the stage or delivery.
-- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) every 10 minutes, in batches of ≤2,000 rows per phase, five a run. It never deletes another kind, a delta-extended row, an item's newest save, a delivery event or cited revision, an uncompleted merged item's row, or an unread flow-projection row. Each batch logs `ledger.compacted` counts per kind. Only `VACUUM FULL` returns space to the volume.
+- **Routine ledger rows** (`github.observed`, `heartbeat`, `reconciled`, `action.claimed`, `action.failed`, `github.queue`, `session`) store only deltas unless moving stage or delivery.
+- **Compaction** deletes routine rows older than `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, minimum 1) every 10 minutes, in batches of ≤2,000 rows per phase, five a run. It never deletes other kinds, delta-extended rows, an item's newest save, delivery events, cited revisions, uncompleted merged items' rows or unread flow-projection rows. Each batch logs `ledger.compacted` counts per kind; only `VACUUM FULL` returns volume space.
 
 ### Host memory
 
-Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` hold one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`) in the managed root's `.verification-slots` (Codex: `--add-dir`); CI unbounded.
+Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` wait for one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`) in the managed root's `.verification-slots`; CI unbounded.
 
-Below max(10% RAM, 4 GB) available, launches defer (`escalation:dispatch:memory`; a `resources` item `memory` names top consumers; one `memory-pressure` fault per dip) until 1 GB above.
+Below max(10% RAM, 4 GB) available, launches defer (`escalation:dispatch:memory`; `resources` item `memory` names top consumers; one `memory-pressure` fault per dip) until 1 GB above.
 
 ## Bootstrap mode for a self-proving change
 
