@@ -18,35 +18,32 @@ import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
 import { liveRun, liveRunCheckouts, registeredRun, unendedRunOnDisk, type RunAdopter } from './runner/registry.js';
 import type { EvidencePayload } from './runner/payloads.js';
-import { narrowRunner, piProducerPrompt, producerRunOptions, registryRunner, runOutcome, startNarrowRun, submitEvidence } from './runner/roles.js';
+import { liveInstallGuidance, liveInstallProof, liveInstallRequiredEnv, liveInstallSshKeyEnv, narrowRunner, piProducerPrompt, producerRunOptions, registryRunner, runOutcome, startNarrowRun, submitEvidence } from './runner/roles.js';
 import { runRecordSchema, type RunRecord, type Runner } from './runner/types.js';
 import { projectMemoryDigest, type ProjectMemory } from './model/project-memory.js';
 import { readProjectMemory } from './project-memory.js';
 
 /**
  * The local secrets a live-install proof producer may receive from the repo-root .env
- * (operator-approved for GY-49's live installs, GY-73). Nothing else in .env leaves it,
- * and none of these names can shadow a control-plane variable.
+ * (operator-approved for GY-49's live installs, GY-73; the SSH key name since GY-1170). Nothing
+ * else in .env leaves it, and none of these names can shadow a control-plane variable.
  */
-export const producerEnvNames = ['HCLOUD_TOKEN', 'HETZNER_SPEND_CAP_USD_MONTHLY'] as const;
+export const producerEnvNames = [...liveInstallRequiredEnv, liveInstallSshKeyEnv] as const;
 /**
  * The proofs that provision real servers, and the .env names each cannot run without (GY-1071): a
  * launch for one of them on a host whose .env lacks a name is refused before any session exists,
  * as a host-configuration fault naming what is missing, rather than started into a proof that
- * would fail for want of a credential.
+ * would fail for want of a credential. Which proofs those are is liveInstallProof's one match
+ * (GY-1170); the SSH key name is passed when set and never required.
  */
-export const liveInstallProofEnv: readonly { proof: RegExp; names: readonly (typeof producerEnvNames)[number][] }[] = [
-  { proof: /^manual:install-hetzner-live$/, names: producerEnvNames },
-];
-const liveInstallRules = (proofs: readonly string[]) => liveInstallProofEnv.filter(rule => proofs.some(proof => rule.proof.test(proof)));
 export function missingProducerEnv(proofs: readonly string[], env: Record<string, string>) {
-  return [...new Set(liveInstallRules(proofs).flatMap(rule => rule.names.filter(name => !env[name])))];
+  return needsProducerEnv(proofs) ? liveInstallRequiredEnv.filter(name => !env[name]) : [];
 }
 /**
  * Only a launch whose proofs need the .env secrets reads .env (GY-1071): a unit, integration or
  * other proof gets none of them, so a malformed .env line never refuses a launch that needs no secret.
  */
-export const needsProducerEnv = (proofs: readonly string[]) => liveInstallRules(proofs).length > 0;
+export const needsProducerEnv = (proofs: readonly string[]) => proofs.some(liveInstallProof);
 
 /**
  * One .env value as a shell would read it: a value in a matching pair of quotes is the text
@@ -376,7 +373,8 @@ export function producerPrompt(config: Pick<MasterConfig, 'repository' | 'cliPat
   const memorySection = projectMemoryDigest(memory, 'producer', { baseSha: binding.baseSha });
   return `You are an independent Graphyard proof producer for ${config.repository}, principal ${profile.principal}. Produce trusted evidence for work item ${binding.key} (pull request #${binding.pr}) at exact head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for the ${binding.group} proof group: ${binding.proofs.join(', ')}. `
     + (memorySection || '')
-    + `Your Graphyard credential is the file named by GRAPHYARD_TOKEN_FILE and is used only by node ${config.cliPath}; never print, copy, cat, or echo it or any other credential, and never read .graphyard/connection.json, .graphyard/credentials.json, .env, or anything under ~/.config. For live install proofs, HCLOUD_TOKEN and HETZNER_SPEND_CAP_USD_MONTHLY are available in your environment. `
+    + `Your Graphyard credential is the file named by GRAPHYARD_TOKEN_FILE and is used only by node ${config.cliPath}; never print, copy, cat, or echo it or any other credential, and never read .graphyard/connection.json, .graphyard/credentials.json, .env, or anything under ~/.config. `
+    + liveInstallGuidance(binding.proofs, checkout.directory, binding.key, binding.sha)
     + `Work in a detached worktree of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root — never in the repository's own checkout, never under .graphyard/worktrees and never under a temporary directory: git fetch origin ${binding.sha} && git worktree add --detach ${worktree} ${binding.sha}. Install and build there, then run what establishes each proof — start from the tests and scripts named for the proof (grep the proof name under tests/ and scripts/) and the acceptance criteria in node ${config.cliPath} status ${binding.key}. Run the project's tests through its own runners — node ${config.cliPath} verify ${binding.key} in that worktree, or npm test — which withhold every GRAPHYARD_* and HERDR_* variable from the tests and reserve free test ports themselves; a proof's cases are the ones whose title begins with its name, counted from a run of its whole test file, never narrowed with --test-name-pattern, and that title rule applies to unit: and integration: proofs only. A manual: proof is judged, not counted from titles: its executed is the number of test cases and checks you ran to judge the criterion, recorded with its exercise record. `
     + 'Do not edit, commit, push, rebase or merge the candidate, do not claim Graphyard work, do not post a review, and never weaken, skip or narrow a test to make a proof pass. '
     + `A proof that passes against an unchanged tree proves nothing, so for each proof that passes also show it exercises its criterion: in a second detached worktree of the same head at ${stripped} (git worktree add --detach ${stripped} ${binding.sha}), remove the behaviour the criterion the proof is attached to describes — revert or stub exactly the lines of the change that implement it — and run the same proof there. `

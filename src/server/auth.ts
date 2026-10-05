@@ -65,13 +65,15 @@ export class HumanSignIn {
   constructor(private readonly clock: () => number = Date.now) {}
 
   /**
-   * A link for the issuing principal. Only a configured admin credential issues one: never an agent
-   * identity, a reader, or a worker — and never an admin declared an AI session, since redeeming the
-   * link declares the session human and would hand that agent the decisions only a human may make.
+   * A link for the issuing principal. Only a configured admin credential declared a human session
+   * issues one: never an agent identity, a reader, or a worker, and never an admin declared an AI
+   * session or declaring nothing, since redeeming the link declares the session human and would hand
+   * whoever holds that credential the decisions only a human may make. An install declares its
+   * operator human (install/index.ts), and the server treats an undeclared session as never human.
    */
   issue(issuer: Principal, configured: boolean) {
     demand(configured && issuer.role === 'admin', 'Only the operator\'s own admin credential issues a sign-in link', 403);
-    demand(issuer.sessionKind !== 'ai', `A sign-in link opens a human session; ${issuer.id} is declared an AI session and issues none`, 403);
+    demand(issuer.sessionKind === 'human', `A sign-in link opens a human session; ${issuer.id} is ${issuer.sessionKind === 'ai' ? 'declared an AI session' : 'not declared "sessionKind": "human"'} and issues none`, 403);
     const now = this.prune(), code = randomBytes(32).toString('base64url');
     const { displayName } = issuer;
     bounded(this.links, maxSignInLinks - 1);
