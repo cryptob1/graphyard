@@ -10,7 +10,7 @@ import { directMergeWindows } from '../src/direct-merge.js';
 import { evaluate, type Observation, type Principal, type Work } from '../src/model.js';
 import { mergeAuthorized, mergeQueueAction } from '../src/merge-queue.js';
 import { reviewNeed } from '../src/model/dispatch.js';
-import { githubMergesAnswer, operationsCommand } from '../src/cli/master/operations.js';
+import { operationsCommand } from '../src/cli/master/operations.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GitHub delivery is the only delivery (GY-1235): a candidate whose build, review and required
@@ -45,10 +45,13 @@ const githubState = { pullRequestId: 'PR_x', head: A, queue: false, mergeStateSt
 test('unit:guarded-merge-removed — the guarded merge is gone, master merge says GitHub merges, and a ten-minute-old observation does not hold a passing candidate', async () => {
   assert.equal(existsSync(new URL('../src/master/merge.ts', import.meta.url)), false, 'src/master/merge.ts is deleted');
   assert.equal(existsSync(new URL('../src/model/delivery-mode.ts', import.meta.url)), false, 'the delivery-mode switch is deleted');
+  // Read inside the case, so a base without the answer fails here rather than at module load.
+  const { githubMergesAnswer } = await import('../src/cli/master/operations.js') as { githubMergesAnswer?: string };
+  assert.equal(typeof githubMergesAnswer, 'string', 'master merge has an answer of its own');
   const printed: unknown[] = [];
   await operationsCommand({ id: 'merge', args: ['GY-9'], print: (value: unknown) => { printed.push(value); return value; } } as any);
   assert.deepEqual(printed, [{ merged: false, result: githubMergesAnswer }]);
-  assert.match(githubMergesAnswer, /^GitHub merges/);
+  assert.match(githubMergesAnswer!, /^GitHub merges/);
 
   const stale = new Date(now.getTime() - 10 * 60_000).toISOString();
   const work = evaluated(item(stale));
