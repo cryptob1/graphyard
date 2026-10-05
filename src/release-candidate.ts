@@ -386,6 +386,18 @@ export async function validate(candidate: ReleaseCandidate, url: string, suites:
  */
 export const uatValidationWindowMs = 4 * 3_600_000;
 
+/** A job's `needs`, inline (`needs: a` / `needs: [a, b]`) or a block sequence of `- a` lines; any other shape throws. */
+function jobNeeds(name: string, block: string) {
+  const line = /^ {4}needs:[ \t]*(.*)$/m.exec(block);
+  if (!line) return [];
+  const inline = line[1].replace(/\s+#.*$/, '').trim();
+  const needs = inline
+    ? (/^\[(.*)\]$/.exec(inline)?.[1] ?? inline).split(',').map(entry => entry.trim())
+    : [...block.slice(line.index + line[0].length).matchAll(/\n {4,}- *([^\n]*)/gy)].map(match => match[1].replace(/\s+#.*$/, '').trim());
+  if (!needs.length || needs.some(need => !/^[\w-]+$/.test(need))) throw new Error(`Workflow job ${name} has a needs value the UAT validation window cannot read`);
+  return needs;
+}
+
 /**
  * Pure: the longest a release-candidate workflow can run up to and including its `uat` job — the
  * heaviest `needs` chain of `timeout-minutes` ending there — so a test can hold
@@ -398,7 +410,7 @@ export function uatValidationCeilingMs(workflow: string, job = 'uat') {
   for (const block of section.split(/^(?= {2}[\w-]+:\s*$)/m)) {
     const name = /^ {2}([\w-]+):\s*$/m.exec(block)?.[1];
     if (!name) continue;
-    const needs = /^ {4}needs:\s*(.+)$/m.exec(block)?.[1].replace(/[[\]]/g, '').split(',').map(entry => entry.trim()).filter(Boolean) ?? [];
+    const needs = jobNeeds(name, block);
     const minutes = Number(/^ {4}timeout-minutes:\s*(\d+)/m.exec(block)?.[1]);
     if (!Number.isFinite(minutes)) throw new Error(`Workflow job ${name} declares no timeout-minutes, so the UAT validation window cannot bound it`);
     jobs.set(name, { needs, minutes });

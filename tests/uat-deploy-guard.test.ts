@@ -162,4 +162,10 @@ test('the UAT validation window covers the release-candidate workflow\'s longest
   assert.equal(uatValidationCeilingMs(sample), (10 + 90 + 120) * 60_000, 'the heaviest needs chain ending at uat, not later jobs');
   assert.ok(uatValidationCeilingMs(sample.replace('timeout-minutes: 90', 'timeout-minutes: 200')) > uatValidationWindowMs, 'a grown timeout is detected');
   assert.throws(() => uatValidationCeilingMs(sample.replace('    timeout-minutes: 5\n', '')), /fast declares no timeout-minutes/);
+
+  // A block-sequence `needs` counts the same chain; a needs value the parser cannot read throws rather than under-counting.
+  const block = sample.replace('    needs: [candidate, slow, fast]', '    needs:\n      - candidate\n      - slow # heaviest\n    - fast');
+  assert.equal(uatValidationCeilingMs(block), (10 + 90 + 120) * 60_000, 'a block-sequence needs is read in full');
+  assert.throws(() => uatValidationCeilingMs(sample.replace('    needs: [candidate, slow, fast]', '    needs:\n    timeout-minutes: 1')), /uat has a needs value the UAT validation window cannot read/);
+  assert.throws(() => uatValidationCeilingMs(sample.replace('needs: [candidate, slow, fast]', 'needs: ${{ fromJSON(x) }}')), /uat has a needs value/);
 });
