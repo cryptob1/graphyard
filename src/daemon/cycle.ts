@@ -4,6 +4,7 @@ import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
 import { cycleMetricsSchema, type CycleStepName, type DaemonAction, type DaemonActionKind, type DaemonState, emptyCycleSteps, message, pruneDaemonState } from './state.js';
 import { reconcilePendingActions } from './reconcile.js';
 import { type ExhaustedProof, setAsideFollowUpThreads } from './decisions.js';
+import { emptyHeldDecisions, type HeldDecisions } from './decision-reads.js';
 import { actionableSubjects, latencyBudget, observeItemClock, stageMetrics, trackSilence } from './metrics.js';
 import { profileHealth } from './sessions.js';
 import { boundedPersist } from './liveness.js';
@@ -185,7 +186,10 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
       }
     }
   });
-  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, launcher, launch, detached: !settle, exhaustedProofs };
+  // The decision histories a loop keeps between its cycles (GY-1142) are its own, like its write chain.
+  let heldDecisions = heldHistories.get(unbounded);
+  if (!heldDecisions) heldHistories.set(unbounded, heldDecisions = emptyHeldDecisions());
+  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, launcher, launch, detached: !settle, exhaustedProofs, heldDecisions };
   /** A cycle that owns its launcher waits for what a step handed it; the loop's cycles never do. */
   const settleLaunches = async () => { if (settle && launcher.pending) { await timings.step('launches', () => launcher.idle()); performed.push(...launcher.drain()); } };
   await timings.step('close', () => closeStep(cycle));
@@ -285,6 +289,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
  * so the order is kept per underlying effects, across cycles, not per cycle.
  */
 const writeChains = new WeakMap<object, { writing: Promise<unknown> }>();
+const heldHistories = new WeakMap<object, HeldDecisions>();
 function serialPersist(effects: DaemonEffects, owner: object): DaemonEffects {
   let chain = writeChains.get(owner);
   if (!chain) writeChains.set(owner, chain = { writing: Promise.resolve() });
@@ -310,4 +315,6 @@ export interface Cycle {
   launch: (kind: DaemonActionKind, item: Work | null, key: string, holds: string[], body: (sink: DaemonAction[]) => Promise<void>) => boolean;
   /** Whether launches outlive this cycle (the loop's launcher), or are settled within it (a cycle run on its own). */
   detached: boolean;
+  /** The decision histories read on earlier cycles of this loop (GY-1142), which the decisions step keeps while their ledger has not moved. */
+  heldDecisions: HeldDecisions;
 }
