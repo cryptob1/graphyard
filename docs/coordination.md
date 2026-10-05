@@ -51,4 +51,4 @@ The [routine target](master-agent-reference.md#pipeline-speed) comes from `sync`
 
 ## Explain stalls
 
-`graphyard diagnose GY-N` explains the refusing gate and what else holds it; `base-behind`/`base-conflict` get rework or, docs-only, [docs-sync](development.md#documentation-that-rarely-conflicts), whose launcher creates `.graphyard/docs-sync/<KEY>-<head7>`; only it, objects, its worktree admin and remote refs stay writable; if unwritable, it is removed and refused for rework. Three unobserved observation jobs in a row are `observation-starved` (master attention, `/api/status` `starvedJobs`).
+`graphyard diagnose GY-N` explains the refusing gate and what else holds it; `base-behind`/`base-conflict` get rework or, docs-only, [docs-sync](development.md#documentation-that-rarely-conflicts), whose launcher creates its worktree in a managed checkout of its own; only it, objects, its worktree admin and remote refs stay writable; if unwritable, it is removed and refused for rework. Three unobserved observation jobs in a row are `observation-starved` (master attention, `/api/status` `starvedJobs`).
