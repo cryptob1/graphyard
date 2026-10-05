@@ -23,6 +23,8 @@ Required: `typecheck`, `test` (`.github/workflows/ci.yml`), under ten minutes. S
 
 With `GRAPHYARD_DELIVERY=github`, GitHub merges: once build, review and required checks pass, the observation enables auto-merge on that head; no proof, queue or guarded merge gates it, and UAT validates before promotion.
 
+Every 30 s the main guard reverts a merge commit failing a required check its parent passed, via a `graphyard-revert/` pull request the App merges once green, and reopens the item naming check and commit. A revert that conflicts, fails or stalls an hour is closed after one attempt with one attention line; fix main forward.
+
 ## Managed repositories
 
 `init --scan` splits checks into `delivery.mergeGate` (pull requests) and per-candidate; `--apply` writes `delivery` and renders `graphyard-release-candidate.yml` (cut on `candidateSchedule`, `--candidate-cron CRON|off`; checks at the exact SHA; UAT; validation) and `graphyard-promotion.yml` (promote a UAT-passed SHA, then verify), pinning the installing CLI. `deploy.adapter`: `railway` (`deploy.project`) or `command` (`deploy.uat`/`deploy.production` with `GRAPHYARD_CANDIDATE_SHA`; unset leaves workflows ungenerated). UAT reports the SHA at `/healthz` as `commit` or `revision`. `--delivery per-pr` (or `"mode": "per-pr"`) keeps every check required per pull request. `install --plan` lists the resources; `human` ones need `--apply --create-environments`.

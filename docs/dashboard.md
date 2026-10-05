@@ -29,7 +29,7 @@ Rows: **Build, Validate, Test, Review, Prove, Merge, Deploy**, then *Merged*, *L
 
 ## An item page
 
-Below the summary: **What is left**; **Requirements** (✓/○); **Pull request** with **Merge danger** (low/medium/high); **Test cases**; **Activity**; **Technical details** (gates, sessions, evidence, overlaps).
+**What is left**; **Requirements** (✓/○); **Pull request** with **Merge danger** (low/medium/high); **Test cases**; **Activity**; **Technical details** (gates, sessions, evidence, overlaps).
 
 ## Insights
 

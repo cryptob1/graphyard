@@ -5,7 +5,7 @@
 
 Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit:`/`integration:` are producer-runnable on the exact head ([automatic dispatch](master-agent.md#automatic-dispatch-at-submit)); `manual:` needs two-party attestation unless in `producerProofs`; judged, not title-counted, a trusted pass proves it whatever it executed (`unit:`/`integration:`/`e2e:` need `executed > 0`); `e2e:` uses the [validation runner](validation.md).
 
-`graphyard master create` plans criteria up front; `master requirements GY-N revision.json "REASON"` adds; rewriting, removing, narrowing: two-party `master decide GY-N requirements @revision.json "REASON"`. Revisions replace the document (`expectedPolicyRevision`), lapsing evidence, review, authorization.
+`graphyard master create` plans criteria up front; `master requirements GY-N revision.json "REASON"` adds; rewriting, removing, narrowing: two-party `master decide GY-N requirements @revision.json "REASON"`. Revisions replace the document (`expectedPolicyRevision`) and lapse evidence, review, authorization.
 
 ## Dispatch optimistically, smallest scope first
 
@@ -21,11 +21,11 @@ Reviewer approval of the exact head plus required CI gates landing; threads are 
 
 `plannedFiles` bounds changes at `complete`, new heads and landings: files in scope, new files and touched `tests/helpers/timing-baseline.json` lines pass; others must match base byte-for-byte. Scope requests or audited revisions widen it.
 
-`evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: build/acceptance gates and queue ejections are its refusals (not sticky: a head re-enters once landable), published as required check `graphyard/landable`, never a verdict input.
+`evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: gate failures and ejections are its non-sticky refusals, published as required check `graphyard/landable`, never a verdict input.
 
 Out-of-scope files three-way merge onto the landing commit: extended or base-only changes pass; reverts, deletions, rewrites refuse.
 
-Pre-push, `graphyard sync GY-N` merges `origin/BASE` (no rebase), regenerates, commits; `graphyard sync GY-N --restore` restores out-of-scope files to base tip in one commit (plain push, never force).
+Pre-push, `graphyard sync GY-N` merges `origin/BASE` (no rebase), regenerates, commits; `graphyard sync GY-N --restore` restores out-of-scope files to base tip in one commit.
 
 ### Submit when your own criteria pass
 
@@ -37,4 +37,4 @@ The full suite is CI's gate: workers run build and `graphyard verify GY-N` (own 
 
 ## Ship in under thirty minutes
 
-[Speed](master-agent-reference.md#pipeline-speed): `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci), conflict avoidance, never weaker gates. `graphyard diagnose GY-N` names refusing gate, other holds; `base-behind`/`base-conflict` get rework or, docs-only, [docs-sync](development.md#documentation-that-rarely-conflicts) in `.graphyard/docs-sync/<KEY>-<head7>` (removed and refused for rework if unwritable). Three unobserved observation jobs: `observation-starved` (master attention; `/api/status` `starvedJobs`).
+[Speed](master-agent-reference.md#pipeline-speed): `sync`, automatic dispatch, [proofs in CI](github.md#proofs-in-ci), conflict avoidance. `graphyard diagnose GY-N` names holds; `base-behind`/`base-conflict` get rework or, docs-only, [docs-sync](development.md#documentation-that-rarely-conflicts). Three unobserved observation jobs: `observation-starved` (master attention; `/api/status` `starvedJobs`).

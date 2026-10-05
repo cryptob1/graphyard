@@ -3,7 +3,7 @@
 
 ## Items, scope and human waits
 
-Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (flags before `--` refused). Auto-granted if grounded: docs; files criteria name; `web/`/`browser-tests/` for `docs/`-planning items; files review findings name; tests pinning planned text; symbol definitions; successors; companions (docs-budget gate, timing baseline, importing tests). Decided by an executor with `approve-scope` or the loop; standing decisions replay. Otherwise an approver judges; `master scope GY-N [--allow-broad-scope] REASON` applies refused requests (needs reason); leases stay (`--wait` reads outcome). Ending attempts (submit, release, lapse, rework, requirements) close open/refused requests as `attempt ended`; `master unblock GY-N` closes stale ones. Human decisions: `park GY-N EPOCH KIND NEEDED [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you), answered via `graphyard answer GY-N …`).
+Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (flags before `--` refused). Auto-granted if grounded: docs; files criteria or follow-ups name; `web/`/`browser-tests/` for `docs/`-planning items; files review findings name; tests pinning planned text; symbol definitions; successors; companions (docs-budget gate, timing baseline, importing tests, planned modules' imports and importers). An `approve-scope` executor or the loop decides; standing decisions replay. Otherwise an approver judges; `master scope GY-N [--allow-broad-scope] REASON` applies refused requests (needs reason); leases stay (`--wait` reads outcome). Ending attempts (submit, release, lapse, rework, requirements) close open/refused requests as `attempt ended`; `master unblock GY-N` closes stale ones. Human decisions: `park GY-N EPOCH KIND NEEDED [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you), answered via `graphyard answer GY-N …`).
 
 ## Conflict avoidance
 
@@ -27,7 +27,7 @@ A worker restores its own: `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-
 
 ## GitHub administration through the browser
 
-`master protection --apply` reconciles protection; where only a page exists, `master browser FLOW` drives the `master init --browser-profile` profile (`master browser app-permissions`, `master browser installation-accept`, `master browser protection`):
+`master protection --apply` reconciles protection; where only a page exists, `master browser FLOW` drives the `master init --browser-profile` profile  (`master browser app-permissions`, `master browser installation-accept`, `master browser protection`):
 
 | Flow | Effect
 | --- | ---
@@ -35,13 +35,13 @@ A worker restores its own: `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-
 | `installation-accept` | Accept pending requests
 | `protection` | Reconcile branch protection
 
-Flows read `GET /api/github/installation` (App credential, not gh), record `record.json` under `.graphyard/master-actions/` and append `ledger.json`. Approving a *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, uses a merge bypass, pushes code or reads a worker credential.
+Flows read `GET /api/github/installation` (App credential) and record `.graphyard/master-actions/` `record.json`, `ledger.json`. Approving a *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, uses a merge bypass, pushes code or reads a worker credential.
 
 If a harness classifier refuses routine administration, `master harness claude --apply` (Codex: `master harness codex`) writes rules to `.claude/settings.local.json`.
 
 Denied, by endpoint: `gh pr merge`/`review`, `gh api` `pulls/N/merge`, `repos/R/merges`, `merge-upstream`, `pulls/N/reviews`, `access_tokens`, `PUT`/`POST`/`DELETE`; `gh api graphql` with `mutation` (merge, enqueue, auto-merge, approval) or `=@`/`--input`.
 
-Missing or retired rules (`gh api *merge*`, `gh api graphql*`) are drift, named by `master status` (`harness`); `master harness claude --apply` rewrites them.
+Missing or retired rules (`gh api *merge*`, `gh api graphql*`) are `harness` drift in `master status`; `--apply` rewrites them.
 
 ## Typed actions and executors
 
@@ -49,7 +49,7 @@ One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-
 
 A `resync` (`POST /api/work/:id/resync` `{ since }`) completes only on an observation newer than its claim.
 
-A `dispatch` or `request-review` finding a session already answering the head completes on it; standing verdicts block a second reviewer until dismissed; busy or reserved worker profiles wait 30 minutes before stalling. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle, in no count and no list), shown in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate it. Ticks requeue ownerless items (`liveness.violations`).
+A `dispatch` or `request-review` finding a session already answering the head completes on it; standing verdicts block a second reviewer until dismissed; busy or reserved worker profiles wait 30 minutes before stalling. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle), shown in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate it. Ticks requeue ownerless items (`liveness.violations`).
 
 ## Recovery
 
@@ -63,7 +63,7 @@ A producer request spent with no attempt acting (never started, launch refused, 
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`). Workless sessions raise `fleet-capacity`; sandbox or `workflows`-permission refusals are `configuration`.
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`). Workless sessions raise `fleet-capacity`; settled requests unanswered past `settledAnswerGraceMs` (5 minutes) are `unanswered-request`; sandbox or `workflows`-permission refusals are `configuration`.
 
 ## Pipeline speed
 

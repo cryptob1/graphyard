@@ -25,7 +25,7 @@ npm ci && npm run build && npm test
 
 ### Documentation that rarely conflicts
 
-Add self-contained paragraphs. Candidates conflicting only in `docs/**/*.md` get docs-sync, not rework: base merges in, both sides kept, approval kept if the non-docs diff is unchanged.
+Candidates conflicting only in `docs/**/*.md` get docs-sync, not rework: base merges in keeping both sides, and approval stays if the non-docs diff is unchanged.
 
 ## Trusted contracts
 

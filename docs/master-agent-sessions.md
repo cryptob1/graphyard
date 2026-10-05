@@ -19,11 +19,11 @@ Every launch but the master session's gets the checkout unwritable to shell comm
 
 ## Accounts and failover
 
-A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first account under `run.quotaCeilingPercent`, else **fail over** (`dispatch.accounts`), as does a runtime failing to start. A limit notice commits work as unpushed `WIP:`, sets `capacity.exhausted` and relaunches elsewhere or after reset.
+A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first account under `run.quotaCeilingPercent`, else **fail over** (`dispatch.accounts`), as does a runtime failing to start. A limit notice commits work as unpushed `WIP:`, sets `capacity.exhausted` and relaunches elsewhere or after reset (agy's `Individual quota reached`).
 
 ## The loop's own master session
 
-Fleet role `master registry role set master ACCOUNTS …` (unconfigured, nothing launches): one session holding its slot; the loop and `master start` adopt a live `masterAgentName`. It starts on the master prompt plus a handover of standing judgement work and relaunches on exit, a limit notice or past `run.masterSessionMinutes` (240). Changed subjects wake it; after `run.masterHeartbeatMinutes` (30) of silence it gets a heartbeat (`master status` `daemon.master`).
+Fleet role `master registry role set master ACCOUNTS …` (unset: none): one session; the loop and `master start` adopt a live `masterAgentName`. It starts on the master prompt plus a handover of standing judgement work and relaunches on exit, a limit notice or past `run.masterSessionMinutes` (240). Changed subjects wake it; after `run.masterHeartbeatMinutes` (30) of silence it gets a heartbeat (`master status` `daemon.master`).
 
 ### The request is the session's first message
 

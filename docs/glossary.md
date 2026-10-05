@@ -17,7 +17,7 @@ A model in a runtime with only its credential's authority.
 
 One running agent instance.
 
-**Canonical usage:** *session*; hosting software: *runtime*.
+**Canonical usage:** *session*; its host: *runtime*.
 
 ### 4. Principal, role, and credential
 
