@@ -27,7 +27,7 @@ A worker restores its own: `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-
 
 ## GitHub administration through the browser
 
-`master protection --apply` reconciles protection; where only a page exists, `master browser FLOW` drives the `master init --browser-profile` profile  (`master browser app-permissions`, `master browser installation-accept`, `master browser protection`):
+`master protection --apply` reconciles protection; where only a page exists, `master browser FLOW` drives the `master init --browser-profile` profile:
 
 | Flow | Effect
 | --- | ---
@@ -37,11 +37,11 @@ A worker restores its own: `git reset --hard REVIEWED_HEAD`, `graphyard sync GY-
 
 Flows read `GET /api/github/installation` (App credential) and record `.graphyard/master-actions/` `record.json`, `ledger.json`. Approving a *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, uses a merge bypass, pushes code or reads a worker credential.
 
-If a harness classifier refuses routine administration, `master harness claude --apply` (Codex: `master harness codex`) writes rules to `.claude/settings.local.json`. `master status` applies that same write itself when the installed file has drifted from the plan (missing rules, or retired ones such as `Bash(gh api graphql*)`), logs the repair to stderr, and reports harness drift only if the repair fails.
+If a harness classifier refuses routine administration, `master harness claude --apply` (Codex: `master harness codex`) writes rules to `.claude/settings.local.json`.
 
 Denied, by endpoint: `gh pr merge`/`review`, `gh api` `pulls/N/merge`, `repos/R/merges`, `merge-upstream`, `pulls/N/reviews`, `access_tokens`, `PUT`/`POST`/`DELETE`; `gh api graphql` with `mutation` (merge, enqueue, auto-merge, approval) or `=@`/`--input`.
 
-Missing or retired rules (`gh api *merge*`, `gh api graphql*`) are `harness` drift in `master status`; `--apply` rewrites them.
+`master status` applies that write itself when rules are missing or retired (`gh api *merge*`, `gh api graphql*`), logs it to stderr, and reports `harness` drift only if it fails.
 
 ## Typed actions and executors
 
