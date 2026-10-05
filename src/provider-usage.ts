@@ -364,7 +364,10 @@ export function deriveAccountPlan(
     acc.credential?.key?.variable === 'ZAI_API_KEY' || (!!acc.credential?.key?.file && /zai/i.test(acc.credential.key.file));
   const match = /^(?:pi|opencode)[-_]([a-zA-Z0-9]+)$/i.exec(account.name);
   // A Z.AI-credentialed pi-X/opencode-X always names plan zai-X, alone or beside others, so its plan id never depends on
-  // the registry's size; only a sibling with its own Z.AI credential joins it (GY-1158).
+  // the registry's size; only a sibling with its own Z.AI credential joins it (GY-1158). The credential read is the
+  // registry's key alone, never the login a host's auth.json holds: the control plane derives plans without the
+  // account's host, so an auth.json-only login would give that host and the control plane two plan ids for one
+  // account. Such an account shares a budget by declaring it, `--plan zai-X` (GY-1210).
   if (match && hasZaiCredential(account)) {
     const suffix = match[1];
     return { planId: `zai-${suffix.toLowerCase()}`, planName: `Z.AI (${suffix})`, planKind: 'zai' };

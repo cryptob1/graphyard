@@ -17,7 +17,10 @@ import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { capacityRefusal } from './fleet.js';
 import { answeredByPendingReview, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, type ReviewRecord } from './reviewer.js';
 import { answeredByPendingSession, independentProducerProfiles, launchProducer, reconcileProducers, requestAttemptLimit, sessionRetry, type ProducerRecord } from './producer.js';
+import { currentEvidence } from './model/evidence.js';
+import { judgeHostMemory, memoryDeferral, readHostMemory, type HostMemoryReading } from './master-resources.js';
 import { unexercisedFindings } from './model/mechanical-proofs.js';
+export { hostMemoryHold, loopMemoryAttention } from './master-resources.js';
 
 /**
  * The launch side of automatic dispatch at submit. The control plane records what each exact
@@ -347,6 +350,8 @@ export interface DispatchEffects {
   selectedAccount?: (role: 'reviewer' | 'producer', profile: string) => Promise<{ environment: string | null; kind: string | null } | null>;
   holdAccount?: (account: string, observed: Omit<ObservedExhaustion, 'until'>) => Promise<{ until?: string } | void>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<unknown>;
+  /** This host's memory (GY-612): below its floor, no reviewer or producer is launched and each request waits with the reason. */
+  hostMemory?: () => Promise<HostMemoryReading | null>;
   /**
    * Ends one session record the liveness sweep found settled. A dispatcher wired without it still
    * launches and still judges liveness — it simply leaves the record standing, which is the state
@@ -684,6 +689,11 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   const isReleased = (pane: string | null | undefined, name: string | null | undefined) => !!pane && !!name && releasedPanes.has(`${pane}\0${name}`);
   const agents = (herdr ?? []).filter(agent => !isReleased(agent.pane_id, agent.name));
   const credentials = await timings.step('credentials', () => effects.credentials(config.producers));
+  // A host below its memory floor launches nothing new (GY-612): every request that would launch
+  // waits with the reason, and launches on the first tick after memory recovers.
+  const memory = effects.hostMemory ? await timings.step('memory', () => effects.hostMemory!().catch(() => null)) : null;
+  const memoryHold = memory ? judgeHostMemory(null, memory, clock, config.hostId) : null;
+  const memoryDeferred = memoryHold?.state.low ? memoryDeferral(memoryHold.state) : null;
   // The sessions this tick has started join the inventory at once, so two requests in one tick
   // never both take a profile's last slot. A launcher that does not report its session name is
   // counted under the name it would have chosen for the request.
@@ -904,6 +914,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   const dispatchReview = async (item: Work, review: DispatchRequest) => {
     if (!session('review', item, review, reviews)) { /* settled, or waiting to relaunch */ }
     else if (!herdr) wait('review', item, review, 'Herdr session inventory is unavailable');
+    else if (memoryDeferred) wait('review', item, review, memoryDeferred);
     else if (spent('review')) wait('review', item, review, capacityWait('review'));
     else if (!retryable(review)) wait('review', item, review, `launch refused ${cursor.failures[review.id].attempts} time(s): ${cursor.failures[review.id].reason}; ${cursor.failures[review.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt, launch it with master review once the cause is fixed' : `next attempt at ${cursor.failures[review.id].nextAt}`}`);
     else {
@@ -970,6 +981,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
           if (unexercised.length) { tick.skipped++; wait('producer', item, request, `evidence does not exercise its criterion (${unexercised.map(entry => entry.proof).join(', ')}); the head returns to its worker through a rework decision, and no producer is launched for it again`); continue; }
           if (!session('producer', item, request, producers)) continue;
           if (!herdr) { wait('producer', item, request, 'Herdr session inventory is unavailable'); continue; }
+          if (memoryDeferred) { wait('producer', item, request, memoryDeferred); continue; }
           if (spent('producer')) { wait('producer', item, request, capacityWait('producer')); continue; }
           if (!retryable(request)) { wait('producer', item, request, `launch refused ${cursor.failures[request.id].attempts} time(s): ${cursor.failures[request.id].reason}; ${cursor.failures[request.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt' : `next attempt at ${cursor.failures[request.id].nextAt}`}`); continue; }
           // Independence is per item, never per process: a profile whose principal held an assignment
@@ -1136,6 +1148,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     credentials: profiles => inspectProducerCredentials(root, profiles),
     reconcileReviews: (work, agents) => reconcileReviews(root, current(), { run, work, agents }),
     reconcileProducers: (work, agents) => reconcileProducers(root, current(), work, agents, { run }),
+    hostMemory: readHostMemory,
     // Each launch's reads of its own pane are watched: a runtime that exited on its provider's
     // limit notice is failed over below rather than counted as a refusal.
     launchReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, requestId: request.id, request: { sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } }).catch(error => { throw watch.classify(error); }); },
@@ -1355,7 +1368,15 @@ export interface ExecutorEffects {
   renew?: (action: ActionRow) => Promise<unknown>;
   /** One handler per action kind this executor can run. A kind with no handler is never claimed. */
   handlers: Partial<Record<NextActionKind, ExecutorHandler>>;
+  /**
+   * Why no session may be launched on this host now (GY-612: its memory is below the floor), or
+   * null. While it names a reason the executor claims no launching kind, so the row waits in the
+   * queue without a failure or a backoff and is claimed on the first poll after memory recovers.
+   */
+  launchHold?: () => Promise<string | null>;
 }
+/** The kinds whose handler starts a session on this host. */
+export const launchingKinds: readonly NextActionKind[] = ['dispatch', 'request-review'];
 export interface ExecutorStep { at: string; executor: string; host: string; action: ActionRow | null; result: 'done' | 'failed' | 'idle'; kind: NextActionKind | null; work: string | null; reason: string }
 
 /**
@@ -1408,9 +1429,12 @@ export async function runExecutorTick(identity: ExecutorIdentity, effects: Execu
   const step = (action: ActionRow | null, result: ExecutorStep['result'], reason: string): ExecutorStep =>
     ({ at: new Date(now()).toISOString(), executor: identity.id, host: identity.host, action, result, kind: action?.kind ?? null, work: action?.key ?? null, reason });
   if (!kinds.length) return step(null, 'idle', 'this executor has no handler for any action kind');
-  const claimed = await effects.claim({ host: identity.host, executor: identity.id, kinds });
+  const hold = kinds.some(kind => launchingKinds.includes(kind)) && effects.launchHold ? await effects.launchHold().catch(() => null) : null;
+  const claimable = hold ? kinds.filter(kind => !launchingKinds.includes(kind)) : kinds;
+  if (!claimable.length) return step(null, 'idle', `claims nothing: ${hold}`);
+  const claimed = await effects.claim({ host: identity.host, executor: identity.id, kinds: claimable });
   const action = claimed.action;
-  if (!action) return step(null, 'idle', 'the queue has no action this executor can run');
+  if (!action) return step(null, 'idle', hold ? `the queue has no action this executor can run without launching a session, and it launches none: ${hold}` : 'the queue has no action this executor can run');
   // The handlers are not bounded by the claim lease: a dispatch prepares a worktree and waits on
   // a runtime, and a guarded merge chains provider calls that each have their own timeout. While
   // one runs, this says so at the renewal interval, so the row is never offered to a second
