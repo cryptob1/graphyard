@@ -735,9 +735,20 @@ test('unit:rerun-owed-holds-while-run-in-progress — an owed rerun whose workfl
   // A wait no longer read lapses as an owed rerun always did.
   assert.equal(reconcileCheckReruns(f.work([owed]), [15368], 1, new Date(later - 60_000 + checkRerunVisibilityMs)).reruns[0].state, 'expired');
 
+  // A waiting rerun names its run, so each further wait reads only the run, not the job again.
+  f.calls.length = 0;
+  assert.deepEqual(await f.github.rerunFailedJobs(77, { completedOnly: true, run: { runId: 500, attempt: 1 } }), { runId: 500, attempt: 1, waiting: 'in_progress' });
+  assert.deepEqual(f.calls.map(call => `${call.method} ${call.path}`), ['GET /actions/runs/500']);
+  // A run GitHub cannot read for now is neither a wait nor a refusal: nothing is POSTed.
+  const request = f.github.request;
+  f.github.request = async (path, method) => { if (path === '/actions/runs/500') throw new Refusal('GitHub GET /actions/runs/500 failed (502)', 502); return request(path, method); };
+  assert.deepEqual(await f.github.rerunFailedJobs(77, { completedOnly: true, run: { runId: 500, attempt: 1 } }), { runId: 500, attempt: 1, unreadable: 'GitHub GET /actions/runs/500 failed (502)' });
+  f.github.request = request;
+  assert.equal(f.posts(), 0);
+
   // The run completes: the rerun is POSTed and recorded as requested, timed from the request.
   f.status('completed');
-  const requested = await f.github.rerunFailedJobs(77, { completedOnly: true });
+  const requested = await f.github.rerunFailedJobs(77, { completedOnly: true, run: { runId: 500, attempt: 1 } });
   assert.deepEqual(requested, { runId: 500, attempt: 1 });
   assert.equal(f.posts(), 1);
   const at = new Date(later).toISOString();

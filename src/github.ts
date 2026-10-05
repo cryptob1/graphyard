@@ -2045,17 +2045,23 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * An Actions check run's id is its job's id, which names the run; only the failed jobs rerun, on
    * the same sha, so the rerun's check run is the one the gates read next.
    */
-  async rerunFailedJobs(checkRunId: number, options: { completedOnly?: boolean } = {}): Promise<{ runId: number; attempt?: number; waiting?: string }> {
-    const job = await this.request(`/actions/jobs/${checkRunId}`);
+  async rerunFailedJobs(checkRunId: number, options: { completedOnly?: boolean; run?: { runId: number; attempt?: number } } = {}): Promise<{ runId: number; attempt?: number; waiting?: string; unreadable?: string }> {
+    // A rerun already waiting on its workflow run knows the run (GY-1329): the job is not read again.
+    const known = options.run && Number.isSafeInteger(options.run.runId) ? options.run : null;
+    const job = known ? { run_id: known.runId, run_attempt: known.attempt } : await this.request(`/actions/jobs/${checkRunId}`);
     demand(Number.isSafeInteger(job?.run_id), `Check run ${checkRunId} is not a GitHub Actions job; it cannot be rerun`);
+    const named = { runId: job.run_id as number, ...(Number.isSafeInteger(job.run_attempt) ? { attempt: job.run_attempt as number } : {}) };
     // GitHub refuses (403) to rerun a workflow run whose other jobs are still running (GY-1329): an
-    // owed rerun waits for the run to complete instead of being asked and refused.
+    // owed rerun waits for the run to complete instead of being asked and refused. A run GitHub
+    // cannot be read for now leaves the rerun owed too, bounded by checkRerunVisibilityMs.
     if (options.completedOnly) {
-      const run = await this.rerunWorkflowRun(job.run_id);
-      if (run && run.status !== 'completed') return { runId: job.run_id, ...(Number.isSafeInteger(job.run_attempt) ? { attempt: job.run_attempt } : {}), waiting: run.status };
+      let run: RerunWorkflowRun | null;
+      try { run = await this.rerunWorkflowRun(job.run_id); }
+      catch (error) { return { ...named, unreadable: error instanceof Error ? error.message.slice(0, 300) : String(error) }; }
+      if (run && run.status !== 'completed') return { ...named, waiting: run.status };
     }
     await this.request(`/actions/runs/${job.run_id}/rerun-failed-jobs`, 'POST', {});
-    return { runId: job.run_id, ...(Number.isSafeInteger(job.run_attempt) ? { attempt: job.run_attempt } : {}) };
+    return named;
   }
   /**
    * The workflow run a rerun was requested on (GY-1096): its status (`queued`, `waiting`,
@@ -2860,7 +2866,10 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
         let outcome: Parameters<Engine['recordCheckRerun']>[3];
         if (typeof github.rerunFailedJobs !== 'function') outcome = { state: 'refused', detail: 'This GitHub adapter cannot rerun failed jobs' };
         else try {
-          const requested = await github.rerunFailedJobs(owed.failedRunId, { completedOnly: true });
+          const requested = await github.rerunFailedJobs(owed.failedRunId, { completedOnly: true, ...(owed.waiting && owed.runId !== undefined ? { run: { runId: owed.runId, ...(owed.attempt !== undefined ? { attempt: owed.attempt } : {}) } } : {}) });
+          // An unreadable workflow run is neither a wait nor a refusal: the rerun stays owed, unchanged,
+          // and lapses at checkRerunVisibilityMs from its last reading if GitHub never answers.
+          if (requested.unreadable) { console.error(`Graphyard could not read workflow run ${requested.runId} before rerunning ${owed.check} of ${work.key}: ${requested.unreadable}`); continue; }
           const attempt = requested.attempt !== undefined ? { attempt: requested.attempt } : {};
           outcome = requested.waiting ? { state: 'waiting', runId: requested.runId, ...attempt, status: requested.waiting } : { state: 'requested', runId: requested.runId, ...attempt };
         }

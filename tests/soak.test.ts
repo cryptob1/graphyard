@@ -568,6 +568,8 @@ async function simulateDay(options: { hours: number; backlog?: boolean; master?:
    * them, each history read taking `readMs` of real time.
    */
   staleRelease?: { item: number; racing: number; backlog: number; readMs: number };
+  /** GY-1329: item `item`'s flaky workflow run keeps running its other jobs for `ms` after its `test` check failed. */
+  unfinishedRun?: { item: number; ms: number };
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
   failover?: Failover;
   /**
@@ -833,6 +835,7 @@ async function simulateDay(options: { hours: number; backlog?: boolean; master?:
   github.exhaustedProfiles.add('claude-reviewer');
   if (plan.flaky.rerunPasses) github.flaky.set(items[plan.flaky.rerunPasses - 1].key, 'rerun-passes');
   if (plan.flaky.rerunFails) github.flaky.set(items[plan.flaky.rerunFails - 1].key, 'rerun-fails');
+  if (options.unfinishedRun) github.unfinishedRunMs.set(items[options.unfinishedRun.item - 1].key, options.unfinishedRun.ms);
   // GY-1250: two items whose first merges break main though each passed CI alone; the second's
   // revert fails its own checks too, so the guard gives it up and main is fixed forward by hand.
   const guardDay = options.mainGuard && { breaks: items[options.mainGuard.breaks - 1].key, abandons: items[options.mainGuard.abandons - 1].key, fixedAt: null as number | null,
@@ -3315,6 +3318,37 @@ test('unit:soak-invariants-hold — stale rework and stale merges each wake the 
   }
   assert.equal(wakes.length, restartLog.length, `no wake beyond the stale observations: ${JSON.stringify(wakes)}`);
   assert.ok(Object.keys(state.actions).filter(key => key.startsWith('wake:observation:')).length <= wakes.length, 'one wake entry per item woken');
+});
+
+test('unit:soak-invariants-hold — a flaky check whose workflow run is still running its other jobs waits for the run under the real loop: no rerun is POSTed while it runs, one is requested once it completes, the waiting cycles add no ledger entries, and the item keeps the rerun fast path with no refusal or rework round', { timeout: 300_000 }, async () => {
+  // GY-1329: GitHub refuses (403) to rerun a workflow run that has not completed, and that refusal
+  // used to resolve the owed rerun and cost the item a rework round. The run here stays unfinished
+  // past checkRerunVisibilityMs, so the wait must also outlast the owed rerun's visibility bound.
+  const flakyItem = 2, unfinishedMs = 20 * minute;
+  const { items, final, github, violations, failures, lost, dayStart } = await simulateDay({ hours: 4, unfinishedRun: { item: flakyItem, ms: unfinishedMs },
+    plan: { items: 4, leftovers: 0, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: flakyItem, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 4, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 4 } } });
+  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  assert.deepEqual(final.filter(item => item.stage !== 'done' || !item.delivery).map(item => `${item.key} ${item.stage}`), [], 'every item is delivered');
+  const key = items[flakyItem - 1].key, flaky = final.find(item => item.key === key)!;
+  // The loop read the unfinished run on several cycles, past the visibility bound, and never POSTed meanwhile.
+  const waits = github.runReads.filter(read => read.key === key && read.status !== 'completed');
+  assert.ok(waits.length >= 3, `the run was read unfinished on several cycles: ${JSON.stringify(github.runReads)}`);
+  const failedAt = Math.min(...waits.map(read => read.at)), lastWait = Math.max(...waits.map(read => read.at));
+  assert.ok(lastWait - failedAt > 15 * minute, `the wait outlasted the owed rerun's visibility bound (${(lastWait - failedAt) / minute} min)`);
+  assert.deepEqual(github.refusedReruns, [], 'no rerun was POSTed while its workflow run was unfinished');
+  // One rerun was requested, after the run completed.
+  const reruns = github.reruns.filter(rerun => rerun.key === key);
+  assert.equal(reruns.length, 1, `one rerun: ${JSON.stringify(github.reruns)}`);
+  assert.ok(reruns[0].at > lastWait, 'the rerun was requested only after the run completed');
+  // The ledger: one waiting entry for the one status the run held, one request, nothing refused or expired.
+  const ledger = (await store.pool.query(`SELECT kind FROM events WHERE work_id = $1 AND kind LIKE 'check.rerun.%' AND created_at >= $2 ORDER BY seq`, [flaky.id, new Date(dayStart).toISOString()])).rows.map(row => row.kind);
+  const count = (kind: string) => ledger.filter(entry => entry === `check.rerun.${kind}`).length;
+  assert.deepEqual([count('waiting'), count('requested'), count('refused'), count('expired')], [1, 1, 0, 0], `the waiting cycles added no ledger entries beyond the one wait: ${JSON.stringify(ledger)}`);
+  assert.ok(!(flaky.checkReruns ?? []).some(entry => entry.state === 'refused' || entry.state === 'expired' || /permission/i.test(entry.detail ?? '')), `no refused or expired rerun: ${JSON.stringify(flaky.checkReruns)}`);
+  assert.equal(flaky.pipeline?.reworkRounds ?? 0, 0, 'the flake cost no rework round');
+  assert.ok(github.contains(github.merges.find(merge => merge.key === key)!.sha, reruns[0].sha), 'the head whose rerun passed is what landed');
 });
 
 test('unit:soak-invariants-hold — approver launches refused for capacity wait uncounted and relaunch oldest-first within two cycles of capacity freeing, with no hand action and every invariant holding', { timeout: 360_000 }, async () => {
