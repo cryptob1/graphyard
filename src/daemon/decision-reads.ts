@@ -101,6 +101,8 @@ export async function decisionReads(effects: DaemonEffects, held: HeldDecisions,
   return reads;
 }
 
+/** The control plane's answer to a withdrawal that settled a stalled approval by applying it (server/lane-rework.ts, GY-1297). */
+export const resumedApplication = /its application was resumed and it is applied now/;
 /**
  * Why an approved decision the loop reads must be settled rather than waited on, or null (GY-1297):
  * the item moved past the situation it was bound to, or it has stood approved and unapplied past

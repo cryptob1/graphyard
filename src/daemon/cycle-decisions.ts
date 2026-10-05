@@ -9,7 +9,7 @@ import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonAct
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
 import { approvalStep, approverLaunchKey, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
-import { decisionReads, lateDecisionRead } from './decision-reads.js';
+import { decisionReads, lateDecisionRead, resumedApplication } from './decision-reads.js';
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { baseRefreshConflict } from '../merge-queue.js';
@@ -62,8 +62,19 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       let standing = history.find(entry => entry.action === decision.action && (entry.state === 'requested' || entry.state === 'approved'));
       // A merge or attest decision names what it binds. One standing for an earlier head can never
       // apply to this one, and it refuses the request that could: the requester takes it back.
-      const overtaken = standing ? overtakenDecision(item, decision, standing, !!effects.withdraw) : null;
-      if (overtaken) { await effects.withdraw!(item, standing!.id, overtaken); standing = undefined; }
+      const overtaken = standing ? overtakenDecision(item, decision, standing, !!effects.withdraw, clock) : null;
+      if (overtaken) {
+        // An approval the withdrawal settled by applying it is this decision, applied (GY-1298): the
+        // binding is settled, not a failed request repeated on the widening interval.
+        const applied = await effects.withdraw!(item, standing!.id, overtaken).then(() => null, (error: unknown) => { if (resumedApplication.test(message(error))) return message(error); throw error; });
+        if (applied) {
+          const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: standing!.id, requestedAt: stamp, settledAt: stamp });
+          recordSettledDecision(state.projectMemory, watch, { ...standing!, state: 'applied' }, stamp);
+          performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${overtaken}; the control plane applied it: ${boundDetail(applied, 400)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+          return;
+        }
+        standing = undefined;
+      }
       // Nor does the server keep more than one resolve standing, whatever its trigger. One for
       // another escalation (a security-concern a master asked about) is not this decision: adopting
       // it would settle this watch while the lease-loss still stands, and the binding would never
@@ -247,6 +258,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, () => undefined) : undefined;
     const judged = history === undefined ? undefined : history.find(entry => entry.id === watch.decision) ?? null;
     if ((!judged || judged.state === 'requested') && await approverExhausted(item, watch)) return;
+    // What the silence measure names this wait (GY-1298): an approval owed its settlement is not an approver judging it.
+    if (judged?.state === 'approved') Object.assign(watch, { approvedAt: judged.approvedAt ?? null, approvedBy: judged.approvedBy });
     const step = approvalStep(watch, judged, await sessions(), clock);
     if (step.step === 'wait' || (watch.exhaustedAt && step.step === 'exhausted')) return;
     // A decision whose approver could not be launched for want of capacity is not a session that
