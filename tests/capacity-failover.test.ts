@@ -20,7 +20,7 @@ import { actionableSubjects, approvalWatchSchema, capacityKey, carriedSession, e
 import { capacityRecheckMs, emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { approverProfile, approverRoleHealth, roleCapacity, heldRuntimeLogin, approverSessionName, buildMasterStatus, escalationProfile, escalationRoleHealth, launchEscalationHandler, type ChildRun, readApproverLaunch, readEscalationSessions, retainedEscalationSessions, saveApproverLaunch, saveEscalationSession, type EscalationSession, heldAwareProbe, inspectProfileAccounts, masterConfigSchema, NoHealthyAccountError, observedExhaustions, ownLoginAccounts, preservePartialWork, profileAccount, recordObservedExhaustion, runtimeLogin, selectAccount, selectApproverAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
 import { selectFleetSession, type FleetClient } from '../src/fleet.js';
-import { describeCapacity, detectExhaustion, parseResetTime } from '../src/model/capacity.js';
+import { describeCapacity, detectExhaustion, detectRetryingExhaustion, parseResetTime } from '../src/model/capacity.js';
 import type { EscalationContext } from '../src/model/escalation-context.js';
 import { answerCommand, humanRequestBlocker, openHumanRequests } from '../src/model/human-request.js';
 import type { Observation, Principal, Work } from '../src/model.js';
@@ -662,6 +662,118 @@ test('unit:approver-exhaustion-fails-over — an approver session stopped on its
   assert.deepEqual(after.actions.filter(action => ['failover', 'decision', 'capacity'].includes(action.kind)), []);
   assert.deepEqual(launches, ['env-a', 'env-b']);
   assert.equal((await reload(work.id)).capacity!.exhaustions.length, 1);
+});
+
+/** OpenCode 1.18's status line on a spent Z.AI account, as captured on 2026-09-30: it retries forever, padded out to the terminal width. */
+const opencodeBanner = (reset: string) => `  ■⬝⬝⬝⬝⬝⬝⬝  Weekly/Monthly Limit Exhausted. Your limit will reset at ${reset} [retrying in 4s attempt #5]${' '.repeat(96)}… esc interrupt • OpenCode 1.18.32  `;
+/** A reset as OpenCode prints it: a wall clock in the host's zone, no offset. */
+const hostWallClock = (instant: Date) => { const pad = (value: number) => String(value).padStart(2, '0'); return `${instant.getFullYear()}-${pad(instant.getMonth() + 1)}-${pad(instant.getDate())} ${pad(instant.getHours())}:${pad(instant.getMinutes())}:${pad(instant.getSeconds())}`; };
+
+test('unit:opencode-limit-exhausted-banner-detected — OpenCode 1.18\'s "Limit Exhausted" banner is a notice with the reset it names in the host zone; prose mentioning an exhausted limit is not', () => {
+  const now = Date.parse('2026-09-30T05:00:00Z');
+  const expected = new Date(2026, 9, 3, 8, 27, 35).toISOString();
+  const screen = `┃ Implementing GY-973…\n┃ Edited src/model/capacity.ts\n\n${opencodeBanner('2026-10-03 08:27:35')}\n`;
+  for (const read of [detectExhaustion(screen, now), detectRetryingExhaustion(screen, now)]) {
+    assert.ok(read, 'the banner is a limit notice');
+    assert.equal(read.resetsAt, expected, 'the reset is the wall clock the banner names, read in the host zone, not the retry\'s four seconds');
+    assert.match(read.reason, /^Weekly\/Monthly Limit Exhausted\. Your limit will reset at 2026-10-03 08:27:35 \[retrying in 4s attempt #5\] … esc interrupt • OpenCode 1\.18\.32$/);
+  }
+  // The same line with the status text right-aligned at any width, and without the ellipsis.
+  assert.equal(detectExhaustion(`■⬝⬝⬝⬝⬝⬝⬝ Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-10-03 08:27:35 [retrying in 4s attempt #5]${' '.repeat(180)}esc interrupt • OpenCode 1.18.32`, now)?.resetsAt, expected);
+  for (const summary of [
+    'Tests pass; the weekly limit exhausted branch is covered.',
+    'Handled the case where the Weekly/Monthly Limit Exhausted banner is on screen',
+    'I made sure a monthly limit exhausted notice holds the account [retrying in 4s attempt #5]',
+  ]) {
+    assert.equal(detectExhaustion(`● ${summary}`, now), null, summary);
+    assert.equal(detectRetryingExhaustion(`● ${summary}`, now), null, summary);
+  }
+});
+
+test('unit:retrying-session-fails-over-while-working — a worker, producer, reviewer or approver session Herdr reports working, whose runtime retries on a limit banner, is failed over: the account is held until the reset, partial work is kept, and the next launch takes the next account; a working session with no banner is left alone', async () => {
+  await fresh();
+  // A home of its own: an account an earlier test held is not this test's to inherit.
+  const config = loopConfig([profileOf('builder', workerA, ['env-a', 'env-b'])], { credentialFile: join(await temporaryDirectory('capacity-retrying-home'), 'coordinator.token') });
+  const herdr: Herdr = { agents: [], output: {} }, clock = { skewMs: 0 };
+  const worktree = await temporaryDirectory('capacity-retrying');
+  git(worktree, 'init', '-q', '-b', 'graphyard/retrying'); await writeFile(join(worktree, 'README.md'), 'base\n');
+  git(worktree, 'add', '-A'); git(worktree, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'base');
+  const { cycle, calls } = loop(config, herdr, clock, {
+    dispatch: async (work, profile) => {
+      const selected = await selectAccount(config, 'worker', profile, { ...loginsOnly(() => Date.now() + clock.skewMs), work: work.key });
+      await launcherClaims(work, workerA, calls.dispatch.length ? `${worktree}-next` : worktree);
+      herdr.agents = [...herdr.agents.filter(agent => agent.name !== profile.agentName), { name: profile.agentName, pane_id: `pane-${calls.dispatch.length}`, agent_status: 'working' }];
+      calls.dispatch.push({ work: work.key, profile: profile.name, account: selected.account?.name ?? null });
+    },
+  });
+  const state = emptyDaemonState(config);
+  let work = await released('retrying on a spent account');
+  await cycle(state);
+  assert.deepEqual(calls.dispatch, [{ work: work.key, profile: 'builder', account: 'env-a' }]);
+
+  // Working, with no banner, or with a notice its runtime is not retrying on: left alone.
+  await writeFile(join(worktree, 'README.md'), 'base\nhalf-finished change\n');
+  herdr.output['agent-builder'] = '● Update(src/model/capacity.ts)\n  ⎿ Added 12 lines\n';
+  clock.skewMs += 20_000; await cycle(state);
+  herdr.output['agent-builder'] = '● Weekly usage limit reached is now a notice\n';
+  clock.skewMs += 20_000; await cycle(state);
+  assert.equal(kinds(state, 'failover').length, 0, 'a working session without a retry banner is never failed over');
+  assert.equal((await reload(work.id)).lease?.epoch, 1);
+
+  // OpenCode on a spent account: Herdr still says working, the screen tail says retrying.
+  const reset = new Date(Math.ceil(Date.now() / 1000) * 1000 + 3 * 86_400_000), resetsAt = reset.toISOString();
+  herdr.output['agent-builder'] = `┃ Reading src/model/capacity.ts\n\n${opencodeBanner(hostWallClock(reset))}\n`;
+  assert.equal(herdr.agents[0].agent_status, 'working');
+  clock.skewMs += 20_000; await cycle(state);
+  const failover = state.actions[failoverKey('worker', work, 1)];
+  assert.equal(failover.state, 'done', failover.detail);
+  assert.match(failover.detail, /exhausted env-a mid-session \(Weekly\/Monthly Limit Exhausted/);
+  assert.ok(failover.detail.includes(`resets ${resetsAt}`), failover.detail);
+  assert.match(failover.detail, /Partial work committed at [0-9a-f]{12}/);
+  assert.equal(git(worktree, 'status', '--porcelain'), '', 'the partial work is kept as a commit on the attempt branch');
+  work = await reload(work.id);
+  assert.equal(work.lease, null, 'the attempt ended on the record');
+  assert.equal((work as any).pipeline.attempts[0].end, 'released');
+  assert.deepEqual([work.capacity!.exhaustions[0].account, work.capacity!.exhaustions[0].resetsAt, work.capacity!.exhaustions[0].partialWork.state], ['env-a', resetsAt, 'committed']);
+  assert.equal((await observedExhaustions(config))['env-a'].until, resetsAt, 'the account is held until the reset the banner names');
+
+  // The next dispatch, once the supervisor has stopped the session on the ended lease, takes the next eligible account in the role order.
+  herdr.agents = herdr.agents.filter(agent => agent.name !== 'agent-builder');
+  clock.skewMs += 20_000; await cycle(state);
+  assert.deepEqual(calls.dispatch[1], { work: work.key, profile: 'builder', account: 'env-b' });
+
+  // A producer and a reviewer retrying on the banner while working fail over the same way; one without it is left alone.
+  const sessions: LaunchedSession[] = (['producer', 'reviewer'] as const).map(role => ({ role, record: randomUUID(), profile: `${role}-own`, agentName: `agent-${role}`, pane: `pane-${role}`, work: work.key, requestId: `request-${role}` }));
+  const quiet: LaunchedSession = { role: 'reviewer', record: randomUUID(), profile: 'reviewer-quiet', agentName: 'agent-quiet', pane: 'pane-quiet', work: work.key, requestId: 'request-quiet' };
+  for (const session of [...sessions, quiet]) herdr.agents.push({ name: session.agentName, pane_id: session.pane!, agent_status: 'working' });
+  for (const session of sessions) herdr.output[session.agentName] = opencodeBanner(hostWallClock(reset));
+  herdr.output['agent-quiet'] = '● Reading the diff…\n';
+  const relaunched: string[] = [];
+  const sessionLoop = loop(config, herdr, clock, { dispatch: async () => {}, launchedSessions: async () => [...sessions, quiet], endSession: async entry => { herdr.agents = herdr.agents.filter(agent => agent.name !== entry.agentName); }, relaunch: async entry => { relaunched.push(entry.requestId!); return { profile: `${entry.role}-next` }; } });
+  await sessionLoop.cycle(state);
+  for (const session of sessions) {
+    const done = state.actions[failoverKey(session.role, work, session.record)];
+    assert.equal(done?.state, 'done', done?.detail);
+    assert.ok(done.detail.includes(`resets ${resetsAt}); relaunched on profile ${session.role}-next`), done.detail);
+    assert.equal((await observedExhaustions(config))[profileAccount(session.profile)].until, resetsAt);
+  }
+  assert.deepEqual(relaunched.sort(), ['request-producer', 'request-reviewer']);
+  assert.equal(state.actions[failoverKey('reviewer', work, quiet.record)], undefined, 'a working reviewer with no banner is left alone');
+
+  // An approver Herdr reports working, retrying on the banner: its decision goes to the next account.
+  const approver = await approverLoop('retrying');
+  const approverState = emptyDaemonState(approver.config);
+  await approver.cycle(approverState);
+  assert.deepEqual(approver.launches, ['env-a']);
+  const name = approverSessionName(approver.work, approver.decisions[0].id);
+  approver.herdr.output[name] = '● Reading the decision…\n';
+  await approver.cycle(approverState);
+  assert.deepEqual(approver.launches, ['env-a'], 'a working approver with no banner is left alone');
+  approver.herdr.output[name] = opencodeBanner(hostWallClock(reset));
+  assert.equal(approver.herdr.agents.find(agent => agent.name === name)!.agent_status, 'working');
+  await approver.cycle(approverState);
+  assert.deepEqual(approver.launches, ['env-a', 'env-b'], 'the same decision is relaunched on the next account');
+  assert.equal((await observedExhaustions(approver.config))['env-a'].until, resetsAt);
 });
 
 /** Spend the approver the loop launched on its provider limit, as the weekly-limit menu leaves it. */
