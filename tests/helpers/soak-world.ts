@@ -263,8 +263,13 @@ export class SimulatedGitHub {
   docsSync(key: string, head: string, base: string) {
     const pr = [...this.prs.values()].find(entry => entry.key === key && entry.open);
     if (!pr || pr.head !== head) return null;
-    const onto = this.commits.get(base)!, merged = this.record({ sha: sha('docs-sync', head, base), tree: sha('tree', 'docs-sync', head, base), parents: [head, base],
-      files: [...new Set([...this.commits.get(head)!.files, ...onto.files])], at: clock.now(), message: `Graphyard docs-sync of ${key} onto ${base.slice(0, 12)}` });
+    // The session merges the base in, as GitHub's merge commit holds it: the base's content with the
+    // pull request's own changes taken from its head — never the head's stale copy of a path the
+    // base changed since, which the landing check would read as a change outside the plan.
+    const onto = this.commits.get(base)!, own = this.commits.get(head)!, contents = new Map(onto.contents);
+    for (const [path, blob] of own.contents) if (pr.files.includes(path) || !contents.has(path)) contents.set(path, blob);
+    const merged = this.record({ sha: sha('docs-sync', head, base), tree: sha('tree', 'docs-sync', head, base), parents: [head, base],
+      files: [...new Set([...own.files, ...onto.files])], at: clock.now(), message: `Graphyard docs-sync of ${key} onto ${base.slice(0, 12)}` }, contents);
     Object.assign(pr, { head: merged.sha, base, autoMerge: false, mergeRequestedAt: null });
     pr.pushed.set(merged.sha, clock.now());
     this.docsConflicts.delete(key);
