@@ -19,11 +19,11 @@ import type { Work } from './work.js';
 // ---------------------------------------------------------------------------
 
 export const blockerClasses = ['github-credential', 'control-plane-error', 'sandbox-path', 'worktree-mismatch', 'outside-scope-test-failure',
-  'planned-file-scope', 'needs-decision', 'human-only', 'genuine'] as const;
+  'dispatch-failure', 'planned-file-scope', 'needs-decision', 'human-only', 'genuine'] as const;
 export type BlockerClass = typeof blockerClasses[number];
 
 /** The classes whose cause lies outside the item: the loop probes each, every cycle, and clears the blocker once its probe passes. */
-export const environmentalBlockerClasses: readonly BlockerClass[] = ['github-credential', 'control-plane-error', 'sandbox-path', 'worktree-mismatch', 'outside-scope-test-failure'];
+export const environmentalBlockerClasses: readonly BlockerClass[] = ['github-credential', 'control-plane-error', 'sandbox-path', 'worktree-mismatch', 'outside-scope-test-failure', 'dispatch-failure'];
 /** Only these need a person (the master, or the human for a human-only decision); every other class is resolved by the loop. */
 export const needsSomeone = (blockerClass: BlockerClass) => blockerClass === 'genuine' || blockerClass === 'human-only';
 /** How many times in a row the loop clears an item's blocker before it stops and leaves it to the master: a cause that keeps coming back is not routine. */
@@ -36,6 +36,7 @@ export const blockerClassMeaning: Record<BlockerClass, string> = {
   'sandbox-path': 'a path the worker must write was read-only or denied; cleared once the path is writable inside the worker confinement',
   'worktree-mismatch': "the session ran in another item's worktree or the wrong checkout; cleared once the attempt has ended, since the next one gets its own worktree",
   'outside-scope-test-failure': "a suite failed in files outside the item's plannedFiles; cleared once the base branch has moved past the tip it failed on",
+  'dispatch-failure': "the master loop stopped redispatching the item after repeated launches no worker profile could take; cleared once a profile can take a launch again",
   'planned-file-scope': 'the change needs named files outside plannedFiles; becomes an additive widening decision for the independent approver, cleared once plannedFiles cover them',
   'needs-decision': 'the item waits on a requested two-party decision; its approver is launched, and the blocker is cleared once the decision is judged',
   'human-only': 'one of the three decisions only a human may make',
@@ -93,6 +94,18 @@ const commitToken = /\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b/g;
 const namedCommit = /\bcommit\s+([0-9a-f]{7,40})\b/gi;
 const uuidToken = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
 
+/** How every blocker the loop records for repeated dispatch failures opens (dispatchFailureBlocker, src/daemon/dispatch-failures.ts). */
+const dispatchFailureBlocker = /^Dispatch failed \d+ consecutive times with the same cause since \S+, so the master loop stopped redispatching /;
+/**
+ * Whether a dispatch failure's cause is the fleet's, not the item's (GY-1322): no worker profile
+ * could take it, or a profile's name was held by a runtime session that was idle, done or still
+ * launching. It clears as sessions finish or are closed: it never counts toward the dispatch-failure
+ * bound, and a blocker recorded on it before is cleared once a profile can launch. An item's own
+ * cause (a worktree that holds its branch) is not one, and its blocker stands for the operator.
+ */
+export const fleetIdleCause = (failure: string) =>
+  /\bno worker profile can take\b|\bagent name \S+ is already visible in \w+\b|\b\w+ agent \S+ is (?:idle|done)\b|\bis reserved by another dispatch\b/i.test(failure);
+
 /** The first path the text says could not be written: an explicit environment blocker's path, a quoted path, or the first path-shaped token. */
 function refusedPath(text: string): string | null {
   const recorded = /cannot write (\S+), so required command/.exec(text)?.[1];
@@ -113,6 +126,8 @@ export function classifyBlocker(text: string | null | undefined, context: { huma
   const none = { paths: [], commit: null, decision: null, path: null };
   if (context.humanRequest || blocker.startsWith(humanRequestBlocker) || /^A human declined /.test(blocker)) return { class: 'human-only', ...none };
   if (!blocker) return { class: 'genuine', ...none };
+  // The loop's own record of repeated launch failures on a fleet-idle cause (GY-1322), whatever else its cause quotes.
+  if (dispatchFailureBlocker.test(blocker) && fleetIdleCause(blocker)) return { class: 'dispatch-failure', ...none };
   if (githubCredential(blocker)) return { class: 'github-credential', ...none };
   if (worktree.test(blocker)) return { class: 'worktree-mismatch', ...none };
   // A suite that fails outside the item is that, whatever its output says about servers or permissions.

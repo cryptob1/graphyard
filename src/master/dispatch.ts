@@ -18,13 +18,13 @@ import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { atomicPrivateWrite, loadMasterConfig, readCredentialFile, readWorkerCredential } from './config.js';
 import { accountLaunch, agentLaunchPlan, type EnvironmentProbe, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
 import { closeFailedLaunch, launchStartMs, type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, SessionStartError, startAgentSession, type StartBounds, withLaunchClose } from './launch.js';
-import { createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
+import { closeHerdrPane, createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
 import { agentOwner, type AttentionItem } from './attention.js';
 import { containmentHold, stopLaunchSupervisor } from './containment.js';
 import { dependencyDirectories, failureText, type SharedDependencies, shareDependencies } from './worktrees.js';
 import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessionSlotsGrant, submissionPolicyRule } from './harness.js';
 import { withVerificationPath } from './verification-slots.js';
-import { currentAgents, dispatchedFile, DispatchReservedError, profileLaunchedFile, reserveDispatch, watchSupervisorRunning } from './dispatch-reservation.js';
+import { currentAgents, dispatchedFile, DispatchReservedError, launchedSinceSnapshot, profileLaunchedFile, reclaimableAgent, reserveDispatch, watchSupervisorRunning } from './dispatch-reservation.js';
 import { projectMemoryDigest, type ProjectMemory } from '../model/project-memory.js';
 import { readProjectMemory } from '../project-memory.js';
 
@@ -43,6 +43,8 @@ export interface DispatchOptions {
   probe?: EnvironmentProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
   /** A hand dispatch's deadline on this host's clock: past it the item's backed-off dispatch row is the executor's again, so the launch claims nothing (GY-175). */
   claimBy?: number;
+  /** Closes, bounded, the pane of a finished session a launch takes its profile's name back from (GY-1322); closeHerdrPane by default. */
+  closePane?: (pane: string) => Promise<void>;
   /**
    * Whether the watch supervisor for an assignment is running on this host (GY-273): a launch that
    * fails once one may be is never closed under it. A test's stub answers for its fake panes.
@@ -134,20 +136,31 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   let delivery: RequestDelivery | null = null, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null;
   let started: 'started' | 'awaiting consent' = 'started', consent: { answered: ConsentAnswer[]; awaiting: ConsentHold | null } = { answered: [], awaiting: null };
   const startFailures: AccountStartFailure[] = [];
+  let closedAgent: string | null = null;
   if (profile.mode === 'existing') {
     if (!target) throw new Error('Existing worker is not visible in Herdr');
     throw new Error('Existing sessions are observable but cannot be safely adopted for new work; use a launch profile so Graphyard supervises the agent process');
   } else {
     await readCredentialFile(profile.credentialFile!);
-    if (target) throw new DispatchReservedError('profile', profile.name, 'Launch profile agent name is already visible in Herdr');
+    const now = Date.parse(observedAt);
+    if (target && !reclaimableAgent(profile, target, allWork, now)) throw new DispatchReservedError('profile', profile.name, 'Launch profile agent name is already visible in Herdr');
     // A profile that cannot launch without a human at its prompts is refused before any account is chosen.
     assertNoApprovalOptOut(profile.kind ?? 'unnamed', profile.approvals);
     // The profile and the item are reserved before anything is claimed, and Herdr's agents are read
     // again under the reservation: the snapshot this dispatcher chose from may already be stale (GY-273).
     const unreserve = await reserveDispatch(root, work, profile, observedAt);
     try {
-      if ((await currentAgents(root, profile, agents, observedAt, run, options.agents)).some(agent => agent.name === profile.agentName))
+      const visible = (await currentAgents(root, profile, agents, observedAt, run, options.agents)).find(agent => agent.name === profile.agentName);
+      if (visible && (!reclaimableAgent(profile, visible, allWork, now) || await launchedSinceSnapshot(root, profile, allWork)))
         throw new DispatchReservedError('profile', profile.name, `Launch profile agent name ${profile.agentName} is already visible in Herdr; pick another profile`);
+      // GY-1322: a finished session no live assignment owns holds the name and nothing else; it is
+      // closed, bounded, and the launch goes on as on a profile with no agent.
+      if (visible) {
+        try { await (options.closePane ?? (pane => closeHerdrPane(pane, run)))(visible.pane_id!); }
+        catch (error) { throw new Error(`Herdr agent ${visible.name} is ${visible.agent_status} with no live assignment, and its bounded close failed: ${failureText(error).slice(0, 300)}; remedy: close pane ${visible.pane_id} on the host (herdr pane close ${visible.pane_id}) or relaunch Herdr`, { cause: error }); }
+        closedAgent = `${visible.name} (${visible.agent_status}, pane ${visible.pane_id})`;
+        target = undefined;
+      }
       // The account is chosen before anything is claimed: a profile whose accounts are all logged out
       // or out of quota claims nothing, and the refusal names every account it skipped and why. An
       // account whose runtime already failed to start under this dispatch is passed over, so the
@@ -220,7 +233,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   }
   const concurrent = concurrentOverlap(work, allWork, Date.parse(observedAt));
   return { work: work.key, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
-    launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox, ...(reclaimed.length ? { reclaimed } : {}),
+    launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox, ...(reclaimed.length ? { reclaimed } : {}), ...(closedAgent ? { closedAgent } : {}),
     // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
     started, consent: { answered: consent.answered, awaiting: consent.awaiting ? { prompt: consent.awaiting.prompt, kind: consent.awaiting.kind, pane: consent.awaiting.pane, attach: consent.awaiting.attach, releaseAt: consent.awaiting.releaseAt, attention: consentHoldAttention(consent.awaiting) } : null },
     account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null, relaunched,

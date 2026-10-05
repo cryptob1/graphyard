@@ -6,7 +6,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { agentOwner, loadMasterConfig, masterConfigSchema, setupMaster, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { cycleFaults, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { cycleDelay, cycleFaults, emptyDaemonState, loopLiveness, runCycle, type DaemonEffects, type LoopState } from '../src/master-daemon.js';
 import { launchAppearanceMs } from '../src/daemon/effects.js';
 import type { Work } from '../src/model.js';
 import type { ReviewRecord } from '../src/reviewer.js';
@@ -868,7 +868,7 @@ test('unit:loaded-revision-owed-restart-is-not-a-fault — commits behind while 
   }
   // A loop that spaces its cycles further apart gets two of its own intervals (GY-1255's bound).
   const { revision, at } = revisions[0];
-  const loop = { lagMs: 0, stalledAfterMs: 2 * 3_600_000, detail: '' };
+  const loop = { state: 'running' as const, lagMs: 0, stalledAfterMs: 2 * 3_600_000, detail: '' };
   assert.deepEqual(faults(inputs({ now: at + 8 * 3_600_000, loop, revision, upgrade: owed(revision.checkout, at + 8 * 3_600_000 - 90 * 60_000) })), []);
 });
 
@@ -959,7 +959,7 @@ test('unit:resource-fault-recurrence-reproduces-gy-1196-subjects — the three G
   assert.equal(typeof owedUpgrade, 'function', 'master status reads the owed restart from the cursor');
   assert.deepEqual(owedUpgrade!(cursor), { from: revision.loaded, to: revision.checkout, code: true, attemptedAt: now - cycleMs }, 'the latest attempt is the upgrade action, not its refusal record');
   assert.equal(owedUpgrade!({ upgrade: { pending: null }, actions: {} }), null);
-  const loop = { lagMs: 0, stalledAfterMs: 120_000, detail: '', lock: { pid: 1, host: 'vishrog' } };
+  const loop = { state: 'running' as const, lagMs: 0, stalledAfterMs: 120_000, detail: '', lock: { pid: 1, host: 'vishrog' } };
   const status = (withCursor: boolean) => resourceStatus(directory, master, { reviews: [], producers: [], agents: [gy1198.pane], work: gy1198.work, loop },
     { run, now: now + selfUpgradeBoundMs, fetcher: (async () => { throw new Error('no plane'); }) as unknown as typeof fetch, cursor: async () => withCursor ? cursor : { upgrade: { pending: null }, actions: {} } });
   const subjects = async (withCursor: boolean) => classifyAttention((await status(withCursor)).attention).filter(item => item.faultClass === 'resources').map(item => item.subject).sort();
@@ -1031,4 +1031,95 @@ test('manual:fault-class-resources — GY-1272: the 05:29:45Z loaded-revision in
   // CANDIDATE: 32 seconds after the move is the upgrade under way; the bound still holds once it passes.
   assert.deepEqual(faults(inputs({ now: unloadedReadAt, revision: unloaded })), []);
   assert.deepEqual(faults(inputs({ now: unloaded.movedAt + selfUpgradeBoundMs, revision: unloaded })), ['resource:loaded-revision']);
+});
+
+/**
+ * GY-1317: three resource:executor-liveness instances in 24 hours, each "301–302s used of 600s"
+ * while the loop's own liveness verdict was 'running'. The bound is two cycle intervals
+ * (run.intervalSeconds 300 → 600s) and the line warns at half of it — exactly one interval — which
+ * the loop's idle cadence reaches by design: a cycle ending with nothing actionable waits the full
+ * interval (cycleDelay), so the next fault-step reading lands a second or two past the line. The
+ * reading now faults only when the verdict does not vouch for the lag.
+ */
+const livenessIntervalMs = 300_000;
+const livenessLock = { id: 'lock', pid: 4242, host: 'vishrog', startedAt: '2026-10-05T00:00:00.000Z', heartbeatAt: '2026-10-05T00:00:00.000Z' };
+/** The loop input as faultStep and master status pass it: loopLiveness over the cursor, read `lagMs` after cycle `cycle` completed. */
+const livenessAt = (cycle: number, lagMs: number, overrides: Partial<Parameters<typeof loopLiveness>[0]> = {}) => {
+  const completedAt = Date.parse('2026-10-05T16:26:24.800Z');
+  return { now: completedAt + lagMs, loop: loopLiveness({ lock: livenessLock, cycle, lastCycleAt: iso(completedAt), ...overrides }, completedAt + lagMs, livenessIntervalMs) };
+};
+const livenessReading = (input: ResourceInputs) => readResources(input).find(reading => reading.id === 'executor-liveness')!;
+
+test('unit:executor-liveness-idle-cadence-vouched — the instances\' shape (running, 301–302s of 600s after a full idle interval) is no low reading and no resources fault', () => {
+  for (const [cycle, lagMs] of [[12494, 301_000], [12500, 302_000], [12502, 301_000]] as const) {
+    const { now, loop } = livenessAt(cycle, lagMs);
+    assert.equal(loop.state, 'running', 'the loop\'s own verdict is running');
+    assert.equal(loop.stalledAfterMs, 600_000);
+    const reading = livenessReading(inputs({ now, loop }));
+    // The shape: past the one-interval line the base warned at.
+    assert.ok(reading.headroom! < Math.ceil(reading.bound! / 2), `the lag ${lagMs}ms is past the old one-interval warn line`);
+    assert.equal(reading.state, 'ok', `a vouched lag is within its bound: ${JSON.stringify(reading)}`);
+    assert.equal(reading.used, lagMs, 'the reading keeps the true lag');
+    assert.match(reading.detail!, new RegExp(`Cycle ${cycle} completed ${Math.round(lagMs / 1000)}s ago`), 'the detail names the true lag');
+    assert.match(reading.detail!, /liveness verdict is running, which vouches for the lag/, 'the detail names the verdict');
+    assert.deepEqual(resourceAttention(readResources(inputs({ now, loop }))).filter(item => item.subject === 'resource:executor-liveness'), []);
+    assert.deepEqual(faults(inputs({ now, loop })), []);
+    // As faultStep classifies the reported attention: no resource-bound fault on the resource.
+    const state = emptyDaemonState(budgetConfig);
+    assert.deepEqual(cycleFaults(state, [], now, { config: budgetConfig, reported: resourceAttention(readResources(inputs({ now, loop }))) })
+      .filter(fault => fault.subject === 'resource:executor-liveness'), []);
+  }
+});
+
+test('unit:executor-liveness-unvouched-lag-still-faults — slow, stalled, absent or a lag past the bound still raises the reading and its resources fault', () => {
+  const resourceBound = (input: ResourceInputs) => cycleFaults(emptyDaemonState(budgetConfig), [], input.now, { config: budgetConfig, reported: resourceAttention(readResources(input)) })
+    .filter(fault => fault.subject === 'resource:executor-liveness').map(fault => [fault.kind, fault.faultClass]);
+  const expect = (input: ResourceInputs, state: 'low' | 'exhausted', verdict: LoopState) => {
+    assert.equal(input.loop!.state, verdict);
+    const reading = livenessReading(input);
+    assert.equal(reading.state, state, `${verdict}: ${JSON.stringify(reading)}`);
+    assert.match(reading.detail!, new RegExp(`liveness verdict is ${verdict}$`), 'the detail names the verdict, and vouches for nothing');
+    assert.deepEqual(faults(input), ['resource:executor-liveness']);
+    assert.deepEqual(resourceBound(input), [['resource-bound', 'resources']]);
+  };
+  // Stalled: past the stall bound with no measured cycle that explains it.
+  const stalled = livenessAt(12502, 601_000);
+  expect(inputs(stalled), 'exhausted', 'stalled');
+  // Slow: a measured cycle past the bound explains the lag, but nothing vouches for a lag past the bound.
+  const slow = livenessAt(12502, 700_000, { metrics: [{ cycle: 12502, at: '2026-10-05T16:26:24.800Z', durationMs: 650_000 }] as any });
+  expect(inputs(slow), 'exhausted', 'slow');
+  // Absent: no loop holds the cursor, so its verdict vouches for no lag, even one inside the bound.
+  const absent = livenessAt(12502, 301_000, { lock: null });
+  expect(inputs(absent), 'low', 'absent');
+  // A verdict claiming running while the lag is past the stall bound does not vouch for it either.
+  const { now, loop } = livenessAt(12502, 301_000);
+  expect(inputs({ now, loop: { ...loop, lagMs: 601_000 } }), 'exhausted', 'running');
+  // Unread: no cursor stays unknown, as before.
+  assert.equal(livenessReading(inputs({ loop: null })).state, 'unknown');
+});
+
+test('integration:recurring-resources-idle-cadence-files-nothing — idle/actionable alternation opens no executor-liveness instances, while other resources faults still open theirs', () => {
+  // Cycles alternate: an idle cycle waits the full interval, an actionable one 30s; each next cycle's
+  // fault step reads the cursor a moment after it starts. Under the base, every idle stretch cleared
+  // and recurred as one more instance on resource:executor-liveness.
+  const config = budgetConfig;
+  const state = emptyDaemonState(config);
+  const actionable = [0, 3, 0, 0, 2, 0, 1, 0, 0, 4, 0];
+  let completedAt = Date.parse('2026-10-05T10:00:00.000Z'), cycle = 12494, priorPastLine = 0;
+  const opened: string[] = [];
+  for (const [index, count] of actionable.entries()) {
+    const readAt = completedAt + cycleDelay(livenessIntervalMs, { actionable: count }) + 1_500;
+    const loop = loopLiveness({ lock: livenessLock, cycle, lastCycleAt: iso(completedAt) }, readAt, livenessIntervalMs);
+    assert.equal(loop.state, 'running');
+    if (loop.lagMs! > loop.stalledAfterMs / 2) priorPastLine += 1;
+    // A spent GitHub budget on every other reading: a real resources fault that clears and recurs.
+    const plane = index % 2 === 0 ? { writable: true, writeError: null, database: null, github: { used: 5000, bound: 5000, detail: 'spent' } } : null;
+    const reported = resourceAttention(readResources(inputs({ now: readAt, loop, plane })));
+    opened.push(...trackFaults(state.faults, cycleFaults(state, [], readAt, { config, reported }).filter(fault => fault.faultClass === 'resources'), iso(readAt)).map(fault => fault.subject));
+    completedAt = readAt + 77_000; cycle += 1;
+  }
+  assert.ok(priorPastLine >= 3, `the alternation crossed the old one-interval line ${priorPastLine} times: the base's threshold`);
+  assert.equal(opened.filter(subject => subject === 'resource:executor-liveness').length, 0, 'no executor-liveness instances open');
+  assert.equal(state.faults.instances.filter(instance => instance.subject === 'resource:executor-liveness').length, 0, 'the fault record holds none');
+  assert.equal(opened.filter(subject => subject === 'resource:github-budget').length, 6, 'the spent budget opens one instance per recurrence');
 });

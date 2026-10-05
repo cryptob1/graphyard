@@ -1,6 +1,8 @@
 // Concern: an item whose dispatch keeps failing for one unchanged cause (GY-1078).
 import type { Work } from '../model.js';
 import type { DaemonState, DispatchFailureRun } from './state.js';
+import { fleetIdleCause } from '../model/blocker-class.js';
+export { fleetIdleCause };
 
 /**
  * How many consecutive dispatch failures of one item with the same cause, each spending an epoch,
@@ -41,12 +43,15 @@ export function dispatchFailureCause(item: Pick<Work, 'key'>, failure: string): 
 /**
  * Adds one failure to the item's run, starting a new run when the cause changed. `item.epoch` is
  * the epoch the snapshot showed before this dispatch; a failure counts again only when it moved
- * past the run's last one, that is when the failure before it claimed and spent an epoch. One
+ * past the run's last one, that is when the failure before it claimed and spent an epoch, and a
+ * fleet-idle cause (`fleetIdleCause`) never counts. One
  * refused before any claim (a dependency unfinished, a resource held, no account free) is a
  * condition that clears on its own, so repeating it never reaches the bound.
  */
 export function noteDispatchFailure(state: DaemonState, item: Pick<Work, 'id' | 'key' | 'epoch'>, failure: string, at: string): DispatchFailureRun {
   const cause = dispatchFailureCause(item, failure), previous = state.dispatchFailures[item.id];
+  // A fleet-idle cause is answered at count zero and kept nowhere: it ends any run, and starts none.
+  if (fleetIdleCause(cause)) { delete state.dispatchFailures[item.id]; return { key: item.key, cause, count: 0, epoch: item.epoch, firstAt: at, lastAt: at }; }
   const run = previous && previous.cause === cause
     ? { ...previous, count: item.epoch > previous.epoch ? previous.count + 1 : previous.count, epoch: item.epoch, lastAt: at }
     : { key: item.key, cause, count: 1, epoch: item.epoch, firstAt: at, lastAt: at };
