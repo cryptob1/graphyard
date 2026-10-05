@@ -6,7 +6,6 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { candidateKey } from '../src/daemon/reconcile.js';
 import { checkInvariants, emptyInvariantRecord, followUpProof, invariantDefaults, invariantFaultClass, invariantFaultKind, invariantFaults, systemInvariants, type InvariantInput, type SystemInvariant } from '../src/model/invariants.js';
-import { followUpTriageProof } from '../src/review-threads.js';
 import { repeatingPaths, repetitionReviewSection, reviewPrompt } from '../src/reviewer.js';
 import { readFile } from 'node:fs/promises';
 
@@ -62,7 +61,7 @@ const verdict = (checks: ReturnType<typeof judge>, invariant: SystemInvariant) =
 
 test('unit:system-invariants-checked — each invariant driven over its threshold reports exactly one fault of its class; at its threshold it holds', () => {
   assert.deepEqual([...systemInvariants], ['follow-ups-per-parent', 'lingering-sessions', 'refresh-churn', 'merge-stall', 'cycle-p90', 'untriaged-backlog', 'deploy-lease-loss']);
-  assert.equal(followUpProof, followUpTriageProof, 'a follow-up item is recognised by the proof the loop files it with');
+  assert.equal(followUpProof, 'manual:review-followups-triaged', 'a follow-up item filed before GY-1249 is recognised by the proof it was filed with');
   const parent = item('GY-1', { stage: 'done' });
   // Each fixture drives one invariant over its threshold (`over`) and holds it at the threshold (`at`).
   const fixtures: Record<SystemInvariant, { over: InvariantInput[]; at: InvariantInput[] }> = {

@@ -158,6 +158,12 @@ export function detectRetryingExhaustion(output: string, now: number): Exhaustio
 }
 
 /**
+ * A 429 the provider answered with: leading the error (`429: {…}`, `429 Too Many Requests`, `API Error: 429 {…}`) or
+ * named as its status (`HTTP 429`, `status 429`, `status code: 429`, `"code":429`). A 429 inside an
+ * id or an echoed body is not the provider's answer, and a real failure must not become a wait (GY-1245).
+ */
+const providerStatus429 = /^(?:(?:\w+\s+)?error:?\s*)?429\b(?![\d.])|\b(?:http(?:\/[\d.]+)?|status(?:\s*code)?|code)["']?\s*[:=]?\s*["']?429\b(?![\d.])/i;
+/**
  * Whether the error a headless run ended on is its provider refusing for quota or rate (GY-1092):
  * an HTTP 429, or any of the limit notices above. The text is the provider's own error — Pi's last
  * `errorMessage` or a runtime's stderr, never the agent's prose — so the notice may sit anywhere in
@@ -165,7 +171,7 @@ export function detectRetryingExhaustion(output: string, now: number): Exhaustio
  */
 export function providerLimit(error: string, now: number): ExhaustionSignal | null {
   const text = error.replace(/\s+/g, ' ').trim();
-  if (!text || !(/(?:^|[^\d.])429(?:[^\d.]|$)/.test(text) || /\btoo many requests\b/i.test(text) || exhaustionNotices.some(notice => notice.test(text)))) return null;
+  if (!text || !(providerStatus429.test(text) || /\btoo many requests\b/i.test(text) || exhaustionNotices.some(notice => notice.test(text)))) return null;
   return { reason: text.slice(0, 300), resetsAt: parseResetTime(text, now) };
 }
 

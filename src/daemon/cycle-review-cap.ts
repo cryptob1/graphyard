@@ -1,13 +1,13 @@
-// Concern: the review-round cap step (GY-1118) — a change request past the cap is filed as follow-ups and withdrawn, or escalated.
+// Concern: the review-round cap step (GY-1118) — a change request past the cap is withdrawn, or escalated; nothing is filed (GY-1249).
 import { cappedReview, detailChanged, type CappedReview } from './decisions.js';
 import { record } from './effects.js';
 import { readyToRetry } from './sessions.js';
 import type { Cycle } from './cycle.js';
 import type { Work } from '../model.js';
 
-/** How many times the step tries to file and withdraw one change request before it escalates instead. */
+/** How many times the step tries to withdraw one change request before it escalates instead. */
 export const maxCappedFilingAttempts = 5;
-/** The cursor key of one capped change request's filing: per head and review, so a later request on the same head is its own. */
+/** The cursor key of one capped change request's withdrawal: per head and review, so a later request on the same head is its own. */
 export const cappedFilingKey = (work: Pick<Work, 'id'>, capped: Pick<CappedReview, 'sha' | 'reviewId'>) => `${cappedHeadKey(work, capped.sha)}${capped.reviewId}`;
 const cappedHeadKey = (work: Pick<Work, 'id'>, sha: string) => `review-cap:${work.id}:${sha}:`;
 /** The cursor key of the escalation a blocking finding past the cap raises: one per head, re-recorded only when its findings change. */
@@ -22,12 +22,12 @@ export function cappedEscalation(work: Pick<Work, 'key'>, capped: CappedReview, 
 
 /**
  * Step 4b. Each open item past its review-round cap whose head carries a change request
- * (`cappedReview`): one that names no blocking finding has its findings recorded as the item's one
- * follow-up batch and is withdrawn as the reviewer App, so the review request is answered afresh on
- * the same head and the item goes on toward merge with no rework; one that names a blocking finding,
- * or that Graphyard cannot withdraw, is escalated for an independent approver's decision. The
- * routine decisions request no rework for either (`neededDecision`). Each request is filed once,
- * keyed on its head and review id; a failed filing is retried with backoff and escalated after
+ * (`cappedReview`): one that names no blocking finding is withdrawn as the reviewer App — its
+ * findings are nits, and nothing is filed for them (GY-1249) — so the review request is answered
+ * afresh on the same head and the item goes on toward merge with no rework; one that names a
+ * blocking finding, or that Graphyard cannot withdraw, is escalated for an independent approver's
+ * decision. The routine decisions request no rework for either (`neededDecision`). Each request is
+ * withdrawn once, keyed on its head and review id; a failed withdrawal is retried with backoff and escalated after
  * `maxCappedFilingAttempts`. A head is withdrawn at most once: a later change request on the same
  * head, from its re-review, is escalated instead, so a reviewer that keeps requesting changes
  * cannot keep the head re-reviewing.
@@ -45,24 +45,23 @@ export async function reviewCapStep(cycle: Cycle) {
     if (capped.kind === 'escalate') return escalate();
     const key = cappedFilingKey(item, capped), previous = state.actions[key];
     if (previous?.state === 'done') return;
-    // A head is withdrawn once: its re-review requesting changes again escalates rather than repeating the filing (GY-1118 review).
+    // A head is withdrawn once: its re-review requesting changes again escalates rather than repeating the withdrawal (GY-1118 review).
     const head = cappedHeadKey(item, capped.sha);
     const earlier = Object.keys(state.actions).find(other => other !== key && other.startsWith(head) && state.actions[other]?.state === 'done');
-    if (earlier) return escalate(`${capped.reason}, after change request ${earlier.slice(head.length)} on the same head was already filed as follow-ups and withdrawn; its re-review requested changes again, so it is not withdrawn a second time`);
-    if (!effects.fileReviewFollowUps || !effects.withdrawReview)
-      return escalate(`${capped.reason}, and this loop runs without the operator-agent identity or reviewer App it needs to file the findings and withdraw the request`);
-    if (previous && previous.attempts >= maxCappedFilingAttempts) return escalate(`${capped.reason}; filing its findings and withdrawing it failed ${previous.attempts} times (${previous.detail.slice(0, 300)})`);
+    if (earlier) return escalate(`${capped.reason}, after change request ${earlier.slice(head.length)} on the same head was already withdrawn; its re-review requested changes again, so it is not withdrawn a second time`);
+    if (!effects.withdrawReview)
+      return escalate(`${capped.reason}, and this loop runs without the reviewer App it needs to withdraw the request`);
+    if (previous && previous.attempts >= maxCappedFilingAttempts) return escalate(`${capped.reason}; withdrawing it failed ${previous.attempts} times (${previous.detail.slice(0, 300)})`);
     if (!readyToRetry(previous, state.cycle)) return;
-    const reason = `Review round ${capped.round} of ${item.key} is past its cap of ${capped.cap}: ${capped.reviewer}'s change request ${capped.reviewId} on ${capped.sha.slice(0, 12)} names no BLOCKING: finding, so its findings are follow-ups and the item proceeds toward merge without another rework`;
+    const reason = `Review round ${capped.round} of ${item.key} is past its cap of ${capped.cap}: ${capped.reviewer}'s change request ${capped.reviewId} on ${capped.sha.slice(0, 12)} names no BLOCKING: finding, so its findings are nits, not filed, and the item proceeds toward merge without another rework`;
     try {
-      await effects.fileReviewFollowUps(item, capped.findings.map(text => ({ path: null, text })), reason, key);
-      await effects.withdrawReview(item, capped.reviewId!, `Graphyard withdrew this change request: review round ${capped.round} is past the cap of ${capped.cap}, and it names no BLOCKING: finding. Its findings are recorded as ${item.key}'s follow-ups; the head is reviewed again, and only a BLOCKING: finding holds it.`);
+      await effects.withdrawReview(item, capped.reviewId!, `Graphyard withdrew this change request: review round ${capped.round} is past the cap of ${capped.cap}, and it names no BLOCKING: finding. Its findings are nits and are not filed; the head is reviewed again, and only a BLOCKING: finding holds it.`);
     } catch (error) {
-      performed.push(await record(state, key, { kind: 'review', work: item.key, principal: null, state: 'failed', detail: `${reason}, but filing or withdrawing it failed: ${error instanceof Error ? error.message : String(error)}`,
+      performed.push(await record(state, key, { kind: 'review', work: item.key, principal: null, state: 'failed', detail: `${reason}, but withdrawing it failed: ${error instanceof Error ? error.message : String(error)}`,
         attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       return;
     }
-    performed.push(await record(state, key, { kind: 'review', work: item.key, principal: null, state: 'done', detail: `${reason}: ${capped.findings.length} finding${capped.findings.length === 1 ? '' : 's'} recorded as follow-ups and the change request withdrawn`,
+    performed.push(await record(state, key, { kind: 'review', work: item.key, principal: null, state: 'done', detail: `${reason}: ${capped.findings.length} finding${capped.findings.length === 1 ? '' : 's'} left as nits, nothing filed, and the change request withdrawn`,
       attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   });
 }
