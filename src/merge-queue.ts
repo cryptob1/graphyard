@@ -592,6 +592,22 @@ export interface BaseRefresh {
    * refresh. `head` is then the unchanged candidate, and whatever the record carried onto it stays.
    */
   stale?: StaleMergeability | null;
+  /**
+   * With a conflict (GY-1200): when a conflict was first recorded for this same head and policy
+   * revision. A refresh onto each new base tip rewrites `at`, so on a base that moves often `at`
+   * alone would keep restarting the bound an unhandled conflict is counted against (faults.ts
+   * baseConflictInMotion). Absent on records that predate the rule, which read as `at`.
+   */
+  conflictSince?: string | null;
+}
+/**
+ * GY-1200. When the conflict a refresh records was first found on this head: the earlier record's
+ * own first conflict when it conflicted on the same head and policy revision, else the refresh's own time.
+ */
+export function conflictSince(previous: Pick<BaseRefresh, 'from' | 'policyRevision' | 'at' | 'conflict' | 'conflictSince'> | null | undefined, refresh: Pick<BaseRefresh, 'from' | 'policyRevision' | 'at' | 'conflict'>): string | null {
+  if (!refresh.conflict) return null;
+  const same = !!previous?.conflict && previous.from.sha === refresh.from.sha && previous.policyRevision === refresh.policyRevision;
+  return same ? previous!.conflictSince ?? previous!.at : refresh.at;
 }
 /** Why a branch was written by the control plane rather than by its worker (GY-375). */
 export type RefreshTrigger = 'conflict confirmed' | 'ejection restore' | 'repair' | 'docs sync';

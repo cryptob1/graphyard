@@ -47,6 +47,10 @@ Permission flows read `GET /api/github/installation` (App credential, not gh). E
 
 A harness classifier refuses routine administration; `master harness claude --apply` (Codex: `master harness codex`) writes rules to `.claude/settings.local.json`.
 
+Denied, by endpoint: `gh pr merge`/`review`, `gh api` `pulls/N/merge`, `repos/R/merges`, `merge-upstream`, `pulls/N/reviews`, `access_tokens`, `PUT`/`POST`/`DELETE`; `gh api graphql` with `mutation` (merge, enqueue, auto-merge, approval) or `=@`/`--input`.
+
+Missing or retired rules (`gh api *merge*`, `gh api graphql*`) are drift, named by `master status` (`harness`); `master harness claude --apply` rewrites them.
+
 ## Typed actions and executors
 
 Each item has one typed action (`nextAction`): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment` or `escalate`. Executors claim rows under their own credential; `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units; `master executors restart` moves them to the current release. After a verified deployment the loop moves a clean detached checkout to the base tip (else `upgrade` attention); `src/`, `scripts/`, `bin/` or `package.json` changes restart executors, then the loop. `releaseLag` flags >1-delivery lag past 10 minutes. A moved checkout exits the executor 0 for systemd; one killed mid-action is named in `master status`. `Nothing can run KIND` skips `merge` beside a merging loop, empty fleets ≤120 s post-restart, `deactivating` units.
