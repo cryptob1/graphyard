@@ -8,7 +8,7 @@ import { pathScopeContains } from '../model/scope.js';
 import { temporaryDirectories, underTestRunner } from '../supervisor.js';
 import { defaultMergeBatchSize, defaultParallelTips, maxMergeBatchSize, maxParallelTips, mergeQueueInsights } from '../merge-queue.js';
 import type { Work } from '../model/work.js';
-import { diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
+import { decompositionSettingsSchema, diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
 import { doctorSettingsSchema } from './doctor-settings.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
@@ -278,8 +278,7 @@ export const masterRunSchema = z.object({
   worktreeRoot: z.string().trim().min(1).max(1000).refine(isAbsolute, 'worktreeRoot must be an absolute path').optional(),
   worktreeRootMinFreeGb: z.number().min(0.1).max(10_000).optional(),
   worktreeRootBudgetGb: z.number().min(0.1).max(10_000).optional(),
-  // An account whose provider usage reached this percentage of any window is skipped at launch:
-  // a session started just below a hard limit would stall mid-task.
+  // An account whose usage reached this percentage of any window is skipped at launch: a session started just below a hard limit would stall mid-task.
   quotaCeilingPercent: z.number().int().min(50).max(100).optional(),
   // The runtime of each narrow role (GY-169): `herdr` terminal session, or `pi` headless runner
   // (the approver and unit proof producer). `pi` names the wrapper and model those runs use.
@@ -288,6 +287,7 @@ export const masterRunSchema = z.object({
   // Research before build (GY-259): the cheap Pi session that briefs a feature before its worker
   // starts — its model (the Z.AI GLM flash model by default), time limit and token budget.
   research: researchSettingsSchema.optional(),
+  decomposition: decompositionSettingsSchema.optional(), // splitting broad items before first dispatch (GY-1126): size bounds and run time limit; it runs on run.research's account
   // The pipeline doctor (GY-711): headless Pi session fixing stuck work every intervalMinutes (10 by default).
   doctor: doctorSettingsSchema.optional(),
   // The diagnostician (GY-439): headless Pi session turning each recurring-fault item into its root
@@ -363,26 +363,25 @@ export const masterConfigSchema = z.object({
   deliverySpeed: z.object({ readyToMergedP90Ms: z.number().int().positive().max(30 * 86_400_000).optional(), mergedToProductionP90Ms: z.number().int().positive().max(30 * 86_400_000).optional() }).strict().optional(),
 }).strict();
 export type MasterConfig = z.infer<typeof masterConfigSchema>;
-/**
- * How many sessions the automatic reviewer profile runs when its `concurrency` is unset (GY-1072).
- * Every automatic review goes to the profile `run.reviewerProfile` names, so at the general
- * default of one the whole installation reviewed one candidate at a time, and one finished
- * session left in its pane held the only name and stalled every review behind it. The profile
- * `run.reviewerProfile` names therefore runs this many sessions unless it declares its own
- * concurrency; every other profile keeps the default of one.
- */
+/** Sessions `run.reviewerProfile`'s profile runs at unset concurrency (GY-1072); other reviewer profiles keep one. */
 export const automaticReviewerConcurrency = 4;
+/** Sessions a producer profile runs at unset concurrency (GY-1113): at one, proofs queued an hour for a slot. */
+export const automaticProducerConcurrency = 4;
 /**
- * The config as the reviewer launchers and their readers count sessions: the automatic profile's unset
- * concurrency read as `automaticReviewerConcurrency`. `loadMasterConfig` applies it once at load
- * (GY-1075) and writers read `loadStoredMasterConfig`, so the default is never written back; it is
- * idempotent, so a caller handed a config built elsewhere may still apply it.
+ * The config as the launchers and their readers count sessions: unset concurrency read as the role's
+ * automatic default. `loadMasterConfig` applies it once at load (GY-1075) and writers read
+ * `loadStoredMasterConfig`, so a default is never written back; idempotent, so any caller may apply it.
  */
 export function withReviewerDefaults<T extends Pick<MasterConfig, 'reviewers' | 'run'>>(config: T): T {
   const automatic = config.run.reviewerProfile;
   if (!automatic || !config.reviewers.some(profile => profile.name === automatic && profile.concurrency === undefined)) return config;
   return { ...config, reviewers: config.reviewers.map(profile => profile.name === automatic && profile.concurrency === undefined ? { ...profile, concurrency: automaticReviewerConcurrency } : profile) };
 }
+export function withProducerDefaults<T extends Pick<MasterConfig, 'producers'>>(config: T): T {
+  if (!config.producers.some(profile => profile.concurrency === undefined)) return config;
+  return { ...config, producers: config.producers.map(profile => profile.concurrency === undefined ? { ...profile, concurrency: automaticProducerConcurrency } : profile) };
+}
+export const withRoleDefaults = <T extends Pick<MasterConfig, 'reviewers' | 'producers' | 'run'>>(config: T): T => withProducerDefaults(withReviewerDefaults(config));
 /** The merge queue's batch size under this master config: `mergeQueue.batchSize`, or the default of 4. */
 export function mergeBatchSize(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.batchSize ?? defaultMergeBatchSize;

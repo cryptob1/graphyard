@@ -100,7 +100,7 @@ export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'rev
  * moved past. The loop waits for a fresh observation and decides from that.
  */
 export const reworkObservationMaxAgeMs = 120_000;
-/** GY-1266. The age bound on the observation the loop's own wake brought in: the longest interval (900s), so it survives one cycle gap. */
+/** GY-1266's former age bound on the woken observation, lifted by GY-1257 (a cycle may outlast it); the span a burst replay covers. */
 export const reworkWokenObservationMaxAgeMs = 15 * 60_000;
 export interface GitHubPause { until: string }
 /**
@@ -130,9 +130,10 @@ export function reworkObservationWait(work: Work, now: number, pause: GitHubPaus
   const seen = `the last GitHub observation (taken at ${observation.at} of head ${observation.candidate.sha.slice(0, 12)})`;
   if (pause) return `${work.key}: rework waits for a fresh GitHub observation — GitHub requests are paused until ${pause.until}, so ${seen} is a stale observation that may describe a head the branch has moved past`;
   const age = now - Date.parse(observation.at);
-  // GY-1266. The loop's own woken observation of the submitted head is the reading it waited for: the next cycle reads it an interval
-  // later, past two minutes, so on that bound alone every landed wake was stale again, re-sent, and no rework was ever requested.
-  if (wokenAt && Date.parse(observation.at) > Date.parse(wokenAt) && observation.candidate.sha === work.candidate?.sha && age < reworkWokenObservationMaxAgeMs) return null;
+  // GY-1266/GY-1257. The loop's own woken observation of the submitted head is the reading it waited for: the next cycle reads it
+  // an interval or a slow cycle later, past any age bound on the cycle clock, so on such a bound every landed wake was stale again,
+  // re-sent, and no rework was ever requested. Its head must still be the candidate's; apply time withdraws one the item moved past.
+  if (wokenAt && Date.parse(observation.at) > Date.parse(wokenAt) && observation.candidate.sha === work.candidate?.sha) return null;
   if (!(Number.isFinite(age) && age < reworkObservationMaxAgeMs)) return `${work.key}: rework waits for a fresh GitHub observation — ${seen} is a stale observation, older than two minutes, and the branch may have moved past that head`;
   return null;
 }

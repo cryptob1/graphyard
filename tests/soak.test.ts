@@ -35,7 +35,9 @@ import { maxApproverLaunches, maxLostApproverRuns } from '../src/daemon/decision
 import { decisionReadDeadlineMs, decisionRefreshMs } from '../src/daemon/decision-reads.js';
 import { adoptRuns, detachRuns, liveRuns, pruneRunDirectories, runDirectoryRetentionMs, runsDirectory, watchedRuns, withRunnerAgents, type Applied } from '../src/runner/registry.js';
 import { applyDecision, approverRunOptions, startNarrowRun } from '../src/runner/roles.js';
-import type { DecidePayload } from '../src/runner/payloads.js';
+import type { DecidePayload, DecompositionPayload } from '../src/runner/payloads.js';
+import { decompositionTool, splitReport, type DecompositionEvent } from '../src/decomposition.js';
+import { clearDecompositionRuns } from '../src/decomposition-step.js';
 import { plannedFilesMax, type ScopeRequestState } from '../src/model/scope.js';
 import { diagnosticianSettings, diagnosisSettled } from '../src/runner/payloads.js';
 import { stoppedStates } from '../src/daemon/effects.js';
@@ -512,7 +514,8 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * wake is lost too, so the loop must ask again in the next observation window.
  */
 let days = 0;
-async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+async function simulateDay(options: { hours: number; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; queued?: { window: number; reconfigure?: { at: number; window: number }; failTip?: number; releaseEveryMs?: number }; stale?: { stuck: number; lostCarry: number }; starved?: { items: number[]; dropFirst: number }; protectedBranch?: boolean; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; slowDecisions?: { from: number; to: number; ms: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+  decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-417: dispatch through the real `dispatchWork` on a real master root with a two-account launch profile. */
   failover?: Failover }) {
   const dayStart = clock.now();
@@ -522,13 +525,16 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const failover = options.failover;
   const config: MasterConfig = failover ? failover.master : options.queued
     ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...queueWorkers], mergeQueue: { parallelTips: options.queued.window } })
+    // GY-1286: the slow-server day staffs every item at once, so their decisions fall due together.
+    : options.slowDecisions ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...queueWorkers] })
     : options.master ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, masterSessionMinutes: options.master.sessionMinutes, masterHeartbeatMinutes: options.master.heartbeatMinutes } })
+    : options.decomposition ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, research: { command: 'pi', model: 'research-pi-model' }, decomposition: { concurrency: options.decomposition.concurrency ?? 2 } } })
     : soakConfig;
   if (options.stale) config.reviewer = { slug: 'graphyard-reviewer', appId: 77_001, installationId: 77_002, credentialFile: '/outside/reviewer.json', boundAt: new Date(dayStart).toISOString() };
   // The spent producer request (GY-496) is a main-day fault, like the blind window and the split:
   // the queue-only, hand-approver and regression days exercise their own faults and would only
   // inherit this one's rework round.
-  const mainDay = !options.queued && !options.handApprovers && !options.regression && !options.scope && !options.headless && !options.blockers && !options.starved;
+  const mainDay = !options.queued && !options.handApprovers && !options.regression && !options.scope && !options.headless && !options.blockers && !options.starved && !options.decomposition;
   // GY-793's base breakage runs only on the day that asserts it (`github806`): on any other day it
   // would reshape that day's own scenario (a rework or fenced item doubling as the broken one).
   const baseBreakDay = mainDay && !!options.github806;
@@ -615,6 +621,75 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   const moveClock = async (ms: number) => { clock.advance(ms); await store.pool.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]); };
   await moveClock(0);
 
+  const pending: (() => Promise<void>)[] = [];
+  const decompositionHistory = {
+    starts: [] as { key: string; at: number }[],
+    peakConcurrent: 0,
+    currentLive: 0,
+    createdChildren: [] as string[],
+    deliveredParents: [] as string[],
+  };
+  clearDecompositionRuns();
+  let fakeDecompositionRunner: Runner | undefined;
+  if (options.decomposition) {
+    fakeDecompositionRunner = {
+      name: 'soak-decomposer',
+      start<T>(prompt: string, runOptions: RunOptions<T>) {
+        const itemKey = /GY-\d+/.exec(prompt)?.[0] ?? 'unknown';
+        decompositionHistory.starts.push({ key: itemKey, at: clock.now() });
+        decompositionHistory.currentLive++;
+        decompositionHistory.peakConcurrent = Math.max(decompositionHistory.peakConcurrent, decompositionHistory.currentLive);
+        const children = [
+          {
+            title: `${itemKey} Child Part 1`,
+            criteria: ['AC-1', 'AC-2', 'AC-3'],
+            plannedFiles: [`src/soak/${itemKey.toLowerCase()}-part-1.ts`],
+            after: [],
+          },
+          {
+            title: `${itemKey} Child Part 2`,
+            criteria: ['AC-4', 'AC-5'],
+            plannedFiles: [`src/soak/${itemKey.toLowerCase()}-part-2.ts`],
+            after: [0],
+          },
+        ];
+        const payload = {
+          reason: `Split ${itemKey} into two smaller parts`,
+          children,
+        };
+        const parsed = runOptions.validate ? runOptions.validate(payload) : payload;
+        let resolveResult: (res: RunResult<T>) => void;
+        const resultPromise = new Promise<RunResult<T>>(resolve => {
+          resolveResult = resolve;
+        });
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          decompositionHistory.currentLive--;
+        };
+        pending.push(async () => {
+          finish();
+          resolveResult({
+            ok: true,
+            tool: runOptions.tool,
+            payload: parsed as T,
+            payloads: [parsed as T],
+          });
+        });
+        return {
+          id: `soak-decomp-${randomUUID()}`,
+          events: [],
+          onEvent: () => () => {},
+          cancel() {
+            finish();
+          },
+          result: () => resultPromise,
+        };
+      },
+    };
+  }
+
   // ---- The fifteen items, created in the backlog and released one every fifteen minutes. ----
   const releaseEveryMs = options.queued?.releaseEveryMs ?? plan.releaseEveryMs;
   for (let n = 1; n <= plan.items + (options.scope ? 3 : 0); n++) {
@@ -634,9 +709,20 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       plannedFiles: [...files(n), docs.page(n)],
       policy: { checks: ['test', 'typecheck', 'unit:docs-word-budget'], review: true },
     } : {};
+    const isBroad = options.decomposition?.broadItems.includes(n);
+    const broadIntake = isBroad ? {
+      criteria: [
+        { id: 'AC-1', text: `Item ${n} behaviour 1`, proofs: [PROOF] },
+        { id: 'AC-2', text: `Item ${n} behaviour 2`, proofs: [PROOF] },
+        { id: 'AC-3', text: `Item ${n} behaviour 3`, proofs: [PROOF] },
+        { id: 'AC-4', text: `Item ${n} behaviour 4`, proofs: [PROOF] },
+        { id: 'AC-5', text: `Item ${n} behaviour 5`, proofs: [PROOF] },
+      ],
+      plannedFiles: ['src/', 'tests/', 'docs/'],
+    } : {};
     const criteria = [{ id: 'AC-1', text: plan.scoped.has(n) || (options.remedies && n === remedyItem) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: [PROOF] },
       ...(n === plan.attested ? [{ id: 'AC-2', text: `Item ${n} is attested`, proofs: [MANUAL] }] : [])];
-    let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria, ...scopeIntake, ...docsIntake }, id());
+    let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria, ...scopeIntake, ...docsIntake, ...broadIntake }, id());
     if (n === plan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
       reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' }, { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer' }] }, id());
     items.push(work);
@@ -702,7 +788,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; exitsAt: number | null; dispatchAt: number; state: 'working' | 'submitted' | 'dead' | 'exited' | 'idling' | 'reclaimed' | 'credential-blocked' | 'blocked' | 'failed-over'; syncs: number; syncedFor?: string; refusedSince?: number;
-    scopeAt: number | null; misreadAt: number | null; misread: boolean; credentialAt: number | null; blockAt: number | null; retryingAt: number | null; settlementToken?: string }
+    scopeAt: number | null; misreadAt: number | null; misread: boolean; credentialAt: number | null; blockAt: number | null; retryingAt: number | null; settlementToken?: string; files?: string[] }
   const sessions: Session[] = [], lost: string[] = [], launches: number[] = [];
   // GY-973: what each pane's screen tail shows, where it is not a session at work, and the
   // accounts the loop held. OpenCode 1.18 on a spent account prints its limit banner with a retry
@@ -790,6 +876,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     const principal = principalOf(profile);
     const claimed = await engine.execute(principal, 'claim', work.id, {}, id());
     const epoch = claimed.epoch, key = work.key, n = numberOf(work);
+    const sessionFiles = (work.plannedFiles && !work.plannedFiles.some(f => f.endsWith('/'))) ? [...work.plannedFiles] : files(n);
     // GY-860: for part of the day an earlier attempt's worktree holds this item's branch where the
     // host cannot free it. The worktree command releases the claim as a workspace failure with
     // git's message, which hands the epoch back, and fails the way the real child runner reports
@@ -863,7 +950,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       scopeAt: !idling && plan.scoped.has(n) && attempt === 1 ? clock.now() + plan.scopeAfterMs : null, misreadAt: !idling && plan.misread.has(n) && attempt === 1 ? clock.now() + plan.misreadAfterMs : null, misread: false,
       // GY-1008: the blocked day's first attempts record their blocker; the repeating item's every attempt does.
       blockAt: options.blockers && blockerPlan.classes[n] && (attempt === 1 || n === blockerPlan.repeating) ? clock.now() + blockerPlan.blockAfterMs : null,
-      credentialAt: credentialBlocks ? clock.now() + 5 * minute : null, retryingAt: options.retrying?.worker === n && attempt === 1 ? clock.now() + 5 * minute : null, settlementToken });
+      credentialAt: credentialBlocks ? clock.now() + 5 * minute : null, retryingAt: options.retrying?.worker === n && attempt === 1 ? clock.now() + 5 * minute : null, settlementToken, files: sessionFiles });
     // A scope scenario asks the moment it holds the lease, as a worker does, and keeps working
     // while the control plane decides. An ask carries at most fifty paths, so a wide ask is
     // filed in batches, which one open request of the attempt merges.
@@ -962,7 +1049,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       }
       const head = sha('head', session.key, session.epoch);
       const grown = docs?.grow(numberOf(session));
-      const pr = github.push(session.key, session.branch, principal.id, head, grown ? [...files(numberOf(session)), grown.page] : files(numberOf(session)), grown);
+      const sessionFiles = session.files ?? (grown ? [...files(numberOf(session)), grown.page] : files(numberOf(session)));
+      const pr = github.push(session.key, session.branch, principal.id, head, sessionFiles, grown);
       await engine.execute(principal, 'submit', session.work, { epoch: session.epoch, pr: pr.number, documentation: 'A simulated item: it changes no documented behaviour' }, id());
       session.state = 'submitted';
       await lowerFence(session);
@@ -989,7 +1077,8 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       if (now - since < 3 * minute) continue;
       session.syncs += 1; session.syncedFor = candidate; session.refusedSince = undefined;
       const syncedGrow = docs?.grow(numberOf(session));
-      github.push(session.key, session.branch, principalOf(session.profile).id, sha('head', session.key, session.epoch, 'sync', session.syncs), syncedGrow ? [...files(numberOf(session)), syncedGrow.page] : files(numberOf(session)), syncedGrow);
+      const sessionFiles = session.files ?? (syncedGrow ? [...files(numberOf(session)), syncedGrow.page] : files(numberOf(session)));
+      github.push(session.key, session.branch, principalOf(session.profile).id, sha('head', session.key, session.epoch, 'sync', session.syncs), sessionFiles, syncedGrow);
     }
   };
 
@@ -1048,7 +1137,6 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   };
 
   // ---- Approvers and producers: sessions the loop launches, each acting on the minute after. ----
-  const pending: (() => Promise<void>)[] = [];
   const wakes: { key: string; at: number }[] = [];
   const approverPanes: string[] = [], approverWorks: string[] = [];
   /** A headless approver's verdict, applied as the approver identity; each run's launch is counted once it is. */
@@ -1202,8 +1290,12 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
       if (!current.candidate || current.candidate.sha !== work.candidate?.sha || current.stage === 'done') return;
       // The trusted workflow publishes nothing for the spent head: only the dispatcher's producer runs stand for it.
       if (spentOn(current)) return;
-      await engine.execute(principals.producer, 'evidence', current.id, { proof: PROOF, sha: current.candidate.sha, baseSha: current.candidate.baseSha, policyRevision: current.policyRevision, result: 'pass', executed: 4, skipped: 0,
-        exercise: { criterion: 'AC-1', behaviour: `item ${numberOf(current)}'s change`, result: 'fail', executed: 1 } }, id());
+      for (const proof of new Set(current.criteria.flatMap(cr => cr.proofs))) {
+        const matchingCriteria = current.criteria.filter(cr => cr.proofs.includes(proof)).map(cr => cr.id);
+        const criterion = matchingCriteria[0] ?? 'AC-1';
+        await engine.execute(principals.producer, 'evidence', current.id, { proof, sha: current.candidate.sha, baseSha: current.candidate.baseSha, policyRevision: current.policyRevision, result: 'pass', executed: 4, skipped: 0,
+          exercise: { criterion, behaviour: `item ${numberOf(current) || current.key}'s change`, result: 'fail', executed: 1 } }, id());
+      }
     });
   };
 
@@ -1287,6 +1379,14 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   };
   // The control plane's status read the faults are classified from; `heldJobs` is the flap below.
   let heldJobs = false;
+  const recordDecompositionEffect: DaemonEffects['recordDecomposition'] = async (work, event) => {
+    if (event.event === 'decided') {
+      for (const child of event.payload.children) {
+        decompositionHistory.createdChildren.push(child.title);
+      }
+    }
+    return api(principals.coordinator, 'POST', `work/${work.id}/decomposition`, event);
+  };
   const effects: DaemonEffects = {
     agents: () => headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(),
     herdr: () => ({ agents: headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(), available: true }),
@@ -1418,6 +1518,10 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         return { items: [], docs: status.docs } as ReportedAttention;
       },
     } : {}),
+    ...(options.decomposition ? {
+      recordDecomposition: recordDecompositionEffect,
+      research: { cwd: coordinatorRoot ?? process.cwd(), runner: fakeDecompositionRunner },
+    } : {}),
   };
   // ---- The loop's own master session (GY-898): launched on the registry's master role, woken on
   // ---- material events, killed mid-day while the registry refuses to end sessions, rotated at its
@@ -1431,21 +1535,36 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     wakes: [] as { at: number; cycle: number; text: string; clock?: number }[],
     ended: [] as string[], refusedEnds: [] as string[], killed: null as string | null,
     maxLive: 0, cycleOf: 0, rotations: [] as { at: number; detail: string; before: number; after: number }[],
+    // GY-1223: the master pane the day set working, every read of a master screen, the accounts each launch took and the loop held.
+    worked: null as string | null, bannerAt: null as number | null, reads: [] as { at: number; pane: string; status: string }[],
+    accounts: [] as string[], holds: [] as { account: string; resetsAt: string | null; at: number }[],
   };
   if (options.master) {
     const plan = options.master, name = config.masterAgentName!;
     // Timed on the day's schedule position, as every other fault of the day is.
     const refusing = () => elapsed >= plan.refuseRelease.from && elapsed < plan.refuseRelease.to;
+    // The registry launches the master role on its first account the loop does not hold (GY-1223).
     effects.masterSession = { launch: async () => {
       const pane = herdr.open(name, 'idle'), session = `master-registry-${master.launches.length + 1}`;
+      const account = ['claude-master', 'claude-master-b'].find(candidate => !accountHeld(candidate)) ?? 'claude-master';
       master.launches.push({ at: elapsed, pane, session });
-      return { agentName: name, pane, runtime: 'claude', account: 'claude-master', session };
+      master.accounts.push(account);
+      return { agentName: name, pane, runtime: 'claude', account, session };
     } };
     effects.endRegistrySession = async session => {
       if (refusing()) { master.refusedEnds.push(session); throw new Error('the agent registry is unreachable: timeout'); }
       master.ended.push(session);
     };
-    effects.holdAccount = async () => {};
+    effects.holdAccount = async (account, observed) => { heldAccounts.set(account, { resetsAt: observed.resetsAt }); master.holds.push({ account, resetsAt: observed.resetsAt, at: elapsed }); };
+    // GY-1223: the loop reads the master's screen every cycle it supervises it. A working master
+    // shows its own prose — which names the limit banner with no retry marker — until the day
+    // prints its runtime's retry banner; any other pane reads as no screen, as on the other days.
+    const workerOutput = effects.sessionOutput;
+    effects.sessionOutput = agent => {
+      if (agent.name !== name) return workerOutput ? workerOutput(agent) : null;
+      master.reads.push({ at: elapsed, pane: agent.pane_id ?? '', status: agent.agent_status ?? '' });
+      return screens.get(agent.pane_id ?? '') ?? '● Waiting for the next wake\n';
+    };
     const workerPrompt = effects.promptSession!;
     // A wake leaves the master idle, as a session that read master status and found nothing to do.
     effects.promptSession = async (agent, text) => agent.name === name ? void master.wakes.push({ at: elapsed, cycle: master.cycleOf, text }) : workerPrompt(agent, text);
@@ -1509,6 +1628,21 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         reason: `The soak loop verified on ${assessment.host} that the supervisor of epoch ${assessment.epoch} is gone`, verification: assessment.verification });
       fenced.settled.push({ key: work.key, epoch: assessment.epoch, elapsed, cycle: cycles });
     };
+  }
+  // ---- GY-1286: the slow-server day. Inside the window every decision request and observation wake
+  // ---- the loop sends takes `ms` of the clock before the plane answers, as the 30s-timeout writes of
+  // ---- cycles 12285 and 12293 did, so the decisions step runs past its budget and puts items off.
+  const budgetDay = { cycles: [] as { cycle: number; elapsed: number; spentMs: number; slow: number; deferred: string[] }[], withdrawn: [] as { key: string; cycle: number }[], slowCalls: 0, cycleSlow: 0 };
+  if (options.slowDecisions) {
+    const window = options.slowDecisions, { decide, wakeObservation, withdraw } = effects;
+    const slow = async () => {
+      const at = clock.now() - dayStart;
+      if (at < window.from || at >= window.to) return;
+      budgetDay.slowCalls++; budgetDay.cycleSlow++; fenced.drift += window.ms; await moveClock(window.ms);
+    };
+    effects.decide = async (work, action, reason, input) => { await slow(); return decide!(work, action, reason, input); };
+    effects.wakeObservation = async work => { await slow(); return wakeObservation!(work); };
+    effects.withdraw = async (work, decision, reason) => { budgetDay.withdrawn.push({ key: work.key, cycle: cycles }); return withdraw!(work, decision, reason); };
   }
   let publishedMergeQueue: string | null = null;
   const mergeQueuePosts: { at: number; settings: Record<string, number> }[] = [];
@@ -2058,6 +2192,18 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
         const live = herdr.byName(config.masterAgentName!);
         if (live?.pane_id) { herdr.kill(live.pane_id); master.killed = live.pane_id; }
       }
+      // GY-1223: from `working.from` the live master works (Herdr reports it working) and its screen
+      // carries a bare limit notice it wrote itself; at `working.retryAt` its runtime prints the
+      // retry banner on its spent account and keeps retrying, still working, until the loop acts.
+      const working = options.master?.working;
+      if (working && !master.worked && elapsed >= working.from) {
+        const live = herdr.byName(config.masterAgentName!);
+        if (live?.pane_id) {
+          herdr.status(live.pane_id, 'working'); master.worked = live.pane_id;
+          screens.set(live.pane_id, `● Reading docs/master-agent-sessions.md\n\nWeekly/Monthly Limit Exhausted. Your limit will reset at ${hostWallClock(retryReset)} is the banner a working session must carry its retry marker beside\n● Working as ${config.masterAgentName}…\n`);
+        }
+      }
+      if (working && master.worked && master.bannerAt === null && elapsed >= working.retryAt) { screens.set(master.worked, retryBanner); master.bannerAt = elapsed; }
       if (options.staleRework && await restartOnVerdict(now)) { elapsed += minute; await moveClock(minute); continue; }
       if (options.staleMerge && await restartOnMerge(now)) { elapsed += minute; await moveClock(minute); continue; }
       master.cycleOf = cycles;
@@ -2070,7 +2216,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
           // An adopted run that already ended is applied on adoption, before the cycle judges its decision.
           headless.adoptedEnded++; await run.settled; headless.settling.delete(run.directory); await new Promise(resolve => setImmediate(resolve));
         }
+        const cycleStart = clock.now(); budgetDay.cycleSlow = 0;
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
+        if (options.slowDecisions) budgetDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, slow: budgetDay.cycleSlow, deferred: [...state.decisionsDeferred] });
         if (options.workspaceFailure) for (const [name, entry] of Object.entries(state.profiles)) if (/worktree/.test(entry.reason ?? '')) workspaceCooled.push(`+${Math.round(elapsed / minute)} min ${name}: ${entry.reason}`);
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
         escalations.push(...result.actions.filter(action => action.kind === 'escalation').map(action => action.detail));
@@ -2193,6 +2341,9 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
   }
   engine.reconcileLanded = reconcileLanded; engine.directMergeEnvironment = null;
   const final = (await store.list()).filter(item => items.some(entry => entry.id === item.id));
+  if (options.decomposition) {
+    decompositionHistory.deliveredParents = (await store.list()).filter(item => item.children?.length && item.stage === 'done').map(item => item.key);
+  }
   await settleTmpReclaim(); await holder.close();
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
@@ -2201,7 +2352,7 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     mergeQueuePosts, windowSamples, tipPublications, chainedTips, peakWindow, config, refused, decideCalls, restarted, stale, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, restoreLines, master,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, staleMerges, restartLog, guardDay };
+    wakes, staleMerges, restartLog, guardDay, budgetDay, decompositionDay: decompositionHistory };
 }
 
 /**
@@ -2883,7 +3034,7 @@ test('unit:soak-invariants-hold — a guarded merge that refuses a queue head is
   const stuck = 4, lostCarry = 2;
   const { items, final, github, violations, failures, lost, escalations, state, herdr, stale, config, dayStart } =
     await simulateDay({ hours: 4, queued: { window: 4, releaseEveryMs: 3 * minute }, stale: { stuck, lostCarry }, plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set([5]), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 } } });
-  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all ten items are delivered');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all seven items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds across the refusals, the rereviews and the rework');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no worker lost its lease');
@@ -2996,11 +3147,13 @@ test('unit:soak-invariants-hold — approver launches refused for capacity wait 
   assert.ok(seconds < 200, `the capacity-wait day runs inside its budget (${seconds.toFixed(1)} s)`);
 });
 
-test('unit:soak-invariants-hold — the loop\'s own master session across a day: launched once, relaunched within three cycles of dying while the registry refuses to end its session (which stays owed until it is ended), rotated at its budget, never two at once, and woken only by material events with the heartbeat as the fallback', { timeout: 600_000 }, async () => {
+test('unit:soak-invariants-hold — the loop\'s own master session across a day: launched once, relaunched within three cycles of dying while the registry refuses to end its session (which stays owed until it is ended), rotated at its budget, never two at once, woken only by material events with the heartbeat as the fallback, and rotated once off a spent account it keeps retrying on while working', { timeout: 600_000 }, async () => {
   // GY-898: the master-session step runs every cycle of the real loop here. The session dies at
   // minute 70, inside a window (minutes 60–100) in which the registry refuses every end, so the
   // rotation's release is owed and retried; the relaunched session passes its 90-minute budget.
-  const plan = { exitAt: 70 * minute, refuseRelease: { from: 60 * minute, to: 100 * minute }, sessionMinutes: 90, heartbeatMinutes: 30 };
+  // GY-1223: the third session works from minute 200 with a bare limit notice of its own on screen,
+  // and from minute 230 its runtime retries on its spent account, still working.
+  const plan = { exitAt: 70 * minute, refuseRelease: { from: 60 * minute, to: 100 * minute }, sessionMinutes: 90, heartbeatMinutes: 30, working: { from: 200 * minute, retryAt: 230 * minute } };
   const day = await simulateDay({ hours: 6, master: plan });
   const { final, violations, failures, state, master, cycles } = day;
   assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all fifteen items are delivered with the master session in the loop');
@@ -3025,6 +3178,26 @@ test('unit:soak-invariants-hold — the loop\'s own master session across a day:
   assert.ok(budget && budget.after >= relaunched + plan.sessionMinutes * minute && budget.before <= relaunched + (plan.sessionMinutes + 32) * minute,
     `the relaunched session rotated at its ${plan.sessionMinutes}-minute budget: ${JSON.stringify({ relaunched, rotations: master.rotations })}`);
   assert.equal(master.launches.length, master.rotations.length + 1, 'every rotation relaunched exactly one session');
+  // GY-1223: a working master is read and judged every cycle by the real loop; its own prose about
+  // the banner never rotates it, the retry banner rotates it exactly once, its account is held to
+  // the banner's reset, and no later launch takes that account before the reset.
+  const worked = master.launches.findIndex(launch => launch.pane === master.worked);
+  assert.ok(worked >= 0 && master.bannerAt !== null, `the scenario set a live master working and printed its retry banner: ${JSON.stringify({ worked: master.worked, bannerAt: master.bannerAt })}`);
+  const workingReads = master.reads.filter(read => read.pane === master.worked && read.status === 'working');
+  assert.ok(workingReads.some(read => read.at < master.bannerAt!), `the loop read the working master's own prose before the banner: ${workingReads.length} reads`);
+  // The soak cadence equals workingOutputReadMs, so this proves one read per cycle, not the
+  // throttle itself; unit:working-session-output-read-throttled pins the throttle.
+  assert.ok(workingReads.length <= new Set(workingReads.map(read => read.at)).size, 'a working master is read at most once a cycle (the throttle is pinned by its unit test)');
+  const exhausted = master.rotations.filter(rotation => /\(exhausted\)/.test(rotation.detail));
+  assert.equal(exhausted.length, 1, `exactly one rotation off the spent account: ${JSON.stringify(master.rotations)}`);
+  assert.ok(exhausted[0].at >= master.bannerAt! && exhausted[0].at <= master.bannerAt! + 2 * minute, `the retrying master rotated within two cycles of its banner: ${JSON.stringify({ bannerAt: master.bannerAt, rotation: exhausted[0] })}`);
+  assert.match(exhausted[0].detail, /is retrying on its provider's limit notice/);
+  assert.ok(!master.rotations.some(rotation => rotation.at >= plan.working.from && rotation.at < master.bannerAt!), 'the working master\'s own prose about the banner rotated nothing');
+  assert.deepEqual(master.holds.map(hold => hold.account), [master.accounts[worked]], 'the spent account, and only it, was held');
+  assert.equal(master.holds[0].resetsAt, day.retryReset.toISOString(), 'the hold lasts until the banner\'s reset');
+  assert.ok(master.accounts.slice(worked + 1).length > 0 && master.accounts.slice(worked + 1).every(account => account !== master.accounts[worked]),
+    `no later master launched into the held account before its reset: ${JSON.stringify(master.accounts)}`);
+  assert.equal(master.launches[worked + 1]?.at !== undefined && master.launches[worked + 1].at <= exhausted[0].at + 3 * minute, true, 'the role relaunched within three cycles of the rotation');
   // AC-2: at most one wake per cycle, every event wake names its causes, heartbeats are spaced by
   // the configured window, and no cycle repeats the previous cycle's causes (a wake storm).
   const perCycle = new Map<number, number>();
@@ -3160,7 +3333,7 @@ test('unit:soak-invariants-hold — a worker idle past its bound whose pane died
     hours: 6, reassigned: n,
     plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
   });
-  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all six items are delivered');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}`), [], 'all seven items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds across the idle re-prompt and the reclaim');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no lease was lost: the idle attempt was reclaimed');
@@ -3250,6 +3423,12 @@ test('unit:soak-invariants-hold — under GitHub delivery the main guard across 
   assert.equal(github.merges.filter(merge => merge.key === reverted).length, 2, 'the reopened item merged again on a fresh pull request');
   assert.notEqual(reopened.delivery?.mergeSha, brokenBy(reverted).mergeSha, 'its delivery is the new merge');
   assert.ok(reverts.find(revert => revert.key === reverted)!.merged, 'the App merged its revert');
+  // GY-1291: branch protection refuses the App's merge of its own push without another's approval,
+  // so the revert approver approved exactly the revert's head, once, after its diff was read once.
+  const mergedRevert = [...github.reverts].find(([, revert]) => revert.key === reverted)!;
+  assert.deepEqual(mergedRevert[1].approvals, [mergedRevert[1].head], 'the merged revert was approved at its head, once');
+  assert.deepEqual(github.guardRequests.filter(request => request.kind === 'approve').map(request => `${request.pr}@${request.sha}`), [`${mergedRevert[0]}@${mergedRevert[1].head}`], 'only the verified revert is approved, once');
+  assert.deepEqual(github.guardRequests.filter(request => request.kind === 'merge-diff' || request.kind === 'revert-diff').map(request => request.kind), ['merge-diff', 'revert-diff'], 'the diffs are read once, for the revert whose checks passed');
 
   // The given-up revert: closed after one attempt, its item left delivered, and one attention line.
   const kept = final.find(item => item.key === givenUp)!;
@@ -3257,6 +3436,7 @@ test('unit:soak-invariants-hold — under GitHub delivery the main guard across 
   assert.match(kept.mainGuardReverts![0].reason!, /own required checks failed: test/);
   assert.equal(kept.delivery?.mergeSha, brokenBy(givenUp).mergeSha, 'nothing withdrew the delivery whose revert was given up');
   assert.ok(reverts.find(revert => revert.key === givenUp)!.closed, 'its revert pull request was closed');
+  assert.deepEqual(reverts.find(revert => revert.key === givenUp)!.approvals, [], 'the revert whose checks failed was never approved');
   const lines = escalations.filter(detail => detail.startsWith('Main guard:'));
   assert.equal(lines.length, 1, `exactly one attention line across the day: ${lines.join(' | ')}`);
   assert.match(lines[0], new RegExp(`${givenUp}'s merge ${brokenBy(givenUp).mergeSha.slice(0, 12)}.*\\(test\\).*revert PR #\\d+`));
@@ -3692,6 +3872,44 @@ test('unit:soak-invariants-hold — launches that keep failing for one cause are
   assert.deepEqual(state.dispatchFailures, {}, 'every failure run was retired: by the blocker, or by the launch that landed');
 });
 
+test('unit:soak-invariants-hold — a slow control plane carries the decisions step past its budget for an hour and a half: every cycle stays within the interval, every item put off is reached within a few cycles, attestations included, none has its standing decision withdrawn while put off, nothing is left put off once the plane is fast, and every invariant holds', { timeout: 600_000 }, async () => {
+  // GY-1286: for the window every decision request and observation wake takes 12 s to answer, so
+  // the step's 30 s budget (two fifths of the 60 s interval, never under the actionable cadence)
+  // holds two requests a cycle and the rest are put off; ten items release thirty seconds apart
+  // and nine of them are sent back once, so several need a decision at once, and item 3's `manual:` proof needs the loop's attestation.
+  const slow = { from: 5 * minute, to: 150 * minute, ms: 15_000 }, rework = new Set([1, 2, 4, 5, 6, 7]);
+  const { items, final, violations, failures, lost, decideCalls, budgetDay } = await simulateDay({
+    hours: 5, slowDecisions: slow,
+    plan: { items: 7, leftovers: 0, slowRecompute: 0, releaseEveryMs: 1_000, workMs: 50 * minute, rework, deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, attested: 3, exhaustedReviewer: 0, unstable: 0, lowLane: 0, outOfQueue: { item: 7, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 7 } },
+  });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all seven items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds while the step is bounded and once the plane is fast');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  const cycles = budgetDay.cycles, deferring = cycles.filter(entry => entry.deferred.length);
+  assert.ok(budgetDay.slowCalls >= 6 && deferring.length >= 2, `the window ran and the step put items off across cycles (${budgetDay.slowCalls} slow calls, ${deferring.length} cycles deferring)`);
+  // The step's budget plus the request in flight at the bound and each pass's one guaranteed
+  // request: never the whole interval, however many items wait.
+  assert.deepEqual(cycles.filter(entry => entry.spentMs > soakConfig.run.intervalSeconds * 1000).map(entry => `cycle ${entry.cycle} +${Math.round(entry.elapsed / minute)} min: ${entry.spentMs}ms, ${entry.slow} slow calls`), [], 'every cycle stays within the interval');
+  // Nothing waits for good: an item stays put off a handful of consecutive cycles at most.
+  const runs = new Map<string, number>(), longest = new Map<string, number>();
+  for (const entry of cycles) for (const key of new Set([...runs.keys(), ...entry.deferred])) {
+    const run = entry.deferred.includes(key) ? (runs.get(key) ?? 0) + 1 : 0;
+    if (run) runs.set(key, run); else runs.delete(key);
+    longest.set(key, Math.max(longest.get(key) ?? 0, run));
+  }
+  assert.deepEqual([...longest].filter(([, run]) => run > 4), [], `no item is put off more than four cycles running: ${JSON.stringify([...longest])}`);
+  assert.ok(Math.max(...cycles.map(entry => entry.deferred.length)) <= items.length, 'what is put off is bounded by the open items');
+  assert.deepEqual(cycles.filter(entry => entry.elapsed >= slow.to + 2 * minute && entry.deferred.length).map(entry => `+${Math.round(entry.elapsed / minute)} min: ${entry.deferred.join(', ')}`), [], 'once the plane is fast, nothing is put off');
+  // A decision the step still needs is never withdrawn while its item waits for the next cycle.
+  const withdrawnDeferred = budgetDay.withdrawn.filter(entry => cycles.find(cycle => cycle.cycle === entry.cycle)?.deferred.includes(entry.key));
+  assert.deepEqual(withdrawnDeferred, [], 'no standing decision is withdrawn for an item put off');
+  // The attested item's attestation is requested, and it is delivered on it.
+  const attested = items[2].key;
+  assert.ok(decideCalls.some(call => call.key === attested && call.action === 'attest'), `${attested}'s attestation was requested: ${JSON.stringify(decideCalls.filter(call => call.key === attested).map(call => call.action))}`);
+  assert.ok(final.find(item => item.key === attested)!.evidence.some(entry => entry.proof === MANUAL && entry.result === 'pass'), `${attested} was delivered on its attestation`);
+});
+
 test('unit:soak-invariants-hold — containment quarantines of dead workers stand across many cycles while the timed clock read fails and then answers slowly, one read a cycle and none without an assessable quarantine, each escalation recorded once, and they settle once reads are fast, with every invariant holding', { timeout: 600_000 }, async () => {
   // GY-811: every supervised launch raises a containment quarantine; two workers die, so their
   // fences outlive them and only the loop can lower them. The work snapshot takes 6 s to read, so
@@ -3707,7 +3925,7 @@ test('unit:soak-invariants-hold — containment quarantines of dead workers stan
     hours: 3, containment: { failUntil, slowUntil },
     plan: { items: 6, leftovers: 2, slowRecompute: 0, releaseEveryMs: 5 * minute, workMs: 20 * minute, rework: new Set(), deaths: new Set(deaths), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set([3]), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
   });
-  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all six items are delivered');
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all seven items are delivered');
   assert.deepEqual(violations, [], 'every system invariant holds while the fences stand and once they settle');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no lease was lost: a dead worker lapses and its fence waits for the loop');
@@ -3749,6 +3967,57 @@ test('unit:soak-invariants-hold — containment quarantines of dead workers stan
     assert.equal(new Set(escalated.map(containmentRefusalCause)).size, escalated.length, `${key}: no escalation repeats: ${JSON.stringify(escalated)}`);
     assert.equal(final.find(item => item.key === key)!.stage, 'done', `${key}: delivered by the attempt after the settled one`);
   }
+});
+
+test('unit:soak-invariants-hold — broad items are split before dispatch with bounded decomposition concurrency, child items merge, parents are delivered, and every system invariant holds', { timeout: 360_000 }, async () => {
+  clearDecompositionRuns();
+  const broadItems = [1, 2, 3];
+  const concurrency = 2;
+  const day = await simulateDay({
+    hours: 3,
+    decomposition: { broadItems, concurrency },
+    plan: {
+      items: 4,
+      releaseEveryMs: 0,
+      workMs: 10 * minute,
+      leftovers: 2,
+      rework: new Set(),
+      deaths: new Set(),
+      flaky: { rerunPasses: 0, rerunFails: 0 },
+      scoped: new Set(),
+      misread: new Set(),
+      exits: new Set(),
+      spentProducer: 0,
+      lostRuns: 0,
+      outOfQueue: { item: 4, afterMs: 99 * hour },
+      blind: { from: 99 * hour, to: 100 * hour },
+      split: { at: 99 * hour, item: 4 },
+      slowRecompute: 0,
+      blockedMerge: 0,
+    },
+  });
+  assertLaunchesConfined(day, coordinatorRoot!);
+  const { items, final, violations, failures, lost, sessions, decompositionDay } = day;
+  assert.deepEqual(violations, [], 'every system invariant holds across the decomposition runs and deliveries');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  assert.equal(decompositionDay.peakConcurrent, concurrency, 'decomposition concurrency was capped at the configured limit');
+  assert.ok(decompositionDay.starts.length >= broadItems.length, 'every broad item started decomposition');
+  assert.equal(decompositionDay.createdChildren.length, broadItems.length * 2, 'each broad item was split into two children');
+  const expectedParents = broadItems.map(n => items[n - 1].key).sort();
+  assert.deepEqual(decompositionDay.deliveredParents.sort(), expectedParents, 'every broad parent item was delivered when its children merged');
+
+  const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
+  assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}`), [], 'every item, the split parents and whole item, was delivered');
+
+  const allDelivered = (await store.list()).filter(item => item.stage === 'done');
+  const childItems = allDelivered.filter(item => item.parent);
+  assert.equal(childItems.length, broadItems.length * 2, 'all child items were delivered');
+  assert.ok(sessions.length >= broadItems.length * 2 + 1, 'sessions were opened for child items and the whole item');
+
+  const report = splitReport(await store.list());
+  assert.equal(report.length, broadItems.length, 'master status split report lists all split parents');
+  assert.ok(report.every(entry => entry.delivered && entry.children.length === 2 && entry.children.every(c => c.delivered)), 'split report shows parent and children delivered');
 });
 
 test('unit:decisions-step-bounded — at the 2026-10-03 load (90 open items, 360 recorded decisions) the decisions step stays within 10 s a cycle and reads no history whose decision ledger did not move', { timeout: 120_000 }, async () => {

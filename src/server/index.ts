@@ -19,6 +19,7 @@ import { Next, Sent, matchRoute, requestFailure, type RouteContext, type RouteMo
 import { authenticate, operatorAgentRouteGuard, operatorVisible } from './auth.js';
 import type { Credential } from './principals.js';
 import { healthRoutes } from './routes/health.js';
+import { signinClaimFromEnv, signinRoutes } from './routes/signin.js';
 import { githubRoutes } from './routes/github.js';
 import { operatorAgentRoutes } from './routes/operator-agents.js';
 import { proofGrantRoutes } from './routes/proof-grants.js';
@@ -35,11 +36,10 @@ import { actionRoutes } from './routes/actions.js';
 import { workRoutes } from './routes/work.js';
 import { interventionPolicyFromEnv, interventionRoutes } from './routes/interventions.js';
 import { staticRoutes } from './static.js';
-
 export { principalSchema, type Credential } from './principals.js';
 
 /** Routes that answer without a bearer token. */
-export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubRoutes];
+export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubRoutes, signinRoutes];
 /**
  * Every authenticated `/api/` route, in matching order. A resource adds its module here;
  * the identity-administration modules precede the operator-agent guard because they
@@ -78,9 +78,7 @@ export function assembleServices(engine: Engine, credentials: Credential[], gith
   const repository = engine.repository || github?.config.repository || process.env.GITHUB_REPOSITORY || '';
   demand(!engine.repository || !github || engine.repository.toLowerCase() === github.config.repository.toLowerCase(),
     'Engine and GitHub repositories must match');
-  // Keep mutation authorization on the same canonical repository binding used
-  // by authentication and operator-agent administration. Some embedders pass
-  // the repository only through their GitHub adapter.
+  // Mutations authorize against the same canonical binding as authentication; some embedders pass it only via GitHub.
   engine.repository = repository;
   // Reviewer identities come from deployment configuration alongside the control-plane App,
   // so a single parsed registry authorizes both policy validation and provider observation.
@@ -98,14 +96,13 @@ export function assembleServices(engine: Engine, credentials: Credential[], gith
   const configured = credentials.map(({ token, ...actor }) => actor);
   engine.principals = configured;
   const proofGrants = new ProofGrants(engine.store, configured);
-  return { engine, github, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, proofGrants, productionDelivery, agentRegistry: new AgentRegistry(engine.store), interventionPolicy: interventionPolicyFromEnv(env), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
+  return { signinClaim: signinClaimFromEnv(env, credentials), engine, github, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, proofGrants, productionDelivery, agentRegistry: new AgentRegistry(engine.store), interventionPolicy: interventionPolicyFromEnv(env), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
 }
 
 export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }, options: ServerOptions = {}) {
   const services = assembleServices(engine, credentials, github, artifacts, options);
   const unauthenticated: Principal = { id: '', role: 'reader' };
-  // The assembled services ride on the server so the process entry can announce what they
-  // decided (limit drift, build identity) without assembling them twice.
+  // The services ride on the server so the entry announces their decisions (limit drift, build) without reassembling.
   return Object.assign(createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');

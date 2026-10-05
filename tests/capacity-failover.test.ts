@@ -21,6 +21,8 @@ import { capacityRecheckMs, emptyDispatchCursor, runDispatchTick, type DispatchE
 import { approverProfile, approverRoleHealth, roleCapacity, heldRuntimeLogin, approverSessionName, buildMasterStatus, escalationProfile, escalationRoleHealth, launchEscalationHandler, type ChildRun, readApproverLaunch, readEscalationSessions, retainedEscalationSessions, saveApproverLaunch, saveEscalationSession, type EscalationSession, heldAwareProbe, inspectProfileAccounts, masterConfigSchema, NoHealthyAccountError, observedExhaustions, ownLoginAccounts, preservePartialWork, profileAccount, recordObservedExhaustion, runtimeLogin, selectAccount, selectApproverAccount, readEnvironmentLog, workerPrompt, type MasterConfig } from '../src/master.js';
 import { selectFleetSession, type FleetClient } from '../src/fleet.js';
 import { describeCapacity, detectExhaustion, detectRetryingExhaustion, parseResetTime } from '../src/model/capacity.js';
+import { detectRuntimeExhaustion } from '../src/master/environments.js';
+import { outputReadDue, workingOutputReadMs } from '../src/daemon/cycle-sessions.js';
 import type { EscalationContext } from '../src/model/escalation-context.js';
 import { answerCommand, humanRequestBlocker, openHumanRequests } from '../src/model/human-request.js';
 import type { Observation, Principal, Work } from '../src/model.js';
@@ -693,6 +695,40 @@ test('unit:opencode-limit-exhausted-banner-detected — OpenCode 1.18\'s "Limit 
   }
 });
 
+test('unit:opencode-banner-stopped-path-detected — a stopped OpenCode session on its padded "Limit Exhausted" banner is its provider\'s notice; another runtime\'s catalog does not read it (GY-1223)', () => {
+  const now = Date.parse('2026-09-30T05:00:00Z');
+  const expected = new Date(2026, 9, 3, 8, 27, 35).toISOString();
+  // Padded out to the terminal width: the line runs past exhaustionNoticeMaxLength until the padding collapses.
+  const padded = `■⬝⬝⬝⬝⬝⬝⬝ Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-10-03 08:27:35${' '.repeat(240)}esc interrupt • OpenCode 1.18.32`;
+  for (const screen of [`┃ Edited src/model/capacity.ts\n\n${padded}\n`, `┃ Edited src/model/capacity.ts\n\n${opencodeBanner('2026-10-03 08:27:35')}\n`]) {
+    const read = detectRuntimeExhaustion(screen, 'opencode', now);
+    assert.ok(read, 'the stopped OpenCode session is failed over');
+    assert.equal(read.resetsAt, expected);
+    assert.match(read.reason, /^Weekly\/Monthly Limit Exhausted\. Your limit will reset at 2026-10-03 08:27:35/);
+    assert.equal(detectRuntimeExhaustion(screen, 'claude', now), null, 'the banner is OpenCode\'s, not Claude\'s');
+  }
+  // Padding is collapsed for every runtime: a padded Claude notice is read too.
+  assert.ok(detectRuntimeExhaustion(`You've hit your weekly limit${' '.repeat(260)}· resets Oct 3, 8am`, 'claude', now));
+  for (const summary of ['Tests pass; the weekly limit exhausted branch is covered.', 'Handled the case where the Weekly/Monthly Limit Exhausted banner is on screen']) {
+    assert.equal(detectRuntimeExhaustion(`● ${summary}`, 'opencode', now), null, summary);
+  }
+});
+
+test('unit:working-session-output-read-throttled — a working session\'s screen is read at most once per workingOutputReadMs; a stopped one every cycle; a new pane at once (GY-1223)', () => {
+  const state = {}, t0 = Date.parse('2026-09-30T05:00:00Z');
+  const working = { name: 'agent-a', pane_id: 'pane-a', agent_status: 'working' }, other = { name: 'agent-b', pane_id: 'pane-b', agent_status: 'working' };
+  const agents = [working, other];
+  assert.equal(outputReadDue(state, agents, working, false, t0), true, 'the first reading is due');
+  assert.equal(outputReadDue(state, agents, working, false, t0 + 20_000), false, 'a working pane read 20s ago waits');
+  assert.equal(outputReadDue(state, agents, other, false, t0 + 20_000), true, 'each pane keeps its own time');
+  assert.equal(outputReadDue(state, agents, working, true, t0 + 20_000), true, 'a stopped session is read every cycle');
+  assert.equal(outputReadDue(state, agents, working, false, t0 + workingOutputReadMs), true, 'due again once the interval has passed');
+  assert.equal(outputReadDue({}, agents, working, false, t0 + workingOutputReadMs), true, 'another loop state keeps its own times');
+  // A pane gone from the listing is forgotten; listed again (a relaunch reusing it), it is read at once.
+  assert.equal(outputReadDue(state, [other], other, false, t0 + 20_000 + workingOutputReadMs), true);
+  assert.equal(outputReadDue(state, agents, working, false, t0 + workingOutputReadMs + 21_000), true, 'pane-a was read 21s ago, but it left the listing in between');
+});
+
 test('unit:retrying-session-fails-over-while-working — a worker, producer, reviewer or approver session Herdr reports working, whose runtime retries on a limit banner, is failed over: the account is held until the reset, partial work is kept, and the next launch takes the next account; a working session with no banner is left alone', async () => {
   await fresh();
   // A home of its own: an account an earlier test held is not this test's to inherit.
@@ -718,8 +754,9 @@ test('unit:retrying-session-fails-over-while-working — a worker, producer, rev
   await writeFile(join(worktree, 'README.md'), 'base\nhalf-finished change\n');
   herdr.output['agent-builder'] = '● Update(src/model/capacity.ts)\n  ⎿ Added 12 lines\n';
   clock.skewMs += 20_000; await cycle(state);
+  // A working pane is read at most once per workingOutputReadMs (GY-1223), so each screen below stands that long.
   herdr.output['agent-builder'] = '● Weekly usage limit reached is now a notice\n';
-  clock.skewMs += 20_000; await cycle(state);
+  clock.skewMs += workingOutputReadMs; await cycle(state);
   assert.equal(kinds(state, 'failover').length, 0, 'a working session without a retry banner is never failed over');
   assert.equal((await reload(work.id)).lease?.epoch, 1);
 
@@ -727,7 +764,7 @@ test('unit:retrying-session-fails-over-while-working — a worker, producer, rev
   const reset = new Date(Math.ceil(Date.now() / 1000) * 1000 + 3 * 86_400_000), resetsAt = reset.toISOString();
   herdr.output['agent-builder'] = `┃ Reading src/model/capacity.ts\n\n${opencodeBanner(hostWallClock(reset))}\n`;
   assert.equal(herdr.agents[0].agent_status, 'working');
-  clock.skewMs += 20_000; await cycle(state);
+  clock.skewMs += workingOutputReadMs; await cycle(state);
   const failover = state.actions[failoverKey('worker', work, 1)];
   assert.equal(failover.state, 'done', failover.detail);
   assert.match(failover.detail, /exhausted env-a mid-session \(Weekly\/Monthly Limit Exhausted/);

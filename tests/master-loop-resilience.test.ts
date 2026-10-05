@@ -125,7 +125,7 @@ test('integration:producer-session-retry — a failed or expired producer sessio
   const { root, credentials, token, cleanup } = await installed();
   try {
     const credential = await token('producer');
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential }, producerVerify('proof-runner'));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, concurrency: 1 }, producerVerify('proof-runner'));
     const config = await loadMasterConfig(root);
     const item = requested();
     const request = item.autoDispatch!.producers.find(entry => entry.group === 'integration')!;
@@ -569,7 +569,7 @@ test('unit:autonomous-session-prompts — reviewer, producer and worker sessions
   const { root, token, cleanup } = await installed({ reviewer: true });
   try {
     const credential = await token('producer');
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential }, producerVerify('proof-runner'));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, concurrency: 1 }, producerVerify('proof-runner'));
     const master = await loadMasterConfig(root);
     const item = requested();
     await launchProducer(root, item, item.autoDispatch!.producers[0], master.producers[0], [], new Date().toISOString(), { run: herdr([]) });

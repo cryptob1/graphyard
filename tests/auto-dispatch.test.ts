@@ -574,7 +574,7 @@ test('integration:instant-exit-classified — a session Herdr cannot find second
     written.environments = ['env-a', 'env-b'].map(name => ({ name, kind: 'claude', home: join(homes, name) }));
     await writeFile(file, JSON.stringify(written), { mode: 0o600 });
     const credential = join(credentialDirectory, 'producer.token'); await writeFile(credential, 'producer-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, accounts: ['env-a', 'env-b'] }, async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] } }));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, accounts: ['env-a', 'env-b'], concurrency: 1 }, async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] } }));
     const config = await loadMasterConfig(root);
     // The control plane no longer requests producers (GitHub delivery); a producer request standing on the
     // record is still what the launcher answers, and it is the launch whose instant exit is classified here.

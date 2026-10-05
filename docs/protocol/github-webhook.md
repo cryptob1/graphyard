@@ -13,7 +13,9 @@ A base push wakes only open items whose files overlap it or whose last `mergeabl
 
 ## Prioritized wakes
 
-`POST /api/work/:id/resync` with `prioritized: true` is claimed like a webhook wake. A rework decision waiting on a stale observation sends one such wake and decides from its observation while under 15 minutes old.
+`POST /api/work/:id/resync` with `prioritized: true` is claimed like a webhook wake. A rework decision waiting on a stale observation sends one such wake and decides from the observation it brought in, whatever its age, provided it reads the candidate head and no GitHub pause stands; a decision the candidate moved past is withdrawn. Loop bookkeeping saved meanwhile (sessions, next action, gates, escalations) does not refuse that observation. The loop's wakes add `wait: false`, so the route answers without waiting for a reconcile tick. A rework dispatch refused because its PR branch moved (`Submitted PR branch changed`) releases its claim with a prioritized wake, so the next dispatch starts from the new head.
+
+The loop's decisions step has a budget: two fifths of `run.intervalSeconds`, at least 30 s. Items not reached keep their standing decisions but make no request that cycle; `decisions:deferred` names them (and is superseded once a cycle reaches every item). Both of the step's passes, rework and routine decisions then attestations, start the next cycle with what they put off and always reach their first item, so the oldest deferred item is requested even past the budget.
 
 ## Automatic dispatch records
 

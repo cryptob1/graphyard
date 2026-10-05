@@ -28,6 +28,7 @@ import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeD
 import { mergedScopeRequest, plannedFilesCovered, widenedPlannedFiles } from './model/scope-collapse.js';
 import { configuredDocumentation, documentationObligation, recordDocumentationSubmission, type DocumentationPolicy } from './model/documentation.js';
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
+import { submittedBranchMoved } from './model/assignment.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
 import { nextAction, nextActionKinds, sameAction } from './model/next-action.js';
 import { recordScenarioRun } from './test-runs.js';
@@ -43,6 +44,7 @@ import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordInt
 import { dispatchFailureBlockAfter } from './daemon/dispatch-failures.js';
 import { foldDecisions, type Decision } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
+import { deliverSplitParent, splitChildRevisionRefusal } from './decomposition.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
 import { coordinationProjection, isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type SavedVersion } from './store/locked-read.js';
 
@@ -74,7 +76,7 @@ export const containmentScopeSchema = z.object({ unit: z.string().trim().min(1).
 const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional() }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
-  requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs,
+  requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs, split: createSchema.shape.split,
     answers: z.object({ epoch: z.number().int().positive(), at: z.string().datetime(), sha: z.string().regex(/^[0-9a-f]{40}$/).nullable().optional() }).strict().optional() }).strict(),
   reviewpolicy: z.object({ provider: z.enum(reviewProviders), reviewerProfiles: z.array(reviewerProfileSchema).min(1).max(10).optional(), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
@@ -181,7 +183,7 @@ const actionSettleSchema = z.object({ executor: executorName.optional(), result:
 const actionRenewSchema = z.object({ executor: executorName.optional(), leaseSeconds: z.number().int().min(10).max(900).optional() }).strict();
 // A resync names the instant its claim was made, so the answer says whether an observation saved
 // since then satisfies it; `wake: false` only reads, for an executor waiting on the job it woke.
-const resyncSchema = z.object({ since: z.string().datetime({ offset: true }).optional(), wake: z.boolean().optional(), prioritized: z.boolean().optional() }).strict();
+const resyncSchema = z.object({ since: z.string().datetime({ offset: true }).optional(), wake: z.boolean().optional(), prioritized: z.boolean().optional(), wait: z.boolean().optional() }).strict();
 const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.string().min(1).max(200).optional() }).strict();
 /** The refusal a replay of one idempotency key with different input earns; read back by the pull. */
 export const idempotencyMismatch = 'Idempotency key reused with different input';
@@ -317,6 +319,18 @@ export function sameBesideActions(read: Work, current: Work): boolean {
   const rest = ({ actionQueue: _queue, revision: _revision, updatedAt: _updated, ...others }: Work) => stableJson(others);
   return rest(read) === rest(current);
 }
+/**
+ * Whether two readings of one item differ only in the loop's own bookkeeping (GY-1257): the action
+ * queue (`sameBesideActions`), plus what each save re-derives or the loop records about the item
+ * rather than the submitted work — its next action, gates and the lane they stamp, the sessions it
+ * reports, and the escalations it raises for attention. None of it is what a GitHub observation
+ * reads, and the observation's own save re-evaluates the gates, so it never stands on a stale one.
+ */
+export function sameBesideBookkeeping(read: Work, current: Work): boolean {
+  const rest = ({ actionQueue: _queue, revision: _revision, updatedAt: _updated, nextAction: _next, gates: _gates, lane: _lane, speedTarget: _target,
+    sessions: _sessions, escalation: _escalation, escalations: _escalations, ...others }: Work) => stableJson(others);
+  return rest(read) === rest(current);
+}
 /** How many saves behind a reader may be and still have its read resolved from the ledger. */
 export const actionOnlyLookback = 20;
 /**
@@ -324,11 +338,11 @@ export const actionOnlyLookback = 20;
  * ledger — differs from `work` only in action-queue bookkeeping. A writer that read the item at
  * that revision may then still write: what it read is what it would read now.
  */
-async function onlyActionsMovedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number): Promise<boolean> {
+async function onlyActionsMovedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number, same = sameBesideActions): Promise<boolean> {
   const behind = work.revision - revision;
   if (!Number.isInteger(behind) || behind <= 0 || behind > actionOnlyLookback) return false;
   const read = (await db.query(`SELECT ${eventWorkSql('saved')} AS work FROM (SELECT work_id, payload FROM events WHERE work_id=$1 AND (payload ? 'work' OR payload ? 'delta') ORDER BY seq DESC OFFSET $2 LIMIT 1) saved`, [work.id, behind])).rows[0]?.work as Work | undefined;
-  return !!read && read.revision === revision && sameBesideActions(read, work);
+  return !!read && read.revision === revision && same(read, work);
 }
 
 /**
@@ -1000,6 +1014,7 @@ export class Engine {
         work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
       }
       if (command === 'requirements') {
+        demand(!work.children?.length, `${work.key} was split into child items; revise the child items directly rather than the parent`);
         if (actor.role !== 'operator-agent') admin(actor);
         const flag = flagPathRefusal(data.plannedFiles, 'plannedFiles'); demand(!flag, flag!, 422);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
@@ -1028,6 +1043,11 @@ export class Engine {
           if (data.answers.sha !== undefined) demand((work.candidate?.sha ?? null) === data.answers.sha, `The findings this widening rests on were read for ${data.answers.sha?.slice(0, 12) ?? 'no head'}, which is no longer the item's head`);
         }
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
+        if (work.parent) {
+          const parent: Work | undefined = (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [work.parent])).rows[0]?.document;
+          const refusal = parent ? splitChildRevisionRefusal(work, parent, data.criteria) : null;
+          demand(!refusal, refusal!);
+        }
         if (actor.role === 'operator-agent') {
           demand(work.criteria.every(previous => data.criteria.some((next: typeof previous) => next.id === previous.id && next.text === previous.text && JSON.stringify(next.proofs) === JSON.stringify(previous.proofs))), 'Operator agents may add requirements but cannot weaken or rewrite existing criteria');
           demand(work.dependencies.every(dependency => data.dependencies.includes(dependency)), 'Operator agents cannot remove dependencies');
@@ -1060,6 +1080,8 @@ export class Engine {
         work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
         work.criteria = revised;
         work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources; work.producerProofs = data.producerProofs;
+        // Opting in or out of splitting before first dispatch (GY-1126); a revision that omits it keeps the item's setting.
+        if (data.split !== undefined) work.split = data.split;
         work.scenarioRequirements = pins; work.policyRevision++;
         this.refuseRenewedDeferral(work, all);
         work.proofGaps = await unauthorizedProofs(db, this.principals, [...proofs, ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])], work.producerProofs);
@@ -1158,6 +1180,7 @@ export class Engine {
       }
       if (command === 'claim') {
         demand(actor.role === 'worker' || actor.role === 'admin', 'Worker permission required', 403);
+        demand(!work.children?.length, `${work.key} was split into ${work.children?.join(', ')} before dispatch; it is delivered when they are and is never claimed directly`);
         demand(work.ready && !work.blocker, 'Task is not ready or has a blocker');
         demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}`);
         demand(work.dependencies.every(dep => all.find(w => w.id === dep)?.stage === 'done'), 'Unfinished dependencies');
@@ -1239,6 +1262,9 @@ export class Engine {
         const untouched = open && work.lease && Date.parse(work.lease.expiresAt) === Date.parse(open.claimedAt) + this.leaseSeconds * 1000
           && work.containmentQuarantine?.epoch !== data.epoch && work.submission?.epoch !== data.epoch ? open : undefined;
         if (data.failure) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'workspace.failed', JSON.stringify({ details: { epoch: data.epoch, message: data.failure.message, at: now.toISOString() } })]);
+        // GY-1286: a rework workspace refused because the PR branch moved past the observed head can
+        // only be built once that head is observed, so the release wakes the observation, prioritized.
+        if (data.failure?.message.startsWith(submittedBranchMoved) && work.submission) await wakeJob(db, work.id, true);
         if (untouched && work.epoch === data.epoch) {
           timeline.attempts.splice(timeline.attempts.indexOf(untouched), 1);
           work.workspaces = work.workspaces.filter(w => w.epoch !== data.epoch);
@@ -1749,7 +1775,10 @@ export class Engine {
     // batches, the contention GY-1115 removed (GY-1212). A failed tick is a server fault, not this item's:
     // every resync waiting on it would share the rejection, so the resync logs it and answers with the
     // item as it stands, whose `changed`, `observed` and `job` say what the attempt achieved (GY-1212).
-    if (wake) await this.reconcile().catch(error => { console.warn(`reconciliation tick failed during the resync of ${before!.key}: ${error instanceof Error ? error.message : String(error)}`); });
+    // `wait: false` is a wake alone (GY-1286): the master loop reads the observation it woke on its
+    // next cycle, so it waits on no tick; waiting held its decisions step up to the request's 30s
+    // timeout per wake, one wake after another.
+    if (wake && data.wait !== false) await this.reconcile().catch(error => { console.warn(`reconciliation tick failed during the resync of ${before!.key}: ${error instanceof Error ? error.message : String(error)}`); });
     const work = (await this.store.list()).find(item => item.id === before!.id)!;
     // Without `since`, the claim of the item's own `resync` row is the instant a reading must beat.
     const since = data.since ?? work.actionQueue?.actions.find(row => row.kind === 'resync' && row.state === 'claimed')?.claim?.claimedAt ?? null;
@@ -2625,7 +2654,8 @@ export class Engine {
    * action-queue bookkeeping (`onlyActionsMovedSince`): an executor claiming or settling the item's
    * `resync` row saves the item, and refusing the observation over that write discarded the very
    * reading the row was waiting for, so the item stayed stale and the row was claimed again,
-   * forever (GY-607).
+   * forever (GY-607). The loop's own bookkeeping counts the same way (`sameBesideBookkeeping`,
+   * GY-1257): its per-cycle writes refused the very observation it had woken for a rework decision.
    */
   async observe(id: string, expectedRevision: number, observation: Observation, jobToken?: string) {
     return this.store.transaction(async (db, now) => {
@@ -2642,7 +2672,7 @@ export class Engine {
       }
       const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id);
-      requireCurrent(work && (work.revision === expectedRevision || await onlyActionsMovedSince(db, work, expectedRevision)), 'Task changed while GitHub was being observed; retry');
+      requireCurrent(work && (work.revision === expectedRevision || await onlyActionsMovedSince(db, work, expectedRevision, sameBesideBookkeeping)), 'Task changed while GitHub was being observed; retry');
       demand(work.submission?.pr === observation.candidate.pr, 'Unassigned pull request');
       demand(work.workspaces.some(w => w.epoch === work.submission!.epoch && w.branch === observation.candidate.branch), 'PR branch does not match the assigned workspace');
       if (work.stage === 'done') return work;
@@ -2805,6 +2835,8 @@ export class Engine {
           // Delivered in this transaction: what it still owes is recomputed now, its leftover rows
           // retired and its queue entry cleared, so nothing retries against the delivery (GY-185).
           settleDelivered(work, all, now);
+          // The last child of a split parent delivers the parent in the same transaction (GY-1126).
+          await deliverSplitParent(db, work, all, now);
           // The queue shifted. The entries that can land next (the head and its batch) are woken now; the rest are observed on
           // their own schedule and re-predict their base when they near the head.
           for (const behind of nextQueueEntries(all, work.id, Math.max(mergeBandQueueDepth, this.mergeBatchSize, this.parallelTips))) await wakeJob(db, behind.id);

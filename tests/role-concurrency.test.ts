@@ -10,7 +10,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { buildMasterStatus, concurrencyAttention, concurrencyStarvedMs, isProfileSession, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, profileAtLimit, profileConcurrency, profileSessions, reviewerProfileSchema, roleConcurrency, sessionAgentName, sessionNameLimit, setupMaster, saveProducerProfile, type HerdrAgent, type MasterConfig } from '../src/master.js';
+import { automaticProducerConcurrency, buildMasterStatus, concurrencyAttention, concurrencyStarvedMs, isProfileSession, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, profileAtLimit, profileConcurrency, profileSessions, reviewerProfileSchema, roleConcurrency, sessionAgentName, sessionNameLimit, setupMaster, saveProducerProfile, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
 import { launchProducer, reconcileProducers, summarizeProducers } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';

@@ -20,7 +20,7 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 ### Providers
 
 - `railway`: `npm i -g @railway/cli`, `railway login`.
-- `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--domain`, `--ssh-key NAME`. A coordinator producing `manual:host-install-live` or a Hetzner `manual:…install…-live` proof needs `HCLOUD_TOKEN` and `HETZNER_SPEND_CAP_USD_MONTHLY` in repo-root `.env` (`0600`, uncommitted), else launch is refused; optional `HETZNER_SSH_KEY` names a registered key (else a throwaway one).
+- `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--ssh-key NAME`, optional `--domain` (else Caddy certifies `<ip>.sslip.io`). A coordinator producing `manual:host-install-live` or a Hetzner `manual:…install…-live` proof needs `HCLOUD_TOKEN` and `HETZNER_SPEND_CAP_USD_MONTHLY` in repo-root `.env` (`0600`, uncommitted), else launch is refused; optional `HETZNER_SSH_KEY` names a registered key (else a throwaway one).
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; `--ssh-host`, `--domain`.
 - `compose`: `curl -fsSL https://get.docker.com | sh`; local evaluation only.
 
@@ -52,6 +52,16 @@ Human installs the App at the printed `http://127.0.0.1:4311`; **Verify** *App r
 
 Dispatch a [small item](onboarding.md#4-prove-the-first-pr); once `Graphyard / merge` appears, rerun `--apply` to require it and `graphyard/landable`. **Verify** both are required on the base branch; `--apply` is idempotent.
 
+## Self-contained host
+
+`--target host --ssh-host HOST` (or `--target hetzner`) runs server, Postgres, loop, executors, Herdr and the agent runtimes on one systemd machine, credentials `0600` in `~graphyard/.config/graphyard/<install>/`; without `--domain` a public IPv4 is served as `<ip>.sslip.io` (a private or `--local` address needs `--domain`); bootstrap installs gh and bubblewrap and checks its namespaces as `graphyard`. When the release image cannot be pulled, the host builds it from its Graphyard checkout at the installer's commit. Workers push and open pull requests as the App: git's credential helper and the `gh` wrapper mint one-hour tokens scoped to the repository from the App key in `<install>/github/`, so nobody logs into the host. Sign in with the printed link, then connect each runtime's account in Settings › Agents (Pi: **Pi (z.ai key)**). A re-apply that cannot read the host's credentials refuses rather than rotating them.
+
+**Sizing:** 3 GB per concurrent agent, 2 GB per verification slot, 2 GB base, max(10%, 4 GB) spare; confirmed with `--confirm-price` / `--max-monthly`.
+
+**GitHub App:** an App already saved for the repository (`--github-app FILE`, this install's, or the checkout's `.graphyard/github-app.json`) is reused once it mints a token, so one command reaches a running fleet; a webhook still serving another live installation stays there until `--migrate`. Only a first App registration is a human browser click.
+
+**Moving:** `--migrate` stops the old loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; a failure before cutover releases the fence. Local logins move, others reconnect.
+
 ## Upgrading an existing installation
 
 [Back up, deploy](deployment.md#backup-upgrade-rollback); beside `.graphyard/github-app.json` run `node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600` until `doctor` shows `appPermissions.missing` empty. `--apply` fixes `delegationLimits` drift (`Set GRAPHYARD_MAX_REVIEWERS=N`) and declares undeclared principals' `sessionKind`.
@@ -74,6 +84,6 @@ Dispatch a [small item](onboarding.md#4-prove-the-first-pr); once `Graphyard / m
 
 Run steps 1–5, report verifications; never weaken a gate.
 
-## Manual fallback for unsupported platforms
+## Manual fallback (unsupported platforms)
 
 See [deployment](deployment.md#manual-fallback).
