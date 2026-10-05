@@ -68,6 +68,6 @@ A passing producer records `"exercise"`: rerun without the criterion's behaviour
 
 ## GitHub merges
 
-A candidate whose build, review and required checks pass on its head is GitHub's to merge; its merged observation is the delivery ([one delivery path](delivery.md#one-delivery-path)). The loop's merge step only reconciles merged items, and `master merge` says so. Merging a head whose gates had not passed is held as a violation until a two-party `master decide GY-N merge` reconciles it. Protocol skew shows in `master status` (`… deploy main first`).
+GitHub merges a candidate whose build, review and required checks pass on its head; that merge is the delivery ([one delivery path](delivery.md#one-delivery-path)). The loop only reconciles merges, as `master merge` says. A merge of a failing head is a violation until a two-party `master decide GY-N merge` reconciles it. Protocol skew shows in `master status` (`… deploy main first`).
 
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); approvals list each under `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).

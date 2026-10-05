@@ -60,7 +60,7 @@ About ten requests uncached; unchanged, none.
 
 ### What a pause means for gates
 
-A rate-limit `403`/`429` pause stops requests; gates read stale until it lifts. GitHub keeps merging on its branch protection, and the merge is recorded once requests resume ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
+A rate-limit `403`/`429` pause stops requests; gates read the last observation until it lifts. GitHub keeps merging on its branch protection, and the merge is recorded once requests resume ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
 
 ### Reading the budget
 
