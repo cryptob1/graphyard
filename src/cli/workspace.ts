@@ -210,7 +210,9 @@ export const workspaceCommands = defineCommands([
     help: ['  worktree GY-N EPOCH [BASE]    Reserve and create a local isolated worktree; an earlier attempt\'s hold on the branch is preserved and released'],
     async run(context, work) {
       const { args, api, print } = context;
-      const mutate = workMutation(context, work);
+      // GY-1059: under GRAPHYARD_REQUEST_ID each write keys off it by name, so the failure release never replays the reservation.
+      const request = process.env.GRAPHYARD_REQUEST_ID;
+      const mutate = (name: string, data: unknown) => api(`work/${work.id}/${name}`, data, request && name !== 'heartbeat' ? `${request}:worktree-${name}` : randomUUID());
       const epoch = Number(args[0]); const root = context.repositoryRoot();
       const status = await api('status');
       assertRepository((await discover(root)).repository, status.repository);
@@ -228,22 +230,20 @@ export const workspaceCommands = defineCommands([
       // GY-860: an earlier attempt's hold is recorded with the reservation and released; the branch never moves.
       const now = Date.parse(status.now ?? '') || Date.now();
       const released = await reserveReleasingHold(root, branch, path, runChild, mutate, epoch, context.individualHostId(), work, now);
-      await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
       const exists = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`]).status === 0;
-      // GY-1078: a mid-am or mid-bisect session worktree the release leaves is reclaimed; failures carry git's stderr.
+      // GY-1078: a mid-bisect session worktree the release leaves is reclaimed; failures carry git's stderr.
       let reclaimed: ReclaimedHolder[] = [];
       try {
+        // A full or read-only volume is the host's failure too (GY-1059), so it costs no attempt.
+        await mkdir(resolve(root, '.graphyard/worktrees'), { recursive: true });
         if (exists) reclaimed = reclaimBranchHolders(root, branch, path, work, now, { checkouts: !!work.submission });
         for (const entry of reclaimed) console.error(`Reclaimed ${entry.path}, which held ${branch}${entry.epoch !== null ? ` for ${entry.key} epoch ${entry.epoch}` : ''}: ${entry.action}`);
         if (!released?.reused) gitOrThrow(exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, startPoint]);
         if (work.submission) gitOrThrow(['-C', path, 'reset', '--hard', startPoint]);
       }
       catch (error) { await workspaceFailure(mutate, epoch, error); } // GY-860: the host failed, not the attempt
-      // A checkout whose lockfile the reachable install does not match gets its own install now,
-      // so the session never starts on the wrong dependency versions. The lease is kept alive
-      // while npm runs; the session's supervisor takes over heartbeats once it starts. A refused
-      // heartbeat means this epoch is no longer held: npm is stopped there and the command fails
-      // rather than reporting a worktree ready for work nobody may do.
+      // A checkout whose lockfile the reachable install does not match gets its own install, under heartbeats
+      // until the session's supervisor takes over; a refused heartbeat stops npm and fails the command.
       const dependencies = await installUnderLease(path, () => mutate('heartbeat', { epoch }), `${work.key} epoch ${epoch}`);
       return print({ path, branch, epoch, dependencies, ...(reclaimed.length ? { reclaimed } : {}) });
     },
@@ -251,10 +251,10 @@ export const workspaceCommands = defineCommands([
   {
     name: 'watch',
     help: ['  watch GY-N EPOCH -- COMMAND   Run a worker, heartbeat, stop on lease loss'],
-    // Not work-scoped (GY-1033): the setup line comes from argv before any control-plane call, even the item lookup.
+    // Not work-scoped (GY-1033): the setup line comes from argv before any control-plane call, even the item lookup, once the epoch is checked (GY-1184).
     async run(context) {
       const { id, args, api, base } = context; const epoch = Number(args[0]); const separator = args.indexOf('--');
-      if (!id || separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
+      if (!id || !Number.isSafeInteger(epoch) || epoch <= 0 || separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
       console.error(setupLine(id, epoch));
       const work = (await api('work')).find((w: any) => w.id === id || w.key === id); if (!work) throw new Error(`Unknown work item ${id}`);
       const workspace = work.workspaces.find((w: any) => w.epoch === epoch); const hostId = context.individualHostId();

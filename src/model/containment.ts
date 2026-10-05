@@ -1,5 +1,7 @@
 import type { Work } from '../model.js';
 
+/* Must equal src/quarantine.ts containmentGraceMs (settlement and status); kept here because the browser
+   bundle cannot load quarantine.ts's node-only imports. tests/containment-followups.test.ts pins them equal (GY-1179). */
 export const containmentGraceMs = 120_000;
 
 export type ContainmentPhase =
