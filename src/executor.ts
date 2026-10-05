@@ -395,7 +395,14 @@ export function releaseGuardedEffects(effects: ExecutorEffects, guard: ReleaseGu
       await guard.claiming?.();
       let claimed: Awaited<ReturnType<ExecutorEffects['claim']>>;
       try {
-        if (await guard.fenced?.()) { await guard.abandoned?.(); return { action: null, open: 0 }; }
+        if (await guard.fenced?.()) {
+          await guard.abandoned?.();
+          // Fenced, not gone (GY-1288): the claim it may not make is still its presence, or a restart
+          // that outlasts the liveness window reads as a dead fleet. A control plane that predates the
+          // presence poll refuses it, which changes nothing about the claim this executor skips.
+          await effects.present?.(request).catch(() => {});
+          return { action: null, open: 0 };
+        }
         claimed = await effects.claim(request);
       } catch (error) { await guard.abandoned?.(); throw error; }
       if (claimed.action) await guard.claimed?.(claimed.action); else await guard.abandoned?.();

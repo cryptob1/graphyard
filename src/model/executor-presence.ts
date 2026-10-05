@@ -35,6 +35,17 @@ import type { Work } from './work.js';
  * it (`loopPresenceHeader`), so a live loop is live however long it has had nothing to merge
  * (`LoopRegistry`). Until this process has seen one such read (a restart, another replica), the
  * merge requests its ledger holds from the loop's `daemon-` instance stand in (`ledgerLoopMerger`).
+ *
+ * Presence is heard from every executor that is alive, not only from one asking for a row (GY-1288).
+ * A claim poll is the usual signal, but a live executor goes minutes without one in two ordinary
+ * states: inside a long handler, where it renews its claim instead, and behind a fleet restart's
+ * fence (`restartExecutors`), which forbids every claim on the host for up to the restart's whole
+ * wait. A renewal therefore refreshes the renewing executor, and a fenced executor sends a
+ * presence-only poll (`POST /api/actions/presence`) in place of the claim it may not make. Without
+ * both, the loop's own self-upgrade restart read as a dead fleet: on 5 October 2026 one restart
+ * filed GY-1287 (dispatch), GY-1286 (approve-scope) and GY-1238 (request-review) as three
+ * configuration faults at one instant, each naming a start command for executors that were running.
+ * An executor that stands down on a moved checkout sends nothing: it really claims nothing more.
  */
 
 export interface ExecutorPresence { executor: string; host: string; principal: string; kinds: NextActionKind[]; seenAt: string; claims: number }
@@ -131,6 +142,16 @@ export class ExecutorRegistry {
     const previous = this.seen.get(key);
     this.seen.set(key, { executor: poll.executor, host: poll.host, principal: poll.principal, kinds: [...poll.kinds], seenAt: now.toISOString(), claims: (previous?.claims ?? 0) + (claimed ? 1 : 0) });
     if (this.seen.size > retainedExecutors) for (const [stale, entry] of this.seen) { if (this.seen.size <= retainedExecutors) break; if (now.getTime() - Date.parse(entry.seenAt) > executorLiveMs) this.seen.delete(stale); }
+  }
+  /**
+   * A renewal of a claim it holds (GY-1288): the executor is alive inside a handler and polls
+   * nothing until the handler ends, which a dispatch waiting on a runtime can take minutes to do.
+   * A known executor keeps the kinds it last polled with; one this process has not heard poll (a
+   * restarted control plane) is known by the kind it is demonstrably running.
+   */
+  renewed(renewal: { executor: string; host: string; principal: string; kind: NextActionKind }, now: Date) {
+    const previous = this.seen.get(`${renewal.principal}\0${renewal.executor}`);
+    this.observe({ executor: renewal.executor, host: previous?.host ?? renewal.host, principal: renewal.principal, kinds: previous?.kinds ?? [renewal.kind] }, now);
   }
   /** Every executor that polled inside the liveness window, most recently seen first. */
   live(now: Date, liveMs = executorLiveMs): ExecutorPresence[] {

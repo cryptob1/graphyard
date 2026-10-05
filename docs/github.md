@@ -3,7 +3,7 @@
 
 ## App permissions
 
-The control-plane App holds (`src/github-permissions.ts`):
+Control-plane App (`src/github-permissions.ts`):
 
 | Permission | Access | Needed to |
 | --- | --- | --- |
@@ -25,46 +25,38 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
-`graphyard master reviewer setup` creates it (Pull requests write, reads otherwise). Review tokens last one hour; `SLUG[bot]` approving the head satisfies both. Grants recheck every five minutes and 403s; a shortfall (`appPermissions`) holds jobs **not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept` fixes it.
+`graphyard master reviewer setup` creates it (Pull requests write, reads otherwise); review tokens last one hour; `SLUG[bot]` approving the head satisfies both. Shortfalls (`appPermissions`) hold jobs, **not retried** (`integration-held`), until `master browser app-permissions` or `master browser installation-accept`.
 
 ## Workflow base syncs
 
-Worker tokens carry `contents`, `pull_requests` and `workflows` write ([push credential](protocol/leases.md#push-credential)), so a base sync with the base's workflow changes pushes plainly. If GitHub refuses it, `sync GY-N --push-via-control-plane COMMIT` has the control plane push COMMIT when it fast-forwards the branch, merges `origin/BASE` and keeps that base's workflow files (plannedFiles aside), else names differing paths; history records `sync.workflow-push` (worker, epoch).
+Worker tokens carry `contents`, `pull_requests` and `workflows` write ([push credential](protocol/leases.md#push-credential)). If GitHub refuses a base sync, `sync GY-N --push-via-control-plane COMMIT` has the control plane push (`POST /api/work/:id/sync-push`) a COMMIT that fast-forwards the branch and merges `origin/BASE` (`sync.workflow-push`).
 
 ## Require the check
 
-Require `Graphyard / merge` and `graphyard/landable` ([landability](coordination.md)) from this App on the base branch: `strict` **off**, admin-enforced, no force pushes or deletion; `master protection --apply` and `master browser protection` reconcile both, ruleset included.
-
-The gate requires `GITHUB_CI_APP_IDS` and protection-required checks, current-head approval and a mergeable non-draft PR; GitHub merges a head that passes them ([one delivery path](delivery.md#one-delivery-path)).
+Require `Graphyard / merge` and `graphyard/landable` ([landability](coordination.md)) from the control-plane App on base: `strict` **off**, admin-enforced, no force push or deletion (`master protection --apply`, `master browser protection` reconcile). Needs: green `GITHUB_CI_APP_IDS` and protection-required checks, current-head approval, mergeable non-draft PR; GitHub merges a head that passes them ([one delivery path](delivery.md#one-delivery-path)) and only those; restrict other merge identities (lease-less workers still push).
 
 ## Merge queue
 
-A failed required check reruns once on the unchanged head (its newest configured-CI-App run) before rework or ejection; an owed rerun lapses after 15 runless minutes; an accepted one is read from its workflow run: queued or in progress is a runner-queue wait (no new head owed), one not found is requested once more; lacking Actions: write, preflight diagnoses it and rerun requests hold.
+A failed required check failing only tests (`graphyard-failed-tests:`) its old base broke and the tip fixed refreshes onto the tip (`baseBreak`), not rework; a rework awaiting fresh observation wakes it first.
 
-Once gated, the candidate's speculative tip, pushed onto the candidate branch once and `refs/graphyard/queue/KEY`, binds every check, review and proof; a failed check, requested changes, revoked proof, conflict or rework ejects it back, one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves; one ejected for a failed check re-enters in place once that check's newest run on that tip passes and no other required check fails (`queue.ejection-lifted`). It passes the check for an authorized head and merge group, then merges through GitHub; protection decides; withdrawal dequeues; queueless `CLEAN`, `UNSTABLE`, `HAS_HOOKS` PRs merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled` naming GitHub's blocker.
+Once gated, a speculative tip pushed onto the candidate branch once and `refs/graphyard/queue/KEY` binds every check, review and proof; failure, requested changes, revoked proof, conflict or rework ejects it; one conflicting only with entries ahead of it re-enters unchanged once one lands or leaves. Authorized heads pass the check and merge through GitHub; without a queue they merge at once, head-bound; `BLOCKED` auto-merge past ten minutes raises `merge-stalled`.
 
 ### Bindings and carry
 
-Reviews and proofs bind one head, base and policy revision. On moved bases all carry if the clean merge kept the patch-id, else the approval if no reviewed file changed, disjoint-`scopeFiles` proofs. A republication reads the PR's reviews before force-pushing: the replaced tip's approval carries onto a Graphyard-authored tip over the same author head and patch, the App's own dismissal restoring when observed; never a person's, a moved head or a changed patch.
+Reviews and proofs bind head, base and policy revision. On a moved base all carry if the clean merge kept the patch-id; else the approval carries if no reviewed file changed, and disjoint-`scopeFiles` proofs carry.
 
 GitHub merges: Graphyard re-posts no carried approval and requests no merge, so branch protection alone decides whether the approvals on the tip suffice.
 
 ### Parallel tips
 
-`mergeQueue.parallelTips` (master config, default 4, `POST /api/merge-queue`) stacked tips test at once; entries merge in order once every tip through theirs passes, each publication waking successors, re-reading in-flight verdicts. Each entry validates on its own tip, costing concurrent CI and a discarded suffix on failure; `parallelTips: 1` restores batching. A failing tip ejects its entry once those ahead pass; later tips rebuild. A tip failing only `unit:docs-word-budget` ejects the entry whose docs change took the running total over budget, naming words over and pages that grew; entries ahead merge. A total the base carries, no page grown, is attributed to nobody. The word budget never gates merges ([development](development.md#documentation)): an overage only warns.
+`mergeQueue.parallelTips` (master config, default 4; `POST /api/merge-queue`): stacked per-entry tips test concurrently (`parallelTips: 1` batches). Entries merge in order; a failing tip ejects its entry once those ahead pass, and later tips rebuild. Failing only `unit:docs-word-budget` ejects the first entry whose running total exceeds the budget, naming words over and pages grown; otherwise the budget only warns ([development](development.md#documentation)).
 
 ### Proofs in CI
 
-A protected `pull_request_target` workflow runs on every `graphyard/*` push: **plan** finds the item's `unit:*`/`integration:*` proofs, **exercise** runs one secret-free job on the base-merged candidate, **publish** reports via the `ciRun`-bound [CI producer](deployment.md#ci-producer), queue tips cached. Manual proofs stay producer sessions.
+Protected `pull_request_target` workflow per `graphyard/*` push: **plan** finds the item's `unit:*`/`integration:*` proofs; **exercise** runs one secret-free job on the base-merged candidate; **publish** reports via the `ciRun`-bound [CI producer](deployment.md#ci-producer). Queue tips are cached. Manual proofs stay producer sessions.
 
-## Post-deployment smoke proof
-
-With `"deploySmoke": true` the master dispatches the smoke install once the release serves the merge; failure marks it [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
-
-## Enforcement boundary
-
-GitHub merges only heads whose required check passed; restrict other merge identities; a lease-losing worker can still push.
+`"deploySmoke": true` dispatches the smoke install once the release serves the merge; failure marks it [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
 
 ## Identity-bound agent review
 
-`reviewProvider: "codex"` accepts only Codex's clean result on the exact head; `agent` requires a registered reviewer App distinct from the author (`github-setup URL --reviewer claude`, listed in `GRAPHYARD_REVIEWER_APPS`), adopted with `graphyard reviewpolicy GY-N agent REVISION "reason" --profiles` [FILE](../examples/reviewer-profiles.json), replying an approved `graphyard-verdict` comment naming the head.
+`reviewProvider: "codex"` accepts Codex's clean result on the exact head; `agent` needs a non-author reviewer App (`github-setup URL --reviewer claude`; `GRAPHYARD_REVIEWER_APPS`), adopted by `graphyard reviewpolicy GY-N agent REVISION "reason" --profiles` [FILE](../examples/reviewer-profiles.json); approving via `graphyard-verdict` comment naming the head.
