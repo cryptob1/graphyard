@@ -2,7 +2,6 @@ import { workerLaunchStatus } from '../master/dispatch.js';
 import { probeCandidateConflictsWithBudget } from '../conflicts.js';
 import { dataDirectory } from '../install/worktree-root.js';
 import { mergeQueueStatus } from '../master/profiles.js';
-import { optimisticStatus } from '../master/optimistic-attention.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
 import { agentOwner, assessContainment, branchReport, buildMasterStatus, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, humanOwner, inspectWorkerCredentials, installationOwner, statusWorktreeInventory, managedRootStatus, mergeProtocolSkew, observeHerdrAgents, planWorktreeReclaim, profileConcurrency, reclaimIdleMs, worktreesDirectory, type AttentionItem, type MasterConfig } from '../master.js';
 import { impliedScopeRequests, type Work } from '../model/work.js';
@@ -25,7 +24,7 @@ import { ghCheckAnnotations, qualifyTimingFailures } from './timing-failures.js'
 import { setupHealth } from './master-setup.js';
 import { stuckRequestReport, withStuckRequests } from './stuck-requests.js';
 import { nameUnresolvedThreads } from '../merge-queue.js';
-import { reworkRoundsWithOwnCauses } from '../flow-analytics.js';
+import { speedSections } from '../flow-analytics.js';
 import type { LoopSupervisorHost } from '../supervisor.js';
 import { attributeAttention, derivedAttention, faulted, ledgerRefusalAttention, resourceStatus } from '../master-status.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
@@ -124,10 +123,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // A check failed on the clock says so, against its budget; a routed scope request, its approver.
   const status = routedScopeStatus(nameBaseBreaks(await timedStep('timing failures', () => qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository))), snapshot.work), snapshot.work, cycling?.approvals, master);
   for (const worker of status.workers) Object.assign(worker, launches.rows[worker.profile] ?? {});
-  // Rework rounds by cause (GY-643), out-of-item causes removed, cached beside the worktree
-  // inventory (GY-725); a failed read marks the section.
-  try { status.speed.reworkRounds = await reworkRoundsWithOwnCauses(status.speed.reworkRounds, masterApi, snapshot, 100, { root }); }
-  catch (error) { sections.mark('rework causes', 'GET /api/events?kind=rework', error); }
+  // Rework rounds by cause (GY-643, GY-725) onto `speed`, delivery speed on the GitHub path with its
+  // breach attention (GY-1232); a failed read marks its section.
+  const delivery = await speedSections(status.speed, masterApi, snapshot, { root, targets: master.deliverySpeed, sections });
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device.
   const sudo = administration.sudo;
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
@@ -146,7 +144,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // The slow intervention report: the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors }));
-  // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406), a main red after optimistic merges (GY-500),
+  // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406),
   // queue-head lag (GY-492), slow renewals (GY-558) and conflict hotspots (GY-566).
   const { observation, health, stalledItems } = stallAttention(snapshot, coordinator, derivedStalls, hs.attention);
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
@@ -159,7 +157,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   attentionItems.unshift(...ahead);
   // Setup that stops every launch, or leaves the loop unsupervised, is the master's to repair.
   attentionItems.push(...setupItems);
-  attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []));
+  attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...delivery.attention);
   attentionItems.splice(loopItems.length + dispatchItems.length, 0, ...resources.attention);
   // Everything the control plane takes from the operator's own credential alone, from the
   // human-only rule table, answered on the dashboard's Needs you page (GY-102).
@@ -172,12 +170,13 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
       ...backlog,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + triage.length + ahead.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length } }, snapshot.work);
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + triage.length + ahead.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length + delivery.attention.length } }, snapshot.work);
   return { ...directMergeLine(coordinator), ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
     // The board (GY-200): what the master owes first, with commands, then the rest.
     board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator, decisions.unanswered)),
     unavailable: sections.unavailable,
     docsBudget: docs,
+    delivery: delivery.report,
     humanOnly: humanOnly.map(humanOnlyStatusRow),
     // Every open item the control plane names no action for, with the account it names and how
     // long it has held its failing gate.
@@ -188,7 +187,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     terminalDecisions: decisions.listed, throughput, unansweredDecisions: decisions.unanswered,
     // Commits no reviewer session ever got a verdict on, with the dismissed review.
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
-    conflictHotspots: hs.report, merger: { merger: merger.merger, detail: merger.detail }, autoMerge: master.autoMerge, ...optimisticStatus(master, snapshot.work), mergeQueue, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
+    conflictHotspots: hs.report, merger: { merger: merger.merger, detail: merger.detail }, autoMerge: master.autoMerge, mergeQueue, mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     conflictProbe: probe,
     // What the observation workers achieve and how far the queue head has drifted (GY-492).
     observationThroughput: observation, leaseHealth: health.report,

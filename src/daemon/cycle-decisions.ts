@@ -10,6 +10,7 @@ import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonAct
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
 import { approvalStep, type ApprovalStep, approverLaunchKey, attestDecisions, approverPrefixes, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, namePaths, neededDecision, observedFrom, overtakenDecision, recordWatchEnded, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { decisionReads } from './decision-reads.js';
 import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
 import { capacityRefusal } from '../fleet.js';
 import type { Cycle } from './cycle.js';
@@ -23,7 +24,8 @@ export { handWatchPrefix };
 
 /** Step 4c: request and supervise the routine decisions. */
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
-  const { config, state, effects, now, snapshot, clock, performed, isolate, agents, open } = cycle;
+  const { config, state, now, snapshot, clock, performed, isolate, agents, open } = cycle;
+  const effects = await decisionReads(cycle.effects, cycle.heldDecisions, snapshot.work, Object.values(state.approvals));
   // 4c. The routine decisions. A standing verdict, a base the control plane could not merge in, and
   //     a delivered item still fenced by a dead supervisor each have one correct answer, and each
   //     used to wait for a master session to notice. The loop requests the decision with the

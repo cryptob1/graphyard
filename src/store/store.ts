@@ -3,8 +3,11 @@ import { randomUUID } from 'node:crypto';
 import type { Work } from '../model.js';
 import type { IntegrationJob } from '../coordination.js';
 import { appendSave, resolvedPayloadSql } from './snapshot-delta.js';
-import { assertSavable } from './locked-read.js';
+import { noteSaved } from './locked-read.js';
 import { advisoryLocks } from './locks.js';
+import { StaleWrite, lockItem, staleWriteAttempts, type StoreTransactionOptions } from './item-lock.js';
+import { saveDocument } from './document-write.js';
+export { saveDocument, rewriteDocument } from './document-write.js';
 import { runStartupMigration } from './migration-locks.js';
 // The startup migration's engine lives beside its locks and its recorded state (migration-locks.ts);
 // the lock budget stays exported here with the store that applies it.
@@ -14,6 +17,7 @@ import { namedPool, reportPool, type ReportPoolOptions } from './report-pool.js'
 import { closePool, leasePoolConnections, trackedPool } from './pools.js';
 
 export * from './snapshot-delta.js';
+export * from './item-lock.js';
 export type { CoordinationTrim } from './coordination-sql.js';
 
 /**
@@ -88,14 +92,28 @@ export class Store {
   async schema() { return Number((await this.pool.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version); }
   /** Resolves once every connection of all three pools has closed (GY-483), so the database may be stopped right after. */
   async close() { await Promise.all([closePool(this.pool, 'main'), closePool(this.leasePool, 'lease'), closePool(this.reportPool, 'report')]); }
-  async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, { lane = 'request', coordinationLock: takeCoordinationLock = true }: { lane?: StoreLane; coordinationLock?: boolean } = {}): Promise<T> {
+  /**
+   * Run `fn` in one transaction under the locks `options` name. A `StaleWrite` reruns the whole of
+   * `fn` on a fresh transaction (up to `staleWriteAttempts` runs), so `fn` must keep its effects in
+   * the database: an external call or in-memory change it makes is repeated by each rerun.
+   */
+  async transaction<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, options: StoreTransactionOptions = {}): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try { return await this.transactionOnce(fn, options); } catch (error) {
+        if (!(error instanceof StaleWrite) || options.retryStaleWrites === false || attempt >= staleWriteAttempts) throw error;
+      }
+    }
+  }
+  private async transactionOnce<T>(fn: (db: pg.PoolClient, now: Date) => Promise<T>, options: StoreTransactionOptions): Promise<T> {
+    const { lane = 'request', itemLock } = options;
+    const fleetLock = options.fleetLock ?? (options.coordinationLock !== false);
     const permit = lane === 'background' ? await this.background.acquire() : null;
     const db = await (lane === 'lease' ? this.leasePool : this.pool).connect().catch(error => { permit?.(); throw error; });
     try {
       await db.query('BEGIN');
-      // Serializes short coordination decisions across replicas, including dependency edits and cross-task workspace
-      // reservations; never held during external I/O. Reconciliation batches lock their own rows instead (GY-727).
-      if (takeCoordinationLock) await db.query('SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
+      // Serializes coordination decisions: fleet lock first, then per-item lock in fixed order so no deadlock is possible (GY-1124).
+      if (fleetLock) await db.query('SELECT pg_advisory_xact_lock($1)', [coordinationLock]);
+      if (itemLock !== undefined && itemLock !== null) await lockItem(db, itemLock);
       const { rows } = await db.query('SELECT clock_timestamp() AS now');
       // Job wakes are taken last, in work-id order (GY-1115): see `wakeJob`.
       pendingWakes.set(db, new Map());
@@ -109,6 +127,20 @@ export class Store {
   }
   async list(): Promise<Work[]> {
     return (await this.pool.query('SELECT document FROM work_items ORDER BY number')).rows.map(r => r.document);
+  }
+  /** One item's document by its id, without reading the fleet (GY-1052). */
+  async workItem(id: string): Promise<Work | undefined> {
+    return (await this.pool.query('SELECT document FROM work_items WHERE id=$1', [id])).rows[0]?.document;
+  }
+  /**
+   * The live merge-queue entries, which is all a queue position is computed from (GY-1052): the
+   * filter is `queueOrder`'s own, a queue entry on an item not done, so `queuePlacement` over this
+   * equals it over the whole fleet. Selected through the work index, so no unqueued item's
+   * document is read; a settled item has no queue (`settledSql`), so none is read either.
+   */
+  async queuedWork(): Promise<Work[]> {
+    return (await this.pool.query(`SELECT w.document FROM work_index i JOIN work_items w ON w.id=i.id
+      WHERE i.stage IS DISTINCT FROM 'done' AND jsonb_typeof(w.document->'queue')='object' ORDER BY i.number`)).rows.map(row => row.document);
   }
   async workSnapshot(): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[] }> {
     const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs FROM work_items")).rows[0];
@@ -159,7 +191,7 @@ export class Store {
    */
   async takeJob(order: string[] = [], headCount = 0, starvedAfterMs = observationStarvedAfterMs) {
     const token = randomUUID();
-    const result = await this.pool.query(`WITH picked AS (SELECT work_id, generation<>claimed_generation AS woken, webhook_at > now() - ($5::text||' milliseconds')::interval AS webhook, refreshed_until > now() AS refreshed FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY CASE WHEN webhook_at > now() - ($5::text||' milliseconds')::interval THEN -1 WHEN array_position($1::uuid[], work_id) <= $3::int THEN 0 WHEN available_at < now() - ($4::text||' milliseconds')::interval * 3 THEN 1 WHEN available_at < now() - ($4::text||' milliseconds')::interval THEN 2 WHEN array_position($1::uuid[], work_id) IS NOT NULL THEN 3 ELSE 4 END, CASE WHEN available_at < now() - ($4::text||' milliseconds')::interval * 3 THEN available_at END, CASE WHEN webhook_at > now() - ($5::text||' milliseconds')::interval THEN webhook_at END, array_position($1::uuid[], work_id), available_at FOR UPDATE SKIP LOCKED LIMIT 1)
+    const result = await this.pool.query(`WITH picked AS (SELECT work_id, generation<>claimed_generation AS woken, webhook_at > now() - ($5::text||' milliseconds')::interval AS webhook, refreshed_until > now() AS refreshed FROM jobs WHERE available_at<=now() AND (held_until IS NULL OR held_until<=now()) AND (locked_until IS NULL OR locked_until<now()) ORDER BY CASE WHEN webhook_at > now() - ($5::text||' milliseconds')::interval THEN -1 WHEN array_position($1::uuid[], work_id) <= $3::int THEN 0 WHEN available_at < now() - ($4::text||' milliseconds')::interval * 3 THEN 1 WHEN available_at < now() - ($4::text||' milliseconds')::interval THEN 2 WHEN array_position($1::uuid[], work_id) IS NOT NULL THEN 3 ELSE 4 END, CASE WHEN webhook_at > now() - ($5::text||' milliseconds')::interval THEN webhook_at END, CASE WHEN available_at < now() - ($4::text||' milliseconds')::interval * 3 THEN available_at END, array_position($1::uuid[], work_id), available_at FOR UPDATE SKIP LOCKED LIMIT 1)
       UPDATE jobs SET token=$2, locked_until=now()+interval '90 seconds', attempts=attempts+1,claimed_generation=generation,webhook_at=NULL
       FROM picked WHERE jobs.work_id=picked.work_id RETURNING jobs.*, picked.woken, picked.webhook IS TRUE AS webhook, picked.refreshed IS TRUE AS refreshed`, [order.length ? order : null, token, Math.max(0, Math.floor(headCount)), String(Math.max(0, Math.floor(starvedAfterMs))), String(webhookWakeTtlMs)]);
     return result.rows[0] as { work_id: string; token: string; attempts: number; woken: boolean; webhook: boolean; refreshed: boolean; refreshed_until: Date | null } | undefined;
@@ -292,11 +324,8 @@ export async function wakeJobs(db: Pick<pg.PoolClient, 'query'>, ids: string[], 
 }
 
 export async function save(db: pg.PoolClient, work: Work, actor: string, kind: string, now: Date, details?: unknown) {
-  assertSavable(work);
-  work.revision++;
-  work.updatedAt = now.toISOString();
-  const text = JSON.stringify(work);
-  await db.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, text]);
+  const text = await saveDocument(db, work, now);
+  noteSaved(work, text);
   // Stored as a delta on the item's last full snapshot when that is small (snapshot-delta.ts).
   await appendSave(db, work, actor, kind, details, text);
 }

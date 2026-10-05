@@ -5,7 +5,7 @@ import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
 import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
-import { unexercisedFindings } from '../auto-dispatch.js';
+import { extractProducerAccountsOrRuntimes, unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
 import { decisionBindingMax } from '../model/approval.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js';
@@ -440,6 +440,12 @@ const groupName = (entry: ExhaustedProof) => `the ${entry.group ?? 'producer'} p
 const quoteAttempts = (entry: ExhaustedProof, limit = 1600) => { const text = entry.attempts.map(attempt => `"${attempt}"`).join('; '); return text.length > limit ? `${text.slice(0, limit - 1)}…` : text || 'no attempt recorded'; };
 /** The attention the loop raises the cycle it first sees the request spent: group, every attempt's outcome, and the next step's owner. */
 export function exhaustedProofEscalation(entry: ExhaustedProof) {
+  const unacted = unactedProducerAttempts(entry.attempts);
+  if (unacted) {
+    const runtimesOrAccounts = extractProducerAccountsOrRuntimes(entry.attempts);
+    const target = runtimesOrAccounts.length ? runtimesOrAccounts.join(', ') : 'producer runtime or account';
+    return boundDetail(`${entry.work}: producer attempts for ${groupName(entry)} on ${entry.sha.slice(0, 12)} are used up (${entry.reason}); no producer is launched for this head until an eligible account exists. Attempts: ${quoteAttempts(entry)}. Next step, owned by the master loop: no rework is requested for ${entry.work}; the attempts name a producer-runtime fault on ${target}; the loop relaunches the request once an eligible producer account exists`);
+  }
   return boundDetail(`${entry.work}: producer attempts for ${groupName(entry)} on ${entry.sha.slice(0, 12)} are used up (${entry.reason}); no producer is launched for this head again. Attempts: ${quoteAttempts(entry)}. Next step, owned by the master loop: on its next cycle it requests a rework decision for ${entry.work} quoting these attempts, and the independent approver judges it; the master fixes a launcher fault (a producer profile or its credential) if the attempts name one`);
 }
 /** The rework an item whose proof requests are spent calls for, once the escalation has stood a cycle, or null. */
@@ -448,8 +454,15 @@ export function exhaustedProofRework(work: Work, exhausted: readonly ExhaustedPr
   if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
   const spent = exhausted.filter(entry => entry.work === work.key && entry.sha === candidate.sha);
   if (!spent.length) return null;
-  const each = Math.max(200, Math.floor(1600 / spent.length));
-  return { reason: `${work.key}: the producer attempts for ${spent.map(entry => `${groupName(entry)} on ${candidate.sha.slice(0, 12)} ended without trusted evidence — ${quoteAttempts(entry, each)}`).join('. And ')}. No producer is launched for this head again, so it cannot pass its proofs; the item returns to a worker to fix what the attempts name and push a fresh head the producers are requested for.`,
+  // GY-1153: When every spent producer attempt on a head ended without the session acting (never
+  // started, profile busy, account exhausted or launch refused), the loop requests no rework for the head.
+  // A head whose producer attempts include at least one session that acted and failed to produce
+  // evidence still gets the GY-496 rework, and so does a spent entry with no recorded attempt
+  // (GY-1227), exactly as `exhaustedProofEscalation` announced it.
+  const acted = spent.filter(entry => !unactedProducerAttempts(entry.attempts));
+  if (!acted.length) return null;
+  const each = Math.max(200, Math.floor(1600 / acted.length));
+  return { reason: `${work.key}: the producer attempts for ${acted.map(entry => `${groupName(entry)} on ${candidate.sha.slice(0, 12)} ended without trusted evidence — ${quoteAttempts(entry, each)}`).join('. And ')}. No producer is launched for this head again, so it cannot pass its proofs; the item returns to a worker to fix what the attempts name and push a fresh head the producers are requested for.`,
     // Keyed on the head alone: a second group spent on the same head asks for no second rework.
     binding: `${candidate.sha}:proof-exhausted` };
 }
@@ -774,6 +787,8 @@ export function repeatedMergeRefusal(work: Pick<Work, 'mergeRefusal' | 'candidat
   const refusal = work.mergeRefusal, candidate = work.candidate;
   return refusal && refusal.action === 'rework' && candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha && refusal.policyRevision === work.policyRevision ? refusal : null;
 }
+
+
 
 /** The launcher key of the approver launch for a decision (GY-616). */
 export const approverLaunchKey = (decision: string) => `launch:approver:${decision}`;
