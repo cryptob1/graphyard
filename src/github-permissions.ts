@@ -5,15 +5,15 @@
  * else. Anything not declared here is not requested and is never silently relied upon.
  */
 export type PermissionLevel = 'read' | 'write' | 'admin';
-export type PermissionFeature = 'repository' | 'observation' | 'check' | 'review-dispatch' | 'comment-events' | 'merge-queue' | 'check-rerun' | 'workflow-sync';
+export type PermissionFeature = 'repository' | 'observation' | 'check' | 'review-dispatch' | 'comment-events' | 'merge-queue' | 'check-rerun' | 'workflow-sync' | 'production-watch';
 export interface PermissionRequirement { permission: string; level: PermissionLevel; feature: PermissionFeature; reason: string }
 export interface PermissionShortfall { permission: string; required: PermissionLevel; granted: PermissionLevel | null; features: PermissionFeature[]; reasons: string[] }
 
 const levels: PermissionLevel[] = ['read', 'write', 'admin'];
-export const permissionLabels: Record<string, string> = { actions: 'Actions', metadata: 'Metadata', contents: 'Contents', pull_requests: 'Pull requests', issues: 'Issues', checks: 'Checks', administration: 'Administration', workflows: 'Workflows' };
+export const permissionLabels: Record<string, string> = { actions: 'Actions', metadata: 'Metadata', contents: 'Contents', pull_requests: 'Pull requests', issues: 'Issues', checks: 'Checks', administration: 'Administration', workflows: 'Workflows', deployments: 'Deployments' };
 export const featureLabels: Record<PermissionFeature, string> = {
   repository: 'repository access', observation: 'pull request observation', check: 'the required checks',
-  'check-rerun': 'failed CI reruns', 'review-dispatch': 'review dispatch', 'comment-events': 'comment webhooks', 'merge-queue': 'branch refresh', 'workflow-sync': 'workflow sync',
+  'check-rerun': 'failed CI reruns', 'review-dispatch': 'review dispatch', 'comment-events': 'comment webhooks', 'merge-queue': 'branch refresh', 'workflow-sync': 'workflow sync', 'production-watch': 'production observation',
 };
 
 /** The control-plane App: it observes, publishes the gate check, dispatches reviews, and refreshes candidate branches. */
@@ -28,6 +28,7 @@ export const controlPlanePermissions: readonly PermissionRequirement[] = [
   { permission: 'checks', level: 'read', feature: 'observation', reason: 'read CI check runs' },
   { permission: 'checks', level: 'write', feature: 'check', reason: 'publish `Graphyard / merge` and `graphyard/landable` on the exact candidate commit' },
   { permission: 'administration', level: 'read', feature: 'observation', reason: 'inspect branch protection' },
+  { permission: 'deployments', level: 'read', feature: 'production-watch', reason: 'read the deployments the hosting provider reports to production' },
   { permission: 'workflows', level: 'write', feature: 'workflow-sync', reason: 'push base syncs carrying the base\'s workflow changes' },
 ];
 /**

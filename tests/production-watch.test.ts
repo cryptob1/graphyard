@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { CONTAINED_EVENT, DEPLOYMENT_GRACE_MS, PENDING_EVENT, ProductionWatch, attentionLines, startProductionWatch, type ProductionReport } from '../src/production-watch.js';
+// A namespace import, so the GY-1327 cases fail one by one (not the whole file) against a base without these exports.
+import * as productionWatch from '../src/production-watch.js';
 import { controlPlaneAttention, productionSummary, type ControlPlaneStatus } from '../src/master/attention.js';
 import { classifyAttention, statusFaults, trackFaults, type FaultRecord } from '../src/model/fault-classes.js';
 import { startReconciliation } from '../src/server/main.js';
@@ -337,4 +339,107 @@ test('unit:fault-class-deployment-rollout-grace — the deployment class opens n
   }
   assert.equal(baseRecord.instances.filter(instance => instance.faultClass === 'deployment').length, merges, 'the base opens one deployment instance per merge');
   assert.equal(candidateRecord.instances.filter(instance => instance.faultClass === 'deployment').length, 0, 'the candidate opens none');
+});
+
+// GY-1327: without a Railway token every promotion not served within the grace was recorded
+// 'missing'. Railway reports each deploy to GitHub as a deployment in 'production' with statuses,
+// which the control plane's App credential can read.
+/** GitHub over a linear main sha(0) < … < sha(tip) that also answers the deployments API from `deployments`; every request is counted. */
+function deploymentsGitHub(tip: number, deployments: { id: number; sha: string; ref?: string; environment?: string; statuses: { state: string; log_url?: string }[] }[]) {
+  const base = linearGitHub(tip), requests: string[] = [];
+  const request = async (path: string) => {
+    requests.push(path);
+    const listing = path.match(/^\/deployments\?environment=([^&]+)&/);
+    if (listing) return deployments.filter(d => (d.environment ?? 'production') === decodeURIComponent(listing[1])).map(d => ({ id: d.id, sha: d.sha, ref: d.ref ?? 'main', environment: d.environment ?? 'production', created_at: new Date(T0).toISOString() }));
+    const statuses = path.match(/^\/deployments\/(\d+)\/statuses/);
+    if (statuses) return [...deployments.find(d => d.id === Number(statuses[1]))!.statuses].reverse().map(status => ({ ...status, created_at: new Date(T0).toISOString() }));
+    return base.request(path);
+  };
+  return { requests, github: { request, contains: base.contains, aheadBy: base.aheadBy, config: { repository: 'owner/project' } } };
+}
+function promotedWatch(github: ReturnType<typeof deploymentsGitHub>['github']) {
+  const work = [{ id: 'work-2', key: 'GY-2', stage: 'done', delivery: { mergedAt: new Date(T0).toISOString(), mergeSha: sha(2), authorizationRevision: 1 } }] as unknown as Work[];
+  const { store, events } = memoryStore(work);
+  let clock = T0;
+  const provider = productionWatch.productionProvider({}, github);
+  const watch = new ProductionWatch(store, { provider, github, build: buildIdentity({ GRAPHYARD_BUILD_SHA: sha(1) }), baseBranch: 'main', now: () => clock });
+  return { watch, events, provider, at: (ms: number) => { clock = T0 + ms; } };
+}
+
+test('unit:production-watch-github-deployments — with no Railway token an in-flight GitHub deployment holds the promotion, a failure names its log_url, and a success served records the delivery', async () => {
+  // In flight: an in_progress or queued latest status is a rollout, never 'missing', past the grace.
+  for (const state of ['in_progress', 'queued']) {
+    const { github } = deploymentsGitHub(2, [{ id: 7, sha: sha(2), statuses: [{ state: 'queued' }, ...(state === 'in_progress' ? [{ state }] : [])] }, { id: 6, sha: sha(1), statuses: [{ state: 'success' }] }]);
+    const { watch, provider, events, at } = promotedWatch(github);
+    assert.equal(provider?.name, 'github');
+    at(DEPLOYMENT_GRACE_MS + 60_000);
+    const report = await watch.tick(true);
+    assert.equal(report.provider, 'github');
+    assert.equal(report.serving, sha(1)); assert.equal(report.servingSource, 'provider');
+    assert.equal(report.latest?.status, state === 'in_progress' ? 'deploying' : 'queued');
+    assert.deepEqual(report.pending, ['GY-2']);
+    assert.deepEqual(report.incidents, [], `a ${state} deployment of the promoted sha is held as in flight`);
+    assert.equal(events.filter(event => event.kind === 'delivery.deployment-incident').length, 0);
+    assert.equal(report.ahead?.rollingOut, true);
+  }
+
+  // Failed: a failure or error status is a failed deployment naming the status's log_url.
+  for (const state of ['failure', 'error']) {
+    const { github } = deploymentsGitHub(2, [{ id: 8, sha: sha(2), statuses: [{ state: 'in_progress' }, { state, log_url: 'https://railway.example/logs/8' }] }, { id: 6, sha: sha(1), statuses: [{ state: 'success' }] }]);
+    const { watch, at } = promotedWatch(github);
+    at(60_000);
+    const report = await watch.tick(true);
+    assert.equal(report.incidents.length, 1);
+    assert.equal(report.incidents[0].status, 'failed');
+    assert.equal(report.incidents[0].provider, 'github');
+    assert.equal(report.incidents[0].deploymentId, '8');
+    assert.equal(report.incidents[0].reason, `github deployment 8 of ${sha(2).slice(0, 12)} ${state.toUpperCase()} (https://railway.example/logs/8); production still serves ${sha(1).slice(0, 12)}`);
+  }
+
+  // Delivered: a success status of the promoted sha makes it what production serves, and a held incident recovers.
+  const deployments = [{ id: 9, sha: sha(2), statuses: [{ state: 'in_progress' }] }, { id: 6, sha: sha(1), statuses: [{ state: 'success' }] }];
+  const { github, requests } = deploymentsGitHub(2, deployments);
+  const { watch, events, at } = promotedWatch(github);
+  at(60_000);
+  assert.deepEqual((await watch.tick(true)).pending, ['GY-2']);
+  deployments[0].statuses.push({ state: 'success' });
+  requests.length = 0; at(120_000);
+  const report = await watch.tick(true);
+  assert.equal(report.serving, sha(2)); assert.equal(report.servingSource, 'provider');
+  assert.deepEqual(report.deployed, ['GY-2']); assert.deepEqual(report.pending, []); assert.deepEqual(report.incidents, []);
+  assert.equal(events.filter(event => event.kind === CONTAINED_EVENT).length, 1, 'the delivery is recorded deployed');
+  assert.deepEqual(requests.filter(path => path.startsWith('/deployments')), ['/deployments?environment=production&per_page=10', '/deployments/9/statuses?per_page=1'], 'a concluded deployment\'s status is not read again');
+  // Railway marks a served success inactive minutes later: the concluded status is kept, so production still serves it.
+  deployments[0].statuses.push({ state: 'inactive' });
+  at(180_000);
+  assert.equal((await watch.tick(true)).serving, sha(2));
+});
+
+test('unit:production-watch-provider-selection — a Railway token selects the Railway provider as before, none falls back to GitHub deployments, and the missing remedy no longer asks for a Railway token', async () => {
+  const github = deploymentsGitHub(2, []).github;
+  const railwayEnv = { RAILWAY_SERVICE_ID: 'svc', RAILWAY_ENVIRONMENT_ID: 'env' };
+  for (const token of [{ RAILWAY_API_TOKEN: 'account' }, { RAILWAY_TOKEN: 'project' }]) {
+    const railway = productionWatch.productionProvider({ ...railwayEnv, ...token }, github);
+    assert.equal(railway?.name, 'railway');
+    assert.equal(railway?.description, 'Railway service svc, environment env');
+    assert.equal(productionWatch.observationLine(railway, { commit: sha(1) }), 'production observation via Railway service svc, environment env');
+  }
+  const fallback = productionWatch.productionProvider(railwayEnv, github);
+  assert.equal(fallback?.name, 'github');
+  assert.match(productionWatch.observationLine(fallback, { commit: sha(1) }), /^production observation via GitHub deployments to production of owner\/project$/);
+  assert.equal(productionWatch.productionProvider({ GRAPHYARD_PRODUCTION_ENVIRONMENT: 'prod-eu' }, github)?.description, 'GitHub deployments to prod-eu of owner/project');
+  assert.equal(productionWatch.productionProvider(railwayEnv, null), null, 'without the GitHub App nothing can be read');
+  assert.equal(productionWatch.observationLine(null, { commit: sha(1) }), 'production observation from the build identity only; configure the GitHub App to read GitHub deployments');
+  // Server startup selects through productionProvider and logs the line.
+  const main = await readFile(new URL('../src/server/main.ts', import.meta.url), 'utf8');
+  assert.match(main, /productionProvider\(process\.env, github\)/);
+  assert.match(main, /observationLine\(provider, build\)/);
+
+  // The missing-incident remedy, with no provider readable at all.
+  const { store } = memoryStore([{ id: 'work-2', key: 'GY-2', stage: 'done', delivery: { mergedAt: new Date(T0).toISOString(), mergeSha: sha(2), authorizationRevision: 1 } }] as unknown as Work[]);
+  const watch = new ProductionWatch(store, { provider: null, github: linearGitHub(2), build: buildIdentity({ GRAPHYARD_BUILD_SHA: sha(1) }), baseBranch: 'main', now: () => T0 + DEPLOYMENT_GRACE_MS + 60_000 });
+  const report = await watch.tick(true);
+  assert.equal(report.incidents[0].status, 'missing');
+  assert.doesNotMatch(report.incidents[0].reason, /required|needs? (a )?Railway|so the provider reports/i, 'a Railway token is not presented as required');
+  assert.match(report.incidents[0].reason, /\. Configure RAILWAY_API_TOKEN \(or RAILWAY_TOKEN\) or the GitHub App: either one reads a deployment list \(Railway's, or the GitHub deployments Railway reports\) that names the failing deployment$/);
 });
