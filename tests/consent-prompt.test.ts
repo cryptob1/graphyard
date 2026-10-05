@@ -210,6 +210,8 @@ test('integration:known-consent-answered-unknown-escalated — the launcher answ
       observation: { candidate: { sha: H, baseSha: B, pr: 130, branch: 'graphyard/gy-130-1', author: 'implementer' }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [], at: new Date().toISOString(), prState: 'open', draft: false, baseTip: B, baseTree: sha40('7b'), baseTipContained: true } as Work['observation'],
       gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }] });
     reconcileAutoDispatch(item, [item], new Date(clock));
+    // Dispatch opens no producer request any more (GY-1235); the launcher still binds one, built by hand.
+    item.autoDispatch!.producers.push({ id: 'producer-integration', kind: 'producer', group: 'integration', proofs: ['integration:known-consent-answered-unknown-escalated'], sha: H, baseSha: B, policyRevision: item.policyRevision, pr: 130, requestedAt: at, reason: 'unproven', state: 'requested' });
     const request = item.autoDispatch!.producers[0];
     const hooks = new ConsentPane('codex', hooksDialog, ['3']);
     const produced = await launchProducer(root, item, request, config.producers[0], [], at, { run: hooks.run, start: hooks.bounds() });

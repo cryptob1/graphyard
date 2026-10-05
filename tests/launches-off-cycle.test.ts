@@ -45,7 +45,7 @@ test('unit:launches-off-cycle — the cycle hands 10 five-second launches to the
     closeSession: () => {},
     // Each launch — a pane and a registered session — takes five seconds.
     dispatch: async item => { running += 1; peak = Math.max(peak, running); await delay(5_000); running -= 1; finished.push(item.key); },
-    requestProof: () => {}, merge: async () => ({}), observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
+    requestProof: () => {}, observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
   };
   const state = emptyDaemonState(master), launcher = new Launcher();

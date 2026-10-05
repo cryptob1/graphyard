@@ -165,7 +165,7 @@ test('unit:loop-and-executor-dispatch-safely — the loop and an executor dispat
 
     const loopEffects: DaemonEffects = {
       agents, credentials: async list => Object.fromEntries(list.map(profile => [profile.name, { available: true, reason: null }])), snapshot,
-      closeSession: () => {}, dispatch, requestProof: () => {}, merge: async () => ({}),
+      closeSession: () => {}, dispatch, requestProof: () => {},
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
       recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
     };
@@ -176,7 +176,7 @@ test('unit:loop-and-executor-dispatch-safely — the loop and an executor dispat
       workerCredentials: async list => Object.fromEntries(list.map(profile => [profile.name, { available: true, reason: null }])),
       producerCredentials: async () => ({}),
       dispatchWorker: (item, profile, seen, snap) => dispatchWorker(item, profile, seen, snap),
-      launchReview: async () => ({}), launchProducer: async () => ({}), merge: async () => ({}),
+      launchReview: async () => ({}), launchProducer: async () => ({}),
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }) as any,
     });
     // The executor reads Herdr through the script's launcher, which supplies no fresh reader.

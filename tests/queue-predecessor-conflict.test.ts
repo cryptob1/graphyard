@@ -1,10 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { routineDecision, syncConflict } from '../src/master-daemon.js';
-import { buildMasterStatus } from '../src/master.js';
 import { ejectedTipRestore, predecessorWait } from '../src/merge-queue.js';
-import { evaluate, type Work } from '../src/model.js';
+import type { Work } from '../src/model.js';
 import { placeInQueue, queueEjectionRecord } from '../src/model/queue.js';
 
 // GY-321, 2026-09-25: GY-173, GY-177, GY-182 and GY-245 were ejected because their speculative
@@ -127,7 +125,7 @@ test('unit:predecessor-conflict-reenters — the ejected head re-enters at the b
   assert.equal(decision?.binding, `${sha('2')}:conflict`, 'the refresh conflict (baseRefreshConflict) is what asks for the rework');
 });
 
-test('unit:predecessor-conflict-status — an ejected tip is still restored first, and master status names the predecessors in the merge refusal', async () => {
+test('unit:predecessor-conflict-status — an ejected tip is still restored first', async () => {
   const predecessor = item('GY-1', sha('1'), 1);
   // The branch head is a speculative tip published behind GY-1, then ejected: it carries GY-1's
   // unlanded commits, so it is restored to its own head before anything re-enters.
@@ -140,21 +138,4 @@ test('unit:predecessor-conflict-status — an ejected tip is still restored firs
   assert.equal(restore!.own, own);
   assert.deepEqual(restore!.foreign, ['GY-1']);
   assert.equal(place(ejected, [predecessorOut, ejected]).queue, null, 'the contaminated tip does not re-enter; its restored head does');
-
-  // master status: the waiting item's merge refusal names its predecessors.
-  const waiting = eject(item('GY-2', own, 2), [predecessor, item('GY-2', own, 2)]);
-  const graded = [predecessor, waiting].map(work => {
-    const all = [predecessor, waiting];
-    const result = evaluate(work, all, now, [1]);
-    return { ...work, stage: result.stage, gates: result.gates, violations: result.violations, queue: result.queue, queueSequence: result.queueSequence, queueEjection: result.queueEjection, queueHistory: result.queueHistory } as Work;
-  });
-  assert.equal(graded[1].queue, null);
-  const status = buildMasterStatus({ work: graded, now: at }, [], []);
-  const row = status.work.find((entry: { key: string }) => entry.key === 'GY-2')!;
-  assert.equal(row.refusal?.gate, 'merge');
-  assert.match(row.refusal!.reason, /^Waiting for GY-1 to land or leave the merge queue: /);
-
-  // docs/github.md states the rule.
-  const docs = await readFile(new URL('../docs/github.md', import.meta.url), 'utf8');
-  assert.match(docs, /conflicting only with entries ahead of it re-enters unchanged/);
 });

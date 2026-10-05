@@ -486,7 +486,10 @@ test('unit:protection-no-conversation-resolution — master protection plans con
 
 test('the master CLI installs its harness rules and reconciles protection against a live snapshot', async () => {
   const root = await repository(), credentialDirectory = await temporaryDirectory('cli-master'), binary = join(credentialDirectory, 'bin');
-  const item = work({ policy: { checks: ['test'], review: true, reviewProvider: 'agent' } as any });
+  // Real timestamps: an item with every gate passed now waits on GitHub (GY-1235), and status
+  // dates that wait from when the item entered its stage.
+  const stamp = new Date().toISOString();
+  const item = work({ policy: { checks: ['test'], review: true, reviewProvider: 'agent' } as any, createdAt: stamp, updatedAt: stamp, stageEnteredAt: stamp });
   const server = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json');
     if (request.url === '/api/status') return response.end(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));

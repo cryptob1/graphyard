@@ -36,7 +36,19 @@ function work(overrides: Partial<Work> = {}): Work {
     lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 421 }, reworkRequested: false, scenarioRequirements: [], evidence: [] as Evidence[],
     observation: observation(candidate), blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [], ...overrides } as Work;
 }
-const requested = () => { const item = work(); reconcileAutoDispatch(item, [item], new Date(clock)); return item; };
+/**
+ * An item holding the unit producer request. Since GY-1235 the reconciler opens none (proofs gate
+ * nothing), so it is the one a record raised before then still holds; the reconciler keeps it while
+ * its proofs are unproven, and the dispatch tick and the loop still settle it.
+ */
+const requested = () => {
+  const item = work();
+  item.autoDispatch = { review: null, history: [], producers: [{ id: 'producer-unit-gy-421', kind: 'producer', group: 'unit', proofs: ['unit:exhaustion-only-provider-notice', 'unit:tmp-reclaim'],
+    sha: H, baseSha: B, policyRevision: 1, pr: 421, requestedAt: iso(-7_300_000), reason: `unit proofs have no trusted evidence on ${H.slice(0, 12)}`, state: 'requested' }] };
+  reconcileAutoDispatch(item, [item], new Date(clock));
+  assert.equal(item.autoDispatch.producers.length, 1, 'the reconciler keeps the retained request');
+  return item;
+};
 function masterConfig(credentialFile: string): MasterConfig {
   return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project',
     autoMerge: true, workers: [],
@@ -115,7 +127,7 @@ function decisionLoop(items: () => Work[], decided: { action: string; reason: st
   return {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: items(), now: iso(1_000), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(1_000), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {},
     exhaustedProofs: async () => exhausted(),

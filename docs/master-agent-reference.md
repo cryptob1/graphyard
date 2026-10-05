@@ -9,13 +9,13 @@ Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (flags bef
 
 Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)); `git merge-tree` reports `conflicts`.
 
-### Speculative tips and branch protection
+### Base refreshes and branch protection
 
-**An approval must survive a tip publication.** [Carry rules](github.md#bindings-and-carry) apply.
+**An approval must survive a base refresh.** [Carry rules](github.md#bindings-and-carry) apply.
 
 **A merge-base dismissal is not a reviewer withdrawing a verdict.** Only a current-head approval dismissed with `The merge-base changed after approval.` is restored (`observation.reviews[].dismissal`); its re-post is no new verdict (`observation.dismissedReviewIds`).
 
-**A branch must never keep another item's unlanded commits.** Tips build from reviewed heads; ejected branches restore onto the base tip in one push (`baseRefresh.restore`; a second failure → `escalated` in `master status`). Another item's carried files (`Carried from another item's tip`) are neither rework nor ejection.
+**A branch must never keep another item's unlanded commits.** A contaminated branch restores onto the base tip in one push (`baseRefresh.restore`; a second failure → `escalated` in `master status`).
 
 #### A contaminated branch
 

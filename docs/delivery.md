@@ -13,13 +13,18 @@ Graphyard's own deployment: main → candidate → uat → production. `.railway
 - `release promote ID` requires that passing record, deploys the SHA to production (leased on the last promoted SHA) and records `rc-production/ID`; `release verify --url URL` confirms production serves it.
 - A failed candidate files one follow-up item (`release follow-up ID` retries); fix forward.
 
-With `GRAPHYARD_DELIVERY=github` on the server, GitHub merges: an observation that sees build, review and required checks pass enables auto-merge on that head; no proof, queue or observation age gates it, the loop skips its guarded merge and requests no proofs; UAT validates before promotion.
-
 `release status` lists candidates; `release GY-N EPOCH` still gives up an item's lease. The workflow needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, `GRAPHYARD_UAT_TOKEN` and `GRAPHYARD_RELEASE_TOKEN`.
 
 ### Pre-merge gate and release-candidate validation
 
 Required: `typecheck`, `test` (`.github/workflows/ci.yml`), under ten minutes. Soak/timing files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container and Helm checks run in `.github/workflows/release-candidate.yml` on each [release candidate](#release-candidates).
+
+### One delivery path
+
+1. **CI and review** of the exact head.
+2. **GitHub merges into main** once build, review and required checks pass on that head, and that merge is the delivery: no authorization, execution, proof, queue or observation age intervenes. A failing head's merge is a held violation.
+3. **UAT end-to-end** validates each [release candidate](#release-candidates).
+4. **Promotion** deploys only a validated candidate to production.
 
 Every 30 s the main guard reverts a merge commit failing a required check its parent passed, via a `graphyard-revert/` pull request the App merges once green, and reopens the item naming check and commit. Protection wants approval from someone other than the last pusher, and the App pushed the revert, so once its checks pass the guard compares its diff with the merge's: only the exact inverse (same files, each restoring exactly the lines the merge removed and dropping those it added) is approved once at its head by the revert approver App (`GRAPHYARD_REVERT_APPROVER_APP_ID`/`_INSTALLATION_ID`/`_PRIVATE_KEY` or `_FILE`, e.g. the reviewer App; never the control-plane App), then merged head-bound with no human or reviewer round. Without an approver the App merges on its ruleset bypass alone. A revert that is not the exact inverse, conflicts, fails or stalls an hour is closed after one attempt with one attention line; fix main forward.
 

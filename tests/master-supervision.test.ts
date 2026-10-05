@@ -6,7 +6,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { agentRuntimeRun, agentRuntimeTimeoutMs, daemonExecutor, listHerdrAgents, masterConfigSchema, masterHarness, observeHerdrAgents, setupMaster, type MasterConfig } from '../src/master.js';
+import { agentRuntimeRun, agentRuntimeTimeoutMs, listHerdrAgents, masterConfigSchema, masterHarness, observeHerdrAgents, setupMaster, type MasterConfig } from '../src/master.js';
 import { daemonEffects, emptyDaemonState, runDaemon, writeDaemonState } from '../src/master-daemon.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { ChildProcessError, defaultChildTimeoutMs } from '../src/child-runner.js';
@@ -282,7 +282,7 @@ test('integration:runtime-calls-bounded — a hung agent runtime fails its step,
     let cycles = 0;
     const effects = daemonEffects(root, master, {
       snapshot: async () => { if (++cycles >= 2) process.emit('SIGUSR2' as NodeJS.Signals); return { work: [], now: new Date().toISOString() }; },
-      mutate: async () => ({}), executor: daemonExecutor('coordinator-1'), run: bounded,
+      mutate: async () => ({}), run: bounded,
     });
     // The loop's own reading of the runtime, through the hung stub: an empty answer, not a throw.
     assert.deepEqual(await effects.agents(), []);
