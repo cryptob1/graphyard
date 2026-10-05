@@ -6,7 +6,7 @@ import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../
 import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, restoringAfterEjectionPrefix, speculativeConflict, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { extractProducerAccountsOrRuntimes, unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
-import { decisionBindingMax, unsettledApproval, type DecisionSituation } from '../model/approval.js';
+import { decisionBindingMax, type DecisionSituation } from '../model/approval.js'; import { unsettledApproval } from './decision-reads.js';
 import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { researchRework } from '../research.js'; import { baseBreakHold } from '../master/base-break-refresh.js';
 import { unproducedManualProofs } from '../model/unproduced-attestation.js';
@@ -760,11 +760,9 @@ export function approvalStep(watch: ApprovalWatch, decision: { id?: string; acti
   if (decision === undefined) return { step: 'wait', detail: `The decision history of ${watch.work} could not be read; ${label} is looked at again next cycle` };
   if (decision === null) return { step: 'rerequest', detail: `The control plane no longer holds ${label}` };
   if (decision.state === 'applied') return { step: 'settled', detail: `The approver applied ${label}` };
-  // A refusal is the approver's considered judgement (GY-141), not a session to replace or a
-  // request to repeat: the server refuses the same request unchanged, and answering it is the master's.
+  // A refusal is the approver's considered judgement (GY-141), not a session to replace or a request to repeat: the server refuses the same request unchanged, and answering it is the master's.
   if (decision.state === 'refused') return { step: 'refused', detail: `${label} was refused by ${decision.refusal?.approver ?? 'its approver'}: ${decision.refusal?.reason ?? decision.outcome ?? 'no reason recorded'}` };
-  if (decision.state !== 'requested' && decision.state !== 'approved')
-    return { step: 'rerequest', detail: `${label} ended ${decision.state}${decision.outcome ? ` (${decision.outcome})` : ''}` };
+  if (decision.state !== 'requested' && decision.state !== 'approved') return { step: 'rerequest', detail: `${label} ended ${decision.state}${decision.outcome ? ` (${decision.outcome})` : ''}` };
   if (decision.state === 'approved') { const settle = unsettledApproval({ key: watch.work }, { id: watch.decision, action: watch.action, ...decision }, now); if (settle) return { step: 'rerequest', detail: settle }; } // GY-1297: the server settles it, this cycle
   if (!sessions.available) return { step: 'wait', detail: `Herdr could not be read, so the approver session of ${label} is unknown this cycle` };
   const session = watch.agentName ? sessions.agents.find(agent => agent.name === watch.agentName) : undefined;

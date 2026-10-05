@@ -65,7 +65,7 @@ Role | Held by | May | Never
 
 The master applies non-weakening intent directly. Two-party decisions (`graphyard master decide GY-N ACTION REASON`, applied by a separate approver's `graphyard master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, triage closures and merges with automatic merging off. Gates decide the rest; human-only decisions [park](master-agent-reference.md#items-scope-and-human-waits) items.
 
-An approved decision is applied by its approval. One left approved with no outcome never blocks the next request of its action: a rework or recover approved for a head and base the item has moved past settles `superseded`, recording the head it was bound to and the current one, and the new request is judged for the current candidate; one whose head still holds is resumed after 60 seconds and settles applied, or failed naming why. Any request for the item, or the loop's next cycle, settles it.
+An approved decision is applied by its approval. One left approved with no outcome never blocks the next request of its action: a rework or recover approved for a head and base the item has moved past settles `superseded`, recording the head it was bound to and the current one, and the new request is judged for the current candidate; one whose head still holds is resumed after 60 seconds and settles applied, or failed naming why. Any request for the item settles it, and so does the loop's next cycle, which sends the settling withdrawal also for a decision put to an approver by hand.
 
 ## Diagram legend
 

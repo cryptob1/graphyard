@@ -9,6 +9,8 @@ import { Refusal, type Principal } from '../src/model.js';
 import * as approval from '../src/model/approval.js';
 import { approvalStep, overtakenDecision, type RoutineDecision } from '../src/daemon/decisions.js';
 import { approvalWatchSchema } from '../src/daemon/state.js';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { approverSessionName, type MasterConfig } from '../src/master.js';
 import type { Observation, Work } from '../src/model/work.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -106,7 +108,8 @@ async function start() {
     try { return await during(); } finally { store.transaction = transaction; }
   };
   const moveTo = async (work: Work, sha: string) => engine.observe(work.id, (await store.list()).find(item => item.id === work.id)!.revision, observed(sha, work.submission!.pr, work.workspaces.at(-1)!.branch));
-  return { engine, store, master, send, call, decisions, stranded, later, moveTo, rework };
+  const get = async (path: string) => (await fetch(`${url}/api/${path}`, { headers: { Authorization: `Bearer ${master.token}` } })).json();
+  return { engine, store, master, send, call, get, decisions, stranded, later, moveTo, rework };
 }
 
 test('unit:stale-approved-decision-superseded — a rework approved for head A settles superseded once the item is at head B, and B’s rework request is accepted', { timeout: 120_000 }, async () => {
@@ -144,7 +147,7 @@ test('unit:stale-approved-decision-superseded — a rework approved for head A s
 });
 
 test('unit:approved-decision-applied-or-named — an approved decision whose situation holds is applied, or names why it cannot be, within one loop cycle and inside the decision bound', { timeout: 120_000 }, async () => {
-  const { engine, store, master, send, decisions, stranded, later, rework } = await plane();
+  const { engine, store, master, send, get, decisions, stranded, later, rework } = await plane();
   // Inside the grace the approval is still its own: a request is refused as before, and the loop
   // leaves it to its approver session.
   const { work, decision } = await stranded('applied-after-stall');
@@ -194,4 +197,33 @@ test('unit:approved-decision-applied-or-named — an approved decision whose sit
   assert.match(failed.outcome, /^Approved by supersede-approver at .+ but its application was never recorded; resuming it was refused: Merged work requires a follow-up task$/);
   // Nothing stands approved and unapplied on either item.
   for (const key of [work.key, second.work.key]) assert.deepEqual((await decisions(key)).filter(entry => entry.state === 'approved'), []);
+
+  // A decision a master requested and put to an approver by hand: the loop's own request path
+  // never sees it, so the loop's hand watch settles it. One real loop cycle past the grace closes
+  // the approver session and sends the withdrawal; the server resumes it, and it is applied
+  // within the bound. The next cycle retires the watch.
+  const third = await stranded('hand-watched-stall');
+  const pane = { name: approverSessionName(third.work, third.decision.id), pane_id: 'pane-hand', agent: 'claude', agent_status: 'idle' }, closed: string[] = [];
+  let loopNow = Date.parse(third.decision.approvedAt);
+  const config = { hostId: 'supersede-host', autoMerge: false, mergeMethod: 'merge', workers: [], reviewers: [], producers: [], repository: 'owner/supersede', baseBranch: 'main',
+    url: 'https://graphyard.example', credentialFile: '/dev/null', githubAppId: 1234, run: { intervalSeconds: 20 } } as unknown as MasterConfig;
+  const loop: DaemonEffects = {
+    agents: () => closed.includes(pane.pane_id) ? [] : [pane], credentials: async () => ({}),
+    snapshot: async () => ({ work: (await store.list()).filter(item => item.id === third.work.id), now: new Date(loopNow).toISOString() }),
+    closeSession: closing => { closed.push(closing); }, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({ result: 'merged', merged: false }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    approverLaunches: async () => [], approver: async () => { throw new Error('no approver is launched here'); },
+    decisions: work => get(`work/${encodeURIComponent(work.id)}/decisions`),
+    withdraw: async (work, decision, reason) => { const result = await send(master.token, `work/${work.id}/decide`, { action: 'withdraw', decision, reason }); if (result.status !== 200) throw new Error(result.body.error); return result.body; },
+  };
+  const state = emptyDaemonState(config), stalledAt = Date.parse(third.decision.approvedAt) + approvalApplyGraceMs + 1000;
+  loopNow = stalledAt;
+  await later(approvalApplyGraceMs + 1000, () => runCycle(config, state, loop, () => loopNow));
+  assert.deepEqual(closed, [pane.pane_id], 'the approver session of the stalled approval is put down');
+  const resumed = (await decisions(third.work.key)).find(entry => entry.id === third.decision.id)!;
+  assert.deepEqual([resumed.state, resumed.approvedBy], ['applied', 'supersede-approver'], 'one loop cycle applied it under its own approval');
+  assert.ok(stalledAt - Date.parse(third.decision.approvedAt) <= approvedDecisionBoundMs, 'the cycle that applied it ran inside the decision bound');
+  loopNow = stalledAt + 20_000;
+  await later(approvalApplyGraceMs + 21_000, () => runCycle(config, state, loop, () => loopNow));
+  assert.equal(Object.values(state.approvals).some(watch => watch.decision === third.decision.id), false, 'and the next cycle retires its watch');
 });

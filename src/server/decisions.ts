@@ -3,21 +3,21 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
-import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, situationLabel, stalledApproval, standingRefusal, supersededSituation, type Decision, type DecisionState } from '../model/approval.js';
+import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, standingRefusal, type Decision, type DecisionState } from '../model/approval.js';
 import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
 import type { Services } from './routes.js';
-import { refuseDecision, withdrawDecision } from './decision-refusal.js';
+import { refuseDecision } from './decision-refusal.js';
 import { precedentAvailability } from './escalation-context.js';
 import { applyTriageClosure } from './followups.js';
 import { closeWork } from './close.js';
-import { answerWith, applyLaneRework, laneApprover, resumeLaneReworks } from './lane-rework.js';
+import { answerWith, applyLaneRework, laneApprover, resumeLaneReworks, settleApprovedDecisions, supersedeMoved, withdrawOrSettle } from './lane-rework.js';
 import { lockedWork, workIdByRef } from '../store/locked-read.js';
 
 type Db = pg.PoolClient;
 // The ledger's read half lives in decision-ledger.ts (GY-102); decision-refusal.ts reads it from here too.
 export { readDecisions, type DecisionRecord } from './decision-ledger.js';
-// The risk lane's own application of a rework lives in lane-rework.ts (GY-1110).
-export { laneApprover, resumeLaneReworks } from './lane-rework.js';
+// The risk lane's own application of a rework (GY-1110), and the settlement of any approval left unapplied (GY-1297), live in lane-rework.ts.
+export { laneApprover, resumeLaneReworks, settleApprovedDecisions } from './lane-rework.js';
 export const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const findWork = async (db: Db, id: string): Promise<Work | undefined> =>
   (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')} FOR UPDATE`, [id])).rows[0]?.document;
@@ -91,77 +91,6 @@ async function callerMayRequest(services: Services, caller: Principal, id: strin
     const work = await findWork(db, id); demand(work, 'Work item not found', 404);
     for (const capability of requiredDecisionCapabilities(action, input, work!)) assertDecisionAuthority(actor, capability, work!, services.repository);
   });
-}
-
-/**
- * The requester's withdrawal of a decision it requested, which first settles the decision when it
- * stands approved and unapplied (GY-1297): an approval cannot be taken back, so the loop that finds
- * its standing approval superseded or stalled sends the withdrawal and gets the settlement. One the
- * settlement applied is refused naming that, so the loop requests nothing in its place.
- */
-async function withdrawOrSettle(services: Services, caller: Principal, id: string, body: unknown, key: string) {
-  const named = typeof (body as any)?.decision === 'string' ? (body as any).decision as string : null;
-  const settled = named ? (await settleApprovedDecisions(services, caller, id, named)).find(decision => decision.id === named) : undefined;
-  if (settled?.state === 'applied') throw new Refusal(`Decision ${settled.id} (${settled.action}) stood approved by ${settled.approvedBy} with no outcome recorded; its application was resumed and it is applied now (${settled.outcome}), so there is nothing to withdraw`, 409);
-  if (settled) return settled;
-  // Superseded already, by another request for the item: the loop's history may predate it, and the answer is the same.
-  const superseded = named ? await services.engine.store.transaction(async (db, now) => {
-    const actor = await authenticated(services, db, now, caller), work = await findWork(db, id);
-    const decision = work ? (await readDecisions(db, work)).find(entry => entry.id === named) : undefined;
-    return decision?.state === 'superseded' && decision.requestedBy === actor.id ? decision : undefined;
-  }) : undefined;
-  return superseded ?? withdrawDecision(services, caller, id, body, key);
-}
-
-/**
- * Settle the item's approved, unapplied decisions (GY-1297; `supersededSituation` and
- * `stalledApproval` in model/approval.ts say when). One whose situation moved is recorded
- * `superseded`, naming the head and base it was bound to and the item's current ones. One whose
- * situation holds and that stood approved past the grace is applied through the engine under its
- * approval — keyed by the decision, so a resumption that races the approval applies it once — and
- * settles applied, or failed naming why: a refusal, or a fault, since a decision left approved after
- * a fault refuses every later request of its action. The risk lane's own approvals are superseded
- * here and resumed by `resumeLaneReworks`. `only` limits the settlement to one decision, and then
- * only its requester settles it (the withdrawal path). Returns the decisions it settled.
- */
-export async function settleApprovedDecisions(services: Services, caller: Principal, id: string, only?: string): Promise<DecisionRecord[]> {
-  const found = await services.engine.store.transaction(async (db, now) => {
-    const actor = await authenticated(services, db, now, caller);
-    const work = await findWork(db, id);
-    if (!work) return { superseded: [] as DecisionRecord[], stalled: [] as DecisionRecord[], work: null };
-    const history = (await readDecisions(db, work)).filter(decision => decision.state === 'approved' && (!only || (decision.id === only && decision.requestedBy === actor.id)));
-    const superseded = await supersedeMoved(db, work, history, actor);
-    const stalled = history.filter(decision => !superseded.some(entry => entry.id === decision.id) && decision.approvedBy !== laneApprover && stalledApproval(decision, now.getTime()));
-    return { superseded, stalled, work };
-  });
-  const settled = [...found.superseded];
-  for (const decision of found.stalled) {
-    let outcome: { kind: string; details: object };
-    const approver = { id: decision.approvedBy!, role: 'admin' } as Principal;
-    try { outcome = { kind: 'decision.applied', details: { outcome: await applyThroughEngine(services, decision, approver, decision.approvalReason ?? 'approved'), resumed: true } }; }
-    catch (error) { outcome = { kind: 'decision.failed', details: { error: `Approved by ${decision.approvedBy} at ${decision.approvedAt} but its application was never recorded; resuming it ${error instanceof Refusal || error instanceof z.ZodError ? 'was refused' : 'failed'}: ${error instanceof Error ? error.message : 'unknown'}`.slice(0, 2000), resumed: true } }; }
-    settled.push(await services.engine.store.transaction(async db => {
-      // The approval's own application, or a second resumer, may have settled it meanwhile; the first outcome stands.
-      const current = (await readDecisions(db, found.work!)).find(entry => entry.id === decision.id)!;
-      if (current.state !== 'approved') return current;
-      await record(db, found.work!, approver.id, outcome.kind, { id: decision.id, ...outcome.details });
-      return (await readDecisions(db, found.work!)).find(entry => entry.id === decision.id)!;
-    }));
-  }
-  return settled;
-}
-
-/** Record `decision.superseded` for each approved decision whose situation the item has moved past, in the caller's transaction (GY-1297). */
-async function supersedeMoved(db: Db, work: Work, decisions: DecisionRecord[], actor: Principal): Promise<DecisionRecord[]> {
-  const settled: DecisionRecord[] = [];
-  for (const decision of decisions) {
-    const moved = supersededSituation(decision, work);
-    if (!moved) continue;
-    const reason = `Superseded: approved for ${situationLabel(moved.bound)}, but ${work.key} is now at ${situationLabel(moved.current)}, so it can never apply to what it judged; a ${decision.action} request is judged afresh for the current candidate`;
-    await record(db, work, actor.id, 'decision.superseded', { id: decision.id, action: decision.action, reason, bound: moved.bound, current: moved.current, observedBy: { id: actor.id, role: actor.role } });
-    settled.push((await readDecisions(db, work)).find(entry => entry.id === decision.id)!);
-  }
-  return settled;
 }
 
 async function recordRequest(services: Services, caller: Principal, id: string, data: z.infer<typeof decisionRequestSchema>, input: any, key: string, fingerprint: string): Promise<DecisionRecord> {

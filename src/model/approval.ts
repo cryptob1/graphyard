@@ -95,8 +95,7 @@ export interface Decision {
   concurrences: { requester: string; reason: string; precedent: string[]; context: string | null; at: string }[];
   /** For a rework or recover request, the candidate it was requested against (GY-229); null otherwise and for requests recorded before it was kept. */
   situation?: DecisionSituation | null;
-  /** For an approved decision settled `superseded` (GY-1297): the situation it was bound to and the item's when it was settled. */
-  superseded?: { bound: DecisionSituation; current: DecisionSituation } | null;
+  superseded?: { bound: DecisionSituation; current: DecisionSituation } | null; // GY-1297: the situation it was bound to, and the item's
 }
 /**
  * What a rework or recover request judged: the item's candidate head and the base it was built
@@ -122,46 +121,15 @@ const sameSituation = (recorded: DecisionSituation | null | undefined, current: 
  */
 const judgedSame = (action: DecisionAction, decision: { situation?: DecisionSituation | null }, situation: DecisionSituation | null | undefined) =>
   !situatedDecisionActions.includes(action) || sameSituation(decision.situation, situation);
-/**
- * GY-1297. An approved decision is applied by its approval, in the approval's own request: only a
- * fault between the approval and its outcome leaves it approved and unapplied, and the control
- * plane holds one standing decision of an action at a time, so such a decision refused every later
- * request of its action forever (GY-949: a rework approved for head 5d78667000f3 still stood two
- * days later, when the item was at c7c93c895f68 and needed a rework of its own). It is settled
- * instead. A rework or recover decision judged one situation (head and base); once the item's
- * candidate is another, the decision can never apply to what it judged, so it settles
- * `superseded`, recording both, and a request of the same action is judged afresh. One whose
- * situation still holds and that has stood approved past `approvalApplyGraceMs` is taken over: its
- * application is resumed under its approval and it settles applied, or failed naming why.
- * `approvedDecisionBoundMs` is the longest any decision stands approved and unapplied: the grace,
- * plus the loop cycles it takes the loop to see it (`approvalStep` sends it back at once).
- */
-export const approvalApplyGraceMs = 60_000;
-export const approvedDecisionBoundMs = 300_000;
-/** The situation an approved rework or recover decision was bound to and the item's own, when the two differ; null otherwise (GY-1297). */
+// GY-1297. An approved decision left without an outcome refused its action forever (GY-949): one bound to a head
+// and base the item has left is `superseded`, naming both; one whose situation holds is resumed past the grace.
+export const approvalApplyGraceMs = 60_000, approvedDecisionBoundMs = 300_000;
 export function supersededSituation(decision: { action: string; state: string; situation?: DecisionSituation | null }, work: Pick<Work, 'candidate'>): { bound: DecisionSituation; current: DecisionSituation } | null {
-  if (decision.state !== 'approved' || !decision.situation) return null;
-  const current = decisionSituation(decision.action, work);
-  return !current || sameSituation(decision.situation, current) ? null : { bound: { sha: decision.situation.sha ?? null, baseSha: decision.situation.baseSha ?? null }, current };
+  const bound = decision.state === 'approved' ? decision.situation : null, current = bound ? decisionSituation(decision.action, work) : null;
+  return !bound || !current || sameSituation(bound, current) ? null : { bound: { sha: bound.sha ?? null, baseSha: bound.baseSha ?? null }, current };
 }
-/** Whether an approved decision has stood unapplied past the grace its own approval has to apply it (GY-1297). */
-export const stalledApproval = (decision: { state: string; approvedAt?: string | null }, now: number) =>
-  decision.state === 'approved' && !!decision.approvedAt && now - Date.parse(decision.approvedAt) >= approvalApplyGraceMs;
-/** How a superseded decision's situation reads in a reason: `head 5d78667000f3 on base d378f5d0e1a2`. */
+export const stalledApproval = (decision: { state: string; approvedAt?: string | null }, now: number) => decision.state === 'approved' && !!decision.approvedAt && now - Date.parse(decision.approvedAt) >= approvalApplyGraceMs;
 export const situationLabel = (situation: DecisionSituation) => situation.sha ? `head ${situation.sha.slice(0, 12)} on base ${String(situation.baseSha).slice(0, 12)}` : 'no candidate';
-
-/**
- * Why an approved decision must be settled rather than waited on, or null (GY-1297): the item moved
- * past the situation it was bound to, or it has stood approved and unapplied past the grace its
- * own approval had to apply it.
- */
-export function unsettledApproval(work: Pick<Work, 'key'> & Partial<Pick<Work, 'candidate'>>, decision: { id: string; action: string; state: string; approvedBy?: string | null; approvedAt?: string | null; situation?: DecisionSituation | null }, now: number): string | null {
-  // Without the item's candidate (a watch read alone) only the stall is judged; the request it leads to judges the situation.
-  const moved = work.candidate === undefined ? null : supersededSituation(decision, { candidate: work.candidate });
-  if (moved) return `${decision.action} decision ${decision.id} on ${work.key} was approved for ${situationLabel(moved.bound)}, but the item is now at ${situationLabel(moved.current)}; it is superseded so the current candidate's request is judged`;
-  if (stalledApproval(decision, now)) return `${decision.action} decision ${decision.id} on ${work.key} was approved by ${decision.approvedBy ?? 'its approver'} at ${decision.approvedAt} and no outcome was recorded within ${Math.round(approvalApplyGraceMs / 1000)}s; its application is resumed so it settles applied or failed`;
-  return null;
-}
 export interface DecisionEvent { kind: string; actor: string; at: string; payload: any }
 
 /** Rebuild every decision on an item from its append-only ledger entries, oldest first. */
