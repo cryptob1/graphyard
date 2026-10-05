@@ -105,8 +105,8 @@ test('unit:locked-read-cold-cache-warmed — a fresh process warms the stand-in 
   assert.equal(readsWhole(warm), 0);
   // The engine warms on its first pass, before the pass's opening locked read.
   const engineSource = readFileSync(fileURLToPath(new URL('../src/engine.ts', import.meta.url)), 'utf8');
-  const reconcile = engineSource.slice(engineSource.indexOf('  async reconcile() {'));
-  assert.ok(reconcile.indexOf('await warmLockedReads(this.store.pool)') > 0 && reconcile.indexOf('await warmLockedReads(this.store.pool)') < reconcile.indexOf('await lockedRows(db, [])'), 'reconcile warms the cache before its opening locked read');
+  const reconcile = engineSource.slice(engineSource.indexOf('  private async reconcileTick() {'));
+  assert.ok(reconcile.indexOf('await warmLockedReads(this.store.pool)') > 0 && reconcile.indexOf('await warmLockedReads(this.store.pool)') < reconcile.indexOf('await lockedRows(db, [])') && reconcile.indexOf('  private async reconcileTick() {') === 0, 'reconcile warms the cache before its opening locked read');
 });
 
 test('unit:locked-read-keeps-cache-hits — a call that caches its misses past the cache bound still serves the hits it found, never reading them whole (GY-1042 finding 42)', async () => {
