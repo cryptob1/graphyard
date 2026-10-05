@@ -5,11 +5,11 @@ The master (`coordinator`) routes, merges, verifies deployments, administers Git
 
 ## Agents approve agents
 
-The master acts without asking. Three decisions are human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); everything else it applies alone or through an approver agent.
+The master acts without asking. Three decisions are human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); everything else it applies alone or via an approver.
 
 ## Operate
 
-Keep cycling: status, dispatch, review, merge, verify deployments. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked.
+Keep cycling: status, dispatch, review, merge, deployment verification. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked.
 
 1. `master status` on startup and events.
 2. `master run` dispatches ready work in `schedule.order`.
@@ -17,9 +17,9 @@ Keep cycling: status, dispatch, review, merge, verify deployments. Stop only whe
 4. `master verify-deployment GY-N` after delivery ([refusals](operations-reference.md#perpetual-master-loop)). Railway: set `productionEnvironment`.
 5. Close finished agent sessions; repeat.
 
-Review findings, rework, idle workers and proof setup are not stopping conditions. `controlPlane.production` flags main ahead.
+Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
-`master run` is `graphyard-master.service` ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) if `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout ([sessions](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level)).
+`master run` is `graphyard-master.service` ([supervision](onboarding.md#the-loop-must-be-supervised)); restart it (`systemctl --user restart graphyard-master`) when `daemon.liveness` is `stalled` or `absent`, never from a dirty checkout ([sessions](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level)).
 
 The loop launches, wakes and rotates its [master session](master-agent-sessions.md#the-loops-own-master-session).
 
@@ -27,7 +27,7 @@ The loop launches, wakes and rotates its [master session](master-agent-sessions.
 
 Unless created `"systemDriven": false`, an item refuses hand `dispatch`, `merge`, `review` and `decide attest|merge`, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` of unauthorized merges or with no operator agent.
 
-Unproduced `manual:` proofs are the loop's: one `attest` decision per proof, head, base and policy revision, an independent approver launched, withdrawn on head change (`loopDecisions.attestations`, not needs-human).
+Unproduced `manual:` proofs are the loop's: one `attest` decision per proof, head, base and policy revision, independently approved, withdrawn on head change (`loopDecisions.attestations`, not needs-human).
 
 ### Session liveness is reconciled, not trusted
 
@@ -42,7 +42,7 @@ that host's loop. `dispatch.sessionReconcile` reports each closure:
   way as any other. Implementation sessions are left to the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
-A closure decides no gate, ends no lease, stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, never closed.
+A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) raises attention, is never closed.
 
 **So what an operator or a master does instead of closing sessions by hand:** nothing, for a session
 that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark
@@ -56,7 +56,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ### The pipeline doctor
 
-Every `run.doctor.intervalMinutes` (default 10) the loop runs the [doctor](onboarding.md#the-pipeline-doctor-on-by-default) on stuck work, sanctioned commands only (`scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`), never merge, dispatch, evidence or leases. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (default 10) the loop's [doctor](onboarding.md#the-pipeline-doctor-on-by-default) checks stuck work. Sanctioned: `scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`; never merge, dispatch, evidence or leases. Off: `run.doctor.enabled=false`.
 
 ## Research and diagnosis
 
@@ -66,7 +66,7 @@ With `run.research` set, a feature (or `"research": true`) gets one read-only Pi
 
 ## Machine-filed backlog
 
-Review follow-ups are never filed: worth-fixing findings are fixed on the same pull request; nit threads are replied to and resolved. Older follow-up items wait for their parent. With `run.research`, Pi triages follow-up and fault items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) at once; status counts `machineUntriaged`/`operatorBacklog`.
+Review follow-ups are never filed: worth-fixing findings are fixed on the same pull request; nits are answered and resolved. Older follow-up items wait for their parent. With `run.research`, Pi triages follow-up and fault items (release, close, merge; closure needs approval), `triageConcurrency` (default 2) concurrently; status counts `machineUntriaged`/`operatorBacklog`.
 
 ## Automatic dispatch at submit
 
@@ -76,7 +76,7 @@ A candidate passing the build gate gets, in `autoDispatch`, one producer request
 
 **Launches bind heads**; stale refusals wake observation, then retry. 15m+ `dispatch.waiting` reviews raise attention.
 
-**Requests always settle.** A gone pane (`pane_not_found`) is closed. A settled reviewer's open pane closes next dispatch tick, freeing its name; after 3 refused closes, attention names the pane. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. Killed or vanished runs spend no attempt; spent ones raise `escalation:proof-exhausted`, then a rework unless [none acted](master-agent-reference.md#producer-runtime-faults).
+**Requests always settle.** A gone pane (`pane_not_found`) is closed. A settled reviewer's open pane closes next dispatch tick; after 3 refused closes, attention names the pane. No request outlives its own token: expired, unreported by Herdr, it settles `expired`; one still pending counts in `dispatch.sessionReconcile.stuck`. Unanswered sessions relaunch elsewhere (12 per request, then `dispatch.abandoned`); an unposted reviewer is reminded first. Killed or vanished runs spend no attempt; spent ones raise `escalation:proof-exhausted`, then a rework unless [none acted](master-agent-reference.md#producer-runtime-faults).
 
 **Every role fails over on spent quota** or waits as a `capacity` line, uncounted, relaunching oldest-first.
 
@@ -90,7 +90,7 @@ A passing producer records `"exercise"`: the proof rerun with the criterion's be
 "exercise":{"criterion":"AC-1","behaviour":"the lease expiry check in claim()","result":"fail","executed":4}
 ```
 
-A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`), and automated proofs get rework quoting it. When only such unit or integration findings remain, the next action is `request-rework` (proof, criterion, surviving mutation), a wait the rework decision owns, not loop silence. `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
+A pass is trusted only when that stripped run failed with a case executed; otherwise it is recorded as not exercising its criterion rather than as passing (`unexercised`, `evidence.exercise.refused`), and automated proofs get rework quoting it. When only such findings remain, the next action is `request-rework` (proof, criterion, surviving mutation). `decide attest` adds `exercise` (fails on base), approver-confirmed; unexercised `manual:` proofs re-attest, never rework. Attestations carry only on a kept patch-id.
 
 ## Guarded merges
 
@@ -98,6 +98,6 @@ A pass is trusted only when that stripped run failed with a case executed; other
 
 ### Repair lane
 
-The one exception: a `"repair": "merge-path"` item (`mergePath` files only) stalled 15m, checks passed, with an approver's `master decide GY-N repair-merge REASON`, merges through the App's ruleset bypass, audited (`repair.merged`), flagged until a normal merge.
+A `"repair": "merge-path"` item (`mergePath` files only) stalled 15m, checks passed, with an approver's `master decide GY-N repair-merge REASON`, merges through the App's ruleset bypass, audited (`repair.merged`), flagged until a normal merge.
 
 Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); its approval names each on `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
