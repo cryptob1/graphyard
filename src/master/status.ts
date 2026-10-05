@@ -14,11 +14,12 @@ import { pipelineSpeed, pipelineSpeedSummary } from '../pipeline-speed.js';
 import { profileSessions, type WorkerProfile } from './profiles.js';
 import { sessionActivity } from './launch.js';
 import { sessionView } from '../model/session-state.js';
-import { mechanicalProof, unexercisedDetail, unexercisedFindings } from '../model/mechanical-proofs.js';
 import type { HerdrAgent } from './herdr.js';
 import { type ContainmentAssessment, containmentHold, containmentPhase } from './containment.js';
 import { agentOwner, type AttentionItem, controlPlaneAttention, type ControlPlaneStatus, fleetStatus, workAttentionOwner, type WorkAttentionCause } from './attention.js';
 import { classified } from '../model/fault-classes.js';
+import { mechanicalProof, unexercisedDetail, unexercisedFindings } from '../model/mechanical-proofs.js';
+import { requestRemedy } from '../model/dispatch.js';
 import { unrunnableRemedies } from './harness.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation } from './merge.js';
 import { splitRelation, splitReport } from '../decomposition.js';
@@ -67,14 +68,16 @@ export function describeDispatch(work: Work, reviews: { pending: any[]; complete
     // it awaits acknowledgement, with the one re-prompt the loop sent on the record.
     return record ? { id: record.review ?? record.producer, profile: record.profile, agentName: record.agentName, state: record.state, attempt: record.attempt ?? 1, requestedAt: record.requestedAt, sinceMs: since(record.requestedAt),
       delivery: record.delivery ?? null, activity: record.state === 'pending' ? record.activity ?? sessionActivity(record) : null, acknowledgedAt: record.acknowledgedAt ?? null, repromptedAt: record.repromptedAt ?? null,
-      ...(record.verdict !== undefined ? { verdict: record.verdict } : {}), ...(record.outcome ? { outcome: record.outcome } : {}), resolution: record.resolution ?? null, attention: record.attention ?? null } : null;
+      ...(record.verdict !== undefined ? { verdict: record.verdict } : {}), ...(record.outcome ? { outcome: record.outcome } : {}), resolution: record.resolution ?? null, attention: record.attention ?? null,
+      // How long ago a session that is no longer pending settled (GY-533): its answer is still being read for a while after.
+      closedAt: record.closedAt ?? null, settledMs: record.state !== 'pending' && record.closedAt ? since(record.closedAt) : null } : null;
   };
   const failure = (requestId: string) => sessions.failures.find(entry => entry.requestId === requestId) ?? null;
   // A session that failed or expired is relaunched for the same request on a widening interval;
   // the attempts so far and when the next one is due are reported beside the request.
   const retry = (requestId: string) => sessions.retries?.find(entry => entry.requestId === requestId) ?? null;
   const describe = (request: NonNullable<typeof state.review>, records: any[]) => ({ requestId: request.id, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision, requestedAt: request.requestedAt, sinceMs: since(request.requestedAt), reason: request.reason,
-    ...(request.group ? { group: request.group, proofs: request.proofs } : {}), session: session(records, request.id), failure: failure(request.id), retry: retry(request.id),
+    ...(request.group ? { group: request.group, proofs: request.proofs } : {}), session: session(records, request.id), failure: failure(request.id), retry: retry(request.id), remedy: requestRemedy(work, request),
     // A proof the producer found does not exercise its criterion returns the head to its worker (GY-817).
     ...(request.group ? unexercisedOf(request) : {}) });
   const unexercisedOf = (request: NonNullable<typeof state.review>) => {
