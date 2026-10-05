@@ -202,11 +202,7 @@ export interface Work extends Create {
   sessions?: SessionHandle[];
   mergeExecution?: { id: string; owner: string; sha: string; baseSha: string; policyRevision: number; authorizationRevision: number; issuedAt: string; expiresAt: string; verifiedAt?: string; committingAt?: string; clockOffset?: { min: number; max: number }; fenced?: { reason: string; at: string } | null } | null;
   delivery?: Delivery;
-  /**
-   * Retired with the repair lane (GY-406, removed by GY-1234): an item stored with
-   * `"repair": "merge-path"`, or delivered through the lane with its audit entry, still loads and
-   * evaluates; nothing reads either field, and a new item cannot set `repair`.
-   */
+  /** Retired repair lane (GY-406, removed by GY-1234): stored items keep loading; nothing reads these. */
   repair?: 'merge-path';
   repairLane?: Record<string, unknown> | null;
   /**
