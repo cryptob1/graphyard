@@ -41,7 +41,7 @@ If a harness classifier refuses routine administration, `master harness claude -
 
 Denied, by endpoint: `gh pr merge`/`review`, `gh api` `pulls/N/merge`, `repos/R/merges`, `merge-upstream`, `pulls/N/reviews`, `access_tokens`, `PUT`/`POST`/`DELETE`; `gh api graphql` with `mutation` (merge, enqueue, auto-merge, approval) or `=@`/`--input`.
 
-Missing or retired rules (`gh api *merge*`, `gh api graphql*`) are `harness` drift; `master status` reapplies it and reports only unrepaired drift.
+Missing/retired rules (`gh api *merge*`, `gh api graphql*`) are `harness` drift; `master status` reapplies the harness plan and reports only unrepaired drift.
 
 ## Typed actions and executors
 
