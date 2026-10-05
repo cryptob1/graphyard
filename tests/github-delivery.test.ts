@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { evaluate, type Observation, type Work } from '../src/model.js';
 import { mergeAuthorized, mergeQueueAction } from '../src/merge-queue.js';
 import { deliveredByGitHub, githubDeliveryGate } from '../src/model/delivery-mode.js';
+import { reviewNeed } from '../src/model/dispatch.js';
 
 // GitHub delivery (GRAPHYARD_DELIVERY=github): a candidate whose build, review and required checks
 // pass is handed to GitHub auto-merge by the observation that saw it pass. No acceptance proof, no
@@ -65,4 +66,12 @@ test('unit:queue-delivery-unchanged-without-mode — without GRAPHYARD_DELIVERY=
   assert.equal(work.gates.some(gate => gate.name === githubDeliveryGate), false);
   assert.equal(work.gates.find(gate => gate.name === 'acceptance')?.passed, false);
   assert.equal(mergeQueueAction(work, githubState, null, now.getTime()).kind, 'hold');
+});
+
+test('unit:github-delivery-review-not-held-for-proofs — a submitted candidate with unproven unit proofs is asked for review at once under GitHub delivery, and held without it', () => {
+  const unreviewed = item(now.toISOString());
+  unreviewed.criteria = [{ id: 'AC-1', text: 'Behaviour holds', proofs: ['unit:behaviour-holds'] }] as any;
+  unreviewed.observation = { ...unreviewed.observation!, reviews: [] };
+  assert.equal(withMode('github', () => reviewNeed(unreviewed, [unreviewed], now)).needed, true);
+  assert.equal(withMode(undefined, () => reviewNeed(unreviewed, [unreviewed], now)).state, 'proofs-pending');
 });

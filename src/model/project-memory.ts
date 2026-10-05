@@ -236,17 +236,10 @@ export function projectMemoryDigest(memory: ProjectMemory | null | undefined, ro
       if (baseWords <= budget) {
         const wordsAvailable = budget - baseWords;
         const reasonWords = d.reason.split(/\s+/).filter(Boolean);
-        if (decisionLines.length === 0 || wordsAvailable >= 5) {
-          let count = Math.min(reasonWords.length, Math.max(1, wordsAvailable));
-          let abbrLine = `${prefix}${reasonWords.slice(0, count).join(' ')}…${suffix}`;
-          while (count > 0 && docsWords([...parts, 'Recent decisions:', ...decisionLines, abbrLine].join(' ')) > budget) {
-            count--;
-            abbrLine = count > 0 ? `${prefix}${reasonWords.slice(0, count).join(' ')}…${suffix}` : `${prefix}…${suffix}`;
-          }
-          if (docsWords([...parts, 'Recent decisions:', ...decisionLines, abbrLine].join(' ')) <= budget) {
-            decisionLines.push(abbrLine);
-          }
-        }
+        // The ellipsis joins the last kept word, so the abbreviated line takes `count - 1` words
+        // beyond the base: the slice is computed once rather than re-counted per dropped word (GY-1180).
+        if (decisionLines.length === 0 || wordsAvailable >= 5)
+          decisionLines.push(`${prefix}${reasonWords.slice(0, Math.min(reasonWords.length, wordsAvailable + 1)).join(' ')}…${suffix}`);
       }
       // GY-1125 follow-up finding 5: continue to allow later shorter decisions to be considered
     }

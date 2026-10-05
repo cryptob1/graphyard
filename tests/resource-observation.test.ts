@@ -173,7 +173,8 @@ test('integration:headroom-warned-before-exhaustion — status reports each reso
       : args.includes('reflog') ? `${'c'.repeat(40)} HEAD@{${started + 60}}\n${'l'.repeat(40)} HEAD@{${started - 60}}\n`
       : args.includes('diff') ? 'src/master.ts\n'
       : '3\n';
-    assert.deepEqual(loadedRevision('/nonexistent', 1, git), { loaded: 'l'.repeat(40), checkout: 'c'.repeat(40), behind: 3 });
+    // The move is timed too (GY-1196): the self-upgrade has its bound from it.
+    assert.deepEqual(loadedRevision('/nonexistent', 1, git), { loaded: 'l'.repeat(40), checkout: 'c'.repeat(40), behind: 3, movedAt: (started + 60) * 1000 });
   });
 });
 
