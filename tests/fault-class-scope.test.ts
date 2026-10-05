@@ -12,7 +12,6 @@ import { decideScopeRequest, followUpPaths, impliedScopes, namedPaths, plannedCo
 import { peerModuleGround, importingTestGround } from '../src/model/scope-companions.js';
 import { automaticScopeGrounds } from '../src/daemon/cycle-scope.js';
 import { derivePlannedFiles } from '../src/model/work.js';
-import { coalescedScope, plannedScope, shippedFollowUpItem } from '../src/review-threads.js';
 
 // GY-1085 names this file for its proof: manual:fault-class-scope. The master loop filed 9 scope
 // faults in 24 hours on 1 October 2026. Every one was a live attempt's scope request that the
@@ -29,7 +28,9 @@ import { coalescedScope, plannedScope, shippedFollowUpItem } from '../src/review
 // GY-1116: The master loop filed 3 scope faults in 24 hours on 2 October 2026 (GY-1115, GY-1048,
 // GY-794). All three were promoted review follow-ups where promoteFollowUp planned at most one file,
 // derivePlannedFiles added only exact criterion paths, and the widening rule refused peer modules,
-// server wiring and importing tests.
+// server wiring and importing tests. GY-1249 has since stopped filing follow-up items, so no new
+// item is promoted with one file; the follow-up items already filed still carry their findings, and
+// those, with peer modules and importing tests, are what the widening rule now grounds.
 //
 // Each instance is replayed from the ledger (`graphyard events GY-N --kind scope,autoscope`) as the
 // item stood at the instant the loop recorded it. Against the base each subtest fails: the instance
@@ -239,7 +240,7 @@ test('manual:fault-class-scope — GY-1116: unrelated items asking for peer modu
   assert.equal(autoResult.grounds, undefined, 'no grounds granted for unrelated request');
 });
 
-test('manual:fault-class-scope — GY-1116: follow-up promotion and derivePlannedFiles plan finding paths up front', () => {
+test('manual:fault-class-scope — GY-1116: derivePlannedFiles plans finding paths up front', () => {
   const tree = new Set([
     'src/backup.ts', 'tests/store-locks.test.ts', 'src/server/main.ts', 'src/store/locks.ts',
     'src/store/tables/work.ts', 'src/store/store.ts', 'src/store/coordination-sql.ts', 'src/direct-merge.ts', 'docs/deployment.md'
@@ -270,30 +271,14 @@ test('manual:fault-class-scope — GY-1116: follow-up promotion and derivePlanne
   assert.ok(companionsWithFollowup.some(c => c.path === 'src/direct-merge.ts'), 'plannedCompanions derives peer cluster from follow-up findings');
 });
 
-test('manual:fault-class-scope — GY-1116: follow-up paths are bounded by plannedScope and coalescedScope', () => {
-  // 1. plannedScope truncates paths longer than 500 characters to a containing directory:
-  const longPath = 'src/' + 'a'.repeat(510) + '/file.ts';
-  const bounded = plannedScope(longPath);
-  assert.ok(bounded !== null);
-  assert.ok(bounded.length <= 500);
-  assert.ok(bounded.endsWith('/'));
-
-  // 2. coalescedScope lifts entries to parent directory when count exceeds 100:
-  const manyPaths = Array.from({ length: 120 }, (_, i) => `src/sub${i % 5}/module${i}.ts`);
-  const coalesced = coalescedScope(manyPaths);
-  assert.ok(coalesced.length <= 100, `coalesced entries (${coalesced.length}) within 100`);
-  assert.ok(coalesced.some(p => p.endsWith('/')), 'coalesced into directory scopes');
-});
-
 test('manual:fault-class-scope — GY-1116: a dotted API name in a finding is prose, never a planned file', () => {
   const gy1048 = instances.find(e => e.subject === 'GY-1048')!;
   const finding = gy1048.origin!.reviewFollowUps!.findings![0];
   assert.ok(namedPaths(finding.text).includes('store.init'), 'the finding text carries the dotted token');
   const paths = followUpPaths([finding]);
   assert.deepEqual(paths.sort(), ['src/server/main.ts', 'src/store/locks.ts', 'src/store/tables/work.ts']);
-  const shipped = shippedFollowUpItem({ key: 'GY-970' }, [{ path: finding.path ?? null, text: finding.text }]);
-  assert.equal(shipped.plannedFiles.includes('store.init'), false, 'the shipped follow-up item does not plan store.init');
-  assert.ok(shipped.plannedFiles.includes('src/server/main.ts'));
+  const derived = derivePlannedFiles(standing(gy1048), new Set(['src/server/main.ts', 'src/store/locks.ts', 'src/store/tables/work.ts']));
+  assert.equal(derived.plannedFiles.includes('store.init'), false, 'the follow-up item does not plan store.init');
   const implied = impliedScopes([{ id: 'AC-1', text: 'x' }], [], gy1048.origin, gy1048.description);
   assert.equal(implied.some(entry => entry.scope === 'store.init'), false, 'store.init implies no scope');
 });
