@@ -11,7 +11,7 @@
 
 ### Approval modes
 
-`"approvals": "auto"` adds: Claude Code `--permission-mode bypassPermissions`, `.claude.json` trust; Codex `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir`; Cursor `--force --trust`, run and logged in as `agent` (not `cursor` or `cursor-agent`); opencode allow-all `OPENCODE_PERMISSION`; Gemini, Qwen `--yolo`; Copilot `--allow-all-tools --allow-all-paths`; Muse `--approval-mode never --trust-workspace`; Antigravity `agy` `--dangerously-skip-permissions`, `trustedWorkspaces`, `--prompt-interactive`; Pi none. `"prompt"`, `refusedLaunchKinds` and runtimes lacking command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}` in arguments.
+`"approvals": "auto"` adds: Claude Code `--permission-mode bypassPermissions`, `.claude.json` trust; Codex `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir`, `config.toml` `[projects."DIR"] trust_level = "trusted"`; Cursor `--force --trust`, run and logged in as `agent` (not `cursor` or `cursor-agent`); opencode allow-all `OPENCODE_PERMISSION`; Gemini, Qwen `--yolo`; Copilot `--allow-all-tools --allow-all-paths`; Muse `--approval-mode never --trust-workspace`; Antigravity `agy` `--dangerously-skip-permissions`, `trustedWorkspaces`, `--prompt-interactive`; Pi none. `"prompt"`, `refusedLaunchKinds` and runtimes lacking command-line requests never start; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}` in arguments.
 
 ### The coordinator checkout is confined at the OS level
 
@@ -19,7 +19,7 @@ Every launch but the master session's gets the checkout unwritable to shell comm
 
 ## Accounts and failover
 
-A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first account under `run.quotaCeilingPercent`, else **fail over** (`dispatch.accounts`), as does a runtime failing to start. A runtime's limit notice (never agent text; from a working session, master too, only beside its retry marker `[retrying in 4s]`) commits work as unpushed `WIP:`, sets `capacity.exhausted` and relaunches elsewhere or after reset (agy's `Individual quota reached`).
+A profile's `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless the [registry](onboarding.md#configure-the-fleet) defines the role. Launches take the first account under `run.quotaCeilingPercent`, else **fail over** (`dispatch.accounts`), as does a runtime failing to start. A runtime's limit notice (never agent text; from a working session, master too, only beside its retry marker `[retrying in 4s]`) commits work as unpushed `WIP:`, sets `capacity.exhausted` and relaunches elsewhere or after reset (agy's `Individual quota reached`). Reviewers and producers launch only on accounts of their profile's `kind`: another runtime's account is skipped (`cross-runtime`) and the profile waits; their session handles name the runtime launched.
 
 ## The loop's own master session
 
@@ -45,7 +45,7 @@ OpenCode 1.18 is ready at `Ask anything…`/`tab agents` ([fixture](../tests/fix
 
 #### First-run consent prompts
 
-On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; anything else (e.g. **credential**, **payment**) escalates; workspace-trust prompts fail the launch. Held workers: `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops it; the item is dispatchable.
+On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; anything else (e.g. **credential**, **payment**) escalates; workspace-trust prompts fail the launch. Trust records are read back just before the runtime starts (a dropped one refuses the launch naming the config); a session blocked later on a folder-trust dialog is closed as a failed launch at once, not after the five-minute unknown-prompt hold. Held workers: `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops it; the item is dispatchable.
 
 ### Acknowledgement, resume and idle sessions
 

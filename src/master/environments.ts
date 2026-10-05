@@ -349,7 +349,7 @@ export type LaunchRole = CapacityRole;
  * name that is not a configured environment is something a master fixes in one command, so it must
  * keep reading as a launch that went wrong rather than as a wait (GY-89).
  */
-export type AccountSkipCause = 'exhausted' | 'logged-out' | 'unconfigured';
+export type AccountSkipCause = 'exhausted' | 'logged-out' | 'unconfigured' | 'cross-runtime';
 export interface AccountSkip { at: string; role: LaunchRole; profile: string; environment: string; reason: string; work: string | null; cause: AccountSkipCause }
 /** Every account of a profile was skipped: the caller fails over to its next profile, or reports the skips. */
 export class NoHealthyAccountError extends Error {
@@ -359,7 +359,10 @@ export class NoHealthyAccountError extends Error {
   readonly capacityExhausted: boolean;
   constructor(message: string, readonly skipped: AccountSkip[]) {
     super(message);
-    this.capacityExhausted = skipped.length > 0 && skipped.every(skip => skip.cause === 'exhausted');
+    // An account of another runtime is never this role's to take (GY-1306): a profile whose own
+    // runtime's accounts are all spent waits for their reset, whatever else it lists.
+    const own = skipped.filter(skip => skip.cause !== 'cross-runtime');
+    this.capacityExhausted = own.length > 0 && own.every(skip => skip.cause === 'exhausted');
   }
 }
 
@@ -370,7 +373,7 @@ const environmentLogSchema = z.object({
   environments: z.record(z.string(), z.any()).default({}),
   skipped: z.array(z.object({ at: z.string(), role: z.enum(quotaRoles), profile: z.string(), environment: z.string(), reason: z.string().max(500), work: z.string().nullable(),
     // Logs written before GY-89 carry no cause; they read as the exhaustion the flag then meant.
-    cause: z.enum(['exhausted', 'logged-out', 'unconfigured']).default('exhausted') }).strict()).max(50).default([]),
+    cause: z.enum(['exhausted', 'logged-out', 'unconfigured', 'cross-runtime']).default('exhausted') }).strict()).max(50).default([]),
   // Accounts a session exhausted mid-work (GY-89), by environment name, each held until its reset.
   // The account each profile's latest launch selected, by `role:profile`, so an exhausted session can be traced to its account.
   selected: z.record(z.string(), z.object({ environment: z.string().nullable(), kind: z.string().nullable(), at: z.string(), work: z.string().nullable() }).strict()).default({}),
@@ -448,7 +451,16 @@ export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentia
  * within quota, under its session and concurrency limits — and records the choice and its reason
  * (see fleet.ts). The profile then supplies only the Graphyard identity the session acts under.
  * A role the registry does not define yet launches from the profile's own accounts, as before.
+ *
+ * A reviewer or producer launch stays on its profile's own runtime (GY-1306): each starts in a
+ * freshly allocated managed checkout, and a profile's harness, arguments and trust step are its
+ * own runtime's, so an account of another kind the profile lists is passed over, with the reason
+ * recorded, and a profile none of whose own-runtime accounts is healthy waits for one rather than
+ * starting, say, codex under a claude profile into a folder codex has never trusted.
  */
+export const sameRuntimeRoles: readonly LaunchRole[] = ['reviewer', 'producer'];
+export const crossRuntimeSkip = (role: LaunchRole, profile: { name: string; kind?: string }, account: { name: string; kind: string }) =>
+  `${account.name} runs ${account.kind}, not ${profile.kind}: a ${role} launch of profile ${profile.name} starts only on ${profile.kind} accounts, so it waits for one rather than starting ${account.kind} in a checkout its ${profile.kind} launch prepared`;
 export type LaunchAccount = AgentEnvironment | FleetLaunchAccount;
 /** The agent registry session a launch was chosen under, or undefined when no registry chose it. */
 export const registrySessionOf = (selected: Pick<LaunchSelection, 'account'> | null | undefined) => selected?.account && 'fleet' in selected.account ? selected.account.fleet.session : undefined;
@@ -493,6 +505,7 @@ export async function selectAccount(config: Pick<MasterConfig, 'environments' | 
   for (const name of profile.accounts) {
     const environment = (config.environments ?? []).find(candidate => candidate.name === name);
     if (!environment) { skipped.push({ at, role, profile: profile.name, environment: name, reason: `${name} is not a configured agent environment; run master environments --apply`, work: probe.work ?? null, cause: 'unconfigured' }); continue; }
+    if (profile.kind && environment.kind !== profile.kind && sameRuntimeRoles.includes(role)) { skipped.push({ at, role, profile: profile.name, environment: name, reason: crossRuntimeSkip(role, profile, environment), work: probe.work ?? null, cause: 'cross-runtime' }); continue; }
     // What a session itself reported outranks the provider's usage read, which may lag or not exist.
     if (held[name]) { skipped.push({ at, role, profile: profile.name, environment: name, reason: describeObservedExhaustion(name, held[name]), work: probe.work ?? null, cause: 'exhausted' }); continue; }
     const health = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
@@ -647,6 +660,8 @@ export async function inspectProfileAccounts<T extends { available: boolean; rea
     for (const name of profile.accounts) {
       const environment = (config.environments ?? []).find(candidate => candidate.name === name);
       if (!environment) { accounts.push({ environment: name, healthy: false, reason: `${name} is not a configured agent environment`, quota: 'unknown', resetsAt: null }); continue; }
+      // As selectAccount passes it over (GY-1306), an account of another runtime launches nothing for this role.
+      if (profile.kind && environment.kind !== profile.kind && sameRuntimeRoles.includes(role)) { accounts.push({ environment: name, healthy: false, reason: crossRuntimeSkip(role, profile, environment), quota: 'unknown', resetsAt: null }); continue; }
       if (held[name]) { accounts.push({ environment: name, healthy: false, reason: describeObservedExhaustion(name, held[name]), quota: 'exhausted', resetsAt: held[name].resetsAt }); continue; }
       const checked = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
       // The reset that matters is the latest among the spent windows: the account launches again only when all of them have.

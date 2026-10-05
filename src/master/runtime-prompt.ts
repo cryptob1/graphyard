@@ -7,11 +7,14 @@
  * that stops on one waits for a person no one will be. The loop answers the shapes it knows with
  * the answer that does nothing: a Yes/No (or proceed/cancel) menu whose "yes" runs a destructive
  * command is declined, and the session is then told how to carry on without that command. Any
- * other prompt is `unknown`, and the loop fails the attempt on it rather than waiting.
+ * other prompt is `unknown`, and the loop fails the attempt on it rather than waiting. A runtime's
+ * first-run folder-trust dialog is `folder-trust` (GY-1306): every launch records its folder
+ * trusted before the runtime starts, so a session that still meets the dialog is a failed launch,
+ * closed at once naming the dialog, never answered and never held as an unclassifiable prompt.
  */
 export interface RuntimePrompt {
-  /** `destructive-command` is a known shape with a safe answer; `unknown` is everything else a blocked screen shows. */
-  kind: 'destructive-command' | 'unknown';
+  /** `destructive-command` is a known shape with a safe answer; `folder-trust` a runtime's first-run folder-trust dialog, a failed launch; `unknown` is everything else a blocked screen shows. */
+  kind: 'destructive-command' | 'folder-trust' | 'unknown';
   /** The prompt's own words, collapsed to one line and bounded, as the record quotes it. */
   text: string;
   /** The keys that choose the non-destructive answer, and that answer's label; null for an unknown prompt. */
@@ -51,6 +54,22 @@ const collapse = (lines: string[]) => {
   return text.length > runtimePromptTextLimit ? `${text.slice(0, runtimePromptTextLimit - 1)}…` : text;
 };
 /**
+ * A folder-trust dialog's own option, as each runtime draws it: Claude Code's "Yes, I trust this
+ * folder" (numbered, or arrow-selected unnumbered), Codex's "Trust and continue", Antigravity's and
+ * Cursor's "Trust this folder"/"Trust workspace". Only an option-shaped line among the screen's last
+ * lines counts, so a session merely printing these words above some other prompt is not one.
+ */
+const folderTrustOption = /^\s*(?:[❯>›▶→]\s*)?(?:\d[.)]\s+)?(?:Yes,?\s+I\s+trust\s+(?:this|the)\s+(?:folder|files|workspace|project)|Trust\s+and\s+continue|Trust\s+(?:this\s+)?(?:folder|workspace|project))\b/i;
+export const folderTrustScreenLines = 8;
+function folderTrustDialog(filled: { entry: string }[]): RuntimePrompt | null {
+  const tail = filled.slice(-folderTrustScreenLines).map(({ entry }) => entry);
+  const at = tail.findIndex(line => folderTrustOption.test(line.replace(screenFrame, '')));
+  if (at < 0) return null;
+  // The dialog's own text: the lines above its option that ask, through its last option.
+  const index = filled.length - tail.length + at, above = filled.slice(Math.max(0, index - 6), index).map(({ entry }) => entry);
+  return { kind: 'folder-trust', text: collapse([...above, ...tail.slice(at)]), keys: null, answer: null };
+}
+/**
  * The prompt a blocked session's screen shows. Only the bottom of the screen is read — the last
  * menu on it and the lines just above that menu — so a command the session ran earlier and that
  * scrolled up cannot make the current prompt look destructive. Null when there is no screen.
@@ -60,6 +79,8 @@ export function classifyRuntimePrompt(screen: string | null | undefined): Runtim
   const lines = screen.split('\n').map(entry => entry.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').trimEnd());
   const filled = lines.map((entry, index) => ({ entry, index })).filter(({ entry }) => entry.trim());
   if (!filled.length) return null;
+  const trust = folderTrustDialog(filled);
+  if (trust) return trust;
   // The last run of numbered options is the prompt's menu; the prompt is the lines above it.
   let end = -1;
   for (let at = filled.length - 1; at >= 0; at--) if (menuOption.test(filled[at].entry)) { end = at; break; }
