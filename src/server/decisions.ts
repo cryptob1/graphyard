@@ -11,6 +11,7 @@ import { precedentAvailability } from './escalation-context.js';
 import { applyTriageClosure } from './followups.js';
 import { mergePath, namedMergePathFault } from '../master/repair-lane.js';
 import { closeWork } from './close.js';
+import { idempotencyKeyLimit } from '../model/followups-held.js';
 import { lockedWork, workIdByRef } from '../store/locked-read.js';
 
 type Db = pg.PoolClient;
@@ -27,7 +28,7 @@ export async function authenticated(services: Services, db: Db, now: Date, actor
   return services.engine.operatorAuthorizer!(db, now, actor);
 }
 export async function receipt(db: Db, actor: Principal, key: string, fingerprint: string) {
-  demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+  demand(key && key.length <= idempotencyKeyLimit, 'An Idempotency-Key is required', 400);
   const row = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
   if (row) demand(row.fingerprint === fingerprint, 'Idempotency key reused with different input');
   return row?.result as DecisionRecord | undefined;

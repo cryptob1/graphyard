@@ -1,7 +1,7 @@
 <!-- page: Agent protocol | 1 | every work mutation. -->
 # Work commands
 
-Every endpoint except `/healthz` requires `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)). Every mutation requires an `Idempotency-Key`, reused only to retry the identical request (replaying the original result). Errors are `{ "error": "reason" }`; a `409` is a coordination refusal: read it, don't retry blindly.
+Every endpoint except `/healthz` requires `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)). Every mutation requires an `Idempotency-Key` of at most 200 characters (longer is refused with `400`), reused only to retry the identical request (replaying the original result). Filing a parent's held follow-ups scopes the key to the hold, so a reopened hold files afresh; a scoped key that would pass 200 characters keeps a prefix of the key plus a hash of all of it. Errors are `{ "error": "reason" }`; a `409` is a coordination refusal: read it, don't retry blindly.
 
 Create with `POST /api/work` ([example](../../examples/work.json)): `title` and `criteria` are required; `dependencies`, `exclusiveResources`, `plannedFiles` and `producerProofs` (`manual:` proofs a producer may run) optional. Other commands are `POST /api/work/KEY/COMMAND`:
 
