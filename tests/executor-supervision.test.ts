@@ -365,8 +365,12 @@ test('integration:unserved-queue-visible: a pending action whose kind no live ex
 
   // Nobody polls. The queue alone cannot tell this from every executor being busy; presence can,
   // once the control plane has listened for a whole liveness window (GY-1086) — before that an
-  // empty registry is a fleet not yet heard from. This one has been listening that long.
+  // empty registry is a fleet not yet heard from. This one has been listening that long, and so
+  // has its durable presence table (GY-1289): an empty table proves silence only a window after it
+  // began recording.
   Object.assign(executorRegistry(engine), { since: new Date(Date.now() - executorLiveMs - 1) });
+  await ok(coordinator, 'GET', 'actions');
+  await store.pool.query(`UPDATE executor_presence SET seen_at = $1 WHERE principal = '' AND executor = ''`, [new Date(Date.now() - executorLiveMs - 1)]);
   const before = await ok(coordinator, 'GET', 'actions');
   assert.deepEqual(before.executors.live, []);
   assert.deepEqual(before.executors.unserved.map((entry: any) => [entry.key, entry.kind]), [[item.key, 'dispatch']]);

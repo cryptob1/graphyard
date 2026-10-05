@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { after, mock, test } from 'node:test';
 import { EventEmitter } from 'node:events';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -9,7 +9,15 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { loadMasterConfig, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import type { ActionRow } from '../src/model/actions.js';
-import { describeUnserved, ExecutorRegistry, executorReport, ledgerLoopMerger, LoopRegistry, loopPresenceInterval, loopPresenceLiveMs, reportedLoopMerger, startExecutorFor } from '../src/model/executor-presence.js';
+import EmbeddedPostgres from 'embedded-postgres';
+import { Engine } from '../src/engine.js';
+import { Store } from '../src/store.js';
+import type { Principal } from '../src/model.js';
+import type { NextActionKind } from '../src/model/next-action.js';
+import { classifyAttention } from '../src/model/fault-classes.js';
+import { actionRoutes } from '../src/server/routes/actions.js';
+import { matchRoute, type RouteContext } from '../src/server/routes.js';
+import { describeUnserved, durablePresence, ExecutorRegistry, type ExecutorPresence, executorLiveMs, executorRegistry, executorReport, ledgerLoopMerger, LoopRegistry, loopPresenceInterval, loopPresenceLiveMs, presenceQuery, reportedLoopMerger, startExecutorFor } from '../src/model/executor-presence.js';
 import { executorFleet } from '../src/cli/executor-report.js';
 import { deploymentObservationSchema, emptyDaemonState, noteWatchdog, runDaemon, watchdogPlan, writeDaemonState, type DaemonState } from '../src/master-daemon.js';
 import type { DaemonEffects } from '../src/daemon/effects.js';
@@ -413,3 +421,223 @@ test('unit:watchdog-refusal-clears-on-reapplied-unit — watchdogPlan\'s refusal
     assert.deepEqual(await noteWatchdog(emptyDaemonState(master), watchdogPlan({}, intervalMs), iso(0), persist), []);
   } finally { await dispose(); }
 });
+
+/**
+ * GY-1289: executor presence outlives the control-plane process. GY-1288's three instances —
+ * dispatch on GY-1287, approve-scope on GY-1286 and request-review on GY-1238, one read at
+ * 2026-10-05T09:43:15.274Z — came from a production deploy: the fleet claimed durably at 09:42:41,
+ * the serving process was replaced, and the new one answered the loop's read with an empty
+ * in-memory registry past its birth-keyed grace. Each test is named for the proof it produces:
+ * unit:executor-presence-outlives-restart (AC-1), unit:executor-presence-idle-poll-no-event (AC-2),
+ * unit:executor-presence-renewal-live (AC-3), unit:executor-listening-keyed-to-evidence (AC-4), and
+ * manual:fault-class-configuration (AC-5). The executor routes run against a real engine and store.
+ */
+const fleetKinds: NextActionKind[] = ['dispatch', 'request-review', 'approve-scope', 'resync', 'reclaim', 'verify-deployment'];
+const coordinatorActor = { id: 'graphyard-master', role: 'coordinator' } as Principal;
+const fleetSlot = (n: number) => `graphyard-master@vishrog/${n}`;
+let database: EmbeddedPostgres | undefined, sharedStore: Store | undefined;
+/** One Postgres for the file, started by the first test that needs it; every such test starts from an empty presence table. */
+async function presenceStore(): Promise<Store> {
+  if (!sharedStore) {
+    const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1289;
+    database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('executor-presence-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+    await database.initialise(); await database.start(); await database.createDatabase('presence_test');
+    sharedStore = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/presence_test`); await sharedStore.init();
+  }
+  await sharedStore.pool.query('TRUNCATE executor_presence');
+  return sharedStore;
+}
+after(async () => { await sharedStore?.close(); await database?.stop(); });
+/** One serving process: an engine over the shared store, with its own in-memory registry. */
+function servingProcess(store: Store) {
+  const engine = new Engine(store, [15368], 300, 'owner/project');
+  engine.submissionObserver = null;
+  return engine;
+}
+/** Call one shipped executor route as the coordinator would over HTTP. */
+let requestKey = 0;
+async function route(engine: object, method: string, path: string, body: unknown = {}) {
+  const url = new URL(`https://graphyard.example${path}`);
+  for (const candidate of actionRoutes.routes) {
+    const params = matchRoute(candidate, method, url.pathname);
+    if (!params) continue;
+    const context = { actor: coordinatorActor, url, services: { engine }, operatorVisible: (work: Work[]) => work, body: async () => Buffer.from(JSON.stringify(body)), idempotencyKey: () => `presence-${++requestKey}` } as unknown as RouteContext;
+    return await candidate.handle(context, params) as any;
+  }
+  throw new Error(`no route ${method} ${path}`);
+}
+const ledgerCounts = async (store: Store) => (await store.pool.query('SELECT (SELECT count(*)::int FROM events) AS events, (SELECT count(*)::int FROM receipts) AS receipts')).rows[0] as { events: number; receipts: number };
+/** GY-1288's pending rows, aged as the 09:43:15 instances name their waits, relative to `read`. */
+function switchoverQueue(read: number) {
+  const ago = (ms: number) => new Date(read - ms).toISOString();
+  return [
+    item('GY-1287', [row('7'.repeat(32), 'GY-1287', 'dispatch', ago(135_000))]), item('GY-1285', [row('5'.repeat(32), 'GY-1285', 'dispatch', ago(75_000))]),
+    item('GY-1286', [row('6'.repeat(32), 'GY-1286', 'approve-scope', ago(125_000))]),
+    item('GY-1238', [row('8'.repeat(32), 'GY-1238', 'request-review', ago(75_000))]), item('GY-1236', [row('9'.repeat(32), 'GY-1236', 'request-review', ago(45_000))]),
+  ];
+}
+const configurationFaults = (report: ReturnType<typeof executorReport>) =>
+  classifyAttention(describeUnserved(report).map(entry => ({ subject: entry.keys[0], text: entry.text }))).filter(fault => fault.faultClass === 'configuration');
+
+/**
+ * The switchover: the fleet polls the old process, which is replaced; the new one has been up longer
+ * than its birth grace (the deploy's request storm kept every poll off it) when the loop reads, 34s
+ * after the fleet's last poll. Returns the new process and the instant of the read.
+ */
+async function switchover(store: Store) {
+  const old = servingProcess(store);
+  for (const n of [1, 2]) await route(old, 'POST', '/api/actions/claim', { executor: fleetSlot(n), host: 'vishrog', kinds: fleetKinds });
+  const replacement = servingProcess(store);
+  Object.assign(executorRegistry(replacement), { since: new Date(Date.now() - 10 * 60_000) });
+  return { replacement, read: Date.now() + 34_000 };
+}
+
+test('unit:executor-presence-outlives-restart — a control plane replaced between two claim polls reads the fleet live on its first actions read; its in-memory view alone reports "no executor is alive"', async () => {
+  const store = await presenceStore();
+  const { replacement, read } = await switchover(store);
+  // Its first read through the shipped route: the fleet that polled the old process is live.
+  const answer = await route(replacement, 'GET', '/api/actions');
+  assert.deepEqual(answer.executors.live.map((entry: any) => entry.executor).sort(), [fleetSlot(1), fleetSlot(2)]);
+  assert.deepEqual(answer.executors.served, [...fleetKinds].sort());
+  assert.equal(answer.executors.listening, undefined);
+  // The same read 34s later over GY-1288's queue: nothing is unserved.
+  const now = new Date(read);
+  const candidate = executorReport(switchoverQueue(read), executorRegistry(replacement), now, undefined, null, await durablePresence(presenceQuery(replacement)));
+  assert.deepEqual(candidate.unserved, []);
+  assert.deepEqual(describeUnserved(candidate), []);
+  // The base: what the replaced process heard in memory, past its birth grace — a live fleet reported dead.
+  const base = executorReport(switchoverQueue(read), executorRegistry(replacement), now);
+  assert.deepEqual(base.live, []);
+  assert.ok(describeUnserved(base).length > 0 && describeUnserved(base).every(entry => entry.text.includes('no executor is alive')));
+});
+
+test('unit:executor-presence-idle-poll-no-event — a claim poll that takes no action refreshes durable presence and appends no event row or receipt', async () => {
+  const store = await presenceStore();
+  const engine = servingProcess(store);
+  const before = await ledgerCounts(store);
+  const first = await route(engine, 'POST', '/api/actions/claim', { executor: fleetSlot(1), host: 'vishrog', kinds: fleetKinds });
+  assert.equal(first.action, null, 'nothing to claim: an idle poll');
+  const recorded = await durablePresence(presenceQuery(engine));
+  assert.deepEqual(recorded?.executors.map(entry => [entry.principal, entry.executor, entry.host, entry.kinds, entry.claims]), [[coordinatorActor.id, fleetSlot(1), 'vishrog', fleetKinds, 0]]);
+  await delay(5);
+  const second = await route(engine, 'POST', '/api/actions/claim', { executor: fleetSlot(1), host: 'vishrog', kinds: fleetKinds });
+  assert.equal(second.action, null);
+  const refreshed = await durablePresence(presenceQuery(engine));
+  assert.equal(refreshed?.executors.length, 1, 'one row per executor, overwritten by each poll');
+  assert.ok(Date.parse(refreshed!.executors[0].seenAt) > Date.parse(recorded!.executors[0].seenAt), 'the second poll moved the executor\'s seenAt forward');
+  // A presence-only poll (a fenced executor) is the same upsert.
+  await route(engine, 'POST', '/api/actions/presence', { executor: fleetSlot(2), host: 'vishrog', kinds: ['dispatch'] });
+  assert.equal((await durablePresence(presenceQuery(engine)))?.executors.length, 2);
+  assert.deepEqual(await ledgerCounts(store), before, 'no event row and no receipt for any poll that claimed nothing (GY-185)');
+});
+
+test('unit:executor-presence-renewal-live — an executor renewing its claim inside a handler longer than 120s stays live, on this process and a replaced one', async () => {
+  const store = await presenceStore();
+  const running = row('d'.repeat(32), 'GY-1126', 'dispatch', new Date().toISOString(), { state: 'claimed', claim: { executor: fleetSlot(1), host: 'vishrog', principal: coordinatorActor.id } as ActionRow['claim'] });
+  // The engine's queue is a stub here (presence is judged beside it); the presence table is the real one.
+  const serving = () => ({ store, claimNextAction: async () => ({ action: running, open: 0, at: new Date().toISOString() }), renewClaimedAction: async (_actor: Principal, id: string) => { assert.equal(id, running.id); return { action: running }; } });
+  mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  try {
+    const engine = serving();
+    const start = Date.now();
+    await route(engine, 'POST', '/api/actions/claim', { executor: fleetSlot(1), host: 'vishrog', kinds: fleetKinds });
+    // Inside the handler for 180s, renewing every 30s and polling nothing.
+    for (let elapsed = 30_000; elapsed <= 180_000; elapsed += 30_000) {
+      mock.timers.setTime(start + elapsed);
+      await route(engine, 'POST', `/api/actions/${running.id}/renew`, {});
+    }
+    mock.timers.setTime(start + 190_000);
+    const now = new Date();
+    const queue = [item('GY-1300', [row('3'.repeat(32), 'GY-1300', 'request-review', new Date(start).toISOString())])];
+    const durable = await durablePresence(presenceQuery(engine));
+    const here = executorReport(queue, executorRegistry(engine), now, undefined, null, durable);
+    assert.deepEqual(here.live.map(entry => entry.executor), [fleetSlot(1)], 'live 190s into one action');
+    assert.deepEqual(here.unserved, [], 'it still serves every kind it polled with');
+    // A process replaced mid-handler hears only renewals, yet the durable row keeps every kind the poll named.
+    const replaced = serving();
+    await route(replaced, 'POST', `/api/actions/${running.id}/renew`, {});
+    const afterRestart = executorReport(queue, executorRegistry(replaced), new Date(), undefined, null, await durablePresence(presenceQuery(replaced)));
+    assert.deepEqual(afterRestart.live.map(entry => [entry.executor, entry.kinds.length]), [[fleetSlot(1), fleetKinds.length]]);
+    assert.deepEqual(afterRestart.unserved, []);
+    // Without the renewals the same executor would have lapsed: the window is still 120s.
+    assert.equal(durable!.executors[0].seenAt, new Date(start + 180_000).toISOString());
+    assert.deepEqual(executorReport(queue, new ExecutorRegistry(new Date(start)), now, undefined, null, { ...durable!, executors: [{ ...durable!.executors[0], seenAt: new Date(start).toISOString() }] }).live, []);
+  } finally { mock.timers.reset(); }
+});
+
+test('unit:executor-listening-keyed-to-evidence — an empty fleet is judged once a poll was heard or durable presence older than one window was read, never on how long the process has been up', async () => {
+  const now = new Date(clock);
+  const work = [item('GY-1301', [row('1'.repeat(32), 'GY-1301', 'dispatch', iso(-180_000))])];
+  const recording = (sinceMs: number, executors = [] as ExecutorPresence[]) => ({ executors, since: iso(sinceMs) });
+  const stale = [{ executor: fleetSlot(1), host: 'vishrog', principal: coordinatorActor.id, kinds: fleetKinds, seenAt: iso(-executorLiveMs - 1), claims: 3 }];
+  // A process born this instant that reads executor presence older than one window judges at once.
+  const young = executorReport(work, new ExecutorRegistry(now), now, undefined, null, recording(-1000, stale));
+  assert.equal(young.listening, undefined);
+  assert.deepEqual(young.unserved.map(entry => entry.key), ['GY-1301']);
+  // An empty table is no evidence while it has recorded for less than a window — however old the process.
+  const fresh = executorReport(work, new ExecutorRegistry(new Date(clock - 3_600_000)), now, undefined, null, recording(-1000));
+  assert.deepEqual([fresh.listening, fresh.unserved], [true, []]);
+  // Recording for a window with nothing heard is: a fleet that was never started still gets its remedy.
+  assert.deepEqual(executorReport(work, new ExecutorRegistry(now), now, undefined, null, recording(-executorLiveMs)).unserved.map(entry => entry.key), ['GY-1301']);
+  // A process up for an hour that has heard nothing and cannot read durable presence judges nothing.
+  const old = executorReport(work, new ExecutorRegistry(new Date(clock - 3_600_000)), now, undefined, null, null);
+  assert.equal(old.listening, true);
+  assert.deepEqual(old.unserved, []);
+  // A poll heard and lapsed is evidence, whatever the durable reading.
+  const heard = new ExecutorRegistry(new Date(clock - 3_600_000));
+  heard.observe({ executor: fleetSlot(1), host: 'vishrog', principal: coordinatorActor.id, kinds: fleetKinds }, new Date(clock - executorLiveMs - 1));
+  assert.deepEqual(executorReport(work, heard, now, undefined, null, null).unserved.map(entry => entry.key), ['GY-1301']);
+  assert.deepEqual(executorReport(work, heard, now, undefined, null, recording(-1000)).unserved.map(entry => entry.key), ['GY-1301']);
+  // And durable presence inside the window is live, however young or unheard the process.
+  const live = executorReport(work, new ExecutorRegistry(now), now, undefined, null, recording(-3_600_000, [{ ...stale[0], seenAt: iso(-1000) }]));
+  assert.deepEqual([live.live.map(entry => entry.executor), live.unserved, live.listening], [[fleetSlot(1)], [], undefined]);
+
+  // Through the real table: the deploy that creates it, or a restore that empties it, starts recording at the first read.
+  const store = await presenceStore();
+  const engine = servingProcess(store);
+  const created = new Date();
+  const first = await durablePresence(presenceQuery(engine), created);
+  assert.deepEqual(first, { executors: [], since: created.toISOString() });
+  const queue = [item('GY-1301', [row('1'.repeat(32), 'GY-1301', 'dispatch', new Date(created.getTime() - 180_000).toISOString())])];
+  const onDeploy = executorReport(queue, new ExecutorRegistry(new Date(created.getTime() - 3_600_000)), created, undefined, null, first);
+  assert.deepEqual([onDeploy.listening, describeUnserved(onDeploy)], [true, []], 'the deploy that ships the table reports no fault on its first read');
+  // The marker is written once: a later read, from any process, keeps the original start.
+  const later = new Date(created.getTime() + executorLiveMs);
+  const second = await durablePresence(presenceQuery(servingProcess(store)), later);
+  assert.equal(second?.since, created.toISOString());
+  assert.deepEqual(executorReport(queue, new ExecutorRegistry(later), later, undefined, null, second).unserved.map(entry => entry.key), ['GY-1301'], 'a window of recording with no executor heard judges, whatever the process age');
+  // A poll prunes nothing it should keep: the marker survives an executor's write.
+  await route(engine, 'POST', '/api/actions/presence', { executor: fleetSlot(1), host: 'vishrog', kinds: ['dispatch'] });
+  const third = await durablePresence(presenceQuery(engine));
+  assert.deepEqual([third?.since, third?.executors.map(entry => entry.executor)], [created.toISOString(), [fleetSlot(1)]]);
+  // A restore leaves the cache empty: recording starts again at the next read, and the fleet is unjudged until a window passes.
+  await store.pool.query('TRUNCATE executor_presence');
+  const restored = new Date(created.getTime() + 600_000);
+  const afterRestore = await durablePresence(presenceQuery(engine), restored);
+  assert.equal(afterRestore?.since, restored.toISOString());
+  assert.equal(executorReport(queue, new ExecutorRegistry(new Date(0)), restored, undefined, null, afterRestore).listening, true);
+});
+
+const switchoverInstances = [
+  { subject: 'GY-1287', kind: 'dispatch', text: 'Nothing can run dispatch: GY-1287 has waited 2m and 1 more for an executor that serves it, and no executor is alive.' },
+  { subject: 'GY-1286', kind: 'approve-scope', text: 'Nothing can run approve-scope: GY-1286 has waited 2m for an executor that serves it, and no executor is alive.' },
+  { subject: 'GY-1238', kind: 'request-review', text: 'Nothing can run request-review: GY-1238 has waited 1m and 1 more for an executor that serves it, and no executor is alive.' },
+];
+for (const instance of switchoverInstances) {
+  test(`manual:fault-class-configuration — GY-1288 via GY-1289, ${instance.kind} on ${instance.subject} at 2026-10-05T09:43:15.274Z: a serving-process replacement between durable claims and the loop's read no longer reports a live fleet dead`, async () => {
+    const store = await presenceStore();
+    const { replacement, read } = await switchover(store);
+    const now = new Date(read);
+    // The base: the replaced process judges from memory alone and files the instance word for word.
+    const reproduced = configurationFaults(executorReport(switchoverQueue(read), executorRegistry(replacement), now)).find(fault => fault.subject === instance.subject);
+    assert.ok(reproduced, `${instance.subject} reproduces on the base`);
+    assert.ok(reproduced.text.startsWith(instance.text), reproduced.text);
+    assert.equal(reproduced.kind, 'executor');
+    // The candidate: the same read with the durable presence the fleet left before the replacement.
+    const candidate = executorReport(switchoverQueue(read), executorRegistry(replacement), now, undefined, null, await durablePresence(presenceQuery(replacement)));
+    assert.equal(configurationFaults(candidate).find(fault => fault.subject === instance.subject), undefined, `${instance.subject} does not recur`);
+    // A fleet that really stopped is still named once the window passes.
+    const silent = executorReport(switchoverQueue(read + executorLiveMs), executorRegistry(replacement), new Date(read + executorLiveMs), undefined, null, await durablePresence(presenceQuery(replacement)));
+    assert.ok(configurationFaults(silent).some(fault => fault.subject === instance.subject), 'a fleet silent past the window is still reported');
+  });
+}
