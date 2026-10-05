@@ -10,6 +10,7 @@ import { defaultMergeBatchSize, defaultParallelTips, maxMergeBatchSize, maxParal
 import type { Work } from '../model/work.js';
 import { diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
+import { doctorSettingsSchema } from './doctor-settings.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 import { invariantThresholdsSchema } from '../model/invariants.js';
 import { runtimeSandboxes } from '../worker-sandbox.js';
@@ -265,36 +266,32 @@ export const masterRunSchema = z.object({
   // How long a launched runtime has to come up in its pane before the launch fails and closes it
   // (GY-413); default 60. A loaded host echoes the launch command slowly, which is a slow start.
   launchStartSeconds: z.number().int().min(10).max(600).optional(),
-  // Worktree reclamation: how long an assignment worktree may sit untouched before its dependency
-  // directories count as disposable, and the free space below which `master status` raises disk
-  // pressure. Both are read from .graphyard/master.json on every cycle, so a host with a smaller
-  // volume raises the threshold without restarting the loop.
+  // Worktree reclamation: idle hours before dependencies count as disposable, and free space
+  // threshold for disk pressure. Both read from .graphyard/master.json on every cycle.
   reclaimIdleHours: z.number().min(0.25).max(720).optional(),
   diskThresholdGb: z.number().min(0.1).max(10_000).optional(),
   // How many finished assignment worktrees one reclaim pass removes outright (GY-360; default 50),
   // so a large backlog drains over a few cycles without stalling any one of them.
   worktreeRemovalLimit: z.number().int().min(1).max(1000).optional(),
-  // The managed worktree root every proof and review checkout is created under: an absolute path
-  // on durable storage outside every worktree (default: the installation's data directory), the
-  // free space setup and each launch require of its volume, and the size the root may reach before
-  // `master status` asks for a reclaim — a user quota is invisible in the volume's free space.
+  // Managed worktree root for proof and review checkouts: absolute path outside worktrees,
+  // required free space, and max size before master status asks for a reclaim.
   worktreeRoot: z.string().trim().min(1).max(1000).refine(isAbsolute, 'worktreeRoot must be an absolute path').optional(),
   worktreeRootMinFreeGb: z.number().min(0.1).max(10_000).optional(),
   worktreeRootBudgetGb: z.number().min(0.1).max(10_000).optional(),
   // An account whose provider usage reached this percentage of any window is skipped at launch:
   // a session started just below a hard limit would stall mid-task.
   quotaCeilingPercent: z.number().int().min(50).max(100).optional(),
-  // The runtime of each narrow role (GY-169): `herdr`, a terminal session (what an absent setting
-  // means), or `pi`, the headless runner (src/runner) — the approver, and the producer for the
-  // unit proof group. `pi` names the environment wrapper and model those runs use.
+  // The runtime of each narrow role (GY-169): `herdr` terminal session, or `pi` headless runner
+  // (the approver and unit proof producer). `pi` names the wrapper and model those runs use.
   runtimes: narrowRoleRuntimeSchema.optional(),
   pi: piRuntimeSchema.optional(),
   // Research before build (GY-259): the cheap Pi session that briefs a feature before its worker
   // starts — its model (the Z.AI GLM flash model by default), time limit and token budget.
   research: researchSettingsSchema.optional(),
-  // The diagnostician (GY-439): the headless Pi session that turns each recurring-fault item into
-  // its root cause and a fix item — its model, stronger fallback model, time limit, the bound an
-  // invariant violation stands before it is diagnosed, and the commands that read its log excerpts.
+  // The pipeline doctor (GY-711): headless Pi session fixing stuck work every intervalMinutes (10 by default).
+  doctor: doctorSettingsSchema.optional(),
+  // The diagnostician (GY-439): headless Pi session turning each recurring-fault item into its root
+  // cause and fix item — its model, fallback, time limit, bound and log-reading commands.
   diagnostician: diagnosticianSettingsSchema.optional(),
 }).strict();
 export type MasterRun = z.infer<typeof masterRunSchema>;
@@ -308,12 +305,9 @@ export const masterBrowserSchema = z.object({
 export type MasterBrowser = z.infer<typeof masterBrowserSchema>;
 
 export const agentIdentitySchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/), credentialFile: z.string().min(1).max(1000) }).strict();
-/**
- * GY-516: the product default for `mergeQueue.rerunFailedChecks`, so every installation reruns a
- * failed required check once on the same sha before the failure ejects the entry; 0 disables it.
- */
+// GY-516: default for mergeQueue.rerunFailedChecks (reruns failed check once on same sha; 0 disables).
 export const defaultRerunFailedChecks = 1;
-/** The most reruns per sha and check master config and the control plane accept. */
+// The most reruns per sha and check master config and the control plane accept.
 export const maxRerunFailedChecks = 3;
 export const masterConfigSchema = z.object({
   version: z.literal(1),

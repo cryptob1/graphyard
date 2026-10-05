@@ -7,7 +7,7 @@ import { daemonSummary, loopAttention, readDaemonState } from '../master-daemon.
 import { slowCycleAttention } from '../daemon/liveness.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, loopMemoryAttention, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
-import { approverLaunchAttention } from './status-attention.js';
+import { approverLaunchAttention, nameBaseBreaks } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
@@ -93,7 +93,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Browser administration beside the work it unblocks: a pending sudo code, and who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
   // Candidate session status, conflict probe, merge queue and timing failure qualification (GY-1157)
-  const { mergeQueue, probe, status, delivery } = await buildPipelineStatus(root, master, snapshot, coordinator, runtime, credentials, containment, reviews, producers, dispatch.failures, retries, daemonState, cycling, launches, masterApi, sections);
+  const { mergeQueue, probe, status: pipelined, delivery } = await buildPipelineStatus(root, master, snapshot, coordinator, runtime, credentials, containment, reviews, producers, dispatch.failures, retries, daemonState, cycling, launches, masterApi, sections);
+  // A failed check a since-fixed base breakage explains names the refresh that clears it (GY-793).
+  const status = nameBaseBreaks(pipelined, snapshot.work);
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device.
   const sudo = administration.sudo;
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
@@ -160,6 +162,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // Commits no reviewer session ever got a verdict on, with the dismissed review.
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
     ...sectionsReport,
+    // Doctor runs: accepted, else cursor's.
+    doctor: coordinator?.doctor?.length ? coordinator.doctor : cycling?.doctor?.recent ?? null,
   };
 }
 
