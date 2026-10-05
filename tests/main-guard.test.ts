@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Work } from '../src/model.js';
-import { applyMainGuardRevert, commitVerdict, mainGuardAttention, readMain, runMainGuard, type CheckRun, type MainCommit, type MainGuardPorts } from '../src/main-guard.js';
+import { generateKeyPairSync } from 'node:crypto';
+import { applyMainGuardRevert, commitVerdict, mainGuardAttention, readMain, revertInverseRefusal, runMainGuard, type CheckRun, type FileChange, type MainCommit, type MainGuardPorts } from '../src/main-guard.js';
+import { GitHub } from '../src/github.js';
 import { mergeStep } from '../src/daemon/cycle-delivery.js';
 import { emptyDaemonState, pruneDaemonState, retainedActions } from '../src/daemon/state.js';
 import type { Cycle } from '../src/daemon/cycle.js';
@@ -23,11 +25,25 @@ function delivered(key: string, mergeSha: string, pr: number): Work {
 const runs = (results: Record<string, string>): CheckRun[] => Object.entries(results).map(([name, result], id) => ({ name, result, appId: ci, id }));
 const green = runs({ test: 'success', typecheck: 'success' });
 
-/** A fake GitHub: main's history, the check runs on each commit, and the revert pull requests the guard opens. */
+/** What a merge changed: one file, two lines replaced by one. */
+const mergeDiff = (mergeSha: string): FileChange[] => [
+  { filename: 'docs/delivery.md', status: 'modified', patch: `@@ -10,4 +10,3 @@ intro\n context\n-old line one ${mergeSha.slice(0, 4)}\n-old line two\n+new line\n context` },
+  { filename: 'src/added.ts', status: 'added', patch: '@@ -0,0 +1,2 @@\n+export const a = 1;\n+export const b = 2;' },
+];
+/** The exact inverse of a diff, as GitHub lists the revert pull request's files: line numbers shifted by a later merge. */
+const inverseOf = (diff: FileChange[]): FileChange[] => diff.map(change => ({ ...change, status: change.status === 'added' ? 'removed' : change.status === 'removed' ? 'added' : change.status,
+  patch: change.patch!.split('\n').map(line => line.startsWith('@@') ? '@@ -40,3 +40,4 @@ moved' : line.startsWith('-') ? `+${line.slice(1)}` : line.startsWith('+') ? `-${line.slice(1)}` : line).join('\n') }));
+
+/**
+ * A fake GitHub: main's history, the check runs on each commit, and the revert pull requests the
+ * guard opens. Like the protected branch (GY-1291) it requires an approval of the head from someone
+ * other than the last pusher, and the App that opened the revert pushed it.
+ */
 function world(history: MainCommit[], items: Work[]) {
   const checks = new Map<string, CheckRun[]>();
   const pulls = new Map<number, { merged: boolean; mergeSha: string | null; open: boolean; mergeable: boolean | null; head: string }>();
-  const calls = { opened: [] as string[], merged: [] as number[], closed: [] as { pr: number; reason: string }[] };
+  const pushers = new Map<number, string>(), approvals = new Map<number, { by: string; head: string }[]>(), revertDiffs = new Map<number, FileChange[]>();
+  const calls = { opened: [] as string[], merged: [] as number[], closed: [] as { pr: number; reason: string }[], approved: [] as number[] };
   let next = 900, refuse: string | null = null;
   const ports: MainGuardPorts = {
     reverting: async () => items.filter(work => work.mainGuardReverts?.some(revert => revert.state === 'opened')),
@@ -39,10 +55,20 @@ function world(history: MainCommit[], items: Work[]) {
       if (refuse) return { refusal: refuse };
       const pr = next++, head = sha(`e${pr}`);
       pulls.set(pr, { merged: false, mergeSha: null, open: true, mergeable: true, head });
+      pushers.set(pr, 'graphyard-app'); revertDiffs.set(pr, inverseOf(mergeDiff(mergeSha)));
       return { pr, head };
     },
     pull: async pr => pulls.get(pr)!,
+    mergeChanges: async mergeSha => mergeDiff(mergeSha),
+    revertChanges: async pr => revertDiffs.get(pr)!,
+    approveRevert: async (pr, head) => {
+      calls.approved.push(pr);
+      approvals.set(pr, [...approvals.get(pr) ?? [], { by: 'revert-approver[bot]', head }]);
+      return 'approved';
+    },
     mergeRevert: async (_work, revert) => {
+      // Branch protection: require_last_push_approval, enforced for admins and the App alike.
+      if (!(approvals.get(revert.pr) ?? []).some(approval => approval.head === revert.head && approval.by !== pushers.get(revert.pr))) throw new Error('New changes require approval from someone other than the last pusher.');
       calls.merged.push(revert.pr);
       const merge = sha(`d${revert.pr}`);
       pulls.set(revert.pr, { ...pulls.get(revert.pr)!, merged: true, open: false, mergeSha: merge });
@@ -51,7 +77,7 @@ function world(history: MainCommit[], items: Work[]) {
     closeRevert: async (pr, reason) => { calls.closed.push({ pr, reason }); pulls.set(pr, { ...pulls.get(pr)!, open: false }); },
     record: async (snapshot, revert) => { applyMainGuardRevert(items.find(work => work.id === snapshot.id)!, revert, new Date(at)); },
   };
-  return { ports, checks, pulls, calls, items, refuse: (reason: string | null) => { refuse = reason; } };
+  return { ports, checks, pulls, calls, items, revertDiffs, approvals, refuse: (reason: string | null) => { refuse = reason; } };
 }
 
 test('unit:main-guard-reverts-breaking-merge a merge that fails a check its parent passed is reverted by an App-merged revert PR and its item reopened', async () => {
@@ -218,4 +244,92 @@ test('unit:main-guard-never-sticks an abandoned revert raises its attention line
   assert.ok(pruned, `the day's ${fillerPerCycle} rows a cycle retire the line's row past the ${retainedActions}-row bound`);
   assert.deepEqual(raised, ['GY-2', 'GY-5'], 'each abandoned revert is raised exactly once');
   assert.equal(mainGuardAttention(work).length, 2, 'both reverts stay abandoned on their items');
+});
+
+test('unit:guard-revert-lands-under-protection a revert the App pushed is approved by the independent approver and merges under last-push approval, with no human', async () => {
+  const [base, A, B] = ['b0', 'a1', 'b2'].map(sha);
+  const itemB = delivered('GY-2', B, 702);
+  const fake = world([{ sha: B, parent: A }, { sha: A, parent: base }], [itemB]);
+  fake.checks.set(A, green); fake.checks.set(B, runs({ test: 'failure', typecheck: 'success' }));
+  const options = { required, ciAppIds: [ci], now: new Date(at) };
+  await runMainGuard(fake.ports, options);
+  const revert = itemB.mainGuardReverts![0].revert!;
+
+  // The protection is real: the App that pushed the revert cannot merge it on its own standing.
+  await assert.rejects(fake.ports.mergeRevert(itemB, { ...revert, failing: ['test'] }), /approval from someone other than the last pusher/);
+  assert.deepEqual(fake.calls.merged, []);
+
+  // While the revert's checks run nothing is approved; once they pass, the exact inverse is approved at its head and merged.
+  await runMainGuard(fake.ports, options);
+  assert.deepEqual(fake.calls.approved, []);
+  fake.checks.set(revert.head, green);
+  const tick = await runMainGuard(fake.ports, options);
+  assert.deepEqual(tick.errors, []);
+  assert.deepEqual(fake.calls.approved, [revert.pr]);
+  assert.deepEqual(fake.approvals.get(revert.pr), [{ by: 'revert-approver[bot]', head: revert.head }]);
+  assert.deepEqual(fake.calls.merged, [revert.pr]);
+  assert.equal(itemB.mainGuardReverts![0].state, 'merged');
+  assert.equal(itemB.stage, 'ready', 'main is restored and the item reopened, with no reviewer round');
+});
+
+test('unit:guard-revert-lands-under-protection the GitHub client approves as the revert approver App, bound to the head, and never as the control-plane App', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
+  const head = sha('e900'), requests: { method: string; url: string; body: any; auth: string }[] = [];
+  let reviews: any[] = [];
+  const github = new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 7, privateKey: 'not-used', revertApprover: { appId: 5678, installationId: 9, privateKey } });
+  github.fetch = (async (input: string, init: RequestInit) => {
+    const method = init.method ?? 'GET', body = init.body ? JSON.parse(String(init.body)) : undefined;
+    requests.push({ method, url: String(input), body, auth: String((init.headers as Record<string, string>).Authorization) });
+    if (String(input).endsWith('/app/installations/9/access_tokens')) return Response.json({ token: 'approver-installation-token', expires_at: new Date(Date.now() + 3_600_000).toISOString() }, { status: 201 });
+    if (String(input).includes('/pulls/900/reviews') && method === 'GET') return Response.json(reviews);
+    if (String(input).endsWith('/pulls/900/reviews') && method === 'POST') {
+      const review = { id: 1, state: 'APPROVED', commit_id: body.commit_id, performed_via_github_app: { id: 5678 } };
+      reviews.push(review);
+      return Response.json(review);
+    }
+    return new Response('unexpected', { status: 500 });
+  }) as typeof fetch;
+  assert.equal(await github.approveRevert(900, head, 'exact inverse'), 'approved');
+  const posted = requests.filter(request => request.method === 'POST' && request.url.endsWith('/reviews'));
+  assert.deepEqual(posted.map(request => request.body), [{ commit_id: head, event: 'APPROVE', body: 'exact inverse' }]);
+  assert.equal(posted[0].auth, 'Bearer approver-installation-token', 'the approval is the approver App\'s, not the App that pushed the revert');
+  // An approval already standing on the head is not posted again.
+  assert.equal(await github.approveRevert(900, head, 'exact inverse'), 'approved');
+  assert.equal(requests.filter(request => request.method === 'POST' && request.url.endsWith('/reviews')).length, 1);
+  // Without an approver the merge is attempted on the App's own standing; the control-plane App is never its own approver.
+  assert.equal(await new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 7, privateKey: 'not-used' }).approveRevert(900, head, 'x'), 'unconfigured');
+  await assert.rejects(new GitHub({ repository: 'owner/project', base: 'main', appId: 1234, installationId: 7, privateKey: 'not-used', revertApprover: { appId: 1234, installationId: 7, privateKey } }).approveRevert(900, head, 'x'), /other than the control-plane App/);
+});
+
+test('unit:guard-revert-exact-inverse-only a revert with one line altered is neither approved nor merged, and is closed', async () => {
+  const merge = mergeDiff(sha('b2'));
+  assert.equal(revertInverseRefusal(merge, inverseOf(merge)), null, 'the exact inverse passes, whatever its line numbers');
+  // One line of the revert altered: refused.
+  const altered = inverseOf(merge);
+  altered[0] = { ...altered[0], patch: altered[0].patch!.replace('+old line two', '+old line 2') };
+  assert.match(revertInverseRefusal(merge, altered)!, /docs\/delivery\.md is not exactly the inverse/);
+  // An extra file, a missing file, a status that does not invert, and a file without a patch are refused too.
+  assert.match(revertInverseRefusal(merge, [...inverseOf(merge), { filename: 'src/other.ts', status: 'modified', patch: '@@ -1 +1 @@\n-a\n+b' }])!, /changes src\/other\.ts, which the merge did not/);
+  assert.match(revertInverseRefusal(merge, inverseOf(merge).slice(1))!, /does not change docs\/delivery\.md/);
+  assert.match(revertInverseRefusal(merge, inverseOf(merge).map(change => ({ ...change, status: 'modified' })))!, /src\/added\.ts is modified, not the inverse of the merge's added/);
+  assert.match(revertInverseRefusal(merge, inverseOf(merge).map(change => ({ ...change, patch: null })))!, /no patch to compare/);
+
+  // Through the guard: the altered revert's checks pass, yet it is never approved or merged, and is closed after its one attempt.
+  const [base, A, B] = ['b0', 'a1', 'b2'].map(sha);
+  const itemB = delivered('GY-2', B, 702);
+  const fake = world([{ sha: B, parent: A }, { sha: A, parent: base }], [itemB]);
+  fake.checks.set(A, green); fake.checks.set(B, runs({ test: 'failure', typecheck: 'success' }));
+  const options = { required, ciAppIds: [ci], now: new Date(at) };
+  await runMainGuard(fake.ports, options);
+  const revert = itemB.mainGuardReverts![0].revert!;
+  const diff = fake.revertDiffs.get(revert.pr)!;
+  diff[0] = { ...diff[0], patch: diff[0].patch!.replace('-new line', '-new line, edited') };
+  fake.checks.set(revert.head, green);
+  await runMainGuard(fake.ports, options);
+  assert.deepEqual(fake.calls.approved, []);
+  assert.deepEqual(fake.calls.merged, []);
+  assert.deepEqual(fake.calls.closed.map(close => close.pr), [revert.pr]);
+  assert.equal(itemB.mainGuardReverts![0].state, 'abandoned');
+  assert.match(itemB.mainGuardReverts![0].reason!, new RegExp(`revert PR #${revert.pr} is not exactly the inverse of merge ${B.slice(0, 12)}, so it is neither approved nor merged`));
+  assert.equal(itemB.stage, 'done');
 });

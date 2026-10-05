@@ -10,6 +10,13 @@
 // App once the revert's own required checks pass, and reopens the reverted item for a rework round
 // naming the failing check and the merge commit.
 //
+// Branch protection requires an approval from someone other than the last pusher (GY-1291), and the
+// App pushed the revert, so its own merge is refused. Before merging, the guard compares the revert
+// pull request's diff with the named merge's: only a diff that is exactly its inverse — the same
+// files, each adding back exactly the lines the merge removed and removing exactly the lines it
+// added — is approved by the independent revert approver App and then merged. Anything else is
+// never approved and is abandoned.
+//
 // The guard never holds anything. A revert gets one attempt: one that conflicts, whose checks fail
 // or do not conclude, or that GitHub refuses to merge is closed and recorded `abandoned`, which the
 // loop raises as one attention line naming the merge, the failing check and the revert PR. A merge
@@ -111,6 +118,52 @@ export function applyMainGuardRevert(work: Work, revert: MainGuardRevert, now: D
   return { reopened: revert.state === 'merged' && reopenReverted(work, revert, now) };
 }
 
+/** One file of a diff as GitHub lists it: its status, its path (and the path it was renamed from) and its unified patch. */
+export interface FileChange { filename: string; status: string; previousFilename?: string | null; patch?: string | null }
+const inverseStatus: Record<string, string> = { added: 'removed', removed: 'added', modified: 'modified', renamed: 'renamed' };
+/** GitHub reports a mode-only or content change as `changed` as well as `modified`; both are a modification. */
+const statusOf = (change: FileChange) => change.status === 'changed' ? 'modified' : change.status;
+/** The removed and added lines of a unified patch, in order; hunk headers and context lines say nothing about what changed. */
+function patchLines(patch: string) {
+  const removed: string[] = [], added: string[] = [];
+  for (const line of patch.split('\n')) {
+    if (line.startsWith('-')) removed.push(line.slice(1));
+    else if (line.startsWith('+')) added.push(line.slice(1));
+  }
+  return { removed, added };
+}
+/**
+ * Null when `revert` is exactly the inverse of `merge`, else why not: the same files, a file the
+ * merge added removed (and the reverse), a rename renamed back, and each file adding back exactly
+ * the lines the merge removed and removing exactly the lines it added, in order. Line numbers and
+ * context may differ, since later merges may have moved the lines; the lines changed may not. A
+ * file without a patch (binary, or too large for GitHub to show) cannot be compared, so it refuses.
+ */
+export function revertInverseRefusal(merge: readonly FileChange[], revert: readonly FileChange[]): string | null {
+  if (!merge.length) return 'the merge changed no file GitHub lists, so no revert of it can be verified';
+  const keyOf = (change: FileChange) => change.filename;
+  const reverted = new Map(revert.map(change => [keyOf(change), change]));
+  if (reverted.size !== revert.length) return 'the revert lists a file twice';
+  const expected = new Set<string>();
+  for (const change of merge) {
+    // A rename a→b is undone by a rename b→a: the revert's file is the merge's previous name.
+    const target = change.status === 'renamed' ? change.previousFilename ?? '' : change.filename;
+    expected.add(target);
+    const inverse = reverted.get(target);
+    if (!inverse) return `the revert does not change ${target}, which the merge changed`;
+    if (statusOf(inverse) !== (inverseStatus[statusOf(change)] ?? statusOf(change))) return `the revert's ${target} is ${inverse.status}, not the inverse of the merge's ${change.status}`;
+    if (change.status === 'renamed' && inverse.previousFilename !== change.filename) return `the revert renames ${target} from ${inverse.previousFilename ?? 'nowhere'}, not back from ${change.filename}`;
+    if (typeof change.patch !== 'string' || typeof inverse.patch !== 'string') {
+      if (change.patch == null && inverse.patch == null && change.status === 'renamed') continue;
+      return `${target} has no patch to compare (binary or too large), so the revert of it cannot be verified`;
+    }
+    const forward = patchLines(change.patch), backward = patchLines(inverse.patch);
+    if (JSON.stringify(backward.added) !== JSON.stringify(forward.removed) || JSON.stringify(backward.removed) !== JSON.stringify(forward.added)) return `the revert's change to ${target} is not exactly the inverse of the merge's`;
+  }
+  const extra = revert.find(change => !expected.has(keyOf(change)));
+  return extra ? `the revert changes ${extra.filename}, which the merge did not` : null;
+}
+
 /** What the guard needs of GitHub and the store; github.ts supplies the App's, tests a fake. */
 export interface MainGuardPorts {
   /** The items holding a revert still `opened`, as whole documents. */
@@ -123,6 +176,16 @@ export interface MainGuardPorts {
   /** Opens the revert pull request of exactly `mergeSha` onto main's tip, or says why it cannot (a conflict). */
   openRevert(work: Work, mergeSha: string, reason: string): Promise<{ pr: number; head: string } | { refusal: string }>;
   pull(pr: number): Promise<{ merged: boolean; mergeSha: string | null; open: boolean; mergeable: boolean | null; head: string }>;
+  /** The files the merge commit `mergeSha` changed against its first parent. */
+  mergeChanges(mergeSha: string): Promise<FileChange[]>;
+  /** The files the revert pull request changes against main. */
+  revertChanges(pr: number): Promise<FileChange[]>;
+  /**
+   * Approves the revert at exactly `head` as the independent revert approver App, which branch
+   * protection accepts as someone other than the last pusher (GY-1291). `unconfigured` when no
+   * approver is registered: the merge is then attempted on the App's own standing (its ruleset bypass).
+   */
+  approveRevert(pr: number, head: string, body: string): Promise<'approved' | 'unconfigured'>;
   /** Merges the revert as the App, bound to `head`; the merge commit, or null when GitHub has not merged it yet. */
   mergeRevert(work: Work, revert: { pr: number; head: string; failing: string[] }): Promise<string | null>;
   closeRevert(pr: number, reason: string): Promise<void>;
@@ -185,6 +248,13 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
         if (now.getTime() - Date.parse(revert.at) > (options.checksTimeoutMs ?? revertChecksTimeoutMs)) await abandon(work, revert, `revert PR #${pr}'s required checks did not conclude within ${Math.round((options.checksTimeoutMs ?? revertChecksTimeoutMs) / 60_000)} minutes`);
         continue;
       }
+      // Only a revert that is exactly the inverse of the merge it names is approved or merged.
+      let refused: string | null;
+      try { refused = revertInverseRefusal(await ports.mergeChanges(revert.mergeSha), await ports.revertChanges(pr)); }
+      catch (error) { refused = `its diff could not be compared with the merge's: ${message(error)}`; }
+      if (refused) { await abandon(work, revert, `revert PR #${pr} is not exactly the inverse of merge ${revert.mergeSha.slice(0, 12)}, so it is neither approved nor merged: ${refused}`); continue; }
+      try { await ports.approveRevert(pr, head, `Graphyard's main guard: this revert is exactly the inverse of ${work.key}'s merge ${revert.mergeSha} and its required checks passed at ${head}.`); }
+      catch (error) { await abandon(work, revert, `the revert approver could not approve revert PR #${pr}: ${message(error)}`); continue; }
       let sha: string | null;
       try { sha = await ports.mergeRevert(work, { pr, head, failing: revert.failing }); }
       catch (error) { await abandon(work, revert, `GitHub refused to merge revert PR #${pr}: ${message(error)}`); continue; }
