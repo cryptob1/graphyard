@@ -254,7 +254,7 @@ async function startLanes() {
     assert.equal((await store.list()).find(item => item.id === work.id)!.reworkRequested, false, 'and nothing was applied');
     return { work, stranded };
   };
-  return { engine, store, master, send, call, decisions, submitted, interrupted };
+  return { engine, store, master, send, call, decisions, submitted, interrupted, implementer: credentials[1] };
 }
 test('unit:lane-sets-required-gates — a low- or medium-lane rework is applied as it is requested, and a high-lane one waits for its independent approver', { timeout: 120_000 }, async () => {
   const { store, master, call, submitted } = await lanes();
@@ -326,6 +326,55 @@ test('unit:lane-rework-unapplied-not-blocking — a new rework request resumes o
   const ledger = await decisions(second.work.key);
   assert.equal(ledger.find(entry => entry.id === second.stranded.id)!.state, 'failed', 'the standing decision settled failed');
   assert.equal((await store.list()).find(item => item.id === second.work.id)!.reworkRequested, true);
+});
+
+// GY-1265 (review follow-up of GY-1244): resumption is best-effort. An unexpected engine fault while
+// resuming a stranded rework leaves it approved for the next request, and the unrelated request that
+// triggered the resumption is still judged on its own merits rather than failing with the fault.
+test('unit:lane-rework-resume-best-effort — an engine fault during resumption neither fails the triggering request nor settles the rework', { timeout: 120_000 }, async () => {
+  const { engine, store, master, send, decisions, interrupted } = await lanes();
+  const { work, stranded } = await interrupted('resume-faults');
+  const execute = engine.execute;
+  engine.execute = (async (...args: Parameters<typeof execute>) => {
+    if (args[1] === 'rework') { engine.execute = execute; throw new Error('connection terminated while resuming the rework'); }
+    return execute.apply(engine, args);
+  }) as typeof execute;
+  const unrelated = await send(master.token, `work/${work.key}/decide`, { action: 'unblock', input: { expectedRevision: 1 }, reason: 'Nothing to unblock' });
+  const faulted = engine.execute === execute;
+  engine.execute = execute;
+  assert.equal(faulted, true, 'the resumption reached the engine and faulted');
+  assert.equal(unrelated.status, 409, `the unblock is judged on its own merits, not failed by the fault: ${JSON.stringify(unrelated.body)}`);
+  const [standing] = await decisions(work.key);
+  assert.equal(standing.id, stranded.id);
+  assert.equal(standing.state, 'approved', 'the faulted rework stays approved for the next request to resume');
+  assert.equal((await store.list()).find(item => item.id === work.id)!.reworkRequested, false, 'and nothing was applied');
+  // The next request resumes it.
+  await send(master.token, `work/${work.key}/decide`, { action: 'unblock', input: { expectedRevision: 1 }, reason: 'Nothing to unblock' });
+  const [resumed] = await decisions(work.key);
+  assert.equal(resumed.state, 'applied');
+  assert.equal((await store.list()).find(item => item.id === work.id)!.reworkRequested, true);
+});
+
+// GY-1265 (review follow-up of GY-1244): a caller without authority for the request it makes is
+// refused before the request resumes any stranded rework, so an unauthorised request moves nothing.
+test('unit:lane-rework-unauthorised-no-resume — an unauthorised decision request is refused before it resumes a stranded rework', { timeout: 120_000 }, async () => {
+  const { store, master, send, decisions, interrupted, implementer } = await lanes();
+  const { work, stranded } = await interrupted('unauthorised-resume');
+  for (const body of [
+    { action: 'unblock', input: { expectedRevision: 1 }, reason: 'Not mine to unblock' },
+    { action: 'rework', input: { previousWorkerStopped: true }, reason: 'Not mine to rework' },
+  ]) {
+    const refused = await send(implementer.token, `work/${work.key}/decide`, body);
+    assert.equal(refused.status, 403, `${body.action}: ${JSON.stringify(refused.body)}`);
+    const ledger = await decisions(work.key);
+    assert.equal(ledger.length, 1, `${body.action}: the refused request recorded nothing`);
+    assert.equal(ledger[0].id, stranded.id);
+    assert.equal(ledger[0].state, 'approved', `${body.action}: the stranded rework was not resumed by an unauthorised caller`);
+    assert.equal((await store.list()).find(item => item.id === work.id)!.reworkRequested, false);
+  }
+  // An authorised request still resumes it.
+  await send(master.token, `work/${work.key}/decide`, { action: 'unblock', input: { expectedRevision: 1 }, reason: 'Nothing to unblock' });
+  assert.equal((await decisions(work.key))[0].state, 'applied');
 });
 
 // AC-3: lanes are inputs to the single landability verdict (GY-878), not separate required-check
