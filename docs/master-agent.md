@@ -5,7 +5,7 @@ The master (`coordinator`) routes and administers GitHub unasked; never implemen
 
 ## Operate
 
-Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)). Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
+Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)); Close finished agent sessions. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
 `master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from a [dirty or moved checkout](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level), which raises `escalation:dirty-checkout` ([operations](operations.md#resources-and-disk)). The loop launches, wakes and rotates the [master session](master-agent-sessions.md#the-loops-own-master-session). Railway: set `productionEnvironment`.
 
@@ -46,7 +46,7 @@ Every `run.doctor.intervalMinutes` (default 10) the loop's [doctor](onboarding.m
 
 ## Research and diagnosis
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); quota refusals read `waiting` in `daemon.diagnoses` until `retryAt`, then one probe. Its `stale`/`withdrawn` decisions are re-requested (≤3), then escalated; a stale backlog release stays owed attention. Branch restores, base conflicts under 30m and restart-resumed merges aren't `merge` faults.
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); quota refusals read `waiting` in `daemon.diagnoses` until `retryAt`, then one probe; its `stale`/`withdrawn` decisions are re-requested (≤3), then escalated; stale backlog releases stay owed. Branch restores, base conflicts under 30m and restart-resumed merges aren't `merge` faults.
 
 ## Machine-filed backlog
 
