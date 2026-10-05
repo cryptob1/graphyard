@@ -103,7 +103,15 @@ export const coordinationTrimSql = (kept: string, keep: number) => `jsonb_build_
   'actionHistory', GREATEST(0, ${length("d.document->'actionQueue'->'history'")} - ${keep}),
   'sessions', ${length("d.document->'sessions'")} - ${length(`${kept}->'sessions'`)})`;
 
-/** Items a pass reads whole after its opening stand-ins (GY-727, GY-1027): each batch's own items, and those that moved since. */
+/**
+ * Every row's version and settled flag, never a document (GY-1124). A pass compares the versions
+ * with the view the previous pass kept and reads again only the rows that moved; `settled` is the
+ * work index's own flag, kept current beside every write by the same trigger, and matches the
+ * locked read's (GY-1027), which serves a settled delivery as its summary instead of its document.
+ */
+export const reconcileRowsSql = `SELECT w.id, w.number, w.xmin::text AS version, COALESCE(i.settled AND i.summary IS NOT NULL, false) AS settled
+  FROM work_items w LEFT JOIN work_index i ON i.id = w.id ORDER BY w.number`;
+/** Items a pass reads whole after its opening stand-ins (GY-727, GY-1027, GY-1124): the rows that moved since the view the pass keeps. */
 export const reconcileRereadSql = 'SELECT w.id, w.number, w.xmin::text AS version, w.document FROM work_items w WHERE w.id = ANY($1::uuid[])';
 /**
  * The versions of the rows a pass can be affected by, never their documents: the pass's own

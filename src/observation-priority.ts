@@ -1,4 +1,4 @@
-import type { Work } from './model.js';
+import type { Observation, Work } from './model.js';
 import { nextAction } from './model/next-action.js';
 import { mergeAuthorized, predictQueue } from './merge-queue.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
@@ -149,4 +149,47 @@ export function observationBandLag(all: Work[], now: number, skipHead: string | 
     text: `The ${entry.band} band has ${entry.pastBound} of ${entry.items} item(s) observed longer ago than its ${observationLag(entry.boundMs!)} bound (oldest ${entry.stale!.key}, ${entry.stale!.lagMs === Infinity ? 'never observed' : observationLag(entry.stale!.lagMs)}): ${entry.band === 'merge' ? 'the merge gate refuses them' : 'their review requests may name heads that have since moved'} until the observation workers reach them`,
     ...agentOwner('control plane', 'Nothing to run: the workers claim these bands ahead of the backlog; if the lag persists, raise GRAPHYARD_OBSERVATION_CONCURRENCY with GRAPHYARD_DATABASE_POOL_SIZE (workers at most half the pool) and restart the server') }));
   return { bands: report, attention };
+}
+
+/**
+ * What a move of the base branch re-observes (GY-1231). Under GitHub delivery merges land minutes
+ * apart, and every one woke every open item's observation job: on 2026-10-05 four merges in four
+ * minutes spent the App's 5000-request hour by 02:03 and paused every GitHub request until 02:37.
+ * A base move changes an observation's answer only where it can: an item whose pull request touches
+ * a file the base change touched (its patch, landing check and docs carry are read against it), and
+ * one whose last reading GitHub did not report CLEAN or UNSTABLE — blocked, behind, conflicting
+ * (dirty), still computing (unknown), any other state, no state recorded, or never read. A CLEAN or
+ * UNSTABLE reading has nothing a disjoint base change can move, so it keeps its cadence; the queue's
+ * head band is observed every 20 seconds regardless.
+ */
+export const mergeabilitySettled = (observation: Pick<Observation, 'mergeableState' | 'conflicting' | 'mergeabilityUnknown'> | null | undefined) =>
+  !!observation && ['clean', 'unstable'].includes(observation.mergeableState?.toLowerCase() ?? '') && !observation.conflicting && !observation.mergeabilityUnknown;
+/**
+ * The files a push to the base branch changed, from its webhook payload; null when the payload
+ * cannot say: a forced push, a push listing no commits, or one GitHub truncated at 20 commits (its
+ * file lists are then incomplete), in which case every open item is woken as before. A merge
+ * commit's own lists can be partial; the pull request's commits in the same payload name the rest.
+ */
+export function baseChangeFiles(payload: any): string[] | null {
+  const commits = payload?.commits;
+  if (payload?.forced || !Array.isArray(commits) || !commits.length || commits.length >= 20) return null;
+  const files = new Set<string>();
+  for (const commit of commits) {
+    if (!commit || !['added', 'removed', 'modified'].every(field => Array.isArray(commit[field]))) return null;
+    for (const field of ['added', 'removed', 'modified']) for (const file of commit[field]) if (typeof file === 'string') files.add(file);
+  }
+  return [...files];
+}
+/** What `baseMoveWakes` reads of an item: the route projects only these fields. */
+export type BaseMoveItem = Pick<Work, 'id' | 'stage'> & { submission?: { pr: number } | null; observation?: (Pick<Observation, 'files' | 'mergeableState' | 'conflicting' | 'mergeabilityUnknown'>) | null };
+/**
+ * The open submitted items a base move wakes at once (GY-1231): with the base change's files known,
+ * those whose observed pull-request files overlap them or whose mergeability is not settled
+ * (`mergeabilitySettled`); with them unknown (null), every one. Every other item keeps its cadence.
+ */
+export function baseMoveWakes(all: readonly BaseMoveItem[], baseFiles: readonly string[] | null): string[] {
+  const open = all.filter(work => work.stage !== 'done' && !!work.submission);
+  if (!baseFiles) return open.map(work => work.id);
+  const changed = new Set(baseFiles);
+  return open.filter(work => !mergeabilitySettled(work.observation) || work.observation!.files.some(file => changed.has(file))).map(work => work.id);
 }

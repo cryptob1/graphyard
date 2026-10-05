@@ -7,7 +7,7 @@ import { nameOrphanSupervisors } from './status-attention.js';
 import { nameUnresolvedThreads } from '../merge-queue.js';
 import { qualifyTimingFailures, ghCheckAnnotations } from './timing-failures.js';
 import { routedScopeStatus } from './owed-report.js';
-import { reworkRoundsWithOwnCauses } from '../flow-analytics.js';
+import { speedSections } from '../flow-analytics.js';
 import { timedStep } from '../master/timings.js';
 import type { ReportSections } from '../master/sections.js';
 import { readReviewLedger, reconcileReviews, summarizeReviews } from '../reviewer.js';
@@ -49,9 +49,8 @@ export async function buildPipelineStatus(
   // A check failed on the clock says so, against its budget; a routed scope request, its approver.
   const status = routedScopeStatus(await timedStep('timing failures', () => qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository))), snapshot.work, cycling?.approvals, master);
   for (const worker of status.workers) Object.assign(worker, launches.rows[worker.profile] ?? {});
-  // Rework rounds by cause (GY-643), out-of-item causes removed, cached beside the worktree
-  // inventory (GY-725); a failed read marks the section.
-  try { status.speed.reworkRounds = await reworkRoundsWithOwnCauses(status.speed.reworkRounds, masterApi, snapshot, 100, { root }); }
-  catch (error) { sections.mark('rework causes', 'GET /api/events?kind=rework', error); }
-  return { mergeQueue, probe, sessions, status };
+  // Rework rounds by cause (GY-643, GY-725) onto `speed`, delivery speed on the GitHub path with its
+  // breach attention (GY-1232); a failed read marks its section.
+  const delivery = await speedSections(status.speed, masterApi, snapshot, { root, targets: master.deliverySpeed, sections });
+  return { mergeQueue, probe, sessions, status, delivery };
 }

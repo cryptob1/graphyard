@@ -2,7 +2,6 @@
 import { directMergeLine, docsBudgetAttention } from './status-attention.js';
 import { masterBoard } from '../model/board.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
-import { optimisticStatus } from '../master/optimistic-attention.js';
 import { branchReport, mergeProtocolSkew, profileConcurrency, reclaimIdleMs, type AttentionItem, type MasterConfig } from '../master.js';
 import { reviewLedgerSpec, sessionLedgerHeadroom } from '../reviewer.js';
 import { producerLedgerSpec } from '../producer.js';
@@ -74,7 +73,6 @@ export async function assembleStatusSections<
     conflictHotspots: hs.report,
     merger: { merger: merger.merger, detail: merger.detail },
     autoMerge: master.autoMerge,
-    ...optimisticStatus(master, snapshot.work),
     mergeQueue,
     mergeApproval: master.autoMerge ? 'routine merges permitted after gates pass' : 'each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by the approver agent',
     conflictProbe: probe,

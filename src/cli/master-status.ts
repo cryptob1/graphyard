@@ -93,7 +93,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Browser administration beside the work it unblocks: a pending sudo code, and who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
   // Candidate session status, conflict probe, merge queue and timing failure qualification (GY-1157)
-  const { mergeQueue, probe, status } = await buildPipelineStatus(root, master, snapshot, coordinator, runtime, credentials, containment, reviews, producers, dispatch.failures, retries, daemonState, cycling, launches, masterApi, sections);
+  const { mergeQueue, probe, status, delivery } = await buildPipelineStatus(root, master, snapshot, coordinator, runtime, credentials, containment, reviews, producers, dispatch.failures, retries, daemonState, cycling, launches, masterApi, sections);
   // A waiting sudo prompt is the operator confirming their own GitHub credential on their device.
   const sudo = administration.sudo;
   // A request whose session settled without satisfying its gate: nothing runs for it, nothing
@@ -112,7 +112,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // The slow intervention report: the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors }));
-  // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406), a main red after optimistic merges (GY-500),
+  // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406),
   // queue-head lag (GY-492), slow renewals (GY-558) and conflict hotspots (GY-566).
   const { observation, health, stalledItems } = stallAttention(snapshot, coordinator, derivedStalls, hs.attention);
   // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
@@ -125,7 +125,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   attentionItems.unshift(...ahead);
   // Setup that stops every launch, or leaves the loop unsupervised, is the master's to repair.
   attentionItems.push(...setupItems);
-  attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []));
+  attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...delivery.attention);
   attentionItems.splice(loopItems.length + dispatchItems.length, 0, ...resources.attention);
   // Everything the control plane takes from the operator's own credential alone, from the
   // human-only rule table, answered on the dashboard's Needs you page (GY-102).
@@ -138,7 +138,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
       ...backlog,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + triage.length + ahead.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length } }, snapshot.work);
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + triage.length + ahead.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length + delivery.attention.length } }, snapshot.work);
   const sectionsReport = await assembleStatusSections({
     master, snapshot, coordinator, cli, mergeQueue, probe, observation, health, hs,
     merger, setup, administration, daemon, dispatch, reviewRecords, producerRecords,
@@ -149,6 +149,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
     unavailable: sections.unavailable,
     docsBudget: docs,
+    delivery: delivery.report,
     // Every open item the control plane names no action for, with the account it names and how
     // long it has held its failing gate.
     actionless: { bound: stallBoundMs, items: actionless },
