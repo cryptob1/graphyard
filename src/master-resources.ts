@@ -143,13 +143,13 @@ export const unownedPaneConfirmMs = 120_000;
  * fifteen minutes, so the bound gives the upgrade two of them.
  */
 export const selfUpgradeBoundMs = 30 * 60_000;
+/** Whether the loop's own liveness verdict vouches for its lag (GY-1317): running, with a lag inside the stall bound. */
+export const vouchedLag = (loop: NonNullable<ResourceInputs['loop']>) => loop.state === 'running' && loop.lagMs !== null && loop.lagMs < loop.stalledAfterMs;
 /**
  * The upgrade's bound for this loop (GY-1255): the upgrade runs between cycles, so a loop whose
  * `run` config spaces cycles further apart than the fixed bound allows gets its own stalled bound
  * (two intervals and any backoff) instead; it is never shorter than `selfUpgradeBoundMs`.
  */
-/** Whether the loop's own liveness verdict vouches for its lag (GY-1317): running, with a lag inside the stall bound. */
-export const vouchedLag = (loop: NonNullable<ResourceInputs['loop']>) => loop.state === 'running' && loop.lagMs !== null && loop.lagMs < loop.stalledAfterMs;
 export const upgradeBoundMs = (loop: ResourceInputs['loop']) => Math.max(selfUpgradeBoundMs, loop?.stalledAfterMs ?? 0);
 /** The plane's database bound when GRAPHYARD_DATABASE_MAX_BYTES is unset. */
 export const defaultDatabaseMaxBytes = 10 * 1024 ** 3;
