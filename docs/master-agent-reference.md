@@ -63,7 +63,7 @@ A producer request spent with no attempt acting (never started, launch refused, 
 
 ## Fault classes
 
-Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`). Workless sessions raise `fleet-capacity`; settled requests unanswered past `settledAnswerGraceMs` (5 minutes) are `unanswered-request`; sandbox or `workflows`-permission refusals are `configuration`. A silent decision waiting on its approver session is `decision-unanswered` (`decision`), not `loop-silence`; a doctor command its allowlist refused is recorded done, not a failed `loop` action.
+Faults carry `faultClass` (`master status` `faults`); recurring classes file one item (`GRAPHYARD_FAULT_CLASS_*`). Workless sessions raise `fleet-capacity`; settled requests unanswered past `settledAnswerGraceMs` (5 minutes) are `unanswered-request`; sandbox or `workflows`-permission refusals are `configuration`. A silent decision waiting on its approver session is `decision-unanswered` (`decision`), not `loop-silence`; a doctor command its allowlist refused is recorded done, not a failed `loop` action. A review waiting over 15 minutes without a launch is `concurrency-starved` (capacity) when every reviewer profile is busy, `review-settlement` (review-convergence) when a reviewer already answered, else `launch-review`.
 
 ## Pipeline speed
 
