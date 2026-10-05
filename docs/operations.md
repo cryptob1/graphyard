@@ -12,6 +12,7 @@
 - **Item not moving**: fix the refusal's cause. Never weaken requirements.
   - Escalation: a declared human session runs `graphyard resolve GY-N TRIGGER "reason"`; an explained `lease-loss` is settleable by `admin --attestation` alone.
   - Lease expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission). Another attempt: [rework](operations-reference.md#submitted-implementation-needs-rework). Fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
+  - A new head owed by `request-rework` is a rework round the loop decides itself; it counts as an `owed-decision` fault only after 30 minutes (`reworkDecisionWaitBoundMs`). An owed escalation counts at once.
   - A failed manual proof a producer may run returns to a worker, never to an operator escalation; one no producer may run needs an operator witness, an unexecuted one an attestation.
 - **Merge refused**: wait or repair the cause; never bypass. Auto-merge `BLOCKED` past ten minutes with every gate passing is asked of GitHub as a head-bound merge; GitHub's refusal is the item's merge refusal in `master status`, and after 30 minutes one `merge-blocked` attention item names the pull request and GitHub's last answer.
 - **Merged outside Graphyard**: [merge bypass](operations-reference.md#merge-bypass).
@@ -51,3 +52,7 @@ The filter admits only the Secret Service methods a credential read needs, but b
 ## Deeper references
 
 - [Operations reference](operations-reference.md), [master agent](master-agent.md), [coordination](coordination.md), [delegation](delegation.md)
+
+## Resources and disk
+
+`resourceRegistry` declares every bounded resource, reported under `resources` ([remedies](operations-reference.md#control-plane-resources)). Each cycle the loop removes finished worktrees (`run.reclaimIdleHours`, at most `run.worktreeRemovalLimit`, never dirty or unpushed; logged to `.graphyard/worktree-reclaim.jsonl`), stale [test temp entries](operations-reference.md#control-plane-resources) and `/tmp/tsx-<uid>` (dead owner or 2h/6h idle, unheld, ≤100, one pass in flight), and raises `disk` attention below `run.diskThresholdGb`. Review and proof checkouts live under `run.worktreeRoot` (default `~/.local/share/graphyard/worktrees/REPOSITORY-ID`). Agentless panes Graphyard launched are swept each cycle ([panes](master-agent-sessions.md#panes-are-closed-and-reclaimed)); the reclaim closes any unowned, non-`working` pane on a profile's name, `unknown` or recordless included, once two passes 60 s apart saw it.
