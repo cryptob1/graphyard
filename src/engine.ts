@@ -253,12 +253,14 @@ export function closeEndedScopeRequest(work: Work, now: Date, by: string) {
   const request = work.scopeRequest;
   if (!request || work.lease?.epoch === request.epoch) return null;
   work.scopeRequest = null;
-  if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
+  // A blocker the worker has just reported is its own, whatever its words: only a refusal left standing is cleared.
+  if (by !== 'blocked' && work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
   return { epoch: request.epoch, paths: request.paths, requestedBy: request.requestedBy, requestedAt: request.at, decision: request.decision?.state ?? null,
     refusal: request.decision?.state === 'refused' ? request.decision.reason : null, reason: scopeRequestEndedReason, by, at: now.toISOString() };
 }
 /** The commands that end an attempt, or clear what an ended one left behind, and so close its scope request. */
-const attemptEndingCommands = new Set<string>(['submit', 'release', 'rework', 'requirements', 'unblock']);
+// A blocker ends its attempt (GY-1008); a cleared one (`blocked GY-N EPOCH -`) keeps the lease, so its request stays open.
+const attemptEndingCommands = new Set<string>(['submit', 'release', 'rework', 'requirements', 'unblock', 'blocked']);
 export function applyScopeDecision(work: Work, request: NonNullable<Work['scopeRequest']>, now: Date): ScopeDecision {
   const verdict = decideScopeRequest(work, request);
   const decision: ScopeDecision = { state: verdict.state, reason: verdict.reason, at: now.toISOString(), decidedBy: 'graphyard',
@@ -1314,7 +1316,6 @@ export class Engine {
           work.capacity = { ...capacity, exhaustions: [...capacity.exhaustions, record].slice(-retainedExhaustions) };
           endAttempt(work, data.epoch, 'released', now);
           work.lease = null;
-          work.scopeRequest = null;
         }
       }
       if (command === 'scope') {

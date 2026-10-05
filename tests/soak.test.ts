@@ -67,7 +67,8 @@ import { loopWatchdogSeconds } from '../src/supervisor.js';
 import { queuePlacement } from '../src/merge-queue.js';
 import { ChildProcessError } from '../src/child-runner.js';
 import { probeBlocker } from '../src/daemon/blocker-probes.js';
-import { classifyBlocker, maxAutomaticClears, type BlockerClass } from '../src/model/blocker-class.js';
+import { blockerEscalateMs } from '../src/daemon/cycle-blockers.js';
+import { classifyBlocker, itemSpecificPlaneError, maxAutomaticClears, type BlockerClass } from '../src/model/blocker-class.js';
 import { SimulatedGitHub, SimulatedHerdr, SimulatedPi, blockedMergeMs, brokenBaseTest, clock, protectionOnlyCheck, statusContext, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 import { mergeStallAttention } from '../src/cli/master-status.js';
 import { laneApprover } from '../src/server/decisions.js';
@@ -409,28 +410,33 @@ const scopePlan = {
 const padded = (n: number) => String(n).padStart(3, '0');
 
 /**
- * GY-1008: the blocked day. Each of the first seven items' first attempt records one of the
+ * GY-1008: the blocked day. Each of the first eight items' first attempt records one of the
  * 2026-09-30 blocker texts a few minutes in, which ends the attempt; the loop re-checks each one
  * every cycle and nobody else touches them. The credential, sandbox and control-plane probes run
  * through the real probe code and fail until their cause clears at the minute below; the
- * outside-scope failure clears once the base moves (items eight and nine land meanwhile); the
+ * outside-scope failure clears once the base moves (items nine and ten land meanwhile); the
  * planned-file-scope blocker becomes a widening decision its approver judges; the needs-decision
  * blocker names a decision the master requested and never put to an approver, which the loop
  * launches. Item `repeating` blocks on every attempt, so the loop clears it `maxAutomaticClears`
  * times in a row and then leaves it to the master.
+ * GY-1055: the control-plane blockers that clear on health name the whole plane (503, a refused
+ * connection); item `requestError` met a 500 on its own request, which health cannot show fixed,
+ * so the loop hands it to the master once and never probes it. The credential cause stands past
+ * `blockerEscalateMs`, so the loop reports it to the master once and still clears it when it goes.
  */
 const blockerPlan = {
-  items: 9, repeating: 7, blockAfterMs: 5 * minute,
-  clearsAt: { 'github-credential': 60 * minute, 'sandbox-path': 75 * minute, 'control-plane-error': 30 * minute } as Partial<Record<BlockerClass, number>>,
-  classes: { 1: 'github-credential', 2: 'sandbox-path', 3: 'control-plane-error', 4: 'outside-scope-test-failure', 5: 'planned-file-scope', 6: 'needs-decision', 7: 'control-plane-error' } as Record<number, BlockerClass>,
+  items: 10, repeating: 7, requestError: 8, blockAfterMs: 5 * minute,
+  clearsAt: { 'github-credential': 150 * minute, 'sandbox-path': 75 * minute, 'control-plane-error': 30 * minute } as Partial<Record<BlockerClass, number>>,
+  classes: { 1: 'github-credential', 2: 'sandbox-path', 3: 'control-plane-error', 4: 'outside-scope-test-failure', 5: 'planned-file-scope', 6: 'needs-decision', 7: 'control-plane-error', 8: 'control-plane-error' } as Record<number, BlockerClass>,
   text: (n: number, branch: string, decision: string | null): string | null => ({
     1: "git push failed: fatal: could not read Username for 'https://github.com': terminal prompts disabled",
     2: `error: unable to append to '.git/logs/refs/remotes/origin/${branch}': Read-only file system`,
-    3: 'graphyard complete command failed with Internal error',
+    3: 'graphyard complete command failed with HTTP 503 Service Unavailable',
     4: "The test suite fails in tests/shared.test.ts on the base branch, outside this item's plannedFiles",
     5: `SCOPE NEEDED: ${extraFile(5)} (https://github.com/owner/project/issues/5 explains why) for commit 8106499e9f`,
     6: `Waiting on decision ${decision}: its approver was never launched`,
-    7: 'graphyard complete command failed with Internal error (HTTP 500)',
+    7: 'graphyard complete command failed: connect ECONNREFUSED 127.0.0.1:8787',
+    8: 'graphyard complete command failed with Internal error (HTTP 500)',
   } as Record<number, string>)[n] ?? null,
 };
 const extraFile = (n: number) => `src/soak/item-${n}-extra.ts`;
@@ -2396,13 +2402,13 @@ async function simulateDay(options: { hours: number; master?: { exitAt: number; 
     }
   }
 
-  // The blocked day ends with its repeating item left to the master: it is closed here, so the
-  // next day's loop does not inherit it.
+  // The blocked day ends with its repeating and request-error items left to the master: they are
+  // closed here, so the next day's loop does not inherit them.
   if (options.blockers) {
     await moveClock(5 * minute);
     for (const leftover of await store.list()) {
       if (leftover.stage === 'done' || leftover.closure || !items.some(item => item.id === leftover.id)) continue;
-      await api(principals.operator, 'POST', `work/${leftover.key}/close`, { kind: 'obsolete', reason: 'soak: the blocked day ends with its repeating blocker left to the master' });
+      await api(principals.operator, 'POST', `work/${leftover.key}/close`, { kind: 'obsolete', reason: 'soak: the blocked day ends with its repeating and request-error blockers left to the master' });
     }
     // One more cycle sees it closed: the rows the loop kept for its blocker go with it.
     await runCycle(config, state, effects, clock.now, launcher); await launcher.idle();
@@ -3614,20 +3620,20 @@ test('unit:soak-invariants-hold — blocked work unblocks itself: every routine 
     plan: { items: blockerPlan.items, releaseEveryMs: 5 * minute, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, outOfQueue: { item: 9, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 9 } },
   });
   const { items, final, violations, failures, state, herdr, blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts } = day;
-  const repeating = items[blockerPlan.repeating - 1].key;
-  assert.deepEqual(final.filter(item => item.key !== repeating && item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.blocker ?? ''} ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'every item but the repeating one is delivered');
+  const repeating = items[blockerPlan.repeating - 1].key, requestError = items[blockerPlan.requestError - 1].key;
+  assert.deepEqual(final.filter(item => item.key !== repeating && item.key !== requestError && item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.blocker ?? ''} ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'every item but the repeating and request-error ones is delivered');
   assert.deepEqual(violations, [], 'every system invariant holds across the blockers, their probes and their approvers');
   assert.deepEqual(failures, [], 'no cycle failed');
 
   // AC-2 in the loop: every recorded blocker ended its attempt — the item held no lease after it.
-  assert.ok(blockerEvents.length >= 7, `each blocked item recorded its blocker: ${JSON.stringify(blockerEvents)}`);
+  assert.ok(blockerEvents.length >= 8, `each blocked item recorded its blocker: ${JSON.stringify(blockerEvents)}`);
   assert.deepEqual(blockerEvents.filter(entry => entry.lease !== null), [], 'a recorded blocker leaves no lease behind');
 
   const cleared = (key: string) => blockerActions.filter(action => action.work === key && action.state === 'done' && /^Cleared /.test(action.detail));
   for (const [n, blockerClass] of Object.entries(blockerPlan.classes).map(([n, cls]) => [Number(n), cls] as const)) {
     const key = items[n - 1].key;
     assert.equal(classifyBlocker(blockerPlan.text(n, 'graphyard/x', 'decision')).class, blockerClass, `item ${n}'s blocker text reads as ${blockerClass}`);
-    if (key === repeating) continue;
+    if (key === repeating || key === requestError) continue;
     const clear = cleared(key);
     assert.equal(clear.length, 1, `${key}'s ${blockerClass} blocker was cleared by the loop exactly once: ${JSON.stringify(blockerActions.filter(action => action.work === key))}`);
     assert.match(clear[0].detail, new RegExp(`Cleared ${key}'s ${blockerClass} blocker`));
@@ -3654,6 +3660,21 @@ test('unit:soak-invariants-hold — blocked work unblocks itself: every routine 
   assert.ok(day.decideCalls.some(call => call.key === scoped.key && call.action === 'requirements'), 'the loop requested the scope widening itself');
   assert.ok(blockerActions.some(action => action.work === decided.key && new RegExp(`blocked on decision ${decision} .*launched approver`).test(action.detail)), `the loop launched the waiting decision's approver: ${JSON.stringify(blockerActions.filter(action => action.work === decided.key))}`);
 
+  // GY-1055: a 500 on the item's own request is the master's to recheck: handed over once, never
+  // probed on health nor cleared; the plane-wide errors beside it cleared on health above.
+  assert.deepEqual([3, 7, 8].map(n => itemSpecificPlaneError(blockerPlan.text(n, 'graphyard/x', null))), [false, false, true], 'only the request-level 500 reads as the item\'s own server error');
+  assert.deepEqual(cleared(requestError), [], `${requestError}'s request-level server error was never cleared on health`);
+  assert.deepEqual(blockerProbes.filter(probe => probe.key === requestError), [], `${requestError}'s blocker was never probed`);
+  assert.equal(blockerActions.filter(action => action.work === requestError && /server error its own request met, .*needs the master to recheck that operation/.test(action.detail)).length, 1, `${requestError} was handed to the master once: ${JSON.stringify(blockerActions.filter(action => action.work === requestError))}`);
+  assert.equal(attempts.get(requestError), 1, `${requestError} was not dispatched again`);
+  // GY-1055: the credential cause stood past blockerEscalateMs: reported to the master once, after
+  // that long, while the loop kept probing it and cleared it when it went. No shorter cause was.
+  const credential = items[0].key, firstFailed = blockerProbes.find(probe => probe.key === credential && !probe.passed)!;
+  const escalations = blockerActions.filter(action => /its probe has failed since .* so it is reported to the master/.test(action.detail));
+  assert.deepEqual(escalations.map(action => action.work), [credential], `only the long-standing credential blocker was reported to the master, once: ${JSON.stringify(escalations)}`);
+  assert.ok(escalations[0].elapsed >= firstFailed.elapsed + blockerEscalateMs && escalations[0].elapsed <= firstFailed.elapsed + blockerEscalateMs + 2 * minute && escalations[0].elapsed < blockerPlan.clearsAt['github-credential']!,
+    `${credential} was reported within two cycles of its probe having failed for blockerEscalateMs, before its cause went (+${escalations[0].elapsed / minute} min, first failed at +${firstFailed.elapsed / minute} min)`);
+
   // The repeating blocker: cleared maxAutomaticClears times in a row, then left to the master.
   assert.equal(cleared(repeating).length, maxAutomaticClears, `${repeating} was cleared ${maxAutomaticClears} times and no more`);
   assert.ok(blockerActions.some(action => action.work === repeating && new RegExp(`again after the loop cleared its blocker ${maxAutomaticClears} times in a row`).test(action.detail)), `${repeating} was left to the master once spent`);
@@ -3667,7 +3688,9 @@ test('unit:soak-invariants-hold — blocked work unblocks itself: every routine 
   assert.deepEqual(approvers.map(agent => agent.name), [], 'no approver session of a blocked item is left open');
   assert.ok(!Object.values(state.approvals).some(watch => watch.decision === decision), 'the launched approver\'s watch went with its judged decision');
   assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('blocker:')), [], 'no blocker row outlives its item');
-  assert.ok(blockerKeysPeak <= 2 * 7, `the blocker rows stayed bounded by the blocked items (peak ${blockerKeysPeak})`);
+  // Per blocked item: its blocker row and its episode's rows (the failing probe's start and its
+  // report to the master, the base tip, the decisions awaited, the approver launched).
+  assert.ok(blockerKeysPeak <= 3 * 8, `the blocker rows stayed bounded by the blocked items (peak ${blockerKeysPeak})`);
 });
 
 test('unit:soak-invariants-hold — start failures on the real dispatch path fall forward across the day: three consecutive failures of one account across items raise one attention item, a later start on the account clears it, and every failed pane is closed at its bound', { timeout: 300_000 }, async () => {
