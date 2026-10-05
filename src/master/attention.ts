@@ -40,7 +40,7 @@ export const humanOwner = (humanOnly: typeof humanOnlyDecisions[number], next: s
 /** The sources of installation attention; each is also its fault kind. */
 export const installationSources = ['app-permissions', 'held-jobs', 'delegation-limits', 'production'] as const;
 /** The owner of one installation attention line, by the source that raised it. */
-export function installationOwner(source: typeof installationSources[number], text: string): AttentionOwner {
+export function installationOwner(source: typeof installationSources[number], text: string, productionBranch: string | null = null): AttentionOwner {
   // Reinstating a suspended App installation is an account decision on the operator's GitHub account.
   if (source === 'app-permissions') return /suspended/i.test(text) ? humanOwner('spending money or opening third-party accounts', 'Reinstate the suspended GitHub App installation from the account that owns it')
     : agentOwner('master', 'graphyard master browser app-permissions, then graphyard master browser installation-accept');
@@ -48,7 +48,10 @@ export function installationOwner(source: typeof installationSources[number], te
   if (source === 'delegation-limits') { const assignment = /Set (\S+=\S+)/.exec(text)?.[1]; return agentOwner('master', assignment ? `Set ${assignment} on the deployment (Railway: railway variables --set ${assignment} --service graphyard), then redeploy` : 'Set the named capacity variable on the deployment, then redeploy'); }
   // Production may track a release branch only `graphyard release promote` moves: the fix is the
   // deployment of what production tracks, never a deploy of main past the release gates (GY-1207).
-  return agentOwner('master', 'Fix the failing deployment of the branch production tracks (release/production when the release pipeline owns production, else the base branch) with the configured provider, never deploying main past graphyard release; then graphyard master verify-deployment GY-N for each pending delivery');
+  // The branch is the one the watch reported (GRAPHYARD_PRODUCTION_BRANCH when set), never a fixed name (GY-1256).
+  return agentOwner('master', productionBranch
+    ? `Fix the failing deployment of ${productionBranch}, the branch production tracks, with the configured provider, never deploying main past graphyard release; then graphyard master verify-deployment GY-N for each pending delivery`
+    : 'Fix the failing deployment of the base branch, which production tracks, with the configured provider; then graphyard master verify-deployment GY-N for each pending delivery');
 }
 /** Why a work item raises attention; each cause is also its fault kind. */
 export const workAttentionCauses = ['human-request', 'containment-settleable', 'containment-grace', 'containment', 'session', 'proof-gap', 'reviewer-exhausted', 'launch-review', 'launch-producer',
@@ -140,7 +143,7 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause): Atten
 export function controlPlaneAttention(status: ControlPlaneStatus | undefined) {
   const report = status?.appPermissions;
   const items: AttentionItem[] = [];
-  const raise = (source: Parameters<typeof installationOwner>[0], text: string) => items.push({ subject: 'installation', text, ...installationOwner(source, text), ...classified(source) });
+  const raise = (source: Parameters<typeof installationOwner>[0], text: string) => items.push({ subject: 'installation', text, ...installationOwner(source, text, source === 'production' ? status?.production?.release?.branch ?? null : null), ...classified(source) });
   for (const text of report?.attention ?? []) raise('app-permissions', text);
   if (status?.heldJobs) raise('held-jobs', `${status.heldJobs} integration job${status.heldJobs === 1 ? ' is' : 's are'} held on that permission shortfall rather than retried; they resume on their own once the installation reports the permission`);
   for (const text of status?.delegationLimits?.attention ?? []) raise('delegation-limits', text);

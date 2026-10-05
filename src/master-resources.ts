@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { lstat, mkdir, readdir, readFile, rm, stat, statfs } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { lstat, mkdir, readdir, readFile, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isProfileSession, neverStartedReason, privateFile, profileConcurrency, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
@@ -630,32 +631,59 @@ export const reclaimLockStaleMs = 60_000;
  * The dispatcher tick's name pass and the cycle's full pass each read-modify-write the reclaim
  * file (GY-1255): the write happens under this lock (`FILE.lock`, a directory) from a fresh read,
  * so one pass never drops a sighting, a stuck-session clock or a report the other recorded.
+ *
+ * Each holder writes its own token into the lock (GY-1270). A stale lock is taken over by renaming
+ * it aside — atomic, so of two waiters that both saw it stale only one moves it — and only when the
+ * lock moved aside still carries the token seen stale; a fresh lock moved aside by mistake is put
+ * back. A holder removes the lock on release only while it still carries its own token.
  */
-async function withReclaimLock<T>(root: string, body: () => Promise<T>, waitMs = 30_000): Promise<T> {
-  const lock = `${resourceReportFile(root)}.lock`, deadline = Date.now() + waitMs;
+const lockOwner = 'owner';
+const lockToken = (lock: string) => readFile(resolve(lock, lockOwner), 'utf8').catch(() => null);
+/** Moves the lock aside and removes it, while it still carries `token`; a lock moved aside that does not is put back. */
+async function removeLock(lock: string, token: string | null) {
+  const aside = `${lock}.${randomUUID()}`;
+  try { await rename(lock, aside); } catch { return; }
+  if (await lockToken(aside) === token) { await rm(aside, { recursive: true, force: true }); return; }
+  // Another waiter took the lock over and acquired it between this look and this move: put the
+  // live lock back. Where a newer lock already stands, the moved one's holder has lost it.
+  await rename(aside, lock).catch(() => rm(aside, { recursive: true, force: true }));
+}
+export async function withReclaimLock<T>(root: string, body: () => Promise<T>, waitMs = 30_000, staleMs = reclaimLockStaleMs): Promise<T> {
+  const lock = `${resourceReportFile(root)}.lock`, deadline = Date.now() + waitMs, token = randomUUID();
   await mkdir(dirname(lock), { recursive: true, mode: 0o700 });
   for (;;) {
-    try { await mkdir(lock, { mode: 0o700 }); break; }
+    try { await mkdir(lock, { mode: 0o700 }); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       const held = await stat(lock).then(entry => Date.now() - entry.mtimeMs, () => 0);
-      if (held > reclaimLockStaleMs) { await rm(lock, { recursive: true, force: true }); continue; }
+      if (held > staleMs) { await removeLock(lock, await lockToken(lock)); continue; }
       if (Date.now() > deadline) throw new Error(`another reclaim pass has held ${lock} for ${Math.round(held / 1000)}s`);
       await new Promise(done => setTimeout(done, 20 + Math.random() * 30));
+      continue;
     }
+    // Exclusive: a lock put back over this one's empty directory already carries its holder's token.
+    try { await writeFile(resolve(lock, lockOwner), token, { mode: 0o600, flag: 'wx' }); break; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue; await rm(lock, { recursive: true, force: true }); throw error; }
   }
-  try { return await body(); } finally { await rm(lock, { recursive: true, force: true }); }
+  try { return await body(); } finally { if (await lockToken(lock) === token) await removeLock(lock, token); }
 }
 /**
- * The clocks one pass leaves, merged onto the file as it stands now. A key this pass carried keeps
- * the earlier of its time and the file's; a key it read and dropped (its pane closed, its session
- * failed or back) goes, unless another pass has set it since; a key this pass does not own — the
- * `missing:` clocks, for the name pass — and any key another pass added are kept as they stand.
+ * The clocks one pass leaves, merged onto the file as it stands now. A key this pass read and
+ * dropped (its pane closed, its session failed or back) goes, unless another pass has set it since;
+ * a key this pass read and carried stands as the file has it when another pass changed or dropped
+ * it since the read — that pass saw the condition clear after this one read, so the older time is
+ * never brought back (GY-1270) — and is kept otherwise; a key this pass set new keeps the earlier
+ * of its time and one another pass set meanwhile; a key this pass does not own — the `missing:`
+ * clocks, for the name pass — and any key another pass added are kept as they stand.
  */
 export function mergeReclaimSeen(fresh: Record<string, string>, read: Record<string, string>, mine: Record<string, string>, owns: (key: string) => boolean) {
   const merged = { ...fresh };
   for (const [key, at] of Object.entries(read)) if (owns(key) && !(key in mine) && merged[key] === at) delete merged[key];
-  for (const [key, at] of Object.entries(mine)) if (owns(key)) merged[key] = merged[key] !== undefined && Date.parse(merged[key]) < Date.parse(at) ? merged[key] : at;
+  for (const [key, at] of Object.entries(mine)) {
+    if (!owns(key)) continue;
+    if (key in read && at === read[key]) continue;
+    merged[key] = merged[key] !== undefined && Date.parse(merged[key]) < Date.parse(at) ? merged[key] : at;
+  }
   return merged;
 }
 export async function readReclaimReports(root: string): Promise<ResourceReclaimReport[]> { return (await readReclaimFile(root)).reports; }
