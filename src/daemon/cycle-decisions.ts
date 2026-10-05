@@ -354,7 +354,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (decision.action === 'rework' && !state.approvals[key] && baseRefreshConflict(item) && decision.binding === `${item.candidate!.sha}:conflict` && await docsSync.holds(item)) return;
     needed.add(key);
     // Rework waits for an observation that still describes the item (GY-144); the step wakes it unless paused (GY-793) and re-decides.
-    // The loop's own landed wake of the submitted head counts as that observation (GY-1266).
+    // The loop's own landed wake of the submitted head counts as that observation, whatever its age (GY-1266, GY-1257).
     const woken = state.actions[`wake:observation:${item.id}`];
     let wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause, woken?.state === 'done' ? woken.at : null) : null;
     const fresh = wait && !pause && wake && !state.approvals[key] ? await wake(item, clock) : null;
