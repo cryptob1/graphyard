@@ -5,15 +5,15 @@ import { execFileSync } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadMasterConfig, setupMaster, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { agentOwner, loadMasterConfig, masterConfigSchema, setupMaster, type AttentionItem, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { cycleFaults, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { launchAppearanceMs } from '../src/daemon/effects.js';
 import type { Work } from '../src/model.js';
 import type { ReviewRecord } from '../src/reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from '../src/producer.js';
 import { baseReclaimGates, describeReclaim, finishedSessionGraceMs, ledgerRetentionMs, loadedRevision, nameReclaimBoundMs, readReclaimReports, readResources, readGitHubBudget, reclaimResources, resourceAttention, resourceReportFile, selfUpgradeBoundMs, stuckSessionMs, unownedPaneConfirmMs, type PlaneReading, type ResourceInputs } from '../src/master-resources.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { classifyAttention } from '../src/model/fault-classes.js';
+import { classifyAttention, trackFaults } from '../src/model/fault-classes.js';
 import { attributeAttention, resourceStatus } from '../src/master-status.js';
 import * as masterResources from '../src/master-resources.js';
 import { writeFile } from 'node:fs/promises';
@@ -979,4 +979,56 @@ test('unit:resource-fault-recurrence-real-stuck-states-still-raise — an owed r
   assert.deepEqual(faults(inputs({ now, revision, upgrade: null })), ['resource:loaded-revision']);
   assert.deepEqual(faults(names({ reclaimSeen: { 'w1V:pHAS': new Date(readAt - nameReclaimBoundMs).toISOString() } })), ['resource:agent-names:claude-primary']);
   assert.deepEqual(faults(names({ agents: [{ name: 'graphyard-claude-1', agent_status: 'done', agent: 'claude' } as HerdrAgent], reclaimSeen: {} })), ['resource:agent-names:claude-primary']);
+});
+
+/**
+ * GY-1272: seven resources faults in 24 hours. Six were one event — the plane's GitHub App budget
+ * spent at 06:36:13Z on 5 October 2026 — counted once for the resource and once more for each subject
+ * it held (installation, GY-711, GY-1052, GY-1241, GY-1245): the report attributes each held
+ * subject's symptom to the resource, and the loop tracked each under its own subject. The seventh,
+ * loaded-revision at 05:29:45Z, was the self-upgrade's own checkout move read 32 seconds later by a
+ * loop that had loaded 5f2df649, which predates the upgrade grace GY-1196 delivered (9961b70f5).
+ * The budget's own cause, one SHA pair compared under three queries on every base move, is removed
+ * in src/github.ts and replayed in tests/github-rate-budget.test.ts; here the spent budget, should
+ * it recur, is one fault rather than six.
+ */
+const budgetConfig: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/nonexistent/coordinator.token', cliPath: '/nonexistent/graphyard.mjs',
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'host-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
+const spentAt = Date.parse('2026-10-05T06:36:13.546Z'), pausedUntil = '2026-10-05T06:38:26.160Z';
+const budgetSpent = readResources(inputs({ now: spentAt, plane: { writable: true, writeError: null, database: null,
+  github: { used: 5000, bound: 5000, detail: `the GitHub client paused every request until ${pausedUntil} after a rate-limit refusal; the budget is spent until then` } } }));
+const heldByBudget = ['installation', 'GY-711', 'GY-1052', 'GY-1241', 'GY-1245'];
+/** What each held subject showed before the report attributed it: its own stalled read. */
+const budgetSymptom = (subject: string): AttentionItem => ({ subject, text: `${subject}'s observe action is stalled — GitHub requests paused until ${pausedUntil} after a rate/access refusal`, ...agentOwner('master', 'Clear what that reason names') });
+const attributeToBudget = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(status.attentionItems, budgetSpent);
+const budgetReport = () => ({ reported: [...resourceAttention(budgetSpent), ...heldByBudget.map(budgetSymptom)], attribute: attributeToBudget });
+const unloaded = { behind: 24, loaded: '5f2df649755cfc8f637c558a24b28a19d9c5ced7', checkout: '6b0e67da1b29e796415a00f763da73095ef9fe50', movedAt: Date.parse('2026-10-05T05:29:13.000Z') };
+const unloadedReadAt = Date.parse('2026-10-05T05:29:45.052Z');
+
+test('manual:fault-class-resources — GY-1272: one GitHub budget at its bound is one resources fault however many subjects it holds (the six 06:36:13Z instances)', () => {
+  assert.equal(budgetSpent.find(reading => reading.id === 'github-budget')!.state, 'exhausted', 'the recorded reading is the budget at its bound');
+  // The report still names the resource on every subject it holds: master status shows it where it is held.
+  const attributed = attributeAttention([...resourceAttention(budgetSpent), ...heldByBudget.map(budgetSymptom)], budgetSpent);
+  assert.deepEqual(attributed.filter(item => /is held by a registered resource at its bound: GitHub App request budget/.test(item.text)).map(item => item.subject), heldByBudget);
+  // REPRODUCE against base: the loop tracked each held subject as its own resources fault, six for one bound.
+  // CANDIDATE: the spent budget is one fault, on its own subject and in its own words.
+  const state = emptyDaemonState(budgetConfig);
+  const tracked = cycleFaults(state, [], spentAt, { config: budgetConfig, ...budgetReport() }).filter(fault => fault.faultClass === 'resources');
+  assert.deepEqual(tracked.map(fault => [fault.kind, fault.subject]), [['resource-bound', 'resource:github-budget']], `one fault for the spent budget: ${JSON.stringify(tracked.map(fault => fault.subject))}`);
+  assert.match(tracked[0].text, /^GitHub App request budget is at its bound: 5000 requests used of 5000 requests/);
+  assert.equal(trackFaults(state.faults, tracked, iso(spentAt)).length, 1, 'one instance where the loop recorded six');
+  // It stands while the budget stays spent: the next cycle opens nothing.
+  assert.deepEqual(trackFaults(state.faults, cycleFaults(state, [], spentAt + 30_000, { config: budgetConfig, ...budgetReport() }), iso(spentAt + 30_000)), []);
+  // Where only the held subjects were listed, the first stands for the resource: still one.
+  const symptomsOnly = cycleFaults(emptyDaemonState(budgetConfig), [], spentAt, { config: budgetConfig, reported: heldByBudget.map(budgetSymptom), attribute: attributeToBudget });
+  assert.deepEqual(symptomsOnly.filter(fault => fault.faultClass === 'resources').map(fault => fault.subject), ['resource:github-budget']);
+});
+
+test('manual:fault-class-resources — GY-1272: the 05:29:45Z loaded-revision instance is the upgrade\'s own move, which the loaded code read without its move time', () => {
+  // REPRODUCE against the code that filed it (5f2df649, before GY-1196): no move time, every commit behind counted at once.
+  const { movedAt: _, ...untimed } = unloaded;
+  assert.deepEqual(faults(inputs({ now: unloadedReadAt, revision: untimed })), ['resource:loaded-revision']);
+  // CANDIDATE: 32 seconds after the move is the upgrade under way; the bound still holds once it passes.
+  assert.deepEqual(faults(inputs({ now: unloadedReadAt, revision: unloaded })), []);
+  assert.deepEqual(faults(inputs({ now: unloaded.movedAt + selfUpgradeBoundMs, revision: unloaded })), ['resource:loaded-revision']);
 });
