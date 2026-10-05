@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { Work } from './model.js';
@@ -17,18 +16,18 @@ import { failureText } from './master/worktrees.js';
 // GY-566: the docs-sync session the loop launches for a docs-only conflict; the routing and carry
 // rules it serves are in model/docs-sync.ts.
 
-type Run = (command: string, args: string[]) => string;
-const gitRun: Run = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 });
 /**
  * The paths git itself reports conflicting when `head` is merged with `base`, from an in-memory
  * `git merge-tree` over this checkout's object store after fetching both; null when either commit
- * cannot be had or the probe fails, and [] for a clean merge.
+ * cannot be had or the probe fails, and [] for a clean merge. Every git call goes through `run`,
+ * the loop's asynchronous child runner, so a slow fetch never blocks the loop's event loop.
  */
-export function localConflictPaths(root: string, branch: string, head: string, base: string, run: Run = gitRun): string[] | null {
-  try { run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]); } catch { /* a head fetched earlier still serves */ }
-  try { run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', base]); } catch { /* likewise */ }
-  try { run('git', ['-C', root, 'cat-file', '-e', `${head}^{commit}`]); run('git', ['-C', root, 'cat-file', '-e', `${base}^{commit}`]); } catch { return null; }
-  try { run('git', ['-C', root, 'merge-tree', '--write-tree', '--name-only', '--no-messages', '-z', head, base]); return []; }
+export async function localConflictPaths(root: string, branch: string, head: string, base: string, run: ChildRun): Promise<string[] | null> {
+  const git = async (...args: string[]) => run('git', ['-C', root, ...args], { timeoutMs: 60_000 });
+  try { await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`); } catch { /* a head fetched earlier still serves */ }
+  try { await git('fetch', '--quiet', '--no-tags', 'origin', base); } catch { /* likewise */ }
+  try { await git('cat-file', '-e', `${head}^{commit}`); await git('cat-file', '-e', `${base}^{commit}`); } catch { return null; }
+  try { await git('merge-tree', '--write-tree', '--name-only', '--no-messages', '-z', head, base); return []; }
   catch (error: any) {
     if (error?.status !== 1 || typeof error.stdout !== 'string') return null;
     return [...new Set<string>(error.stdout.split('\0').slice(1).filter(Boolean))].sort();
@@ -101,5 +100,5 @@ export interface DocsSyncEffects {
 
 export const docsSyncEffects = (root: string, run: ChildRun, register: (work: Work) => SessionRegistrar): DocsSyncEffects => ({
   docsSync: async (work, plan) => launchDocsSync(root, work, plan, await observeHerdrAgents(run), run, register(work)),
-  conflictPaths: async (work, head, base) => work.candidate ? localConflictPaths(root, work.candidate.branch, head, base) : null,
+  conflictPaths: async (work, head, base) => work.candidate ? localConflictPaths(root, work.candidate.branch, head, base, run) : null,
 });
