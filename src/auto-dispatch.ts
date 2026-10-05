@@ -14,6 +14,7 @@ import { actionRenewIntervalMs, type ActionRow } from './model/actions.js';
 import { nextActionKinds, type NextActionKind } from './model/next-action.js';
 import { agentOwner, assertOutsideWorktrees, closeHerdrPane, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, neverStarted, neverStartedReason, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
+import { withLaunchedRuntime } from './master/launch.js';
 import { capacityRefusal } from './fleet.js';
 import { answeredByPendingReview, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, type ReviewRecord } from './reviewer.js';
 import { answeredByPendingSession, independentProducerProfiles, launchProducer, reconcileProducers, requestAttemptLimit, sessionRetry, type ProducerRecord } from './producer.js';
@@ -1033,9 +1034,10 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
           // The session is registered before its runtime starts and its coordinates written once it
           // has (GY-172), where every Graphyard reader looks — so watching this reviewer never means
           // reading this host's local ledger, and the session report observes it from the start.
-          const launched = await launchInTurns(review, withRoom(), candidate => room(candidate, reviews).free > 0, candidate => registeredLaunch(record(item),
-            launchedSessionHandle('review', review, `${item.key}: review ${review.sha.slice(0, 12)} (PR #${review.pr})`, config.hostId, undefined, candidate.kind, config.herdrWorkspace),
-            () => effects.launchReview(item, review, candidate, inventory(), observedAt), result => coordinates(candidate, review, result), attachTo), effects.holdAccount ? exhaustedAtLaunch('review', item, review) : undefined);
+          const launched = await launchInTurns(review, withRoom(), candidate => room(candidate, reviews).free > 0, candidate => {
+            const handle = launchedSessionHandle('review', review, `${item.key}: review ${review.sha.slice(0, 12)} (PR #${review.pr})`, config.hostId, undefined, candidate.kind, config.herdrWorkspace);
+            return registeredLaunch(record(item), handle, withLaunchedRuntime(handle, () => effects.launchReview(item, review, candidate, inventory(), observedAt)), result => coordinates(candidate, review, result), attachTo);
+          }, effects.holdAccount ? exhaustedAtLaunch('review', item, review) : undefined);
           if (!launched) busy();
           else {
             delete cursor.failures[review.id]; delete cursor.capacity.review;
@@ -1101,9 +1103,10 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
           producerLaunches.push(afterEarlier(available.map(profile => profile.agentName), async () => {
             if (!usable().length) { busy(); return; }
             try {
-              const launched = await launchInTurns(request, usable(), eligible, candidate => registeredLaunch(record(item),
-                launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, undefined, candidate.kind, config.herdrWorkspace, candidate.principal),
-                () => effects.launchProducer(item, request, candidate, inventory(), observedAt), result => coordinates(candidate, request, result), attachTo), effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
+              const launched = await launchInTurns(request, usable(), eligible, candidate => {
+                const handle = launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, undefined, candidate.kind, config.herdrWorkspace, candidate.principal);
+                return registeredLaunch(record(item), handle, withLaunchedRuntime(handle, () => effects.launchProducer(item, request, candidate, inventory(), observedAt)), result => coordinates(candidate, request, result), attachTo);
+              }, effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
               if (!launched) busy();
               else {
                 delete cursor.failures[request.id]; delete cursor.capacity.producer; delete cursor.abandoned[request.id];

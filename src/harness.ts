@@ -18,12 +18,14 @@ export type ApprovalMode = 'auto' | 'prompt';
  * generic `key=value` override flags and the keys whose value is pinned to the recipe's (Codex's
  * `-c approval_policy=…` would otherwise bring the approval prompt back past `--ask-for-approval`);
  * `trust` records the session's working directory as trusted where the runtime has no flag for it,
- * before the session starts, given the launch's arguments (Claude Code's folder-trust dialog).
+ * before the session starts, given the launch's arguments (Claude Code's folder-trust dialog);
+ * `verify` reads that record again immediately before the runtime command is typed, and refuses
+ * the launch naming the config when a concurrent rewrite of it dropped the record (GY-1306).
  * `program` is the command typed to start the runtime when it is not the kind's own name: Cursor's
  * interactive agent is `agent`, since `cursor` is the IDE's launcher and, from Cursor CLI
  * 2026.09.23, `cursor-agent` run interactively prints "No Cursor IDE installation found" and exits.
  */
-export interface LaunchRecipe { program?: string; args: string[]; environment: Record<string, string>; prompts: string; tradeoff: string; trust?: (directory: string, environment: Record<string, string>, args: string[]) => Promise<FolderTrust>; equivalents?: string[]; settable?: string[]; aliases?: Record<string, string>; permits?: Record<string, (value: string) => boolean>; config?: { flags: string[]; pins: Record<string, string> } }
+export interface LaunchRecipe { program?: string; args: string[]; environment: Record<string, string>; prompts: string; tradeoff: string; trust?: (directory: string, environment: Record<string, string>, args: string[]) => Promise<FolderTrust>; verify?: (trust: FolderTrust) => Promise<void>; equivalents?: string[]; settable?: string[]; aliases?: Record<string, string>; permits?: Record<string, (value: string) => boolean>; config?: { flags: string[]; pins: Record<string, string> } }
 /** A permission document that answers nothing with "ask", at any depth: OpenCode's prompting value. */
 export function asksNothing(value: string) {
   let document: unknown;
@@ -36,9 +38,11 @@ export function asksNothing(value: string) {
 // launched session blocks on. These are runtime CLI contracts, not Graphyard authority: a session
 // that never asks can still only act inside its own assigned worktree and its own credentials.
 export const nonInteractiveLaunch: Record<string, LaunchRecipe> = {
-  claude: { args: ['--permission-mode', 'bypassPermissions'], environment: {}, equivalents: ['--dangerously-skip-permissions'], trust: trustClaudeFolder, prompts: 'tool-approval prompts on first use of each command class, and the folder-trust dialog in a folder it has not been trusted in',
+  claude: { args: ['--permission-mode', 'bypassPermissions'], environment: {}, equivalents: ['--dangerously-skip-permissions'], trust: trustClaudeFolder, verify: verifyClaudeTrust, prompts: 'tool-approval prompts on first use of each command class, and the folder-trust dialog in a folder it has not been trusted in',
     tradeoff: 'Claude Code stops classifying commands for this session and trusts its working directory without asking wherever that loads none of the repository\'s own Claude settings; everything the agent proposes runs without asking.' },
-  codex: { args: ['--ask-for-approval', 'never', '--sandbox', 'workspace-write'], environment: {}, equivalents: ['--dangerously-bypass-approvals-and-sandbox', '--yolo'], settable: ['--sandbox'], aliases: { '-a': '--ask-for-approval', '-s': '--sandbox' }, config: { flags: ['-c', '--config'], pins: { approval_policy: 'never' } }, prompts: 'directory-trust and per-command approval prompts',
+  // No Codex flag skips its "Trust this folder?" dialog in a folder its config does not list, so
+  // the folder is recorded trusted first (trustCodexFolder, GY-1306).
+  codex: { args: ['--ask-for-approval', 'never', '--sandbox', 'workspace-write'], environment: {}, equivalents: ['--dangerously-bypass-approvals-and-sandbox', '--yolo'], settable: ['--sandbox'], aliases: { '-a': '--ask-for-approval', '-s': '--sandbox' }, config: { flags: ['-c', '--config'], pins: { approval_policy: 'never' } }, trust: trustCodexFolder, verify: verifyCodexTrust, prompts: 'directory-trust and per-command approval prompts',
     tradeoff: 'Codex never asks for approval; only its workspace-write sandbox still limits what a command can touch.' },
   cursor: { program: 'agent', args: ['--force', '--trust'], environment: {}, prompts: "the 'Run Everything' approval and the fresh-worktree workspace-trust prompt",
     tradeoff: 'Cursor Agent (`agent`) runs every command it proposes in the assigned worktree and trusts that worktree without asking.' },
@@ -167,6 +171,103 @@ export async function trustClaudeFolder(directory: string, environment: Record<s
       throw refuse(`the folder could not be recorded as trusted in ${file} (${error instanceof Error ? error.message : String(error)}); fix the config's directory, then launch again`);
     }
   }
+}
+
+/**
+ * The folder's trust record read again immediately before the runtime command is typed (GY-1306).
+ * Every Claude Code session of the account rewrites the shared config as it runs, and one that
+ * read it before trustClaudeFolder's rename writes it back without the record: the session would
+ * then start into the folder-trust dialog nobody answers. The launch is refused instead, naming the
+ * account config, so it fails and is retried rather than held. A config under the test runner that
+ * trustClaudeFolder did not write is not read, as it was not written.
+ */
+export async function verifyClaudeTrust(trust: FolderTrust) {
+  if (underTestRunner() && !temporaryDirectories().some(temporary => canonicalPath(trust.file).startsWith(`${temporary}${sep}`))) return;
+  let projects: Record<string, any> = {};
+  try { const document = JSON.parse(await readFile(trust.file, 'utf8')); projects = document?.projects && typeof document.projects === 'object' ? document.projects : {}; }
+  catch (error) { throw new LaunchRefusedError('claude', `Graphyard refuses to start the claude runtime in ${trust.directory}: its account config ${trust.file} could not be read back before the session started (${error instanceof Error ? error.message : String(error)}), so the session could stop at Claude Code's folder-trust dialog for a human.`); }
+  if (!ancestors(trust.directory).some(path => projects[path]?.hasTrustDialogAccepted === true)) throw new LaunchRefusedError('claude', `Graphyard refuses to start the claude runtime in ${trust.directory}: the folder's hasTrustDialogAccepted record in its account config ${trust.file} was dropped by a concurrent rewrite of that config before the session started, so the session would stop at Claude Code's folder-trust dialog for a human; the launch is tried again.`);
+}
+
+/**
+ * Codex asks "Trust this folder?" the first time it starts in a folder its config does not list
+ * as trusted, and neither `--ask-for-approval never` nor the sandbox flag skips it: a reviewer or
+ * producer launched into a freshly allocated managed checkout stopped there (GY-1306). Its "Trust
+ * and continue" writes `[projects."<folder>"] trust_level = "trusted"` into `config.toml` of the
+ * home the session runs under (`$CODEX_HOME`, else `~/.codex`), so Graphyard records it there
+ * before the session starts, under the same lock, read-back and test-runner rules as
+ * trustClaudeFolder. A table for the folder that holds another trust level is the operator's
+ * decision and refuses the launch; one written any other way than a `[projects."…"]` table is not
+ * rewritten (a second table would make the whole config unreadable to Codex) and refuses it too.
+ * Records of Graphyard checkouts that no longer exist are dropped as trustAgyFolder drops them.
+ */
+export const codexConfigFile = (environment: Record<string, string> = {}) => {
+  const home = environment.CODEX_HOME ?? process.env.CODEX_HOME;
+  return home ? resolve(home, 'config.toml') : resolve(environment.HOME ?? homedir(), '.codex', 'config.toml');
+};
+/** A TOML table header naming one project: `[projects."PATH"]` or `[projects.'PATH']`, as Codex writes it. */
+const codexProjectHeader = /^\s*\[\s*projects\s*\.\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)')\s*\]\s*(?:#.*)?$/;
+const tomlTableHeader = /^\s*\[/;
+interface CodexProject { path: string; start: number; end: number; trust: string | null }
+/** The `[projects."…"]` tables of a Codex config, with each table's line span and trust level. */
+export function codexProjects(text: string): CodexProject[] {
+  const lines = text.split('\n'), projects: CodexProject[] = [];
+  for (let index = 0; index < lines.length; index++) {
+    const header = codexProjectHeader.exec(lines[index]);
+    if (!header) continue;
+    let path = header[2] ?? header[1];
+    if (header[1] !== undefined) { try { path = JSON.parse(`"${header[1]}"`); } catch { path = header[1]; } }
+    let end = index + 1;
+    while (end < lines.length && !tomlTableHeader.test(lines[end])) end++;
+    const level = lines.slice(index + 1, end).map(line => /^\s*trust_level\s*=\s*["']([^"']*)["']/.exec(line)?.[1]).find(value => value !== undefined);
+    projects.push({ path, start: index, end, trust: level ?? null });
+  }
+  return projects;
+}
+export async function trustCodexFolder(directory: string, environment: Record<string, string> = {}): Promise<FolderTrust> {
+  const file = codexConfigFile(environment), folder = canonicalPath(directory);
+  if (underTestRunner() && !temporaryDirectories().some(temporary => canonicalPath(file).startsWith(`${temporary}${sep}`))) return { file, directory: folder, written: false };
+  const refuse = (why: string) => new LaunchRefusedError('codex', `Graphyard refuses to launch the codex runtime in ${folder}: ${why}, so the session would stop at Codex's "Trust this folder?" dialog for a human.`);
+  const read = async () => {
+    let text = '';
+    try { text = await readFile(file, 'utf8'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw refuse(`its config ${file} could not be read (${error instanceof Error ? error.message : String(error)}); fix or remove it, then launch again`); }
+    const projects = codexProjects(text), own = projects.find(project => project.path === folder);
+    if (own && own.trust !== null && own.trust !== 'trusted') throw refuse(`its config ${file} records the folder with trust_level "${own.trust}", which the operator set and Graphyard does not override`);
+    if (!own && text.includes(JSON.stringify(folder))) throw refuse(`its config ${file} names the folder other than as a [projects."…"] table, which Graphyard does not rewrite; record it as [projects.${JSON.stringify(folder)}] trust_level = "trusted"`);
+    const stale = projects.filter(project => removedGraphyardWorktree(project.path));
+    return { text, own, trusted: own?.trust === 'trusted', stale };
+  };
+  const current = await read();
+  if (current.trusted && !current.stale.length) return { file, directory: folder, written: false };
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const recorded = await withConfigLock(file, async () => {
+        const { text, own, trusted, stale } = await read();
+        if (trusted && !stale.length) return false;
+        const drop = new Set(stale.flatMap(project => Array.from({ length: project.end - project.start }, (_, offset) => project.start + offset)));
+        // A table already headed for the folder with no trust level gets the line; otherwise one is appended.
+        const kept = text.split('\n').flatMap((line, index) => drop.has(index) ? [] : own && !trusted && index === own.start ? [line, 'trust_level = "trusted"'] : [line]).join('\n');
+        const body = own ? kept : `${kept.replace(/\n*$/, '')}${kept.trim() ? '\n\n' : ''}[projects.${JSON.stringify(folder)}]\ntrust_level = "trusted"\n`;
+        const staged = `${file}.graphyard-${randomUUID()}`;
+        await writeFile(staged, body, { mode: 0o600 });
+        await rename(staged, file);
+        return !trusted;
+      });
+      if ((await read()).trusted) return { file, directory: folder, written: recorded };
+      if (attempt >= 3) throw refuse(`the folder's trust record in ${file} was overwritten ${attempt} times by another writer of that config`);
+    } catch (error) {
+      if (error instanceof LaunchRefusedError) throw error;
+      throw refuse(`the folder could not be recorded as trusted in ${file} (${error instanceof Error ? error.message : String(error)}); fix the config's directory, then launch again`);
+    }
+  }
+}
+/** Codex's record read back immediately before the runtime command is typed, as verifyClaudeTrust reads Claude Code's. */
+export async function verifyCodexTrust(trust: FolderTrust) {
+  if (underTestRunner() && !temporaryDirectories().some(temporary => canonicalPath(trust.file).startsWith(`${temporary}${sep}`))) return;
+  let text = '';
+  try { text = await readFile(trust.file, 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  if (!codexProjects(text).some(project => project.path === trust.directory && project.trust === 'trusted')) throw new LaunchRefusedError('codex', `Graphyard refuses to start the codex runtime in ${trust.directory}: the folder's trust_level record in its account config ${trust.file} was dropped by a concurrent rewrite of that config before the session started, so the session would stop at Codex's "Trust this folder?" dialog for a human; the launch is tried again.`);
 }
 
 /**

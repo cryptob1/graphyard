@@ -14,72 +14,13 @@ import { atomicPrivateText, atomicPrivateWrite, externalCredential, loadStoredMa
 import { failureText } from './worktrees.js';
 import { shellQuote } from './dispatch.js';
 import { timedCall } from './timings.js';
-import { exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLines, parseResetTime, type ExhaustionSignal } from '../model/capacity.js';
 import { getCachedPlanUsage, setCachedPlanUsage, parseZaiUsage, type ProviderUsageResult } from '../provider-usage.js';
 
 /** One reading of a shared plan's quota, with the limit flag its provider reported (GY-1260). */
 type PlanReading = ProviderUsageResult & { reached?: boolean };
+// A stopped session's provider limit notices are read off its output beside its runtime prompts (runtime-prompt.ts).
+export { providerLimitNotices, runtimeLimitNotices, detectRuntimeExhaustion } from './runtime-prompt.js';
 export { hostKeyPair, unsealToHost, writeProviderAuthFile, runSmokePrompt, processConnectAccounts, type ConnectWorkerReport, type ConnectAccountOptions } from './connect-accounts.js';
-
-// ---------------------------------------------------------------------------
-// What a stopped session's output must say before the loop reads it as its provider saying the
-// account is spent (GY-421). Only the runtimes' own provider-authored limit notices count —
-// Claude's "You've hit your … limit · resets …", Codex's usage-limit banner, the provider APIs'
-// 429 usage error — and never free text the agent itself wrote: GY-402's epoch 2 was failed over
-// on its own narration "tmp disk quota is exhausted (a known local issue)…", an account with 86%
-// of its window left, because a generic quota-exhausted pattern matched the prose about a disk.
-// Each runtime is matched against its own catalog, and a runtime with no catalog of its own
-// against the usage errors the provider APIs return, which every runtime's output can carry. The
-// line scan is detectExhaustion's (the tail only, the notice leading its line behind at most
-// `exhaustionNoticeLabelWords` words of label); the catalogs replace its generic list wherever a
-// session is being judged mid-work.
-// ---------------------------------------------------------------------------
-
-/** The usage-limit messages the provider APIs themselves return, in a runtime's error output. */
-const providerUsageErrors: readonly RegExp[] = [
-  /\b(?:you(?:'|’)?ve|you have) (?:hit|reached) your (?:\w+[- ]){0,3}limit\b/i,
-  /\b(?:usage|rate) limit reached\b/i,
-  /\breached your [\w .-]{0,40}usage limits?\b/i,
-  /\busage limits? (?:has|have) been reached\b/i,
-  /\bexceeded your (?:current )?(?:quota|usage|plan)\b/i,
-  /\blimit reached\b.*\breset/i,
-];
-/** Each runtime's own provider-authored limit notices, keyed by the kind its profiles name. */
-export const providerLimitNotices: Readonly<Record<string, readonly RegExp[]>> = {
-  claude: [...providerUsageErrors, /\bClaude AI usage limit reached\b/],
-  codex: [...providerUsageErrors],
-  opencode: [...providerUsageErrors, /\b(?:weekly|monthly|daily|hourly|usage)(?:\/(?:weekly|monthly|daily|hourly))? limit exhausted\b/i], // OpenCode 1.18's `Weekly/Monthly Limit Exhausted` (GY-973)
-  cursor: [...providerUsageErrors],
-  agy: [...providerUsageErrors, /\bIndividual quota reached\b(?=.*\b(?:upgrade your subscription|resets? in)\b)/i], // GY-1135
-};
-/** The notices a session on `runtime` is judged against; an unnamed runtime gets the shared provider errors. */
-export const runtimeLimitNotices = (runtime: string | null | undefined): readonly RegExp[] => providerLimitNotices[runtime ?? ''] ?? providerUsageErrors;
-
-/** The label a runtime draws in front of a provider error — `Error:`, `API Error:`, `Error code: 429 -` — which is not the agent's voice. */
-const severityLabel = /^(?:\[[^\]]*\]\s*)?(?:api\s+)?error(?:\s+code)?\s*[:#]?\s*(?:\d{3}\s*)?[-–—:]*\s*/i;
-
-/**
- * Whether the tail of a stopped session's output is `runtime`'s provider saying the account is
- * spent. The same tail, lead-of-line and reset-time rules as `detectExhaustion`, matched against
- * the runtime's own provider-authored notices instead of generic quota wording, so a worker's own
- * prose about a quota — a disk's, not the account's — is never a failover. A leading severity
- * label (the runtime's rendering of the provider's answer) is not counted as label words, and a
- * compact wait (agy's `Resets in 1h31m31s`) is spaced into units the reset parser reads.
- */
-export function detectRuntimeExhaustion(output: string, runtime: string | null | undefined, now: number): ExhaustionSignal | null {
-  const notices = runtimeLimitNotices(runtime);
-  const lines = output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n').map(line => line.replace(/[│┃|]\s*$/, '').trim().replace(/\s{2,}/g, ' ')).filter(Boolean).slice(-exhaustionTailLines);
-  for (let index = lines.length - 1; index >= 0; index--) {
-    // The banner, with what the terminal drew before it removed and its padding collapsed (as in findExhaustion).
-    const line = lines[index].replace(/^[^A-Za-z0-9]+/, '').replace(severityLabel, '');
-    if (line.length > exhaustionNoticeMaxLength) continue;
-    const at = notices.map(notice => notice.exec(line)?.index ?? -1).filter(offset => offset >= 0);
-    if (!at.length || (line.slice(0, Math.min(...at)).match(/\S+/g) ?? []).length > exhaustionNoticeLabelWords) continue;
-    const context = [line, ...lines.slice(index + 1, index + 3)].join(' ').replace(/(\d+[dhms])(?=\d)/gi, '$1 ');
-    return { reason: line.slice(0, 300), resetsAt: parseResetTime(context, now) };
-  }
-  return null;
-}
 
 /** Where agent environments live: one directory per account, named <agent>-<letter>. */
 export function agentEnvironmentRoot(input?: string) {
@@ -349,7 +290,7 @@ export type LaunchRole = CapacityRole;
  * name that is not a configured environment is something a master fixes in one command, so it must
  * keep reading as a launch that went wrong rather than as a wait (GY-89).
  */
-export type AccountSkipCause = 'exhausted' | 'logged-out' | 'unconfigured';
+export type AccountSkipCause = 'exhausted' | 'logged-out' | 'unconfigured' | 'cross-runtime';
 export interface AccountSkip { at: string; role: LaunchRole; profile: string; environment: string; reason: string; work: string | null; cause: AccountSkipCause }
 /** Every account of a profile was skipped: the caller fails over to its next profile, or reports the skips. */
 export class NoHealthyAccountError extends Error {
@@ -359,7 +300,10 @@ export class NoHealthyAccountError extends Error {
   readonly capacityExhausted: boolean;
   constructor(message: string, readonly skipped: AccountSkip[]) {
     super(message);
-    this.capacityExhausted = skipped.length > 0 && skipped.every(skip => skip.cause === 'exhausted');
+    // An account of another runtime is never this role's to take (GY-1306): a profile whose own
+    // runtime's accounts are all spent waits for their reset, whatever else it lists.
+    const own = skipped.filter(skip => skip.cause !== 'cross-runtime');
+    this.capacityExhausted = own.length > 0 && own.every(skip => skip.cause === 'exhausted');
   }
 }
 
@@ -370,7 +314,7 @@ const environmentLogSchema = z.object({
   environments: z.record(z.string(), z.any()).default({}),
   skipped: z.array(z.object({ at: z.string(), role: z.enum(quotaRoles), profile: z.string(), environment: z.string(), reason: z.string().max(500), work: z.string().nullable(),
     // Logs written before GY-89 carry no cause; they read as the exhaustion the flag then meant.
-    cause: z.enum(['exhausted', 'logged-out', 'unconfigured']).default('exhausted') }).strict()).max(50).default([]),
+    cause: z.enum(['exhausted', 'logged-out', 'unconfigured', 'cross-runtime']).default('exhausted') }).strict()).max(50).default([]),
   // Accounts a session exhausted mid-work (GY-89), by environment name, each held until its reset.
   // The account each profile's latest launch selected, by `role:profile`, so an exhausted session can be traced to its account.
   selected: z.record(z.string(), z.object({ environment: z.string().nullable(), kind: z.string().nullable(), at: z.string(), work: z.string().nullable() }).strict()).default({}),
@@ -448,7 +392,16 @@ export async function recordEnvironmentLog(config: Pick<MasterConfig, 'credentia
  * within quota, under its session and concurrency limits — and records the choice and its reason
  * (see fleet.ts). The profile then supplies only the Graphyard identity the session acts under.
  * A role the registry does not define yet launches from the profile's own accounts, as before.
+ *
+ * A reviewer or producer launch stays on its profile's own runtime (GY-1306): each starts in a
+ * freshly allocated managed checkout, and a profile's harness, arguments and trust step are its
+ * own runtime's, so an account of another kind the profile lists is passed over, with the reason
+ * recorded, and a profile none of whose own-runtime accounts is healthy waits for one rather than
+ * starting, say, codex under a claude profile into a folder codex has never trusted.
  */
+export const sameRuntimeRoles: readonly LaunchRole[] = ['reviewer', 'producer'];
+export const crossRuntimeSkip = (role: LaunchRole, profile: { name: string; kind?: string }, account: { name: string; kind: string }) =>
+  `${account.name} runs ${account.kind}, not ${profile.kind}: a ${role} launch of profile ${profile.name} starts only on ${profile.kind} accounts, so it waits for one rather than starting ${account.kind} in a checkout its ${profile.kind} launch prepared`;
 export type LaunchAccount = AgentEnvironment | FleetLaunchAccount;
 /** The agent registry session a launch was chosen under, or undefined when no registry chose it. */
 export const registrySessionOf = (selected: Pick<LaunchSelection, 'account'> | null | undefined) => selected?.account && 'fleet' in selected.account ? selected.account.fleet.session : undefined;
@@ -493,6 +446,7 @@ export async function selectAccount(config: Pick<MasterConfig, 'environments' | 
   for (const name of profile.accounts) {
     const environment = (config.environments ?? []).find(candidate => candidate.name === name);
     if (!environment) { skipped.push({ at, role, profile: profile.name, environment: name, reason: `${name} is not a configured agent environment; run master environments --apply`, work: probe.work ?? null, cause: 'unconfigured' }); continue; }
+    if (profile.kind && environment.kind !== profile.kind && sameRuntimeRoles.includes(role)) { skipped.push({ at, role, profile: profile.name, environment: name, reason: crossRuntimeSkip(role, profile, environment), work: probe.work ?? null, cause: 'cross-runtime' }); continue; }
     // What a session itself reported outranks the provider's usage read, which may lag or not exist.
     if (held[name]) { skipped.push({ at, role, profile: profile.name, environment: name, reason: describeObservedExhaustion(name, held[name]), work: probe.work ?? null, cause: 'exhausted' }); continue; }
     const health = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
@@ -647,6 +601,8 @@ export async function inspectProfileAccounts<T extends { available: boolean; rea
     for (const name of profile.accounts) {
       const environment = (config.environments ?? []).find(candidate => candidate.name === name);
       if (!environment) { accounts.push({ environment: name, healthy: false, reason: `${name} is not a configured agent environment`, quota: 'unknown', resetsAt: null }); continue; }
+      // As selectAccount passes it over (GY-1306), an account of another runtime launches nothing for this role.
+      if (profile.kind && environment.kind !== profile.kind && sameRuntimeRoles.includes(role)) { accounts.push({ environment: name, healthy: false, reason: crossRuntimeSkip(role, profile, environment), quota: 'unknown', resetsAt: null }); continue; }
       if (held[name]) { accounts.push({ environment: name, healthy: false, reason: describeObservedExhaustion(name, held[name]), quota: 'exhausted', resetsAt: held[name].resetsAt }); continue; }
       const checked = await checkAgentEnvironment(environment, { ...probe, ceilingPercent: probe.ceilingPercent ?? config.run.quotaCeilingPercent });
       // The reset that matters is the latest among the spent windows: the account launches again only when all of them have.

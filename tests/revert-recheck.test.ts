@@ -349,6 +349,6 @@ test('manual:gy-84-content-restored — every file GY-93\'s merge took from GY-8
   // The proof file runs here, against this tree, with every case executed and none skipped.
   const run = spawnSync(process.execPath, ['--import', 'tsx', '--test', '--test-reporter', 'tap', 'tests/unattended-cycle.test.ts'], { cwd: root, encoding: 'utf8', timeout: 240_000, env: { ...process.env, NODE_TEST_CONTEXT: undefined } as NodeJS.ProcessEnv });
   assert.equal(run.status, 0, `tests/unattended-cycle.test.ts passes:\n${run.stdout.slice(-4000)}\n${run.stderr.slice(-2000)}`);
-  // Nine cases: GY-84's restored eight, and GY-1118's review-round cap driven through the same loop.
-  assert.match(run.stdout, /# pass 9\b/); assert.match(run.stdout, /# fail 0\b/); assert.match(run.stdout, /# skipped 0\b/);
+  // Ten cases: GY-84's restored eight, GY-1118's review-round cap and GY-1300's stranded-approval resume, driven through the same loop.
+  assert.match(run.stdout, /# pass 10\b/); assert.match(run.stdout, /# fail 0\b/); assert.match(run.stdout, /# skipped 0\b/);
 });

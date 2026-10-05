@@ -1,4 +1,5 @@
-// Concern: a blocked session's runtime prompt — reading it off the screen and the safe answer the loop gives.
+// Concern: what a blocked or stopped session's runtime shows — its prompts and its provider limit notices — and the loop's answer.
+import { exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLines, parseResetTime, type ExhaustionSignal } from '../model/capacity.js';
 /**
  * A runtime's own safety prompt, read off a blocked session's screen (GY-197).
  *
@@ -6,12 +7,17 @@
  * `rm` whose target it cannot resolve even under `--dangerously-skip-permissions` — and a session
  * that stops on one waits for a person no one will be. The loop answers the shapes it knows with
  * the answer that does nothing: a Yes/No (or proceed/cancel) menu whose "yes" runs a destructive
- * command is declined, and the session is then told how to carry on without that command. Any
- * other prompt is `unknown`, and the loop fails the attempt on it rather than waiting.
+ * command is declined, and the session is then told how to carry on without that command. A
+ * runtime's folder-trust dialog is `folder-trust`: the loop never answers it (consent-prompt.ts),
+ * it relaunches the session, whose launch records the folder's trust before the runtime starts
+ * (GY-1304). Any other prompt is `unknown`, and the loop fails the attempt on it rather than waiting.
  */
 export interface RuntimePrompt {
-  /** `destructive-command` is a known shape with a safe answer; `unknown` is everything else a blocked screen shows. */
-  kind: 'destructive-command' | 'unknown';
+  /**
+   * `destructive-command` is a known shape with a safe answer; `folder-trust` is a runtime's folder-trust
+   * dialog, which the loop answers by relaunching; `unknown` is everything else a blocked screen shows.
+   */
+  kind: 'destructive-command' | 'folder-trust' | 'unknown';
   /** The prompt's own words, collapsed to one line and bounded, as the record quotes it. */
   text: string;
   /** The keys that choose the non-destructive answer, and that answer's label; null for an unknown prompt. */
@@ -46,6 +52,15 @@ export function destructivePrompt(lines: string[]) {
   if (runtimeWarning.test(lines.join(' '))) return true;
   return lines.some(entry => { const line = entry.replace(screenFrame, ''); return destructiveCommand.test(line) || commandConfirmation.test(line) || overwriteRedirect.test(line); });
 }
+/**
+ * The trust option of a runtime's folder-trust dialog, numbered or arrow-selected: Claude Code and
+ * Antigravity both label it "Yes, I trust this folder", and a screen read may draw the menu
+ * unnumbered with "No, exit" first (`❯ No, exit` / `Yes, I trust this folder`). Codex labels it
+ * "Trust and continue" under "Trust this folder?" (`› 1. Trust and continue` / `2. Quit`, GY-1306).
+ */
+const folderTrustOption = /^[\s│┃║]*(?:[❯>›▶→]\s*)?(?:\d[.)]\s+)?(?:Yes,? I trust this (?:folder|project|workspace)|Trust and continue)\b/i;
+/** How far above the screen's bottom a folder-trust option may sit: its menu, then a key hint below it. */
+const folderTrustLines = 4;
 const collapse = (lines: string[]) => {
   const text = lines.map(entry => entry.replace(/\s+/g, ' ').trim()).filter(Boolean).join(' / ');
   return text.length > runtimePromptTextLimit ? `${text.slice(0, runtimePromptTextLimit - 1)}…` : text;
@@ -60,6 +75,8 @@ export function classifyRuntimePrompt(screen: string | null | undefined): Runtim
   const lines = screen.split('\n').map(entry => entry.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').trimEnd());
   const filled = lines.map((entry, index) => ({ entry, index })).filter(({ entry }) => entry.trim());
   if (!filled.length) return null;
+  // A folder-trust dialog is the last thing drawn: its trust option within the bottom few lines.
+  if (filled.slice(-folderTrustLines).some(({ entry }) => folderTrustOption.test(entry))) return { kind: 'folder-trust', text: collapse(filled.slice(-folderTrustLines - 4).map(({ entry }) => entry)), keys: null, answer: null };
   // The last run of numbered options is the prompt's menu; the prompt is the lines above it.
   let end = -1;
   for (let at = filled.length - 1; at >= 0; at--) if (menuOption.test(filled[at].entry)) { end = at; break; }
@@ -88,4 +105,64 @@ export function continueAfterDecline(key: string, prompt: Pick<RuntimePrompt, 't
   return `Graphyard answered your runtime's destructive-command prompt for you with "${prompt.answer}", because no person will answer it: "${prompt.text}". Continue ${key} without that command. ${remedy}`
     + `Use a safe alternative that needs no confirmation: name ${where}, or create a scratch directory with mktemp -d and remove only that directory by its exact path. `
     + 'Never give rm or mv a glob or a variable as its target outside a directory you created with mktemp -d. Do not stop or ask anyone; carry on with your task.';
+}
+
+// ---------------------------------------------------------------------------
+// What a stopped session's output must say before the loop reads it as its provider saying the
+// account is spent (GY-421). Only the runtimes' own provider-authored limit notices count —
+// Claude's "You've hit your … limit · resets …", Codex's usage-limit banner, the provider APIs'
+// 429 usage error — and never free text the agent itself wrote: GY-402's epoch 2 was failed over
+// on its own narration "tmp disk quota is exhausted (a known local issue)…", an account with 86%
+// of its window left, because a generic quota-exhausted pattern matched the prose about a disk.
+// Each runtime is matched against its own catalog, and a runtime with no catalog of its own
+// against the usage errors the provider APIs return, which every runtime's output can carry. The
+// line scan is detectExhaustion's (the tail only, the notice leading its line behind at most
+// `exhaustionNoticeLabelWords` words of label); the catalogs replace its generic list wherever a
+// session is being judged mid-work.
+// ---------------------------------------------------------------------------
+
+/** The usage-limit messages the provider APIs themselves return, in a runtime's error output. */
+const providerUsageErrors: readonly RegExp[] = [
+  /\b(?:you(?:'|’)?ve|you have) (?:hit|reached) your (?:\w+[- ]){0,3}limit\b/i,
+  /\b(?:usage|rate) limit reached\b/i,
+  /\breached your [\w .-]{0,40}usage limits?\b/i,
+  /\busage limits? (?:has|have) been reached\b/i,
+  /\bexceeded your (?:current )?(?:quota|usage|plan)\b/i,
+  /\blimit reached\b.*\breset/i,
+];
+/** Each runtime's own provider-authored limit notices, keyed by the kind its profiles name. */
+export const providerLimitNotices: Readonly<Record<string, readonly RegExp[]>> = {
+  claude: [...providerUsageErrors, /\bClaude AI usage limit reached\b/],
+  codex: [...providerUsageErrors],
+  opencode: [...providerUsageErrors, /\b(?:weekly|monthly|daily|hourly|usage)(?:\/(?:weekly|monthly|daily|hourly))? limit exhausted\b/i], // OpenCode 1.18's `Weekly/Monthly Limit Exhausted` (GY-973)
+  cursor: [...providerUsageErrors],
+  agy: [...providerUsageErrors, /\bIndividual quota reached\b(?=.*\b(?:upgrade your subscription|resets? in)\b)/i], // GY-1135
+};
+/** The notices a session on `runtime` is judged against; an unnamed runtime gets the shared provider errors. */
+export const runtimeLimitNotices = (runtime: string | null | undefined): readonly RegExp[] => providerLimitNotices[runtime ?? ''] ?? providerUsageErrors;
+
+/** The label a runtime draws in front of a provider error — `Error:`, `API Error:`, `Error code: 429 -` — which is not the agent's voice. */
+const severityLabel = /^(?:\[[^\]]*\]\s*)?(?:api\s+)?error(?:\s+code)?\s*[:#]?\s*(?:\d{3}\s*)?[-–—:]*\s*/i;
+
+/**
+ * Whether the tail of a stopped session's output is `runtime`'s provider saying the account is
+ * spent. The same tail, lead-of-line and reset-time rules as `detectExhaustion`, matched against
+ * the runtime's own provider-authored notices instead of generic quota wording, so a worker's own
+ * prose about a quota — a disk's, not the account's — is never a failover. A leading severity
+ * label (the runtime's rendering of the provider's answer) is not counted as label words, and a
+ * compact wait (agy's `Resets in 1h31m31s`) is spaced into units the reset parser reads.
+ */
+export function detectRuntimeExhaustion(output: string, runtime: string | null | undefined, now: number): ExhaustionSignal | null {
+  const notices = runtimeLimitNotices(runtime);
+  const lines = output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n').map(line => line.replace(/[│┃|]\s*$/, '').trim().replace(/\s{2,}/g, ' ')).filter(Boolean).slice(-exhaustionTailLines);
+  for (let index = lines.length - 1; index >= 0; index--) {
+    // The banner, with what the terminal drew before it removed and its padding collapsed (as in findExhaustion).
+    const line = lines[index].replace(/^[^A-Za-z0-9]+/, '').replace(severityLabel, '');
+    if (line.length > exhaustionNoticeMaxLength) continue;
+    const at = notices.map(notice => notice.exec(line)?.index ?? -1).filter(offset => offset >= 0);
+    if (!at.length || (line.slice(0, Math.min(...at)).match(/\S+/g) ?? []).length > exhaustionNoticeLabelWords) continue;
+    const context = [line, ...lines.slice(index + 1, index + 3)].join(' ').replace(/(\d+[dhms])(?=\d)/gi, '$1 ');
+    return { reason: line.slice(0, 300), resetsAt: parseResetTime(context, now) };
+  }
+  return null;
 }

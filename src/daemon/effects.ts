@@ -56,6 +56,8 @@ import { diagnosticianSettings } from '../runner/payloads.js';
 import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
+import type { FlowResult, RemedyFlow, RemedyRecord } from '../stall-remedies.js';
+import { browserFlowChild } from './cycle-remedies.js';
 import { readMechanicalFixState, type MechanicalFixState } from '../mechanical-findings.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
@@ -223,6 +225,12 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * for a later round on a reason that describes an older head.
    */
   withdraw?: (work: Work, decision: string, reason: string) => Promise<unknown>;
+  /**
+   * Asks the control plane to apply a decision an approver already approved whose application
+   * recorded no outcome (GY-1300). It approves nothing: the server replays what the recorded
+   * approval authorized, under the decision's own engine key, and answers the decision as it settled.
+   */
+  resume?: (work: Work, decision: string) => Promise<{ id: string; state?: string; outcome?: string | null; approvedBy?: string | null; approvedAt?: string | null; approvalReason?: string | null }>;
   /** Verifies on this host which quarantined supervisors are demonstrably gone. */
   containment?: (work: Work[], observed: ContainmentObservation) => Record<string, ContainmentAssessment> | Promise<Record<string, ContainmentAssessment>>;
   /** Bounds this host's clock against the control plane with a light timed read just before containment is assessed (GY-811). */
@@ -247,6 +255,10 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   promptSession?: (agent: HerdrAgent, text: string) => void | Promise<void>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<Work>;
   blockDispatch?: (work: Work, reason: string) => Promise<unknown>; // GY-1078: an item's repeated dispatch-failure cause as its blocker; absent, the loop holds it
+  /** Run one master browser flow as a child command (GY-949); a refusal resolves, only a child that printed no result rejects. */
+  browserFlow?: (flow: RemedyFlow) => Promise<FlowResult>;
+  /** Record the loop's attempt of a remedy on the stalled row it was applied for (`POST /api/actions/:id/remedy`). */
+  recordRemedy?: (row: string, attempt: Omit<RemedyRecord, 'at' | 'by'>) => Promise<unknown>;
   /**
    * Research before build (GY-259): records a research run's start, brief or failure on the item as
    * the coordinator, and names the checkout the research session reads (and, in a test, its runner).
@@ -500,6 +512,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   };
   // The same route, as the same requester: only the identity that asked may take a request back.
   const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
+  const resume: DaemonEffects['resume'] = (work, decision) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'resume', decision });
   const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
   // One coordinator read of the decision ledger's kinds after the last seq the loop saw (GY-1142).
   const decisionChanges: DaemonEffects['decisionChanges'] = async after => {
@@ -564,6 +577,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     answerSession: async (agent, keys) => { await run('herdr', ['pane', 'send-keys', agent.pane_id!, ...keys]); await delay(2_000); },
     promptSession: async (agent, text) => { await deliverPrompt(promptTarget(agent), text, run); },
     reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event), blockDispatch: (work, reason) => mutate(`work/${work.id}/dispatchblock`, { reason }),
+    browserFlow: flow => browserFlowChild(run, root, flow),
+    recordRemedy: (row, attempt) => mutate(`actions/${row}/remedy`, attempt),
     recordResearch: (work, event) => mutate(`work/${work.id}/research`, event), recordDecomposition: (work, event) => mutate(`work/${work.id}/decomposition`, event),
     research: { cwd: root },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
@@ -722,6 +737,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get approver() { return current().operatorAgent ? approver : undefined; },
     get docsSync() { return current().operatorAgent ? docsSyncing.docsSync : undefined; }, conflictPaths: docsSyncing.conflictPaths,
     get withdraw() { return current().operatorAgent ? withdraw : undefined; },
+    get resume() { return current().operatorAgent ? resume : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },
     get decisionChanges() { return current().operatorAgent ? decisionChanges : undefined; },
     // A recurring fault class is filed as intent, by the same operator-agent identity (GY-173);
