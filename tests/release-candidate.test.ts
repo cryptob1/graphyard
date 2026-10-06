@@ -12,9 +12,10 @@ import {
   apiSuite, assessProductionServing, commandSuite, cut, deployToUat, endpointSuite, gitIn, itemsFromCommits, ledgerStatus, productionBranch, promote, readLedger,
   servedRevision, uatBranch, validateAndRecord, type ReleaseCandidate, type Suite,
 } from '../src/release-candidate.js';
-import { checkContract, checkRepositoryContract, inspectCases, loadCases, parseCase, parseContract, type ReleaseContract } from '../src/e2e/case.js';
+import { loadCases, parseCase, type ReleaseContract } from '../src/e2e/case.js';
+import * as e2eCase from '../src/e2e/case.js';
 import { e2eSuite, type E2eReport } from '../src/e2e/runner.js';
-import { foldHolds, foldRecord, holdTagPrefix, releaseHolds, type HoldRecord } from '../src/release-holds.js';
+import type { HoldRecord } from '../src/release-holds.js';
 import { readRecords } from '../src/release-candidate.js';
 
 const run = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -366,6 +367,7 @@ async function contractCheckout(cases: Record<string, unknown>, contract: unknow
 const contractCase = (id: string, extra: Record<string, unknown> = {}) => ({ id, title: `Case ${id}`, target: 'uat', required: true, steps: [{ kind: 'http', method: 'GET', path: `/api/${id}`, status: 200 }], ...extra });
 
 test('unit:e2e-release-contract-precut — e2e/contract.json binds each required outcome to its cases; the pre-cut check refuses a missing, invalid, non-uat or optional bound case and an unbound required case, naming each, and the cut step runs it', async () => {
+  const { checkContract, checkRepositoryContract, inspectCases, parseContract } = e2eCase;
   // The shipped contract binds all five shipped cases, each required and targeted at uat.
   const shipped = await checkRepositoryContract(new URL('..', import.meta.url).pathname);
   assert.deepEqual(shipped.refusals, []); assert.equal(shipped.passed, true);
@@ -442,6 +444,9 @@ test('unit:e2e-release-contract-precut — e2e/contract.json binds each required
 });
 
 test('unit:e2e-release-holds-per-risk — a failing candidate files one hold per failed outcome with its cases, steps and criteria; a repeat failure attaches; a fold needs an independent approver; a hold clears only on a newer served candidate', async () => {
+  // GY-1378's release holds module, loaded here so that without it this case fails on its own.
+  const { foldHolds, foldRecord, holdTagPrefix, releaseHolds } = await import('../src/release-holds.js');
+  const { parseContract } = e2eCase;
   const contract: ReleaseContract = parseContract(JSON.stringify({ outcomes: [
     { id: 'alpha', title: 'Customers sign in', criteria: ['A customer reaches their account'], cases: ['a1', 'a2'] },
     { id: 'beta', title: 'Customers pay', criteria: ['A payment is taken once'], cases: ['b1'] },

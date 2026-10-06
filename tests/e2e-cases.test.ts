@@ -14,9 +14,9 @@ import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import type { CaseRun } from '../src/scenarios.js';
 import { caseDirectory, loadCases, parseCase, scenarioDefinition, selectCases, syncCases, type CaseFile } from '../src/e2e/case.js';
-import { e2eSuite, recordRuns, releaseVerdict, runCases, summarize, type E2eLauncher, type E2ePage } from '../src/e2e/runner.js';
+import { e2eSuite, recordRuns, runCases, summarize, type E2eLauncher, type E2ePage } from '../src/e2e/runner.js';
+import * as runner from '../src/e2e/runner.js';
 import { assessPromotion, assessUat, type ReleaseCandidate } from '../src/release-candidate.js';
-import { acceptancesFrom, e2eRecord, holdItem } from '../src/release-holds.js';
 import { commands } from '../src/cli/index.js';
 import { TestsView } from '../web/pages/tests.js';
 
@@ -294,14 +294,14 @@ test('unit:e2e-case-verdict-states — a release run ends each case passed, fail
   assert.deepEqual([report.passed, report.failed, report.flaky, report.unrun], [1, 1, 1, 2], 'unrun cases count neither as failures nor as passes');
 
   // The verdict: the failed required case and the flaky one block; the unrun ones are listed apart.
-  const verdict = releaseVerdict(report);
+  const verdict = runner.releaseVerdict(report);
   assert.equal(verdict.passed, false);
   assert.deepEqual(verdict.blocking.map(entry => entry.id), ['verdict-b', 'verdict-c']);
   assert.deepEqual(verdict.unrun.map(entry => entry.id), ['verdict-d', 'verdict-e']);
   assert.ok(!verdict.blocking.some(entry => entry.verdict === 'unrun'));
   // An acceptance of the flaky case for this run at this SHA leaves only the failure blocking; one at another SHA or run accepts nothing.
-  assert.deepEqual(releaseVerdict(report, [{ case: 'verdict-b', runId: 'rc-verdicts', sha, decision: 'd-1' }]).blocking.map(entry => entry.id), ['verdict-c']);
-  assert.deepEqual(releaseVerdict(report, [{ case: 'verdict-b', runId: 'rc-verdicts', sha: '2'.repeat(40), decision: 'd-2' }, { case: 'verdict-b', runId: 'rc-other', sha, decision: 'd-3' }]).blocking.map(entry => entry.id), ['verdict-b', 'verdict-c']);
+  assert.deepEqual(runner.releaseVerdict(report, [{ case: 'verdict-b', runId: 'rc-verdicts', sha, decision: 'd-1' }]).blocking.map(entry => entry.id), ['verdict-c']);
+  assert.deepEqual(runner.releaseVerdict(report, [{ case: 'verdict-b', runId: 'rc-verdicts', sha: '2'.repeat(40), decision: 'd-2' }, { case: 'verdict-b', runId: 'rc-other', sha, decision: 'd-3' }]).blocking.map(entry => entry.id), ['verdict-b', 'verdict-c']);
 
   const words = summarize(report);
   assert.match(words, /PASS verdict-a/); assert.match(words, /FLAKY verdict-b .*\n {5}attempt 1 failed at step 1 read verdict-b: expected status 200, got 500/);
@@ -337,6 +337,8 @@ test('unit:e2e-case-verdict-states — a release run ends each case passed, fail
 });
 
 test('unit:e2e-flaky-evidence-decision — a flaky required case blocks promotion until an evidence decision requested and approved by two different agents accepts it, bound to the case, run and exact SHA', async () => {
+  // GY-1378's release holds module, loaded here so that without it this case fails on its own.
+  const { acceptancesFrom, e2eRecord, holdItem } = await import('../src/release-holds.js');
   const sha = '3'.repeat(40), other = '4'.repeat(40);
   const agents = { requester: { id: 'evidence-requester', capabilities: ['decision:attest'] }, approver: { id: 'evidence-approver', capabilities: ['decision:approve'] } };
   const agentToken = (id: string) => `${id}-${'e'.repeat(32)}`;
