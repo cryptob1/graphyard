@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
@@ -10,6 +11,8 @@ import * as decisionReport from '../src/cli/decision-report.js';
 import { terminalDecisions } from '../src/cli/decision-report.js';
 import { containmentGraceMs } from '../src/model/containment.js';
 import { maxApproverLaunches } from '../src/daemon/decisions.js';
+// GY-1346's bound is read through the namespace too, so the base exercise loads this file and its replays fail on their assertions.
+import * as decisions from '../src/daemon/decisions.js';
 import { humanNeededAttention } from '../src/cli/owed-report.js';
 import { humanNeeded, type NextAction } from '../src/model/next-action.js';
 
@@ -83,7 +86,7 @@ test('manual:fault-class-decision — a rework decision owed past the bound, or 
   assert.deepEqual(decisionFaults(undated, observedAt).faults.map(fault => fault.kind), ['owed-decision']);
 });
 
-test('manual:fault-class-decision — an owed escalation is not a rework round and counts at once', () => {
+test('manual:fault-class-decision — an owed escalation is not a rework round: it waits only for the master\'s turn (GY-1346)', () => {
   const work = standing(instances[0], observedAt);
   const action: NextAction = { kind: 'escalate', work: work.id, key: work.key, gate: 'merge', refusal: 'lease lost', reason: `${work.key} lost its lease`,
     inputs: { kind: 'escalate', trigger: 'lease-loss', detail: 'lease lost' } as NextAction['inputs'], llmRole: null, binding: `escalate:${work.key}` };
@@ -91,7 +94,8 @@ test('manual:fault-class-decision — an owed escalation is not a rework round a
   (work.actionQueue!.actions[0] as { kind: string; binding: string }).kind = 'escalate';
   (work.actionQueue!.actions[0] as { kind: string; binding: string }).binding = action.binding;
   assert.equal(reworkDecisionInMotion(work, Date.parse(observedAt) + 60_000), false);
-  assert.deepEqual(decisionFaults(work, new Date(Date.parse(observedAt) + 60_000).toISOString()).faults.map(fault => fault.kind), ['owed-decision']);
+  assert.deepEqual(decisionFaults(work, new Date(Date.parse(observedAt) + 60_000).toISOString()).faults.map(fault => fault.kind), []);
+  assert.deepEqual(decisionFaults(work, new Date(Date.parse(observedAt) + decisions.masterTurnWaitBoundMs + 60_000).toISOString()).faults.map(fault => fault.kind), ['owed-decision']);
 });
 
 // GY-1337: three more decision faults in 24 hours, on 5–6 October 2026, from the same cause as
@@ -193,9 +197,74 @@ test('manual:fault-class-decision — an unanswered decision with its launches s
   const kinds = async (approvals: Parameters<typeof terminalDecisions>[2]['approvals'], at: string) =>
     (await decisionReport1335([requirements1335], at, approvals)).faults.map(fault => fault.kind);
   const at = '2026-10-06T01:07:20.695Z';
-  assert.deepEqual(await kinds([], at), ['decision-unanswered'], 'no watch: nothing will relaunch it');
+  // No watch: the master's to put to an approver, so it counts once the master's turn has passed (GY-1346).
+  assert.deepEqual(await kinds([], new Date(Date.parse(requirements1335.requestedAt) + decisions.masterTurnWaitBoundMs + 60_000).toISOString()), ['decision-unanswered'], 'no watch, past the master\'s turn');
   assert.deepEqual(await kinds([{ ...handWatch1335, launches: maxApproverLaunches }], at), ['decision-unanswered'], 'launches spent');
   assert.deepEqual(await kinds([{ ...handWatch1335, exhaustedAt: '2026-10-06T01:06:00.000Z' }], at), ['decision-unanswered'], 'escalated as unjudged');
   const late = new Date(Date.parse(handWatch1335.launchedAt) + decisionReport.approverRelaunchWaitBoundMs + 60_000).toISOString();
   assert.deepEqual(await kinds([handWatch1335], late), ['decision-unanswered'], 'past the relaunch bound');
+});
+
+// GY-1346: three more decision faults in 24 hours, on 6 October 2026, from GY-1337's cause in the
+// lanes it left: a wait only the master's turn moves counted the moment it was seen.
+//
+// - decision-unanswered|GY-1338: the master asked for requirements decision f8a7ec3d at 02:41:24 and
+//   launched its approver at 03:01:16 (.graphyard/approvers/launches.json), which declined it at
+//   03:02:06; the line counted 17 minutes in, while no watch existed for the loop to relaunch.
+// - decision-unanswered|GY-1335: the master asked for resolve decision bbc92e6a at 03:05:42 and the
+//   line counted one minute later, before the master's approver launch.
+// - owed-decision|GY-1335|2026-10-06T03:06:13.542Z: the requirement-weakening escalation's row was
+//   queued at 03:02:55 and counted 3 minutes in — 31 seconds after the master had asked for the
+//   resolve decision above. Replayed from the ledger snapshot the loop observed (tests/fixtures).
+
+const master1346 = 'graphyard-master-graphyard-operator';
+const unanswered1346 = [
+  { item: { id: '4932070a-203a-45e7-9825-90047f7054b9', key: 'GY-1338', stage: 'backlog', ready: false }, age: '17m',
+    decision: { id: 'f8a7ec3d-e828-4a9c-bc28-147ff7be3edc', action: 'requirements', state: 'requested', requestedAt: '2026-10-06T02:41:24.958Z', requestedBy: master1346 } },
+  { item: { id: 'ee99a47c-bda7-4892-a52b-acf4c8e96039', key: 'GY-1335', stage: 'build', ready: true }, age: '1m',
+    decision: { id: 'bbc92e6a-b2b6-4423-8505-c3d6df4ef7ac', action: 'resolve', state: 'requested', requestedAt: '2026-10-06T03:05:42.740Z', requestedBy: master1346 } },
+];
+/** The unanswered line for the decision `ageMs` after its request, with no approval watch and no live approver session, and the decision faults the cycle records from it. */
+async function unansweredReplay(entry: typeof unanswered1346[number], ageMs: number) {
+  const now = Date.parse(entry.decision.requestedAt) + ageMs;
+  const report = await terminalDecisions(async () => ({ decisions: [entry.decision] }), [entry.item], { approvals: [], runtime: { available: true, agents: [] }, now });
+  const faults = cycleFaults(emptyDaemonState(config()), [], now, { config: config(), reported: report.attentionItems }).filter(fault => fault.faultClass === 'decision');
+  return { report, faults };
+}
+
+for (const entry of unanswered1346) test(`manual:fault-class-decision — decision-unanswered|${entry.item.key} (${entry.decision.id.slice(0, 8)}, ${entry.age}) is no fault inside the master's turn`, async () => {
+  const { report, faults } = await unansweredReplay(entry, (parseInt(entry.age) * 60 + 10) * 1000);
+  const session = `gy-approver-${entry.item.key.toLowerCase()}-${entry.decision.id.slice(0, 8)}`;
+  assert.deepEqual(report.attentionItems.map(item => item.text), [`Decision ${entry.decision.id} (${entry.decision.action}) is unanswered after ${entry.age}: approver session ${session} is not running and recorded no outcome — a stall, not a refusal`]);
+  assert.deepEqual(faults.map(fault => fault.kind), [], 'the master asked for it and had not yet put it to an approver');
+  assert.equal(report.attentionItems[0].inMotionUntil, new Date(Date.parse(entry.decision.requestedAt) + decisions.masterTurnWaitBoundMs).toISOString());
+  // The line still stands in master status: the bound only defers the fault.
+  assert.equal(report.unanswered.length, 1);
+});
+
+test('manual:fault-class-decision — an unwatched decision past the master\'s turn, or with no instant to date it, still counts', async () => {
+  const [entry] = unanswered1346;
+  assert.deepEqual((await unansweredReplay(entry, decisions.masterTurnWaitBoundMs + 60_000)).faults.map(fault => fault.kind), ['decision-unanswered']);
+  assert.equal(decisionReport.unansweredInMotionUntil(undefined, 'not a date'), undefined);
+});
+
+const fixture1346 = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/gy-1346-decision-faults.json', import.meta.url)), 'utf8')) as { work: Work };
+
+test('manual:fault-class-decision — owed-decision|GY-1335|2026-10-06T03:06:13.542Z is no fault inside the master\'s turn to resolve the escalation', () => {
+  const at = '2026-10-06T03:06:13.542Z', work = structuredClone(fixture1346.work);
+  const { reported, faults } = decisionFaults(work, at);
+  assert.deepEqual(reported.map(line => line.text), ["GY-1335 has a standing requirement-weakening escalation and nothing else to do: Requirement revision retires AC-1, AC-2, AC-5 and narrows proofs for no criterion — no executor may run it; resolving GY-1335's requirement-weakening escalation has been owed for 3m"]);
+  assert.deepEqual(faults.map(fault => fault.kind), [], 'the master asked for the resolve decision 31s before the loop counted the line');
+  assert.equal(daemon.owedEscalationInMotion(work, reported[0].text, Date.parse(at)), true);
+});
+
+test('manual:fault-class-decision — an owed escalation past the master\'s turn, undated, or a containment one still counts as before', () => {
+  const work = structuredClone(fixture1346.work);
+  const late = new Date(Date.parse(work.actionQueue!.actions[0].requestedAt!) + decisions.masterTurnWaitBoundMs + 60_000).toISOString();
+  assert.deepEqual(decisionFaults(work, late).faults.map(fault => fault.kind), ['owed-decision']);
+  const undated = structuredClone(fixture1346.work);
+  (undated.actionQueue!.actions[0] as { requestedAt: string | null }).requestedAt = null;
+  assert.deepEqual(decisionFaults(undated, '2026-10-06T03:06:13.542Z').faults.map(fault => fault.kind), ['owed-decision']);
+  // A containment escalation's owed line is the fence's (owedContainmentLine), never the master's turn.
+  assert.equal(daemon.owedEscalationInMotion(fenced1329(), "resolving GY-1329's containment refusal has been owed for 15s", Date.parse('2026-10-05T23:25:31.610Z')), false);
 });
