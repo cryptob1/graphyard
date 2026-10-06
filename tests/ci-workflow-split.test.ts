@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { isReleaseCandidateTest, listTestFiles, releaseCandidateKind, preMergeTestFiles, readDurations, releaseCandidateTests, repositoryRoot, shardFiles } from '../scripts/ci-tests.mjs';
+import { isReleaseCandidateTest, listTestFiles, preMergeTestFiles, readDurations, releaseCandidateTests, repositoryRoot, shardFiles } from '../scripts/ci-tests.mjs';
 import { policySchema } from '../src/model/policy.js';
 import { readWorkflow } from '../src/protection.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -150,7 +150,7 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
   const soaks = listTestFiles().filter(file => /^tests\/soak/.test(file));
   assert.ok(soaks.length >= 4, `the soak is split per concern: ${soaks.join(', ')}`);
   for (const file of soaks) {
-    assert.equal(releaseCandidateKind(file), 'soak', `${file} is the release-candidate soak suite`);
+    assert.equal(releaseCandidateTests[file], 'soak', `${file} is the release-candidate soak suite`);
     assert.ok(listed.includes(file), `${file} runs on the release candidate`);
     assert.ok(read(file).split('\n').length <= 1500, `${file} stays within 1,500 lines`);
   }

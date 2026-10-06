@@ -7,8 +7,6 @@ export const repositoryRoot: string;
 export const baselinePath: string;
 export const speculativeTipSubject: RegExp;
 export function listTestFiles(root?: string): string[];
-export const soakSuite: RegExp;
-export function releaseCandidateKind(file: string): 'soak' | 'timing-budget' | null;
 export const releaseCandidateTests: Record<string, 'soak' | 'timing-budget'>;
 export function isReleaseCandidateTest(file: string): boolean;
 export function preMergeTestFiles(root?: string): string[];
