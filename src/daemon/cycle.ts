@@ -25,6 +25,7 @@ import { triageBacklogStep } from './cycle-triage.js';
 import { remedyStep } from './cycle-remedies.js';
 import { Timings, withTimings, withoutTimings } from '../master/timings.js';
 import { syncProjectMemory } from '../project-memory.js';
+import { planeUnavailable } from '../model/refusal.js';
 
 /** How many session launches the launcher runs at once when master.json sets no `run.launchConcurrency` (GY-616). */
 export const defaultLaunchConcurrency = 3;
@@ -135,9 +136,12 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
     try { return await body(); }
     catch (error) {
       const key = `isolated:${kind}:${item?.id ?? name}`;
+      // GY-1344: a control plane that did not answer judged nothing; it is retried next cycle and is no fault of the step's.
+      const unanswered = planeUnavailable(error);
       performed.push(await record(state, key, { kind, work: item?.key ?? null, principal: null, state: 'failed', epoch: item?.epoch ?? null,
-        detail: `Handling ${name} in the ${kind} step threw, so only its own action failed and the cycle went on with every other item: ${message(error)}`,
-        attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        detail: unanswered ? `Handling ${name} in the ${kind} step met a control plane that did not answer, so it is retried next cycle: ${message(error)}`
+          : `Handling ${name} in the ${kind} step threw, so only its own action failed and the cycle went on with every other item: ${message(error)}`,
+        attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist, unanswered ? null : undefined));
       return undefined;
     }
   };
@@ -280,7 +284,9 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   timings.add('measure', now() - measuredFrom);
   const durationMs = Math.max(0, Math.round(now() - startedAt));
   const childWaitMs = Math.min(durationMs, Object.values(steps).reduce((total, step) => total + step.childWaitMs, 0));
-  const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs, childWaitMs, workMs: durationMs - childWaitMs, steps, timings: timings.report(), open: open.length, actions: performed.length,
+  // GY-1344: time spent on requests the control plane never answered is the plane's outage, not the loop's work.
+  const report = timings.report(), planeWaitMs = Math.min(durationMs - childWaitMs, report.planeWaitMs ?? 0);
+  const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs, childWaitMs, workMs: durationMs - childWaitMs - planeWaitMs, ...(planeWaitMs ? { planeWaitMs } : {}), steps, timings: report, open: open.length, actions: performed.length,
     actionable: silence.actionable, idleMs: silence.longestIdleMs, stages, lead, production, postDeploy, postDeployFailures,
     scope: { count: budget.count, p50Ms: budget.p50Ms, p90Ms: budget.p90Ms }, scopeOpenMs: budget.longestOpenMs });
   state.metrics.push(metrics);
