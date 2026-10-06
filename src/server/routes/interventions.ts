@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { demand, stages } from '../../model.js';
 import { plannedFilesMax } from '../../model/scope.js';
 import { interventionKinds, interventionRecordSchema, interventionWindows, judgementSchema, type InterventionWindow } from '../../model/interventions.js';
-import { judgementToWork, openPatternItems, readInterventionReport, recordIntervention, recordJudgement } from '../../interventions.js';
+import { interventionScan, judgementToWork, openPatternItems, readInterventionReport, recordIntervention, recordJudgement } from '../../interventions.js';
 import { classifyIntervention, retroJudgementSchema, retroStanding, type RetroClassification } from '../../model/retro-synthesis.js';
 import { judgeRetroArtefact, readRetroArtefacts, readRetroReport, synthesizeRetro } from '../../retro-synthesis.js';
 import { defineRoutes, parseJson } from '../routes.js';
@@ -47,7 +47,8 @@ export const interventionRoutes = defineRoutes('interventions', [
         tally.count++; catalogued.set(filed.entry, tally);
         return { ...entry, catalogue: filed };
       });
-      return { ...report, interventions, catalogued: [...catalogued.values()].sort((a, b) => b.count - a.count || a.entry.localeCompare(b.entry)) };
+      // Whether the tick opens an item for a crossed pattern on its own (GY-1372).
+      return { ...report, scan: interventionScan(), interventions, catalogued: [...catalogued.values()].sort((a, b) => b.count - a.count || a.entry.localeCompare(b.entry)) };
     },
   },
   {
