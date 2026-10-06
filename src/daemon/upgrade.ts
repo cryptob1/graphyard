@@ -296,12 +296,14 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
  * moved by something other than the loop's own alignment — a hand `git checkout`, a session whose
  * pane points at it — onto a commit that descends from the one the loop loaded. Standing down there
  * pins the control plane to stale code: no alignment ever runs again and every merged fix stays
- * inert. A clean, detached descendant is adopted as the loop's own move instead: the executors are
+ * inert. A clean, detached descendant that is on the freshly fetched base branch — merged code, as
+ * an alignment would check out — is adopted as the loop's own move instead: the executors are
  * restarted onto it and the loop re-executes itself through its supervisor, as an alignment does.
- * Anything else — a dirty tree, a branch, a commit the loaded one is not an ancestor of — is
- * refused and stays the drift the guard reports. Nothing here throws.
+ * Anything else — a dirty tree, a branch, a commit the loaded one is not an ancestor of, or one the
+ * base branch does not contain (an unmerged feature-branch head) — is refused and stays the drift
+ * the guard reports. Nothing here throws.
  */
-export async function recoverMovedHead(state: DaemonState, from: string, to: string, deps: SelfUpgradeDeps): Promise<SelfUpgradeOutcome> {
+export async function recoverMovedHead(config: MasterConfig, state: DaemonState, from: string, to: string, deps: SelfUpgradeDeps): Promise<SelfUpgradeOutcome> {
   const now = deps.now ?? Date.now, at = () => new Date(now()).toISOString();
   const git = (...args: string[]) => deps.run('git', ['-C', deps.root, ...args]);
   const persist = async () => { if (deps.persist) await deps.persist(state); };
@@ -317,10 +319,17 @@ export async function recoverMovedHead(state: DaemonState, from: string, to: str
   if (checkout.dirty !== false) return { outcome: 'refused', reason: 'tracked files differ from the commit it holds', commit: to };
   try { await git('merge-base', '--is-ancestor', from, to); }
   catch { return { outcome: 'refused', reason: `${shortCommit(to)} does not descend from ${shortCommit(from)}, the commit the loop runs`, commit: to }; }
+  // Only reviewed, merged code is adopted: the base branch, fetched as the self-upgrade fetches it, must contain the HEAD.
+  const base = `refs/remotes/origin/${config.baseBranch}`;
+  try { await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:${base}`); }
+  catch (error) { return { outcome: 'failed', reason: `the base branch could not be fetched: ${message(error)}` }; }
+  try { await git('merge-base', '--is-ancestor', to, base); }
+  catch { return { outcome: 'refused', reason: `${shortCommit(to)} is not on ${config.baseBranch}, so it is not merged code`, commit: to }; }
   let code: boolean;
   try { code = upgradeTouchesCode((await git('diff', '--name-only', `${from}..${to}`)).split('\n').map(path => path.trim()).filter(Boolean)); }
   catch (error) { return { outcome: 'failed', reason: `the diff from ${shortCommit(from)} to ${shortCommit(to)} could not be read: ${message(error)}` }; }
   const moved = `the coordinator checkout's HEAD moved forward from ${shortCommit(from)} to ${shortCommit(to)} under the running loop; the loop adopted it`;
+  state.upgrade.refused = null;
   if (!code) {
     state.upgrade.last = { at: at(), from, to, code: false, executors: null, self: false };
     await note(`${moved}; no loaded code moved, so nothing was restarted`, false);

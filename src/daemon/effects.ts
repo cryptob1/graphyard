@@ -560,9 +560,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     if (memory && memory !== writtenMemory) await writeProjectMemory(root, state.projectMemory).then(() => { writtenMemory = memory; }, () => {});
     return writeDaemonState(current(), state);
   };
-  // The restarts an alignment owes, shared by the self-upgrade and the moved-HEAD recovery (GY-1356).
-  const upgradeDeps = (keepAlive?: () => Promise<void>): SelfUpgradeDeps => ({
-    root, run,
+  const upgradeDeps = (keepAlive?: () => Promise<void>): SelfUpgradeDeps => ({ root, run, // shared with the moved-HEAD recovery (GY-1356)
     restartExecutors: to => restartExecutors(current(), { actions: () => asCoordinator('actions'), coordinatorCommit: to, onWait: keepAlive }),
     restartSelf: async () => {
       const unit = detectLoopSupervisorUnit();
@@ -792,7 +790,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // its own cgroup like an executor's.
     loadedRelease: readRelease(root),
     selfUpgrade: (state, keepAlive) => performSelfUpgrade(current(), state, upgradeDeps(keepAlive)),
-    recoverHead: (state, from, to, keepAlive) => recoverMovedHead(state, from, to, upgradeDeps(keepAlive)),
+    recoverHead: (state, from, to, keepAlive) => recoverMovedHead(current(), state, from, to, upgradeDeps(keepAlive)),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
     masterSession: masterSessionEffects(root, current, run),
     persist: persistLoop,
