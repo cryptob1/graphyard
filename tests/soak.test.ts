@@ -49,6 +49,7 @@ import { paneSweepLimit } from '../src/daemon/cycle-reclaim.js';
 import { wakeOwnObservation } from '../src/master/base-break-refresh.js';
 import { buildMasterStatus } from '../src/master/status.js';
 import { docsHeadroomStatus, docsTrimActionKey, docsWordCountAt, type ReportedAttention } from '../src/daemon/faults.js';
+import * as faultsStep from '../src/daemon/faults.js';
 import { docsTrimTitle } from '../src/model/documentation.js';
 import { successorWidening } from '../src/model/successors.js';
 import { checkInvariants, emptyInvariantRecord, invariantDefaults, systemInvariants, type InvariantCheck } from '../src/model/invariants.js';
@@ -558,7 +559,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * (`rejected`).
  */
 let days = 0;
-async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
   staleDiagnosis?: boolean;
@@ -1956,6 +1957,32 @@ async function simulateDay(options: { hours: number; backlog?: boolean; master?:
     effects.wakeObservation = async work => { await slow(); return wakeObservation!(work); };
     effects.withdraw = async (work, decision, reason) => { budgetDay.withdrawn.push({ key: work.key, cycle: cycles }); return withdraw!(work, decision, reason); };
   }
+  // ---- GY-1345: the slow-observation day. Inside the window the attention master status adds answers
+  // ---- `attentionMs` after it is asked, as cycle 12621's did in 350.8s: the cycle that asks spends the
+  // ---- faults step's whole budget on it and is cut, and the read stays in flight across cycles.
+  const observationDay = { cycles: [] as { cycle: number; elapsed: number; spentMs: number; cut: boolean; pending: number }[], started: 0, landed: 0, inFlight: 0, maxInFlight: 0 };
+  if (options.slowObservation) {
+    const window = options.slowObservation, { controlPlane } = effects, attention = effects.reportedAttention ?? (async () => ({ items: [] }) as ReportedAttention);
+    const budget = faultsStep.faultObservationBudgetMs(config.run.intervalSeconds * 1000);
+    const inWindow = () => { const at = clock.now() - dayStart; return at >= window.from && at < window.to; };
+    let landing: { at: number; answer: () => void } | null = null;
+    effects.controlPlane = async () => {
+      // A plane fast again answers the read in flight; inside the window it answers once its time is up.
+      if (landing && (!inWindow() || clock.now() >= landing.at)) { const read = landing; landing = null; read.answer(); }
+      return controlPlane!();
+    };
+    effects.reportedAttention = (...args) => {
+      if (!inWindow()) return attention(...args);
+      observationDay.started++; observationDay.inFlight++; observationDay.maxInFlight = Math.max(observationDay.maxInFlight, observationDay.inFlight);
+      // The asking cycle waits its budget out on the read: the loop's clock moves at once (the budget is
+      // judged right after the read is asked), less a moment the real timer still waits.
+      const waited = budget - 200;
+      fenced.drift += waited;
+      return moveClock(waited).then(() => new Promise<ReportedAttention>(resolve => {
+        landing = { at: clock.now() - waited + window.attentionMs, answer: () => { observationDay.inFlight--; observationDay.landed++; resolve(attention(...args)); } };
+      }));
+    };
+  }
   if (options.staleRelease) {
     // The backlog's history reads take real time, as a slow control plane's do; master status's own
     // decision report is the attention the loop classifies, so an owed stale release reaches the fault step.
@@ -2524,6 +2551,7 @@ async function simulateDay(options: { hours: number; backlog?: boolean; master?:
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
         if (options.staleRelease) { staleReleaseDay.steps.push({ elapsed, ms: result.metrics.steps?.decisions?.ms ?? 0, backlogReads: staleReleaseDay.backlogReads }); staleReleaseDay.backlogReads = 0; }
         if (options.slowDecisions) budgetDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, slow: budgetDay.cycleSlow, deferred: [...state.decisionsDeferred] });
+        if (options.slowObservation) observationDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, cut: result.actions.some(action => action.kind === 'fault' && /spent its \d+s observation budget/.test(action.detail)), pending: faultsStep.observationReadsPending(state) });
         if (options.workspaceFailure) for (const [name, entry] of Object.entries(state.profiles)) if (/worktree/.test(entry.reason ?? '')) workspaceCooled.push(`+${Math.round(elapsed / minute)} min ${name}: ${entry.reason}`);
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
         escalations.push(...result.actions.filter(action => action.kind === 'escalation').map(action => action.detail));
@@ -2660,7 +2688,7 @@ async function simulateDay(options: { hours: number; backlog?: boolean; master?:
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, staleMerges, restartLog, guardDay, budgetDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain };
+    wakes, staleMerges, restartLog, guardDay, budgetDay, observationDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain };
 }
 
 /**
@@ -4334,6 +4362,32 @@ test('unit:soak-invariants-hold — a slow control plane carries the decisions s
   const attested = items[2].key;
   assert.ok(decideCalls.some(call => call.key === attested && call.action === 'attest'), `${attested}'s attestation was requested: ${JSON.stringify(decideCalls.filter(call => call.key === attested).map(call => call.action))}`);
   assert.ok(final.find(item => item.key === attested)!.evidence.some(entry => entry.proof === MANUAL && entry.result === 'pass'), `${attested} was delivered on its attestation`);
+});
+
+test('unit:soak-invariants-hold — a control plane too slow to observe within the faults step\'s budget for an hour and a quarter: the step is cut while the attention read is in flight, never more than one such read is in flight however many cycles run, every cycle stays within the interval, the read in flight is taken once it lands, no loop-cost fault opens, and every invariant holds', { timeout: 600_000 }, async () => {
+  // GY-1345: cycle 12621's window, longer. The attention master status adds answers fifteen minutes
+  // after it is asked, so a cut read stays in flight across a dozen one-minute cycles; before the reads
+  // were single-flight each cut cycle started another full-plane read and spent the whole budget on it.
+  const slow = { from: 60 * minute, to: 135 * minute, attentionMs: 15 * minute };
+  const { final, violations, failures, lost, observationDay, state } = await simulateDay({
+    hours: 4, slowObservation: slow,
+    plan: { items: 4, leftovers: 0, slowRecompute: 0, releaseEveryMs: 1_000, workMs: 50 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, attested: 0, exhaustedReviewer: 0, unstable: 0, lowLane: 0, outOfQueue: { item: 4, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 4 } },
+  });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all four items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds while the step is cut and once the plane is fast');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  const cycles = observationDay.cycles, cut = cycles.filter(entry => entry.cut);
+  assert.ok(cut.length >= 30, `the window cut the step across many cycles (${cut.length} cut of ${cycles.length})`);
+  assert.equal(observationDay.maxInFlight, 1, `never more than one attention read in flight (${observationDay.started} started)`);
+  assert.ok(observationDay.started <= Math.ceil((slow.to - slow.from) / slow.attentionMs) + 2, `about one read per landing, not one a cycle: ${observationDay.started} started over ${cut.length} cut cycles`);
+  assert.ok(observationDay.landed >= observationDay.started - 1 && observationDay.landed >= 2, `the reads in flight land and are taken (${observationDay.landed} of ${observationDay.started})`);
+  assert.deepEqual(cycles.filter(entry => entry.spentMs > soakConfig.run.intervalSeconds * 1000).map(entry => `cycle ${entry.cycle} +${Math.round(entry.elapsed / minute)} min: ${entry.spentMs}ms`), [], 'every cycle stays within the interval');
+  assert.deepEqual(cycles.filter(entry => entry.pending > 2).map(entry => `cycle ${entry.cycle}: ${entry.pending}`), [], 'at most one read per source is pending after any cycle');
+  assert.deepEqual(cycles.filter(entry => entry.elapsed >= slow.to + 2 * minute && entry.cut).map(entry => `+${Math.round(entry.elapsed / minute)} min`), [], 'once the plane is fast, no observation is cut');
+  assert.equal(faultsStep.observationReadsPending(state), 0, 'nothing is left in flight at the end of the day');
+  assert.match(state.actions['faults:deferred']?.detail ?? '', /^The faults step observed every source within its budget/);
+  assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'loop-cost').map(entry => entry.text), [], 'no loop-cost instance opens for slow plane reads');
 });
 
 test('unit:soak-invariants-hold — releases requested outside any diagnosis that go stale in backlog are asked again by the loop once per stale decision against the current revision, each put to an approver that judges and is closed, a release that keeps racing escalates exactly once at the bound, no owed-decision fault is counted while the loop is still asking, a large slow backlog is read side by side and kept, and every invariant holds', { timeout: 600_000 }, async () => {

@@ -326,10 +326,11 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
         // profile's — it puts no profile into its failure cool-off. The worktree command has
         // already released the claim with its git message, which hands the epoch back, and the
         // item's record here keeps that message.
-        const workspace = workspaceDispatchFailure(message(error));
-        if (!workspace) recordProfileFailure(state, current.profile, message(error), now());
+        // GY-1345: nor does a plane-wide failure, which says nothing about the profile that met it.
+        const workspace = workspaceDispatchFailure(message(error)), planeWide = planeWideFailure(message(error));
+        if (!workspace && !planeWide) recordProfileFailure(state, current.profile, message(error), now());
         const run = noteDispatchFailure(state, item, message(error), new Date(now()).toISOString());
-        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}${workspace ? " (the item's workspace could not be prepared on this host; the profile is not cooled off and the item's next dispatch waits out a doubling backoff)" : ''}${run.count ? ` (failure ${run.count} of ${dispatchFailureBlockAfter} with this cause)` : planeWideFailure(message(error)) ? ' (a plane-wide control-plane failure, which never counts toward a dispatch-failure blocker)' : ' (a fleet-idle cause, which never counts toward a dispatch-failure blocker)'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}${workspace ? " (the item's workspace could not be prepared on this host; the profile is not cooled off and the item's next dispatch waits out a doubling backoff)" : ''}${run.count ? ` (failure ${run.count} of ${dispatchFailureBlockAfter} with this cause)` : planeWide ? ' (a plane-wide control-plane failure, which cools no profile and never counts toward a dispatch-failure blocker)' : ' (a fleet-idle cause, which never counts toward a dispatch-failure blocker)'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
         if (run.count && run.count >= dispatchFailureBlockAfter) performed.push(...await blockRepeatedFailure(item));
         return;
       }

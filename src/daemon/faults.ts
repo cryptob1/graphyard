@@ -414,19 +414,48 @@ export const faultObservationIntervalMs = 60_000;
  * the control plane's status and the attention `master status` adds, which reads every open item;
  * while the plane answered in 1-21s on 2026-10-06 they took 372s of cycle 12621, past the 300s
  * interval (loop-cost). Like the decisions step's budget (GY-1286), a fifth of the interval, never
- * under the 30s actionable cadence: a read still unanswered at the bound is left to finish on its
- * own and its answer dropped, the cycle is partial, so nothing standing ends on what went unread,
- * and the next cycle observes again.
+ * under the 30s actionable cadence: a read still unanswered at the bound is left in flight, the
+ * cycle is partial, so nothing standing ends on what went unread, and the next cycle observes again.
  */
 export const faultObservationBudgetMs = (intervalMs: number) => Math.max(actionableIntervalMs, Math.round(intervalMs * 0.2));
 const unread = Symbol('unread');
-/** The read's answer, or `unread` when the deadline passes first. `read` handles its own failure, so a read left behind rejects nowhere. */
-async function withinBudget<T>(read: () => Promise<T>, deadline: number, now: () => number): Promise<T | typeof unread> {
-  const remaining = deadline - now();
-  if (remaining <= 0) return unread;
+type Observed<T> = { value: T; failed: boolean };
+/**
+ * The observation's reads still in flight, per loop state and source. A read the budget cut keeps
+ * running with nothing to stop it, so a cycle that finds one here starts no other: at the 30s
+ * actionable cadence a 350s read would otherwise stack a dozen full-plane reads on the plane already
+ * too slow to answer one. Nor does that cycle wait on it again: it takes the answer if it has landed
+ * and is otherwise partial at once, so only the cycle that asked spends the budget and a slow window
+ * does not stretch every cycle to it (cycle-p90). An answer that lands between cycles is kept until
+ * a cycle takes it; one taken leaves the slot free for the next observation's read.
+ */
+const observing = new WeakMap<object, Map<string, Promise<Observed<unknown>>>>();
+/** The pending read of `source`, or `read()` started now (`started`); never more than one per loop state and source. */
+function singleFlight<T>(owner: object, source: string, read: () => Promise<Observed<T>>) {
+  let reads = observing.get(owner);
+  if (!reads) observing.set(owner, reads = new Map());
+  const pending = reads.get(source) as Promise<Observed<T>> | undefined;
+  if (pending) return { pending, started: false };
+  const started = read();
+  reads.set(source, started);
+  return { pending: started, started: true };
+}
+/** How many of the observation's reads `owner` has in flight or answered but not yet taken. */
+export function observationReadsPending(owner: object) { return observing.get(owner)?.size ?? 0; }
+/**
+ * The source's answer, or `unread` when the deadline passes first — at once for a read an earlier cycle
+ * started that has not landed. The read is single-flight across cycles, and a taken answer frees its
+ * slot. `read` settles its own failure into `failed`, so a read left behind rejects nowhere.
+ */
+async function withinBudget<T>(owner: object, source: string, read: () => Promise<Observed<T>>, deadline: number, now: () => number): Promise<Observed<T> | typeof unread> {
+  const { pending, started } = singleFlight(owner, source, read), remaining = started ? deadline - now() : 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const expired = new Promise<typeof unread>(resolve => { timer = setTimeout(() => resolve(unread), remaining); });
-  try { return await Promise.race([read(), expired]); } finally { clearTimeout(timer); }
+  const expired = new Promise<typeof unread>(resolve => { timer = setTimeout(() => resolve(unread), Math.max(0, remaining)); });
+  try {
+    const answer = await Promise.race([pending, expired]);
+    if (answer !== unread && observing.get(owner)?.get(source) === pending) observing.get(owner)!.delete(source);
+    return answer;
+  } finally { clearTimeout(timer); }
 }
 const observedWithin = 'The faults step observed every source within its budget';
 /**
@@ -452,17 +481,18 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   const budgetMs = faultObservationBudgetMs(config.run.intervalSeconds * 1000), deadline = local + budgetMs, unreadSources: string[] = [];
   const herdrRead = effects.herdr ? await Promise.resolve(effects.herdr()).catch(() => ({ agents: [] as HerdrAgent[], available: false })) : { agents, available: true };
   const seen = herdrRead.available ? herdrRead.agents : [];
-  const status = effects.controlPlane ? await withinBudget(() => effects.controlPlane!().catch(() => { partial = true; return null; }), deadline, now) : null;
+  const status = effects.controlPlane ? await withinBudget(state, 'status', () => effects.controlPlane!().then(value => ({ value, failed: false }), () => ({ value: null, failed: true })), deadline, now) : null;
   if (status === unread) unreadSources.push("the control plane's status");
-  const controlPlane = status === unread ? null : status;
+  else if (status?.failed) partial = true;
+  const controlPlane = status === unread ? null : status?.value ?? null;
   const summary = daemonSummary(state, clock, config.run.intervalSeconds * 1000, config.hostId, policy);
   if (controlPlane && effects.reportedAttention) {
-    const read = await withinBudget(() => effects.reportedAttention!(snapshot.work, controlPlane, { agents: seen, available: herdrRead.available, approvals: summary.approvals, loop: summary.liveness, now: new Date(clock).toISOString() })
-      .catch(error => { partial = true; return { items: [{ subject: 'loop', text: `The loop could not read the attention master status adds to classify it: ${message(error)}`, kind: 'loop-failures' } as AttentionItem] }; }), deadline, now);
+    const read = await withinBudget(state, 'attention', () => effects.reportedAttention!(snapshot.work, controlPlane, { agents: seen, available: herdrRead.available, approvals: summary.approvals, loop: summary.liveness, now: new Date(clock).toISOString() })
+      .then(value => ({ value, failed: false }), error => ({ value: { items: [{ subject: 'loop', text: `The loop could not read the attention master status adds to classify it: ${message(error)}`, kind: 'loop-failures' } as AttentionItem] } as ReportedAttention, failed: true })), deadline, now);
     if (read === unread) unreadSources.push('the attention master status adds');
-    else reported = read;
+    else { reported = read.value; if (read.failed) partial = true; }
   }
-  // A source the budget cut is unread: the cycle is partial, and the next cycle observes again rather than waiting out the interval.
+  // A source the budget cut is unread: the cycle is partial, and the next cycle observes again (taking the read in flight) rather than waiting out the interval.
   if (unreadSources.length) { partial = true; state.faults.observedAt = lastObservedAt; }
   await noteObservationBudget(cycle, budgetMs, unreadSources);
   // The loop's own health lines, as master status puts them first: its cost, silence and delivery budget. The loop reading
@@ -491,5 +521,5 @@ async function noteObservationBudget(cycle: Pick<Cycle, 'state' | 'effects' | 'n
     return;
   }
   performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'done', attempts: (standing?.attempts ?? 0) + 1, cycle: state.cycle,
-    detail: `The faults step spent its ${Math.round(budgetMs / 1000)}s observation budget before ${unreadSources.join(' and ')} answered, so the cycle is partial: nothing standing ends on what went unread, the diagnoses wait, and the next cycle observes again` }, now(), effects.persist, null));
+    detail: `The faults step spent its ${Math.round(budgetMs / 1000)}s observation budget before ${unreadSources.join(' and ')} answered, so the cycle is partial: nothing standing ends on what went unread, the diagnoses wait, and a later cycle takes the answer of the read still in flight once it lands rather than starting another` }, now(), effects.persist, null));
 }

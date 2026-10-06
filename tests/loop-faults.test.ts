@@ -769,10 +769,10 @@ test('manual:fault-class-loop — GY-1345 lists five instances, and every one is
 
 test('unit:plane-wide-failure-shapes — one recognizer reads every shape the window produced as the plane\'s, and an item-specific HTTP 500 as the item\'s', () => {
   for (const text of [decide502, file502, tickTimeout, 'Application failed to respond', 'HTTP 502 Bad Gateway', 'Graphyard refused work/x/session (503): upstream', 'HTTP 504',
-    '{"status":504,"message":"timeout"}', 'connect ECONNREFUSED 10.0.0.1:443', 'read ECONNRESET', 'socket hang up', `server GET status: ${tickTimeout}`])
+    '{"status":504,"message":"timeout"}', 'connect ECONNREFUSED 10.0.0.1:443', 'read ECONNRESET', 'socket hang up', `server GET status: ${tickTimeout}`, 'the database is out of memory'])
     assert.equal(planeWideFailure(text), true, text);
   for (const text of ['Graphyard refused work/x/decide (500): {"status":500,"message":"Internal server error"}', 'Graphyard refused work/x/decide (409): Task revision changed (now 2)',
-    'Graphyard refused work/x/decide (403): not permitted', 'The operation was aborted', null, ''])
+    'Graphyard refused work/x/decide (403): not permitted', 'The operation was aborted', 'spawn ENOMEM', 'FATAL ERROR: JavaScript heap out of memory', null, ''])
     assert.equal(planeWideFailure(text), false, String(text));
   // itemSpecificPlaneError is unchanged: a 500 the item's own request met stays the item's, whatever else the text says.
   assert.equal(itemSpecificPlaneError('Graphyard refused work/x/decide (500): {"status":500,"message":"Internal server error"}'), true);
@@ -862,6 +862,27 @@ test(`unit:plane-wide-dispatch-tick-not-counted — ${gy1345Instances[1].id}: ti
   assert.equal((state.dispatchFailures as Record<string, { count: number }>)['work-GY-9'].count, dispatchFailureBlockAfter);
 });
 
+test(`unit:plane-wide-dispatch-tick-not-counted — ${gy1345Instances[1].id}: an item's dispatch failing on the plane cools no profile, while its own cause still does`, async () => {
+  const master = masterConfigSchema.parse({ ...burstConfig(), workers: [{ name: 'builder', principal: 'worker-a', agentName: 'agent-builder', mode: 'launch', kind: 'claude', credentialFile: '/outside/builder.token' }] });
+  const at = Date.parse(gy1345Instances[1].at), work = item('GY-9', at, { stage: 'build', ready: true, epoch: 1 } as Partial<Work>);
+  const cycleWith = async (failure: string) => {
+    const state = emptyDaemonState(master);
+    const effects = { agents: () => [], credentials: async (profiles: { name: string }[]) => Object.fromEntries(profiles.map(entry => [entry.name, { available: true, reason: null }])),
+      snapshot: async () => ({ work: [work], now: iso(at) }), closeSession: () => {}, dispatch: async () => { throw new Error(failure); }, requestProof: () => {},
+      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(at), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {} } as unknown as DaemonEffects;
+    await runCycle(master, state, effects, () => at);
+    return state;
+  };
+  for (const failure of [decide502, tickTimeout]) {
+    const state = await cycleWith(failure);
+    assert.equal(state.actions[`dispatch:${work.id}:1`]?.state, 'failed', failure);
+    assert.equal(state.profiles['builder'], undefined, `no profile cool-off for ${failure}`);
+    assert.match(state.actions[`dispatch:${work.id}:1`].detail, /plane-wide control-plane failure, which cools no profile/);
+  }
+  const own = await cycleWith('Herdr refused agent start: workspace w1V not found');
+  assert.ok(own.profiles['builder']?.cooldownUntil, 'an item-specific failure still cools the profile');
+});
+
 // Cycle 12621 replayed: the control plane's status answered in 21.3s and the attention master status
 // adds, which reads every open item, in 350.8s — the 372.1s the faults step spent.
 const slowStatusMs = 21_300, slowAttentionMs = 350_800;
@@ -872,13 +893,17 @@ async function drive<T>(running: Promise<T>, stepMs = 500): Promise<T> {
   for (let turns = 0; !settled && turns < 20_000; turns++) { await new Promise(resolve => setImmediate(resolve)); if (!settled) mock.timers.tick(stepMs); }
   return running;
 }
-function slowPlane(reads: { attention: number }, attentionMs = () => slowAttentionMs) {
+type PlaneReads = { attention: number; inFlight?: number; maxInFlight?: number };
+function slowPlane(reads: PlaneReads, attentionMs = () => slowAttentionMs) {
   return {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => ({ work: [item('GY-9', Date.now(), { stage: 'build', ready: true })], now: iso(Date.now()), jobs: [] }),
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(Date.now()), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
     controlPlane: () => new Promise(resolve => setTimeout(() => resolve({}), slowStatusMs)),
-    reportedAttention: () => { reads.attention += 1; return new Promise(resolve => setTimeout(() => resolve({ items: [{ subject: 'GY-9', text: 'GY-9 escalation context overflows', kind: 'context-overflow' }] }), attentionMs())); },
+    reportedAttention: () => {
+      reads.attention += 1; reads.inFlight = (reads.inFlight ?? 0) + 1; reads.maxInFlight = Math.max(reads.maxInFlight ?? 0, reads.inFlight);
+      return new Promise(resolve => setTimeout(() => { reads.inFlight! -= 1; resolve({ items: [{ subject: 'GY-9', text: 'GY-9 escalation context overflows', kind: 'context-overflow' }] }); }, attentionMs()));
+    },
     persist: async () => {},
   } as unknown as DaemonEffects;
 }
@@ -898,11 +923,11 @@ test(`unit:fault-observation-budget — ${gy1345Instances[3].id}: a plane answer
   } finally { mock.timers.reset(); }
 });
 
-test('unit:fault-observation-budget — the step stops reading, marks the cycle partial so nothing standing ends, and the next cycle observes again', async () => {
+test('unit:fault-observation-budget — the step stops reading, marks the cycle partial so nothing standing ends, and later cycles take the read in flight once it lands rather than starting another', async () => {
   const at = Date.parse(gy1345Instances[3].at);
   mock.timers.enable({ apis: ['setTimeout', 'Date'], now: at });
   try {
-    const master = burstConfig(), state = emptyDaemonState(master), reads = { attention: 0 };
+    const master = burstConfig(), state = emptyDaemonState(master), reads: PlaneReads = { attention: 0 };
     let attentionMs = 1_000;
     const effects = slowPlane(reads, () => attentionMs);
     await drive(runCycle(master, state, effects, () => Date.now()));
@@ -917,12 +942,41 @@ test('unit:fault-observation-budget — the step stops reading, marks the cycle 
     assert.ok(Date.now() - before <= faultObservationBudgetMs(intervalMs) + 5_000, `the cycle did not wait for the read: ${Date.now() - before}ms`);
     assert.deepEqual(Object.keys(state.faults.open).filter(key => key.startsWith('context-overflow|GY-9')), standing, 'an unread source ends no standing fault');
     assert.equal(state.faults.observedAt, observedAt, 'the cut observation does not count as one');
-    // The next cycle, inside faultObservationIntervalMs of the cut one, observes again.
-    attentionMs = 1_000;
+    assert.equal(faultsStep.observationReadsPending(state), 1, 'the cut read is kept in flight');
+    // The next cycle, inside faultObservationIntervalMs of the cut one, observes again: it takes the read in flight, and does not wait on it.
     mock.timers.tick(30_000);
+    const again = Date.now();
     await drive(runCycle(master, state, effects, () => Date.now()));
-    assert.equal(reads.attention, 3, 'the next cycle reads again rather than waiting out the observation interval');
+    assert.ok(Date.now() - again <= slowStatusMs + 5_000, `a cycle finding the read in flight waits only on its own status read, not its budget again: ${Date.now() - again}ms`);
+    assert.equal(reads.attention, 2, 'the next cycle starts no second read while the first is in flight');
+    assert.match(state.actions['faults:deferred'].detail, /takes the answer of the read still in flight once it lands rather than starting another/);
+    // Cycles go on at the actionable cadence until the read lands; the cycle that takes its answer observes fully.
+    for (let cycles = 0; cycles < 12 && !/^The faults step observed every source/.test(state.actions['faults:deferred'].detail); cycles++) {
+      mock.timers.tick(30_000);
+      await drive(runCycle(master, state, effects, () => Date.now()));
+    }
+    assert.equal(reads.attention, 2, 'the answer of the read in flight is taken, not read again');
     assert.match(state.actions['faults:deferred'].detail, /^The faults step observed every source within its budget/);
+    assert.notEqual(state.faults.observedAt, observedAt, 'the answer taken counts as an observation');
+    assert.equal(faultsStep.observationReadsPending(state), 0, 'a taken answer frees its slot');
+  } finally { mock.timers.reset(); }
+});
+
+test(`unit:fault-observation-budget — ${gy1345Instances[3].id}: cycles every 30s against a plane answering in ${slowAttentionMs / 1000}s keep at most one observation read in flight, and every cycle stays within its interval`, async () => {
+  const at = Date.parse(gy1345Instances[3].at);
+  mock.timers.enable({ apis: ['setTimeout', 'Date'], now: at });
+  try {
+    const master = burstConfig(), state = emptyDaemonState(master), reads: PlaneReads = { attention: 0 }, effects = slowPlane(reads);
+    const started = Date.now();
+    while (Date.now() - started < 30 * minute) {
+      const result = await drive(runCycle(master, state, effects, () => Date.now()));
+      assert.ok(cycleCost(result.metrics, intervalMs)!.withinInterval, `cycle ${state.cycle} past its interval`);
+      assert.ok(faultsStep.observationReadsPending(state) <= 2, 'at most one read per source is pending');
+      mock.timers.tick(30_000);
+    }
+    assert.equal(reads.maxInFlight, 1, `never more than one attention read in flight (${reads.attention} started over 30 minutes)`);
+    // One read per landing, plus the one still in flight: about one every 350s, not one every cycle.
+    assert.ok(reads.attention <= Math.ceil(30 * minute / slowAttentionMs) + 1, `${reads.attention} reads in 30 minutes`);
   } finally { mock.timers.reset(); }
 });
 
