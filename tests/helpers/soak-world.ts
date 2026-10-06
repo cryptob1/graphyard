@@ -195,8 +195,8 @@ export class SimulatedGitHub {
    * are counted onto its observed review, except on a head that is the bot round's own commit.
    */
   reviewBody: ((key: string, review: { id: number; sha: string; state: string; reviewer: string }) => string) | null = null;
-  /** How many times the landing check ran in the loop, the bases it judged, and the two compare kinds it asked. */
-  landingChecks = 0; landingBases = new Set<string>(); ancestorCompares = 0; blindCompares = 0;
+  /** How many times the landing check ran in the loop, the bases it judged, and the two compare kinds it asked; and every head answered blind (GY-839). */
+  landingChecks = 0; landingBases = new Set<string>(); ancestorCompares = 0; blindCompares = 0; blindHeads = new Set<string>();
   /**
    * GY-1250. Items whose next merge breaks main's `test` check, though each pull request passed CI
    * alone (the parallel-merge fault the main guard answers), and those whose revert's own `test`
@@ -380,7 +380,7 @@ export class SimulatedGitHub {
   compare(from: string, to: string, query = '') {
     const params = new URLSearchParams(query), perPage = Number(params.get('per_page') ?? 30), page = Number(params.get('page') ?? 1);
     const truth = this.mergeBase(from, to), blind = this.staleMergeBase.has(to) && truth !== from;
-    if (!params.get('per_page')) { if (blind) this.blindCompares += 1; if (truth === from && from !== to) this.ancestorCompares += 1; }
+    if (!params.get('per_page')) { if (blind) { this.blindCompares += 1; this.blindHeads.add(to); } if (truth === from && from !== to) this.ancestorCompares += 1; }
     const commits = this.between(from, to);
     return {
       status: from === to ? 'identical' : this.contains(to, from) ? 'ahead' : this.contains(from, to) ? 'behind' : 'diverged',

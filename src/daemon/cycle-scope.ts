@@ -181,14 +181,18 @@ export async function scopeStep(cycle: Cycle) {
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Widened ${item.key} with ${namePaths(paths)} on ${widenedOn(scoped.grounds!, paths.length)}: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
       return at;
     } catch (error) {
-      // The ask this widening answers was answered, withdrawn or re-asked meanwhile, or its attempt
-      // lost the lease (GY-1348): the engine refused the moot widening by design, and the fresh ask
-      // is judged on its own next cycle. A handled outcome, as the decide path records it (GY-955).
-      const moot = supersededScopeAsk(error);
+      // The race this widening is bound against, lost: the request was answered, withdrawn or re-asked
+      // meanwhile, or its attempt ended, so the widening is moot — answered as the decide path answers
+      // it, never a fault (GY-1347). A superseded ask is named, and its fresh ask is judged on its own
+      // next cycle (GY-1348).
+      const moot = mootScopeWidening(error);
       if (moot) {
-        superseded.add(item.id);
-        performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
-          detail: boundDetail(`Not widened ${item.key}: ${moot} — the ask at ${request.at} by epoch ${request.epoch} was ${supersededScopeNote}`), attempts, cycle: state.cycle }, now(), effects.persist));
+        const superseding = supersededScopeAsk(error);
+        if (superseding) superseded.add(item.id);
+        const detail = boundDetail(`Not widened ${item.key}: ${moot}${superseding ? ` — the ask at ${request.at} by epoch ${request.epoch} was ${supersededScopeNote}` : ''}`);
+        const entry = await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail, attempts, cycle: state.cycle }, now(), effects.persist);
+        // The same moot race read again on a recheck is not a new action.
+        if (!judged || previous.detail !== detail) performed.push(entry);
         return null;
       }
       const transient = transientScopeRefusal(error);
@@ -357,13 +361,29 @@ export const supersededScopeNote = 'answered, withdrawn or re-asked meanwhile; t
  * longer stands, or null: the scope request it names was answered, withdrawn or re-asked meanwhile
  * (a worker's re-ask merges into the open request under its own `at`), or the attempt that asked no
  * longer holds the lease. The engine's refusal is the design (engine.ts, `answers`); the loop only
- * records it as handled, never as a scope fault.
+ * records it as handled, never as a scope fault. Only the plane's own 409 counts, as for any moot
+ * widening (mootScopeWidening).
  */
 export function supersededScopeAsk(error: unknown): string | null {
+  if (!(error instanceof RefusedResponse) || error.status !== 409) return null;
   const text = message(error);
-  if (/The scope request this widening answers is no longer open/.test(text)) return 'the scope request it answers is no longer open';
-  const lease = /Epoch (\d+), which asked for this scope, no longer holds the lease/.exec(text);
-  return lease ? `epoch ${lease[1]}, which asked for this scope, no longer holds the lease` : null;
+  if (/The scope request this widening answers is no longer open/.test(text)) return 'the scope request it answers was already answered: it is no longer open';
+  if (/Epoch \d+, which asked for this scope, no longer holds the lease/.test(text)) return 'the attempt that asked for it no longer holds the lease';
+  return null;
+}
+/**
+ * GY-1347. Why the control plane refused the loop's widening as moot, or null: the widening names
+ * the request it answers, and a claim, a lease end or a push between the loop's reads and its post
+ * makes the plane refuse it (engine.ts, `data.answers`) rather than apply it — the design step 2a
+ * describes. On 6 October 2026 GY-1336 and GY-1345 each counted that refusal as a scope fault,
+ * while the decide path records the same race as already answered. A refusal with no response
+ * status (a message merely quoting one) is not read as moot.
+ */
+export function mootScopeWidening(error: unknown): string | null {
+  const superseded = supersededScopeAsk(error);
+  if (superseded || !(error instanceof RefusedResponse) || error.status !== 409) return superseded;
+  if (/The findings this widening rests on were read for .*, which is no longer the item's head/.test(message(error))) return `the head its findings were read for moved; they are read again for the new head in ${findingRecheckMs / 1000}s`;
+  return null;
 }
 /**
  * The fault kind a refused scope action is noted under: a transient refusal judged nothing about the

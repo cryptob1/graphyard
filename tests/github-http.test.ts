@@ -197,3 +197,89 @@ test('a head\'s added history is one compare per SHA pair, and a truncated list 
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ total_commits: 500, commits: [{ sha: peer }] })));
   assert.equal(await github.historySince(head, base), null, 'a truncated list gives no shortcut');
 });
+
+test('unit:github-http.approve-revert-then-merge-under-last-push-approval — the guard\'s revert is approved by the independent approver App at the verified head and merges head-bound under main\'s last-push-approval rule; without the approver every merge is refused, and the abandonment names the missing approver and keeps main red visible', async () => {
+  // GY-1335: main requires one approval from someone other than the last pusher (require_last_push_approval,
+  // enforce_admins, no bypass). The control-plane App pushes every revert, so this GitHub refuses its
+  // head-bound merge unless an App other than it approved exactly that head — the 2026-10-05 refusal.
+  const { generateKeyPairSync } = await import('node:crypto');
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
+  const { runMainGuard, applyMainGuardRevert, mainGuardAttention } = await import('../src/main-guard.js');
+  const head = 'e9'.repeat(20), mergeSha = 'a1'.repeat(20), pr = 900;
+  const lastPusher = 'New changes require approval from someone other than the last pusher.';
+  function world(approver: boolean) {
+    const github = new GitHub({ repository: 'fixture/repo', base: 'main', appId: 1, installationId: 2, privateKey: 'not-used', ...(approver ? { revertApprover: { appId: 5678, installationId: 9, privateKey } } : {}) });
+    Object.assign(github, { token: 'control-plane-token', expires: Date.now() + 3600000 });
+    const state = { reviews: [] as any[], merged: null as string | null, merges: [] as { head: string; refused: boolean }[], approvals: [] as { auth: string; commit: string }[] };
+    github.fetch = (async (input: string, init: RequestInit = {}) => {
+      const url = new URL(String(input)), method = init.method ?? 'GET', body = init.body ? JSON.parse(String(init.body)) : undefined;
+      const auth = String((init.headers as Record<string, string>)?.Authorization);
+      if (url.pathname === '/app/installations/9/access_tokens') return Response.json({ token: 'approver-installation-token', expires_at: new Date(Date.now() + 3_600_000).toISOString() }, { status: 201 });
+      if (url.pathname === `/repos/fixture/repo/pulls/${pr}/reviews` && method === 'GET') return Response.json(state.reviews);
+      if (url.pathname === `/repos/fixture/repo/pulls/${pr}/reviews` && method === 'POST') {
+        state.approvals.push({ auth, commit: body.commit_id });
+        const review = { id: state.reviews.length + 1, state: 'APPROVED', commit_id: body.commit_id, performed_via_github_app: { id: auth === 'Bearer approver-installation-token' ? 5678 : 1 } };
+        state.reviews.push(review);
+        return Response.json(review);
+      }
+      if (url.pathname === `/repos/fixture/repo/pulls/${pr}`) return Response.json({ number: pr, state: state.merged ? 'closed' : 'open', merged: !!state.merged, merge_commit_sha: state.merged, mergeable: true, head: { sha: head } });
+      if (url.pathname.endsWith('/check-runs') && method === 'GET') return Response.json({ total_count: 0, check_runs: [] });
+      if (url.pathname === '/repos/fixture/repo/check-runs' && method === 'POST') return Response.json({ id: 1, ...body }, { status: 201 });
+      if (url.pathname === '/graphql') {
+        if (/mergePullRequest/.test(body.query)) {
+          // Branch protection: the merger is the control-plane App, which pushed the revert, so only an
+          // approval at exactly the merged head from an App other than it satisfies the rule.
+          const approvedByAnother = state.reviews.some(review => review.state === 'APPROVED' && review.commit_id === body.variables.head && review.performed_via_github_app?.id !== 1);
+          state.merges.push({ head: body.variables.head, refused: !approvedByAnother });
+          if (!approvedByAnother) return Response.json({ data: null, errors: [{ message: lastPusher }] });
+          state.merged = 'c3'.repeat(20);
+          return Response.json({ data: { mergePullRequest: { pullRequest: { id: 'PR_900' } } } });
+        }
+        return Response.json({ data: { repository: { mergeQueue: null, pullRequest: { id: 'PR_900', headRefOid: head, isInMergeQueue: false, mergeQueueEntry: null, autoMergeRequest: null, mergeStateStatus: 'BLOCKED' } } } });
+      }
+      return new Response(`unexpected ${method} ${url.pathname}`, { status: 500 });
+    }) as typeof fetch;
+    const work = { id: 'work-1', key: 'GY-1', stage: 'done', delivery: { mergeSha }, submission: { pr: 800 },
+      mainGuardReverts: [{ mergeSha, pr: 800, failing: ['test'], revert: { pr, head }, state: 'opened', at: new Date().toISOString(), settledAt: null, revertSha: null, reason: null }] } as any;
+    const patch = { forward: '@@ -1 +1 @@\n-old\n+new', backward: '@@ -1 +1 @@\n-new\n+old' };
+    const closed: string[] = [];
+    const ports = {
+      reverting: async () => work.mainGuardReverts.some((revert: any) => revert.state === 'opened') ? [work] : [],
+      culprit: async () => null, history: async () => [], checks: async () => [{ name: 'test', result: 'success', appId: 15368 }],
+      openRevert: async () => ({ refusal: 'not opened here' }),
+      pull: (number: number) => github.revertPull(number),
+      mergeChanges: async () => [{ filename: 'src/a.ts', status: 'modified', patch: patch.forward }],
+      revertChanges: async () => [{ filename: 'src/a.ts', status: 'modified', patch: patch.backward }],
+      approveRevert: (number: number, at: string, text: string) => github.approveRevert(number, at, text),
+      mergeRevert: (item: any, revert: { pr: number; head: string; failing: string[] }) => github.mergeRevert(item, revert),
+      closeRevert: async (_number: number, reason: string) => { closed.push(reason); },
+      record: async (item: any, revert: any) => { applyMainGuardRevert(item, revert, new Date()); },
+    };
+    return { github, state, work, ports, closed };
+  }
+  const options = { required: ['test'], ciAppIds: [15368], approved: new Set<string>() };
+
+  // Configured: one tick approves the verified head as the approver App and merges it, head-bound, under the rule.
+  const configured = world(true);
+  assert.deepEqual((await runMainGuard(configured.ports as any, options)).errors, []);
+  assert.deepEqual(configured.state.approvals, [{ auth: 'Bearer approver-installation-token', commit: head }], 'the approver App approved exactly the verified head');
+  assert.deepEqual(configured.state.merges, [{ head, refused: false }], 'the head-bound merge passed the last-push-approval rule');
+  assert.equal(configured.work.mainGuardReverts[0].state, 'merged');
+  assert.equal(configured.work.mainGuardReverts[0].revertSha, 'c3'.repeat(20));
+  assert.equal(configured.work.stage, 'ready', 'the reverted item is reopened for rework');
+  assert.deepEqual(configured.closed, []);
+
+  // Unconfigured: nothing approves, so every merge is refused by the rule; after its landing attempts
+  // the revert is abandoned naming the rule and the missing approver, and main stays visibly red.
+  const unconfigured = world(false), retries = { ...options, approved: new Set<string>() };
+  for (let tick = 0; tick < 3; tick++) assert.deepEqual((await runMainGuard(unconfigured.ports as any, retries)).errors, []);
+  assert.deepEqual(unconfigured.state.approvals, [], 'no approval was ever posted');
+  assert.deepEqual(unconfigured.state.merges.map(merge => merge.refused), [true, true, true]);
+  const abandoned = unconfigured.work.mainGuardReverts[0];
+  assert.equal(abandoned.state, 'abandoned'); assert.equal(abandoned.cause, 'approval-refused'); assert.equal(abandoned.red, true);
+  assert.match(abandoned.reason, /other than the last pusher/);
+  assert.match(abandoned.reason, /no revert approver App is configured \(GRAPHYARD_REVERT_APPROVER_APP_ID, GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID, GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY\)/);
+  assert.equal(unconfigured.closed.length, 1, 'the revert pull request is closed once');
+  const [line] = mainGuardAttention([unconfigured.work]);
+  assert.match(line.text, /\[approval-rule refusal\]/); assert.match(line.text, /Main is still red/); assert.deepEqual(line.red, ['test']);
+});

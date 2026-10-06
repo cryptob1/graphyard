@@ -18,7 +18,8 @@ import { basePaths, findingScope, namesPath, negatesPath, readReviewFindings } f
 import type { Observation, Principal, ScopeFile, Work } from '../src/model.js';
 import { workFaults } from '../src/model/fault-classes.js';
 import { successorWidening } from '../src/model/successors.js';
-import { supersededScopeAsk, supersededScopeNote } from '../src/daemon/cycle-scope.js';
+import { mootScopeWidening, supersededScopeAsk, supersededScopeNote } from '../src/daemon/cycle-scope.js';
+import { RefusedResponse } from '../src/model/refusal.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-85: an additive scope request is decided by the loop, not by a master command. A worker
@@ -497,7 +498,7 @@ test('integration:scope-from-review-finding — a refused request for a file a r
     widenScope: async (item, asked, paths, reason) => {
       attempted.push(item.id);
       const answer = await call(master.token, 'POST', `work/${item.id}/requirements`, answeringWidening(item, asked, paths, reason));
-      if (answer.status !== 200) throw new Error(answer.body.error ?? JSON.stringify(answer.body));
+      if (answer.status !== 200) throw new RefusedResponse(answer.body.error ?? JSON.stringify(answer.body), answer.status, answer.body);
       return answer.body;
     },
   };
@@ -553,8 +554,10 @@ test('integration:scope-from-review-finding — a refused request for a file a r
   assert.ok(pushed.lease && pushed.scopeRequest, 'the lease and the request both still stand');
   assert.ok(!pushed.plannedFiles.includes('src/merge-queue.ts'), `not widened: ${pushed.plannedFiles}`);
   const moved = state.actions[`${scopeKey(pushed, pushed.scopeRequest!)}:finding:${pushed.policyRevision}`];
-  assert.equal(moved.state, 'failed');
-  assert.match(moved.detail, /read for aaaaaaaaaaaa, which is no longer the item's head/);
+  // The plane's own 409 for a moved head is a moot widening (GY-1347): recorded done, re-read for the new head.
+  assert.equal(moved.state, 'done', moved.detail);
+  assert.match(moved.detail, /the head its findings were read for moved/);
+  assert.ok(!moved.detail.includes(supersededScopeNote), 'a moved head supersedes no ask');
 });
 
 test('unit:review-finding-scope — only a file on the base that a finding names literally is granted; a missing file, a directory, a longer path or an unnamed file is not', async () => {
@@ -923,7 +926,7 @@ const refusing = (overrides: Partial<DaemonEffects> = {}): Partial<DaemonEffects
   basePaths: async paths => new Set(paths),
   widenScope: async (item, asked, paths, reason) => {
     const answer = await call(master.token, 'POST', `work/${item.id}/requirements`, answeringWidening(item, asked, paths, reason));
-    if (answer.status !== 200) throw new Error(`Graphyard refused work/${item.id}/requirements (${answer.status}): ${answer.body.error ?? JSON.stringify(answer.body)}`);
+    if (answer.status !== 200) throw new RefusedResponse(`Graphyard refused work/${item.id}/requirements (${answer.status}): ${answer.body.error ?? JSON.stringify(answer.body)}`, answer.status, answer.body);
     return answer.body;
   },
   ...overrides,
@@ -947,7 +950,7 @@ test('unit:auto-scope-superseded-ask-recorded-done — a widening whose ask was 
   assert.ok(!work.plannedFiles.includes('src/merge-queue.ts'), 'the moot widening applied nothing');
   const moot = state.actions[`${scopeKey(work, first)}:finding:${work.policyRevision}`];
   assert.equal(moot.state, 'done', moot.detail);
-  assert.match(moot.detail, /the scope request it answers is no longer open/);
+  assert.match(moot.detail, /the scope request it answers was already answered: it is no longer open/);
   assert.ok(moot.detail.includes(`the ask at ${first.at} by epoch ${first.epoch} was ${supersededScopeNote}`), moot.detail);
   assert.equal(moot.faultClass, undefined);
   assert.deepEqual(scopeInstances(state, work), [], 'no action:scope fault instance');
@@ -980,8 +983,8 @@ test('unit:auto-scope-lost-lease-recorded-done — a widening whose asking attem
   assert.ok(!work.plannedFiles.includes('src/merge-queue.ts'), 'nothing widens outside a live attempt');
   const moot = state.actions[`${scopeKey(work, asked)}:finding:${work.policyRevision}`];
   assert.equal(moot.state, 'done', moot.detail);
-  assert.match(moot.detail, new RegExp(`epoch ${asked.epoch}, which asked for this scope, no longer holds the lease`));
-  assert.ok(moot.detail.includes(supersededScopeNote));
+  assert.match(moot.detail, /the attempt that asked for it no longer holds the lease/);
+  assert.ok(moot.detail.includes(`the ask at ${asked.at} by epoch ${asked.epoch} was ${supersededScopeNote}`), moot.detail);
   assert.deepEqual(scopeInstances(state, work), []);
 });
 
@@ -996,7 +999,7 @@ test('unit:scope-replan-superseded-ask-recorded-done — a successor re-plan ref
     replan: async (item, paths, reason) => {
       if (item.id !== work.id) return undefined;
       replanned.push(item.id);
-      if (refuse) throw new Error(`Graphyard refused work/${item.id}/requirements (409): The scope request this widening answers is no longer open`);
+      if (refuse) throw new RefusedResponse(`Graphyard refused work/${item.id}/requirements (409): The scope request this widening answers is no longer open`, 409, { error: 'The scope request this widening answers is no longer open' });
       return ok(master.token, 'POST', `work/${item.id}/requirements`, successorWidening(item, paths, reason));
     },
   };
@@ -1004,7 +1007,7 @@ test('unit:scope-replan-superseded-ask-recorded-done — a successor re-plan ref
   await cycle(state, effects);
   const key = `successors:${work.id}:${work.policyRevision}`;
   assert.equal(state.actions[key].state, 'done', state.actions[key].detail);
-  assert.match(state.actions[key].detail, /^Not re-planned .*the scope request it answers is no longer open — the ask was answered, withdrawn or re-asked meanwhile/);
+  assert.match(state.actions[key].detail, /^Not re-planned .*the scope request it answers was already answered: it is no longer open — the ask was answered, withdrawn or re-asked meanwhile/);
   assert.deepEqual(scopeInstances(state, work), []);
   refuse = false;
   await cycle(state, effects);
@@ -1023,12 +1026,16 @@ test('unit:auto-scope-superseded-widening-still-refused — the engine still ref
   const superseded = await call(master.token, 'POST', `work/${asked.id}/requirements`, answeringWidening(asked, first, ['src/merge-queue.ts'], 'stale request'));
   assert.equal(superseded.status, 409, JSON.stringify(superseded.body));
   assert.match(JSON.stringify(superseded.body), /scope request this widening answers is no longer open/);
-  assert.equal(supersededScopeAsk(new Error(superseded.body.error)), 'the scope request it answers is no longer open');
+  const plane = (error: string) => new RefusedResponse(`Graphyard refused work/${asked.id}/requirements (409): ${error}`, 409, { error });
+  assert.equal(supersededScopeAsk(plane(superseded.body.error)), 'the scope request it answers was already answered: it is no longer open');
   const unchanged = await reload(asked.id);
   assert.equal(unchanged.policyRevision, asked.policyRevision, 'nothing widened');
   assert.ok(!unchanged.plannedFiles.includes('src/merge-queue.ts'));
-  // The lease line is the same handled refusal; any other refusal is not.
-  assert.equal(supersededScopeAsk(new Error('Epoch 4, which asked for this scope, no longer holds the lease')), 'epoch 4, which asked for this scope, no longer holds the lease');
-  assert.equal(supersededScopeAsk(new Error("The findings this widening rests on were read for aaaaaaaaaaaa, which is no longer the item's head")), null);
-  assert.equal(supersededScopeAsk(new Error('Operator agents cannot remove planned-file containment')), null);
+  // The lease line is the same handled refusal; a moved head is moot but asks nothing superseded; any other refusal is neither.
+  assert.equal(supersededScopeAsk(plane('Epoch 4, which asked for this scope, no longer holds the lease')), 'the attempt that asked for it no longer holds the lease');
+  const moved = plane("The findings this widening rests on were read for aaaaaaaaaaaa, which is no longer the item's head");
+  assert.equal(supersededScopeAsk(moved), null);
+  assert.match(mootScopeWidening(moved)!, /head its findings were read for moved/);
+  assert.equal(supersededScopeAsk(plane('Operator agents cannot remove planned-file containment')), null);
+  assert.equal(supersededScopeAsk(new Error(superseded.body.error)), null, 'a message merely quoting the refusal is not it');
 });

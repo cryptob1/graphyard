@@ -4,9 +4,11 @@ import { readFile } from 'node:fs/promises';
 import { completionProfiles, frameworkReportFormats, readinessChecklist, summarizeDefinitions } from '../src/readiness.js';
 import { reportFormats } from '../src/report-adapters.js';
 import { buildProposal } from '../src/onboarding.js';
+import { mainGuardReadiness } from '../src/main-guard.js';
 
 const example = JSON.parse(await readFile('examples/setup-proposal.json', 'utf8'));
-const connected = { url: 'https://graphyard.example.test', reachable: true, role: 'admin', github: true, githubPermissions: { pull_requests: 'write', checks: 'write', contents: 'write', issues: 'write' } };
+const connected = { url: 'https://graphyard.example.test', reachable: true, role: 'admin', github: true, githubPermissions: { pull_requests: 'write', checks: 'write', contents: 'write', issues: 'write' },
+  mainGuard: mainGuardReadiness({ github: true, required: ['test', 'typecheck'], revertApprover: 5678 }) };
 const applied = { proposal: '.graphyard/setup-proposal.json', appliedAt: '2026-09-18T10:00:00.000Z', githubApp: { appId: 1, slug: 'graphyard-orders' }, drift: [], unreadable: [] };
 const runnerPath = { environments: 1, runners: 1, collectors: 1, builders: 1, bundles: 1 };
 
@@ -98,4 +100,34 @@ test('definition summaries count only the current, enabled revision of each defi
     { kind: 'bundle', id: 'bundle-1', revision: 1 },
   ]);
   assert.deepEqual(counts, { environments: 1, runners: 0, collectors: 1, builders: 1, bundles: 1 });
+});
+
+test('unit:doctor.revert-approver-missing-names-variables — with GitHub delivery and required checks armed and no revert approver App, doctor reports the approver missing, naming its three variables and main\'s last-push-approval rule, and clears it once one is configured', () => {
+  // GY-1335: on 2026-10-05 five guard reverts were refused by main's last-push-approval rule because
+  // the revert approver was never configured; nothing said so until main had gone red five times.
+  const unconfigured = mainGuardReadiness({ github: true, required: ['test', 'typecheck'], revertApprover: null });
+  assert.equal(unconfigured.armed, true);
+  const doctor = readinessChecklist('through-merge', { repository: 'owner/orders-api', server: { ...connected, mainGuard: unconfigured }, setup: applied, proposal: example });
+  const item = doctor.items.find(entry => entry.id === 'revert-approver')!;
+  assert.equal(item.status, 'missing');
+  for (const variable of ['GRAPHYARD_REVERT_APPROVER_APP_ID', 'GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID', 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY']) assert.ok(item.recovery!.includes(variable), `the recovery names ${variable}: ${item.recovery}`);
+  assert.match(item.recovery!, /last-push-approval rule \(require_last_push_approval\)/);
+  assert.match(item.recovery!, /stay red until an unrelated merge re-runs CI/);
+  assert.match(item.detail, /armed on test, typecheck with no revert approver App/);
+  assert.equal(doctor.ready, false);
+  assert.equal(doctor.next, item.recovery, 'the missing approver is doctor\'s next action');
+
+  // Configured: the item is ready and nothing is owed.
+  const configured = readinessChecklist('through-merge', { repository: 'owner/orders-api', server: connected, setup: applied, proposal: example });
+  assert.deepEqual(configured.items.find(entry => entry.id === 'revert-approver'), { id: 'revert-approver', title: 'Main guard revert approver configured', status: 'ready', detail: 'revert approver App 5678 approves the guard\'s reverts', recovery: null, profiles: ['through-merge', 'preview-validation', 'production-verification'] });
+  assert.equal(configured.ready, true);
+  // Not armed — no GitHub delivery, or no required check to judge main by — owes nothing either.
+  for (const facts of [{ github: false, required: ['test'], revertApprover: null }, { github: true, required: [], revertApprover: null }]) {
+    const idle = mainGuardReadiness(facts);
+    assert.equal(idle.armed, false); assert.equal(idle.attention, null);
+    assert.equal(readinessChecklist('through-merge', { repository: 'owner/orders-api', server: { ...connected, mainGuard: idle }, setup: applied, proposal: example }).items.find(entry => entry.id === 'revert-approver')!.status, 'ready');
+  }
+  // A server that does not report the guard is unknown, never ready.
+  const { mainGuard: _omitted, ...older } = connected;
+  assert.equal(readinessChecklist('through-merge', { repository: 'owner/orders-api', server: older, setup: applied, proposal: example }).items.find(entry => entry.id === 'revert-approver')!.status, 'unknown');
 });

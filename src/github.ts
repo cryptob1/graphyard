@@ -6,7 +6,7 @@ import { observeCodex } from './codex-review.js';
 import { observeAgentReview } from './agent-review.js';
 import { readFile } from 'node:fs/promises';
 import type { Engine } from './engine.js';
-import { behindBaseHold, mechanicalHold } from './model/dispatch.js';
+import { behindBaseHold } from './model/dispatch.js';
 import { CHECK_NAME, carriedApproval, demand, nativeReviewRequired, parseReviewerApps, reviewerProfileFor, reviewProviderOf, type Observation, type ReviewerApp, type ReviewerProfile, type ScopeFile, type TipMerge, type Work, type ReviewRequest } from './model.js';
 import { LANDABLE_CHECK, landableCarried, landableCheckCurrent, landableCheckRun, type LandableCheckRun } from './landable-check.js';
 import { inPlannedScope, threeWayMerge, type LandedCandidate } from './regression-guard.js';
@@ -14,7 +14,7 @@ import { changedTestFiles, judgeTimingCompanion, timingBaselineCompanion, timing
 import type { GitHubCacheStore } from './github-cache.js';
 import type { GitHubChargeLedger } from './github-charges.js';
 import { nextAction } from './model/next-action.js';
-import { applyMainGuardRevert, runMainGuard, type CommitVerdict, type FileChange, type MainCommit, type MainGuardRevert, type MainGuardTick } from './main-guard.js';
+import { applyMainGuardRevert, mainGuardReadiness, runMainGuard, type CommitVerdict, type MainGuardReadiness, type FileChange, type MainCommit, type MainGuardRevert, type MainGuardTick } from './main-guard.js';
 import { lockedWork } from './store/locked-read.js';
 import { save } from './store/store.js';
 export { CHECK_NAME, LANDABLE_CHECK };
@@ -2568,6 +2568,25 @@ function appAuthored(commit: any, login: string): boolean {
 /** What gating one item's merge needs from GitHub (GY-258): the check publication and the merge-queue calls. */
 export type MergeGateClient = Pick<GitHub, 'publish' | 'mergeQueueState' | 'enqueuePullRequest' | 'dequeuePullRequest' | 'publishGroupCheck'>;
 /**
+ * The merge request standing for the item's candidate (GY-1331). Since GY-1235 no executor asks
+ * for a merge: every passing gate is the request. The observation that first finds the candidate
+ * authorized records it once per sha, base and policy revision, as `merge-acquire` did, so how
+ * long GitHub has held the merge is measured from then: the BLOCKED auto-merge probe and the
+ * merge-stall lines in master status (GY-344, GY-430, GY-1112) read that time, and with no
+ * request recorded neither ever fired.
+ */
+export async function mergeRequest(engine: Engine, work: Work): Promise<MergeEnqueueRequest | null> {
+  const standing = await engine.enqueueRequest(work.id);
+  if (!mergeAuthorized(work) || enqueueRequestCurrent(work, standing)) return standing;
+  return engine.store.transaction(async (db, now) => {
+    const current = await engine.enqueueRequest(work.id, db);
+    if (enqueueRequestCurrent(work, current)) return current;
+    const request: MergeEnqueueRequest = { sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision, requestedBy: 'graphyard', at: now.toISOString() };
+    await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'merge.enqueue.requested', JSON.stringify({ details: request })]);
+    return request;
+  });
+}
+/**
  * Graphyard gates, GitHub merges. The `Graphyard / merge` check is published on the exact head
  * first — success only for a head every gate passes — and then GitHub's queue is brought in line:
  * an authorized head the coordinator asked to merge is enqueued (where the base branch has no queue,
@@ -2597,6 +2616,15 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
 }
 /** A file of a GitHub compare or pull request file list, as the main guard compares them. */
 const fileChange = (file: any): FileChange => ({ filename: String(file?.filename ?? ''), status: String(file?.status ?? ''), previousFilename: typeof file?.previous_filename === 'string' ? file.previous_filename : null, patch: typeof file?.patch === 'string' ? file.patch : null });
+/** The required checks the main guard judges main's commits by: those of the latest delivered item's policy. */
+export async function mainGuardRequired(pool: Pick<Engine['store']['pool'], 'query'>): Promise<string[]> {
+  return (await pool.query("SELECT document->'policy'->'checks' AS checks FROM work_items WHERE document->>'stage'='done' AND document ? 'delivery' ORDER BY number DESC LIMIT 1")).rows[0]?.checks ?? [];
+}
+/** What `/api/status` reports of the main guard (GY-1335): whether it is armed and the revert approver it would land a revert with. */
+export async function mainGuardStatus(pool: Pick<Engine['store']['pool'], 'query'>, github: Pick<GitHub, 'config' | 'mainHistory'> | null): Promise<MainGuardReadiness> {
+  const runs = !!github && typeof github.mainHistory === 'function';
+  return mainGuardReadiness({ github: runs, required: runs ? await mainGuardRequired(pool) : [], revertApprover: github?.config.revertApprover?.appId ?? null });
+}
 /** How often the job loop runs the main guard (see guardGitHubMain). */
 export const mainGuardIntervalMs = 30_000;
 /**
@@ -2607,7 +2635,7 @@ export const mainGuardIntervalMs = 30_000;
  */
 export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'evaluate'>, github: Pick<GitHub, 'mainHistory' | 'commitChecks' | 'openMainRevert' | 'revertPull' | 'mergeChanges' | 'revertChanges' | 'approveRevert' | 'mergeRevert' | 'closeRevert'>, now = new Date(), verdicts = new Map<string, CommitVerdict>(), approved = new Set<string>()): Promise<MainGuardTick> {
   const pool = engine.store.pool;
-  const required: string[] = (await pool.query("SELECT document->'policy'->'checks' AS checks FROM work_items WHERE document->>'stage'='done' AND document ? 'delivery' ORDER BY number DESC LIMIT 1")).rows[0]?.checks ?? [];
+  const required = await mainGuardRequired(pool);
   return runMainGuard({
     reverting: async () => (await pool.query("SELECT document FROM work_items WHERE document->'mainGuardReverts' @> '[{\"state\":\"opened\"}]'::jsonb ORDER BY number")).rows.map(row => row.document),
     culprit: async mergeSha => (await pool.query("SELECT document FROM work_items WHERE document->'delivery'->>'mergeSha'=$1 OR document->'mainGuardReverts' @> $2::jsonb ORDER BY number DESC LIMIT 1", [mergeSha, JSON.stringify([{ mergeSha }])])).rows[0]?.document ?? null,
@@ -2966,10 +2994,10 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
       // A head behind the base tip is reviewed when it merges cleanly (GY-191): GitHub integrates
       // it with the base when it merges. One that does not is deferred, and diagnose
       // reports why, until the refresh above republishes it or the worker syncs and pushes.
-      // Nor is a head whose unit and integration proofs have not all passed: mechanical
-      // verification precedes review for every provider, not only the one a session answers.
-      const dispatchable = !observation.merged && observation.prState === 'open' && observation.draft === false && work.policy.review && !behindBaseHold(work)
-        && !mechanicalHold(work, all, new Date());
+      // Proofs never hold it (GY-1331): CI runs the unit tests on the head and no producer is
+      // requested under GitHub delivery, so a hold for them left every codex and agent review
+      // undispatched for good, as `reviewNeed` already says for the review a session answers.
+      const dispatchable = !observation.merged && observation.prState === 'open' && observation.draft === false && work.policy.review && !behindBaseHold(work);
       // A request binds the exact candidate; an approval Graphyard carried onto its own base
       // refresh already stands for that candidate, so no new request is dispatched for it.
       const unbound = (item: Work, profile?: string) => !carriedApproval(item) && (!item.reviewRequest || item.reviewRequest.sha !== item.candidate?.sha
@@ -3020,7 +3048,7 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
           if (typeof github.mergeQueueState === 'function') {
             // The check and GitHub's queue move together (GY-258): an authorized, requested head is
             // published as passed and handed to GitHub to merge; anything else is failed and taken out.
-            const gated = await gateMerge(github, work, await engine.enqueueRequest(work.id), mergeAuthorized(work) ? mergeGuard(work) : guard(work, work.gates.every(g => g.passed) && !work.violations.length));
+            const gated = await gateMerge(github, work, await mergeRequest(engine, work), mergeAuthorized(work) ? mergeGuard(work) : guard(work, work.gates.every(g => g.passed) && !work.violations.length));
             if (gated.state) work = await engine.recordGitHubQueue(work.id, gated.state, gated.action);
           }
           else await github.publish(work, undefined, guard(work, work.gates.every(g => g.passed) && !work.violations.length));

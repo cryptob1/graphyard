@@ -13,6 +13,7 @@ import { decideScopeRequest, followUpPaths, impliedScopes, namedPaths, plannedCo
 import { peerModuleGround, importingTestGround } from '../src/model/scope-companions.js';
 import { automaticScopeGrounds } from '../src/daemon/cycle-scope.js';
 import { derivePlannedFiles } from '../src/model/work.js';
+import { RefusedResponse } from '../src/model/refusal.js';
 
 // GY-1085 names this file for its proof: manual:fault-class-scope. The master loop filed 9 scope
 // faults in 24 hours on 1 October 2026. Every one was a live attempt's scope request that the
@@ -306,7 +307,7 @@ for (const entry of raced) test(`manual:fault-class-scope — action:scope|${ent
     reviewFindings: async () => [{ ground: 'review thread PRRT_replay', text: 'src/daemon/cycle-dispatch.ts:40 still dispatches the stale item' }],
     basePaths: async (paths: string[]) => new Set(paths),
     // The control plane's answer as cycle 12630 journalled it: the request the widening answers was re-asked meanwhile.
-    widenScope: async (item: Work) => { widened.push(item.key); throw new Error(`Graphyard refused work/${entry.id}/requirements (409): The scope request this widening answers is no longer open`); },
+    widenScope: async (item: Work) => { widened.push(item.key); throw new RefusedResponse(`Graphyard refused work/${entry.id}/requirements (409): The scope request this widening answers is no longer open`, 409, { error: 'The scope request this widening answers is no longer open' }); },
   } as unknown as DaemonEffects;
   const state = emptyDaemonState(config());
   await runCycle(config(), state, effects, () => Date.parse(entry.observedAt));

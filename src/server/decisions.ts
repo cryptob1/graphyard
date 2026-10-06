@@ -296,16 +296,16 @@ async function resolveStanding(services: Services, db: Db, now: Date, work: Work
  * GY-1348. The requirement-weakening escalation an approved requirements decision's own application
  * raised is resolved by that approval, in the same pass: the independent approver already judged the
  * narrowing, so it neither holds the merge gate nor stands as a fault waiting on a second resolve.
- * Only the escalation this application raised is resolved — one the engine stamped with the
- * application's own time and requester — so one an operator's direct revision or any other writer
- * raised stands exactly as before. A replayed application finds it resolved already and does nothing.
+ * Only the escalation this application raised is resolved — the one the engine stamped with this
+ * decision's id, which it does only once the item's ledger records the decision approved (GY-1347) —
+ * so one an operator's direct revision or any other writer raised stands exactly as before. A replayed application finds it resolved already and does nothing.
  */
 async function resolveDecidedWeakening(services: Services, decision: DecisionRecord, applied: Work, approver: Principal, approvalReason: string) {
-  const raised = standingEscalations(applied).find(entry => entry.trigger === 'requirement-weakening' && entry.actor === decision.requestedBy && entry.at === applied.updatedAt);
-  if (!raised) return null;
+  const raised = (work: Work) => standingEscalations(work).some(entry => entry.trigger === 'requirement-weakening' && entry.decision === decision.id);
+  if (!raised(applied)) return null;
   return services.engine.store.transaction(async (db, now) => {
     const work = await findWork(db, applied.id);
-    if (!work || !standingEscalations(work).some(entry => entry.trigger === 'requirement-weakening' && entry.at === raised.at && entry.actor === raised.actor)) return null;
+    if (!work || !raised(work)) return null;
     return resolveStanding(services, db, now, work, decision, 'requirement-weakening', `The requirements decision ${decision.id} that raised it was approved by ${approver.id}: ${decision.reason}`.slice(0, 2000), approver, approvalReason);
   });
 }

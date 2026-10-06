@@ -107,8 +107,8 @@ test('integration:agent-approval-flow — release, unblock, requirement rewrite,
   // The blocker ended the attempt and released its lease in the same transaction (GY-1008).
   assert.equal(work.lease, null);
 
-  // A requirement rewrite, which an operator agent alone may never make, applies with approval
-  // and still raises the requirement-weakening escalation, which two agents then resolve.
+  // A requirement rewrite, which an operator agent alone may never make, applies with approval;
+  // the requirement-weakening escalation it raises is resolved by that same approval (GY-1348).
   work = await reload(work.id);
   const rewrite = { expectedPolicyRevision: work.policyRevision, criteria: [{ id: 'AC-1', text: 'Works on every platform', proofs: ['unit:works'] }], dependencies: [], plannedFiles: work.plannedFiles, exclusiveResources: [], producerProofs: [] };
   const alone = await call(master.token, 'POST', `work/${work.key}/requirements`, { ...rewrite, reason: 'Alone' });
@@ -118,15 +118,12 @@ test('integration:agent-approval-flow — release, unblock, requirement rewrite,
   assert.equal(approved.body.state, 'applied', JSON.stringify(approved.body));
   work = await reload(work.id);
   assert.deepEqual(work.criteria.map(criterion => criterion.text), ['Works on every platform']);
-  assert.deepEqual(standingEscalations(work).map(entry => entry.trigger), ['requirement-weakening']);
-  requested = await decide(master.token, work, 'resolve', { trigger: 'requirement-weakening', expectedRevision: work.revision }, 'The retired criterion is carried by a follow-up');
-  approved = await approve(approver.token, work, requested.body.id, 'Verified the follow-up exists');
-  assert.equal(approved.body.state, 'applied', JSON.stringify(approved.body));
-  work = await reload(work.id);
   assert.deepEqual(standingEscalations(work), []);
   const resolved = (await events(work)).find(row => row.kind === 'escalation.resolved')!;
+  assert.equal(resolved.payload.details.trigger, 'requirement-weakening');
   assert.equal(resolved.payload.details.resolvedBy, master.id); assert.equal(resolved.payload.details.approvedBy, approver.id);
-  assert.equal(resolved.payload.details.reason, 'The retired criterion is carried by a follow-up');
+  assert.equal(resolved.payload.details.decision, requested.body.id);
+  assert.equal(resolved.payload.details.approvalReason, 'Follow-up item carries the audit');
 
   // Manual attestation, merge approval with automatic merging off, and rework, on a candidate.
   let item = await candidate('candidate-by-agents');
