@@ -10,7 +10,8 @@ import { qualifyTimingFailures, type CheckAnnotations } from '../cli/timing-fail
 import { type DaemonAction, type DaemonState, faultActionKey, message } from './state.js';
 import { readyToRetry } from './sessions.js';
 import { type DaemonEffects, record } from './effects.js';
-import { loopAttention } from './liveness.js';
+import { actionableIntervalMs, loopAttention } from './liveness.js';
+import { planeWideRefusal } from '../model/blocker-class.js';
 import { daemonSummary } from './run.js';
 import { baseFailureAttention } from './cycle-base-failures.js';
 import type { Cycle } from './cycle.js';
@@ -24,7 +25,6 @@ import { baseRefreshConflict } from '../merge-queue.js';
 import { mergeBaseDismissal } from '../merge-base-ancestry.js';
 import { containmentGraceMs, containmentPhase } from '../model/containment.js';
 import { openAction } from '../model/next-action.js';
-import { planeUnavailable } from '../model/refusal.js';
 import { masterTurnWaitBoundMs } from './decisions.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
@@ -321,7 +321,8 @@ export async function fileRecurringFaultClasses(state: DaemonState, effects: Dae
       performed.push(await record(state, key, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} for the recurring ${recurrence.faultClass} fault class (${recurrence.count} ≥ ${policy.threshold} in ${policy.windowHours} hours), linking ${recurrence.recent.length} instance(s); later instances link to it`, attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       // GY-1344: a control plane that did not answer refused nothing about the filing; it is retried on the backoff and is no loop fault.
-      const unanswered = planeUnavailable(error);
+      // GY-1345: nor is any plane-wide refusal (a 502-504 body, a call timed out): the retry files under the same idempotency key.
+      const unanswered = planeWideRefusal(error);
       performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the item for the recurring ${recurrence.faultClass} fault class${unanswered ? ' (the control plane did not answer, so it is filed on a later cycle)' : ''}: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist, unanswered ? null : undefined));
     }
   }
@@ -406,7 +407,8 @@ export async function fileDocsTrim(state: DaemonState, effects: Pick<DaemonEffec
     work.push(filed);
     performed.push(await record(state, docsTrimActionKey, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} to restore documentation headroom (${docs.headroom.total} of ${docs.headroom.budget} words on ${docs.base}); nothing more is filed until headroom is restored`, attempts, cycle: state.cycle }, now(), effects.persist));
   } catch (error) {
-    performed.push(await record(state, docsTrimActionKey, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the documentation trim item: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+    performed.push(await record(state, docsTrimActionKey, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the documentation trim item: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist,
+      planeWideRefusal(error) ? null : undefined));
   }
 }
 /** The recurrences `master status` reports under daemon.faults: per class, the window's count and the item standing for it. */
@@ -428,6 +430,55 @@ export function faultRecurrenceReport(state: Pick<DaemonState, 'faults'>, policy
  */
 export const faultObservationIntervalMs = 60_000;
 /**
+ * GY-1345: what the observation of standing faults may spend before it stops reading. Its reads are
+ * the control plane's status and the attention `master status` adds, which reads every open item;
+ * while the plane answered in 1-21s on 2026-10-06 they took 372s of cycle 12621, past the 300s
+ * interval (loop-cost). Like the decisions step's budget (GY-1286), a fifth of the interval, never
+ * under the 30s actionable cadence: a read still unanswered at the bound is left in flight, the
+ * cycle is partial, so nothing standing ends on what went unread, and the next cycle observes again.
+ */
+export const faultObservationBudgetMs = (intervalMs: number) => Math.max(actionableIntervalMs, Math.round(intervalMs * 0.2));
+const unread = Symbol('unread');
+type Observed<T> = { value: T; failed: boolean };
+/**
+ * The observation's reads still in flight, per loop state and source. A read the budget cut keeps
+ * running with nothing to stop it, so a cycle that finds one here starts no other: at the 30s
+ * actionable cadence a 350s read would otherwise stack a dozen full-plane reads on the plane already
+ * too slow to answer one. Nor does that cycle wait on it again: it takes the answer if it has landed
+ * and is otherwise partial at once, so only the cycle that asked spends the budget and a slow window
+ * does not stretch every cycle to it (cycle-p90). An answer that lands between cycles is kept until
+ * a cycle takes it; one taken leaves the slot free for the next observation's read.
+ */
+const observing = new WeakMap<object, Map<string, Promise<Observed<unknown>>>>();
+/** The pending read of `source`, or `read()` started now (`started`); never more than one per loop state and source. */
+function singleFlight<T>(owner: object, source: string, read: () => Promise<Observed<T>>) {
+  let reads = observing.get(owner);
+  if (!reads) observing.set(owner, reads = new Map());
+  const pending = reads.get(source) as Promise<Observed<T>> | undefined;
+  if (pending) return { pending, started: false };
+  const started = read();
+  reads.set(source, started);
+  return { pending: started, started: true };
+}
+/** How many of the observation's reads `owner` has in flight or answered but not yet taken. */
+export function observationReadsPending(owner: object) { return observing.get(owner)?.size ?? 0; }
+/**
+ * The source's answer, or `unread` when the deadline passes first — at once for a read an earlier cycle
+ * started that has not landed. The read is single-flight across cycles, and a taken answer frees its
+ * slot. `read` settles its own failure into `failed`, so a read left behind rejects nowhere.
+ */
+async function withinBudget<T>(owner: object, source: string, read: () => Promise<Observed<T>>, deadline: number, now: () => number): Promise<Observed<T> | typeof unread> {
+  const { pending, started } = singleFlight(owner, source, read), remaining = started ? deadline - now() : 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<typeof unread>(resolve => { timer = setTimeout(() => resolve(unread), Math.max(0, remaining)); });
+  try {
+    const answer = await Promise.race([pending, expired]);
+    if (answer !== unread && observing.get(owner)?.get(source) === pending) observing.get(owner)!.delete(source);
+    return answer;
+  } finally { clearTimeout(timer); }
+}
+const observedWithin = 'The faults step observed every source within its budget';
+/**
  * Step 7b: classify what this cycle saw standing wrong and file one item per recurring class.
  * Standing faults are observed at most once per faultObservationIntervalMs; failed actions are noted as
  * they happen, so every cycle still ends silent failing runs and files a class that reached its threshold.
@@ -444,14 +495,26 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
     endFailingRuns(state, policy, clock);
     return fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
   }
+  const lastObservedAt = state.faults.observedAt;
   state.faults.observedAt = new Date(local).toISOString();
   let partial = false, reported: ReportedAttention | undefined;
+  const budgetMs = faultObservationBudgetMs(config.run.intervalSeconds * 1000), deadline = local + budgetMs, unreadSources: string[] = [];
   const herdrRead = effects.herdr ? await Promise.resolve(effects.herdr()).catch(() => ({ agents: [] as HerdrAgent[], available: false })) : { agents, available: true };
   const seen = herdrRead.available ? herdrRead.agents : [];
-  const controlPlane = effects.controlPlane ? await effects.controlPlane().catch(() => { partial = true; return null; }) : null;
+  const status = effects.controlPlane ? await withinBudget(state, 'status', () => effects.controlPlane!().then(value => ({ value, failed: false }), () => ({ value: null, failed: true })), deadline, now) : null;
+  if (status === unread) unreadSources.push("the control plane's status");
+  else if (status?.failed) partial = true;
+  const controlPlane = status === unread ? null : status?.value ?? null;
   const summary = daemonSummary(state, clock, config.run.intervalSeconds * 1000, config.hostId, policy);
-  if (controlPlane && effects.reportedAttention) reported = await effects.reportedAttention(snapshot.work, controlPlane, { agents: seen, available: herdrRead.available, approvals: summary.approvals, loop: summary.liveness, now: new Date(clock).toISOString() })
-    .catch(error => { partial = true; return { items: [{ subject: 'loop', text: `The loop could not read the attention master status adds to classify it: ${message(error)}`, kind: 'loop-failures' } as AttentionItem] }; });
+  if (controlPlane && effects.reportedAttention) {
+    const read = await withinBudget(state, 'attention', () => effects.reportedAttention!(snapshot.work, controlPlane, { agents: seen, available: herdrRead.available, approvals: summary.approvals, loop: summary.liveness, now: new Date(clock).toISOString() })
+      .then(value => ({ value, failed: false }), error => ({ value: { items: [{ subject: 'loop', text: `The loop could not read the attention master status adds to classify it: ${message(error)}`, kind: 'loop-failures' } as AttentionItem] } as ReportedAttention, failed: true })), deadline, now);
+    if (read === unread) unreadSources.push('the attention master status adds');
+    else { reported = read.value; if (read.failed) partial = true; }
+  }
+  // A source the budget cut is unread: the cycle is partial, and the next cycle observes again (taking the read in flight) rather than waiting out the interval.
+  if (unreadSources.length) { partial = true; state.faults.observedAt = lastObservedAt; }
+  await noteObservationBudget(cycle, budgetMs, unreadSources);
   // The loop's own health lines, as master status puts them first: its cost, silence and delivery budget. The loop reading
   // them is cycling, so its liveness is not in question here, and a failed cycle is noted once as it happens (noteCycleFailure).
   const loop = [...loopAttention({ liveness: { ...summary.liveness, state: 'running' }, silence: summary.silence, budget: summary.budget, cost: summary.cost }), ...baseFailureAttention(summary.baseFailures, config.baseBranch)];
@@ -465,6 +528,18 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
   await fileDocsTrim(state, effects, snapshot.work, reported?.docs, now, performed);
   // 7c. Each recurring-fault item filed (this cycle included) and each invariant violation past its
-  //     bound gets its diagnosis, and each diagnosis moves on by one decision (GY-439).
-  await diagnosisStep(cycle);
+  //     bound gets its diagnosis, and each diagnosis moves on by one decision (GY-439). A plane too slow
+  //     to be observed within the budget would only time out the diagnoses' requests too: they wait for the next cycle.
+  if (!unreadSources.length) await diagnosisStep(cycle);
+}
+
+/** Record a cut observation, so the journal and `master status` say the step was bounded rather than blind; a full one supersedes the last cut once. */
+async function noteObservationBudget(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'performed'>, budgetMs: number, unreadSources: string[]) {
+  const { state, effects, now, performed } = cycle, key = 'faults:deferred', standing = state.actions[key];
+  if (!unreadSources.length) {
+    if (standing && !standing.detail.startsWith(observedWithin)) performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'done', attempts: standing.attempts + 1, cycle: state.cycle, detail: `${observedWithin}; nothing was left unread` }, now(), effects.persist, null));
+    return;
+  }
+  performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'done', attempts: (standing?.attempts ?? 0) + 1, cycle: state.cycle,
+    detail: `The faults step spent its ${Math.round(budgetMs / 1000)}s observation budget before ${unreadSources.join(' and ')} answered, so the cycle is partial: nothing standing ends on what went unread, the diagnoses wait, and a later cycle takes the answer of the read still in flight once it lands rather than starting another` }, now(), effects.persist, null));
 }
