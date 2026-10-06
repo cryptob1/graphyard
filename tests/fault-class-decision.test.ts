@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { cycleFaults, emptyDaemonState, reworkDecisionInMotion, reworkDecisionWaitBoundMs } from '../src/master-daemon.js';
+import { containmentInMotion, containmentSettleWaitBoundMs, cycleFaults, emptyDaemonState, reworkDecisionInMotion, reworkDecisionWaitBoundMs } from '../src/master-daemon.js';
+// GY-1337's own exports are read through namespaces, so the base exercise runs these replays and each fails on its assertion.
+import * as daemon from '../src/master-daemon.js';
+import * as decisionReport from '../src/cli/decision-report.js';
+import { terminalDecisions } from '../src/cli/decision-report.js';
+import { containmentGraceMs } from '../src/model/containment.js';
+import { maxApproverLaunches } from '../src/daemon/decisions.js';
 import { humanNeededAttention } from '../src/cli/owed-report.js';
 import { humanNeeded, type NextAction } from '../src/model/next-action.js';
 
@@ -86,4 +92,110 @@ test('manual:fault-class-decision — an owed escalation is not a rework round a
   (work.actionQueue!.actions[0] as { kind: string; binding: string }).binding = action.binding;
   assert.equal(reworkDecisionInMotion(work, Date.parse(observedAt) + 60_000), false);
   assert.deepEqual(decisionFaults(work, new Date(Date.parse(observedAt) + 60_000).toISOString()).faults.map(fault => fault.kind), ['owed-decision']);
+});
+
+// GY-1337: three more decision faults in 24 hours, on 5–6 October 2026, from the same cause as
+// GY-1251's: a decision wait the product is already moving counted the moment it was seen. Each
+// instance is replayed from the ledger snapshot the loop observed (graphyard events --payload full).
+//
+// - owed-decision|GY-1329|2026-10-05T23:25:31.610Z: the worker submitted at 23:25:16 while its
+//   containment fence's deadline (23:27:10) had not passed; the fence's own line was inside its
+//   grace window (containmentInMotion), but the owed line restating its escalation counted 15s in.
+//   The loop autosettled the fence at 23:25:36.
+// - decision-refused|GY-1335|2026-10-06T00:52:38.070Z: the release was refused at 00:47:49 because
+//   GY-1332's PR #813 was in review; it counted five minutes later, and the master answered it at
+//   01:02:17 with a requirements decision rescoping the item.
+// - decision-unanswered|GY-1335|2026-10-06T01:07:20.695Z: the master's approver for that
+//   requirements decision (launched 01:05:18) vanished; the line counted two minutes later, and
+//   the loop's hand-approver supervision (GY-551) relaunched it at 01:15:04, within its launch bound.
+
+const fence1329 = { at: '2026-10-05T23:11:19.885Z', epoch: 2, owner: 'graphyard-claude-1', scope: { pid: 868275, unit: 'graphyard-watch-868275-d2a79447-115f-4c98-a22c-2a4507dfbc75.scope' },
+  leaseExpiresAt: '2026-10-05T23:27:10.056Z', settlementHash: 'd0e9baf497c68912da580f7cae088a7130650372c6daaa1d41b2b23e16031899',
+  launchExpiresAt: '2026-10-05T23:13:21.376Z', launchAcknowledgedAt: '2026-10-05T23:11:21.376Z' };
+/** GY-1329 as its submit at 23:25:16.524Z left it: lease gone, fence standing, the containment escalation computed at 23:25:15.987Z. */
+function fenced1329(): Work {
+  const work = standing({ subject: 'GY-1329', detail: '', owedMs: 0, owed: '' }, '2026-10-05T23:25:15.987Z');
+  const binding = `quarantine:2:${fence1329.settlementHash}`;
+  const action: NextAction = { kind: 'escalate', work: work.id, key: 'GY-1329', gate: null, refusal: null, llmRole: 'resolve-escalation', binding,
+    reason: 'GY-1329 is fenced by unverified containment from epoch 2 and nothing may be assigned to it; no executor step lowers a quarantine',
+    inputs: { kind: 'escalate', trigger: 'containment', detail: "verify that graphyard-claude-1's worker stopped and settle the epoch 2 quarantine (graphyard master settle-containment GY-1329 REASON), or recover it as a stopped worker" } as NextAction['inputs'] };
+  Object.assign(work, { stage: 'review', epoch: 2, lease: null, containmentQuarantine: fence1329, nextAction: { ...action, needsHuman: humanNeeded(action)! } });
+  Object.assign(work.actionQueue!.actions[0], { kind: 'escalate', binding, gate: null, state: 'pending' });
+  return work;
+}
+
+test('manual:fault-class-decision — owed-decision|GY-1329|2026-10-05T23:25:31.610Z is no fault while the fence it restates is in motion', () => {
+  const at = '2026-10-05T23:25:31.610Z', work = fenced1329();
+  const { reported, faults } = decisionFaults(work, at);
+  assert.deepEqual(reported.map(line => line.text), ["GY-1329 is fenced by unverified containment from epoch 2 and nothing may be assigned to it; no executor step lowers a quarantine — no executor may run it; resolving GY-1329's containment refusal has been owed for 15s"]);
+  assert.deepEqual(faults.map(fault => fault.kind), [], "GY-1329's fence was still inside its grace window, and the loop settled it 5s later");
+  assert.equal(containmentInMotion(work, Date.parse(at)), true);
+  assert.equal(daemon.owedContainmentLine(work, reported[0].text), true);
+});
+
+test('manual:fault-class-decision — a fence past its settle bound counts once, as the containment fault its owed line restates', () => {
+  const work = fenced1329();
+  const late = new Date(Date.parse(fence1329.leaseExpiresAt) + containmentGraceMs + containmentSettleWaitBoundMs + 60_000).toISOString();
+  const kinds = cycleFaults(emptyDaemonState(config()), [work], Date.parse(late), { config: config(), reported: humanNeededAttention({ work: [work], now: late }) }).map(fault => fault.kind);
+  assert.deepEqual(kinds, ['containment']);
+  // An owed escalation of any other trigger is not the fence and still counts on sight (see the lease-loss case above).
+  assert.equal(daemon.owedContainmentLine(work, 'resolving GY-1329\'s lease-loss escalation has been owed for 15s'), false);
+});
+
+const master = 'graphyard-master-graphyard-operator';
+const release1335 = { id: '4caa2dd6-9ad2-456e-ac47-4e38218c19e2', action: 'release', state: 'refused', requestedAt: '2026-10-06T00:45:33.194Z', requestedBy: master,
+  refusal: { approver: 'graphyard-approver-graphyard', at: '2026-10-06T00:47:49.398Z', reason: "The diagnosis is sound and the code confirms it: src/github.ts:2187 returns 'unconfigured' when no approver is set, main-guard.ts never retries an abandoned merge, and cycle-delivery.ts:86 records the line only once. The release as written still collides with work already in flight. GY-1332's PR #813 (head 17374fbd, in review) already changes src/main-guard.ts and src/daemon/cycle-delivery.ts to " } };
+const requirements1335 = { id: 'c3835bc8-93fc-47fd-ac09-31c0f8d0e9c2', action: 'requirements', state: 'requested', requestedAt: '2026-10-06T01:02:17.892Z', requestedBy: master };
+const item1335 = { id: 'ee99a47c-bda7-4892-a52b-acf4c8e96039', key: 'GY-1335', stage: 'backlog', ready: false };
+/** The decision-report lines for GY-1335 at `at`, with the approval watches and Herdr agents the loop read, and the faults the cycle records from them. */
+async function decisionReport1335(decisions: object[], at: string, approvals: Parameters<typeof terminalDecisions>[2]['approvals'] = []) {
+  const report = await terminalDecisions(async () => ({ decisions }), [item1335], { approvals, runtime: { available: true, agents: [] }, now: Date.parse(at) });
+  const faults = cycleFaults(emptyDaemonState(config()), [], Date.parse(at), { config: config(), reported: report.attentionItems }).filter(fault => fault.faultClass === 'decision');
+  return { report, faults };
+}
+
+test('manual:fault-class-decision — decision-refused|GY-1335|2026-10-06T00:52:38.070Z is no fault while the master answers it', async () => {
+  const at = '2026-10-06T00:52:38.070Z';
+  const { report, faults } = await decisionReport1335([release1335], at);
+  assert.equal(report.attentionItems.length, 1);
+  assert.match(report.attentionItems[0].text, /^Decision 4caa2dd6-9ad2-456e-ac47-4e38218c19e2 \(release\) was refused by graphyard-approver-graphyard: The diagnosis is sound/);
+  assert.deepEqual(faults.map(fault => fault.kind), [], 'the refusal was 5 minutes old; the master answered it 15 minutes later');
+  assert.equal(report.attentionItems[0].inMotionUntil, new Date(Date.parse(release1335.refusal.at) + decisionReport.refusalAnswerWaitBoundMs).toISOString());
+  // Answered at 01:02:17 by a decision of another action, it raises nothing more, though no later release stands.
+  const answered = await decisionReport1335([release1335, requirements1335], '2026-10-06T01:30:00.000Z', [{ work: 'GY-1335', decision: requirements1335.id, agentName: 'gy-approver-gy-1335-c3835bc8', launches: 1, launchedAt: '2026-10-06T01:18:12.618Z', settledAt: null }]);
+  assert.deepEqual(answered.report.attentionItems.filter(item => item.text.includes(release1335.id)), []);
+  assert.equal(answered.report.listed.some(entry => entry.id === release1335.id && entry.state === 'refused'), true, 'the refusal is still listed for the record');
+});
+
+test('manual:fault-class-decision — a refusal nobody answers within the bound still counts', async () => {
+  const late = new Date(Date.parse(release1335.refusal.at) + decisionReport.refusalAnswerWaitBoundMs + 60_000).toISOString();
+  assert.deepEqual((await decisionReport1335([release1335], late)).faults.map(fault => fault.kind), ['decision-refused']);
+  // A later decision the requester took back is no answer, nor is one somebody else asked for.
+  assert.deepEqual((await decisionReport1335([release1335, { ...requirements1335, state: 'withdrawn' }], late)).faults.map(fault => fault.kind), ['decision-refused']);
+  assert.deepEqual((await decisionReport1335([release1335, { ...requirements1335, state: 'applied', requestedBy: 'graphyard-master' }], late)).faults.map(fault => fault.kind), ['decision-refused']);
+});
+
+const handWatch1335 = { work: 'GY-1335', action: 'requirements', decision: requirements1335.id, agentName: 'gy-approver-gy-1335-c3835bc8', launches: 1, launchedAt: '2026-10-06T01:05:18.944Z', settledAt: null, exhaustedAt: null, ended: [] };
+
+test('manual:fault-class-decision — decision-unanswered|GY-1335|2026-10-06T01:07:20.695Z is no fault while the loop relaunches its approver', async () => {
+  const at = '2026-10-06T01:07:20.695Z';
+  // The line was built by a status read that saw the decision six minutes old.
+  const read = await terminalDecisions(async () => ({ decisions: [release1335, requirements1335] }), [item1335], { approvals: [handWatch1335], runtime: { available: true, agents: [] }, now: Date.parse('2026-10-06T01:08:18.000Z') });
+  const line = read.attentionItems.find(item => item.text.startsWith(`Decision ${requirements1335.id}`))!;
+  assert.equal(line.text, `Decision ${requirements1335.id} (requirements) is unanswered after 6m: approver session gy-approver-gy-1335-c3835bc8 is not running and recorded no outcome — a stall, not a refusal`);
+  const faults = cycleFaults(emptyDaemonState(config()), [], Date.parse(at), { config: config(), reported: [line] }).filter(fault => fault.faultClass === 'decision');
+  assert.deepEqual(faults.map(fault => fault.kind), [], 'the loop relaunched the approver at 01:15:04, inside the bound');
+  assert.equal(line.inMotionUntil, new Date(Date.parse(handWatch1335.launchedAt) + decisionReport.approverRelaunchWaitBoundMs).toISOString());
+  assert.ok(Date.parse('2026-10-06T01:15:04.384Z') < Date.parse(line.inMotionUntil!));
+});
+
+test('manual:fault-class-decision — an unanswered decision with its launches spent, unwatched or past the bound still counts', async () => {
+  const kinds = async (approvals: Parameters<typeof terminalDecisions>[2]['approvals'], at: string) =>
+    (await decisionReport1335([requirements1335], at, approvals)).faults.map(fault => fault.kind);
+  const at = '2026-10-06T01:07:20.695Z';
+  assert.deepEqual(await kinds([], at), ['decision-unanswered'], 'no watch: nothing will relaunch it');
+  assert.deepEqual(await kinds([{ ...handWatch1335, launches: maxApproverLaunches }], at), ['decision-unanswered'], 'launches spent');
+  assert.deepEqual(await kinds([{ ...handWatch1335, exhaustedAt: '2026-10-06T01:06:00.000Z' }], at), ['decision-unanswered'], 'escalated as unjudged');
+  const late = new Date(Date.parse(handWatch1335.launchedAt) + decisionReport.approverRelaunchWaitBoundMs + 60_000).toISOString();
+  assert.deepEqual(await kinds([handWatch1335], late), ['decision-unanswered'], 'past the relaunch bound');
 });
