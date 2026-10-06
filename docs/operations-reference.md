@@ -19,15 +19,15 @@ On the worker, `graphyard master settle-containment GY-N "reason"` verifies noth
 
 ## Submitted implementation needs rework
 
-Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next worker resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rounds by recorded reason (55% own-change, 33% conflicts; raw median 2); `master status` `speed.reworkRounds.ownChange` excludes out-of-item causes (median 0).
+Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next worker resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rounds by reason (55% own-change, 33% conflicts; raw median 2); `master status` `speed.reworkRounds.ownChange` excludes out-of-item causes (median 0).
 
 ## Retro synthesis
 
-`GRAPHYARD_INTERVENTION_PATTERNS=1` groups refusal and rework interventions by cause; at the threshold it drafts unapplied changes (`retro.drafted`: wording, check, producer method, fault-catalogue entry), each [approved](protocol/work-commands.md) or refused by a non-drafting AI operator agent with `decision:approve`. Approved requirements show as [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse a failing `complete` (`409`).
+`GRAPHYARD_INTERVENTION_PATTERNS=1` (default off; `GET /api/interventions` reports `scan`) opens an item per crossed pattern each minute and drafts changes per recurring refusal or rework cause (`retro.drafted`: wording, check, producer method, fault-catalogue entry), each [approved](protocol/work-commands.md) or refused by a non-drafting AI operator agent (`decision:approve`). Approved requirements show as [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse a failing `complete`. Off, `master status` says a crossed pattern waits on enabling it (configuration fault).
 
 ## Flaky CI check
 
-A failing check is [rerun](github.md#failed-checks) once in place (`mergeQueue.rerunFailedChecks`, 0 disables); a second failure fails the test gate and returns the item for rework, and a passing rerun on that head clears it.
+A failing check is [rerun](github.md#failed-checks) once (`mergeQueue.rerunFailedChecks`, 0 disables); a second failure returns the item for rework; a passing rerun clears it.
 
 ## Accepted evidence turns out to be wrong
 
@@ -76,7 +76,7 @@ Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROF
 
 ## Storage retention
 
-Receipts answer retries for a day; ledger rows store changes; compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, min 1), appending `ledger.compacted`.
+Receipts answer retries for a day; compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, min 1), appending `ledger.compacted`.
 
 ### Host memory
 
@@ -88,7 +88,7 @@ A `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths"
 
 ## Delivered with a failed smoke proof
 
-Stays Done, **delivered with failure**; revert via a new item, never backfill evidence.
+Stays Done, **delivered with failure**; revert via a new item, never backfill.
 
 ## Merged but not deployed
 
@@ -125,6 +125,6 @@ A tick runs every 2 s and should finish within 5 s; slower ticks log `reconcilia
 
 1. Opening: the coordination lock, briefly, reading row versions and sweeping direct merges.
 2. Each batch evaluates up to 250 ms lock-free, planning at most 8 writes.
-3. Each write is its own transaction: the coordination lock (waiting at most 500 ms, holding no row), then the item's row (`FOR NO KEY UPDATE`), then commit. If anything it read moved since evaluation, the item is re-evaluated first. Job wakes follow at commit, in work-id order.
+3. Each write is its own transaction: the coordination lock (waiting at most 500 ms, holding no row), then the item's row (`FOR NO KEY UPDATE`), then commit. If anything it read moved, the item is re-evaluated first. Job wakes follow at commit, in work-id order.
 
-Three expired lock waits defer unwritten items a tick. A renewal takes only its item's lock. Before each evaluation and write, reconciliation yields to pending requests and waits up to 1 s for renewals in flight, so a renewal waits on at most one evaluation. Stale observation snapshots retry after 2 s.
+Three expired lock waits defer unwritten items a tick. A renewal takes only its item's lock. Before each evaluation and write, reconciliation yields to pending requests and waits up to 1 s for renewals, so a renewal waits on at most one evaluation. Stale observation snapshots retry after 2 s.
