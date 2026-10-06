@@ -161,10 +161,11 @@ export const holdItemsFor = (holds: readonly Hold[], candidate: string) => uniqu
 /**
  * Pure: the fold record an applied `fold` decision authorizes. Folding is never automatic: it needs
  * the decision applied, approved by an identity other than its requester, and both outcomes'
- * holds open and distinct.
+ * holds open and distinct. Given the outcome being folded, the decision must name that outcome.
  */
-export function foldRecord(holds: readonly Hold[], decision: ListedDecision, now: Date): HoldRecord {
+export function foldRecord(holds: readonly Hold[], decision: ListedDecision, now: Date, outcome?: string): HoldRecord {
   if (decision.action !== 'fold') throw new Error(`Decision ${decision.id} is a ${decision.action} decision, not a fold`);
+  if (outcome !== undefined && decision.input.outcome !== outcome) throw new Error(`Decision ${decision.id} folds outcome ${decision.input.outcome}, not ${outcome}`);
   if (decision.state !== 'applied' || !decision.approvedBy) throw new Error(`Decision ${decision.id} is ${decision.state}; folding two outcomes' holds needs an applied fold decision with an independent approver`);
   if (decision.approvedBy === decision.requestedBy) throw new Error(`Decision ${decision.id} was approved by its own requester ${decision.requestedBy}; a fold needs an independent approver`);
   const covering = (outcome: string) => holds.find(hold => hold.state === 'open' && hold.outcomes.includes(outcome));

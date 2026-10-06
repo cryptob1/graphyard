@@ -530,6 +530,7 @@ test('unit:e2e-release-holds-per-risk — a failing candidate files one hold per
   assert.throws(() => foldRecord(holds, { ...decision, state: 'requested', approvedBy: null }, new Date()), /needs an applied fold decision with an independent approver/);
   assert.throws(() => foldRecord(holds, { ...decision, approvedBy: 'master-agent' }, new Date()), /approved by its own requester/);
   assert.throws(() => foldRecord(holds, { ...decision, input: { outcome: 'alpha', into: 'gamma' } }, new Date()), /Outcome gamma has no open release hold/);
+  assert.throws(() => foldRecord(holds, decision, new Date(), 'beta'), /folds outcome alpha, not beta/);
   const fold = foldRecord(holds, decision, new Date('2026-10-02T13:00:00Z'));
   assert.deepEqual(fold.decision, { id: 'fold-1', requestedBy: 'master-agent', approvedBy: 'approver-agent' });
   const folded = foldHolds([...open, fold]);

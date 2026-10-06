@@ -87,7 +87,7 @@ export const releaseCommands = defineCommands([
         if (!item) throw new Error(`Outcome ${outcome} has no open release hold with a filed item`);
         const listed = (await api(`work/${encodeURIComponent(item)}/decisions`)).decisions.find((entry: any) => entry.id === decision);
         if (!listed) throw new Error(`Decision ${decision} is not recorded on hold item ${item}`);
-        const record = foldRecord(holds, listed, new Date());
+        const record = foldRecord(holds, listed, new Date(), outcome);
         writeRecord(git, holdTag(record), record.sha!, record, push);
         return print(record);
       }

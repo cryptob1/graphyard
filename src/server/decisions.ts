@@ -13,6 +13,7 @@ import { applyTriageClosure } from './followups.js';
 import { closeWork } from './close.js';
 import { answerWith, applyLaneRework, approvedUnapplied, resumeDecision, settleApprovedDecisions, supersedeMoved, withdrawOrSettle } from './lane-rework.js';
 import { lockedWork, workIdByRef } from '../store/locked-read.js';
+import { appliedOutcome, flakyEvidence } from './evidence.js';
 
 type Db = pg.PoolClient;
 // The ledger's read half lives in decision-ledger.ts (GY-102); decision-refusal.ts reads it from here too.
@@ -103,7 +104,7 @@ async function recordRequest(services: Services, caller: Principal, id: string, 
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
     const work = await findWork(db, id); demand(work, 'Work item not found', 404);
     for (const capability of requiredDecisionCapabilities(data.action, input, work!)) assertDecisionAuthority(actor, capability, work!, services.repository);
-    const precondition = decisionPrecondition(data.action, input, work!) ?? (data.action === 'evidence' ? await flakyEvidence(db, input) : null); demand(!precondition, precondition!, 409);
+    const precondition = decisionPrecondition(data.action, input, work!) ?? await flakyEvidence(db, data.action, input); demand(!precondition, precondition!, 409);
     // An approved decision the item has moved past never blocks this request (GY-1297): it settles superseded here, in this transaction.
     const history = await supersedeMoved(db, work!, (await readDecisions(db, work!)).filter(decision => decision.state === 'approved'), actor).then(() => readDecisions(db, work!));
     // A refused decision is answered, never retried unchanged (GY-141). A rework or recover
@@ -145,19 +146,6 @@ async function recordRequest(services: Services, caller: Principal, id: string, 
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
     return result;
   });
-}
-
-/**
- * GY-1378: an evidence decision accepts a flaky result that was recorded — a failed attempt and a
- * later passing one of the case in that release run, both at that exact SHA — or nothing at all.
- */
-async function flakyEvidence(db: Db, input: { case: string; runId: string; sha: string }) {
-  const prefix = `${input.runId}:attempt-`;
-  const attempts = (await db.query(`SELECT document->'run'->>'id' AS run, document->>'result' AS result FROM scenario_runs
-    WHERE scenario=$1 AND document->>'sha'=$2 AND document->'run'->>'kind'='e2e' AND left(document->'run'->>'id', length($3)) = $3`, [input.case, input.sha, prefix])).rows
-    .map(row => ({ attempt: Number(String(row.run).slice(prefix.length)), result: row.result as string })).filter(entry => Number.isInteger(entry.attempt)).sort((a, b) => a.attempt - b.attempt);
-  return attempts.length > 1 && attempts.at(-1)!.result === 'pass' && attempts.some(entry => entry.result === 'fail') ? null
-    : `E2E case ${input.case} has no recorded flaky result in run ${input.runId} at ${input.sha}: an evidence decision accepts a failed attempt followed by a passing one, both recorded at that exact SHA`;
 }
 
 // A refused approval is part of the item's history even though its transaction rolled back.
@@ -233,7 +221,7 @@ export async function approveDecision(services: Services, caller: Principal, id:
       // GY-1296: a revision the requesting loop moved only in bookkeeping (its approver session,
       // gates, next action, queue) is judged and applied at the current revision; see bookkeepingRebase.
       const judged = await bookkeepingRebase(db, decision!, work!);
-      if (judged !== decision && !resuming) precondition = decisionPrecondition(judged.action, judged.input, work!);
+      if (!resuming) precondition = (judged !== decision ? decisionPrecondition(judged.action, judged.input, work!) : precondition) ?? await flakyEvidence(db, judged.action, judged.input);
       if (precondition) {
         // A pin the item has moved past can never hold again, so the decision would stay
         // 'requested' forever and block every re-request; settle it as stale instead.
@@ -242,14 +230,9 @@ export async function approveDecision(services: Services, caller: Principal, id:
         demand(false, `${precondition}; the decision was not applied`, 409);
       }
       if (!resuming) await record(db, work!, actor.id, 'decision.approved', { id: decision!.id, action: decision!.action, reason: data.reason, requestedBy: decision!.requestedBy, approver: { id: actor.id, role: actor.role } });
-      if (decision!.action === 'resolve' || decision!.action === 'merge' || decision!.action === 'evidence' || decision!.action === 'fold') {
-        const input = decision!.input;
-        const outcome = decision!.action === 'merge'
-          ? `Merge of ${input.sha} onto ${input.baseSha} at policy revision ${input.policyRevision} approved; the guarded merge still rechecks every gate`
-          // GY-1378: the release ledger reads these applied decisions; nothing about the item changes.
-          : decision!.action === 'evidence' ? `Flaky E2E case ${input.case} of run ${input.runId} accepted at ${input.sha} only`
-          : decision!.action === 'fold' ? `Release hold of outcome ${input.outcome} may fold into the hold of outcome ${input.into}`
-          : await resolveInTransaction(services, db, now, work!, decision!, actor, data.reason);
+      const applied = appliedOutcome(decision!.action, decision!.input);
+      if (applied || decision!.action === 'resolve') {
+        const outcome = applied ?? await resolveInTransaction(services, db, now, work!, decision!, actor, data.reason);
         return finish(db, work!, actor, decision!.id, 'decision.applied', { outcome }, key, fingerprint);
       }
       approved = { decision: judged, work: work!, approver: actor };

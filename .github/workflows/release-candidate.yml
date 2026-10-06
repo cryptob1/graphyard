@@ -261,10 +261,6 @@ jobs:
       - run: npm ci
       - name: Promote the UAT-passed candidate to production by its exact SHA
         run: node bin/graphyard.mjs release promote "${{ needs.candidate.outputs.id }}"
-        env:
-          # Read only for a candidate held by flaky required cases: the evidence decisions accepting them at its SHA.
-          GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
-          GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
       - name: Confirm production serves the promoted SHA
         run: node bin/graphyard.mjs release verify --url "$PRODUCTION_URL" --wait 1200
         env:

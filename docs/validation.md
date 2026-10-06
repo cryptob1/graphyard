@@ -33,7 +33,7 @@ Each case in a release run ends in one state:
 
 Only required cases block: a failed one, or a flaky one no evidence decision accepts. Unrun cases are listed apart, never counted as failures or passes. Optional cases run, are recorded and show on **Tests** marked optional, but never fail `release validate`. A run at an unreported commit binds no flaky result: a pass after a failure there is failed.
 
-A flaky required case blocks promotion until an `evidence` decision accepts it: one agent requests it on the case's release hold item with `{"case": ID, "runId": RUN, "sha": FULL_SHA}`, a different agent approves it (self-approval is refused), and the server refuses it unless both attempts are recorded at that SHA. `release promote` reads applied evidence decisions only for that run and SHA; an acceptance never carries to another SHA.
+A flaky required case blocks promotion until an `evidence` decision accepts it: one agent requests it on the case's release hold item with `{"case": ID, "runId": RUN, "sha": FULL_SHA}`, a different agent approves it (self-approval is refused), and the server refuses it unless both attempts are recorded at that SHA. `release promote` reads applied evidence decisions only for that run and SHA; an acceptance never carries to another SHA. The workflow promotes only a passing UAT, so a candidate held only by accepted flaky cases is promoted by running `release promote ID` with `GRAPHYARD_URL` and `GRAPHYARD_TOKEN` set.
 
 ## Release contract
 
