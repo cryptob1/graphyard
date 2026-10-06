@@ -18,11 +18,14 @@ import { createSchema, escalationTriggers, operatorCapability, type OperatorCapa
  */
 // `close` is a triage closure (GY-402): a machine-filed item the triage agent judged already fixed,
 // not worth doing, or to be merged into another, which is applied only once an approver agrees.
-export const decisionActions = ['release', 'unblock', 'requirements', 'resolve', 'attest', 'merge', 'rework', 'recover', 'grant', 'close'] as const;
+// `evidence` accepts one flaky E2E case of one release run at one exact SHA, and `fold` folds one
+// customer outcome's release hold into another's (GY-1378); both are recorded on a release hold item.
+export const decisionActions = ['release', 'unblock', 'requirements', 'resolve', 'attest', 'merge', 'rework', 'recover', 'grant', 'close', 'evidence', 'fold'] as const;
 export type DecisionAction = typeof decisionActions[number];
 export const decisionCapabilities: Record<DecisionAction, OperatorCapability> = {
   release: 'intent:ready', unblock: 'intent:unblock', requirements: 'policy:requirements', resolve: 'decision:resolve',
   attest: 'decision:attest', merge: 'decision:merge', rework: 'decision:rework', recover: 'decision:rework', grant: 'decision:grant', close: 'intent:create',
+  evidence: 'decision:attest', fold: 'decision:resolve',
 };
 export const approveCapability: OperatorCapability = 'decision:approve';
 
@@ -37,6 +40,8 @@ const principalId = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/);
  */
 export const decisionBindingMax = 2000;
 const groundsBinding = z.string().trim().min(1).max(decisionBindingMax);
+/** An E2E case id or a release-contract outcome id (src/e2e/case.ts). */
+const caseOrOutcome = z.string().regex(/^[a-z0-9][a-z0-9._-]*$/).max(100);
 /** What each action binds. The engine re-validates every field when the decision is applied. */
 export const decisionInputs = {
   release: z.object({ expectedRevision: revision }).strict(),
@@ -59,6 +64,9 @@ export const decisionInputs = {
   close: z.union([ z.object({ kind: z.enum(['superseded', 'obsolete', 'duplicate']), ref: z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/).nullable(), reason: z.string().trim().min(1).max(2000), triageAt: z.iso.datetime() }).strict(),
     z.object({ kind: z.enum(closureKinds), ref: z.string().trim().min(1).max(200).nullable().optional(), expectedRevision: revision }).strict()]),
   grant: z.object({ principal: principalId, patterns: z.array(z.string().min(1).max(200)).min(1).max(50), expectedRevision: z.number().int().min(0).optional() }).strict(),
+  // GY-1378: bound to the case, the release run and the full SHA it was flaky at, so it never carries to another SHA.
+  evidence: z.object({ case: caseOrOutcome, runId: z.string().regex(/^[a-zA-Z0-9._:-]+$/).max(100), sha }).strict(),
+  fold: z.object({ outcome: caseOrOutcome, into: caseOrOutcome }).strict().refine(input => input.outcome !== input.into, 'A hold folds into another outcome\'s hold'),
 } satisfies Record<DecisionAction, z.ZodType>;
 const reason = z.string().trim().min(1).max(2000);
 /**

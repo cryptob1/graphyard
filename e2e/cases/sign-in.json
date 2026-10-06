@@ -4,6 +4,7 @@
   "description": "The dashboard the target serves accepts the token on its sign-in page, verifies it with the control plane, and renders the primary navigation and the Work view.",
   "tags": ["dashboard", "smoke"],
   "target": "uat",
+  "required": true,
   "steps": [
     { "kind": "browser", "action": "open", "path": "/" },
     { "kind": "browser", "action": "fill", "label": "Access token", "value": "{{token}}" },

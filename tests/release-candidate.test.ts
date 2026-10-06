@@ -12,8 +12,10 @@ import {
   apiSuite, assessProductionServing, commandSuite, cut, deployToUat, endpointSuite, gitIn, itemsFromCommits, ledgerStatus, productionBranch, promote, readLedger,
   servedRevision, uatBranch, validateAndRecord, type ReleaseCandidate, type Suite,
 } from '../src/release-candidate.js';
-import { loadCases, parseCase } from '../src/e2e/case.js';
-import { e2eSuite } from '../src/e2e/runner.js';
+import { checkContract, checkRepositoryContract, inspectCases, loadCases, parseCase, parseContract, type ReleaseContract } from '../src/e2e/case.js';
+import { e2eSuite, type E2eReport } from '../src/e2e/runner.js';
+import { foldHolds, foldRecord, holdTagPrefix, releaseHolds, type HoldRecord } from '../src/release-holds.js';
+import { readRecords } from '../src/release-candidate.js';
 
 const run = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
@@ -290,7 +292,7 @@ test('unit:release-candidate-e2e-suite — UAT runs every case targeted at uat a
     if (path === '/api/board') return new Response(JSON.stringify({ groups: { backlog: [] } }));
     return new Response('{"error":"broken"}', { status: 500 });
   }) as typeof fetch;
-  const file = (id: string, target: string, steps: unknown[]) => ({ file: `e2e/cases/${id}.json`, definition: parseCase(`e2e/cases/${id}.json`, JSON.stringify({ id, title: id, target, steps })) });
+  const file = (id: string, target: string, steps: unknown[]) => ({ file: `e2e/cases/${id}.json`, definition: parseCase(`e2e/cases/${id}.json`, JSON.stringify({ id, title: id, target, required: true, steps })) });
   const cases = [
     file('board-reads', 'uat', [{ kind: 'http', method: 'GET', path: '/api/board', status: 200, expect: [{ path: 'groups.backlog', type: 'array' }] }]),
     file('tests-read', 'uat', [{ kind: 'http', method: 'GET', path: '/api/board', status: 200 }, { kind: 'http', name: 'read the tests', method: 'GET', path: '/api/tests', status: 200 }]),
@@ -351,4 +353,182 @@ test('unit:release-candidate-e2e-suite — UAT runs every case targeted at uat a
   assert.deepEqual(passing, { name: 'e2e', passed: true, detail: `1 E2E case passed against UAT serving ${sha}` });
   const none = await e2eSuite(cases.slice(2), 'uat-token', { fetcher: uat }).run('https://uat.example.test', candidate);
   assert.equal(none.passed, false); assert.match(none.detail, /no E2E case targets uat/);
+});
+
+/** A scratch checkout holding the given case files and, unless null, a contract. */
+async function contractCheckout(cases: Record<string, unknown>, contract: unknown) {
+  const root = await temporaryDirectory('release-contract');
+  await mkdir(join(root, 'e2e/cases'), { recursive: true });
+  for (const [name, content] of Object.entries(cases)) await writeFile(join(root, 'e2e/cases', name), typeof content === 'string' ? content : JSON.stringify(content));
+  if (contract !== null) await writeFile(join(root, 'e2e/contract.json'), typeof contract === 'string' ? contract : JSON.stringify(contract));
+  return root;
+}
+const contractCase = (id: string, extra: Record<string, unknown> = {}) => ({ id, title: `Case ${id}`, target: 'uat', required: true, steps: [{ kind: 'http', method: 'GET', path: `/api/${id}`, status: 200 }], ...extra });
+
+test('unit:e2e-release-contract-precut — e2e/contract.json binds each required outcome to its cases; the pre-cut check refuses a missing, invalid, non-uat or optional bound case and an unbound required case, naming each, and the cut step runs it', async () => {
+  // The shipped contract binds all five shipped cases, each required and targeted at uat.
+  const shipped = await checkRepositoryContract(new URL('..', import.meta.url).pathname);
+  assert.deepEqual(shipped.refusals, []); assert.equal(shipped.passed, true);
+  const bound = new Set(shipped.outcomes.flatMap(outcome => outcome.cases));
+  const cases = await loadCases(new URL('..', import.meta.url).pathname);
+  for (const id of ['sign-in', 'create-work-item', 'board', 'work-item-detail', 'tests-page']) {
+    assert.ok(bound.has(id), `the shipped contract binds ${id}`);
+    assert.equal(cases.find(entry => entry.definition.id === id)?.definition.required, true, `${id} is required`);
+  }
+  assert.equal(parseCase('e2e/cases/x.json', JSON.stringify({ ...contractCase('x'), required: undefined })).required, false, 'a case is optional unless it declares required');
+
+  // Every kind of broken binding is refused, each naming its outcome and case.
+  const broken = await contractCheckout({
+    'good.json': contractCase('good'), 'anywhere.json': contractCase('anywhere', { target: 'any' }), 'optional.json': contractCase('optional', { required: false }),
+    'malformed.json': { ...contractCase('malformed'), steps: [] }, 'stray.json': contractCase('stray'),
+  }, { outcomes: [
+    { id: 'checkout', title: 'A customer checks out', criteria: ['The order is placed'], cases: ['good', 'missing', 'anywhere'] },
+    { id: 'browse', title: 'A customer browses', cases: ['optional', 'malformed'] },
+  ] });
+  const refused = await checkRepositoryContract(broken);
+  assert.equal(refused.passed, false);
+  assert.deepEqual(refused.refusals.map(line => line.replace(/: e2e\/cases.*$/, '')), [
+    'outcome checkout binds case missing, which does not exist under e2e/cases/',
+    'outcome checkout binds case anywhere, which targets any, not uat',
+    'outcome browse binds case optional, which is not required',
+    'outcome browse binds case malformed, which is invalid',
+    'required case stray (e2e/cases/stray.json) is bound to no outcome',
+  ]);
+  assert.match(refused.refusals[3], /malformed, which is invalid: e2e\/cases\/malformed\.json: steps: /);
+  // A malformed contract, or none, is itself a refusal; duplicate outcomes are refused by the schema.
+  assert.match((await checkRepositoryContract(await contractCheckout({ 'good.json': contractCase('good') }, '{ nope'))).refusals[0], /e2e\/contract\.json: \(contract\): not valid JSON/);
+  assert.equal((await checkRepositoryContract(await contractCheckout({ 'good.json': contractCase('good') }, null))).passed, false);
+  assert.throws(() => parseContract(JSON.stringify({ outcomes: [{ id: 'a', title: 'A', cases: ['good'] }, { id: 'a', title: 'A again', cases: ['good'] }] })), /outcomes\.1\.id: outcome a is declared twice/);
+  assert.throws(() => parseContract(JSON.stringify({ outcomes: [{ id: 'Bad/Id', title: 'A', cases: ['good'] }] })), /outcomes\.0\.id: an id is lower-case/);
+
+  // The pass: every bound case is valid, uat and required, and every required case is bound — a case may prove two outcomes.
+  const passing = await contractCheckout({ 'good.json': contractCase('good'), 'shared.json': contractCase('shared'), 'extra.json': contractCase('extra', { required: false }) },
+    { outcomes: [{ id: 'checkout', title: 'A customer checks out', cases: ['good', 'shared'] }, { id: 'refund', title: 'A customer is refunded', cases: ['shared'] }] });
+  assert.deepEqual(await checkRepositoryContract(passing), { passed: true, outcomes: [{ id: 'checkout', cases: ['good', 'shared'] }, { id: 'refund', cases: ['shared'] }], refusals: [] });
+  assert.equal(checkContract(parseContract(await readFile(join(passing, 'e2e/contract.json'), 'utf8')), await inspectCases(passing)).passed, true);
+
+  // `graphyard release contract` is the check; it exits non-zero on a refusal.
+  const release = commands.find(command => command.name === 'release')!;
+  assert.ok(release.help.some(line => line.includes('release contract')));
+  const printed: any[] = [];
+  const exitCode = process.exitCode;
+  try {
+    await release.run({ id: 'contract', args: [], repositoryRoot: () => broken, print: (value: unknown) => printed.push(value) } as any, undefined);
+    assert.equal(process.exitCode, 1); assert.equal(printed[0].refusals.length, 5);
+    process.exitCode = exitCode;
+    await release.run({ id: 'contract', args: [], repositoryRoot: () => passing, print: (value: unknown) => printed.push(value) } as any, undefined);
+    assert.equal(process.exitCode, exitCode); assert.equal(printed[1].passed, true);
+  } finally { process.exitCode = exitCode; }
+
+  // The workflow's cut step runs the check before `release cut`, so a broken binding fails before any rc/ tag is written.
+  const workflow = await readFile(new URL('../.github/workflows/release-candidate.yml', import.meta.url), 'utf8');
+  const cutStep = workflow.slice(workflow.indexOf('- name: Cut a release candidate'), workflow.indexOf('long-suites:'));
+  assert.ok(cutStep.indexOf('node bin/graphyard.mjs release contract') > 0 && cutStep.indexOf('node bin/graphyard.mjs release contract') < cutStep.indexOf('node bin/graphyard.mjs release cut'), 'the pre-cut check precedes the cut');
+  assert.match(cutStep, /set -euo pipefail/, 'a refusal fails the step');
+
+  // Optional cases run in UAT and are reported, but never fail release validate.
+  const repo = await repository();
+  const sha = repo.merge('GY-61', 601);
+  const { candidate } = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-01T12:00:00Z'), push: true }) as any;
+  const uat = (async (url: URL | string) => new URL(String(url)).pathname === '/healthz' ? new Response(JSON.stringify({ commit: sha })) : new URL(String(url)).pathname === '/api/optional' ? new Response('{}', { status: 500 }) : new Response('{}')) as typeof fetch;
+  let report: E2eReport | null = null;
+  const result = await validateAndRecord(repo.git, candidate.id, 'https://uat.example.test', [e2eSuite([
+    { file: 'e2e/cases/good.json', definition: parseCase('e2e/cases/good.json', JSON.stringify(contractCase('good'))) },
+    { file: 'e2e/cases/optional.json', definition: parseCase('e2e/cases/optional.json', JSON.stringify(contractCase('optional', { required: false }))) },
+  ], 'uat-token', { fetcher: uat, report: async written => { report = written; } })], { base: 'main', push: true, timeoutMs: 0, fetcher: uat });
+  assert.equal(result.record.result, 'passed', JSON.stringify(result.record.suites));
+  assert.equal(report!.cases.find(entry => entry.id === 'optional')!.verdict, 'failed', 'the optional case ran and its failure is reported');
+  assert.match(result.record.suites[0].detail, /optional, not blocking: optional failed/);
+});
+
+test('unit:e2e-release-holds-per-risk — a failing candidate files one hold per failed outcome with its cases, steps and criteria; a repeat failure attaches; a fold needs an independent approver; a hold clears only on a newer served candidate', async () => {
+  const contract: ReleaseContract = parseContract(JSON.stringify({ outcomes: [
+    { id: 'alpha', title: 'Customers sign in', criteria: ['A customer reaches their account'], cases: ['a1', 'a2'] },
+    { id: 'beta', title: 'Customers pay', criteria: ['A payment is taken once'], cases: ['b1'] },
+    { id: 'gamma', title: 'Customers get receipts', cases: ['g1'] },
+  ] }));
+  const cases = ['a1', 'a2', 'b1', 'g1'].map(id => ({ file: `e2e/cases/${id}.json`, definition: parseCase(`e2e/cases/${id}.json`, JSON.stringify(contractCase(id))) }));
+  const repo = await repository();
+  const filed: { item: any; requestId: string }[] = [];
+  const file = async (item: any, requestId: string) => { filed.push({ item, requestId }); return `GY-${700 + filed.length}`; };
+  /** Validate the next candidate against UAT serving it, with each case answering `answers[ID]` call by call. */
+  async function validateNext(key: string, pr: number, now: string, answers: Record<string, number[]>, extra: Suite[] = []) {
+    const sha = repo.merge(key, pr);
+    const { candidate } = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date(now), push: true }) as any;
+    const calls = new Map<string, number>();
+    const uat = (async (url: URL | string) => {
+      const path = new URL(String(url)).pathname;
+      if (path === '/healthz') return new Response(JSON.stringify({ commit: sha }));
+      const id = path.slice(5), n = calls.get(id) ?? 0; calls.set(id, n + 1);
+      const statuses = answers[id] ?? [200];
+      return new Response('{}', { status: statuses[Math.min(n, statuses.length - 1)] });
+    }) as typeof fetch;
+    let report: E2eReport | null = null;
+    const result = await validateAndRecord(repo.git, candidate.id, 'https://uat.example.test', [...extra, e2eSuite(cases, 'uat-token', { fetcher: uat, report: async written => { report = written; } })],
+      { base: 'main', push: true, timeoutMs: 0, fetcher: uat, file, now: () => new Date(Date.parse(now) + 1_800_000),
+        holds: releaseHolds(repo.git, { contract, report: async () => report, file, push: true, now: () => new Date(Date.parse(now) + 1_800_000) }) });
+    return { candidate, sha, result, holds: foldHolds(readRecords<HoldRecord>(repo.git, holdTagPrefix)) };
+  }
+
+  // Candidate 1: a2 flakes, b1 fails and stops the run (g1 unrun), and a runner outage fails a suite no case explains.
+  const first = await validateNext('GY-71', 701, '2026-10-01T12:00:00Z', { a2: [500, 200], b1: [503] }, [recordingSuite('container-recovery', false, [])]);
+  assert.equal(first.result.record.result, 'failed');
+  assert.deepEqual(first.result.record.holds, [{ kind: 'open', outcome: 'alpha', hold: 'alpha', item: 'GY-701' }, { kind: 'open', outcome: 'beta', hold: 'beta', item: 'GY-702' }], 'one hold per failed outcome, none for the unrun gamma');
+  assert.deepEqual(filed.map(entry => entry.requestId), [`release-hold:alpha:${first.candidate.id}`, `release-hold:beta:${first.candidate.id}`, `release-candidate-follow-up:${first.candidate.id}`]);
+  assert.match(filed[0].item.title, new RegExp(`Release hold: outcome alpha failed UAT on candidate ${first.candidate.id} at ${first.sha.slice(0, 12)}`));
+  assert.match(filed[0].item.description, /Failed cases: a2 flaky at step 1 \(GET \/api\/a2\): expected status 200, got 500/);
+  assert.match(filed[0].item.description, /Unmet criteria: A customer reaches their account\./);
+  assert.match(filed[0].item.description, /evidence decision on this item/);
+  assert.match(filed[1].item.description, /Failed cases: b1 failed at step 1 \(GET \/api\/b1\): expected status 200, got 503/);
+  // The incident is an ordinary follow-up naming only the suite no case explains, never a hold.
+  assert.match(filed[2].item.title, /failed UAT suite container-recovery/); assert.doesNotMatch(filed[2].item.description, /e2e —/);
+  assert.equal(first.result.record.followUp, 'GY-703');
+  assert.deepEqual(first.result.record.e2e!.cases.map(entry => [entry.case, entry.verdict]), [['a1', 'passed'], ['a2', 'flaky'], ['b1', 'failed'], ['g1', 'unrun']]);
+  assert.deepEqual(first.holds.map(hold => [hold.outcome, hold.state, hold.item, hold.cases.map(entry => `${entry.case}:${entry.verdict}`)]), [['alpha', 'open', 'GY-701', ['a2:flaky']], ['beta', 'open', 'GY-702', ['b1:failed']]]);
+  assert.deepEqual(first.holds[1].cases[0].failingStep, { index: 0, name: 'GET /api/b1', reason: 'expected status 200, got 503: {}' });
+  assert.deepEqual(first.holds[1].criteria, ['A payment is taken once']);
+
+  // Candidate 2: b1 fails again — attached to beta's open hold, not filed again — and a1, a2 pass, so alpha clears on this newer served candidate.
+  const second = await validateNext('GY-72', 702, '2026-10-01T14:00:00Z', { b1: [500] });
+  assert.deepEqual(second.result.record.holds, [{ kind: 'attach', outcome: 'beta', hold: 'beta', item: 'GY-702' }, { kind: 'clear', outcome: 'alpha', hold: 'alpha', item: 'GY-701' }]);
+  assert.equal(filed.length, 3, 'a repeat failure files nothing new; the e2e failure is answered by the hold, so no follow-up either');
+  assert.equal(second.result.followUp, null);
+  const [alpha, beta] = second.holds;
+  assert.deepEqual([alpha.state, alpha.cleared], ['cleared', { candidate: second.candidate.id, sha: second.sha }]);
+  assert.deepEqual(beta.cases.map(entry => [entry.case, entry.candidate, entry.sha]), [['b1', first.candidate.id, first.sha], ['b1', second.candidate.id, second.sha]], 'both failures of the outcome hang under one hold');
+  assert.equal(beta.state, 'open');
+
+  // Candidate 3: UAT never serves it, so nothing is attributed to it and beta stays held.
+  const thirdSha = repo.merge('GY-73', 703);
+  const third = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-01T16:00:00Z'), push: true }) as any;
+  const wrong = deployment([second.sha]);
+  const unserved = await validateAndRecord(repo.git, third.candidate.id, 'https://uat.example.test', [], { base: 'main', push: true, timeoutMs: 0, fetcher: wrong.fetcher, file,
+    holds: releaseHolds(repo.git, { contract, push: true, file, report: async () => ({ runId: `rc-${third.candidate.id}`, url: 'https://uat.example.test', environment: 'uat', sha: thirdSha, startedAt: '', finishedAt: '', passed: 4, failed: 0,
+      cases: cases.map(entry => ({ id: entry.definition.id, title: '', file: entry.file, outcome: 'pass', verdict: 'passed', required: true, durationMs: 1, attempts: 1, attemptResults: [], executed: 1, failingStep: null })) } as E2eReport) }) });
+  assert.equal(unserved.record.result, 'failed'); assert.deepEqual(unserved.record.holds, []);
+  assert.equal(foldHolds(readRecords<HoldRecord>(repo.git, holdTagPrefix))[1].state, 'open', 'a hold clears only on a candidate UAT served at its exact SHA');
+
+  // Candidate 4 passes every case at its served SHA: beta clears.
+  const fourth = await validateNext('GY-74', 704, '2026-10-01T18:00:00Z', {});
+  assert.equal(fourth.result.record.result, 'passed');
+  assert.deepEqual(fourth.result.record.holds, [{ kind: 'clear', outcome: 'beta', hold: 'beta', item: 'GY-702' }]);
+  assert.ok(fourth.holds.every(hold => hold.state === 'cleared'));
+
+  // Folding two outcomes' holds into one is a recorded decision with an independent approver, never automatic.
+  const at = '2026-10-02T12:00:00.000Z', c = (id: string, sha: string) => ({ case: id, verdict: 'failed' as const, candidate: '20261002T120000Z', sha, runId: 'rc-20261002T120000Z', attempts: 2, failingStep: null });
+  const open: HoldRecord[] = [
+    { kind: 'open', outcome: 'alpha', hold: 'alpha', candidate: '20261002T120000Z', sha: '5'.repeat(40), at, cases: [c('a1', '5'.repeat(40))], item: 'GY-801' },
+    { kind: 'open', outcome: 'beta', hold: 'beta', candidate: '20261002T120000Z', sha: '5'.repeat(40), at, cases: [c('b1', '5'.repeat(40))], item: 'GY-802' },
+  ];
+  const holds = foldHolds(open);
+  const decision = { id: 'fold-1', action: 'fold', state: 'applied', input: { outcome: 'alpha', into: 'beta' }, requestedBy: 'master-agent', approvedBy: 'approver-agent' };
+  assert.throws(() => foldRecord(holds, { ...decision, state: 'requested', approvedBy: null }, new Date()), /needs an applied fold decision with an independent approver/);
+  assert.throws(() => foldRecord(holds, { ...decision, approvedBy: 'master-agent' }, new Date()), /approved by its own requester/);
+  assert.throws(() => foldRecord(holds, { ...decision, input: { outcome: 'alpha', into: 'gamma' } }, new Date()), /Outcome gamma has no open release hold/);
+  const fold = foldRecord(holds, decision, new Date('2026-10-02T13:00:00Z'));
+  assert.deepEqual(fold.decision, { id: 'fold-1', requestedBy: 'master-agent', approvedBy: 'approver-agent' });
+  const folded = foldHolds([...open, fold]);
+  assert.deepEqual(folded.map(hold => [hold.outcome, hold.state, hold.foldedInto]), [['alpha', 'folded', 'beta'], ['beta', 'open', null]]);
+  assert.deepEqual(folded[1].outcomes, ['beta', 'alpha']); assert.deepEqual(folded[1].cases.map(entry => entry.case), ['b1', 'a1']);
+  assert.throws(() => foldRecord(folded, decision, new Date()), /already share one hold/);
 });

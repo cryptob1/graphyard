@@ -1,0 +1,28 @@
+{
+  "outcomes": [
+    {
+      "id": "sign-in",
+      "title": "An operator signs in and reaches the control plane",
+      "criteria": ["The dashboard accepts an access token and shows the primary navigation and the Work view"],
+      "cases": ["sign-in"]
+    },
+    {
+      "id": "work-intake",
+      "title": "An operator creates work and finds it where they look",
+      "criteria": ["A created work item is listed in the work list", "A created work item appears in the board's backlog group"],
+      "cases": ["create-work-item", "board"]
+    },
+    {
+      "id": "work-detail",
+      "title": "An operator reads an item's criteria and gates",
+      "criteria": ["An item's page shows its criteria, proofs and gates by id and by key"],
+      "cases": ["work-item-detail"]
+    },
+    {
+      "id": "test-visibility",
+      "title": "An operator sees what is tested and whether it passes",
+      "criteria": ["The Tests page lists every case with its recent runs"],
+      "cases": ["tests-page"]
+    }
+  ]
+}

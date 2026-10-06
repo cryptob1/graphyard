@@ -4,6 +4,7 @@
   "description": "GET /api/board answers every open group with its counts, and an item just created appears in the backlog group with its key and title.",
   "tags": ["api", "board"],
   "target": "uat",
+  "required": true,
   "steps": [
     {
       "kind": "http", "name": "create an item to find", "method": "POST", "path": "/api/work",
