@@ -813,11 +813,11 @@ test(`unit:plane-wide-refusal-records-no-loop-fault — ${gy1345Instances[2].id}
   await isolatedStep(state, effects, [subject, covering], [], at + 5 * minute);
   assert.equal(state.diagnoses['GY-1304'].state, 'closing', 'the next cycle requests it again');
   assert.deepEqual(loopFaults(state), []);
-  // A refusal that is not plane-wide still fails the step as before.
+  // A refusal that is not plane-wide still fails the step as before — a fault, unclassified since GY-1338.
   clearDiagnoses();
   const other = await diagnosed(async () => { throw new Error('Graphyard refused work/work-GY-1304/decide (403): not permitted'); }, at - minute);
   await isolatedStep(other.state, other.effects, [other.subject, covering], [], at);
-  assert.deepEqual(loopFaults(other.state).map(entry => entry.kind), ['action:diagnosis']);
+  assert.deepEqual(other.state.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['action:diagnosis', 'unclassified']]);
 });
 
 test(`unit:plane-wide-refusal-records-no-loop-fault — ${gy1345Instances[4].id}: a class filing refused 502 is retried under the same key and the class does not count its own failure`, async () => {
