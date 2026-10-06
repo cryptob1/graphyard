@@ -5,7 +5,7 @@
 
 One ordered checklist from "a repository and nothing else" to an item Graphyard dispatched, reviewed, merged and deployed. Run each step's command, then its **Verify**; do not start the next step until it passes. **HUMAN** marks the only steps an agent cannot do: stop and ask for exactly that, nothing more. The [install hard rules](install.md#hard-rules) apply throughout: never print a credential.
 
-`graphyard doctor` prints `setupFromZero.lines`: one `PASS`/`FAIL` line per prerequisite, each failure naming the step below that fixes it, and `next`, the first gap.
+`graphyard doctor` prints `setupFromZero.lines`: one `PASS`/`FAIL` line per prerequisite, each failure naming the step below that fixes it. `next` names the first gap: a readiness item's recovery first, then the first `FAIL` line.
 
 ## 1. Machine prerequisites
 
@@ -52,7 +52,7 @@ export GRAPHYARD_TOKEN_FILE=~/.config/graphyard/OWNER-REPO/tokens/OWNER-REPO-ope
 
 ## 5. Reviewer and revert-approver Apps
 
-`--reviewer claude` registers a second App, the independent reviewer (**HUMAN:** one more confirmation, same page). Without it no review gate can pass. **Verify:** `reviewer-app` passes. The main guard's revert approver must be an App other than the control plane's; the reviewer App serves. On a hosted install set `GRAPHYARD_REVERT_APPROVER_APP_ID`, `_INSTALLATION_ID` and `_PRIVATE_KEY` from `.graphyard/github-reviewer-claude.json` ([variables](deployment.md#variables)) and redeploy; **Verify:** readiness `revert-approver` is `ready`. Compose cannot take it yet (see the audit): the guard then cannot revert a broken `main` on its own.
+`--reviewer claude` registers a second App, the independent reviewer (**HUMAN:** one more confirmation, same page). Without it no review gate can pass. The same `--apply` makes that App the main guard's revert approver (`GRAPHYARD_REVERT_APPROVER_*`; compose mounts its key as a file), so the guard can revert a broken `main` on its own. **Verify:** `reviewer-app` passes, and readiness `revert-approver` is `ready`. An installation bound outside `install` uses `gy master reviewer setup` (loopback `http://` is accepted on compose) and sets the [variables](deployment.md#variables) itself.
 
 ## 6. Onboard the checkout
 
@@ -84,7 +84,16 @@ Workers write only their worktree and the shared Git paths ([worker sandbox](mas
 
 ## 10. Start the master
 
-[Start the master](onboarding.md#3-start-the-master) with the master token: `gy master init … --token-stdin`, `gy init --url …` for executors, `gy master start claude`. **HUMAN:** `--browser-profile` names a Chrome profile the human signed in to GitHub. **Verify:** `gy master status` shows `setup.supervisor` active and executors live.
+[Start the master](onboarding.md#3-start-the-master) with the master token:
+
+```sh
+gy master init --url http://127.0.0.1:4310 --herdr-workspace HERDR_WORKSPACE_ID --browser-profile Default \
+  --token-stdin < ~/.config/graphyard/OWNER-REPO/tokens/OWNER-REPO-master.token
+gy init --url http://127.0.0.1:4310   # each executor checkout
+gy master start claude                # or codex
+```
+
+`herdr workspace list` prints the workspace ID. **HUMAN:** `--browser-profile` names a Chrome profile the human signed in to GitHub. **Verify:** `gy master status` shows `setup.supervisor` active and executors live.
 
 ## 11. Hosted variables (Railway only)
 
@@ -92,6 +101,6 @@ Compose skips this. On Railway set `RAILWAY_API_TOKEN` (**HUMAN:** only the acco
 
 ## 12. First item end to end
 
-Write an item like [work.json](../examples/work.json) with one small criterion and `"policy":{"checks":["test"],"review":true}`, then `gy master create item.json`. The loop dispatches it, the worker opens a pull request, the reviewer App posts a verdict, producers prove each criterion, and GitHub merges once `Graphyard / merge` is green. **Verify:** `gy status GY-1` reaches stage `done` with the PR merged; a deploy job then serves the merge ([production observation](deployment.md#production-deployment-observation)).
+Write an item like [work.json](../examples/work.json) with one small criterion and `"policy":{"checks":["test"],"review":true}`, then `gy master create item.json`. The loop dispatches it, the worker opens a pull request, the reviewer App posts a verdict, producers prove each criterion, and GitHub merges once `Graphyard / merge` is green. **Verify:** `gy status GY-1` reaches stage `done` with the PR merged (`gh pr view N --json state` prints `MERGED`). **Verify the deploy:** `gy doctor` reports `production.serving` at (or past) the merge commit, `production.aheadBy` `0` and `production.incidents` `[]`. Graphyard reads it from Railway's API or the GitHub deployments the repository's deploy job reports to `production` ([production observation](deployment.md#production-deployment-observation)). A repository with no deploy job deploys nothing: `production.latest` is `null`, and its end state is merged.
 
-Gaps found walking this checklist, and their follow-ups: [setup-from-zero audit](setup-from-zero-audit.md).
+Gaps found walking this checklist, and their fixes: [setup-from-zero audit](setup-from-zero-audit.md).

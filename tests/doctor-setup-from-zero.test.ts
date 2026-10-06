@@ -6,11 +6,15 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setupFromZeroChecks, setupLine, setupSteps, type SetupFromZeroInput } from '../src/cli/install.js';
+import { setupFromZeroChecks, setupLine, setupSteps, type SetupFromZeroInput } from '../src/setup-from-zero.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { detectStack } from '../src/onboarding.js';
 import { appManifest, reviewerAppManifest } from '../src/github-setup.js';
 import { frameworkReportFormats } from '../src/readiness.js';
+import { reviewerCommand } from '../src/cli/master-reviewer.js';
+import type { MasterConfig } from '../src/master.js';
+import { revertApproverEnv } from '../src/install/index.js';
+import { composeBundle, PRIVATE_KEY_CONTAINER_PATH, REVERT_APPROVER_KEY_CONTAINER_PATH, type AdapterContext } from '../src/install/adapters.js';
 
 /**
  * GY-1352 AC-3: `graphyard doctor` reports each prerequisite docs/setup-from-zero.md depends on as a
@@ -106,7 +110,7 @@ test('unit:doctor-setup-from-zero — a complete installation passes every named
   }
 });
 
-test('unit:doctor-setup-from-zero — graphyard doctor prints the named lines for a fixture installation, and the first failing one is its next step', async () => {
+test('unit:doctor-setup-from-zero — graphyard doctor prints the named lines for a fixture installation, and a missing prerequisite fails exactly its line', async () => {
   const fixture = await installation();
   const shims = join(fixture.directory, 'bin');
   await mkdir(shims);
@@ -159,4 +163,38 @@ test('unit:doctor-setup-from-zero — a local Compose install registers its App 
   assert.equal(appManifest('owner/scratch', 'https://graphyard.example', 'http://127.0.0.1:4311').hook_attributes.active, true);
   assert.equal(reviewerAppManifest('claude', 'owner/scratch', 'http://localhost:4310', 'http://127.0.0.1:4311').url, 'http://localhost:4310');
   assert.throws(() => appManifest('owner/scratch', 'http://graphyard.example', 'http://127.0.0.1:4311'), /HTTPS origin/);
+});
+
+test('unit:doctor-setup-from-zero — master reviewer setup registers a reviewer App on a Compose install\'s loopback origin, and refuses any other plain-HTTP origin before opening its page', async () => {
+  const fixture = await installation();
+  const master = { url: 'http://127.0.0.1:4310', repository: 'owner/scratch', credentialFile: join(fixture.credentials, 'master', 'master.token') } as unknown as MasterConfig;
+  const before = new Set(process.listeners('SIGINT'));
+  const log = console.log; let page = '';
+  console.log = (line: string) => { page = line; };
+  try { await reviewerCommand(fixture.root, master, ['setup', '--port', '0'], () => {}); } finally {
+    console.log = log;
+    // The command serves until Ctrl+C; its own stop handler closes the page server.
+    for (const stop of process.listeners('SIGINT').filter(listener => !before.has(listener))) { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); (stop as () => void)(); }
+  }
+  assert.match(page, /^Open http:\/\/127\.0\.0\.1:\d+ in your browser and register the reviewer App/);
+  await assert.rejects(reviewerCommand(fixture.root, { ...master, url: 'http://graphyard.example' }, ['setup', '--port', '0'], () => {}), /HTTPS origin \(or http:\/\/ on loopback/);
+});
+
+test('unit:doctor-setup-from-zero — install sets the reviewer App as the main guard\'s revert approver, and Compose mounts its key as a file instead of the env file', async () => {
+  const fixture = await installation();
+  const pem = '-----BEGIN RSA PRIVATE KEY-----\nreviewer\n-----END RSA PRIVATE KEY-----\n';
+  assert.deepEqual(await revertApproverEnv({ directory: fixture.credentials, reviewers: [] }), [], 'no reviewer App, no revert approver');
+  await writePrivate(join(fixture.credentials, 'github-reviewer-claude.json'), json({ appId: 7002, installationId: 9, slug: 'scratch-reviewer', privateKey: pem, reviewer: 'claude', repository: 'owner/scratch' }));
+  const values = await revertApproverEnv({ directory: fixture.credentials, reviewers: [{ name: 'claude', appId: 7002, botUserId: 1 }] });
+  assert.deepEqual(values.map(value => [value.name, value.secret ? '<secret>' : value.value]), [['GRAPHYARD_REVERT_APPROVER_APP_ID', '7002'], ['GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID', '9'], ['GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY', '<secret>']]);
+  const context = { workdir: '/srv/graphyard', databasePassword: 'p'.repeat(32), installId: 'fixture', image: 'graphyard:fixture', port: 4310 } as unknown as AdapterContext;
+  const files = composeBundle(context, [{ name: 'GITHUB_PRIVATE_KEY', value: 'app-key\nline', secret: true }, ...values], 'loopback');
+  const file = (name: string) => files.find(entry => entry.path === `/srv/graphyard/${name}`);
+  const environment = file('server.env')!.content;
+  assert.ok(!environment.includes('PRIVATE KEY-----'), 'the raw PEM never reaches the env file');
+  assert.match(environment, new RegExp(`^GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY_FILE=${REVERT_APPROVER_KEY_CONTAINER_PATH}$`, 'm'));
+  assert.match(environment, /^GRAPHYARD_REVERT_APPROVER_APP_ID=7002$/m);
+  assert.equal(file('revert-approver-private-key.pem')?.content, pem);
+  assert.equal(file('revert-approver-private-key.pem')?.mode, 0o600);
+  assert.match(file('compose.yaml')!.content, new RegExp(`volumes: \\["\\./github-private-key\\.pem:${PRIVATE_KEY_CONTAINER_PATH}:ro", "\\./revert-approver-private-key\\.pem:${REVERT_APPROVER_KEY_CONTAINER_PATH}:ro"\\]`));
 });

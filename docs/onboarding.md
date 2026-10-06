@@ -25,7 +25,7 @@ Generated `AGENTS.md`: **every session Graphyard launches receives its instructi
 
 ### Agent environments
 
-Login homes (`~/.coding_agents`): `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` (OpenCode), `CURSOR_CONFIG_DIR`; create, log in and prepare them as [setup step 8](setup-from-zero.md#8-agent-environments) does.
+Login homes (`~/.coding_agents`): `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` (OpenCode), `CURSOR_CONFIG_DIR`; create them with `master environments --create claude,codex --apply`, log in once, and rerun `master environments --apply` ([setup step 8](setup-from-zero.md#8-agent-environments)).
 
 Profiles default to [`"approvals": "auto"`](master-agent-sessions.md#approval-modes) (trade-off: unattended); `"prompt"` is refused at launch.
 

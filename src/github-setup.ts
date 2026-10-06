@@ -137,6 +137,8 @@ export async function startGithubSetup(root: string, repository: string, deploym
   record?: (app: AppCredentials & { installationId: number }) => Promise<void>;
 } = {}, reviewer?: string) {
   if (reviewer !== undefined && !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(reviewer)) throw new Error('Reviewer name must be a lowercase identifier');
+  // Refused before the page opens, not when the human first loads it.
+  manifestOrigin(repository, deployment);
   await localDirectory(root);
   const file = dependencies.file ?? credentialFile(root, reviewer);
   let app: AppCredentials | undefined;

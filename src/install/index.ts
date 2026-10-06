@@ -15,7 +15,7 @@ import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerPro
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
 import { assertOutsideRepository, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord } from './secrets.js';
-import { readSavedApp, type SavedApp } from './manifest.js';
+import { readAppFile, readSavedApp, type SavedApp } from './manifest.js';
 import { localTransport, sshTransport, type Transport } from './transport.js';
 import { installIdFor, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PlannedPrincipal, type Provider } from './types.js';
 
@@ -313,6 +313,22 @@ export function githubEnv(facts: AppFacts, ciAppIds: number[]): EnvValue[] {
   ];
 }
 
+/**
+ * The main guard reverts a broken base through a second App, never the control plane's own
+ * (GY-1352): the first reviewer App this install registered serves, read from its saved
+ * registration. Without one the guard cannot revert unaided, and readiness says so.
+ */
+export async function revertApproverEnv(session: Pick<InstallSession, 'reviewers' | 'directory'>): Promise<EnvValue[]> {
+  const reviewer = session.reviewers[0];
+  const app = reviewer ? await readAppFile(appCredentialFile(session, reviewer.name)) : null;
+  if (!app?.privateKey || app.privateKey === 'undefined') return [];
+  return [
+    { name: 'GRAPHYARD_REVERT_APPROVER_APP_ID', value: String(app.appId), secret: false },
+    { name: 'GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID', value: String(app.installationId), secret: false },
+    { name: 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY', value: app.privateKey, secret: true },
+  ];
+}
+
 const PENDING = 'generated on apply';
 const planValue = (value: EnvValue, materialized: boolean): PlanValue => value.secret
   ? { name: value.name, value: REDACTED, secret: true, ...(materialized ? { fingerprint: fingerprint(value.value) } : { note: PENDING }) }
@@ -426,7 +442,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     actions.push(...wiringActions(session.delivery.context, ghReady ? await observeReleaseWiring(gh, session.inputs.repository) : null));
     actions.push(...session.delivery.adapter.plan(session.delivery.context));
   }
-  if (session.inputs.reviewer) actions.push({ id: 'github.reviewer', target: 'github', state: record?.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer) ? 'satisfied' : 'create', title: `Register the reviewer App "${session.inputs.reviewer}" and add its identity to GRAPHYARD_REVIEWER_APPS`, human: 'One additional browser confirmation, because a reviewer is a separate GitHub identity with no control-plane authority.' });
+  if (session.inputs.reviewer) actions.push({ id: 'github.reviewer', target: 'github', state: record?.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer) ? 'satisfied' : 'create', title: `Register the reviewer App "${session.inputs.reviewer}", add its identity to GRAPHYARD_REVIEWER_APPS, and set it as the main guard's revert approver (GRAPHYARD_REVERT_APPROVER_*)`, human: 'One additional browser confirmation, because a reviewer is a separate GitHub identity with no control-plane authority.' });
 
   // A local Compose install serves loopback only, so GitHub can never deliver to it. Saying
   // so in the plan keeps an agent from chasing an unconfirmable step as if it were a failure.
@@ -522,7 +538,7 @@ export async function applyInstall(session: InstallSession, plan: InstallPlan): 
  * outside every Git checkout — the runbook's hard rule, which the default would otherwise
  * break by writing `<repository>/.graphyard/github-app.json`.
  */
-const appCredentialFile = (session: InstallSession, reviewer?: string) =>
+const appCredentialFile = (session: Pick<InstallSession, 'directory'>, reviewer?: string) =>
   resolve(session.directory, reviewer ? `github-reviewer-${reviewer}.json` : 'github-app.json');
 
 async function performInstall(session: InstallSession, plan: InstallPlan): Promise<InstallSummary> {
@@ -570,7 +586,9 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   const gh = githubCli(context.transport);
   const ciApps = await detectCiAppIds(gh, session.inputs.repository, session.inputs.baseBranch, facts.appId);
   log(`CI App identities on ${session.inputs.baseBranch}: ${ciApps.map(app => `${app.slug} (${app.appId})`).join(', ') || 'none observed yet'}`);
-  await adapter.setEnv(context, [...coreEnv(session), ...githubEnv(facts, ciApps.map(app => app.appId))]);
+  const revertApprover = await revertApproverEnv(session);
+  for (const value of revertApprover) if (value.secret) vault.add(value.value);
+  await adapter.setEnv(context, [...coreEnv(session), ...githubEnv(facts, ciApps.map(app => app.appId)), ...revertApprover]);
   await adapter.deploy(context);
   if (!await waitForHealth(session, url)) throw new Error('The service did not return to health after the GitHub credentials were written');
 
