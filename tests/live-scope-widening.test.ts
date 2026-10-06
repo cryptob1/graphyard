@@ -11,7 +11,8 @@ import { liveScopeWidening } from '../src/model/scope.js';
 import { approverSessionName, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { successorWidening } from '../src/model/successors.js';
-import { scopeRefusalFault, transientScopeRefusal } from '../src/daemon/cycle-scope.js';
+import { mootScopeWidening, scopeRefusalFault, transientScopeRefusal } from '../src/daemon/cycle-scope.js';
+import { workFaults } from '../src/model/fault-classes.js';
 import { lateDecisionRead } from '../src/daemon/decision-reads.js';
 import { RefusedResponse } from '../src/model/refusal.js';
 import type { Principal, ScopeFile, Work } from '../src/model.js';
@@ -408,4 +409,54 @@ test('unit:transient-scope-refusal — only a 5xx response or a stale revision i
   assert.equal(scopeRefusalFault('the control plane answered 5xx', undefined), null);
   assert.equal(scopeRefusalFault('the control plane answered 5xx', { state: 'failed', detail: 'Could not widen GY-1 (the control plane answered 5xx, so it is retried next cycle on a fresh read): …' }), undefined);
   assert.equal(scopeRefusalFault(null, undefined), undefined);
+});
+
+// GY-1347: three scope faults on 6 October 2026, none a scope the product failed to settle. GY-1336
+// (01:00:17Z) and GY-1345 (02:58:05Z) were the loop's widening on a review finding losing the race it
+// is bound against: the request it answers was answered meanwhile, and the control plane refused the
+// widening as moot (409) — counted as action:scope, though the decide path records the same race as
+// already answered. GY-1335 (02:10:48Z) was the requirement-weakening escalation its rescope raised,
+// though that rescope was a two-party decision an independent approver had already judged.
+
+test('manual:fault-class-scope — GY-1336, GY-1345: a widening refused because the request it answers is no longer open is recorded as answered, and noted as no scope fault', async () => {
+  for (const key of ['GY-1336', 'GY-1345']) {
+    const control = plane(item({ key, scopeRequest: refusedRequest(['docs/delivery.md']) } as Partial<Work>));
+    control.fail.push(refused(control.read().id, 409, 'The scope request this widening answers is no longer open'));
+    const state = emptyDaemonState(config());
+    await cycle(state, effects(control, { baseSuccessions: undefined, replan: undefined }));
+    assert.equal(control.posted.length, 1, 'the widening was posted and refused');
+    const row = Object.values(state.actions).find(action => action.work === key && action.kind === 'scope');
+    assert.equal(row?.state, 'done', row?.detail);
+    assert.match(row!.detail, new RegExp(`^Not widened ${key}: the scope request it answers was already answered: it is no longer open`));
+    // On the base this refusal opened an action:scope instance at once.
+    assert.deepEqual(scopeFaults(state), [], `${key}: no scope fault is noted`);
+  }
+});
+
+test('unit:moot-scope-widening — only the plane\'s own 409 for a request answered, an attempt ended or a head moved is moot; every other refusal is not', () => {
+  assert.match(mootScopeWidening(refused('x', 409, 'The scope request this widening answers is no longer open'))!, /already answered/);
+  assert.match(mootScopeWidening(refused('x', 409, 'Epoch 3, which asked for this scope, no longer holds the lease'))!, /no longer holds the lease/);
+  assert.match(mootScopeWidening(refused('x', 409, 'The findings this widening rests on were read for abcdef012345, which is no longer the item\'s head'))!, /head its findings were read for moved/);
+  assert.equal(mootScopeWidening(new Error('Graphyard refused work/x/requirements (409): The scope request this widening answers is no longer open')), null, 'a message merely quoting the refusal is not it');
+  assert.equal(mootScopeWidening(refused('x', 409, 'Operator agents cannot remove planned-file containment')), null);
+  assert.equal(mootScopeWidening(refused('x', 500, 'Internal error; consult server logs')), null);
+});
+
+test('manual:fault-class-scope — GY-1335: a weakening an approved two-party decision applied raises its escalation but no scope fault; an unjudged one still counts', async () => {
+  const rescope = async (title: string, key: string) => {
+    let work = await ok(master.token, 'POST', 'work', { ...input(title), criteria: [{ id: 'AC-1', text: 'Guard reverts land', proofs: ['unit:guard'] }, { id: 'AC-3', text: 'Doctor names the missing approver', proofs: ['unit:doctor'] }] }) as Work;
+    // As applyThroughEngine applies an approved requirements decision: the requester acts with the decision's authority, under its key.
+    const requester: Principal = { id: master.id, role: 'admin', sessionKind: 'ai' };
+    work = await engine.execute(requester, 'requirements', work.id, { expectedPolicyRevision: work.policyRevision, criteria: [work.criteria[1]], dependencies: [], plannedFiles: work.plannedFiles, exclusiveResources: [], producerProofs: [],
+      reason: 'AC-1 is carried by a merged item [decision approved by the approver]' }, key);
+    return reload(work.id);
+  };
+  const decision = randomUUID();
+  const judged = await rescope('Rescoped by an approved decision', `decision:${decision}`);
+  assert.deepEqual((judged.escalations ?? []).map(entry => [entry.trigger, entry.decision]), [['requirement-weakening', decision]], 'the escalation still stands, naming the decision that applied it');
+  // On the base this escalation opened an escalation:requirement-weakening instance of the scope class.
+  assert.deepEqual(workFaults(judged, Date.now()).filter(fault => fault.faultClass === 'scope'), []);
+
+  const unjudged = await rescope('Rescoped directly', randomUUID());
+  assert.deepEqual(workFaults(unjudged, Date.now()).filter(fault => fault.faultClass === 'scope').map(fault => fault.kind), ['escalation:requirement-weakening'], 'a weakening no decision applied still counts');
 });
