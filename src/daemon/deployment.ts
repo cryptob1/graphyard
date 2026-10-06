@@ -323,11 +323,15 @@ export async function withinDeploymentBudget<T>(owner: object, name: string, rea
   let pending = reads.get(name) as Promise<Settled<T>> | undefined;
   const started = !pending;
   if (!pending) {
-    pending = Promise.resolve().then(read).then(value => ({ ok: true as const, value }), error => ({ ok: false as const, error }));
+    // Started before the remaining budget is judged, as the faults step's reads are: what the read spends synchronously counts against it.
+    let asked: Promise<T>;
+    try { asked = read(); } catch (error) { asked = Promise.reject(error); }
+    pending = asked.then(value => ({ ok: true as const, value }), error => ({ ok: false as const, error }));
     reads.set(name, pending);
   }
+  const remaining = started ? deadline - now() : 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const expired = new Promise<typeof stillVerifying>(resolve => { timer = setTimeout(() => resolve(stillVerifying), Math.max(0, started ? deadline - now() : 0)); });
+  const expired = new Promise<typeof stillVerifying>(resolve => { timer = setTimeout(() => resolve(stillVerifying), Math.max(0, remaining)); });
   try {
     const answer = await Promise.race([pending, expired]);
     if (answer !== stillVerifying && reads.get(name) === pending) reads.delete(name);

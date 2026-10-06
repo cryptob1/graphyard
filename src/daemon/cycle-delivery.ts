@@ -108,6 +108,8 @@ export async function deploymentStep(cycle: Cycle) {
   const deploymentKey = `deployment:${delivered.at(-1)?.delivery?.mergeSha ?? 'none'}`;
   // GY-1354: the step's reads share one per-cycle budget. A read still running at the bound is left
   // in flight and the last verified observation stands; a later cycle takes its answer, not a new read.
+  // A carried answer was computed for the deliveries of the cycle that asked; recorded under this
+  // cycle's key, it leaves out a delivery landed since until the next read answers for that one too.
   const budgetMs = deploymentStepBudgetMs(config.run.intervalSeconds * 1000), deadline = now() + budgetMs, deferred: string[] = [];
   const observed = await withinDeploymentBudget(state, 'observation', () => effects.observeDeployment(delivered, state.deployment?.containment ?? null), deadline, now);
   if (observed === stillVerifying) deferred.push('the release observation');
