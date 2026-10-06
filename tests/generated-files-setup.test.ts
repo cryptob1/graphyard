@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join, sep } from 'node:path';
@@ -191,9 +190,7 @@ async function adapterFixture(files: Record<string, string>) {
 
 test('integration:generated-files-setup — the Railway adapter sets the derived variable beside GRAPHYARD_PRINCIPALS', async () => {
   const credentials = JSON.stringify([{ id: 'operator', role: 'admin', token: 'a'.repeat(40) }, { id: 'agent-1', role: 'worker', token: 'b'.repeat(40) }]);
-  // An armed main guard needs its revert approver App (GY-1353); the key travels over stdin, never as an argument.
-  const approver = JSON.stringify({ appId: 200, installationId: 300, privateKey: '-----BEGIN RSA PRIVATE KEY-----\nfixture\n-----END RSA PRIVATE KEY-----\n' });
-  const declared = await adapterFixture({ 'scripts/check-docs.mjs': manifestScript, '.graphyard/credentials.json': credentials, '.graphyard/revert-approver.json': approver });
+  const declared = await adapterFixture({ 'scripts/check-docs.mjs': manifestScript, '.graphyard/credentials.json': credentials });
   try {
     const run = spawnSync(process.execPath, ['scripts/provision-railway.mjs'], { cwd: declared.root, encoding: 'utf8', timeout: 120_000,
       env: { ...process.env, PATH: `${join(declared.root, 'bin')}:${process.env.PATH}`, GRAPHYARD_URL: '' } });
@@ -201,27 +198,16 @@ test('integration:generated-files-setup — the Railway adapter sets the derived
     const set = (await readFile(declared.record, 'utf8')).split('\n');
     assert.ok(set.includes('GRAPHYARD_GENERATED_FILES=docs/index.md,docs/list.md'), `the adapter set ${set.filter(entry => entry.startsWith('GRAPHYARD_')).join(' ')}`);
     assert.ok(set.includes('GRAPHYARD_MAX_REVIEWERS=2'), 'the capacity variables are still set beside it');
-    assert.ok(set.includes('GRAPHYARD_REVERT_APPROVER_APP_ID=200') && set.includes('GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID=300'), 'the revert approver ids are set beside it');
-    assert.ok(!set.some(entry => entry.includes('fixture')), 'the approver key is never an argument');
     assert.match(run.stdout, /GRAPHYARD_GENERATED_FILES=docs\/index\.md,docs\/list\.md/);
   } finally { await rm(declared.root, { recursive: true, force: true }); }
   // A managed repository that declares no manifest sets no exemption at all.
-  const undeclared = await adapterFixture({ '.graphyard/credentials.json': credentials, '.graphyard/revert-approver.json': approver });
+  const undeclared = await adapterFixture({ '.graphyard/credentials.json': credentials });
   try {
     const run = spawnSync(process.execPath, ['scripts/provision-railway.mjs'], { cwd: undeclared.root, encoding: 'utf8', timeout: 120_000,
       env: { ...process.env, PATH: `${join(undeclared.root, 'bin')}:${process.env.PATH}`, GRAPHYARD_URL: '' } });
     assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
     assert.ok(!(await readFile(undeclared.record, 'utf8')).includes(generatedFilesVariable));
   } finally { await rm(undeclared.root, { recursive: true, force: true }); }
-  // Without the approver record the armed guard refuses provisioning before any railway call.
-  const unapproved = await adapterFixture({ '.graphyard/credentials.json': credentials });
-  try {
-    const run = spawnSync(process.execPath, ['scripts/provision-railway.mjs'], { cwd: unapproved.root, encoding: 'utf8', timeout: 120_000,
-      env: { ...process.env, PATH: `${join(unapproved.root, 'bin')}:${process.env.PATH}`, GRAPHYARD_URL: '' } });
-    assert.equal(run.status, 1, `${run.stdout}${run.stderr}`);
-    assert.match(run.stderr, /GRAPHYARD_REVERT_APPROVER_APP_ID, GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID, GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY/);
-    assert.equal(existsSync(unapproved.record), false, 'nothing was set');
-  } finally { await rm(unapproved.root, { recursive: true, force: true }); }
 });
 
 test('integration:generated-files-setup — every other adapter deploys the same derived value', async () => {

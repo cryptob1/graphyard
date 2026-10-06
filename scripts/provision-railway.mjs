@@ -18,19 +18,22 @@ const missingApprover = `set ${revertApproverVariables.join(', ')}`;
  * The revert approver variables to set, from the operator's approver record: `.graphyard/revert-approver.json`
  * (mode 0600, beside credentials.json) or the same JSON on stdin with `--revert-approver-stdin`, as
  * `{ "appId", "installationId", "privateKey" | "privateKeyFile" }`. `live` is what the deployment's
- * `/api/status` reports (null when unreadable). The guard counts as armed unless the live server says
- * otherwise, since this script provisions GitHub delivery. Errors name all three variables and never a key.
+ * `/api/status` reports (null when unreadable); `deployed` is the service's Railway variables (null when
+ * unreadable). The guard arms only under GitHub delivery, so without a live answer it counts as armed
+ * when the service has GITHUB_APP_ID, and when neither can be read. Errors name all three variables and never a key.
  */
-export async function revertApproverAssignment(record, live = null, readKey = path => readFile(path, 'utf8')) {
-  const armed = live?.mainGuard ? live.mainGuard.armed !== false : true;
+export async function revertApproverAssignment(record, live = null, readKey = path => readFile(path, 'utf8'), deployed = null) {
+  const armed = live?.mainGuard ? live.mainGuard.armed !== false : deployed ? !!deployed.GITHUB_APP_ID : true;
+  const keptId = live?.mainGuard?.revertApprover ?? (revertApproverVariables.every(name => deployed?.[name]) ? Number(deployed.GRAPHYARD_REVERT_APPROVER_APP_ID) : null);
   if (!record) {
     if (!armed) return { variables: null, appId: null, note: 'the main guard is not armed; no revert approver is needed' };
-    if (live?.mainGuard?.revertApprover) return { variables: null, appId: live.mainGuard.revertApprover, note: `the deployment already runs with revert approver App ${live.mainGuard.revertApprover}; kept` };
+    if (keptId) return { variables: null, appId: keptId, note: `the deployment already runs with revert approver App ${keptId}; kept` };
     return { error: `The main guard's revert approver is missing: ${missingApprover} on the control plane to an App installed on the repository other than the control-plane App (the reviewer App serves). Write {"appId", "installationId", "privateKey" or "privateKeyFile"} to .graphyard/revert-approver.json (mode 0600) or pipe it with --revert-approver-stdin, then rerun. Without it main's last-push-approval rule refuses every revert the guard opens.` };
   }
   const appId = Number(record.appId), installationId = Number(record.installationId);
   if (!Number.isSafeInteger(appId) || appId <= 0 || !Number.isSafeInteger(installationId) || installationId <= 0) return { error: `The revert approver record needs a GitHub App id and installation id to ${missingApprover}` };
-  if (live?.githubAppId != null && Number(live.githubAppId) === appId) return { error: `The revert approver App ${appId} is the control-plane App; ${missingApprover} to another App installed on the repository (the reviewer App serves)` };
+  const controlPlaneApp = live?.githubAppId ?? deployed?.GITHUB_APP_ID;
+  if (controlPlaneApp != null && Number(controlPlaneApp) === appId) return { error: `The revert approver App ${appId} is the control-plane App; ${missingApprover} to another App installed on the repository (the reviewer App serves)` };
   const privateKey = record.privateKey ?? (record.privateKeyFile ? await readKey(record.privateKeyFile) : '');
   if (!/^-----BEGIN (RSA )?PRIVATE KEY-----/m.test(privateKey)) return { error: `The revert approver record's privateKey (or privateKeyFile) must be the PEM GitHub issued for App ${appId} to ${missingApprover}` };
   return { appId, variables: { GRAPHYARD_REVERT_APPROVER_APP_ID: String(appId), GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID: String(installationId), GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY: privateKey } };
@@ -44,6 +47,15 @@ export function verifyRevertApprover(live, appId) {
   if (guard.attention || !guard.revertApprover) return { ok: false, line: `The deployment still reports no revert approver: ${missingApprover}, redeploy the service, then rerun --verify` };
   if (appId != null && guard.revertApprover !== appId) return { ok: false, line: `The deployment runs with revert approver App ${guard.revertApprover}, not ${appId}; redeploy the service, then rerun --verify` };
   return { ok: true, line: `The deployment's main guard reports revert approver App ${guard.revertApprover}; graphyard doctor lists revert-approver ready` };
+}
+
+// The service's variables, read without printing them; null when Railway cannot answer. An empty
+// answer is a service with no variables set yet.
+function railwayVariables(railway) {
+  try {
+    const out = execFileSync('npx', [...railway, 'variable', 'list', '--service', 'graphyard', '--json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return out.trim() ? JSON.parse(out) : {};
+  } catch { return null; }
 }
 
 async function liveStatus(url, token) {
@@ -104,7 +116,7 @@ async function main(args) {
     process.exitCode = verdict.ok ? 0 : 1;
     return;
   }
-  const approver = await revertApproverAssignment(record, live);
+  const approver = await revertApproverAssignment(record, live, undefined, live?.mainGuard ? null : railwayVariables(railway));
   if (approver.error) { console.error(approver.error); process.exitCode = 1; return; }
   if (url && operator) {
     const read = await readDeployedDelegationLimits(url, operator.token);

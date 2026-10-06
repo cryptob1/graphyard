@@ -173,9 +173,16 @@ test('unit:provision-names-missing-revert-approver — with the guard armed and 
   assert.match((await revertApproverAssignment({ appId: 0, installationId: 300, privateKey: pem }, null)).error!, new RegExp(revertApproverVariables.join(', ')));
   assert.deepEqual(await revertApproverAssignment(null, { mainGuard: { armed: false, required: [], revertApprover: null, attention: null } }), { variables: null, appId: null, note: 'the main guard is not armed; no revert approver is needed' });
   assert.equal((await revertApproverAssignment(null, armedLive(200))).appId, 200);
+  // Without a live answer the service's Railway variables decide: the guard arms only under GitHub delivery.
+  const readKey = async () => pem;
+  assert.match((await revertApproverAssignment(null, null, readKey, { GITHUB_APP_ID: '100' })).error!, new RegExp(revertApproverVariables.join(', ')));
+  assert.equal((await revertApproverAssignment(null, null, readKey, {})).note, 'the main guard is not armed; no revert approver is needed');
+  assert.equal((await revertApproverAssignment(null, null, readKey, { GITHUB_APP_ID: '100', GRAPHYARD_REVERT_APPROVER_APP_ID: '200', GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID: '300', GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY: pem })).appId, 200);
+  assert.match((await revertApproverAssignment({ appId: 100, installationId: 300, privateKey: pem }, null, readKey, { GITHUB_APP_ID: '100' })).error!, /App 100 is the control-plane App/);
   // The script stops before setting anything when the assignment fails.
   const adapter = await readFile(new URL('../scripts/provision-railway.mjs', import.meta.url), 'utf8');
-  assert.ok(adapter.indexOf('if (approver.error)') < adapter.indexOf("execFileSync('npx'"), 'the failure precedes every railway call');
+  assert.ok(adapter.indexOf('if (approver.error)') < adapter.indexOf("'variable', 'set'"), 'the failure precedes every railway variable set');
+  assert.match(adapter, /'variable', 'list', '--service', 'graphyard', '--json'\], \{ encoding: 'utf8', stdio: \['ignore', 'pipe', 'ignore'\] \}/, 'the deployed variables are read, never printed');
 });
 
 test('manual:deploy-limit-docs — the deployment, install, operations and master guides document the variables, derivation, drift and observation', async () => {
