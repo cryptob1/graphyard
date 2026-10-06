@@ -161,14 +161,31 @@ export function reconcileReviewConflict(work: Work, now: Date): ReviewConflictTr
 }
 
 /**
- * The attention line for every item whose review request is conflicted: the item, the head, both
- * verdicts and the sessions that posted them, read from the reviewer ledger by review id (a
- * session the ledger has no record of is named as such — that is the launcher fault itself).
+ * Why a recorded conflict is settled for attention although no fresh review resolved it, or null
+ * while it still stands on a live head (GY-1364). A delivered item's head is never reviewed again,
+ * and a head the item has left is a binding nothing will review: the fresh review the attention
+ * line promises never comes, so the line would stand forever. Such a conflict stays on the item's
+ * record, and the gates still read `openReviewConflict` until the next reconcile supersedes it.
  */
-export function reviewConflictAttention(work: Pick<Work, 'key' | 'reviewConflict'>[], records: { id: string; agentName: string; profile: string; requestId?: string; verdict?: { reviewId: number } }[]): { subject: string; text: string; next: string }[] {
+export function settledReviewConflict(work: Pick<Work, 'stage' | 'candidate' | 'reviewConflict'>): string | null {
+  const conflict = openReviewConflict(work);
+  if (!conflict) return null;
+  if (work.stage === 'done') return `${short(conflict.sha)} was delivered`;
+  if (!work.candidate) return 'the item no longer has a candidate';
+  if (work.candidate.sha !== conflict.sha) return `the item left ${short(conflict.sha)} for ${short(work.candidate.sha)}`;
+  return null;
+}
+
+/**
+ * The attention line for every item whose review request is conflicted on its live head: the item,
+ * the head, both verdicts and the sessions that posted them, read from the reviewer ledger by
+ * review id (a session the ledger has no record of is named as such — that is the launcher fault
+ * itself). A conflict `settledReviewConflict` names is history, not attention.
+ */
+export function reviewConflictAttention(work: Pick<Work, 'key' | 'stage' | 'candidate' | 'reviewConflict'>[], records: { id: string; agentName: string; profile: string; requestId?: string; verdict?: { reviewId: number } }[]): { subject: string; text: string; next: string }[] {
   return work.flatMap(item => {
     const conflict = openReviewConflict(item);
-    if (!conflict) return [];
+    if (!conflict || settledReviewConflict(item)) return [];
     const session = (verdict: ObservedVerdict) => {
       const record = records.find(entry => entry.verdict?.reviewId === verdict.id);
       return `${describe(verdict)} from ${record ? `session ${record.agentName} (${record.profile}, record ${record.id.slice(0, 8)})` : 'a session the reviewer ledger has no record of'}`;

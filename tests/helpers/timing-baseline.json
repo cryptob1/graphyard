@@ -294,6 +294,7 @@
     "tests/decision-application.test.ts": 2400,
     "tests/decision-supersede.test.ts": 2400,
     "tests/delegation.test.ts": 3879,
+    "tests/delivered-attention.test.ts": 380,
     "tests/delivery-causes.test.ts": 365,
     "tests/delivery-docs.test.ts": 369,
     "tests/delivery-setup.test.ts": 1855,

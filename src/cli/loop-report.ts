@@ -1,7 +1,7 @@
 import { agentOwner, humanOwner, type AttentionItem } from '../master.js';
 import type { Work } from '../model.js';
 import { idleActionable, queueSnapshot } from '../model/actions.js';
-import { openAgentRequests } from '../model/agent-requests.js';
+import { attentionAgentRequests, openAgentRequests } from '../model/agent-requests.js';
 import { runningSessions, sessionSummary, unseenSessions } from '../model/sessions.js';
 
 /**
@@ -17,11 +17,12 @@ const minutes = (ms: number) => `${Math.round(ms / 6000) / 10} min`;
  * One line per open typed agent request: who asked, what for, who decides it, and how long it has
  * waited. Nothing here is a prose question left hanging — a session that needed something recorded
  * it and exited, so the item is free and the ask is addressed to a named decider. A human-only
- * decision is owned by the operator; every other kind is an agent's to make.
+ * decision is owned by the operator; every other kind is an agent's to make. A note on a Done item
+ * is not attention (GY-1364): nobody decides it and nothing can still act on it.
  */
 export function agentRequestAttention(snapshot: { work: Work[]; now: string }): AttentionItem[] {
   const now = new Date(snapshot.now);
-  return snapshot.work.flatMap(work => openAgentRequests(work, now).map(request => {
+  return snapshot.work.flatMap(work => attentionAgentRequests(work, now).map(request => {
     const text = `${request.requestedBy} recorded a ${request.type} on ${work.key} ${minutes(request.waitedMs)} ago and released its lease: ${request.reason} — decided by ${request.decider.who}`;
     return { subject: work.key, text,
       ...(request.decider.kind === 'human'
