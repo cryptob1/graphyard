@@ -114,9 +114,10 @@ test('integration:release-candidate-cut — a candidate is cut from main\'s tip 
   assert.equal(commands.filter(command => command.name === 'release').length, 1, 'one entry answers release');
   // The same word still gives up a worker's lease: a work key routes to the lease release.
   const calls: [string, unknown][] = []; const printed: unknown[] = [];
-  const api = async (path: string, data?: unknown) => { calls.push([path, data]); return path === 'work' ? [{ id: 'w-1', key: 'GY-7' }] : { released: true }; };
+  const api = async (path: string, data?: unknown) => { calls.push([path, data]); return path === 'work/GY-7' ? { id: 'w-1', key: 'GY-7' } : { released: true }; };
   await release!.run({ id: 'GY-7', args: ['3'], api, print: (value: unknown) => printed.push(value) } as any, undefined);
-  assert.deepEqual(calls, [['work', undefined], ['work/w-1/release', { epoch: 3 }]]);
+  // The item is read alone by its key, never by downloading the fleet (GY-1377).
+  assert.deepEqual(calls, [['work/GY-7', undefined], ['work/w-1/release', { epoch: 3 }]]);
   assert.deepEqual(printed, [{ released: true }]);
   const workflow = await readFile(new URL('../.github/workflows/release-candidate.yml', import.meta.url), 'utf8');
   assert.match(workflow, /schedule:\s*\n\s*- cron:/); assert.match(workflow, /workflow_dispatch:/);

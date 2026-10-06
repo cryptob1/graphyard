@@ -323,7 +323,7 @@ test('CLI preserves admin ready and sends the current revision and audit reason 
   const work = { id: 'task-id', key: 'GY-7', revision: 12 };
   const http = createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
-    if (req.method === 'GET') return res.end(JSON.stringify([work]));
+    if (req.method === 'GET') return res.end(JSON.stringify(req.url === '/api/work/GY-7' ? work : [work]));
     let raw = ''; for await (const chunk of req) raw += chunk;
     requests.push({ url: req.url!, body: JSON.parse(raw) }); res.end(JSON.stringify(work));
   });
@@ -348,7 +348,7 @@ test('watch refuses the wrong workspace and uses a fresh heartbeat key despite c
     res.setHeader('Content-Type', 'application/json');
     if (req.url === '/api/status') { res.end(JSON.stringify({ actor: { role } })); return; }
     if (req.method === 'POST') { keys.push(String(req.headers['idempotency-key'])); res.end(JSON.stringify(renewal())); }
-    else res.end(JSON.stringify([{ id: 'task', key: 'GY-1', workspaces: [{ epoch: 1, host: hostname(), path: registeredPath }] }]));
+    else { const task = { id: 'task', key: 'GY-1', workspaces: [{ epoch: 1, host: hostname(), path: registeredPath }] }; res.end(JSON.stringify(req.url === '/api/work/GY-1' ? task : [task])); }
   });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
   const env: NodeJS.ProcessEnv = { ...process.env, GRAPHYARD_HOST_ID: hostname(), GRAPHYARD_TOKEN: 'test-only', GRAPHYARD_REQUEST_ID: 'replayed-command', GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}` };
@@ -610,7 +610,7 @@ test('macOS foreground Herdr supervision refuses before launch without durable c
   const http=createServer((req,res)=>{res.setHeader('Content-Type','application/json');
     if(req.url==='/api/status')res.end(JSON.stringify({repository:'OWNER/project',actor:{id:'worker-a',role:'worker'}}));
     else if(req.method==='POST'){reservations++;res.end('{}');}
-    else res.end(JSON.stringify([{id:'task',key:'GY-1',workspaces:[]}]));
+    else{const task={id:'task',key:'GY-1',workspaces:[]};res.end(JSON.stringify(req.url==='/api/work/GY-1'?task:[task]));}
   });
   await new Promise<void>(r=>http.listen(0,'127.0.0.1',r));
   const env={...process.env,GRAPHYARD_TOKEN:'fixture',GRAPHYARD_URL:`http://127.0.0.1:${(http.address() as any).port}`};
@@ -634,7 +634,7 @@ test('rework worktree reopens the exact observed PR branch while preserving its 
   const http=createServer((req,res)=>{res.setHeader('Content-Type','application/json');
     if(req.url==='/api/status')res.end(JSON.stringify({repository:'owner/project',actor:{id:'worker-a',role:'worker'}}));
     else if(req.method==='POST'){reservations++;res.end('{}');}
-    else res.end(JSON.stringify([{id:'task',key:'GY-1',submission:{epoch:1,pr:1},candidate:{sha:candidate},workspaces:[{epoch:1,branch}],reworkRequested:true}]));
+    else{const task={id:'task',key:'GY-1',submission:{epoch:1,pr:1},candidate:{sha:candidate},workspaces:[{epoch:1,branch}],reworkRequested:true};res.end(JSON.stringify(req.url==='/api/work/GY-1'?task:[task]));}
   });
   await new Promise<void>(r=>http.listen(0,'127.0.0.1',r));
   const fakeBin=join(cwd,'fake-bin');await mkdir(fakeBin);const gitBinary=(await exec('which',['git'])).stdout.trim();
@@ -1072,7 +1072,7 @@ test('sync merges origin/BASE without rebasing, passes in-scope and new files, a
   const http = createServer((req, res) => { res.setHeader('Content-Type', 'application/json');
     const task = { id: 'task', key: 'GY-1', plannedFiles: ['src/scoped/', 'tests/'], workspaces: [{ epoch: 1, host: 'machine-a', path: cwd, branch: 'graphyard/gy-1-1' }] };
     res.end(JSON.stringify(req.url === '/api/status' ? { baseBranch: 'main', repository: 'owner/project', actor: { id: 'worker-a', role: 'worker' } }
-      : req.url === '/api/work-snapshot' ? { now: new Date().toISOString(), work: [task] } : [task])); });
+      : req.url === '/api/work-snapshot' ? { now: new Date().toISOString(), work: [task] } : req.url === '/api/work/GY-1' ? task : [task])); });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
   const env = { ...process.env, GRAPHYARD_TOKEN: 'fixture', GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}` };
   const origin = join(cwd, 'origin'), clone = join(cwd, 'clone');

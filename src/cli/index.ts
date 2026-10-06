@@ -1,4 +1,4 @@
-import { createContext } from './context.js';
+import { createContext, resolveWork } from './context.js';
 import type { CliCommand } from './registry.js';
 import { installCommands } from './install.js';
 import { dbCommands } from './db.js';
@@ -46,8 +46,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (selected?.unscoped && !id) return selected.unscoped(context);
   // Work-scoped commands name an item by ID or display key; the lookup precedes the
   // command check so an unknown item is reported before an unknown command.
-  const items = await context.api('work'); const work = items.find((w: any) => w.id === id || w.key === id);
-  if (!work) throw new Error(`Unknown work item ${id}`);
+  const work = await resolveWork(context.api, id);
   if (!selected) throw new Error(`Unknown command: ${command}`);
   return selected.run(context, work);
 }

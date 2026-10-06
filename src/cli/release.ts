@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defineCommands } from './registry.js';
+import { resolveWork } from './context.js';
 import { releaseLeaseCommand } from './lease.js';
 import {
   apiSuite, assessProductionServing, awaitServing, commandSuite, cut, deployToUat, endpointSuite, findCandidate, followUpItem, followUpRequestId, gitIn,
@@ -68,9 +69,7 @@ export const releaseCommands = defineCommands([
       const { id, args, api, print, repositoryRoot } = context;
       // `release GY-N EPOCH` is the worker's lease release; every other word is a candidate step.
       if (id && !subcommands.has(id)) {
-        const work = (await api('work')).find((item: any) => item.id === id || item.key === id);
-        if (!work) throw new Error(`Unknown work item ${id}`);
-        return releaseLeaseCommand.run(context, work);
+        return releaseLeaseCommand.run(context, await resolveWork(api, id));
       }
       const root = repositoryRoot(), git = gitIn(root);
       const options = flags(args);
