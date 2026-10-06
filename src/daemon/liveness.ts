@@ -1,7 +1,7 @@
 // Concern: loop liveness — cycle cost, cycle-failure backoff, loop attention and the watchdog.
 import { type AttentionItem, agentOwner } from '../master.js';
 import { classified, noteFault } from '../model/fault-classes.js';
-import { boundDaemonState, type CycleFailures, type CycleMetrics, type CycleStepName, type CycleSteps, type DaemonState, liveProcess, message, type StepCost } from './state.js';
+import { boundDaemonState, type CycleFailures, type CycleMetrics, type CycleStepName, type CycleSteps, type DaemonState, initialPidNamespace, liveProcess, message, pidNamespace, type StepCost } from './state.js';
 import { approverWait, type LatencyBudget, type SilenceReport } from './metrics.js';
 import type { DaemonEffects } from './effects.js';
 import { slowestSteps } from '../master/timings.js';
@@ -100,8 +100,17 @@ export function cycleTimes(metrics: Pick<CycleMetrics, 'at' | 'durationMs'>[], n
  * A measured cycle that itself accounts for the lag is `slow`, not stalled: the loop is inside a
  * long cycle, and the cost says whether that cycle is computing (a step to shorten) or waiting on
  * a child (a provider to look at), so nobody restarts a loop that is still cycling.
+ *
+ * The pid is probed only from the PID namespace the lock was taken in (GY-1370): a reader inside a
+ * sandbox with its own namespace sees no host process, so there the lock's pid is never evidence of
+ * an absence, and the cycle-lag rule alone judges the loop. A lock that recorded no namespace was
+ * taken on the host, so it is probed only from the host's initial namespace.
  */
-export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCycleAt'> & Partial<Pick<DaemonState, 'failures' | 'metrics'>>, now: number, intervalMs: number, hostId?: string): LoopLiveness {
+export function pidProbeable(lock: Pick<NonNullable<DaemonState['lock']>, 'pidNamespace'>, readerNamespace: string | null) {
+  if (lock.pidNamespace) return readerNamespace === lock.pidNamespace;
+  return readerNamespace === null || readerNamespace === initialPidNamespace;
+}
+export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCycleAt'> & Partial<Pick<DaemonState, 'failures' | 'metrics'>>, now: number, intervalMs: number, hostId?: string, readerNamespace: string | null = pidNamespace()): LoopLiveness {
   const cost = cycleCost(state.metrics?.at(-1) ?? null, intervalMs);
   const lastCycleAt = state.lastCycleAt ? Date.parse(state.lastCycleAt) : Number.NaN;
   const lagMs = Number.isFinite(lastCycleAt) ? Math.max(0, now - lastCycleAt) : null;
@@ -111,7 +120,10 @@ export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCy
   const stalledAfterMs = 2 * intervalMs + (backoff ? Math.max(0, backoff.dueAt - lastCycleAt) : 0);
   const restart = 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)';
   const lock = state.lock;
-  const gone = !!lock && !!hostId && lock.host === hostId && !liveProcess(lock.pid);
+  const local = !!lock && !!hostId && lock.host === hostId;
+  const probeable = !lock || pidProbeable(lock, readerNamespace);
+  const gone = local && probeable && !liveProcess(lock!.pid);
+  const unprobed = local && !probeable ? `; pid ${lock!.pid} could not be probed from this PID namespace (${readerNamespace ?? 'unknown'}, the lock was taken in ${lock!.pidNamespace ?? 'the host\'s'}), so the cycle lag alone judges the loop` : '';
   if (!lock || gone) {
     return { state: 'absent', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost,
       detail: gone ? `No master loop is running: the cursor's lock (pid ${lock!.pid} on ${lock!.host}) names a process that is gone, last cycle ${state.lastCycleAt ?? 'never'}. Nothing is dispatching, deciding or merging until it is restarted.`
@@ -122,15 +134,15 @@ export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCy
     // bound: the loop is inside another cycle like it. Past that, nothing explains the silence.
     const slow = cost && lagMs !== null && cost.durationMs > stalledAfterMs && lagMs <= cost.durationMs + stalledAfterMs;
     if (slow) return { state: 'slow', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost,
-      detail: `The master loop (pid ${lock.pid} on ${lock.host}) has not completed a cycle for ${Math.round(lagMs / 1000)}s, past the two-interval bound of ${Math.round(stalledAfterMs / 1000)}s, but cycle ${cost.cycle} took ${Math.round(cost.durationMs / 1000)}s of its own: ${cost.breakdown}. The loop is inside a slow cycle, not stalled${cost.withinLivenessBound ? `: its own work fits the bound, and the time went to child processes${cost.longestWait ? ` in the ${cost.longestWait.step} step` : ''}` : cost.culprit ? `; ${cost.culprit.phrase} is the one to shorten` : ''}.` };
+      detail: `The master loop (pid ${lock.pid} on ${lock.host}) has not completed a cycle for ${Math.round(lagMs / 1000)}s, past the two-interval bound of ${Math.round(stalledAfterMs / 1000)}s, but cycle ${cost.cycle} took ${Math.round(cost.durationMs / 1000)}s of its own: ${cost.breakdown}. The loop is inside a slow cycle, not stalled${cost.withinLivenessBound ? `: its own work fits the bound, and the time went to child processes${cost.longestWait ? ` in the ${cost.longestWait.step} step` : ''}` : cost.culprit ? `; ${cost.culprit.phrase} is the one to shorten` : ''}${unprobed}.` };
     return { state: 'stalled', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost,
-      detail: `The master loop (pid ${lock.pid} on ${lock.host}) has not completed a cycle ${lagMs === null ? 'at all' : `for ${Math.round(lagMs / 1000)}s`}, past the two-interval bound of ${Math.round(stalledAfterMs / 1000)}s; cycle ${state.cycle} is stalled.` };
+      detail: `The master loop (pid ${lock.pid} on ${lock.host}) has not completed a cycle ${lagMs === null ? 'at all' : `for ${Math.round(lagMs / 1000)}s`}, past the two-interval bound of ${Math.round(stalledAfterMs / 1000)}s; cycle ${state.cycle} is stalled${unprobed}.` };
   }
   if (backoff) {
     return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost,
-      detail: `Cycle ${backoff.last.cycle} failed ${Math.round(lagMs / 1000)}s ago in ${describeFailingCall(backoff.last)} (${backoff.last.reason}); ${backoff.consecutive} consecutive failure(s), the next cycle is due at ${backoff.last.nextAt}` };
+      detail: `Cycle ${backoff.last.cycle} failed ${Math.round(lagMs / 1000)}s ago in ${describeFailingCall(backoff.last)} (${backoff.last.reason}); ${backoff.consecutive} consecutive failure(s), the next cycle is due at ${backoff.last.nextAt}${unprobed}` };
   }
-  return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost, detail: `Cycle ${state.cycle} completed ${Math.round(lagMs / 1000)}s ago` };
+  return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost, detail: `Cycle ${state.cycle} completed ${Math.round(lagMs / 1000)}s ago${unprobed}` };
 }
 
 // ---- A cycle that fails (GY-119) -----------------------------------------------------------

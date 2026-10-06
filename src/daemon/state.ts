@@ -1,5 +1,6 @@
 // Concern: the daemon cursor — its schema, persistence, bounds and single-writer lock.
 import { randomUUID } from 'node:crypto';
+import { readlinkSync } from 'node:fs';
 import { readFile, writeFile, rename, chmod } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import { z } from 'zod';
@@ -462,7 +463,8 @@ export const dispatchFailureRunSchema = z.object({ key: z.string().max(100), cau
 export type DispatchFailureRun = z.infer<typeof dispatchFailureRunSchema>;
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
-  lock: z.object({ id: z.string(), pid: z.number().int().positive(), host: z.string(), startedAt: z.string(), heartbeatAt: z.string() }).strict().nullable().default(null),
+  /** `pidNamespace` (GY-1370): the PID namespace the pid was taken in, absent on a lock written before it was recorded. */
+  lock: z.object({ id: z.string(), pid: z.number().int().positive(), host: z.string(), startedAt: z.string(), heartbeatAt: z.string(), pidNamespace: z.string().max(100).nullable().optional() }).strict().nullable().default(null),
   cycle: z.number().int().min(0).default(0),
   lastCycleAt: z.string().nullable().default(null),
   actions: z.record(z.string(), daemonActionSchema).default({}),
@@ -741,6 +743,14 @@ export function boundDeployment<T extends Pick<DeploymentObservation, 'reason' |
   return { ...observation, reason: cut(observation.reason ?? null, 500), deployed: (observation.deployed ?? []).slice(-200), pending: (observation.pending ?? []).slice(-200) };
 }
 
+/**
+ * This process's PID namespace (`pid:[4026531836]`), or null where /proc does not say (not Linux).
+ * A pid means something only in the namespace it was taken in (GY-1370): a sandbox with its own
+ * PID namespace sees none of the host's processes, so its probe of a host pid always reads gone.
+ */
+export const pidNamespace = () => { try { return readlinkSync('/proc/self/ns/pid'); } catch { return null; } };
+/** The host's initial PID namespace (the kernel's PROC_PID_INIT_INO), which a lock written before GY-1370 was taken in. */
+export const initialPidNamespace = 'pid:[4026531836]';
 export const liveProcess = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === 'EPERM'; } };
 
 /**
@@ -757,7 +767,7 @@ export function acquireDaemonLock(state: DaemonState, identity: { pid: number; h
     const alive = sameHost ? lock.pid !== identity.pid && liveProcess(lock.pid) : !Number.isFinite(age) || age < staleAfterMs;
     if (alive) throw new Error(`Another Graphyard master loop holds this repository (pid ${lock.pid} on ${lock.host}, last cycle ${lock.heartbeatAt}); stop it before starting a second daemon`);
   }
-  state.lock = { id: randomUUID(), pid: identity.pid, host: identity.host, startedAt: new Date(now).toISOString(), heartbeatAt: new Date(now).toISOString() };
+  state.lock = { id: randomUUID(), pid: identity.pid, host: identity.host, startedAt: new Date(now).toISOString(), heartbeatAt: new Date(now).toISOString(), pidNamespace: pidNamespace() };
   return state.lock;
 }
 
