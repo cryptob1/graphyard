@@ -7,7 +7,7 @@ import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import type { SessionHandleInput } from '../src/model/sessions.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { dispatchEffects, dispatchReadTimeoutMs, emptyDispatchCursor, runAutoDispatch, runDispatchTick, tickReadTimeout, type DispatchEffects } from '../src/auto-dispatch.js';
 import { boundedLaunch, launchBoundMs, LaunchBoundError } from '../src/master/launch-bound.js';
 import { planeWideFailure } from '../src/model/blocker-class.js';
 import { planeUnavailableText } from '../src/model/refusal.js';
@@ -90,5 +90,34 @@ test('unit:launch-bound — GY-1373: one reviewer launch on a dead runtime fails
     // The registered session is closed with the runtime named, rather than left running for the session report to lose.
     const closed = records.find(handle => handle.state === 'finished' && handle.subject?.startsWith('GY-1363'));
     assert.match(closed?.outcome ?? '', /the launch failed before the session started: the claude runtime on vishrog did not acknowledge/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('unit:launch-bound — GY-1373: the dispatcher\'s snapshot fetch is bounded by the tick\'s own read bound, so a snapshot slower than the base bound but inside the grown one no longer fails the tick', async () => {
+  const directory = await temporaryDirectory('launch-bound');
+  try {
+    const token = join(directory, 'coordinator.token'); await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const settings = config(token);
+    // The fetch aborts on the bound it is handed, as `masterApi`'s AbortSignal.timeout does; the
+    // server needs 70 ms, over the 40 ms base bound but inside the 80 ms the first failure grows it to.
+    const bounds: (number | undefined)[] = [];
+    const fetchSnapshot = (timeoutMs?: number) => { bounds.push(timeoutMs);
+      return new Promise<{ work: Work[]; now: string }>((resolve, reject) => {
+        const served = setTimeout(() => resolve({ work: [], now: at }), 70);
+        if (timeoutMs !== undefined && timeoutMs < 70) setTimeout(() => { clearTimeout(served); reject(new DOMException('The operation was aborted due to timeout', 'TimeoutError')); }, timeoutMs);
+      }); };
+    const real = dispatchEffects(directory, () => settings, { snapshot: fetchSnapshot, mutate: async () => ({}) });
+    const effects: DispatchEffects = { snapshot: real.snapshot, agents: () => [], credentials: async () => ({}), reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: [] }),
+      launchReview: async () => {}, launchProducer: async () => {}, recordSession: async () => {}, persist: async () => {} };
+    const cursor = emptyDispatchCursor(settings), lines: string[] = [];
+    await runAutoDispatch(settings, cursor, effects, { intervalMs: 10_000, once: true, now: () => clock, log: line => lines.push(line), readTimeoutMs: 40 });
+    assert.equal(cursor.consecutiveFailures, 1, 'the base bound is too short for this server');
+    assert.match(cursor.lastFailure?.reason ?? '', /The operation was aborted due to timeout/);
+    await runAutoDispatch(settings, cursor, effects, { intervalMs: 10_000, once: true, now: () => clock, log: line => lines.push(line), readTimeoutMs: 40 });
+    assert.deepEqual(bounds, [40, 80], 'the fetch itself was handed the tick\'s bound, doubled after the failure');
+    assert.equal(cursor.consecutiveFailures, 0, 'the grown bound served the snapshot: no "failed N ticks in a row"');
+    // In production the base bound is 8 s and the first failure grows it past it.
+    assert.equal(tickReadTimeout(0, 10_000), dispatchReadTimeoutMs);
+    assert.equal(tickReadTimeout(1, 30_000), 2 * dispatchReadTimeoutMs);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

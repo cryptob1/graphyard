@@ -403,9 +403,11 @@ export async function doctorStep(cycle: Cycle) {
   if (!doctor) return;
   const inFlight = state.doctor.runs.find(entry => entry.state === 'running');
   if (inFlight) {
-    // The run settles beside the loop and applies its own report when it ends (see `live` below);
-    // only a run this process lost — a restart — is failed here, past its bound.
-    if (live || clock - Date.parse(inFlight.at) < 2 * doctor.settings.timeoutMinutes * 60_000 + lostRunGraceMs) return;
+    // The run settles beside the loop and applies its own report when it ends (see `live` below).
+    // A run this process did not start was started by a loop process that no longer runs (the
+    // startup lock admits one loop), so nothing will ever settle it: it is failed at once, and the
+    // next cycle starts the next run. Waiting out its bound held every run behind it (GY-1373).
+    if (live) return;
     inFlight.state = 'failed';
     inFlight.detail = `The doctor run started ${inFlight.at} never ended in this process; it is recorded as lost`.slice(0, 1000);
     // Lost to the loop's own restart, as a run with no report is (GY-1318): failed, but no loop fault.
@@ -475,9 +477,6 @@ export async function doctorStep(cycle: Cycle) {
     })
     .finally(() => { live = null; });
 }
-
-/** How long past its bound a run recorded as running, with no run in this process, is waited for before it is recorded as lost. */
-export const lostRunGraceMs = 5 * 60_000;
 
 // ---------------------------------------------------------------------------
 // The deterministic remedies (AC-3): what the doctor would apply most often needs no judgement,

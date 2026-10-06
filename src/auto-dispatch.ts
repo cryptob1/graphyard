@@ -377,7 +377,8 @@ export const botReviewerLine = (bot: { login: string; state: string; since: stri
 export const botReviewReadTimeoutMs = 5_000;
 
 export interface DispatchEffects {
-  snapshot: () => Promise<{ work: Work[]; now: string }>;
+  /** The work snapshot, read within `timeoutMs`: the tick's own read bound, which grows while ticks fail (GY-1373). */
+  snapshot: (timeoutMs?: number) => Promise<{ work: Work[]; now: string }>;
   /** Herdr's agent list, or null when Herdr could not be read; read asynchronously, never blocking the loop beside it. */
   agents: () => HerdrAgent[] | null | Promise<HerdrAgent[] | null>;
   credentials: (profiles: ProducerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null }>>;
@@ -705,7 +706,7 @@ export async function runDispatchTick(config: MasterConfig, cursor: DispatchCurs
 }
 
 async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number, readTimeoutMs: number, botReadTimeoutMs: number, timings: Timings, launchBound: number): Promise<DispatchTick> {
-  const snapshot = await timings.step('snapshot', () => boundedRead(effects.snapshot, readTimeoutMs));
+  const snapshot = await timings.step('snapshot', () => boundedRead(() => effects.snapshot(readTimeoutMs), readTimeoutMs));
   const observedAt = snapshot.now;
   const clock = Number.isFinite(Date.parse(observedAt)) ? Date.parse(observedAt) : now();
   const tick: DispatchTick = { at: new Date(clock).toISOString(), launched: [], refused: [], waiting: [], skipped: 0, closed: [], closeFailures: [] };
@@ -1230,7 +1231,7 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
 }
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
-export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: () => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: ChildRun; log?: (line: string) => void; now?: () => number }): DispatchEffects {
+export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: (timeoutMs?: number) => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: ChildRun; log?: (line: string) => void; now?: () => number }): DispatchEffects {
   // The dispatcher's own bounded asynchronous runner (GY-125): a `herdr agent start` that takes
   // its whole thirty seconds is awaited here, and the cycle's snapshot read beside it is served.
   // Its children and server calls are timed against the tick that made them (GY-377).
@@ -1256,7 +1257,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
   });
   const mutate = (path: string, body: unknown, requestId?: string) => timedCall('server', serverCallName('POST', path), () => post(path, body, requestId));
   return {
-    snapshot: () => timedCall('server', 'GET work-snapshot', deps.snapshot),
+    snapshot: timeoutMs => timedCall('server', 'GET work-snapshot', () => deps.snapshot(timeoutMs)),
     agents: () => listHerdrAgents(run).then(herdrSessionListing).catch(() => null),
     credentials: profiles => inspectProducerCredentials(root, profiles),
     reconcileReviews: (work, agents) => reconcileReviews(root, current(), { run, work, agents }),

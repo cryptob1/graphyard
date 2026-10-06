@@ -890,3 +890,39 @@ test(`manual:fault-class-loop — GY-1336 GY-1333: the run that filed GY-1333 at
   assert.deepEqual(loopFaultsOf(launched.state), []);
   clearDoctorRuns();
 });
+
+test('manual:doctor-launch-fails-fast — a run a killed loop process left running is failed by the next process at once, and the next cycle starts a fresh run, so no doctor gap waits out the old run’s bound (GY-1373)', async () => {
+  clearDoctorRuns();
+  const started: string[] = [], posted: string[] = [];
+  const report = { findings: [], actions: [], filed: [] };
+  const doctor: DoctorEffects = { settings: doctorSettingsSchema.parse({}) as DoctorEffects['settings'], cwd: '/tmp', env: {},
+    file: async () => { throw new Error('nothing is filed'); }, recordRun: async run => { posted.push(`${run.at} ${run.state}`); },
+    runner: async () => ({ runtime: 'pi', model: 'test/model', release: async () => {}, runner: {
+      name: 'pi', start: (_prompt: string, options: { tool: string }) => { started.push(options.tool);
+        return { id: 'run', events: [], onEvent: () => () => {}, cancel: () => {}, result: async () => ({ ok: true as const, tool: options.tool, payload: report, payloads: [report] }) }; } } as unknown as Runner }) };
+  // The predecessor process started a run twelve minutes ago — past the interval, well inside the
+  // old reaping bound of twice the time limit plus five minutes — and was killed before it settled:
+  // this process holds no run, so the record is the only trace of it.
+  const state = emptyDaemonState(config());
+  state.doctor.runs = [summary(at(-12 * 60_000), 'running')];
+  const restarted = cycle([item()], { doctor, state });
+  await doctorStep(restarted);
+  assert.equal(state.doctor.runs[0].state, 'failed', 'the inherited run is failed at once, not after twice its time limit');
+  assert.match(state.doctor.runs[0].detail, /never ended in this process/);
+  assert.deepEqual(posted, [`${at(-12 * 60_000)} failed`], 'the lost run is posted');
+  const next = cycle([item()], { doctor, state });
+  await doctorStep(next);
+  assert.equal(state.doctor.runs.at(-1)?.at, observedAt, 'the next cycle starts a fresh run');
+  await doctorRunsSettled();
+  assert.equal(state.doctor.runs.at(-1)?.state, 'reported');
+  assert.equal(started.length, 1);
+  // A run this process started is still awaited, however long it has run.
+  const running = emptyDaemonState(config());
+  const own = cycle([item()], { doctor: { ...doctor, runner: async () => ({ runtime: 'pi', model: 'test/model', release: async () => {}, runner: {
+    name: 'pi', start: () => ({ id: 'held', events: [], onEvent: () => () => {}, cancel: () => {}, result: () => new Promise(() => {}) }) } as unknown as Runner }) }, state: running });
+  await doctorStep(own);
+  const later = cycle([item()], { doctor, state: running, clock: Date.parse(at(3 * 60 * 60_000)), now: () => Date.parse(at(3 * 60 * 60_000)) });
+  await doctorStep(later);
+  assert.equal(running.doctor.runs[0].state, 'running', 'the run in flight in this process is left to settle');
+  clearDoctorRuns();
+});

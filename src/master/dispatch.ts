@@ -33,8 +33,9 @@ type WorkerCommand = (command: string, args: string[], options?: { cwd?: string;
 /** `reclaimed` names each abandoned worktree the `worktree` command freed the branch from (GY-1078). */
 export type PreparedWorker = { epoch: number; path: string; base: string; branch?: string; dependencies?: SharedDependencies; reclaimed?: string[] };
 /** Claims the item and builds its worktree; `claimBy` is a hand dispatch's claim deadline (prepareWorkerLaunch). */
-/** `onClaimed` is called with the epoch the moment the claim is held, before the worktree is built (GY-1373). */
-type WorkerPreparer = (root: string, key: string, profileName: string, run?: WorkerCommand, claimBy?: number, onClaimed?: (epoch: number) => void) => Promise<PreparedWorker>;
+/** `onClaimed` is called with the epoch the moment the claim is held, before the worktree is built (GY-1373); what it returns stops the keep-alive it started. */
+type WorkerPreparer = (root: string, key: string, profileName: string, run?: WorkerCommand, claimBy?: number, onClaimed?: ClaimedHook) => Promise<PreparedWorker>;
+type ClaimedHook = (epoch: number) => (() => Promise<void>) | void;
 
 /**
  * `sandbox` runs the launch's sandbox probe (GY-134). The worktree prepareWorkerLaunch creates is
@@ -359,7 +360,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
   // expired, or superseded"), and every launch of the item failed the same way. A preparer that does
   // not report its claim is kept alive from its return, as before.
   let keepAlive = null as ReturnType<typeof launchLeaseKeepAlive> | null;
-  const keep = (epoch: number) => { keepAlive ??= launchLeaseKeepAlive(renew ? () => renew(root, work.key, epoch, profile.name) : null, renewIntervalMs); };
+  const keep = (epoch: number) => { keepAlive ??= launchLeaseKeepAlive(renew ? () => renew(root, work.key, epoch, profile.name) : null, renewIntervalMs); return () => keepAlive!.stop(); };
   let prepared: PreparedWorker;
   try { prepared = await prepare(root, work.key, profile.name, undefined, claimBy, keep); }
   catch (error) { await keepAlive?.stop(); throw error; }
@@ -596,7 +597,7 @@ export const workspaceDispatchFailure = (reason: string) =>
  * immediately before the lease claim, after the credential read, discovery and base fetch, so a
  * backed-off dispatch row the executor may claim by then never meets a second launch at the claim.
  */
-export async function prepareWorkerLaunch(root: string, key: string, profileName: string, run: WorkerCommand = workerCommand, claimBy?: number, onClaimed?: (epoch: number) => void): Promise<PreparedWorker> {
+export async function prepareWorkerLaunch(root: string, key: string, profileName: string, run: WorkerCommand = workerCommand, claimBy?: number, onClaimed?: ClaimedHook): Promise<PreparedWorker> {
   const config = await loadMasterConfig(root); const profile = config.workers.find(worker => worker.name === profileName);
   if (!profile || profile.mode !== 'launch' || !profile.kind || !profile.credentialFile) throw new Error('A complete launch profile is required');
   await readWorkerCredential(root, profile.credentialFile);
@@ -610,9 +611,10 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
   assertClaimDeadline(key, claimBy);
   const claim = JSON.parse(String(await run(process.execPath, [config.cliPath, 'claim', key], { cwd: root, env })));
   const claimedEpoch = Number.isSafeInteger(claim.epoch) && claim.epoch > 0 ? claim.epoch as number : null;
+  let stopKeeping: (() => Promise<void>) | void = undefined;
   try {
     if (claim.lease?.owner !== profile.principal || claimedEpoch === null) throw new Error('Worker launcher acquired an unexpected assignment identity');
-    onClaimed?.(claimedEpoch);
+    stopKeeping = onClaimed?.(claimedEpoch);
     // The worktree command's stderr is captured rather than inherited, so the failure the loop
     // records names git's own error instead of only the command line that failed (GY-1078).
     const workspace = JSON.parse(String(await Promise.resolve(run(process.execPath, [config.cliPath, 'worktree', key, String(claimedEpoch), base], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] }))
@@ -627,6 +629,8 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
     return { epoch: claimedEpoch, path: workspace.path, base, dependencies, ...(typeof workspace.branch === 'string' && workspace.branch ? { branch: workspace.branch } : {}), ...(reclaimed.length ? { reclaimed } : {}) };
   } catch (error) {
     if (claimedEpoch !== null) {
+      // The keep-alive stops before the release, so no renewal races the claim being handed back.
+      await stopKeeping?.();
       try { await run(process.execPath, [config.cliPath, 'release', key, String(claimedEpoch)], { cwd: root, env }); }
       catch (releaseError) {
         // GY-860: the worktree command releases its own claim as a workspace failure when git
