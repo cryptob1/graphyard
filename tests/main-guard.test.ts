@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Work } from '../src/model.js';
 import { generateKeyPairSync } from 'node:crypto';
-import { applyMainGuardRevert, commitVerdict, mainGuardAttention, readMain, revertInverseRefusal, revertLandingAttempts, runMainGuard, type CheckRun, type MainGuardRevert, type FileChange, type MainCommit, type MainGuardPorts } from '../src/main-guard.js';
+import * as mainGuard from '../src/main-guard.js';
+import { applyMainGuardRevert, commitVerdict, mainGuardAttention, readMain, revertInverseRefusal, runMainGuard, type CheckRun, type MainGuardRevert, type FileChange, type MainCommit, type MainGuardPorts } from '../src/main-guard.js';
 import { GitHub } from '../src/github.js';
 import { mergeStep } from '../src/daemon/cycle-delivery.js';
 import { emptyDaemonState, pruneDaemonState, retainedActions } from '../src/daemon/state.js';
@@ -12,6 +13,8 @@ import type { MasterConfig } from '../src/master.js';
 // GY-1250: under GitHub delivery a merge that breaks main is reverted through a revert pull request
 // the App merges, and its item is reopened; a revert that cannot merge is given up after one attempt.
 // Each test is named for the proof it produces.
+// A namespace read, so these proofs fail as test cases on a base without GY-1332, not as a load error.
+const revertLandingAttempts = (mainGuard as { revertLandingAttempts?: number }).revertLandingAttempts ?? 3;
 const sha = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
 const ci = 15368, required = ['test', 'typecheck'];
 const at = '2026-10-05T08:00:00.000Z';
