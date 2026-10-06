@@ -59,7 +59,7 @@ The filter cannot select keyring items: keep other secrets out of that keyring, 
 
 ## Loop down on the coordinator host
 
-A confined session cannot see the lock's pid, so its `master status` judges the loop by the stall bound, not "names a process that is gone". If stalled or absent, the operator owning vishrog, in `/home/vish/code/graphyard` detached at `origin/main`, stops any hand-started loop, copies `examples/master/graphyard-master.service` to `~/.config/systemd/user/`, then runs `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
+A session outside the lock's recorded PID namespace cannot probe its pid, so `master status` judges the loop by the stall bound, never "process that is gone". If stalled or absent, the operator owning vishrog, in `/home/vish/code/graphyard` detached at `origin/main`, stops any hand-started loop, copies `examples/master/graphyard-master.service` to `~/.config/systemd/user/`, then runs `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
 
 ## Main guard revert approver
 

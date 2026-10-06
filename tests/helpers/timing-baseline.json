@@ -427,6 +427,7 @@
     "tests/locked-read.test.ts": 17399,
     "tests/loop-faults-dispatch-wake.test.ts": 2375,
     "tests/loop-faults.test.ts": 2260,
+    "tests/loop-liveness-namespace.test.ts": 500,
     "tests/loop-self-upgrade.test.ts": 1583,
     "tests/loop-silence-owner.test.ts": 1330,
     "tests/machine-backlog-routes.test.ts": 3434,
