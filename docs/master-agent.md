@@ -38,7 +38,7 @@ another session's handle finished to free a slot.
 
 ### System invariants
 
-Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Fault thresholds: `invariants` in `.graphyard/master.json`; `tests/soak.test.ts` enforces.
+Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Fault thresholds: `invariants` in `.graphyard/master.json`; `tests/soak-*.test.ts` enforce.
 
 ### The pipeline doctor
 

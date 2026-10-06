@@ -559,13 +559,13 @@ export const repeatingPaths = ['src/daemon/', 'src/master/', 'src/merge-queue.ts
 export const touchesRepeatingPath = (files: readonly string[]) => files.some(file => repeatingPaths.some(path => path.endsWith('/') ? file.startsWith(path) : file === path));
 /**
  * The question the review asks of a change to a repeating path: what it does across many cycles,
- * heads and items, and that `tests/soak.test.ts` covers any repeating behaviour it adds. Files
+ * heads and items, and that the soak suites (`tests/soak-*.test.ts`) cover any repeating behaviour it adds. Files
  * unknown (no observation of this head), the question is asked conditionally.
  */
 export function repetitionReviewSection(files?: readonly string[] | null) {
   if (files && !touchesRepeatingPath(files)) return '';
   const question = 'ask what it does when repeated across many cycles, heads and items: one follow-up per approval becomes 170 for 40 parents, one refresh per merge becomes one per merge for every open candidate, one session per decision stays open unless something closes it. '
-    + 'Any new behaviour that repeats per cycle, per head or per item must be covered by tests/soak.test.ts, which runs the real loop over a simulated day and asserts the system invariants (docs/master-agent.md#system-invariants); a change that adds one without that coverage is a BLOCKING finding. ';
+    + 'Any new behaviour that repeats per cycle, per head or per item must be covered by the soak suites (tests/soak-*.test.ts), which run the real loop over simulated days and assert the system invariants (docs/master-agent.md#system-invariants); a change that adds one without that coverage is a BLOCKING finding. ';
   return files ? `This change touches ${files.filter(file => touchesRepeatingPath([file])).slice(0, 5).join(', ')}, which run on every loop cycle: ${question}`
     : `If this change touches ${repeatingPaths.join(', ')}, which run on every loop cycle, ${question}`;
 }
