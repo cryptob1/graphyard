@@ -321,6 +321,91 @@ test('unit:diagnosis-stale-release-retries-are-bounded — a release settled sta
   assert.deepEqual(other.h.requested.map(request => [request.action, request.revision]), [['release', 1], ['release', 2]]);
 });
 
+// GY-1371: on 2026-10-06 twenty diagnoses sat in releasing or closing on items long done. Each one's
+// decision had settled stale or withdrawn, its target was delivered, and every cycle read its
+// decisions, asked again, was refused "Delivered work is immutable", and left the entry where it was.
+const immutable = () => new Error('Graphyard refused work/work-GY-201/decide (409): Delivered work is immutable; create a follow-up task');
+/** The effects with every decisions read counted. */
+function counted(fx: DaemonEffects) {
+  const reads: string[] = [];
+  const decisions = fx.decisions!;
+  return { reads, fx: { ...fx, decisions: async (target: Work) => { reads.push(target.key); return decisions(target); } } as DaemonEffects };
+}
+
+test('integration:diagnosis-settles-on-delivered-target — a release settled stale on a delivered fix settles the diagnosis, asks nothing, and is not read again', async () => {
+  const { h, state, fx } = await releasing();
+  h.outcomes.set(h.requested[0].id, { state: 'stale', outcome: staleOutcome(3) });
+  const recurringItem = recurring(emptyDaemonState(config()));
+  const delivered = [recurringItem, item('GY-201', { priority: 1, revision: 4, stage: 'done' } as Partial<Work>)];
+  const { reads, fx: watched } = counted(fx);
+  const performed = await step(state, watched, delivered, clock + 2 * minute);
+  assert.equal(h.requested.length, 1, 'decide is not called again');
+  const entry = state.diagnoses['GY-101'];
+  assert.equal(entry.state, 'answered', 'the entry settles in the same cycle');
+  assert.equal(entry.answeredBy, 'GY-201', 'answered by the delivered fix');
+  assert.match(entry.detail, /settled stale, but GY-201 is no longer open.*answered by GY-201/);
+  assert.deepEqual(performed.filter(action => action.state === 'failed'), [], 'no fault');
+  assert.deepEqual(state.faults.instances.filter(instance => instance.kind.startsWith('action:')), [], 'no loop fault instance');
+  reads.length = 0;
+  await step(state, watched, delivered, clock + 3 * minute);
+  assert.deepEqual(reads, [], 'a second cycle performs no decisions read for it');
+  assert.equal(h.requested.length, 1);
+  // A closure settled withdrawn on an item already closed is answered by the item its closure names.
+  clearDiagnoses();
+  const closing = await releasing();
+  closing.h.outcomes.set(closing.h.requested[0].id, { state: 'applied', approvedBy: 'approver-agent' });
+  await step(closing.state, closing.fx, closing.snapshot(2), clock + 2 * minute);
+  assert.equal(closing.state.diagnoses['GY-101'].state, 'closing');
+  closing.h.outcomes.set(closing.h.requested[1].id, { state: 'withdrawn', outcome: 'taken back' });
+  const closed = { ...closing.snapshot(2)[0], stage: 'done', closure: { kind: 'duplicate', ref: 'GY-201', at: iso(0) } } as unknown as Work;
+  await step(closing.state, closing.fx, [closed, closing.snapshot(2)[1]], clock + 3 * minute);
+  assert.equal(closing.h.requested.length, 2, 'no close is asked of a closed item');
+  assert.equal(closing.state.diagnoses['GY-101'].state, 'answered');
+  assert.equal(closing.state.diagnoses['GY-101'].answeredBy, 'GY-201');
+  // A target still open is requested again, as before (unit:diagnosis-stale-release-re-requested).
+  clearDiagnoses();
+  const open = await releasing();
+  open.h.outcomes.set(open.h.requested[0].id, { state: 'stale', outcome: staleOutcome(3) });
+  await step(open.state, open.fx, open.snapshot(3), clock + 2 * minute);
+  assert.equal(open.h.requested.length, 2);
+  assert.equal(open.state.diagnoses['GY-101'].state, 'releasing');
+});
+
+test('unit:decide-fresh-not-applicable-settles — an entry whose re-request decideFresh finds delivered settles, and 20 such entries cost no decide call on the following cycle', async () => {
+  // The cycle's snapshot still shows each fix open; it was delivered before the request landed.
+  const h = harness(() => null);
+  const state = emptyDaemonState(config());
+  const subjects: Work[] = [], open: Work[] = [], delivered: Work[] = [];
+  for (let index = 0; index < 20; index++) {
+    const subject = item(`GY-${300 + index}`, { stage: 'done' } as Partial<Work>), fixKey = `GY-${400 + index}`, id = randomUUID();
+    subjects.push(subject);
+    open.push(item(fixKey, { priority: 1, revision: 3 } as Partial<Work>));
+    delivered.push(item(fixKey, { priority: 1, revision: 4, stage: 'done' } as Partial<Work>));
+    h.requested.push({ work: fixKey, action: 'release', reason: 'release', input: {}, id, revision: 1 });
+    h.outcomes.set(id, { state: 'stale', outcome: staleOutcome(3) });
+    state.diagnoses[subject.key] = { subject: subject.key, kind: 'recurring', faultClass: 'stalled-gate', work: subject.key, state: 'releasing', startedAt: iso(-hour), updatedAt: iso(-minute),
+      runs: [], diagnosis: diagnosisPayloadSchema.parse(diagnosis(subject.key, { fix })), fix: fixKey,
+      decision: { id, action: 'release', work: fixKey, approver: 'approver' }, answeredBy: null, retryAt: null, refusedAt: null, detail: '' };
+  }
+  let decides = 0;
+  h.diagnostician.decide = async () => { decides++; throw immutable(); };
+  const { reads, fx } = counted(effects(h, () => [...subjects, ...delivered], () => clock));
+  const performed = await step(state, fx, [...subjects, ...open], clock);
+  assert.equal(decides, 20, 'each is asked once, and refused as delivered');
+  for (const subject of subjects) {
+    const entry = state.diagnoses[subject.key];
+    assert.equal(entry.state, 'answered', `${subject.key}: decideFresh found it no longer needs the release, so it does not stay releasing`);
+    assert.equal(entry.answeredBy, entry.fix);
+    assert.match(entry.detail, /Delivered work is immutable.*no longer needs the release, so the diagnosis of GY-\d+ is answered by GY-4\d\d/);
+  }
+  assert.deepEqual(performed.filter(action => action.state === 'failed'), [], 'no fault');
+  assert.deepEqual(state.faults.instances.filter(instance => instance.kind.startsWith('action:')), [], 'no loop fault instance');
+  decides = 0; reads.length = 0;
+  await step(state, fx, [...subjects, ...open], clock + minute);
+  assert.equal(decides, 0, 'the following cycle asks nothing');
+  assert.deepEqual(reads, [], 'and reads no decisions');
+});
+
 test('unit:diagnosis-files-fix — a covering item closes the recurring item as its duplicate; a refused decision, or a fix master create would refuse, changes nothing', async () => {
   // The duplicate path: nothing is filed; the closure names the covering item and waits on the approver.
   const h = harness(() => diagnosis('GY-101', { covering: 'GY-50' }));
