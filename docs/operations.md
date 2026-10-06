@@ -54,7 +54,7 @@ The filter cannot select keyring items: keep other secrets out of that keyring, 
 
 ## Resources and disk
 
-`resourceRegistry` declares bounded resources, reported in `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop removes finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed), stale test temp entries and idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen by two passes. `disk` attention below `run.diskThresholdGb`. Every non-master session's checkout lives under `run.worktreeRoot`. Each cycle a dirty coordinator checkout, or a HEAD other than the commit the loop runs, raises `escalation:dirty-checkout` naming the paths, HEAD and sessions pointing at it, and blocks self-upgrade until clean.
+`resourceRegistry` declares bounded resources, reported in `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop removes finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed), stale test temp entries and idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen by two passes. `disk` attention below `run.diskThresholdGb`. Every non-master session's checkout lives under `run.worktreeRoot`. Each cycle a dirty coordinator checkout, or a HEAD other than the commit the loop runs, raises `escalation:dirty-checkout` naming the paths, HEAD and sessions pointing at it, and blocks self-upgrade until clean. A HEAD moved forward to a clean, detached descendant of that commit that the fetched base branch holds is adopted instead (`upgrade:recovered`): the executors restart onto it and the loop re-executes; any other move is tried once and stays drift.
 
 ## Main guard revert approver
 
