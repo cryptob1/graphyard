@@ -25,6 +25,7 @@ import { baseRefreshConflict } from '../merge-queue.js';
 import { mergeBaseDismissal } from '../merge-base-ancestry.js';
 import { containmentGraceMs, containmentPhase } from '../model/containment.js';
 import { openAction } from '../model/next-action.js';
+import { masterTurnWaitBoundMs } from './decisions.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
 export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[];
@@ -61,7 +62,7 @@ export interface FaultSources {
  * restates a fault the item's own record shows (the same kind, or a kind in `restatements`) is that
  * fault, so it is not counted twice; a different fault of the same class on the item is its own
  * instance. Nor is the one-hour dwell line (`gate`) or containment grace window (`containment-grace`) counted,
- * nor a lapsed fence the loop is still settling (containmentInMotion) or the owed line restating its escalation (owedContainmentLine), nor a line whose `inMotionUntil` has not passed (GY-1315), which are the ordinary pace of work — a gate nothing moves is `stalled-item`. Failed actions are not read here:
+ * nor a lapsed fence the loop is still settling (containmentInMotion) or the owed line restating its escalation (owedContainmentLine), nor an escalation inside the master's turn (owedEscalationInMotion), nor a line whose `inMotionUntil` has not passed (GY-1315), which are the ordinary pace of work — a gate nothing moves is `stalled-item`. Failed actions are not read here:
  * the action history retains failures long after they stopped mattering, so each is noted once, as it happens, by storeAction.
  */
 export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, sources: FaultSources = {}): FaultObservation[] {
@@ -88,6 +89,7 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
         && !(item.kind === 'base-conflict' && baseConflictInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'owed-decision' && owedReworkLine(byKey.get(item.subject), item.text) && reworkDecisionInMotion(byKey.get(item.subject), now))
+        && !(item.kind === 'owed-decision' && owedEscalationInMotion(byKey.get(item.subject), item.text, now))
         && !(item.kind === 'owed-decision' && owedContainmentLine(byKey.get(item.subject), item.text) && !standingFence(byKey.get(item.subject), now))
         && !(item.inMotionUntil && Date.parse(item.inMotionUntil) > now))
         if (item.kind === 'resource-bound' && item.resource) attributed.push({ kind: item.kind, faultClass: item.faultClass, subject: `resource:${item.resource}`, text: item.text.slice(0, 500) });
@@ -191,6 +193,24 @@ export function reworkDecisionInMotion(work: Work | undefined, now: number): boo
   const row = (work!.actionQueue?.actions ?? []).find(entry => entry.kind === action.kind && entry.binding === action.binding);
   const since = row?.requestedAt ? Date.parse(row.requestedAt) : Number.NaN;
   return Number.isFinite(since) && now - since <= reworkDecisionWaitBoundMs;
+}
+/**
+ * GY-1346. Whether an owed line names the item's own escalation — any trigger but `containment`,
+ * which is counted as its fence is (owedContainmentLine) — and the master's turn to resolve it is
+ * still running: the queue row for that escalate action was requested within `masterTurnWaitBoundMs`.
+ * The loop wakes the master on the changed item and the master resolves the escalation or asks an
+ * approver to, so an escalation owed for minutes is that turn, not a decision fault: on 6 October
+ * 2026 GY-1335's requirement-weakening line counted 3m after its row was queued, 31s after the master
+ * had asked for the resolve decision. Past the bound it counts, as does a row with no instant to date it.
+ */
+export function owedEscalationInMotion(work: Work | undefined, text: string, now: number): boolean {
+  const action = work && openAction(work);
+  if (action?.kind !== 'escalate' || action.inputs.kind !== 'escalate' || action.inputs.trigger === 'containment') return false;
+  const decision = action.needsHuman?.decision;
+  if (!decision || !text.includes(decision)) return false;
+  const row = (work!.actionQueue?.actions ?? []).find(entry => entry.kind === action.kind && entry.binding === action.binding);
+  const since = row?.requestedAt ? Date.parse(row.requestedAt) : Number.NaN;
+  return Number.isFinite(since) && now - since <= masterTurnWaitBoundMs;
 }
 /** How long an approval dismissed for a merge-base change may stay in motion before it counts as a review-convergence fault (GY-1140). */
 export const mergeBaseDismissalWaitBoundMs = 30 * 60_000;

@@ -3,7 +3,7 @@ import { standingCapacity, type CapacityState } from '../model/capacity.js';
 import { elapsed } from '../model/sessions.js';
 import { mapBounded, readConcurrency } from '../master/timings.js';
 import { staleReleaseAttention } from './owed-report.js';
-import { approverJudgeBoundMs, maxApproverLaunches } from '../daemon/decisions.js';
+import { approverJudgeBoundMs, masterTurnWaitBoundMs, maxApproverLaunches } from '../daemon/decisions.js';
 
 type DecisionRow = { id: string; action: string; state: string; requestedAt: string; requestedBy?: string; outcome?: string | null; race?: unknown; refusal?: { approver: string; reason: string; at: string } | null };
 type ApprovalWatch = { work: string; decision: string; agentName: string | null; settledAt?: string | null; ended?: string[]; launches?: number; launchedAt?: string | null; exhaustedAt?: string | null };
@@ -24,15 +24,23 @@ export const approverRelaunchWaitBoundMs = approverJudgeBoundMs + 5 * 60_000;
  * needs. GY-1335's release was refused at 00:52 on 6 October 2026 because GY-1332's PR #813 was in
  * review, counted at once, and was answered by a requirements decision ten minutes later.
  */
-export const refusalAnswerWaitBoundMs = 30 * 60_000;
+export const refusalAnswerWaitBoundMs = masterTurnWaitBoundMs;
 /**
  * Until when an unanswered decision is a relaunch the loop is already making: its watch is
  * unsettled and unescalated, it counts launches and some remain, and the latest launch (or the request, before any)
- * is within `approverRelaunchWaitBoundMs`. A decision the loop does not watch, or one whose
- * launches are spent, has no bound and counts at once.
+ * is within `approverRelaunchWaitBoundMs`. A decision the loop does not watch is the master's to
+ * put to an approver (`master decide`, then `master approver`), so it is in motion for
+ * `masterTurnWaitBoundMs` after its request (GY-1346): on 6 October 2026 GY-1338's requirements
+ * decision counted 17 minutes after the master asked for it and GY-1335's resolve one minute
+ * after, each before the master's approver launch. A watched decision whose launches are spent,
+ * or one escalated as unjudged, has no bound and counts at once.
  */
 export function unansweredInMotionUntil(watch: ApprovalWatch | undefined, requestedAt: string): string | undefined {
-  if (!watch || watch.settledAt || watch.exhaustedAt || (watch.launches ?? maxApproverLaunches) >= maxApproverLaunches) return undefined;
+  if (!watch) {
+    const requested = Date.parse(requestedAt);
+    return Number.isFinite(requested) ? new Date(requested + masterTurnWaitBoundMs).toISOString() : undefined;
+  }
+  if (watch.settledAt || watch.exhaustedAt || (watch.launches ?? maxApproverLaunches) >= maxApproverLaunches) return undefined;
   const since = Date.parse(watch.launchedAt ?? requestedAt);
   return Number.isFinite(since) ? new Date(since + approverRelaunchWaitBoundMs).toISOString() : undefined;
 }
