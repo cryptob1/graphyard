@@ -49,6 +49,7 @@ export const frameworkReportFormats: Record<string, { format: ReportFormat; via:
   vitest: { format: 'junit-xml-v1', via: 'vitest --reporter=junit' },
   jest: { format: 'junit-xml-v1', via: 'jest-junit' },
   mocha: { format: 'junit-xml-v1', via: 'mocha --reporter xunit or mocha-junit-reporter' },
+  'node:test': { format: 'junit-xml-v1', via: 'node --test --test-reporter=junit --test-reporter-destination=FILE' },
   pytest: { format: 'junit-xml-v1', via: 'pytest --junitxml' },
   unittest: { format: 'junit-xml-v1', via: 'pytest --junitxml (pytest runs unittest suites)' },
   tox: { format: 'junit-xml-v1', via: 'pytest --junitxml inside the tox environment' },

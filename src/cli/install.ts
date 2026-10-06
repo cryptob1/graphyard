@@ -14,7 +14,8 @@ import { completionProfiles, readinessChecklist, summarizeDefinitions, type Comp
 import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
 import { documentationDrift } from '../model/documentation.js';
-
+import { agentEnvironmentRoot } from '../master/environments.js';
+import { setupFromZeroChecks, setupLine } from '../setup-from-zero.js';
 
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
   const setup = await startGithubSetup(root, repository, deployment);
@@ -228,9 +229,14 @@ export const installCommands = defineCommands([
         proposal: stored?.proposal ?? null,
         validation: definitions ? summarizeDefinitions(definitions) : null,
       });
+      // The machine-local prerequisites docs/setup-from-zero.md depends on (GY-1352), each naming its step.
+      const checks = await setupFromZeroChecks({ root, status: live, failure, environments: agentEnvironmentRoot() });
+      const setupFromZero = { ready: checks.every(check => check.status === 'pass'), lines: checks.map(setupLine) };
       // A ready checklist still deploys nothing: once every item is ready, capacity drift and
       // an undeployed merge are the next actions; until then the checklist's own gap comes first.
+      const firstFailed = checks.find(check => check.status === 'fail');
       const next = !readiness.ready ? readiness.next
+        : firstFailed ? setupLine(firstFailed)
         : delegationLimits?.drift?.length ? `Set ${delegationLimits.drift.map((entry: any) => `${entry.variable}=${entry.required}`).join(' ')} on the deployment: ${delegationLimits.drift[0].reason}`
         : documentation.drift ? documentation.drift
         : production?.incidents?.length ? `Production has not deployed ${production.incidents.map((incident: any) => incident.key).join(', ')}: ${production.incidents[0].reason}`
@@ -244,6 +250,7 @@ export const installCommands = defineCommands([
         delegationLimits: delegationLimits ? { limits: delegationLimits.limits, deployed: delegationLimits.deployed, drift: delegationLimits.drift, attention: delegationLimits.attention } : null,
         production: production ? { provider: production.provider, serving: production.serving, running: production.running, aheadBy: production.ahead?.by ?? null, incidents: production.incidents, attention: production.attention, error: production.error } : null,
         documentation,
+        setupFromZero,
         readiness,
         next,
         limits: ['CI discovery is a proposal, not executed-test inventory', 'Herdr two-host recovery and GitHub refusal-to-acceptance must be demonstrated', 'A ready checklist is configuration, never evidence: the first real PR must visibly pass every gate'] });

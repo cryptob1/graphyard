@@ -103,6 +103,12 @@ export interface BundleFile { path: string; content: string; mode: number; /** T
 export const PRIVATE_KEY_FILE_VARIABLE = 'GITHUB_PRIVATE_KEY_FILE';
 export const PRIVATE_KEY_CONTAINER_PATH = '/run/graphyard/github-private-key.pem';
 const PRIVATE_KEY_BUNDLE_NAME = 'github-private-key.pem';
+/** The main guard's revert approver App key (GY-1352), mounted the same way as the control-plane App's. */
+export const REVERT_APPROVER_KEY_CONTAINER_PATH = '/run/graphyard/revert-approver-private-key.pem';
+const mountedKeys = [
+  { variable: 'GITHUB_PRIVATE_KEY', file: PRIVATE_KEY_FILE_VARIABLE, bundle: PRIVATE_KEY_BUNDLE_NAME, container: PRIVATE_KEY_CONTAINER_PATH },
+  { variable: 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY', file: 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY_FILE', bundle: 'revert-approver-private-key.pem', container: REVERT_APPROVER_KEY_CONTAINER_PATH },
+];
 
 /**
  * `databasePort` publishes Postgres on the host's loopback only: a self-contained host restores a
@@ -133,15 +139,15 @@ export function composeBundle(ctx: AdapterContext, values: EnvValue[], publish: 
   // as one `NAME=value` per line: every continuation line of a raw key would be refused as a
   // malformed variable name and the deploy would fail. The key is therefore written to its own
   // file, mounted into the server container read-only, and referenced through
-  // `GITHUB_PRIVATE_KEY_FILE`, which the server reads natively.
-  const key = values.find(value => value.name === 'GITHUB_PRIVATE_KEY' && value.value);
+  // `GITHUB_PRIVATE_KEY_FILE`, which the server reads natively; the revert approver's key likewise.
+  const keys = mountedKeys.flatMap(mount => { const value = values.find(entry => entry.name === mount.variable && entry.value); return value ? [{ ...mount, value: value.value }] : []; });
   const environment = values
-    .filter(value => value.name !== 'GITHUB_PRIVATE_KEY')
+    .filter(value => !mountedKeys.some(mount => mount.variable === value.name))
     .map(value => {
       if (/[\r\n]/.test(value.value)) throw new Error(`${value.name} cannot be written to a Compose env file: its value spans multiple lines`);
       return `${value.name}=${value.value}`;
     });
-  if (key) environment.push(`${PRIVATE_KEY_FILE_VARIABLE}=${PRIVATE_KEY_CONTAINER_PATH}`);
+  for (const key of keys) environment.push(`${key.file}=${key.container}`);
   const proxied = publish === 'proxy';
   const files: BundleFile[] = [
     { path: `${ctx.workdir}/db.env`, mode: 0o600, content: `POSTGRES_USER=graphyard\nPOSTGRES_DB=graphyard\nPOSTGRES_PASSWORD=${ctx.databasePassword}\n` },
@@ -162,7 +168,7 @@ ${options.databasePort ? `    ports: ["127.0.0.1:${options.databasePort}:5432"]\
     image: ${ctx.image}
     restart: unless-stopped
     env_file: [server.env]
-${key ? `    volumes: ["./${PRIVATE_KEY_BUNDLE_NAME}:${PRIVATE_KEY_CONTAINER_PATH}:ro"]\n` : ''}    depends_on:
+${keys.length ? `    volumes: [${keys.map(key => `"./${key.bundle}:${key.container}:ro"`).join(', ')}]\n` : ''}    depends_on:
       db: { condition: service_healthy }
 ${proxied ? '    expose: ["' + SERVER_PORT + '"]' : `    ports: ["127.0.0.1:${ctx.port}:${SERVER_PORT}"]`}
 ${proxied ? `  proxy:
@@ -174,13 +180,13 @@ ${proxied ? `  proxy:
 ` : ''}volumes:
 ${ctx.dataPath ? '' : '  graphyard-data: {}\n'}${proxied ? '  caddy-data: {}\n  caddy-config: {}\n' : ''}` },
   ];
-  if (key) {
+  for (const key of keys) {
     // A bind mount keeps the host file's owner and mode, so the key must land as 0600 owned
     // by the container user itself: root:root 0600 (the SSH transports write as root) or a
     // local installer with a different uid would leave it unreadable inside the container,
     // and the server would restart forever on EACCES. A transport that cannot chown refuses
     // the install instead of deploying a server that cannot start.
-    files.push({ path: `${ctx.workdir}/${PRIVATE_KEY_BUNDLE_NAME}`, mode: 0o600, owner: `${SERVER_CONTAINER_UID}:${SERVER_CONTAINER_UID}`, content: key.value });
+    files.push({ path: `${ctx.workdir}/${key.bundle}`, mode: 0o600, owner: `${SERVER_CONTAINER_UID}:${SERVER_CONTAINER_UID}`, content: key.value });
   }
   // Caddy always serves a public name it obtains a trusted certificate for: never an internal
   // certificate, which GitHub's webhook delivery and the health check would both reject.
@@ -643,7 +649,7 @@ export const railwayAdapter: ProviderAdapter = {
  * string with a password, including the resolved one a provider reports back in place of the
  * reference it was given, and a password must never reach the plan.
  */
-export const secretVariableNames = new Set(['GRAPHYARD_PRINCIPALS', 'GITHUB_PRIVATE_KEY', 'GITHUB_WEBHOOK_SECRET']);
+export const secretVariableNames = new Set(['GRAPHYARD_PRINCIPALS', 'GITHUB_PRIVATE_KEY', 'GITHUB_WEBHOOK_SECRET', 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY']);
 const providerReference = /^\$\{\{[^{}]+\}\}$/;
 /** True for a shared reference such as `${{Postgres.DATABASE_URL}}`, which the provider resolves before reporting it back. */
 export const isProviderReference = (value: string) => providerReference.test(value.trim());

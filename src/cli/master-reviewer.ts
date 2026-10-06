@@ -20,7 +20,7 @@ export async function reviewerCommand(root: string, master: MasterConfig, args: 
   if (args[0] === 'setup') {
     const { values } = parseArgs({ args: args.slice(1), options: { deployment: { type: 'string' }, port: { type: 'string' }, name: { type: 'string' } }, allowPositionals: false });
     const deployment = values.deployment ?? master.url;
-    if (!deployment.startsWith('https://')) throw new Error('Reviewer App registration needs the deployed HTTPS origin; pass --deployment https://YOUR-GRAPHYARD-HOST');
+    // startGithubSetup refuses an origin the manifest cannot use: HTTPS, or http:// on loopback for a local Compose install.
     const registrations = reviewerCredentialDirectory(master);
     await mkdir(registrations, { recursive: true, mode: 0o700 });
     const setup = await startGithubSetup(root, master.repository, deployment, Number(values.port ?? 4312), {
