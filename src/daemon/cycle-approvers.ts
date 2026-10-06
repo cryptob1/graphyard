@@ -10,6 +10,8 @@ import { capacityRefusal } from '../fleet.js';
 import type { Cycle } from './cycle.js';
 import { sessionExhaustion } from './cycle-sessions.js';
 import { resumedApplication } from './decision-reads.js';
+import { planeWideRefusal } from '../model/blocker-class.js';
+import type { FaultKind } from '../model/fault-classes.js';
 
 /**
  * The approver sessions step 4c puts its decisions to (GY-1147 moved them here from
@@ -17,7 +19,7 @@ import { resumedApplication } from './decision-reads.js';
  * request of the loop's launched (4c'), and the registry sessions that end with them (4d).
  */
 export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, stamp: string,
-  note: (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at?: number) => Promise<unknown>,
+  note: (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at?: number, faultKind?: FaultKind | null) => Promise<unknown>,
   capacities: RoleCapacity[], approversSpent: boolean) {
   const { config, state, now, snapshot, clock, performed, isolate } = cycle;
   // One Herdr read serves the step, and is taken again after anything that changes the inventory.
@@ -29,11 +31,17 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
    * live one refuses the next decision's approver, so it goes wherever the approver is closed or
    * replaced, not only on failover. False only when the registry could not be told; it is kept and
    * ended on the next try, which the registry answers the same way when it is already ended.
+   * GY-1375: a registry the plane's outage or restart kept from answering (planeWideRefusal) is no
+   * session-liveness fault of the item's — on 6 October 2026 GY-1359's close met the startup 503.
    */
   const endApproverSession = async (item: Work, watch: ApprovalWatch, why: string) => {
     if (!watch.session || !effects.endRegistrySession) return true;
     try { await effects.endRegistrySession(watch.session, why.slice(0, 500)); watch.session = null; return true; }
-    catch (error) { await note(`close:approver-session:${watch.decision}:${watch.session}`, item, 'close', 'failed', `Could not end approver registry session ${watch.session}: ${message(error)}`); return false; }
+    catch (error) {
+      const unanswered = planeWideRefusal(error);
+      await note(`close:approver-session:${watch.decision}:${watch.session}`, item, 'close', 'failed', `Could not end approver registry session ${watch.session}${unanswered ? ' (the control plane did not answer, so it is ended on the next try)' : ''}: ${message(error)}`, undefined, unanswered ? null : undefined);
+      return false;
+    }
   };
   /**
    * Close the approver session a watch names, if Herdr still lists it, and end its registry
