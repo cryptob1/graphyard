@@ -467,9 +467,14 @@ export async function saveApproverLaunch(root: string, launch: z.input<typeof ap
   const records = [...kept, approverLaunchSchema.parse(launch)].slice(-retainedEscalationSessions);
   const refused: string[] = [];
   for (const file of [approverLaunchesFile(root, environment), checkoutApproverLaunchesFile(root)]) {
-    try { await write(file, records); return { file }; }
-    catch (error) { const code = (error as { code?: string } | null)?.code ?? ''; if (!['EROFS', 'EACCES', 'EPERM'].includes(code)) throw error;
-      refused.push(`${file} (${code}: ${failureText(error).split('\n')[0]!.slice(0, 200)})`); }
+    try {
+      await write(file, records);
+      return { file };
+    } catch (error) {
+      const code = (error as { code?: string } | null)?.code ?? '';
+      if (!['EROFS', 'EACCES', 'EPERM'].includes(code)) throw error;
+      refused.push(`${file} (${code}: ${failureText(error).split('\n')[0]!.slice(0, 200)})`);
+    }
   }
   return { file: null, unrecorded: `the approver launch record could not be written to ${refused.join(' or ')}` };
 }
