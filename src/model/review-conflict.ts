@@ -171,8 +171,8 @@ export function settledReviewConflict(work: Pick<Work, 'stage' | 'candidate' | '
   const conflict = openReviewConflict(work);
   if (!conflict) return null;
   if (work.stage === 'done') return `${short(conflict.sha)} was delivered`;
-  if (!work.candidate) return 'the item no longer has a candidate';
-  if (work.candidate.sha !== conflict.sha) return `the item left ${short(conflict.sha)} for ${short(work.candidate.sha)}`;
+  // With no candidate observed there is no current head to compare; reconcile supersedes that case.
+  if (work.candidate && work.candidate.sha !== conflict.sha) return `the item left ${short(conflict.sha)} for ${short(work.candidate.sha)}`;
   return null;
 }
 

@@ -45,15 +45,13 @@ test('unit:delivered-review-conflict-settled — a conflict on a Done item or on
   const moved = work({ key: 'GY-947', candidate: { sha: H2, baseSha: B, pr: 521, branch: 'graphyard/gy-947-2', author: 'implementer' }, reviewConflict: conflict(H) });
   assert.match(settledReviewConflict(moved)!, /left e9a5521c608c/);
   assert.deepEqual(reviewConflictAttention([moved], []), []);
-  const gone = work({ key: 'GY-948', candidate: null, reviewConflict: conflict(H) });
-  assert.deepEqual(reviewConflictAttention([gone], []), []);
   // The conflict itself stays on the record: settled for attention, not erased.
   assert.equal(openReviewConflict(delivered)?.sha, H);
 
   // A live conflict on the current head is raised (and counted, since counts.reviewConflicts is this list's length).
   const live = work({ reviewConflict: conflict(H), autoDispatch: { review: null, history: [{ kind: 'review', id: 'req-1', sha: H }], producers: [] } as unknown as Work['autoDispatch'] });
   assert.equal(settledReviewConflict(live), null);
-  const lines = reviewConflictAttention([delivered, moved, gone, live], []);
+  const lines = reviewConflictAttention([delivered, moved, live], []);
   assert.equal(lines.length, 1);
   assert.equal(lines[0].subject, 'GY-100');
   assert.match(lines[0].text, /head e9a5521c608c \(PR #116\) is conflicted/);
