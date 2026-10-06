@@ -26,6 +26,14 @@ import * as livenessModule from '../src/daemon/liveness.js';
 import type { CycleMetrics } from '../src/daemon/state.js';
 import { timedCall } from '../src/master/timings.js';
 import * as deploymentModule from '../src/daemon/deployment.js';
+import { execFileSync } from 'node:child_process';
+import { writeFileSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { coordinatorCheckoutGuard } from '../src/daemon/run.js';
+import { readCoordinatorCheckout } from '../src/master/profiles.js';
+// A namespace import for what GY-1356 adds, so a run against the base fails its cases rather than the module's load.
+import * as upgradeModule from '../src/daemon/upgrade.js';
 
 // GY-1092 names this file for its proof: manual:fault-class-loop. The master loop filed ten loop
 // faults in a day, and they share one cause: the loop recorded as its own failure a wait that
@@ -1337,3 +1345,115 @@ for (const instance of gy1354Instances) {
     } finally { mock.timers.reset(); }
   });
 }
+
+// ---- GY-1356: the coordinator HEAD moved forward under the running loop -------------------------
+//
+// At 2026-10-06T05:31:54.601Z the loop recorded escalation:dirty-checkout: its checkout's HEAD had
+// moved from fc04aa78f209 (the commit it loaded) to c67ed34548f2 (GY-1338's merge, a descendant) while
+// it ran. The guard refused restart and self-upgrade on any move, so the loop stood down on stale
+// code and every later merge stayed inert. A clean, detached descendant that the base branch holds is
+// now recovered onto: the executors restart onto it and the loop re-executes itself. Any other move —
+// an unmerged feature-branch head among them — stays drift.
+
+/**
+ * A real repository whose origin is itself: the loaded commit, a descendant touching loaded code that
+ * main holds, a sibling that is no descendant, and a descendant main does not hold (a feature head).
+ */
+async function divergence() {
+  const root = await temporaryDirectory('gy-1356'), git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' }).trim();
+  git('init', '--quiet', '-b', 'main'); git('config', 'user.email', 'loop@example.com'); git('config', 'user.name', 'loop'); git('config', 'commit.gpgsign', 'false');
+  mkdirSync(join(root, 'src'));
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const version = 0;\n'); git('add', '.'); git('commit', '--quiet', '-m', 'base');
+  const base = git('rev-parse', 'HEAD');
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const version = 1;\n'); git('commit', '--quiet', '-am', 'loaded');
+  const loaded = git('rev-parse', 'HEAD');
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const version = 2;\n'); git('commit', '--quiet', '-am', 'GY-1338 merged');
+  const successor = git('rev-parse', 'HEAD');
+  git('remote', 'add', 'origin', root);
+  git('checkout', '--quiet', '--detach', successor);
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const version = 4;\n'); git('commit', '--quiet', '-am', 'feature, never merged');
+  const unmerged = git('rev-parse', 'HEAD');
+  git('checkout', '--quiet', '--detach', base);
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const version = 3;\n'); git('commit', '--quiet', '-am', 'foreign');
+  const foreign = git('rev-parse', 'HEAD');
+  git('checkout', '--quiet', '--detach', loaded);
+  return { root, git, loaded, successor, foreign, unmerged };
+}
+function recoveringGuard(root: string, state: DaemonState) {
+  const restarts = { executors: [] as string[], self: 0, recovers: 0 };
+  const run = (command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8' });
+  const guard = coordinatorCheckoutGuard({
+    state: () => state, read: () => readCoordinatorCheckout(root), agents: async () => [], snapshot: async () => ({ work: [] as Work[], now: iso(Date.now()) }),
+    persist: async () => {}, now: () => Date.parse('2026-10-06T05:31:54.601Z'), log: () => {}, applies: () => true,
+    recover: (current, from, to) => {
+      restarts.recovers++;
+      return upgradeModule.recoverMovedHead(config(), current, from, to, { root, run, now: () => Date.parse('2026-10-06T05:31:54.601Z'),
+        restartExecutors: async commit => { restarts.executors.push(commit); return { result: 'restarted', reason: null, coordinator: { commit }, held: [], restarted: [], unsupervised: [], forgotten: [] }; },
+        restartSelf: async () => { restarts.self++; } });
+    },
+  });
+  return { guard, restarts };
+}
+const skippedUpgrade = async () => ({ outcome: 'skipped' as const, reason: 'no delivered item is verified deployed yet' });
+
+test('unit:upgrade-head-divergence-recovers — a HEAD moved forward to a descendant under the running loop is recovered onto: the executors restart and the loop re-executes, with no drift escalation', async () => {
+  assert.equal(typeof upgradeModule.recoverMovedHead, 'function', 'the loop has a recovery for a moved HEAD');
+  const repo = await divergence();
+  const state = emptyDaemonState(config());
+  const { guard, restarts } = recoveringGuard(repo.root, state);
+  assert.equal(await guard.start(repo.loaded), null);
+  assert.equal(guard.expected(), repo.loaded);
+  // The divergence: something other than the loop's own alignment moves HEAD to GY-1338's merge.
+  repo.git('checkout', '--quiet', '--detach', repo.successor);
+  const { refusal, upgraded } = await guard.betweenCycles(skippedUpgrade);
+  assert.equal(refusal, null, 'the loop does not refuse restart on a forward move');
+  assert.equal(upgraded?.outcome, 'upgraded');
+  assert.deepEqual(restarts.executors, [repo.successor], 'the executors restart onto the successor');
+  assert.equal(restarts.self, 1, 'the loop re-executes itself onto the successor');
+  assert.equal(guard.expected(), repo.successor, 'the successor is now the commit the loop runs');
+  assert.equal(state.actions['escalation:dirty-checkout'], undefined, 'no escalation:dirty-checkout is recorded');
+  assert.equal(state.actions['upgrade:recovered']?.state, 'done');
+  assert.deepEqual(state.upgrade.last && [state.upgrade.last.from, state.upgrade.last.to, state.upgrade.last.self], [repo.loaded, repo.successor, true]);
+  // Three more cycles at the adopted HEAD: no escalation, no further restart.
+  for (let cycle = 0; cycle < 3; cycle++) assert.equal((await guard.betweenCycles(skippedUpgrade)).refusal, null);
+  assert.equal(restarts.self, 1);
+  assert.equal(state.actions['escalation:dirty-checkout'], undefined, 'three consecutive cycles record no escalation');
+});
+
+test('unit:upgrade-head-divergence-recovers — drift raised before the recovery is settled by it', async () => {
+  const repo = await divergence();
+  const state = emptyDaemonState(config());
+  const { guard, restarts } = recoveringGuard(repo.root, state);
+  await guard.start(repo.loaded);
+  repo.git('checkout', '--quiet', '--detach', repo.successor);
+  // A cycle with the self-upgrade off (the loop stopping) only reports the drift.
+  assert.match((await guard.betweenCycles()).refusal ?? '', /moved from/);
+  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed');
+  assert.equal((await guard.betweenCycles(skippedUpgrade)).upgraded?.outcome, 'upgraded');
+  assert.equal(restarts.self, 1);
+  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done', 'the recovery settles the attention the drift raised');
+});
+
+test('unit:upgrade-head-divergence-recovers — a move that is not a clean detached descendant on the base branch still stands down, and is tried once', async () => {
+  for (const move of ['foreign', 'dirty', 'branch', 'unmerged'] as const) {
+    const repo = await divergence();
+    const state = emptyDaemonState(config());
+    const { guard, restarts } = recoveringGuard(repo.root, state);
+    await guard.start(repo.loaded);
+    if (move === 'foreign') repo.git('checkout', '--quiet', '--detach', repo.foreign);
+    // A session whose pane points at the checkout detaches it onto its feature-branch head: a clean descendant, but unreviewed.
+    else if (move === 'unmerged') repo.git('checkout', '--quiet', '--detach', repo.unmerged);
+    else if (move === 'branch') repo.git('checkout', '--quiet', '-B', 'side', repo.successor);
+    else { repo.git('checkout', '--quiet', '--detach', repo.successor); writeFileSync(join(repo.root, 'src', 'loop.ts'), 'export const version = 9;\n'); }
+    for (let cycle = 0; cycle < 2; cycle++) {
+      const { refusal, upgraded } = await guard.betweenCycles(skippedUpgrade);
+      assert.ok(refusal, `${move}: the guard still refuses`);
+      assert.equal(upgraded, null);
+    }
+    assert.equal(restarts.self, 0, `${move}: nothing restarts onto it`);
+    assert.deepEqual(restarts.executors, []);
+    assert.equal(restarts.recovers, move === 'dirty' ? 0 : 1, `${move}: a dirty tree is never offered, a refused HEAD is tried once`);
+    assert.equal(guard.expected(), repo.loaded);
+    assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed', `${move}: the drift is attention`);
+  }
+});
