@@ -652,3 +652,57 @@ test(`unit:diagnosis-lost-run-not-a-loop-fault — ${gy1318Instances[2].id}: a d
     ['The diagnosis of GY-1308 started 2026-10-05T15:23:42.185Z never ended in this process; the master diagnoses it by hand']);
   assert.deepEqual(diagnosisFaults(state), [], 'no action:diagnosis loop fault');
 });
+
+// ---- GY-1336: three more loop faults on 2026-10-05 ----------------------------------------------
+//
+// GY-1336 names this file for its proof too. Its instances share GY-1318's cause: an outcome the loop
+// handles by design, recorded as a failed action of a kind the catalogue files under the loop class.
+// (1) doctor:2026-10-05T23:32:04.689Z and (2) doctor:3379f2b6c361998f7abec8ee:file:merge are replayed
+// in tests/pipeline-doctor.test.ts; (3) is replayed here: GY-1333's diagnosis asked to close GY-1333
+// after it was delivered, past the cycle's snapshot, and the server refused 409 "Delivered work is
+// immutable; create a follow-up task" — the delivered leg of the race GY-1318 answered for a
+// revision change.
+
+const gy1336Instances = [
+  { id: 'action:fault|doctor:2026-10-05T23:32:04.689Z|2026-10-05T23:33:14.947Z', kind: 'action:fault', subject: 'doctor:2026-10-05T23:32:04.689Z', at: '2026-10-05T23:33:14.947Z' },
+  { id: 'action:fault|doctor:3379f2b6c361998f7abec8ee:file:merge|2026-10-06T00:02:05.141Z', kind: 'action:fault', subject: 'doctor:3379f2b6c361998f7abec8ee:file:merge', at: '2026-10-06T00:02:05.141Z' },
+  { id: 'action:diagnosis|GY-1333|2026-10-06T00:45:38.033Z', kind: 'action:diagnosis', subject: 'GY-1333', at: '2026-10-06T00:45:38.033Z' },
+];
+const immutable = new Error('Graphyard refused work/97cfd8d6-c3c6-4876-8bf4-55f60d8d0d5c/decide (409): Delivered work is immutable; create a follow-up task');
+
+test('manual:fault-class-loop — GY-1336 lists three instances, and every one is replayed', () => {
+  assert.deepEqual(gy1336Instances.map(entry => entry.subject), ['doctor:2026-10-05T23:32:04.689Z', 'doctor:3379f2b6c361998f7abec8ee:file:merge', 'GY-1333']);
+});
+
+test(`manual:fault-class-loop — ${gy1336Instances[2].id}: a close refused because the item was delivered meanwhile is no loop fault, and the next cycle answers the diagnosis`, async () => {
+  const at = Date.parse(gy1336Instances[2].at), asked: string[] = [];
+  const decide: DiagnosticianEffects['decide'] = async work => { asked.push(work.key); throw immutable; };
+  const { state, effects, subject } = await diagnosed(decide, at);
+  const delivered = { ...subject, stage: 'done', revision: 5 } as unknown as Work;
+  const performed = await decideStep(state, effects, [subject, covering], () => [delivered, covering], [], at + minute);
+  assert.deepEqual(asked, ['GY-1304'], 'asked once; reloaded, the item is delivered, so it is not asked again');
+  assert.deepEqual(performed.filter(action => action.state === 'failed'), [], 'no failed loop action');
+  assert.deepEqual(diagnosisFaults(state), [], 'no action:diagnosis loop fault');
+  assert.equal(state.diagnoses['GY-1304'].state, 'diagnosed', 'the entry waits for the next cycle');
+  await decideStep(state, effects, [delivered, covering], () => [delivered, covering], [], at + 2 * minute);
+  assert.equal(state.diagnoses['GY-1304'].state, 'answered', 'the next cycle sees the item delivered and answers the diagnosis');
+  assert.deepEqual(diagnosisFaults(state), []);
+});
+
+test(`manual:fault-class-loop — ${gy1336Instances[2].id}: a fix released after its recurring item was delivered answers the diagnosis without asking to close a delivered item`, async () => {
+  const at = Date.parse(gy1336Instances[2].at), asked: string[] = [];
+  const state = emptyDaemonState(config()), starts: string[] = [];
+  const fix = item('GY-1334', at, { stage: 'backlog', ready: true } as Partial<Work>);
+  const delivered = { ...recurring('GY-1333', 'loop', at - hour), stage: 'done' } as unknown as Work;
+  state.diagnoses['GY-1333'] = { subject: 'GY-1333', kind: 'recurring', faultClass: 'loop', work: 'GY-1333', state: 'releasing', startedAt: iso(at - hour), updatedAt: iso(at - minute),
+    runs: [], diagnosis: { subject: 'GY-1333', cause: 'The cause', evidence: { logLines: ['a line'], commands: [] }, faultClass: 'loop', covering: null } as never, fix: 'GY-1334',
+    decision: { id: 'release-1', action: 'release', work: 'GY-1334', approver: 'gy-approver' }, answeredBy: null, retryAt: null, refusedAt: null, detail: '' };
+  const effects = { ...diagnostician(() => 'diagnose', starts), decide: async (work: Work) => { asked.push(work.key); throw immutable; } };
+  const applied = [{ id: 'release-1', action: 'release', state: 'applied', input: {}, approvedBy: 'gy-approver', outcome: null }] as unknown as Decisions;
+  const performed = await decideStep(state, effects, [delivered, fix], () => [delivered, fix], applied, at);
+  assert.deepEqual(asked, [], 'no close is asked of a delivered item');
+  assert.equal(state.diagnoses['GY-1333'].state, 'answered');
+  assert.equal(state.diagnoses['GY-1333'].answeredBy, 'GY-1334');
+  assert.deepEqual(performed.filter(action => action.state === 'failed'), []);
+  assert.deepEqual(diagnosisFaults(state), [], 'no action:diagnosis loop fault');
+});
