@@ -1265,3 +1265,127 @@ test(`manual:fault-class-loop — GY-1344: failed cycles that met a control plan
   for (let attempt = 0; attempt < 3; attempt++) await noteCycleFailure(state, railway('work-snapshot'), 'cycle', { now: Date.parse('2026-10-06T01:45:00.000Z') + attempt * minute, intervalMs, persist: async () => {} });
   assert.deepEqual(state.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['plane-unavailable', 'deployment']]);
 });
+
+// ---- GY-1357: the faults step ran 100-150s past its observation budget --------------------------
+//
+// GY-1357 names this file for its proof too. On c67ed34548f2, with GY-1345's single-flight
+// observation loaded, cycles ran p50 148s / p95 181s against the 60s bound, the faults step 103.7s of
+// one 148.4s cycle. faultObservationBudgetMs bounded only the observation's reads: the filings and
+// the diagnoses' decision requests ran after it unbounded, each re-reading the work snapshot
+// (3.3-4.9s) and some asking for a decision (about 4s). The whole step now shares the budget: a
+// filing or request that does not fit is carried to the next cycle, and the snapshot a refused
+// decision is decided afresh from is read once per step, not once per class.
+
+const gy1357 = { at: Date.parse('2026-10-06T05:30:00.000Z'), intervalMs: 60_000, snapshotMs: 4_000, decideMs: 4_000 };
+/** The classes recurring at once in the replay: eight filings of 8s each are 64s, past the 60s bound when run inline. */
+const gy1357Classes: FaultClass[] = ['loop', 'decision', 'scope', 'merge', 'proof', 'resources', 'configuration', 'stalled-gate'];
+function gy1357Config() {
+  return masterConfigSchema.parse({ ...JSON.parse(JSON.stringify(config())), run: { proofWorkflow: 'acceptance.yml', intervalSeconds: gy1357.intervalMs / 1000 } });
+}
+function recurringInstances(at: number): FaultInstance[] {
+  return gy1357Classes.flatMap(faultClass => [0, 1, 2].map(index => ({ id: `${faultClass}|GY-${index + 1}|${index}`, kind: 'blocker', faultClass, subject: `GY-${index + 1}`, text: 'an instance', at: iso(at - (index + 1) * minute), lastSeenAt: iso(at), linkedTo: null }) as FaultInstance));
+}
+
+test(`manual:fault-class-loop — GY-1357: filings that each cost a ${gy1357.snapshotMs / 1000}s snapshot read and a ${gy1357.decideMs / 1000}s decide answer keep the faults step in its budget and the cycle in its 60s bound; carried filings are filed once, later`, async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'], now: gy1357.at });
+  try {
+    const master = gy1357Config(), state = emptyDaemonState(master), filed: { faultClass: string; key: string; cycle: number }[] = [];
+    state.faults.instances = recurringInstances(gy1357.at);
+    let snapshotReads = 0, decides = 0;
+    const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    const effects = quietEffects(() => Date.now(), () => [], {
+      faultClassPolicy: { threshold: 3, windowHours: 24 },
+      // As production's filings did: each read the whole work snapshot and asked for a decision before it answered.
+      fileFaultClass: async (input, key) => {
+        await wait(gy1357.snapshotMs); snapshotReads += 1;
+        await wait(gy1357.decideMs); decides += 1;
+        filed.push({ faultClass: String(input.origin?.faultClass?.class), key, cycle: state.cycle });
+        return item(`GY-${4000 + filed.length}`, Date.now(), { title: input.title, origin: input.origin } as Partial<Work>);
+      },
+    } as Partial<DaemonEffects>);
+    const budget = faultObservationBudgetMs(gy1357.intervalMs);
+    for (let cycle = 0; cycle < 4; cycle++) {
+      const result = await drive(runCycle(master, state, effects, () => Date.now()));
+      const faults = result.metrics.timings?.steps.find(entry => entry.step === 'faults')?.ms ?? result.metrics.steps!.deployment.ms;
+      assert.ok(faults <= budget, `cycle ${cycle}: the faults step took ${faults}ms against its ${budget}ms budget`);
+      const cost = cycleCost(result.metrics, gy1357.intervalMs)!;
+      assert.ok(cost.withinInterval, `cycle ${cycle}: ${cost.breakdown}`);
+      const line = loopAttention({ liveness: { state: 'running', lagMs: 1_000, stalledAfterMs: 2 * gy1357.intervalMs, cycle: cost.cycle, lock: null, detail: '', restart: '', cost }, cost }).find(entry => entry.kind === 'loop-cost');
+      assert.ok(!line || !/faults step/.test(`${line.text} ${line.next ?? ''}`), `cycle ${cycle}: the loop-cost attention names the faults step: ${line?.text}`);
+      mock.timers.tick(gy1357.intervalMs);
+    }
+    assert.ok(filed.some(entry => entry.cycle > filed[0].cycle), 'some filings were carried to a later cycle');
+    assert.equal(filed.length, gy1357Classes.length, `every recurring class filed, once: ${JSON.stringify(filed)}`);
+    assert.equal(new Set(filed.map(entry => entry.faultClass)).size, gy1357Classes.length, 'no class filed twice');
+    assert.equal(snapshotReads, filed.length);
+    assert.equal(decides, filed.length);
+    for (const faultClass of gy1357Classes) assert.equal(state.actions[faultActionKey(faultClass)]?.state, 'done', faultClass);
+    const seeded = new Set(recurringInstances(gy1357.at).map(entry => entry.id));
+    assert.ok(state.faults.instances.filter(entry => seeded.has(entry.id)).every(entry => entry.linkedTo), `every instance is linked to its class's one item: ${JSON.stringify(state.faults.instances.filter(entry => !entry.linkedTo))}`);
+    assert.equal(state.actions['faults:carried']?.faultClass, undefined, 'a carry is no fault');
+    assert.match(state.actions['faults:carried']?.detail ?? '', /^The faults step fitted every filing and decision request in its budget/);
+  } finally { mock.timers.reset(); }
+});
+
+test('unit:faults-step-within-budget — a filing the remaining budget cannot fit is carried untouched: no started row, no request, and the next cycle files it under the same key', async () => {
+  const at = gy1357.at, keys: string[] = [];
+  const state = emptyDaemonState(config());
+  state.faults.instances = recurringInstances(at).filter(entry => entry.faultClass === 'loop');
+  const effects = { persist: async () => {}, faultClassPolicy: { threshold: 3, windowHours: 24 },
+    fileFaultClass: async (input: { title: string }, key: string) => { keys.push(key); return item('GY-4100', at, { title: input.title }); } } as unknown as DaemonEffects;
+  const performed: DaemonAction[] = [];
+  let clock = at;
+  const spent = faultsStep.filingBudget({}, at + 1_000, 30_000, () => clock);
+  await fileRecurringFaultClasses(state, effects, [], at, () => clock, performed, spent);
+  assert.deepEqual(keys, [], 'nothing was requested past the budget');
+  assert.equal(state.actions[faultActionKey('loop')], undefined, 'no started row is left behind');
+  assert.deepEqual(spent.carried, ['the loop class filing']);
+  assert.ok(state.faults.instances.every(entry => !entry.linkedTo), 'the instances still count toward the class');
+  state.cycle += 1; clock = at + gy1357.intervalMs;
+  const fresh = faultsStep.filingBudget({}, clock + 30_000, 30_000, () => clock);
+  await fileRecurringFaultClasses(state, effects, [], clock, () => clock, performed, fresh);
+  assert.equal(keys.length, 1);
+  assert.equal(state.actions[faultActionKey('loop')].state, 'done');
+  await fileRecurringFaultClasses(state, effects, [], clock, () => clock, performed, faultsStep.filingBudget({}, clock + 30_000, 30_000, () => clock));
+  assert.equal(keys.length, 1, 'filed exactly once');
+  // The expected cost is the slowest recent filing, never past half the budget: one slow answer does not carry every later filing.
+  let now = at;
+  const owner = {}, measured = faultsStep.filingBudget(owner, at + 30_000, 30_000, () => now);
+  await measured.spend(async () => { now += 25_000; });
+  now = at;
+  assert.equal(faultsStep.filingBudget(owner, at + 15_000, 30_000, () => now).fits(), true, 'capped at half the budget');
+  assert.equal(faultsStep.filingBudget(owner, at + 14_000, 30_000, () => now).fits(), false);
+  assert.equal(faultsStep.filingBudget({}, at + faultsStep.faultFilingEstimateMs - 1, 30_000, () => now).fits(), false, 'unmeasured, a filing is taken to cost the estimate');
+});
+
+test('unit:faults-step-within-budget — the diagnoses move on inside the budget: the snapshot a refused decision is decided afresh from is read once per step, and a move that does not fit is carried', async () => {
+  clearDiagnoses();
+  const at = gy1357.at, master = gy1357Config(), state = emptyDaemonState(master);
+  const subjects = ['GY-1304', 'GY-1305', 'GY-1306'].map(key => recurring(key, 'loop', at - minute));
+  for (const subject of subjects) state.diagnoses[subject.key] = { subject: subject.key, kind: 'recurring', faultClass: 'loop', work: subject.key, state: 'diagnosed', startedAt: iso(at - hour), updatedAt: iso(at - minute),
+    runs: [], diagnosis: { subject: subject.key, cause: 'The cause', evidence: { logLines: ['a line'], commands: [] }, faultClass: 'loop', covering: 'GY-50' } as never, fix: null, decision: null, answeredBy: null, retryAt: null, refusedAt: null, detail: '' };
+  let clock = at, reads = 0;
+  const asked: string[] = [];
+  const moved = subjects.map(subject => ({ ...subject, revision: 2 }) as Work);
+  // Every close is refused for the loop's own write moving the item, then asked again at the revision read afresh; each answer costs 4s.
+  const decide: DiagnosticianEffects['decide'] = async work => { clock += gy1357.decideMs; asked.push(`${work.key}@${work.revision}`); if (work.revision < 2) throw raced(2); return { id: `decision-${work.key}` }; };
+  const effects = { diagnostician: { ...diagnostician(() => 'diagnose', []), decide }, persist: async () => {}, herdr: () => ({ agents: [], available: true }),
+    snapshot: async () => { reads += 1; clock += gy1357.snapshotMs; return { work: [...moved, covering], now: iso(clock) }; },
+    decisions: async () => ({ decisions: [] }), approver: async () => ({ agentName: 'gy-approver', pane: null }) } as unknown as DaemonEffects;
+  const isolate = async (_kind: string, _item: unknown, _name: string, body: () => Promise<unknown>) => body();
+  const cycle = { config: master, state, effects, now: () => clock, snapshot: { work: [...subjects, covering], now: iso(at) }, clock: at, performed: [] as DaemonAction[], agents: [], credentials: {}, isolate } as unknown as Cycle;
+  await faultsStep.faultStep(cycle, {});
+  await diagnosesSettled();
+  assert.equal(reads, 1, 'one snapshot read for the step, shared by every refused decision');
+  assert.ok(clock - at <= faultObservationBudgetMs(gy1357.intervalMs), `the step spent ${clock - at}ms`);
+  const closing = subjects.filter(subject => state.diagnoses[subject.key].state === 'closing').map(subject => subject.key);
+  const waiting = subjects.filter(subject => state.diagnoses[subject.key].state === 'diagnosed').map(subject => subject.key);
+  assert.ok(closing.length >= 1 && waiting.length >= 1, `some moved on and the rest were carried: ${JSON.stringify({ closing, waiting })}`);
+  assert.match(state.actions['faults:carried']?.detail ?? '', /carried to the next cycle rather than run inline: the diagnosis of GY-130/);
+  // The next step moves the carried ones on; none is asked twice once its decision stands.
+  clock += gy1357.intervalMs;
+  await faultsStep.faultStep({ ...cycle, now: () => clock, clock, snapshot: { work: [...moved, covering], now: iso(clock) }, performed: [] } as unknown as Cycle, {});
+  assert.deepEqual(subjects.map(subject => state.diagnoses[subject.key].state), ['closing', 'closing', 'closing']);
+  for (const subject of subjects) assert.equal(asked.filter(entry => entry === `${subject.key}@2`).length, 1, `${subject.key} decided once at its current revision: ${asked}`);
+  assert.deepEqual(diagnosisFaults(state), [], 'no loop fault');
+});
