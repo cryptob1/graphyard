@@ -54,8 +54,9 @@ export async function checkoutState(root: string, run: ChildRun): Promise<Checko
 export type SelfUpgradeOutcome =
   | { outcome: 'skipped'; reason: string }
   | { outcome: 'up-to-date'; commit: string }
-  | { outcome: 'refused'; reason: string; commit: string | null }
-  | { outcome: 'failed'; reason: string }
+  /** `forward`: a moved HEAD the recovery found to be merged code descending from the loaded commit, which it could not adopt by itself (GY-1359). */
+  | { outcome: 'refused'; reason: string; commit: string | null; forward?: boolean }
+  | { outcome: 'failed'; reason: string; forward?: boolean }
   /** The checkout moved and the restarts it owes wait on the cursor: the executor restart was refused (a claim still held), which the next cycle retries. */
   | { outcome: 'pending'; reason: string; to: string }
   | { outcome: 'upgraded'; from: string | null; to: string; code: boolean; executors: ExecutorRestartResult | null; self: boolean };
@@ -301,7 +302,10 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
  * restarted onto it and the loop re-executes itself through its supervisor, as an alignment does.
  * Anything else — a dirty tree, a branch, a commit the loaded one is not an ancestor of, or one the
  * base branch does not contain (an unmerged feature-branch head) — is refused and stays the drift
- * the guard reports. Nothing here throws.
+ * the guard reports. GY-1359: merged code is adopted only once a verified release serves it, the
+ * trigger the self-upgrade waits on too; until then, or when the loop cannot re-execute itself, the
+ * outcome is marked `forward` so the guard names a restart onto the checkout's own HEAD, never a
+ * rollback to the stale loaded commit. Nothing here throws.
  */
 export async function recoverMovedHead(config: MasterConfig, state: DaemonState, from: string, to: string, deps: SelfUpgradeDeps): Promise<SelfUpgradeOutcome> {
   const now = deps.now ?? Date.now, at = () => new Date(now()).toISOString();
@@ -325,9 +329,14 @@ export async function recoverMovedHead(config: MasterConfig, state: DaemonState,
   catch (error) { return { outcome: 'failed', reason: `the base branch could not be fetched: ${message(error)}` }; }
   try { await git('merge-base', '--is-ancestor', to, base); }
   catch { return { outcome: 'refused', reason: `${shortCommit(to)} is not on ${config.baseBranch}, so it is not merged code`, commit: to }; }
+  const served = state.deployment;
+  if (!served || served.source === 'unavailable' || !served.sha || !served.deployed.length)
+    return { outcome: 'refused', reason: 'no delivered item is verified deployed yet', commit: to, forward: true };
+  try { await git('merge-base', '--is-ancestor', to, served.sha); }
+  catch { return { outcome: 'refused', reason: `the verified release ${shortCommit(served.sha)} does not serve it yet`, commit: to, forward: true }; }
   let code: boolean;
   try { code = upgradeTouchesCode((await git('diff', '--name-only', `${from}..${to}`)).split('\n').map(path => path.trim()).filter(Boolean)); }
-  catch (error) { return { outcome: 'failed', reason: `the diff from ${shortCommit(from)} to ${shortCommit(to)} could not be read: ${message(error)}` }; }
+  catch (error) { return { outcome: 'failed', reason: `the diff from ${shortCommit(from)} to ${shortCommit(to)} could not be read: ${message(error)}`, forward: true }; }
   const moved = `the coordinator checkout's HEAD moved forward from ${shortCommit(from)} to ${shortCommit(to)} under the running loop; the loop adopted it`;
   state.upgrade.refused = null;
   if (!code) {
@@ -343,7 +352,7 @@ export async function recoverMovedHead(config: MasterConfig, state: DaemonState,
     if (executors.result === 'refused') state.upgrade.pending = { from, to, code: true };
   }
   const fleet = executors ? `the executors ${executors.result}${executors.reason ? ` (${executors.reason})` : ''}` : 'this loop cannot restart the executors';
-  if (!deps.restartSelf) { await note(`${moved}, but it cannot re-execute itself onto it; ${fleet}`, true); return { outcome: 'failed', reason: 'this loop cannot re-execute itself' }; }
+  if (!deps.restartSelf) { await note(`${moved}, but it cannot re-execute itself onto it; ${fleet}`, true); return { outcome: 'failed', reason: 'this loop cannot re-execute itself', forward: true }; }
   state.upgrade.last = { at: at(), from, to, code: true, executors: executors ? `${executors.result}${executors.reason ? `: ${executors.reason}` : ''}` : null, self: true };
   await note(`${moved} and re-executes onto it; ${fleet}`, false);
   await alignRunningUnitQuietly(deps);
@@ -353,7 +362,7 @@ export async function recoverMovedHead(config: MasterConfig, state: DaemonState,
     state.upgrade.last = { ...state.upgrade.last, self: false };
     const reason = `the loop could not re-execute itself through its supervisor: ${message(error)}`;
     await note(`${moved}, but ${reason}; it keeps running ${shortCommit(from)} until its supervisor restarts it`, true);
-    return { outcome: 'failed', reason };
+    return { outcome: 'failed', reason, forward: true };
   }
   return { outcome: 'upgraded', from, to, code: true, executors, self: true };
 }

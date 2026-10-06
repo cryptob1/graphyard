@@ -340,6 +340,7 @@ const escalationKey = 'escalation:dirty-checkout';
  * else that moves HEAD under a running loop is drift — unless it moved forward (GY-1356): a clean,
  * detached HEAD that descends from the commit the loop runs and is on the base branch is adopted through `recover`, which
  * restarts the executors and re-executes the loop onto it, instead of pinning the loop to stale code.
+ * One it cannot adopt by itself (GY-1359) is attention naming a restart onto that HEAD, never a rollback.
  */
 export function coordinatorCheckoutGuard(deps: {
   state: () => DaemonState; read: () => Promise<CoordinatorCheckout>; agents: DaemonEffects['agents']; snapshot: DaemonEffects['snapshot'];
@@ -348,9 +349,17 @@ export function coordinatorCheckoutGuard(deps: {
 }) {
   const applies = deps.applies ?? checkoutGuardApplies, enrichMs = deps.enrichMs ?? 10 * 60_000;
   let expectedHead: string | null = null, enriched: { refusal: string; detail: string; at: number } | null = null;
-  const headDrift = (checkout: CoordinatorCheckout) => checkout.commit && expectedHead && checkout.commit !== expectedHead
-    ? `the master loop refuses to restart or self-upgrade from the coordinator checkout at ${checkout.root}: its HEAD moved from ${expectedHead.slice(0, 12)} to ${checkout.commit.slice(0, 12)} while the loop was running, so HEAD is not the commit it runs. It keeps running the code it loaded; restore the checkout with git -C ${checkout.root} checkout --detach ${expectedHead.slice(0, 12)}, then restart the loop`
-    : null;
+  // GY-1359: a HEAD the recovery found to be merged code moved forward, but could not adopt by itself
+  // (no verified release serves it yet, no supervisor unit to re-execute through), keyed by commit to
+  // why. Its remedy is a restart onto that HEAD; rolling the checkout back to stale code never is.
+  const forward = new Map<string, string>();
+  const headDrift = (checkout: CoordinatorCheckout) => {
+    if (!checkout.commit || !expectedHead || checkout.commit === expectedHead) return null;
+    const from = expectedHead.slice(0, 12), to = checkout.commit.slice(0, 12), unrecovered = forward.get(checkout.commit);
+    return unrecovered
+      ? `the master loop cannot recover onto the coordinator checkout at ${checkout.root} by itself: its HEAD moved from ${from} forward to ${to}, merged code, while the loop was running, and ${unrecovered}. It keeps running the code it loaded; leave the checkout at ${to} and restart the loop onto its own HEAD (systemctl --user restart graphyard-master)`
+      : `the master loop refuses to restart or self-upgrade from the coordinator checkout at ${checkout.root}: its HEAD moved from ${from} to ${to} while the loop was running, so HEAD is not the commit it runs. It keeps running the code it loaded; restore the checkout with git -C ${checkout.root} checkout --detach ${from}, then restart the loop`;
+  };
   // The sessions working where they started, the ones to close first. Graphyard's own managed area
   // under `.graphyard/` is not the checkout's working files and is never named. An inventory that
   // cannot be read (Herdr down: `agents` answers null or throws) leaves the sessions unknown,
@@ -370,17 +379,21 @@ export function coordinatorCheckoutGuard(deps: {
   };
   // GY-1356: a HEAD that moved forward onto merged code is recovered onto, never stood down on. A
   // recovery refused for a HEAD (not a descendant, not on the base branch, not detached) or failed
-  // is tried once per HEAD; the drift the guard then reports stands until HEAD moves to a new commit
-  // or the loop is restarted.
+  // is tried once per HEAD and verified release (GY-1359: a release verified later serves it); the
+  // drift the guard then reports stands until either moves or the loop is restarted.
   const unrecovered = new Set<string>();
   const recoverDrift = async (checkout: CoordinatorCheckout, keepAlive?: () => Promise<void>): Promise<SelfUpgradeOutcome | null> => {
-    const from = expectedHead, to = checkout.commit;
-    if (!deps.recover || !from || !to || unrecovered.has(to) || !applies(checkout.root) || coordinatorCheckoutRefusal(checkout, 'the master loop') || !headDrift(checkout)) return null;
+    const from = expectedHead, to = checkout.commit, attempt = `${to} ${deps.state().deployment?.sha ?? ''}`;
+    if (!deps.recover || !from || !to || unrecovered.has(attempt) || !applies(checkout.root) || coordinatorCheckoutRefusal(checkout, 'the master loop') || !headDrift(checkout)) return null;
     let recovered: SelfUpgradeOutcome;
     try { recovered = await deps.recover(deps.state(), from, to, keepAlive); }
     catch (error) { recovered = { outcome: 'failed', reason: message(error) }; }
     deps.log(`[graphyard-master] moved HEAD ${to.slice(0, 12)} (from ${from.slice(0, 12)}) ${recovered.outcome === 'upgraded' ? 'recovered' : 'not recovered'}: ${describeSelfUpgrade(recovered)}`);
-    if (recovered.outcome !== 'upgraded') { unrecovered.add(to); return null; }
+    if (recovered.outcome !== 'upgraded') {
+      unrecovered.add(attempt);
+      if ((recovered.outcome === 'refused' || recovered.outcome === 'failed') && recovered.forward) forward.set(to, recovered.reason); else forward.delete(to);
+      return null;
+    }
     expectedHead = to;
     return recovered;
   };
