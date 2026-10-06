@@ -59,7 +59,7 @@ test('unit:launch-supervisor-setup-is-starting — a launch whose supervisor is 
   const { printed, events } = await printedSetupLine('GY-1023', 4);
   assert.deepEqual(printed, ['graphyard: establishing containment for GY-1023 epoch 4']);
   assert.equal(printed[0], setupLine('GY-1023', 4));
-  assert.deepEqual(events, ['printed graphyard: establishing containment for GY-1023 epoch 4', 'api work after 1 line(s)'], 'the line is printed before the first control-plane call');
+  assert.deepEqual(events, ['printed graphyard: establishing containment for GY-1023 epoch 4', 'api work/GY-1023 after 1 line(s)'], 'the line is printed before the first control-plane call');
 
   // AC-1: the pane's last line is the launch command and the shell is not the foreground group:
   // the launch command is running, so the start is `starting`, never `absent`.
