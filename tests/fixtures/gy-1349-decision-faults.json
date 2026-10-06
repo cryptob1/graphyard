@@ -1,0 +1,337 @@
+{
+ "_source": "graphyard events GY-1338 --routine --payload full: payload.work of seq 2321832 (session, 2026-10-06T04:13:26.431Z), the last snapshot before the loop observed owed-decision|GY-1338|2026-10-06T04:13:35.901Z; description and sessions emptied",
+ "work": {
+  "id": "4932070a-203a-45e7-9825-90047f7054b9",
+  "key": "GY-1338",
+  "lane": "high",
+  "type": "bug",
+  "epoch": 1,
+  "gates": [
+   {
+    "name": "ready",
+    "passed": true,
+    "reasons": []
+   },
+   {
+    "name": "build",
+    "passed": false,
+    "reasons": [
+     "Worker has not submitted implementation for this attempt",
+     "Pull request has not been independently observed"
+    ],
+    "verdict": {
+     "inputs": {
+      "key": "GY-1338",
+      "sha": null,
+      "baseSha": null,
+      "evidence": [],
+      "observed": null,
+      "landingBase": null,
+      "policyRevision": 2
+     },
+     "version": 1
+    }
+   },
+   {
+    "name": "review",
+    "passed": false,
+    "reasons": [
+     "A new independent GitHub approval after the requirement-review baseline is required"
+    ]
+   },
+   {
+    "name": "test",
+    "passed": false,
+    "reasons": [
+     "Required CI check test has not passed on the current candidate",
+     "Required CI check typecheck has not passed on the current candidate"
+    ],
+    "ciAppIds": [
+     15368
+    ]
+   },
+   {
+    "name": "merge",
+    "passed": false,
+    "reasons": [
+     "GitHub has not been observed at the current candidate",
+     "Pull request is not mergeable against the current base",
+     "Unresolved requirement-weakening escalation requires operator resolution: Requirement revision retires AC-1, AC-3, AC-4, AC-6 and narrows proofs for no criterion"
+    ]
+   }
+  ],
+  "lease": {
+   "epoch": 1,
+   "owner": "graphyard-claude-2",
+   "expiresAt": "2026-10-06T04:15:15.589Z"
+  },
+  "ready": true,
+  "stage": "build",
+  "title": "Loop faults: failed actions are classified by step, not cause — reclassify them; answer the delivered-work decide; refuse invalid doctor filings at intake; dedup settled reports fresh",
+  "policy": {
+   "checks": [
+    "test",
+    "typecheck"
+   ],
+   "review": true
+  },
+  "blocker": null,
+  "criteria": [
+   {
+    "id": "AC-2",
+    "text": "The catalogue no longer files action:fault or action:diagnosis under the loop class (they are unclassified until an entry names their cause), and loop keeps every fault kind its catalogue entry lists on main except action:fault and action:diagnosis (loop-liveness, loop-cost, loop-silence, loop-cursor, loop-failures, dispatch-failures, delivery-budget and retry-stopped today, so later additions like the GY-1344 recognizer are not dropped); a failed action of either moved kind no longer counts toward the loop class recurrence threshold",
+    "proofs": [
+     "unit:fault-catalogue-action-kinds",
+     "manual:fault-class-loop"
+    ]
+   },
+   {
+    "id": "AC-5",
+    "text": "A settled doctor run deduplicates its filings against a snapshot read when it settles, so a run that started before an open item for the same fault class existed files no duplicate — replayed from GY-1333 filed at 2026-10-06T00:30:34Z for the merge class GY-1332 (created 00:17:48Z) already covered",
+    "proofs": [
+     "unit:doctor-report-dedup-fresh-snapshot",
+     "manual:fault-class-loop"
+    ]
+   }
+  ],
+  "evidence": [],
+  "pipeline": {
+   "attempts": [
+    {
+     "end": null,
+     "epoch": 1,
+     "owner": "graphyard-claude-2",
+     "endedAt": null,
+     "claimedAt": "2026-10-06T04:12:06.349Z"
+    }
+   ],
+   "backfill": {
+    "at": "2026-10-06T01:14:47.792Z",
+    "events": 6,
+    "passes": 1,
+    "source": "ledger",
+    "toEvent": "2318478",
+    "retained": true,
+    "fromEvent": "2318440",
+    "truncated": false
+   },
+   "submittedAt": null,
+   "reworkRounds": 0,
+   "interventions": {
+    "blocked": 0,
+    "requirements": 0
+   },
+   "resubmittedAt": null
+  },
+  "priority": 1,
+  "revision": 42,
+  "sessions": [],
+  "candidate": null,
+  "createdAt": "2026-10-06T01:10:09.509Z",
+  "proofGaps": [],
+  "updatedAt": "2026-10-06T04:13:25.814Z",
+  "escalation": {
+   "at": "2026-10-06T03:38:24.729Z",
+   "actor": "graphyard-master-graphyard-operator",
+   "reason": "Requirement revision retires AC-1, AC-3, AC-4, AC-6 and narrows proofs for no criterion",
+   "trigger": "requirement-weakening"
+  },
+  "nextAction": {
+   "key": "GY-1338",
+   "gate": null,
+   "kind": "escalate",
+   "work": "4932070a-203a-45e7-9825-90047f7054b9",
+   "inputs": {
+    "kind": "escalate",
+    "detail": "Requirement revision retires AC-1, AC-3, AC-4, AC-6 and narrows proofs for no criterion",
+    "trigger": "requirement-weakening"
+   },
+   "reason": "GY-1338 has a standing requirement-weakening escalation and nothing else to do: Requirement revision retires AC-1, AC-3, AC-4, AC-6 and narrows proofs for no criterion",
+   "binding": "escalation:requirement-weakening:2026-10-06T03:38:24.729Z",
+   "llmRole": "resolve-escalation",
+   "refusal": null,
+   "needsHuman": {
+    "resolve": "graphyard master escalation GY-1338 requirement-weakening spawns a handler that follows precedent; a judgment nobody has taken before is graphyard master decide GY-1338 resolve '{\"trigger\":\"requirement-weakening\"}' REASON, then graphyard master approver GY-1338 DECISION",
+    "decision": "resolving GY-1338's requirement-weakening escalation"
+   }
+  },
+  "submission": null,
+  "violations": [],
+  "workspaces": [
+   {
+    "host": "vishrog",
+    "path": "/home/vish/code/graphyard/.graphyard/worktrees/GY-1338-1",
+    "epoch": 1,
+    "owner": "graphyard-claude-2",
+    "branch": "graphyard/gy-1338-1"
+   }
+  ],
+  "actionQueue": {
+   "actions": [
+    {
+     "id": "cbf5d95c92e8e6bffd210425bc10ba09",
+     "key": "GY-1338",
+     "gate": null,
+     "kind": "escalate",
+     "work": "4932070a-203a-45e7-9825-90047f7054b9",
+     "claim": null,
+     "state": "pending",
+     "inputs": {
+      "kind": "escalate",
+      "detail": "Requirement revision retires AC-1, AC-3, AC-4, AC-6 and narrows proofs for no criterion",
+      "trigger": "requirement-weakening"
+     },
+     "reason": "GY-1338 has a standing requirement-weakening escalation and nothing else to do: Requirement revision retires AC-1, AC-3, AC-4, AC-6 and narrows proofs for no criterion",
+     "binding": "escalation:requirement-weakening:2026-10-06T03:38:24.729Z",
+     "history": [
+      {
+       "at": "2026-10-06T04:12:06.349Z",
+       "event": "requested",
+       "reason": "GY-1338 has a standing requirement-weakening escalation and nothing else to do: Requirement revision retires AC-1, AC-3, AC-4, AC-6 and narrows proofs for no criterion",
+       "result": null,
+       "executor": null,
+       "requester": "graphyard"
+      }
+     ],
+     "refusal": null,
+     "attempts": 0,
+     "requestedAt": "2026-10-06T04:12:06.349Z",
+     "requestedBy": "graphyard"
+    }
+   ],
+   "history": [
+    {
+     "id": "3b92b0b4fdfe36d6ee96cfc236862662",
+     "key": "GY-1338",
+     "gate": "build",
+     "kind": "dispatch",
+     "work": "4932070a-203a-45e7-9825-90047f7054b9",
+     "claim": null,
+     "state": "done",
+     "inputs": {
+      "kind": "dispatch",
+      "epoch": 0,
+      "target": "implementation",
+      "priority": 1,
+      "plannedFiles": [
+       "src/model/fault-classes.ts",
+       "src/daemon/state.ts",
+       "src/daemon/doctor.ts",
+       "tests/loop-faults.test.ts",
+       "tests/pipeline-doctor.test.ts",
+       "tests/fault-classes.test.ts"
+      ]
+     },
+     "reason": "GY-1338 is ready and unassigned: Worker has not submitted implementation for this attempt",
+     "result": "done",
+     "binding": "dispatch:0",
+     "history": [
+      {
+       "at": "2026-10-06T04:11:32.967Z",
+       "event": "requested",
+       "reason": "GY-1338 is ready and unassigned: Worker has not submitted implementation for this attempt",
+       "result": null,
+       "executor": null,
+       "requester": "graphyard"
+      },
+      {
+       "at": "2026-10-06T04:11:35.351Z",
+       "event": "claimed",
+       "reason": "attempt 1 claimed by graphyard-master@vishrog/2 on vishrog",
+       "result": null,
+       "executor": "graphyard-master@vishrog/2",
+       "requester": "graphyard"
+      },
+      {
+       "at": "2026-10-06T04:13:16.422Z",
+       "event": "completed",
+       "reason": "dispatched GY-1338 to claude-secondary; the worker launcher claimed under graphyard-claude-2",
+       "result": "done",
+       "executor": "graphyard-master@vishrog/2",
+       "requester": "graphyard"
+      }
+     ],
+     "refusal": "Worker has not submitted implementation for this attempt",
+     "attempts": 1,
+     "resolution": "dispatched GY-1338 to claude-secondary; the worker launcher claimed under graphyard-claude-2",
+     "resolvedAt": "2026-10-06T04:13:16.422Z",
+     "requestedAt": "2026-10-06T04:11:32.967Z",
+     "requestedBy": "graphyard"
+    }
+   ]
+  },
+  "description": "",
+  "escalations": [
+   {
+    "at": "2026-10-06T03:38:24.729Z",
+    "actor": "graphyard-master-graphyard-operator",
+    "reason": "Requirement revision retires AC-1, AC-3, AC-4, AC-6 and narrows proofs for no criterion",
+    "trigger": "requirement-weakening"
+   }
+  ],
+  "observation": null,
+  "speedTarget": 14400000,
+  "autoDispatch": {
+   "review": null,
+   "history": [],
+   "producers": []
+  },
+  "dependencies": [],
+  "implementers": [
+   "graphyard-claude-2"
+  ],
+  "plannedFiles": [
+   "src/model/fault-classes.ts",
+   "src/daemon/state.ts",
+   "src/daemon/doctor.ts",
+   "tests/loop-faults.test.ts",
+   "tests/pipeline-doctor.test.ts",
+   "tests/fault-classes.test.ts"
+  ],
+  "scopeRequest": null,
+  "systemDriven": true,
+  "documentation": {
+   "id": "DOCS",
+   "text": "Documentation reflects this change: the diff updates this repository's documentation (docs/, AGENTS.md, README.md) for any user-visible behaviour, command, configuration or API it changes, or the worker states at submission that the change alters no documented behaviour.",
+   "paths": [
+    "docs/",
+    "AGENTS.md",
+    "README.md"
+   ],
+   "changelog": null
+  },
+  "reviewRequest": null,
+  "lastAssignment": {
+   "epoch": 1,
+   "owner": "graphyard-claude-2",
+   "claimedAt": "2026-10-06T04:12:06.349Z"
+  },
+  "policyRevision": 2,
+  "producerProofs": [],
+  "stageEnteredAt": "2026-10-06T04:12:06.349Z",
+  "reworkRequested": false,
+  "exclusiveResources": [],
+  "mergeAuthorization": null,
+  "retiredCriterionIds": [
+   "AC-1",
+   "AC-3",
+   "AC-4",
+   "AC-6"
+  ],
+  "scenarioRequirements": [],
+  "containmentQuarantine": {
+   "at": "2026-10-06T04:13:06.093Z",
+   "epoch": 1,
+   "owner": "graphyard-claude-2",
+   "scope": {
+    "pid": 1126183,
+    "unit": "graphyard-watch-1126183-05821db5-967c-4ec0-b480-b4d22adfb604.scope"
+   },
+   "leaseExpiresAt": "2026-10-06T04:15:15.589Z",
+   "settlementHash": "146b031f0c86ebf531785e5d6e4bd83c398f9fc8357c91f7dde356b07e30cbe5",
+   "launchExpiresAt": "2026-10-06T04:15:10.210Z",
+   "launchAcknowledgedAt": "2026-10-06T04:13:10.210Z"
+  },
+  "formalReviewResetRequired": true
+ }
+}
