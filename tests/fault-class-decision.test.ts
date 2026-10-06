@@ -341,3 +341,29 @@ test('manual:fault-class-decision — the decision ledger records when a decisio
   assert.equal(decision.state, 'stale');
   assert.equal(decision.staleAt, staleResolve1349.staleAt);
 });
+
+// GY-1374, instance owed-decision|GY-1373|2026-10-06T14:03:39.561Z: GY-1373's worker lost its lease
+// at 14:03:13 and the control plane raised the lease-loss escalation itself. The item was ready to
+// be dispatched again, so the escalation was carried beside that dispatch with no queue row of its
+// own, and owedEscalationInMotion — which dated the master's turn only from an `escalate` row —
+// counted the owed line 25 seconds in. Replayed from the ledger snapshot the loop observed.
+const fixture1374 = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/gy-1374-decision-faults.json', import.meta.url)), 'utf8')) as { work: Work };
+
+test('manual:fault-class-decision — owed-decision|GY-1373|2026-10-06T14:03:39.561Z is no fault inside the master\'s turn to resolve the carried escalation', () => {
+  const at = '2026-10-06T14:03:39.561Z', work = structuredClone(fixture1374.work);
+  const { reported, faults } = decisionFaults(work, at);
+  assert.deepEqual(reported.map(line => line.text), ["GY-1373 carries a standing lease-loss escalation while it is worked: Worker graphyard-claude-1 lost lease epoch 1 — no executor may run it; resolving GY-1373's lease-loss escalation has been owed for 25s"]);
+  assert.deepEqual(faults.map(fault => fault.kind), [], 'the escalation was raised 25s before the loop counted its line');
+  assert.equal(daemon.owedEscalationInMotion(work, reported[0].text, Date.parse(at)), true);
+});
+
+test('manual:fault-class-decision — a carried escalation past the master\'s turn, or a carried containment one, still counts', () => {
+  const work = structuredClone(fixture1374.work);
+  const late = new Date(Date.parse('2026-10-06T14:03:13.938Z') + decisions.masterTurnWaitBoundMs + 60_000).toISOString();
+  assert.deepEqual(decisionFaults(work, late).faults.map(fault => fault.kind), ['owed-decision']);
+  const fenced = structuredClone(fixture1374.work);
+  const carried = (fenced.nextAction as unknown as { carried: { trigger: string }[] }).carried;
+  carried[0].trigger = 'containment';
+  const line = "GY-1373 carries a standing containment escalation while it is worked — no executor may run it; resolving GY-1373's containment escalation has been owed for 25s";
+  assert.equal(daemon.owedEscalationInMotion(fenced, line, Date.parse('2026-10-06T14:03:39.561Z')), false, 'a containment concern is counted as its fence is');
+});

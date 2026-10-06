@@ -255,3 +255,35 @@ test('unit:loop-recover-answers-missed-refusal — a loop recover request refuse
   assert.equal(history.at(-1)!.state, 'requested');
   assert.ok(!result.actions.some(action => action.kind === 'decision' && action.state === 'failed'), 'nothing is recorded as failed');
 });
+
+/**
+ * GY-1374, instance action:decision|GY-1352|2026-10-06T05:34:43.748Z: "Could not put the rework
+ * decision for GY-1352 to an approver: Graphyard refused work/…/decide (409): Decision b3c424d3-…
+ * (rework) is already requested on GY-1352; wait for it before requesting another". The loop's
+ * history read failed, a failed rework read is taken as empty, and the request the server then
+ * refused named the very decision the loop wanted — requested and awaiting its approver. Replayed
+ * through the control plane's own request route: the standing rework is adopted and put to an
+ * approver, and nothing is recorded failed. Against the base the cycle records the failure.
+ */
+test('manual:fault-class-decision — action:decision|GY-1352|2026-10-06T05:34:43.748Z: a rework already standing that the history read missed is adopted, not logged failed', async () => {
+  const work = { current: item(shaB) };
+  const { services } = ledger(work);
+  const held = await request(services, work.current, 'The verdict on candidate B needs another round');
+  assert.equal(held.state, 'requested');
+  const sent: string[] = [], approvers: string[] = [];
+  const fx: DaemonEffects = {
+    ...effects(work.current, [], 'fails', sent),
+    decide: async (target, action, reason, given) => {
+      sent.push(reason);
+      try { return await requestDecision(services, operator, target.id, { action, input: { ...input, ...(given ?? {}) }, reason }, `key-${++keys}`); }
+      catch (error) { throw new RefusedResponse(`Graphyard refused work/${target.id}/decide (409): ${(error as Error).message}`, 409, { error: (error as Error).message }); }
+    },
+    approver: async (_target: Work, decision: string) => { approvers.push(decision); return { agentName: 'graphyard-approver-gy-42', pane: 'pane-1' }; },
+  };
+  const result = await runCycle(config(), emptyDaemonState(config()), fx, () => clock);
+  const decisions = result.actions.filter(action => action.kind === 'decision');
+  assert.equal(sent.length, 1, 'one request, refused as already standing');
+  assert.deepEqual(decisions.filter(action => action.state === 'failed').map(action => action.detail), [], 'nothing is recorded as failed');
+  assert.ok(decisions.some(action => action.state === 'done' && action.detail.includes(`Adopted decision ${held.id} (rework)`)), JSON.stringify(decisions));
+  assert.deepEqual(approvers, [held.id], 'the standing decision is put to its approver');
+});

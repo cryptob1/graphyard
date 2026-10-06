@@ -1,0 +1,349 @@
+{
+ "_source": "graphyard events GY-1373 --payload full: payload.work of seq 2329303 (action.claimed, 2026-10-06T14:03:27.353Z), the last snapshot before the loop observed owed-decision|GY-1373|2026-10-06T14:03:39.561Z; description and sessions emptied",
+ "work": {
+  "id": "9dbeccb2-3a34-41d8-8655-748840855e4c",
+  "key": "GY-1373",
+  "lane": "high",
+  "type": "bug",
+  "epoch": 1,
+  "gates": [
+   {
+    "name": "ready",
+    "passed": true,
+    "reasons": []
+   },
+   {
+    "name": "build",
+    "passed": false,
+    "reasons": [
+     "Worker has not submitted implementation for this attempt",
+     "Pull request has not been independently observed"
+    ],
+    "verdict": {
+     "inputs": {
+      "key": "GY-1373",
+      "sha": null,
+      "baseSha": null,
+      "evidence": [],
+      "observed": null,
+      "landingBase": null,
+      "policyRevision": 1
+     },
+     "version": 1
+    }
+   },
+   {
+    "name": "review",
+    "passed": false,
+    "reasons": [
+     "Independent approval of the current commit is required"
+    ]
+   },
+   {
+    "name": "test",
+    "passed": false,
+    "reasons": [
+     "Required CI check test has not passed on the current candidate",
+     "Required CI check typecheck has not passed on the current candidate"
+    ],
+    "ciAppIds": [
+     15368
+    ]
+   },
+   {
+    "name": "merge",
+    "passed": false,
+    "reasons": [
+     "GitHub has not been observed at the current candidate",
+     "Pull request is not mergeable against the current base",
+     "Unresolved lease-loss escalation requires operator resolution: Worker graphyard-claude-1 lost lease epoch 1"
+    ]
+   }
+  ],
+  "lease": null,
+  "ready": true,
+  "stage": "ready",
+  "title": "Dispatch plane unavailable: dispatcher ticks fail with launch timeouts and the claude runtime drops every launched session, so no worker, reviewer or approver session can run",
+  "origin": {
+   "faultClass": {
+    "class": "loop",
+    "count": 1,
+    "instances": [],
+    "threshold": 1,
+    "detectedAt": "2026-10-06T13:54:05.758Z",
+    "windowHours": 1
+   }
+  },
+  "policy": {
+   "checks": [
+    "test",
+    "typecheck"
+   ],
+   "review": true
+  },
+  "triage": {
+   "at": "2026-10-06T14:00:11.663Z",
+   "by": "graphyard-master",
+   "state": "applied",
+   "refusal": null,
+   "runtime": "pi",
+   "decision": null,
+   "judgement": {
+    "reason": "Real, severe availability work, not covered by anything open or delivered. Evidence (all readable on the control plane): dispatcher failed 3+ consecutive ticks (last failed 2026-10-06T13:41:49Z, last success 13:41:12Z) with every launch ending 'The operation was aborted due to timeout'; since 09:51Z every session launched on vishrog ended 'vanished: the claude runtime ... has not reported session/pane' within 13-45s (sessions on GY-1363/1364/1365/1366); doctor report gap since ~10:14Z. The checkout confirms the gap the item names: autonomy.ts abandonLaunch covers only approver/escalation launches (lines 414/424/636/650) and no fail-fast bound that fails a stuck launch as its own action with a runtime-naming fault exists on the dispatch path (src/daemon/cycle-dispatch.ts launch(), src/master/launch.ts launchStartMs/SessionStartError). Not fixed by a delivered item: GY-1369 (commits 20e3b4716b, 9466be0b61) delivered only the confined-PID liveness fix and the operations.md loop-down runbook; GY-1370 only the namespace-aware pid probe — neither restores the runtime nor hardens launches. No open item overlaps: GY-1292 is docs word budget, GY-1365 the revert approver App, GY-1371 releasing-diagnoses, GY-1372 intervention attention. Priority 0 because dispatch-plane availability gates every item — the moment the open human-gated items (GY-1292, GY-1365) unblock or any new fault files, nothing can be launched, and recovery needs the operator or the GY-1369 runbook plus the launch-path hardening to stop one dead runtime silencing dispatch plane-wide.",
+    "outcome": "release",
+    "priority": 0
+   }
+  },
+  "blocker": null,
+  "criteria": [
+   {
+    "id": "AC-1",
+    "text": "The dispatcher completes a full tick with a successful launch again: the next requested session launch is claimed and acknowledged inside the 2-minute launch bound, and master status no longer raises the plane-unavailable fault on dispatch (no 'failed N ticks in a row' line, 'The operation was aborted due to timeout' gone).",
+    "proofs": [
+     "manual:doctor-dispatch-tick-recovered"
+    ]
+   },
+   {
+    "id": "AC-2",
+    "text": "A launched worker session stays reported by its runtime through at least one lease renewal — no 'vanished: the claude runtime on vishrog has not reported session … absent from 2 consecutive session reports' within 5 minutes of its last observed activity — verified across two consecutive post-recovery dispatches.",
+    "proofs": [
+     "manual:doctor-session-persists-lease"
+    ]
+   },
+   {
+    "id": "AC-3",
+    "text": "A launch that cannot be acknowledged within its bound fails its own dispatch action with a fault naming the dead runtime instead of timing out the whole tick, and the doctor cadence resumes (no gap greater than one hour between doctor runs).",
+    "proofs": [
+     "manual:doctor-launch-fails-fast"
+    ]
+   }
+  ],
+  "evidence": [],
+  "pipeline": {
+   "attempts": [
+    {
+     "end": "expired",
+     "epoch": 1,
+     "owner": "graphyard-claude-1",
+     "endedAt": "2026-10-06T14:02:59.366Z",
+     "claimedAt": "2026-10-06T14:00:59.366Z"
+    }
+   ],
+   "submittedAt": null,
+   "reworkRounds": 0,
+   "interventions": {
+    "blocked": 0,
+    "requirements": 0
+   },
+   "resubmittedAt": null
+  },
+  "priority": 0,
+  "revision": 11,
+  "sessions": [],
+  "candidate": null,
+  "createdAt": "2026-10-06T13:54:06.697Z",
+  "proofGaps": [],
+  "updatedAt": "2026-10-06T14:03:26.186Z",
+  "escalation": {
+   "at": "2026-10-06T14:03:13.938Z",
+   "actor": "graphyard",
+   "reason": "Worker graphyard-claude-1 lost lease epoch 1",
+   "trigger": "lease-loss"
+  },
+  "nextAction": {
+   "key": "GY-1373",
+   "gate": "build",
+   "kind": "dispatch",
+   "work": "9dbeccb2-3a34-41d8-8655-748840855e4c",
+   "inputs": {
+    "kind": "dispatch",
+    "epoch": 1,
+    "target": "implementation",
+    "priority": 0,
+    "plannedFiles": [
+     "src/master/dispatch.ts",
+     "src/master/autonomy.ts"
+    ]
+   },
+   "reason": "GY-1373 is ready and unassigned: Worker has not submitted implementation for this attempt",
+   "binding": "dispatch:1",
+   "carried": [
+    {
+     "at": "2026-10-06T14:03:13.938Z",
+     "kind": "escalation",
+     "reason": "Worker graphyard-claude-1 lost lease epoch 1",
+     "resolve": "graphyard master escalation GY-1373 lease-loss spawns a handler that follows precedent; a judgment nobody has taken before is graphyard master decide GY-1373 resolve '{\"trigger\":\"lease-loss\"}' REASON, then graphyard master approver GY-1373 DECISION",
+     "trigger": "lease-loss"
+    }
+   ],
+   "llmRole": "implement",
+   "refusal": "Worker has not submitted implementation for this attempt"
+  },
+  "submission": null,
+  "violations": [],
+  "workspaces": [
+   {
+    "host": "vishrog",
+    "path": "/home/vish/code/graphyard/.graphyard/worktrees/GY-1373-1",
+    "epoch": 1,
+    "owner": "graphyard-claude-1",
+    "branch": "graphyard/gy-1373-1"
+   }
+  ],
+  "actionQueue": {
+   "actions": [
+    {
+     "id": "70fe9fa93a7499e20c9d7afbcfd54b90",
+     "key": "GY-1373",
+     "gate": "build",
+     "kind": "dispatch",
+     "work": "9dbeccb2-3a34-41d8-8655-748840855e4c",
+     "claim": {
+      "host": "vishrog",
+      "attempt": 1,
+      "executor": "graphyard-master@vishrog/1",
+      "renewals": 5,
+      "claimedAt": "2026-10-06T14:00:20.172Z",
+      "expiresAt": "2026-10-06T14:04:57.509Z",
+      "principal": "graphyard-master",
+      "renewedAt": "2026-10-06T14:02:57.509Z"
+     },
+     "state": "claimed",
+     "inputs": {
+      "kind": "dispatch",
+      "epoch": 0,
+      "target": "implementation",
+      "priority": 0,
+      "plannedFiles": [
+       "src/master/dispatch.ts",
+       "src/master/autonomy.ts"
+      ]
+     },
+     "reason": "GY-1373 is ready and unassigned: Worker has not submitted implementation for this attempt",
+     "binding": "dispatch:0",
+     "history": [
+      {
+       "at": "2026-10-06T14:00:11.663Z",
+       "event": "requested",
+       "reason": "GY-1373 is ready and unassigned: Worker has not submitted implementation for this attempt",
+       "result": null,
+       "executor": null,
+       "requester": "graphyard"
+      },
+      {
+       "at": "2026-10-06T14:00:20.172Z",
+       "event": "claimed",
+       "reason": "attempt 1 claimed by graphyard-master@vishrog/1 on vishrog",
+       "result": null,
+       "executor": "graphyard-master@vishrog/1",
+       "requester": "graphyard"
+      }
+     ],
+     "refusal": "Worker has not submitted implementation for this attempt",
+     "attempts": 1,
+     "requestedAt": "2026-10-06T14:00:11.663Z",
+     "requestedBy": "graphyard"
+    },
+    {
+     "id": "b55aff0cd9946a735f1c6e07597b03e6",
+     "key": "GY-1373",
+     "gate": "build",
+     "kind": "dispatch",
+     "work": "9dbeccb2-3a34-41d8-8655-748840855e4c",
+     "claim": {
+      "host": "vishrog",
+      "attempt": 1,
+      "executor": "graphyard-master@vishrog/2",
+      "claimedAt": "2026-10-06T14:03:26.186Z",
+      "expiresAt": "2026-10-06T14:05:26.186Z",
+      "principal": "graphyard-master"
+     },
+     "state": "claimed",
+     "inputs": {
+      "kind": "dispatch",
+      "epoch": 1,
+      "target": "implementation",
+      "priority": 0,
+      "plannedFiles": [
+       "src/master/dispatch.ts",
+       "src/master/autonomy.ts"
+      ]
+     },
+     "reason": "GY-1373 is ready and unassigned: Worker has not submitted implementation for this attempt",
+     "binding": "dispatch:1",
+     "history": [
+      {
+       "at": "2026-10-06T14:03:13.938Z",
+       "event": "requested",
+       "reason": "GY-1373 is ready and unassigned: Worker has not submitted implementation for this attempt",
+       "result": null,
+       "executor": null,
+       "requester": "graphyard"
+      },
+      {
+       "at": "2026-10-06T14:03:26.186Z",
+       "event": "claimed",
+       "reason": "attempt 1 claimed by graphyard-master@vishrog/2 on vishrog",
+       "result": null,
+       "executor": "graphyard-master@vishrog/2",
+       "requester": "graphyard"
+      }
+     ],
+     "refusal": "Worker has not submitted implementation for this attempt",
+     "attempts": 1,
+     "requestedAt": "2026-10-06T14:03:13.938Z",
+     "requestedBy": "graphyard"
+    }
+   ],
+   "history": []
+  },
+  "description": "",
+  "escalations": [
+   {
+    "at": "2026-10-06T14:03:13.938Z",
+    "actor": "graphyard",
+    "reason": "Worker graphyard-claude-1 lost lease epoch 1",
+    "trigger": "lease-loss"
+   }
+  ],
+  "observation": null,
+  "speedTarget": 14400000,
+  "autoDispatch": {
+   "review": null,
+   "history": [],
+   "producers": []
+  },
+  "dependencies": [],
+  "implementers": [
+   "graphyard-claude-1"
+  ],
+  "plannedFiles": [
+   "src/master/dispatch.ts",
+   "src/master/autonomy.ts"
+  ],
+  "scopeRequest": null,
+  "systemDriven": true,
+  "documentation": {
+   "id": "DOCS",
+   "text": "Documentation reflects this change: the diff updates this repository's documentation (docs/, AGENTS.md, README.md) for any user-visible behaviour, command, configuration or API it changes, or the worker states at submission that the change alters no documented behaviour.",
+   "paths": [
+    "docs/",
+    "AGENTS.md",
+    "README.md"
+   ],
+   "changelog": null
+  },
+  "lastAssignment": {
+   "epoch": 1,
+   "owner": "graphyard-claude-1",
+   "runtime": "Claude",
+   "claimedAt": "2026-10-06T14:00:59.366Z",
+   "displayName": "Juniper"
+  },
+  "policyRevision": 1,
+  "stageEnteredAt": "2026-10-06T14:03:13.938Z",
+  "reworkRequested": false,
+  "mergeAuthorization": null,
+  "scenarioRequirements": []
+ }
+}

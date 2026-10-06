@@ -379,6 +379,16 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
       await note(entry, 'done', `${entry.work} is no longer open, so its diagnosis is not acted on${entry.answeredBy ? `; it was closed as answered by ${entry.answeredBy}` : ''}`, null);
       return;
     }
+    // GY-1374: a recurring item parked on an unanswered human-only decision waits on that person, and
+    // a fix filed for it is the act they were asked for: released, it dispatches to worker executors
+    // an item no worker may perform. GY-1367 (the revert approver App GY-1365 was parked on) was
+    // refused for exactly that. The parked decision answers the diagnosis; nothing is filed or asked.
+    const parked = entry.kind === 'recurring' && subjectItem?.humanRequest && !subjectItem.humanRequest.answer ? subjectItem.humanRequest : null;
+    if (parked) {
+      entry.state = 'answered'; entry.answeredBy = subjectItem!.key;
+      await note(entry, 'done', `${entry.work} is parked on a human-only decision (${parked.kind}: ${clip(parked.needed, 300)}), so its diagnosis is left to that person and no fix is filed or released to worker executors. Diagnosis: ${clip(diagnosis.cause, 600)}`, null);
+      return;
+    }
     if (diagnosis.covering) {
       const covering = snapshot.work.find(item => item.key === diagnosis.covering);
       if (!covering || covering.stage === 'done' || covering.key === entry.work) { entry.state = 'failed'; await note(entry, 'failed', `The diagnosis names ${diagnosis.covering} as covering ${entry.subject}, but it is not another open item`); return; }

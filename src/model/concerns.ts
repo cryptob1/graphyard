@@ -60,6 +60,9 @@ export function humanNeeded(action: NextAction): HumanNeeded | null {
     resolve: standing ? escalationResolution(action.key, trigger) : `graphyard diagnose ${action.key} — ${detail}` };
 }
 
+/** The owed decision a concern carried beside a running action is reported under (humanNeededActions). */
+export const carriedDecision = (key: string, trigger: string) => `resolving ${key}'s ${trigger} escalation`;
+
 const carriedConcern = (key: string, escalation: { trigger: string; reason: string; at: string }): CarriedConcern =>
   ({ kind: 'escalation', trigger: escalation.trigger, reason: escalation.reason, at: escalation.at, resolve: escalationResolution(key, escalation.trigger) });
 
@@ -162,7 +165,7 @@ export function humanNeededActions(all: readonly Work[], now: Date): HumanNeeded
       ...action.needsHuman, action: row?.id ?? null, ...since(row?.requestedAt ?? null) });
     for (const concern of action.carried ?? []) rows.push({ key: work.key, work: work.id, source: 'carried', kind: action.kind,
       trigger: concern.trigger, reason: `${work.key} carries a standing ${concern.trigger} escalation while it is worked: ${concern.reason}`,
-      decision: `resolving ${work.key}'s ${concern.trigger} escalation`, resolve: concern.resolve, action: null, ...since(concern.at) });
+      decision: carriedDecision(work.key, concern.trigger), resolve: concern.resolve, action: null, ...since(concern.at) });
   }
   return rows.sort((a, b) => b.waitedMs - a.waitedMs || a.key.localeCompare(b.key));
 }

@@ -8,7 +8,7 @@ import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { decisionReads, lateDecisionRead, resumedApplication } from './decision-reads.js';
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
@@ -184,10 +184,14 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // landed since). The server's answer names it, and this candidate's refusal is the loop's to
       // answer on its new grounds: the request is made again citing it, a bounded number of times,
       // rather than failing on every cycle with nobody told why (GY-229).
-      let requested: { id: string } | undefined = standing;
+      let requested: { id: string } | undefined = standing, adopted = !!standing;
       for (let answers = 0; !requested; answers++) {
         try { requested = await effects.decide!(item, decision.action, reason, decision.input); }
         catch (error) {
+          // GY-1374: the server names the request of this action already standing, which the history
+          // read missed; it is this decision, adopted for an approver like one the read had found.
+          const held = adoptedOnRefusal.includes(decision.action) ? standingNamedIn(error, decision.action) : null;
+          if (held) { requested = { id: held }; adopted = true; continue; }
           const named = situated && answers < maxRefusalAnswers ? refusalNamedIn(error, situated) : null;
           const cited = named && situated && !refused.includes(named) ? reworkDecisionReason(prefix, decision.reason, [...refused, named], situated) : null;
           if (!named || cited === null) throw error;
@@ -199,7 +203,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // changed (a rework's unresolved-thread set moved while it was requested). That watch is
       // retired here, its sessions and counts carried over, so the cleanup below does not withdraw
       // the decision this watch just adopted and close its approver — on every cycle the set moves.
-      const [retired, prior] = standing ? Object.entries(state.approvals).find(([other, entry]) => other !== key && entry.decision === requested.id && !entry.settledAt) ?? [] : [];
+      const [retired, prior] = adopted ? Object.entries(state.approvals).find(([other, entry]) => other !== key && entry.decision === requested.id && !entry.settledAt) ?? [] : [];
       if (retired) delete state.approvals[retired];
       // GY-849: the capacity wait and the exhaustion markers go with the re-keyed watch — dropped,
       // the decision would leave the oldest-first queue and race the other waiters for the freed
@@ -238,7 +242,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       const how = prior?.agentName ? `kept approver session ${prior.agentName}, already judging it under the earlier binding`
         : watch.capacity && capacityRelaunchWaits(watch) ? 'held its capacity wait behind the relaunch already in flight'
         : await launch(item, watch, true);
-      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${standing ? `Adopted decision ${requested.id} (${decision.action}), already standing on ${item.key},` : `Requested decision ${requested.id} (${decision.action}) for ${item.key}`} and ${how}: ${reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${adopted ? `Adopted decision ${requested.id} (${decision.action}), already standing on ${item.key},` : `Requested decision ${requested.id} (${decision.action}) for ${item.key}`} and ${how}: ${reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       // A history read that only missed the step's deadline judged nothing (GY-1293): one alone is
       // no decision fault, and its request is asked again next cycle; the second in a row counts.
