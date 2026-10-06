@@ -42,7 +42,8 @@ export const canonical = (value: unknown): unknown => Array.isArray(value) ? val
 // would clear the incident after that loss had gone unrecorded. The requester asks again.
 export const samePin = (current: ResolvePin, pinned: ResolvePin | null | undefined) =>
   !!pinned && 'lease' in pinned && JSON.stringify(canonical(current)) === JSON.stringify(canonical(pinned));
-export type DecisionRecord = Omit<Decision, 'state'> & { state: DecisionState | TerminalState; race: { expected: unknown; current: unknown } | null; pin: ResolvePin | null };
+// `staleAt`: when the server settled it stale, the instant its master's turn to request it again starts (GY-1349).
+export type DecisionRecord = Omit<Decision, 'state'> & { state: DecisionState | TerminalState; race: { expected: unknown; current: unknown } | null; pin: ResolvePin | null; staleAt?: string };
 
 /** The fold itself, over one item's decision entries in ledger order. */
 function foldLedger(workId: string, rows: { actor: string; kind: string; payload: any; created_at: Date | string }[]): DecisionRecord[] {
@@ -52,7 +53,7 @@ function foldLedger(workId: string, rows: { actor: string; kind: string; payload
     const decision = decisions.find(entry => entry.id === event.payload?.id);
     if (!decision) continue;
     if (event.kind === 'decision.requested') Object.assign(decision, { pin: event.payload.pin ?? null });
-    if (event.kind === 'decision.stale') Object.assign(decision, { state: 'stale', outcome: event.payload.reason ?? null, race: { expected: event.payload.expected ?? null, current: event.payload.current ?? null } });
+    if (event.kind === 'decision.stale') Object.assign(decision, { state: 'stale', staleAt: event.at, outcome: event.payload.reason ?? null, race: { expected: event.payload.expected ?? null, current: event.payload.current ?? null } });
     if (event.kind === 'decision.withdrawn') Object.assign(decision, { state: 'withdrawn', outcome: event.payload.reason ?? null });
   }
   return decisions;

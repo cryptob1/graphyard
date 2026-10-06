@@ -14,6 +14,7 @@ import { maxApproverLaunches } from '../src/daemon/decisions.js';
 // GY-1346's bound is read through the namespace too, so the base exercise loads this file and its replays fail on their assertions.
 import * as decisions from '../src/daemon/decisions.js';
 import { humanNeededAttention } from '../src/cli/owed-report.js';
+import { readDecisions } from '../src/server/decision-ledger.js';
 import { humanNeeded, type NextAction } from '../src/model/next-action.js';
 
 // GY-1251 names this file for its proof: manual:fault-class-decision. The master loop filed 5
@@ -267,4 +268,76 @@ test('manual:fault-class-decision — an owed escalation past the master\'s turn
   assert.deepEqual(decisionFaults(undated, '2026-10-06T03:06:13.542Z').faults.map(fault => fault.kind), ['owed-decision']);
   // A containment escalation's owed line is the fence's (owedContainmentLine), never the master's turn.
   assert.equal(daemon.owedEscalationInMotion(fenced1329(), "resolving GY-1329's containment refusal has been owed for 15s", Date.parse('2026-10-05T23:25:31.610Z')), false);
+});
+
+// GY-1349: four decision faults in 24 hours on GY-1338, on 6 October 2026, replayed from the ledger
+// (graphyard events GY-1338 --payload full). The master asked for release 77cccf4c at 03:55:53 and
+// resolve 19b70cd4 at 03:57:09; the release was applied at 04:11:33, and the resolve went stale at
+// 04:13:09 when the dispatch that followed moved the item's revision under its approver.
+//
+// - decision-unanswered|GY-1338 (release 77cccf4c, 10m) and (resolve 19b70cd4, 9m): unwatched
+//   decisions inside the master's turn, which GY-1346's bound already defers on the base.
+// - owed-decision|GY-1338|2026-10-06T04:13:35.901Z: the requirement-weakening escalation's row was
+//   queued at 04:12:06 and counted a minute in, inside GY-1346's owedEscalationInMotion on the base.
+// - decision-stale|GY-1338|2026-10-06T04:13:35.901Z: the residue. A stale decision of any action
+//   but release is requested again by nothing but the master's next turn, yet its line counted 26
+//   seconds after it went stale — the shape GY-1337 and GY-1346 removed for every sibling wait.
+
+const master1349 = 'graphyard-master-graphyard-operator';
+const item1338 = { id: '4932070a-203a-45e7-9825-90047f7054b9', key: 'GY-1338', stage: 'build', ready: true };
+const release1349 = { id: '77cccf4c-484b-44c7-8d20-28db36f084bd', action: 'release', state: 'requested', requestedAt: '2026-10-06T03:55:53.223Z', requestedBy: master1349 };
+const resolve1349 = { id: '19b70cd4-550e-4802-b214-caf8dbb30696', action: 'resolve', state: 'requested', requestedAt: '2026-10-06T03:57:09.496Z', requestedBy: master1349 };
+const staleResolve1349 = { ...resolve1349, state: 'stale', staleAt: '2026-10-06T04:13:09.269Z', outcome: 'Task revision changed (now 36); reload and request again; the decision was not applied',
+  race: { expected: { epoch: 0, lease: null }, current: { epoch: 1, lease: 1 } } };
+const observed1349 = '2026-10-06T04:13:35.901Z';
+/** The decision-report lines for GY-1338 at `now` with no approval watch and no live approver, and the decision faults the cycle records from them at `at`. */
+async function report1338(rows: object[], now: number, at = now) {
+  const report = await terminalDecisions(async () => ({ decisions: rows }), [{ ...item1338, stage: 'backlog', ready: false }], { approvals: [], runtime: { available: true, agents: [] }, now });
+  return { report, faults: cycleFaults(emptyDaemonState(config()), [], at, { config: config(), reported: report.attentionItems }).filter(fault => fault.faultClass === 'decision').map(fault => fault.kind) };
+}
+
+for (const [decision, age] of [[release1349, '10m'], [resolve1349, '9m']] as const) test(`manual:fault-class-decision — decision-unanswered|GY-1338 (${decision.id.slice(0, 8)}, ${age}) is no fault inside the master's turn`, async () => {
+  const { report, faults } = await report1338([decision], Date.parse(decision.requestedAt) + (parseInt(age) * 60 + 10) * 1000);
+  assert.deepEqual(report.attentionItems.map(item => item.text), [`Decision ${decision.id} (${decision.action}) is unanswered after ${age}: approver session gy-approver-gy-1338-${decision.id.slice(0, 8)} is not running and recorded no outcome — a stall, not a refusal`]);
+  assert.deepEqual(faults, [], 'the master asked for it and its turn to put it to an approver had not passed');
+});
+
+test('manual:fault-class-decision — decision-stale|GY-1338|2026-10-06T04:13:35.901Z is no fault inside the master\'s turn to request it again', async () => {
+  const { report, faults } = await report1338([{ ...release1349, state: 'applied', outcome: 'Released to ready' }, staleResolve1349], Date.parse(observed1349));
+  assert.deepEqual(report.attentionItems.map(item => item.text), [`Decision ${resolve1349.id} (resolve) is stale: Task revision changed (now 36); reload and request again; the decision was not applied; request it again, the stale decision no longer blocks`]);
+  assert.deepEqual(faults, [], 'the resolve went stale 26s before the loop counted it, and only the master requests it again');
+  assert.equal(report.attentionItems[0].inMotionUntil, new Date(Date.parse(staleResolve1349.staleAt) + decisionReport.staleDecisionWaitBoundMs).toISOString());
+  assert.equal(decisionReport.staleDecisionWaitBoundMs, decisions.masterTurnWaitBoundMs);
+});
+
+test('manual:fault-class-decision — a stale decision past the master\'s turn still counts, dated from its request when the record has no stale instant', async () => {
+  const late = Date.parse(staleResolve1349.staleAt) + decisions.masterTurnWaitBoundMs + 60_000;
+  assert.deepEqual((await report1338([staleResolve1349], late)).faults, ['decision-stale']);
+  const { staleAt: _, ...undated } = staleResolve1349;
+  const fromRequest = await report1338([undated], Date.parse(observed1349));
+  assert.equal(fromRequest.report.attentionItems[0].inMotionUntil, new Date(Date.parse(resolve1349.requestedAt) + decisions.masterTurnWaitBoundMs).toISOString());
+  assert.deepEqual((await report1338([undated], Date.parse(resolve1349.requestedAt) + decisions.masterTurnWaitBoundMs + 60_000)).faults, ['decision-stale']);
+  // A later decision of the same action supersedes it, so nothing is owed at all.
+  assert.deepEqual((await report1338([staleResolve1349, { ...resolve1349, id: 'later', requestedAt: '2026-10-06T04:20:00.000Z' }], late)).report.attentionItems.filter(item => item.text.includes('is stale')), []);
+});
+
+const fixture1349 = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/gy-1349-decision-faults.json', import.meta.url)), 'utf8')) as { work: Work };
+
+test('manual:fault-class-decision — owed-decision|GY-1338|2026-10-06T04:13:35.901Z is no fault inside the master\'s turn to resolve the escalation', () => {
+  const work = structuredClone(fixture1349.work);
+  const { reported, faults } = decisionFaults(work, observed1349);
+  assert.deepEqual(reported.map(line => line.text), ["GY-1338 has a standing requirement-weakening escalation and nothing else to do: Requirement revision retires AC-1, AC-3, AC-4, AC-6 and narrows proofs for no criterion — no executor may run it; resolving GY-1338's requirement-weakening escalation has been owed for 1m"]);
+  assert.deepEqual(faults.map(fault => fault.kind), [], 'the escalation row was queued at 04:12:06, a minute before the loop counted it');
+  const late = new Date(Date.parse(work.actionQueue!.actions.find(row => row.kind === 'escalate')!.requestedAt!) + decisions.masterTurnWaitBoundMs + 60_000).toISOString();
+  assert.deepEqual(decisionFaults(structuredClone(fixture1349.work), late).faults.map(fault => fault.kind), ['owed-decision']);
+});
+
+test('manual:fault-class-decision — the decision ledger records when a decision went stale, the instant the master\'s turn starts', async () => {
+  const rows = [
+    { actor: master1349, kind: 'decision.requested', created_at: resolve1349.requestedAt, payload: { id: resolve1349.id, action: 'resolve', input: { trigger: 'requirement-weakening', expectedRevision: 21 }, reason: 'resolve it', requester: { id: master1349, role: 'operator-agent' } } },
+    { actor: 'graphyard-approver-graphyard', kind: 'decision.stale', created_at: staleResolve1349.staleAt, payload: { id: resolve1349.id, action: 'resolve', reason: staleResolve1349.outcome, expected: null, current: null } },
+  ];
+  const [decision] = await readDecisions({ query: (async () => ({ rows })) as never }, { id: item1338.id } as Work);
+  assert.equal(decision.state, 'stale');
+  assert.equal(decision.staleAt, staleResolve1349.staleAt);
 });
