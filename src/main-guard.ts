@@ -349,11 +349,13 @@ const causeText: Record<MainGuardAbandonCause, string> = {
  * "raised and pruned". A revert abandoned at or before `since` — the oldest row the cursor still
  * holds, once it holds as many as it keeps — could have been raised and pruned (its row was recorded
  * after it was abandoned), so it is not raised again; one abandoned later is newer than every
- * retained row, so it cannot have been pruned, and is raised once. A red line is re-recorded every
- * cycle, so its row is never the oldest: a pruned one had stopped, which only recovery does.
+ * retained row, so it cannot have been pruned, and is raised once. `since` applies only to a line
+ * whose row the cursor no longer `held`s: a red line is re-recorded every cycle, so its row is held
+ * and it keeps being raised however many newer rows the cursor fills with (GY-1332 review); a
+ * pruned row had stopped, which only recovery does.
  */
-export function mainGuardAttention(all: Pick<Work, 'key' | 'mainGuardReverts'>[], since = -Infinity): { key: string; work: string; text: string; red: string[]; recovered: string }[] {
-  return all.flatMap(work => (work.mainGuardReverts ?? []).filter(revert => revert.state === 'abandoned' && !(Date.parse(revert.settledAt ?? revert.at) <= since)).map(revert => {
+export function mainGuardAttention(all: Pick<Work, 'key' | 'mainGuardReverts'>[], since = -Infinity, held: (key: string) => boolean = () => false): { key: string; work: string; text: string; red: string[]; recovered: string }[] {
+  return all.flatMap(work => (work.mainGuardReverts ?? []).filter(revert => revert.state === 'abandoned' && (held(`escalation:main-guard:${revert.mergeSha}`) || !(Date.parse(revert.settledAt ?? revert.at) <= since))).map(revert => {
     const head = `Main guard: ${work.key}'s merge ${revert.mergeSha.slice(0, 12)}${revert.pr ? ` (PR #${revert.pr})` : ''} broke main (${revert.failing.join(', ') || 'required checks failed'}) and could not be reverted automatically${revert.cause ? ` [${causeText[revert.cause]}]` : ''}: ${revert.revert ? `revert PR #${revert.revert.pr}` : 'no revert PR'} — ${revert.reason ?? 'abandoned'}.`;
     const red = revert.red ? revert.failing : [];
     return {

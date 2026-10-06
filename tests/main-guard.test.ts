@@ -470,13 +470,32 @@ test('unit:main-guard-attention-until-green an abandoned revert raises its line 
   for (const detail of raised) assert.match(detail, /Main is still red: main's required check test stays red until the next merge to main re-runs CI/);
   assert.equal(state.actions[`escalation:main-guard:${B}`].attempts, 6);
 
+  // A busy loop: while main stays red the cursor fills past `retainedActions` with rows newer than
+  // the abandonment, so its oldest retained row postdates it. The line is still raised every cycle.
+  main = 'failed';
+  for (let cycle = 6; cycle < 10; cycle++) {
+    const clock = start + cycle * 30_000;
+    for (let row = 0; row < 200; row++) state.actions[`dispatch:filler:${cycle}:${row}`] = { kind: 'dispatch', work: null, principal: null, state: 'done', detail: 'filler', attempts: 1, epoch: null, cycle, at: new Date(clock - 1).toISOString() } as never;
+    pruneDaemonState(state);
+    const lines = await mergeCycle(state, [itemB], clock, baseCheck);
+    assert.equal(lines.length, 1, `cycle ${cycle}: raised while main is red, however full the cursor`);
+    assert.match(lines[0].detail, /Main is still red/);
+  }
+  assert.ok(Object.values(state.actions).filter(action => action.state === 'done').length >= retainedActions, 'the cursor holds as many resolved rows as it keeps');
+  assert.ok(Math.min(...Object.values(state.actions).map(action => Date.parse(action.at))) > start, 'every retained row is newer than the abandonment');
+
   // An unrelated merge re-runs CI and main's test passes: the line is raised once more as recovered, then never again.
   main = 'passed';
-  const recovered = await mergeCycle(state, [itemB], start + 6 * 30_000, baseCheck);
+  const recovered = await mergeCycle(state, [itemB], start + 10 * 30_000, baseCheck);
   assert.equal(recovered.length, 1);
   assert.match(recovered[0].detail, /Main's test passed again; nothing is owed/);
-  for (let cycle = 7; cycle < 10; cycle++) assert.deepEqual(await mergeCycle(state, [itemB], start + cycle * 30_000, baseCheck), []);
-  assert.equal(reads.length, 7, 'main is no longer read once the line has recovered');
+  for (let cycle = 11; cycle < 14; cycle++) assert.deepEqual(await mergeCycle(state, [itemB], start + cycle * 30_000, baseCheck), []);
+  assert.equal(reads.length, 11, 'main is no longer read once the line has recovered');
+  // Once the recovered row itself is retired, the abandonment predates every retained row: it is not raised again.
+  for (let row = 0; row < retainedActions; row++) state.actions[`dispatch:late:${row}`] = { kind: 'dispatch', work: null, principal: null, state: 'done', detail: 'filler', attempts: 1, epoch: null, cycle: 14, at: new Date(start + 14 * 30_000).toISOString() } as never;
+  pruneDaemonState(state);
+  assert.equal(state.actions[`escalation:main-guard:${B}`], undefined);
+  assert.deepEqual(await mergeCycle(state, [itemB], start + 15 * 30_000, baseCheck), []);
 
   // A record from before GY-1332 (no `red`), or a loop with no reader of main's checks, raises the line once.
   const legacy = emptyDaemonState({ url: 'https://graphyard.example', repository: 'owner/project', autoMerge: true } as MasterConfig);

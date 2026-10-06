@@ -79,12 +79,13 @@ export async function mergeStep(cycle: Cycle) {
   //    check failed (`red`, GY-1332) is raised every cycle until main's latest run of each failing
   //    check passes, then once more as recovered; an older record is raised once. Once the cursor
   //    holds as many resolved rows as pruneDaemonState keeps, a revert abandoned before the oldest of
-  //    them may have had its row retired, so it is not raised again (`mainGuardAttention`'s `since`).
+  //    them may have had its row retired, so it is not raised again unless its row is still held
+  //    (`mainGuardAttention`'s `since`); a red line's row is re-recorded every cycle, so it is.
   const abandoned = (cycle.snapshot?.work ?? []).filter(item => item.mainGuardReverts?.some(revert => revert.state === 'abandoned'));
   if (abandoned.length) {
     const resolved = Object.entries(state.actions).filter(([key, action]) => (action.state === 'done' || action.state === 'failed') && !state.faults.failing[key]);
     const since = resolved.length >= retainedActions ? Math.min(...resolved.map(([, action]) => Date.parse(action.at))) : -Infinity;
-    for (const line of mainGuardAttention(abandoned, since)) {
+    for (const line of mainGuardAttention(abandoned, since, key => Boolean(state.actions[key]))) {
       const previous = state.actions[line.key];
       const raise = async (detail: string) => { performed.push(await record(state, line.key, { kind: 'escalation', work: line.work, principal: null, state: 'done', detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist)); };
       // Without a reader of main's check runs the loop cannot tell when main is green again, so it raises the line once.
