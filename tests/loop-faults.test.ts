@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import type { Work } from '../src/model.js';
 import { classifyAttention, faultClassItem, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
-import { itemSpecificPlaneError, planeWideFailure } from '../src/model/blocker-class.js';
-import { faultObservationBudgetMs, fileRecurringFaultClasses } from '../src/daemon/faults.js';
+// Namespace imports for what GY-1345 adds, so a run against the base fails its cases rather than the module's load.
+import * as blockerClass from '../src/model/blocker-class.js';
+import * as faultsStep from '../src/daemon/faults.js';
+import { fileRecurringFaultClasses } from '../src/daemon/faults.js';
 import { faultActionKey } from '../src/daemon/state.js';
 import { record as recordAction } from '../src/daemon/effects.js';
 import { dispatchFailureBlockAfter, noteDispatchFailure } from '../src/daemon/dispatch-failures.js';
@@ -740,6 +742,9 @@ const gy1345Instances = [
 const decide502 = 'Graphyard refused work/0e2e01dc-cbd9-4d41-9b88-4f917acb7bb5/decisions (502): {"status":"error","code":502,"message":"Application failed to respond","request_id":"JKn5sxMXSLKpQMhF9fVATg"}';
 const file502 = 'Graphyard refused work (502): {"status":"error","code":502,"message":"Application failed to respond","request_id":"ZLTChWnfSliwZLfq0_TJvA"}';
 const tickTimeout = 'The operation was aborted due to timeout';
+const { itemSpecificPlaneError } = blockerClass;
+const planeWideFailure = (text: string | null) => blockerClass.planeWideFailure(text);
+const faultObservationBudgetMs = (intervalMs: number) => faultsStep.faultObservationBudgetMs(intervalMs);
 const loopFaults = (state: DaemonState) => state.faults.instances.filter(entry => entry.faultClass === 'loop');
 /** One diagnosis step whose isolate records a throw as the cycle's does: a failed action of the step's kind, with its default fault kind. */
 async function isolatedStep(state: DaemonState, effects: DiagnosticianEffects, work: Work[], history: Decisions, at: number) {
