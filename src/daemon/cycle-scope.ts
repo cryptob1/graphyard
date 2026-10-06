@@ -183,7 +183,10 @@ export async function scopeStep(cycle: Cycle) {
       // meanwhile, so the widening is moot — answered as the decide path answers it, never a fault (GY-1347).
       const moot = mootScopeWidening(error);
       if (moot) {
-        performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Not widened ${item.key}: ${moot}`), attempts, cycle: state.cycle }, now(), effects.persist));
+        const detail = boundDetail(`Not widened ${item.key}: ${moot}`);
+        const entry = await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail, attempts, cycle: state.cycle }, now(), effects.persist);
+        // The same moot race read again on a recheck is not a new action.
+        if (!judged || previous.detail !== detail) performed.push(entry);
         return null;
       }
       const transient = transientScopeRefusal(error);

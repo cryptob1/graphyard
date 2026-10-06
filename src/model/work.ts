@@ -125,7 +125,7 @@ export interface Observation {
   revertedDelivery?: RevertedDelivery;
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
-/** `decision`: the approved two-party decision whose application raised it, when one did (GY-1347). */
+/** `decision`: the approved two-party decision whose application raised it, when the item's ledger records it approved (GY-1347). */
 export interface Escalation { trigger: EscalationTrigger; reason: string; at: string; actor: string; decision?: string }
 export interface Work extends Create {
   /**

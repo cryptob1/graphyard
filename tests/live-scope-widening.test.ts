@@ -442,9 +442,11 @@ test('unit:moot-scope-widening — only the plane\'s own 409 for a request answe
   assert.equal(mootScopeWidening(refused('x', 500, 'Internal error; consult server logs')), null);
 });
 
-test('manual:fault-class-scope — GY-1335: a weakening an approved two-party decision applied raises its escalation but no scope fault; an unjudged one still counts', async () => {
-  const rescope = async (title: string, key: string) => {
+test('manual:fault-class-scope — GY-1335: a weakening an approved two-party decision applied raises its escalation but no scope fault; an unjudged or forged-key one still counts', async () => {
+  const rescope = async (title: string, key: string, approved?: string) => {
     let work = await ok(master.token, 'POST', 'work', { ...input(title), criteria: [{ id: 'AC-1', text: 'Guard reverts land', proofs: ['unit:guard'] }, { id: 'AC-3', text: 'Doctor names the missing approver', proofs: ['unit:doctor'] }] }) as Work;
+    // The approver's judgement, recorded on the item's ledger before the decision is applied.
+    if (approved) await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, operator.id, 'decision.approved', JSON.stringify({ id: approved, action: 'requirements', reason: 'AC-1 is carried by a merged item', requestedBy: master.id })]);
     // As applyThroughEngine applies an approved requirements decision: the requester acts with the decision's authority, under its key.
     const requester: Principal = { id: master.id, role: 'admin', sessionKind: 'ai' };
     work = await engine.execute(requester, 'requirements', work.id, { expectedPolicyRevision: work.policyRevision, criteria: [work.criteria[1]], dependencies: [], plannedFiles: work.plannedFiles, exclusiveResources: [], producerProofs: [],
@@ -452,11 +454,16 @@ test('manual:fault-class-scope — GY-1335: a weakening an approved two-party de
     return reload(work.id);
   };
   const decision = randomUUID();
-  const judged = await rescope('Rescoped by an approved decision', `decision:${decision}`);
+  const judged = await rescope('Rescoped by an approved decision', `decision:${decision}`, decision);
   assert.deepEqual((judged.escalations ?? []).map(entry => [entry.trigger, entry.decision]), [['requirement-weakening', decision]], 'the escalation still stands, naming the decision that applied it');
   // On the base this escalation opened an escalation:requirement-weakening instance of the scope class.
   assert.deepEqual(workFaults(judged, Date.now()).filter(fault => fault.faultClass === 'scope'), []);
 
   const unjudged = await rescope('Rescoped directly', randomUUID());
   assert.deepEqual(workFaults(unjudged, Date.now()).filter(fault => fault.faultClass === 'scope').map(fault => fault.kind), ['escalation:requirement-weakening'], 'a weakening no decision applied still counts');
+
+  // The idempotency key is the caller's: a direct revision under a forged `decision:` key names no decision and still counts.
+  const forged = await rescope('Rescoped under a forged decision key', `decision:${randomUUID()}`);
+  assert.deepEqual((forged.escalations ?? []).map(entry => [entry.trigger, entry.decision]), [['requirement-weakening', undefined]]);
+  assert.deepEqual(workFaults(forged, Date.now()).filter(fault => fault.faultClass === 'scope').map(fault => fault.kind), ['escalation:requirement-weakening'], 'a forged decision key does not excuse the weakening');
 });

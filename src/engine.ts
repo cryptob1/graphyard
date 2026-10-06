@@ -1077,7 +1077,13 @@ export class Engine {
         }
         const retired = work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id));
         const narrowed = work.criteria.filter(ac => { const next = data.criteria.find((n: { id: string }) => n.id === ac.id); return next && ac.proofs.some(proof => !next.proofs.includes(proof)); });
-        if (retired.length || narrowed.length) raiseEscalation(work, { trigger: 'requirement-weakening', reason: `Requirement revision retires ${retired.map(ac => ac.id).join(', ') || 'no criterion'} and narrows proofs for ${narrowed.map(ac => ac.id).join(', ') || 'no criterion'}`, at: now.toISOString(), actor: actor.id, ...(key.startsWith('decision:') ? { decision: key.slice('decision:'.length) } : {}) });
+        if (retired.length || narrowed.length) {
+          // The idempotency key is the caller's to choose, so a `decision:` key alone proves nothing: the
+          // escalation names a decision only when this item's ledger records it approved (GY-1347).
+          const decision = key.startsWith('decision:') ? key.slice('decision:'.length) : null;
+          const approved = decision && (await db.query(`SELECT 1 FROM events WHERE work_id=$1 AND kind='decision.approved' AND payload->>'id'=$2 LIMIT 1`, [work.id, decision])).rowCount;
+          raiseEscalation(work, { trigger: 'requirement-weakening', reason: `Requirement revision retires ${retired.map(ac => ac.id).join(', ') || 'no criterion'} and narrows proofs for ${narrowed.map(ac => ac.id).join(', ') || 'no criterion'}`, at: now.toISOString(), actor: actor.id, ...(approved ? { decision: decision! } : {}) });
+        }
         work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
         work.criteria = revised;
         work.dependencies = data.dependencies; work.plannedFiles = data.plannedFiles; work.exclusiveResources = data.exclusiveResources; work.producerProofs = data.producerProofs;

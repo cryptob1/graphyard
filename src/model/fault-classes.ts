@@ -190,9 +190,7 @@ export function workFaults(work: Work, now: number, routes = true): FaultObserva
   if (work.stage === 'done' || isClosed(work)) return [];
   const found: FaultObservation[] = [];
   const escalations = work.escalations ?? (work.escalation ? [work.escalation] : []);
-  // A weakening an independent approver already judged, applied by its two-party decision, is the item rescoped on purpose; the
-  // escalation it still raises is that decision's audit, resolved by the handler on its own revision — no scope fault (GY-1347).
-  for (const escalation of escalations) if (!(escalation.trigger === 'requirement-weakening' && escalation.decision)) found.push(observe(escalationFaultKind(escalation.trigger), work.key, `${escalation.trigger} escalation: ${escalation.reason}`));
+  for (const escalation of escalations) if (!(escalation.trigger === 'requirement-weakening' && escalation.decision)) found.push(observe(escalationFaultKind(escalation.trigger), work.key, `${escalation.trigger} escalation: ${escalation.reason}`)); // an approved decision's weakening: its audit, no scope fault (GY-1347)
   if (work.containmentQuarantine && containmentPhase(work, now)?.state === 'lapsed') found.push(observe('containment', work.key, `Containment quarantine from epoch ${work.containmentQuarantine.epoch} holds ${work.key}`));
   if (work.humanRequest && !work.humanRequest.answer) found.push(observe('human-request', work.key, `${work.key} is parked on a human-only decision: ${work.humanRequest.needed}`));
   if (work.scopeRequest && standingScopeRequest(work, now, routes)) found.push(observe('scope-request', work.key, `${work.key} needs files outside plannedFiles: ${work.scopeRequest.paths.join(', ')}`));
