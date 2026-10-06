@@ -773,11 +773,11 @@ export function owedUpgrade(state: { upgrade?: { pending: { from: string | null;
  */
 /**
  * The loop's bounds for one /tmp pass — at most `tmpReclaimLimitPerCycle` directories and
- * `tmpReclaimWorkMsPerCycle` of removal — over `tmpRoot`, or the host's temporary directories
+ * `tmpReclaimWorkMsPerCycle` of removal — over `tmpRoots`, or the host's temporary directories
  * (`hostTmpRoots`: this process's tmpdir and /tmp, each once, GY-1368) unless the caller names
  * others (a test's scratch roots, so it never sweeps the developer's real /tmp).
  */
-export const loopTmpReclaimOptions = (tmpRoot?: string | readonly string[]): TmpReclaimOptions => ({ limit: tmpReclaimLimitPerCycle, workMs: tmpReclaimWorkMsPerCycle, tmpRoots: tmpRoot === undefined ? hostTmpRoots() : typeof tmpRoot === 'string' ? [tmpRoot] : tmpRoot });
+export const loopTmpReclaimOptions = (tmpRoots?: readonly string[]): TmpReclaimOptions => ({ limit: tmpReclaimLimitPerCycle, workMs: tmpReclaimWorkMsPerCycle, tmpRoots: tmpRoots ?? hostTmpRoots() });
 /** The loop's /tmp pass in flight, and the report of the last one to finish, not yet recorded. */
 let tmpPass: Promise<void> | null = null;
 let tmpFinished: TmpReclaimReport | null = null;
@@ -807,7 +807,7 @@ export const settleTmpReclaim = async () => { await tmpPass; };
  * inside its bound however long the cycle takes. It fails, reaps and sweeps nothing, and keeps the
  * stuck-session clocks the full pass records.
  */
-export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'> & { workers?: ProfileSet['workers'] }, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void>; tmpRoot?: string | readonly string[]; tmpPass?: (options: TmpReclaimOptions) => Promise<TmpReclaimReport>; namesOnly?: boolean; gates?: ReclaimGates } = {}): Promise<ResourceReclaimReport> {
+export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'> & { workers?: ProfileSet['workers'] }, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void>; tmpRoot?: string; tmpRoots?: readonly string[]; tmpPass?: (options: TmpReclaimOptions) => Promise<TmpReclaimReport>; namesOnly?: boolean; gates?: ReclaimGates } = {}): Promise<ResourceReclaimReport> {
   const now = options.now ?? Date.now();
   const gates = options.gates ?? reclaimGates;
   const close = options.closePane ?? (pane => { closeHerdrPane(pane); });
@@ -941,9 +941,9 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   // it: a host with thousands of leftovers never stalls a cycle, and each cycle records what the
   // last finished pass freed. Ages are judged on the host's real clock, never the cycle's `now`,
   // which a caller may set anywhere: a directory is old only when it truly is.
-  // `tmpRoot` names the directories scanned and `tmpPass` the pass itself, for a caller that must
+  // `tmpRoot` (one) or `tmpRoots` names the directories scanned and `tmpPass` the pass itself, for a caller that must
   // keep the sweep off the host's /tmp or watch it run; the loop passes neither.
-  const tmp = namesOnly ? null : takeTmpReclaim(() => (options.tmpPass ?? reclaimTmpDirectories)(loopTmpReclaimOptions(options.tmpRoot)));
+  const tmp = namesOnly ? null : takeTmpReclaim(() => (options.tmpPass ?? reclaimTmpDirectories)(loopTmpReclaimOptions(options.tmpRoots ?? (options.tmpRoot === undefined ? undefined : [options.tmpRoot]))));
   if (tmp) {
     report.tmp = { removed: tmp.removed.length, bytes: tmp.bytes };
     report.errors.push(...tmp.errors.map(error => `Tmp reclaim: ${error}`));

@@ -216,14 +216,15 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
     : (name: string) => { const age = defaultMinAge(name); return age === null ? null : options.maxAgeMs ?? age; };
   // The bounds are the pass's, not each root's: a second root never doubles a cycle's work. The
   // work bound is real elapsed time, not the caller's clock: a mocked `now` must not change how
-  // long a cycle spends taking directories back.
+  // long a cycle spends taking directories back. It bounds removing only, so its clock starts at the
+  // pass's first removal: scanning a backlogged /tmp and /proc never spends it before anything goes.
   const pass: PassState = { now, minAge, limit: options.limit ?? tmpReclaimLimitPerCycle, uid: process.getuid?.(), held: options.held ?? null,
-    deadline: options.workMs === undefined ? Number.POSITIVE_INFINITY : Date.now() + options.workMs };
+    workMs: options.workMs ?? Number.POSITIVE_INFINITY, deadline: null };
   for (const { path, real } of roots) await reclaimRoot(path, real, pass, report);
   return report;
 }
 
-interface PassState { now: number; minAge: (name: string) => number | null; limit: number; uid: number | undefined; held: Set<string> | null; deadline: number }
+interface PassState { now: number; minAge: (name: string) => number | null; limit: number; uid: number | undefined; held: Set<string> | null; workMs: number; deadline: number | null }
 /** One root's share of a pass: scanned within what the pass's bounds have left, its outcome added to `report`. */
 async function reclaimRoot(root: string, real: string, pass: PassState, report: TmpReclaimReport) {
   const { now, minAge, uid } = pass, limit = Math.max(0, pass.limit - report.removed.length), scannedBefore = report.scanned;
@@ -233,6 +234,7 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
   const removable: { path: string; mtime: number }[] = [];
   let held: Set<string> | null = null;
   for (const entry of dirents) {
+    // A root reached after earlier roots spent the pass's limit has none left: it only counts its candidates as kept.
     if (removable.length >= limit) break;
     const path = join(root, entry.name);
     // A marker whose directory is already gone is clutter: take it back, whatever the bound.
@@ -276,7 +278,9 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
   removable.sort((first, second) => first.mtime - second.mtime);
   const removedBefore = report.removed.length;
   for (const { path } of removable.slice(0, limit)) {
-    if (Date.now() > pass.deadline) break;
+    const at = Date.now();
+    pass.deadline ??= at + pass.workMs;
+    if (at > pass.deadline) break;
     try {
       const bytes = await sizeOf(path);
       await rm(path, { recursive: true, force: true });

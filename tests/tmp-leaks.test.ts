@@ -107,7 +107,7 @@ test('unit:loop-sweeps-stale-test-temp — the loop removes this user\'s test te
   ];
   // The loop's own pass over this root: started by one cycle, recorded by the next.
   const options = { tmpRoot: tmp, tmpPass: (pass: Parameters<typeof reclaimTmpDirectories>[0]) => reclaimTmpDirectories({ ...pass, held: new Set() }) };
-  assert.deepEqual(loopTmpReclaimOptions(tmp).tmpRoots, [tmp]);
+  assert.deepEqual(loopTmpReclaimOptions([tmp]).tmpRoots, [tmp]);
   await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
   await settleTmpReclaim();
   const report = await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
@@ -203,7 +203,7 @@ test('unit:tmp-reclaim-scans-every-root — with TMPDIR elsewhere one pass remov
     held.add(join(holding, 'entry'));
     kept.push(holding);
   }
-  const options = { tmpRoot: roots, tmpPass: (pass: Parameters<typeof reclaimTmpDirectories>[0]) => reclaimTmpDirectories({ ...pass, held }) };
+  const options = { tmpRoots: roots, tmpPass: (pass: Parameters<typeof reclaimTmpDirectories>[0]) => reclaimTmpDirectories({ ...pass, held }) };
   await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
   await settleTmpReclaim();
   const report = await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
@@ -232,9 +232,9 @@ test('unit:tmp-reclaim-scans-every-root — with TMPDIR elsewhere one pass remov
   assert.match(reading?.detail ?? '', new RegExp(`^measured ${shared}: 200 of 1000 inodes free; .*the loop's latest /tmp pass removed ${stale.length} entries at [^;]*, scanning ${own} and ${shared}`));
   assert.doesNotMatch(reading?.detail ?? '', /did not scan/);
   // A pass over the loop's own tmpdir alone — the 6 October fault — is visible against /tmp.
-  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, { ...options, tmpRoot: own });
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, { ...options, tmpRoots: [own] });
   await settleTmpReclaim();
-  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, { ...options, tmpRoot: own });
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, { ...options, tmpRoots: [own] });
   await settleTmpReclaim();
   const missed = await readTmpInodes(root, shared, volume);
   assert.equal(missed?.measuredScanned, false);
@@ -242,4 +242,28 @@ test('unit:tmp-reclaim-scans-every-root — with TMPDIR elsewhere one pass remov
   assert.equal(low.state, 'low');
   const [line] = resourceAttention([low]);
   assert.match(line?.text ?? '', new RegExp(`measured ${shared}: .*scanning ${own}; that pass did not scan ${shared}`));
+});
+
+test('unit:tmp-reclaim-scans-every-root — the pass\'s work bound counts removing only: scanning both roots, however slow, never spends it before the first removal', async () => {
+  const root = await temporaryDirectory('work-bound');
+  const roots = [join(root, 'var-tmp'), join(root, 'tmp')];
+  const stale: string[] = [];
+  for (const directory of roots) {
+    await mkdir(directory);
+    const path = join(directory, 'native-leaked');
+    await mkdir(path); await writeFile(join(path, 'entry'), 'x');
+    const old = testTempMinAgeMs + 30 * 60_000;
+    await backdate(join(path, 'entry'), old); await backdate(path, old);
+    stale.push(path);
+  }
+  // Every clock read lands a second later: the scan of two roots alone outlasts a 500 ms bound.
+  const realNow = Date.now, start = realNow();
+  let reads = 0;
+  Date.now = () => start + 1000 * ++reads;
+  let report;
+  try { report = await reclaimTmpDirectories({ now: start, tmpRoots: roots, held: new Set(), workMs: 500 }); }
+  finally { Date.now = realNow; }
+  assert.deepEqual(report.errors, []);
+  assert.deepEqual(report.removed.map(entry => entry.path), [stale[0]], 'the first removal runs; the one bound then holds across both roots');
+  assert.equal(existsSync(stale[1]), true);
 });
