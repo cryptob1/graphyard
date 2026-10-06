@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
-import { Refusal, demand, resolveEscalation, standingEscalations, type EscalationTrigger, type Principal, type Work } from '../model.js';
+import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, standingRefusal, approvalApplyGraceMs, type Decision, type DecisionState } from '../model/approval.js';
 import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
@@ -217,12 +217,8 @@ export async function approveDecision(services: Services, caller: Principal, id:
       // accepted at once.
       if (decision!.action === 'resolve' && !resuming && samePin(resolvePin(work!), decision!.pin)
         && precondition?.startsWith('Task revision changed')) precondition = null;
-      // GY-1296: a release, an unblock or a diagnostician's closure is pinned to the item's whole
-      // revision, and the loop that requested it moves that revision itself — the approver session
-      // it launches is recorded on the very item, and each report of that session is saved there too. A revision that moved
-      // only in that bookkeeping (sessions, gates, next action, action queue: sameBesideBookkeeping)
-      // leaves what the requester judged in place, so the decision is judged at the current
-      // revision, and applied at it; any other change to the item still settles it stale below.
+      // GY-1296: a revision the requesting loop moved only in bookkeeping (its approver session,
+      // gates, next action, queue) is judged and applied at the current revision; see bookkeepingRebase.
       const judged = await bookkeepingRebase(db, decision!, work!);
       if (judged !== decision && !resuming) precondition = decisionPrecondition(judged.action, judged.input, work!);
       if (precondition) {
@@ -274,10 +270,7 @@ async function finish(db: Db, work: Work, approver: Principal, decisionId: strin
  * decision is the replacement for that session, so resolution is applied here, under the same
  * lock and with the same effects: one trigger cleared, gates re-evaluated, history appended.
  */
-async function resolveInTransaction(services: Services, db: Db, now: Date, work: Work, decision: DecisionRecord, approver: Principal, approvalReason: string) {
-  return resolveStanding(services, db, now, work, decision, decision.input.trigger, decision.reason, approver, approvalReason);
-}
-async function resolveStanding(services: Services, db: Db, now: Date, work: Work, decision: DecisionRecord, trigger: EscalationTrigger, reason: string, approver: Principal, approvalReason: string) {
+async function resolveInTransaction(services: Services, db: Db, now: Date, work: Work, decision: DecisionRecord, approver: Principal, approvalReason: string, trigger = decision.input.trigger, reason = decision.reason) {
   const target = standingEscalations(work).find(entry => entry.trigger === trigger)!;
   resolveEscalation(work, trigger);
   const all = (await lockedWork(db, [work.id])).map(item => item.id === work.id ? work : item);
@@ -292,24 +285,6 @@ async function resolveStanding(services: Services, db: Db, now: Date, work: Work
   return `Resolved ${trigger} on ${work.key}`;
 }
 
-/**
- * GY-1348. The requirement-weakening escalation an approved requirements decision's own application
- * raised is resolved by that approval, in the same pass: the independent approver already judged the
- * narrowing, so it neither holds the merge gate nor stands as a fault waiting on a second resolve.
- * Only the escalation this application raised is resolved — the one the engine stamped with this
- * decision's id, which it does only once the item's ledger records the decision approved (GY-1347) —
- * so one an operator's direct revision or any other writer raised stands exactly as before. A replayed application finds it resolved already and does nothing.
- */
-async function resolveDecidedWeakening(services: Services, decision: DecisionRecord, applied: Work, approver: Principal, approvalReason: string) {
-  const raised = (work: Work) => standingEscalations(work).some(entry => entry.trigger === 'requirement-weakening' && entry.decision === decision.id);
-  if (!raised(applied)) return null;
-  return services.engine.store.transaction(async (db, now) => {
-    const work = await findWork(db, applied.id);
-    if (!work || !raised(work)) return null;
-    return resolveStanding(services, db, now, work, decision, 'requirement-weakening', `The requirements decision ${decision.id} that raised it was approved by ${approver.id}: ${decision.reason}`.slice(0, 2000), approver, approvalReason);
-  });
-}
-
 export async function applyThroughEngine(services: Services, decision: DecisionRecord, approver: Principal, approvalReason: string) {
   // The requester acts, with the authority the two-party decision grants for this one input.
   const actor: Principal = { id: decision.requestedBy, role: 'admin', sessionKind: 'ai', displayName: `${decision.requestedBy} (decision ${decision.id} approved by ${approver.id})` };
@@ -320,8 +295,12 @@ export async function applyThroughEngine(services: Services, decision: DecisionR
     case 'unblock': await engine.execute(actor, 'unblock', decision.workId, { reason, expectedRevision: input.expectedRevision }, key); return 'Blocker cleared';
     case 'requirements': {
       const work = await engine.execute(actor, 'requirements', decision.workId, { ...input, reason }, key);
-      const resolved = await resolveDecidedWeakening(services, decision, work, approver, approvalReason);
-      return `Requirements revised to policy revision ${work.policyRevision}${resolved ? `; the requirement-weakening it raised is resolved by this approval` : ''}`;
+      // GY-1348: the approval resolves the requirement-weakening this application raised (the engine stamps it
+      // with the decision's id, GY-1347); one any other writer raised stands. A replay finds it resolved.
+      const raised = (item?: Work) => !!item && standingEscalations(item).some(entry => entry.trigger === 'requirement-weakening' && entry.decision === decision.id);
+      const resolved = raised(work) && await engine.store.transaction(async (db, now) => { const item = await findWork(db, work.id); return raised(item)
+        && resolveInTransaction(services, db, now, item!, decision, approver, approvalReason, 'requirement-weakening', `Raised by requirements decision ${decision.id}, approved by ${approver.id}: ${decision.reason}`.slice(0, 2000)); });
+      return `Requirements revised to policy revision ${work.policyRevision}${resolved ? '; the requirement-weakening it raised is resolved by this approval' : ''}`;
     }
     case 'rework': await engine.execute(actor, 'rework', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Rework authorized';
     case 'recover': await engine.execute(actor, 'recover', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Containment quarantine recovered';
