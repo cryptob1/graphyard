@@ -5,7 +5,7 @@ import { mapBounded, readConcurrency } from '../master/timings.js';
 import { staleReleaseAttention } from './owed-report.js';
 import { approverJudgeBoundMs, masterTurnWaitBoundMs, maxApproverLaunches } from '../daemon/decisions.js';
 
-type DecisionRow = { id: string; action: string; state: string; requestedAt: string; requestedBy?: string; outcome?: string | null; race?: unknown; refusal?: { approver: string; reason: string; at: string } | null };
+type DecisionRow = { id: string; action: string; state: string; requestedAt: string; staleAt?: string; requestedBy?: string; outcome?: string | null; race?: unknown; refusal?: { approver: string; reason: string; at: string } | null };
 type ApprovalWatch = { work: string; decision: string; agentName: string | null; settledAt?: string | null; ended?: string[]; launches?: number; launchedAt?: string | null; exhaustedAt?: string | null };
 export interface UnansweredDecision { work: string; id: string; action: string; requestedAt: string; session: string; ageMs: number; age: string; ended?: string[]; inMotionUntil?: string }
 
@@ -25,6 +25,14 @@ export const approverRelaunchWaitBoundMs = approverJudgeBoundMs + 5 * 60_000;
  * review, counted at once, and was answered by a requirements decision ten minutes later.
  */
 export const refusalAnswerWaitBoundMs = masterTurnWaitBoundMs;
+/**
+ * GY-1349. How long a stale decision of any action but release (GY-1315 re-requests those itself)
+ * may stand before its line counts as a `decision-stale` fault: nothing but the master requests it
+ * again, on its next turn. On 6 October 2026 GY-1338's resolve decision went stale at 04:13:09
+ * when the item's revision moved under its approver, and counted 26 seconds later. The bound runs
+ * from when the server settled it stale, or from its request for a record that does not say.
+ */
+export const staleDecisionWaitBoundMs = masterTurnWaitBoundMs;
 /**
  * Until when an unanswered decision is a relaunch the loop is already making: its watch is
  * unsettled and unescalated, it counts launches and some remain, and the latest launch (or the request, before any)
@@ -116,7 +124,7 @@ export async function terminalDecisions(masterApi: (path: string) => Promise<any
       // A stale release of an item in backlog is owed: nothing else shows that it waits (GY-1294).
       const owed = decision.action === 'release' ? staleReleaseAttention(item, decisions, sessions.now) : null;
       if (owed) attentionItems.push(owed);
-      else attentionItems.push({ subject: item.key, text: `Decision ${decision.id} (${decision.action}) is stale: ${decision.outcome ?? 'the item moved past it'}; request it again, the stale decision no longer blocks`,
+      else attentionItems.push({ ...staleInMotion(decision), subject: item.key, text: `Decision ${decision.id} (${decision.action}) is stale: ${decision.outcome ?? 'the item moved past it'}; request it again, the stale decision no longer blocks`,
           ...agentOwner('master', `graphyard master decide ${item.key} ${decision.action} [JSON|@FILE] REASON, then graphyard master approver ${item.key} DECISION`, 'approver') });
     }
   }
@@ -125,6 +133,12 @@ export async function terminalDecisions(masterApi: (path: string) => Promise<any
     attentionItems.push({ subject: entry.work, text: `Decision ${entry.id} (${entry.action}) is unanswered after ${entry.age}: approver session ${entry.session} is not running and recorded no outcome${entry.ended?.length ? ` (${entry.ended.join('; ')})` : ''} — a stall, not a refusal`,
       ...agentOwner('master', `graphyard master approver ${entry.work} ${entry.id} [AGENT_KIND] puts it to a fresh approver`, 'approver'), ...(entry.inMotionUntil ? { inMotionUntil: entry.inMotionUntil } : {}) });
   return { listed, attentionItems, unanswered, refused };
+}
+
+/** Until when a stale decision is the master's turn to request again (GY-1349): `staleDecisionWaitBoundMs` after it went stale. */
+function staleInMotion(decision: DecisionRow): { inMotionUntil?: string } {
+  const at = Date.parse(decision.staleAt ?? decision.requestedAt);
+  return Number.isFinite(at) ? { inMotionUntil: new Date(at + staleDecisionWaitBoundMs).toISOString() } : {};
 }
 
 /** Whether the refused decision's requester asked the item for a later decision, of any action and not taken back: the refusal's answer (GY-1337). */
