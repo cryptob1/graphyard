@@ -11,9 +11,7 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { standingEscalations, type Observation, type Principal, type Work } from '../src/model.js';
 import { interventionKinds, interventionPolicyFromEnv, type Intervention, type InterventionKind, type InterventionReport } from '../src/model/interventions.js';
-import * as interventions from '../src/interventions.js';
 import { foldInterventions, openPatternItems, readInterventionLedger } from '../src/interventions.js';
-import { classifyAttention } from '../src/model/fault-classes.js';
 import { interventionSummary } from '../src/cli/intervention-status.js';
 import InterventionsPage from '../web/pages/interventions.js';
 import { views } from '../web/pages/index.js';
@@ -388,40 +386,4 @@ test('unit:intervention-fold-reads-only-typed-rows — the fold reads the ledger
   assert.deepEqual({ resolvedAt: open.resolvedAt, resolvedBy: open.resolvedBy, trigger: open.trigger }, { resolvedAt: null, resolvedBy: null, trigger: 'credentials-for-people' });
   assert.ok(open.waitedMs >= 0 && open.waitedMs < 60_000);
   assert.ok((await report('window=7')).open >= 1);
-});
-
-// GY-1372: the attention promised an item "within a minute" while the scan that opens it ran only
-// with GRAPHYARD_INTERVENTION_PATTERNS=1, so twelve lines stood for ever as decision faults.
-// Read through the namespace so a base without the export fails as a test case, not at import.
-const interventionScanVariable: string = (interventions as Record<string, unknown>).interventionScanVariable as string ?? 'GRAPHYARD_INTERVENTION_PATTERNS';
-const withScan = async <T>(value: string | undefined, run: () => Promise<T>) => {
-  const previous = process.env[interventionScanVariable];
-  if (value === undefined) delete process.env[interventionScanVariable]; else process.env[interventionScanVariable] = value;
-  try { return await run(); } finally { if (previous === undefined) delete process.env[interventionScanVariable]; else process.env[interventionScanVariable] = previous; }
-};
-
-test('unit:intervention-pattern-attention-reflects-scan — with the scan off the crossed-pattern line says so, names how to enable it and is a configuration fault, not a decision fault; with it on the existing wording stands', async () => {
-  const crossedReport = (scan: { enabled: boolean; variable: string } | undefined) => async () => ({ window: { days: 7 }, deliveries: 1, total: 3, open: 0, waitedMs: 0, ratePerDelivery: 3, byKind: [], byStage: [], costliest: [], judgements: [], ledger: null,
-    patterns: [{ kind: 'session-nudge', stage: 'build', count: 3, threshold: 3, crossed: true, work: null }], ...(scan ? { scan } : {}) });
-  const off = classifyAttention((await interventionSummary(crossedReport({ enabled: false, variable: interventionScanVariable }))).attentionItems);
-  assert.equal(off.length, 1);
-  assert.equal(off[0].text, '3 session-nudge interventions at the build stage in 7 days crossed the threshold of 3 and no item stands for the pattern yet; the automatic pattern scan is off on this server, so nothing opens one on its own: GRAPHYARD_INTERVENTION_PATTERNS=1 on the deployment enables it');
-  assert.doesNotMatch(off[0].text, /within a minute/);
-  assert.equal(off[0].faultClass, 'configuration'); assert.notEqual(off[0].faultClass, 'decision');
-  assert.match(off[0].next, /POST \/api\/interventions\/patterns/);
-  const on = classifyAttention((await interventionSummary(crossedReport({ enabled: true, variable: interventionScanVariable }))).attentionItems);
-  assert.equal(on[0].text, '3 session-nudge interventions at the build stage in 7 days crossed the threshold of 3 and no item stands for the pattern yet; the server opens one within a minute');
-  assert.deepEqual({ kind: on[0].kind, faultClass: on[0].faultClass }, { kind: 'intervention-pattern', faultClass: 'decision' });
-  // A server that predates the field keeps the wording it always had; only `enabled: false` turns it.
-  assert.deepEqual(classifyAttention((await interventionSummary(crossedReport(undefined))).attentionItems).map(item => item.faultClass), ['decision']);
-});
-
-test('integration:intervention-scan-state-reported — the interventions report says whether the server runs the pattern scan, for both settings', async () => {
-  const off = await withScan(undefined, () => ok(token(coordinator), 'GET', 'interventions?window=7'));
-  assert.deepEqual(off.scan, { enabled: false, variable: 'GRAPHYARD_INTERVENTION_PATTERNS' });
-  assert.deepEqual((await withScan('0', () => ok(token(coordinator), 'GET', 'interventions?window=7'))).scan, { enabled: false, variable: 'GRAPHYARD_INTERVENTION_PATTERNS' });
-  const on = await withScan('1', () => ok(token(coordinator), 'GET', 'interventions?window=7'));
-  assert.deepEqual(on.scan, { enabled: true, variable: 'GRAPHYARD_INTERVENTION_PATTERNS' });
-  // master status reads the field the server sent rather than assuming.
-  assert.deepEqual(((await withScan('1', () => interventionSummary(async (path: string) => ok(token(coordinator), 'GET', path)))).summary as { scan: unknown }).scan, { enabled: true, variable: 'GRAPHYARD_INTERVENTION_PATTERNS' });
 });

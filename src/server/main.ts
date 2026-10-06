@@ -10,7 +10,7 @@ import { Delivery } from '../delivery.js';
 import { ProofGrants } from '../proof-grants.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
 import { projectFlow } from '../flow-analytics.js';
-import { interventionScan, openPatternItems } from '../interventions.js';
+import { openPatternItems } from '../interventions.js';
 import { startRetroIndexWatch, synthesizeRetro } from '../retro-synthesis.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
@@ -171,7 +171,7 @@ export async function main(options: MainOptions = {}) {
     if (Date.now() - ledgerCompactedAt >= ledgerCompactionIntervalMs) { ledgerCompactedAt = Date.now(); await step('compactLedger', () => compactLedger(store.pool, { retentionMs: configuredLedgerRetentionMs() }).catch(error => { console.error('ledger compaction failed', error instanceof Error ? error.message : 'unknown'); return null; })); }
     // The pattern scan's ledger query is quadratic in the events table and held the whole tick for
     // good once the table grew (2026-09-23): it runs only where an operator opts in until it is bounded.
-    if (interventionScan().enabled && Date.now() - patternsAt >= 60_000) {
+    if (process.env.GRAPHYARD_INTERVENTION_PATTERNS === '1' && Date.now() - patternsAt >= 60_000) {
       patternsAt = Date.now();
       for (const work of (await step('openPatternItems', () => openPatternItems(engine, http.services.interventionPolicy))).opened) console.log(`Opened ${work.key} for a recurring intervention pattern: ${work.title}`);
       // The same window read by cause (GY-970): drafts for independent approval, never work items.
