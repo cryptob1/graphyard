@@ -28,6 +28,7 @@ graphyard rework GY-N --previous-worker-stopped "reason"                # worker
 graphyard master settle-containment GY-N "reason"                       # settleable
 graphyard recover-containment GY-N --previous-worker-stopped "reason"   # delivered, stop confirmed
 graphyard unblock GY-N "reason"                                         # unowned blocker
+systemctl --user restart graphyard-master                               # loop down, supervised
 ```
 
 Never attest a stop you have not confirmed; merged work changes only via follow-up items.
@@ -55,6 +56,10 @@ The filter cannot select keyring items: keep other secrets out of that keyring, 
 ## Resources and disk
 
 `resourceRegistry` declares bounded resources, reported in `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop removes finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed), stale test temp entries and idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen by two passes. `disk` attention below `run.diskThresholdGb`. Every non-master session's checkout lives under `run.worktreeRoot`. A clean, detached HEAD moved forward to a descendant of the commit the loop runs, held by the base branch and served by a verified release, is recovered by the loop itself (`upgrade:recovered`): the executors restart onto it and the loop re-executes. Until it can (no verified release yet, no supervisor unit), `escalation:dirty-checkout` names restarting the loop onto that HEAD, never a rollback. Only a dirty tree, a non-detached HEAD or a non-forward move stands refused: the escalation names the paths, HEAD and sessions pointing at it, and blocks self-upgrade until clean.
+
+## Loop down on the coordinator host
+
+Inside a confined session (own PID namespace, user bus masked) the lock's pid always reads gone and systemd unreachable; if `daemon.lock.heartbeatAt` advances across two reads, the loop is alive. Otherwise the operator owning vishrog, in `/home/vish/code/graphyard` detached at `origin/main`, stops any hand-started loop, copies `examples/master/graphyard-master.service` to `~/.config/systemd/user/`, then runs `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
 
 ## Main guard revert approver
 
