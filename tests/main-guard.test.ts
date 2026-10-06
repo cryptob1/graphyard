@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Work } from '../src/model.js';
 import { generateKeyPairSync } from 'node:crypto';
-import { applyMainGuardRevert, commitVerdict, mainGuardAttention, readMain, revertInverseRefusal, runMainGuard, type CheckRun, type FileChange, type MainCommit, type MainGuardPorts } from '../src/main-guard.js';
+import * as mainGuard from '../src/main-guard.js';
+import { applyMainGuardRevert, commitVerdict, mainGuardAttention, readMain, revertInverseRefusal, runMainGuard, type CheckRun, type MainGuardRevert, type FileChange, type MainCommit, type MainGuardPorts } from '../src/main-guard.js';
 import { GitHub } from '../src/github.js';
 import { mergeStep } from '../src/daemon/cycle-delivery.js';
 import { emptyDaemonState, pruneDaemonState, retainedActions } from '../src/daemon/state.js';
@@ -12,6 +13,8 @@ import type { MasterConfig } from '../src/master.js';
 // GY-1250: under GitHub delivery a merge that breaks main is reverted through a revert pull request
 // the App merges, and its item is reopened; a revert that cannot merge is given up after one attempt.
 // Each test is named for the proof it produces.
+// A namespace read, so these proofs fail as test cases on a base without GY-1332, not as a load error.
+const revertLandingAttempts = (mainGuard as { revertLandingAttempts?: number }).revertLandingAttempts ?? 3;
 const sha = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
 const ci = 15368, required = ['test', 'typecheck'];
 const at = '2026-10-05T08:00:00.000Z';
@@ -205,13 +208,13 @@ test('unit:main-guard-never-sticks a revert whose checks never conclude, or that
   assert.match(itemB.mainGuardReverts![0].reason!, /did not conclude within 60 minutes/);
   assert.deepEqual(fake.calls.closed.map(close => close.pr), [revert.pr]);
 
-  // A refused merge is abandoned too, not retried.
+  // A merge GitHub keeps refusing is retried within the one attempt, then abandoned, not waited on (GY-1332).
   const C = sha('c3'), itemC = delivered('GY-3', C, 703), other = world([{ sha: C, parent: A }, { sha: A, parent: base }], [itemC]);
   other.checks.set(A, green); other.checks.set(C, runs({ test: 'failure', typecheck: 'success' }));
   other.ports.mergeRevert = async () => { throw new Error('Repository rule violations found'); };
   await runMainGuard(other.ports, { required, ciAppIds: [ci], now: new Date(at) });
   other.checks.set(itemC.mainGuardReverts![0].revert!.head, green);
-  await runMainGuard(other.ports, { required, ciAppIds: [ci], now: new Date(at) });
+  for (let tick = 0; tick < revertLandingAttempts; tick++) await runMainGuard(other.ports, { required, ciAppIds: [ci], now: new Date(at) });
   assert.equal(itemC.mainGuardReverts![0].state, 'abandoned');
   assert.match(itemC.mainGuardReverts![0].reason!, /GitHub refused to merge revert PR #900: Repository rule violations found/);
 });
@@ -355,4 +358,163 @@ test('unit:guard-revert-exact-inverse-only a revert with one line altered is nei
   assert.equal(itemB.mainGuardReverts![0].state, 'abandoned');
   assert.match(itemB.mainGuardReverts![0].reason!, new RegExp(`revert PR #${revert.pr} is not exactly the inverse of merge ${B.slice(0, 12)}, so it is neither approved nor merged`));
   assert.equal(itemB.stage, 'done');
+});
+
+test('unit:main-guard-approval-refusal-retry an approval or merge the approval rule refuses is retried with a fresh approval and the App\'s bypass merge before the revert is abandoned', async () => {
+  const [base, A, B] = ['b0', 'a1', 'b2'].map(sha);
+  const setup = () => {
+    const itemB = delivered('GY-2', B, 702), fake = world([{ sha: B, parent: A }, { sha: A, parent: base }], [itemB]);
+    fake.checks.set(A, green); fake.checks.set(B, runs({ test: 'failure', typecheck: 'success' }));
+    return { itemB, fake };
+  };
+  const options = () => ({ required, ciAppIds: [ci], now: new Date(at), approved: new Set<string>() });
+
+  // 1. The approver App is refused once: the merge is still tried, the last-push rule refuses it, and
+  //    the revert stays open. The next tick approves afresh and the merge lands: no abandonment.
+  {
+    const { itemB, fake } = setup(), opts = options();
+    await runMainGuard(fake.ports, opts);
+    const revert = itemB.mainGuardReverts![0].revert!;
+    fake.checks.set(revert.head, green);
+    const approve = fake.ports.approveRevert, merges: number[] = [];
+    let refusals = 1;
+    fake.ports.approveRevert = async (pr, head, body) => { if (refusals-- > 0) { fake.calls.approved.push(pr); throw new Error('GitHub refused the revert approver\'s POST /pulls/900/reviews (422)'); } return approve(pr, head, body); };
+    const merge = fake.ports.mergeRevert;
+    fake.ports.mergeRevert = async (work, entry) => { merges.push(entry.pr); return merge(work, entry); };
+    await runMainGuard(fake.ports, opts);
+    assert.equal(itemB.mainGuardReverts![0].state, 'opened', 'one refusal does not abandon the revert');
+    assert.equal(itemB.mainGuardReverts![0].refusals?.length, 1);
+    assert.match(itemB.mainGuardReverts![0].refusals![0], /revert approver could not approve.*New changes require approval/);
+    assert.deepEqual(merges, [revert.pr], 'the refused approval still tries the merge');
+    assert.deepEqual(fake.calls.closed, []);
+    await runMainGuard(fake.ports, opts);
+    assert.deepEqual(fake.calls.approved, [revert.pr, revert.pr], 'the retry approves afresh');
+    assert.deepEqual(merges, [revert.pr, revert.pr], 'and merges through the App\'s merge path again');
+    assert.equal(itemB.mainGuardReverts![0].state, 'merged');
+    assert.equal(itemB.stage, 'ready');
+  }
+
+  // 2. The approver App is refused every time, but the App's ruleset bypass lets the merge land:
+  //    the revert merges on the first attempt, with no abandonment.
+  {
+    const { itemB, fake } = setup();
+    await runMainGuard(fake.ports, options());
+    fake.checks.set(itemB.mainGuardReverts![0].revert!.head, green);
+    fake.ports.approveRevert = async () => { throw new Error('Resource not accessible by integration'); };
+    fake.ports.mergeRevert = async (_work, entry) => { fake.calls.merged.push(entry.pr); fake.pulls.set(entry.pr, { ...fake.pulls.get(entry.pr)!, merged: true, open: false, mergeSha: sha('d900') }); return sha('d900'); };
+    await runMainGuard(fake.ports, options());
+    assert.equal(itemB.mainGuardReverts![0].state, 'merged');
+  }
+
+  // 3. The merge is refused on every attempt: each tick retries with a fresh approval, and only after
+  //    the last attempt is the revert closed and abandoned as an approval-rule refusal.
+  {
+    const { itemB, fake } = setup(), opts = options();
+    await runMainGuard(fake.ports, opts);
+    const revert = itemB.mainGuardReverts![0].revert!;
+    fake.checks.set(revert.head, green);
+    fake.ports.mergeRevert = async () => { throw new Error('Repository rule violations found\n\nAt least 1 approving review is required by reviewers with write access.'); };
+    for (let attempt = 1; attempt < revertLandingAttempts; attempt++) {
+      await runMainGuard(fake.ports, opts);
+      assert.equal(itemB.mainGuardReverts![0].state, 'opened', `attempt ${attempt} is retried`);
+      assert.equal(itemB.mainGuardReverts![0].refusals?.length, attempt);
+    }
+    await runMainGuard(fake.ports, opts);
+    assert.deepEqual(fake.calls.approved, Array(revertLandingAttempts).fill(revert.pr), 'every attempt approved afresh');
+    const settled = itemB.mainGuardReverts![0];
+    assert.equal(settled.state, 'abandoned');
+    assert.equal(settled.cause, 'approval-refused');
+    assert.equal(settled.red, true);
+    assert.equal(settled.refusals?.length, revertLandingAttempts);
+    assert.match(settled.reason!, new RegExp(`GitHub's approval rule refused revert PR #${revert.pr} on all ${revertLandingAttempts} approve-then-merge attempts`));
+    assert.deepEqual(fake.calls.closed.map(close => close.pr), [revert.pr]);
+  }
+
+  // 4. A revert's own failing checks are not a mechanical refusal: they still abandon on the first look.
+  {
+    const { itemB, fake } = setup();
+    await runMainGuard(fake.ports, options());
+    fake.checks.set(itemB.mainGuardReverts![0].revert!.head, runs({ test: 'failure', typecheck: 'success' }));
+    await runMainGuard(fake.ports, options());
+    assert.equal(itemB.mainGuardReverts![0].state, 'abandoned');
+    assert.equal(itemB.mainGuardReverts![0].cause, 'checks-failed');
+    assert.equal(itemB.mainGuardReverts![0].refusals, undefined);
+  }
+});
+
+/** Runs the loop's merge step over `work` for one cycle, with main's check `state` read through `baseCheck`; returns the main guard lines raised. */
+async function mergeCycle(state: ReturnType<typeof emptyDaemonState>, work: Work[], clock: number, baseCheck?: (check: string) => Promise<{ state: string }>) {
+  const performed: { kind: string; work: string | null; detail: string }[] = [];
+  await mergeStep({ config: { autoMerge: true }, state, now: () => clock, clock, snapshot: { jobs: [], work }, performed, open: [],
+    effects: { persist: async () => undefined, snapshot: async () => ({ work }), baseCheck },
+    isolate: async (_kind: unknown, _item: unknown, _name: unknown, body: () => Promise<unknown>) => body() } as unknown as Cycle);
+  return performed.filter(action => action.kind === 'escalation' && action.detail.startsWith('Main guard:'));
+}
+
+test('unit:main-guard-attention-until-green an abandoned revert raises its line every cycle while main\'s failing check is red, and stops once it passes', async () => {
+  const state = emptyDaemonState({ url: 'https://graphyard.example', repository: 'owner/project', autoMerge: true } as MasterConfig);
+  const B = sha('b2'), itemB = delivered('GY-2', B, 702), start = Date.parse(at);
+  itemB.mainGuardReverts = [{ mergeSha: B, pr: 702, failing: ['test'], revert: { pr: 900, head: sha('e900') }, state: 'abandoned', at, settledAt: at, revertSha: null,
+    reason: 'GitHub\'s approval rule refused revert PR #900 on all 3 approve-then-merge attempts', cause: 'approval-refused', refusals: ['a', 'b', 'c'], red: true }];
+  let main = 'failed';
+  const reads: string[] = [];
+  const baseCheck = async (check: string) => { reads.push(check); if (main === 'unreadable') throw new Error('gh: 502'); return { state: main }; };
+  const raised: string[] = [];
+  for (let cycle = 0; cycle < 6; cycle++) {
+    // A pending run on main, or one that cannot be read, is not a pass: main is still red.
+    if (cycle === 3) main = 'pending';
+    if (cycle === 4) main = 'unreadable';
+    raised.push(...(await mergeCycle(state, [itemB], start + cycle * 30_000, baseCheck)).map(line => line.detail));
+  }
+  assert.equal(raised.length, 6, 'raised on every cycle while red, not once');
+  for (const detail of raised) assert.match(detail, /Main is still red: main's required check test stays red until the next merge to main re-runs CI/);
+  assert.equal(state.actions[`escalation:main-guard:${B}`].attempts, 6);
+
+  // A busy loop: while main stays red the cursor fills past `retainedActions` with rows newer than
+  // the abandonment, so its oldest retained row postdates it. The line is still raised every cycle.
+  main = 'failed';
+  for (let cycle = 6; cycle < 10; cycle++) {
+    const clock = start + cycle * 30_000;
+    for (let row = 0; row < 200; row++) state.actions[`dispatch:filler:${cycle}:${row}`] = { kind: 'dispatch', work: null, principal: null, state: 'done', detail: 'filler', attempts: 1, epoch: null, cycle, at: new Date(clock - 1).toISOString() } as never;
+    pruneDaemonState(state);
+    const lines = await mergeCycle(state, [itemB], clock, baseCheck);
+    assert.equal(lines.length, 1, `cycle ${cycle}: raised while main is red, however full the cursor`);
+    assert.match(lines[0].detail, /Main is still red/);
+  }
+  assert.ok(Object.values(state.actions).filter(action => action.state === 'done').length >= retainedActions, 'the cursor holds as many resolved rows as it keeps');
+  assert.ok(Math.min(...Object.values(state.actions).map(action => Date.parse(action.at))) > start, 'every retained row is newer than the abandonment');
+
+  // An unrelated merge re-runs CI and main's test passes: the line is raised once more as recovered, then never again.
+  main = 'passed';
+  const recovered = await mergeCycle(state, [itemB], start + 10 * 30_000, baseCheck);
+  assert.equal(recovered.length, 1);
+  assert.match(recovered[0].detail, /Main's test passed again; nothing is owed/);
+  for (let cycle = 11; cycle < 14; cycle++) assert.deepEqual(await mergeCycle(state, [itemB], start + cycle * 30_000, baseCheck), []);
+  assert.equal(reads.length, 11, 'main is no longer read once the line has recovered');
+  // Once the recovered row itself is retired, the abandonment predates every retained row: it is not raised again.
+  for (let row = 0; row < retainedActions; row++) state.actions[`dispatch:late:${row}`] = { kind: 'dispatch', work: null, principal: null, state: 'done', detail: 'filler', attempts: 1, epoch: null, cycle: 14, at: new Date(start + 14 * 30_000).toISOString() } as never;
+  pruneDaemonState(state);
+  assert.equal(state.actions[`escalation:main-guard:${B}`], undefined);
+  assert.deepEqual(await mergeCycle(state, [itemB], start + 15 * 30_000, baseCheck), []);
+
+  // A record from before GY-1332 (no `red`), or a loop with no reader of main's checks, raises the line once.
+  const legacy = emptyDaemonState({ url: 'https://graphyard.example', repository: 'owner/project', autoMerge: true } as MasterConfig);
+  const old = { ...itemB, mainGuardReverts: [{ ...itemB.mainGuardReverts[0], red: undefined }] } as Work;
+  assert.equal((await mergeCycle(legacy, [old], start, baseCheck)).length, 1);
+  assert.equal((await mergeCycle(legacy, [old], start + 30_000, baseCheck)).length, 0);
+  const unread = emptyDaemonState({ url: 'https://graphyard.example', repository: 'owner/project', autoMerge: true } as MasterConfig);
+  assert.equal((await mergeCycle(unread, [itemB], start)).length, 1);
+  assert.equal((await mergeCycle(unread, [itemB], start + 30_000)).length, 0);
+});
+
+test('manual:main-guard-abandon-reason the abandonment record and attention line name an approval-rule refusal apart from check-failure, conflict and timeout', () => {
+  const B = sha('b2');
+  const revert = (cause: MainGuardRevert['cause'], reason: string): MainGuardRevert => ({ mergeSha: B, pr: 702, failing: ['test'], revert: { pr: 900, head: sha('e900') }, state: 'abandoned', at, settledAt: at, revertSha: null, reason, cause, red: true });
+  const lines = (['approval-refused', 'checks-failed', 'conflict', 'timeout'] as const).map(cause => mainGuardAttention([{ key: 'GY-2', mainGuardReverts: [revert(cause, `${cause} reason`)] }])[0].text);
+  assert.match(lines[0], /\[approval-rule refusal\]/);
+  assert.match(lines[1], /\[its checks failed\]/);
+  assert.match(lines[2], /\[conflict\]/);
+  assert.match(lines[3], /\[its checks timed out\]/);
+  assert.equal(new Set(lines).size, 4, 'each cause reads differently');
+  for (const line of lines) assert.match(line, /main's required check test stays red until the next merge to main re-runs CI/);
 });
