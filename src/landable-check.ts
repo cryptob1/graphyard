@@ -21,18 +21,23 @@ export interface LandableCheckRun {
 
 /**
  * The check run the verdict gives the item's current candidate head, or null when it has none:
- * success when the verdict is landable, failure with every refusal reason as its summary otherwise.
+ * success when no gate the verdict feeds refuses it, failure with every such refusal reason as its
+ * summary otherwise.
  * Pure: it is recomputed from the verdict's live inputs on every observation, so a new head, check
- * result, review, proof or policy revision republishes it, and nothing is stored to go stale.
+ * result, review or policy revision republishes it, and nothing is stored to go stale.
  */
 export function landableCheckRun(work: Work, all: Work[], now: Date, verdict: LandabilityVerdict = evaluateLandability(work, all, now)): LandableCheckRun | null {
   if (!work.candidate) return null;
   const { sha, baseSha } = work.candidate;
   const identity = `Candidate ${sha}; base ${baseSha}; policy ${work.policyRevision}; verdict v${verdict.version}`;
-  if (verdict.verdict === 'landable') {
+  // Only the families a gate reads are published (GY-1331): since GY-1235 proofs gate nothing, so
+  // the acceptance family refuses no merge, and publishing it would hold every head with a proof no
+  // producer runs off GitHub's merge while every Graphyard gate passes.
+  const refusals = verdict.verdict === 'refused' ? verdict.reasons.filter(entry => entry.gate !== 'acceptance') : [];
+  if (!refusals.length) {
     return { name: LANDABLE_CHECK, head_sha: sha, status: 'completed', conclusion: 'success', external_id: work.id, output: { title: 'Landable', summary: identity } };
   }
-  const reasons = verdict.reasons.map(entry => `- ${entry.gate}: ${entry.reason}`);
+  const reasons = refusals.map(entry => `- ${entry.gate}: ${entry.reason}`);
   return { name: LANDABLE_CHECK, head_sha: sha, status: 'completed', conclusion: 'failure', external_id: work.id,
     output: { title: `Refused: ${reasons.length} reason${reasons.length === 1 ? '' : 's'}`, summary: refusalSummary(reasons, identity) } };
 }
