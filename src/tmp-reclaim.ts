@@ -16,7 +16,7 @@
 // gone" checkable rather than guessed from a modification time.
 
 import { existsSync, readFileSync, type Dirent } from 'node:fs';
-import { lstat, readdir, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, readdir, readFile, readlink, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -149,8 +149,27 @@ async function sizeOf(path: string): Promise<number> {
   return total;
 }
 
+/**
+ * The temporary directories a test run on this host may write to, each once (GY-1368): this
+ * process's own tmpdir and `/tmp`, deduplicated by realpath, in that order. The loop's unit can run
+ * with TMPDIR=/var/tmp while the test runs, worker and producer sessions that leak entries write
+ * under /tmp, so a pass over the loop's own tmpdir alone removed nothing for a day.
+ */
+export const hostTmpRoots = (own = tmpdir(), shared = '/tmp'): string[] => [own, shared];
+/** `roots` with every path that resolves to an earlier one dropped, each with its realpath; a root that cannot be resolved is its own. */
+async function distinctRoots(roots: readonly string[]): Promise<{ path: string; real: string }[]> {
+  const distinct: { path: string; real: string }[] = [];
+  for (const path of roots) {
+    const real = await realpath(path).catch(() => path);
+    if (!distinct.some(root => root.real === real)) distinct.push({ path, real });
+  }
+  return distinct;
+}
+
 export interface TmpReclaimReport {
   at: string;
+  /** The directories the pass scanned, each once; absent from a report of a pass that never ran. */
+  roots?: string[];
   scanned: number;
   /** What the pass removed, oldest first, and the bytes that came back with them. */
   removed: { path: string; bytes: number }[];
@@ -163,6 +182,8 @@ export interface TmpReclaimOptions {
   now?: number;
   /** The directory scanned; the host's temporary directory by default. */
   tmpRoot?: string;
+  /** The directories scanned, in place of `tmpRoot`: each once by realpath, sharing the pass's bounds (GY-1368). */
+  tmpRoots?: readonly string[];
   /** Entry-name prefixes considered, all judged by `maxAgeMs`; the default is `testTempPatterns` (by `testTempMinAgeMs`) and the tsx cache (by `tmpReclaimMinAgeMs`). */
   prefixes?: readonly string[];
   /** The most directories one pass removes; `tmpReclaimLimitPerCycle` by default. */
@@ -178,7 +199,7 @@ export interface TmpReclaimOptions {
 const defaultMinAge = (name: string) => testTempPatterns.some(pattern => pattern.test(name)) ? testTempMinAgeMs : /^tsx-\d+$/.test(name) ? tmpReclaimMinAgeMs : null;
 
 /**
- * One bounded pass over the host's temporary directory. Only this user's entries are considered —
+ * One bounded pass over the host's temporary directory, or each of `tmpRoots` once. Only this user's entries are considered —
  * directories, and plain files such as a `pg-password-*` — whose names the pass matches. A marked
  * directory whose owner still runs is kept whatever its age; one whose owner has exited is removed
  * at once, however young — that is the test runner's sweep of a run that just ended; any other
@@ -187,18 +208,32 @@ const defaultMinAge = (name: string) => testTempPatterns.some(pattern => pattern
  * the bytes it freed. Nothing here throws for an entry it cannot read: the error is reported instead.
  */
 export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Promise<TmpReclaimReport> {
-  const now = options.now ?? Date.now(), root = options.tmpRoot ?? tmpdir(), limit = options.limit ?? tmpReclaimLimitPerCycle;
-  const report: TmpReclaimReport = { at: new Date(now).toISOString(), scanned: 0, removed: [], bytes: 0, kept: 0, errors: [] };
+  const now = options.now ?? Date.now();
+  const roots = await distinctRoots(options.tmpRoots ?? [options.tmpRoot ?? tmpdir()]);
+  const report: TmpReclaimReport = { at: new Date(now).toISOString(), roots: roots.map(root => root.path), scanned: 0, removed: [], bytes: 0, kept: 0, errors: [] };
   const minAge = options.prefixes
     ? (name: string) => options.prefixes!.some(prefix => name.startsWith(prefix)) ? options.maxAgeMs ?? tmpReclaimMinAgeMs : null
     : (name: string) => { const age = defaultMinAge(name); return age === null ? null : options.maxAgeMs ?? age; };
-  const uid = process.getuid?.();
+  // The bounds are the pass's, not each root's: a second root never doubles a cycle's work. The
+  // work bound is real elapsed time, not the caller's clock: a mocked `now` must not change how
+  // long a cycle spends taking directories back.
+  const pass: PassState = { now, minAge, limit: options.limit ?? tmpReclaimLimitPerCycle, uid: process.getuid?.(), held: options.held ?? null,
+    deadline: options.workMs === undefined ? Number.POSITIVE_INFINITY : Date.now() + options.workMs };
+  for (const { path, real } of roots) await reclaimRoot(path, real, pass, report);
+  return report;
+}
+
+interface PassState { now: number; minAge: (name: string) => number | null; limit: number; uid: number | undefined; held: Set<string> | null; deadline: number }
+/** One root's share of a pass: scanned within what the pass's bounds have left, its outcome added to `report`. */
+async function reclaimRoot(root: string, real: string, pass: PassState, report: TmpReclaimReport) {
+  const { now, minAge, uid } = pass, limit = Math.max(0, pass.limit - report.removed.length), scannedBefore = report.scanned;
   const dirents = await readdir(root, { withFileTypes: true }).catch(() => [] as Dirent[]);
   // A marker goes with its directory, never as an entry of its own; a symlink is never followed or taken.
   const candidate = (entry: Dirent) => (entry.isDirectory() || entry.isFile()) && !entry.name.endsWith('.owner') && minAge(entry.name) !== null;
   const removable: { path: string; mtime: number }[] = [];
   let held: Set<string> | null = null;
   for (const entry of dirents) {
+    if (removable.length >= limit) break;
     const path = join(root, entry.name);
     // A marker whose directory is already gone is clutter: take it back, whatever the bound.
     if (entry.name.startsWith('graphyard-') && entry.name.endsWith('.owner') && !existsSync(path.slice(0, -'.owner'.length))) {
@@ -226,8 +261,9 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
       // Only holders under the scanned root can hold a candidate, and on a host with a backlog the
       // raw scan holds thousands of paths elsewhere: reduce it once to the root's entries, then
       // every check is a single lookup.
-      if (!held) held = heldEntries(root, options.held ?? await heldOpenPaths());
-      if (held.has(path)) { report.kept++; continue; }
+      // /proc names a holder by its resolved path, so a root reached through a symlink is matched by its realpath.
+      if (!held) held = heldEntries(real, pass.held ??= await heldOpenPaths());
+      if (held.has(join(real, entry.name))) { report.kept++; continue; }
       removable.push({ path, mtime: written });
     }
     // The scan is bounded with the removals: once this pass cannot remove more, another 10,000
@@ -236,13 +272,11 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
   }
   // The candidates the bound left unexamined are the next pass's: they are counted as kept, from
   // the dirent list already in hand, so the report still accounts for every candidate exactly once.
-  report.kept += Math.max(0, dirents.reduce((total, entry) => total + (candidate(entry) ? 1 : 0), 0) - report.scanned);
+  report.kept += Math.max(0, dirents.reduce((total, entry) => total + (candidate(entry) ? 1 : 0), 0) - (report.scanned - scannedBefore));
   removable.sort((first, second) => first.mtime - second.mtime);
-  // The work bound is real elapsed time, not the caller's clock: a mocked `now` must not change
-  // how long a cycle spends taking directories back.
-  const deadline = options.workMs === undefined ? Number.POSITIVE_INFINITY : Date.now() + options.workMs;
+  const removedBefore = report.removed.length;
   for (const { path } of removable.slice(0, limit)) {
-    if (Date.now() > deadline) break;
+    if (Date.now() > pass.deadline) break;
     try {
       const bytes = await sizeOf(path);
       await rm(path, { recursive: true, force: true });
@@ -251,8 +285,7 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
       report.bytes += bytes;
     } catch (error) { report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
   }
-  report.kept += Math.max(0, removable.length - report.removed.length);
-  return report;
+  report.kept += Math.max(0, removable.length - (report.removed.length - removedBefore));
 }
 
 /** One line for the loop's reclaim record and `master status`: what a pass gave back. */

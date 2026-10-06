@@ -2,12 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, symlink, utimes, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loopTmpReclaimOptions, readReclaimReports, readResources, readTmpInodes, reclaimResources, settleTmpReclaim, type ResourceInputs } from '../src/master-resources.js';
-import { reclaimTmpDirectories, testTempMinAgeMs } from '../src/tmp-reclaim.js';
+import { loopTmpReclaimOptions, readReclaimReports, readResources, readTmpInodes, reclaimResources, resourceAttention, settleTmpReclaim, type ResourceInputs } from '../src/master-resources.js';
+import { reclaimTmpDirectories, testTempMinAgeMs, writeTempOwner } from '../src/tmp-reclaim.js';
+// A namespace import: on a base without GY-1368's export the case fails, not the file's load.
+import * as tmpReclaim from '../src/tmp-reclaim.js';
 import { runnerPasswordFileAgeMs, sweepLeftoverTempDirectories } from './helpers/run-tests.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -105,7 +107,7 @@ test('unit:loop-sweeps-stale-test-temp — the loop removes this user\'s test te
   ];
   // The loop's own pass over this root: started by one cycle, recorded by the next.
   const options = { tmpRoot: tmp, tmpPass: (pass: Parameters<typeof reclaimTmpDirectories>[0]) => reclaimTmpDirectories({ ...pass, held: new Set() }) };
-  assert.deepEqual(loopTmpReclaimOptions(tmp).tmpRoot, tmp);
+  assert.deepEqual(loopTmpReclaimOptions(tmp).tmpRoots, [tmp]);
   await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
   await settleTmpReclaim();
   const report = await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
@@ -121,7 +123,7 @@ test('unit:loop-sweeps-stale-test-temp — the loop removes this user\'s test te
   const inodes = await readTmpInodes(root, tmp, async () => ({ files: 1_048_576, ffree: 354_178 }));
   assert.ok(inodes, 'the temporary directory\'s inodes are read');
   assert.deepEqual({ ...inodes, removedAt: typeof inodes.removedAt, latest: inodes.latest && { ...inodes.latest, at: inodes.latest.at === inodes.removedAt } },
-    { path: tmp, totalInodes: 1_048_576, freeInodes: 354_178, removed: stale.length, removedAt: 'string', latest: { removed: stale.length, at: true }, own: { entries: kept.length, testTemp: 3, capped: false } });
+    { path: tmp, totalInodes: 1_048_576, freeInodes: 354_178, removed: stale.length, removedAt: 'string', latest: { removed: stale.length, at: true, roots: [tmp] }, measuredScanned: true, own: { entries: kept.length, testTemp: 3, capped: false } });
   assert.equal(await readTmpInodes(root, tmp, async () => ({ files: 0, ffree: 0 })), null, 'a filesystem without fixed inodes reads as unknown');
   const input: ResourceInputs = { now: Date.now(), reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null, disk: null, tmp: inodes, profiles: { workers: [], reviewers: [], producers: [] } };
   const reading = readResources(input).find(entry => entry.id === 'tmp-inodes');
@@ -165,4 +167,79 @@ test('unit:loop-sweeps-stale-test-temp — the pass considers only this user\'s 
   // As this user's entries, the same pass removes them.
   const own = await reclaimTmpDirectories({ tmpRoot: tmp, held: new Set() });
   assert.equal(own.removed.length, stale.length);
+});
+
+test('unit:tmp-reclaim-scans-every-root — with TMPDIR elsewhere one pass removes stale test temps from /tmp too, keeps young, owned and held entries in both, scans a root once when TMPDIR is /tmp, and status names the roots', async () => {
+  const root = await temporaryDirectory('every-root');
+  await mkdir(join(root, '.graphyard'));
+  // Stand-ins: `own` for the loop's TMPDIR (/var/tmp on 6 October 2026), `shared` for /tmp.
+  const own = join(root, 'var-tmp'), shared = join(root, 'tmp');
+  await mkdir(own); await mkdir(shared);
+  // The loop's default roots are its own tmpdir and /tmp, whatever TMPDIR says.
+  const savedTmpdir = process.env.TMPDIR;
+  process.env.TMPDIR = own;
+  try { assert.deepEqual(loopTmpReclaimOptions().tmpRoots, [own, '/tmp']); }
+  finally { if (savedTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = savedTmpdir; }
+  const roots = tmpReclaim.hostTmpRoots(own, shared);
+  assert.deepEqual(roots, [own, shared]);
+
+  const old = testTempMinAgeMs + 30 * 60_000, young = testTempMinAgeMs - 30 * 60_000;
+  const make = async (directory: string, name: string, age: number) => {
+    const path = join(directory, name);
+    await mkdir(path); await writeFile(join(path, 'entry'), 'x');
+    await backdate(join(path, 'entry'), age); await backdate(path, age);
+    return path;
+  };
+  const stale: string[] = [], kept: string[] = [], held = new Set<string>();
+  for (const directory of roots) {
+    stale.push(await make(directory, 'native-leaked', old));
+    kept.push(await make(directory, 'native-young', young));
+    // Owned by this live process: kept whatever its age.
+    const owned = await make(directory, 'graphyard-owned', old);
+    await writeTempOwner(owned); await backdate(owned, old);
+    kept.push(owned);
+    // Ownerless and old, but a live process holds a file inside it open.
+    const holding = await make(directory, 'native-held', old);
+    held.add(join(holding, 'entry'));
+    kept.push(holding);
+  }
+  const options = { tmpRoot: roots, tmpPass: (pass: Parameters<typeof reclaimTmpDirectories>[0]) => reclaimTmpDirectories({ ...pass, held }) };
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  const report = await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, options);
+  await settleTmpReclaim();
+  assert.deepEqual(report.errors, []);
+  assert.equal(report.tmp.removed, stale.length, 'one pass removed the stale entry from each root');
+  for (const path of stale) assert.equal(existsSync(path), false, `${path} is removed`);
+  for (const path of kept) assert.equal(existsSync(path), true, `${path} stays`);
+
+  // TMPDIR resolving to /tmp — the same path, or a symlink to it — is one root, scanned once.
+  const link = join(root, 'tmp-link');
+  await symlink(shared, link);
+  for (const same of [tmpReclaim.hostTmpRoots(shared, shared), tmpReclaim.hostTmpRoots(link, shared)]) {
+    const once = await reclaimTmpDirectories({ tmpRoots: same, held });
+    assert.deepEqual(once.roots, [same[0]]);
+    assert.equal(once.scanned, 3, 'each of the root\'s three candidates is scanned once');
+    assert.deepEqual(once.removed, []);
+  }
+
+  // Master status names the directory it measured and the roots the latest pass scanned.
+  const volume = async () => ({ files: 1000, ffree: 200 });
+  const covered = await readTmpInodes(root, shared, volume);
+  assert.deepEqual({ roots: covered?.latest?.roots, measuredScanned: covered?.measuredScanned }, { roots: roots, measuredScanned: true });
+  const input: ResourceInputs = { now: Date.now(), reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null, disk: null, tmp: covered, profiles: { workers: [], reviewers: [], producers: [] } };
+  const reading = readResources(input).find(entry => entry.id === 'tmp-inodes');
+  assert.match(reading?.detail ?? '', new RegExp(`^measured ${shared}: 200 of 1000 inodes free; .*the loop's latest /tmp pass removed ${stale.length} entries at [^;]*, scanning ${own} and ${shared}`));
+  assert.doesNotMatch(reading?.detail ?? '', /did not scan/);
+  // A pass over the loop's own tmpdir alone — the 6 October fault — is visible against /tmp.
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, { ...options, tmpRoot: own });
+  await settleTmpReclaim();
+  await reclaimResources(root, { reviewers: [], producers: [] }, { work: [], agents: [] }, { ...options, tmpRoot: own });
+  await settleTmpReclaim();
+  const missed = await readTmpInodes(root, shared, volume);
+  assert.equal(missed?.measuredScanned, false);
+  const low = readResources({ ...input, tmp: missed }).find(entry => entry.id === 'tmp-inodes')!;
+  assert.equal(low.state, 'low');
+  const [line] = resourceAttention([low]);
+  assert.match(line?.text ?? '', new RegExp(`measured ${shared}: .*scanning ${own}; that pass did not scan ${shared}`));
 });
