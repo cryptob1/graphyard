@@ -27,3 +27,16 @@ export const defineCommands = (commands: CliCommand[]) => commands;
 
 /** The `POST /api/work/:id/NAME` helper every work-scoped mutation uses. */
 export const workMutation = (context: CliContext, work: { id: string }) => (name: string, data: unknown) => context.api(`work/${work.id}/${name}`, data);
+
+/**
+ * The one item a command names, by id or display key, read alone through `GET /api/work/:id`
+ * (GY-1377): never the whole fleet, whose download a heartbeat would repeat on every renewal.
+ * An absent id or a 404 is the same refusal the fleet lookup gave.
+ */
+export async function resolveWork(api: CliContext['api'], id: string | undefined): Promise<any> {
+  if (!id) throw new Error(`Unknown work item ${id}`);
+  try { return await api(`work/${encodeURIComponent(id)}`); } catch (error: any) {
+    if (error?.status === 404) throw new Error(`Unknown work item ${id}`);
+    throw error;
+  }
+}

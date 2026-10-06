@@ -13,7 +13,7 @@ import type { CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
 import { restoreAndReport } from './sync-restore.js';
 import { pushViaControlPlane } from './sync-push.js';
-import { defineCommands, workMutation } from './registry.js';
+import { defineCommands, resolveWork, workMutation } from './registry.js';
 import { keepBlockedWork } from './lease.js';
 import { agentsRenderers, agentsTemplateSources, localGeneratedManifest, regenerateGenerated } from './workspace-generated.js';
 import { createWorktree, restoreBranchWork } from './workspace-worktree.js';
@@ -159,7 +159,7 @@ export const workspaceCommands = defineCommands([
       const { id, args, api, base } = context; const epoch = Number(args[0]); const separator = args.indexOf('--');
       if (!id || !Number.isSafeInteger(epoch) || epoch <= 0 || separator < 0 || !args[separator + 1]) throw new Error('Usage: watch GY-N EPOCH -- command args');
       console.error(setupLine(id, epoch));
-      const work = (await api('work')).find((w: any) => w.id === id || w.key === id); if (!work) throw new Error(`Unknown work item ${id}`);
+      const work = await resolveWork(api, id);
       const workspace = work.workspaces.find((w: any) => w.epoch === epoch); const hostId = context.individualHostId();
       if (!workspace || workspace.host !== hostId || await realpath(process.cwd()) !== await realpath(workspace.path)) throw new Error('Run watch from the assigned workspace on its registered host');
       const workerStatus = await api('status'); if (workerStatus.actor?.role !== 'worker') throw new Error('watch requires a worker credential; never pass operator or producer credentials to implementation processes');
