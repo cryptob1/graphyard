@@ -165,7 +165,7 @@ async function syncFixture(plannedFiles: string[]) {
     res.setHeader('Content-Type', 'application/json');
     if (req.url === '/api/status') return res.end(JSON.stringify({ actor: { id: 'worker-a', role: 'worker' }, baseBranch: 'main' }));
     if (req.url === '/api/work-snapshot') return res.end(JSON.stringify({ now: new Date().toISOString(), work: [item, shipped] }));
-    res.end(JSON.stringify([item, shipped]));
+    res.end(JSON.stringify(req.url === '/api/work/GY-1' ? item : [item, shipped]));
   });
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   const env: NodeJS.ProcessEnv = { ...process.env, GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}`, GRAPHYARD_TOKEN: 'test-only' };

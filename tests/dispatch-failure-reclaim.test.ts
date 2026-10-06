@@ -53,7 +53,7 @@ async function controlPlane(item: Record<string, unknown>) {
     response.setHeader('Content-Type', 'application/json');
     if (request.url === '/api/status') return response.end(JSON.stringify({ actor: { id: 'worker-a', role: 'worker' }, repository: 'owner/project', now: new Date().toISOString() }));
     if (request.method === 'POST') { posted.push(request.url!); for await (const _chunk of request) { /* drain */ } return response.end(JSON.stringify(item)); }
-    response.end(JSON.stringify([item]));
+    response.end(JSON.stringify(request.url === `/api/work/${item.key}` || request.url === `/api/work/${item.id}` ? item : [item]));
   });
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   const env: NodeJS.ProcessEnv & { GRAPHYARD_URL: string } = { ...process.env, GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as { port: number }).port}`, GRAPHYARD_TOKEN: workerToken, GRAPHYARD_HOST_ID: 'machine-a' };

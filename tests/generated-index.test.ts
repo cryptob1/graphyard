@@ -95,7 +95,9 @@ async function fakeServer(work: () => Work[]) {
     res.setHeader('Content-Type', 'application/json');
     if (req.url === '/api/status') return res.end(JSON.stringify({ actor: { id: 'worker-a', role: 'worker' }, baseBranch: 'main' }));
     if (req.url === '/api/work-snapshot') return res.end(JSON.stringify({ now: new Date().toISOString(), work: work() }));
-    res.end(JSON.stringify(work()));
+    // The item a command names is read alone (GY-1377).
+    const single = /^\/api\/work\/([^/]+)$/.exec(req.url ?? '');
+    res.end(JSON.stringify(single ? work().find(item => item.id === decodeURIComponent(single[1]) || item.key === decodeURIComponent(single[1])) : work()));
   });
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   const env: NodeJS.ProcessEnv = { ...process.env, GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}`, GRAPHYARD_TOKEN: 'test-only' };

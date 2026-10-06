@@ -182,7 +182,9 @@ test('unit:cli-reads-bounded-snapshot — CLI commands read bounded snapshot or 
       const [path] = (request.url ?? '').split('?');
       response.setHeader('Content-Type', 'application/json');
       if (path === '/api/status') return response.end(JSON.stringify({ baseBranch: 'main', repository: 'owner/project', actor: { id: 'worker-a', role: 'worker' } }));
-      if (path === '/api/work') return response.end(JSON.stringify([task]));
+      // The worker names its item; the CLI reads that one document, never the fleet (GY-1377).
+      if (path === '/api/work') { control.state.violations.push('fleet read (GET /api/work)'); response.statusCode = 500; return response.end('{"error":"fleet reads are refused here"}'); }
+      if (path === '/api/work/GY-1') return response.end(JSON.stringify(task));
       if (path === '/api/work-snapshot') {
         control.state.reads.push({ path: 'work-snapshot', coordination: (request.url ?? '').includes('view=coordination') });
         if (!(request.url ?? '').includes('view=coordination')) { control.state.violations.push(`full work-snapshot read (${request.url})`); response.statusCode = 500; return response.end('{"error":"full reads are refused here"}'); }
