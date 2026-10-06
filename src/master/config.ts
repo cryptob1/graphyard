@@ -28,7 +28,9 @@ export async function readCredentialFile(file: string) {
   return value;
 }
 async function readMasterConfig(root: string): Promise<MasterConfig> {
-  const file = resolve(root, '.graphyard/master.json'); await privateFile(file);
+  const file = resolve(root, '.graphyard/master.json');
+  // A checkout no install or master init has configured names the step that writes it (GY-1352), not a bare lstat ENOENT.
+  await privateFile(file).catch((error: any) => { throw error?.code === 'ENOENT' ? Object.assign(new Error(`${file} does not exist: run graphyard install --apply, or graphyard master init --token-stdin, in this checkout first (docs/setup-from-zero.md steps 3 and 10)`), { code: 'ENOENT' }) : error; });
   const config = masterConfigSchema.parse(JSON.parse(await readFile(file, 'utf8')));
   config.url = serverOrigin(config.url);
   const repositoryRoot = resolve(root), credentialFile = resolve(config.credentialFile);

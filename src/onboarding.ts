@@ -134,6 +134,8 @@ export function detectStack(input: ScanInput): StackDetection {
     const scripts: Record<string, string> = pkg.scripts ?? {};
     const dependencies = { ...pkg.dependencies, ...pkg.devDependencies };
     const frameworks = ['vitest', 'jest', '@playwright/test', 'cypress', 'mocha'].filter(name => dependencies[name]);
+    // Node's built-in runner has no dependency to find; its test script names it (GY-1352).
+    if (Object.values(scripts).some(script => typeof script === 'string' && /\bnode\b[^&|;]*\s--test\b/.test(script))) frameworks.push('node:test');
     const commands = (['test', 'typecheck', 'lint', 'build'] as const)
       .filter(script => typeof scripts[script] === 'string' && scripts[script])
       .map(script => ({ purpose: (script === 'build' ? 'build' : script === 'test' ? 'test' : 'static-analysis') as 'test' | 'build' | 'static-analysis', command: `npm run ${script}`, check: script }));
