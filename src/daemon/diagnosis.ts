@@ -383,6 +383,12 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
   if (!current) return;
   if (current.state === 'requested' && !decision.approver) return launchApprover(cycle, entry, target, note);
   if (current.state === 'refused' || current.state === 'failed') {
+    // GY-1344: the recurring item was delivered meanwhile, and the approver refused the release as
+    // duplicating that delivery (GY-1337's PR #815): its own delivery answered it, as GY-1266 does.
+    if (entry.kind === 'recurring' && (!subjectItem || subjectItem.stage === 'done')) {
+      entry.state = 'answered'; entry.answeredBy = subjectItem ? answeringItem(subjectItem) : null;
+      return note(entry, 'done', `The ${decision.action} decision ${decision.id} on ${decision.work} was ${current.state} (${current.refusal?.reason ?? current.outcome ?? 'no reason recorded'}), but ${entry.work} is no longer open, so its diagnosis is not acted on`, null);
+    }
     entry.state = current.state === 'refused' ? 'refused' : 'failed';
     return note(entry, 'failed', `The ${decision.action} decision ${decision.id} on ${decision.work} was ${current.state}: ${current.refusal?.reason ?? current.outcome ?? 'no reason recorded'}; the diagnosis stands for the master to act on`);
   }
