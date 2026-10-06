@@ -25,6 +25,7 @@ import { noteCycleFailure, type CycleCost } from '../src/daemon/liveness.js';
 import * as livenessModule from '../src/daemon/liveness.js';
 import type { CycleMetrics } from '../src/daemon/state.js';
 import { timedCall } from '../src/master/timings.js';
+import * as deploymentModule from '../src/daemon/deployment.js';
 import { execFileSync } from 'node:child_process';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -1274,6 +1275,76 @@ test(`manual:fault-class-loop — GY-1344: failed cycles that met a control plan
   assert.deepEqual(state.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['plane-unavailable', 'deployment']]);
 });
 
+// ---- GY-1354: the deployment step dominating cycle cost --------------------------------------------
+//
+// GY-1354 names this file for its proof too, beside the GY-1336 lineage. Two loop-cost instances on
+// 2026-10-06 had the same shape: the deployment step's inline release-landing verification took most
+// of a cycle already past the 300s interval.
+// (1) cycle 12621: 450s of its own work, 381.9s of it in the deployment step;
+// (2) cycle 12624: 781s of its own work — past the 600s two-interval liveness bound — and 8.5s
+//     waiting on children, 587.1s of its work in the deployment step.
+// The step's reads now share a per-cycle budget (deploymentStepBudgetMs); a verification still
+// running at the bound stays in flight and a later cycle takes its answer. GY-1355 found the
+// production timings put most of those seconds in the faults step inside the coarse 'deployment'
+// bucket; the attribution case below replays the shape AC-2 names, a cycle whose slowest timed
+// step is the release-landing verification itself, and the replay bounds that step either way.
+
+const gy1354Instances = [
+  { id: 'loop-cost|loop|2026-10-06T01:52:51.656Z', kind: 'loop-cost', subject: 'loop', at: '2026-10-06T01:52:51.656Z', cycle: 12621, workMs: 450_000, childWaitMs: 0, deploymentMs: 381_900 },
+  { id: 'loop-cost|loop|2026-10-06T02:10:48.978Z', kind: 'loop-cost', subject: 'loop', at: '2026-10-06T02:10:48.978Z', cycle: 12624, workMs: 781_000, childWaitMs: 8_500, deploymentMs: 587_100 },
+];
+/** The cycle as it was measured: the deployment step's work and the rest spread over the other steps. */
+function measuredCycle(instance: typeof gy1354Instances[number]) {
+  const rest = instance.workMs - instance.deploymentMs, share = (part: number) => ({ ms: Math.round(rest * part), childWaitMs: 0 });
+  const steps = { observe: share(0.2), close: share(0.1), decisions: share(0.3), dispatch: share(0.2), merge: share(0.2), deployment: { ms: instance.deploymentMs + instance.childWaitMs, childWaitMs: instance.childWaitMs } };
+  const timings = { totalMs: instance.workMs, calls: [], slowCalls: 0, steps: [{ step: 'snapshot', ms: steps.observe.ms }, { step: 'decisions', ms: steps.decisions.ms }, { step: 'deployment verification', ms: instance.deploymentMs }] };
+  return { cycle: instance.cycle, at: instance.at, durationMs: instance.workMs + instance.childWaitMs, childWaitMs: instance.childWaitMs, workMs: instance.workMs, steps, timings } as unknown as DaemonState['metrics'][number];
+}
+
+test('manual:fault-class-loop — GY-1354 lists two instances, and both are replayed', () => {
+  assert.deepEqual(gy1354Instances.map(entry => entry.cycle), [12621, 12624]);
+});
+
+for (const instance of gy1354Instances) {
+  test(`unit:loop-cost-deployment-attribution — ${instance.id}: the loop-cost line names the deployment step and its share of the cycle`, () => {
+    const cost = cycleCost(measuredCycle(instance), intervalMs)!;
+    assert.equal(cost.withinInterval, false);
+    assert.equal(cost.withinLivenessBound, instance.cycle === 12621);
+    assert.equal(cost.slowest?.step, 'deployment');
+    const share = Math.round(100 * instance.deploymentMs / instance.workMs);
+    assert.ok(share >= 60, `the 12621/12624 shape: deployment at ${share}% of a cycle past the interval`);
+    const lines = loopAttention({ liveness: { state: 'running', lagMs: 0, stalledAfterMs: 2 * intervalMs, cycle: instance.cycle, lock: null, detail: '', restart: '', cost }, cost });
+    const line = lines.find(entry => entry.kind === 'loop-cost' || /on its own work/.test(entry.text))!;
+    assert.match(line.text, new RegExp(`Cycle ${instance.cycle} spent ${Math.round(instance.workMs / 1000)}s on its own work`));
+    assert.equal(livenessModule.culpritShare?.(cost), share);
+    assert.match(line.text, new RegExp(`The deployment verification step is the slowest timed step, at ${Math.round(instance.deploymentMs / 1000)}s. It is ${share}% of the cycle's own work`));
+    assert.match(line.next ?? '', /shorten the deployment verification step/);
+  });
+
+  test(`manual:loop-cost-cycle-replay — ${instance.id}: a verification taking the ${instance.deploymentMs / 1000}s it took no longer carries the cycle past the interval, and the delivery is still verified served`, async () => {
+    const at = Date.parse(instance.at) - instance.workMs;
+    mock.timers.enable({ apis: ['setTimeout', 'Date'], now: at });
+    try {
+      const master = burstConfig(), state = emptyDaemonState(master), sha = 'c'.repeat(40);
+      const delivered = { ...item('GY-1350', at, { stage: 'done' } as Partial<Work>), delivery: { mergedAt: iso(at - hour), mergeSha: sha, authorizationRevision: 1 } } as unknown as Work;
+      let reads = 0;
+      const effects = quietEffects(() => Date.now(), () => [delivered], {
+        observeDeployment: () => { reads++; return new Promise(resolve => setTimeout(() => resolve({ source: 'endpoint', sha, at: iso(Date.now()), reason: null, deployed: ['GY-1350'], pending: [], requests: 0, derived: 1, retained: 0 }), instance.deploymentMs)); },
+      });
+      const started = Date.now();
+      while (state.deployment?.sha !== sha && Date.now() - started < 30 * minute) {
+        const result = await drive(runCycle(master, state, effects, () => Date.now()));
+        const cost = cycleCost(result.metrics, intervalMs)!;
+        assert.ok(cost.withinInterval && cost.withinLivenessBound, `cycle ${result.metrics.cycle} fits: ${cost.breakdown}`);
+        assert.ok(result.metrics.steps!.deployment.ms <= deploymentModule.deploymentStepBudgetMs(intervalMs) + faultObservationBudgetMs(intervalMs) + 2_000, `the deployment step is bounded: ${result.metrics.steps!.deployment.ms}ms`);
+        assert.deepEqual(loopAttention({ liveness: { state: 'running', lagMs: 0, stalledAfterMs: 2 * intervalMs, cycle: result.metrics.cycle, lock: null, detail: '', restart: '', cost }, cost }).filter(line => /on its own work/.test(line.text)), [], 'no loop-cost line');
+        mock.timers.tick(30_000);
+      }
+      assert.equal(reads, 1, 'one verification, carried across cycles');
+      assert.deepEqual(state.deployment?.deployed, ['GY-1350'], 'the delivery is verified served once its verification lands');
+    } finally { mock.timers.reset(); }
+  });
+}
 // ---- GY-1357: the faults step ran 100-150s past its observation budget --------------------------
 //
 // GY-1357 names this file for its proof too. On c67ed34548f2, with GY-1345's single-flight
