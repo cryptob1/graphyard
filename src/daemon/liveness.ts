@@ -229,6 +229,9 @@ export function boundedPersist(effects: DaemonEffects): DaemonEffects {
   return new Proxy(effects, { get: (target, property, receiver) => property === 'persist' ? persist : Reflect.get(target, property, receiver) });
 }
 
+/** GY-1354: the culprit step's share of the cycle's own work, so a loop-cost line says how much of the cycle one step took (cycle 12624: 587s of 781s, 75%). */
+export const culpritShare = (cost: Pick<CycleCost, 'culprit' | 'workMs'>) => cost.culprit && cost.workMs > 0 ? Math.min(100, Math.round(100 * cost.culprit.ms / cost.workMs)) : 0;
+
 /**
  * The loop's own attention, ahead of every work item: a coordinator that is not cycling is why
  * nothing else on the list is moving. A breached silence bound or latency budget follows it.
@@ -249,7 +252,7 @@ export function loopAttention(report: { liveness: LoopLiveness; silence?: Silenc
   // what took the time. A cycle that merely waited is reported net: its work fit, and the wait is
   // in the breakdown for anyone reading it.
   if (cost && !cost.withinInterval && report.liveness.state !== 'slow' && report.liveness.state !== 'absent') {
-    items.push({ subject: 'loop', text: `Cycle ${cost.cycle} spent ${Math.round(cost.workMs / 1000)}s on its own work, longer than the ${Math.round(cost.intervalMs / 1000)}s interval${cost.withinLivenessBound ? '' : ` and past the two-interval liveness bound of ${Math.round(cost.stalledAfterMs / 1000)}s`} (${Math.round(cost.durationMs / 1000)}s in all, ${Math.round(cost.childWaitMs / 1000)}s of it waiting on child processes): ${cost.breakdown}${cost.culprit ? `. ${cost.culprit.timed ? `The ${cost.culprit.step} step is the slowest timed step, at ${Math.round(cost.culprit.ms / 1000)}s` : `The ${cost.culprit.step} bucket is the slowest, at ${Math.round(cost.culprit.ms / 1000)}s of work; it rolls up ${cycleBucketSteps[cost.culprit.step as CycleStepName]}, so no one step inside it is named`}` : ''}`, ...agentOwner('master', shorten), ...classified('loop-cost') });
+    items.push({ subject: 'loop', text: `Cycle ${cost.cycle} spent ${Math.round(cost.workMs / 1000)}s on its own work, longer than the ${Math.round(cost.intervalMs / 1000)}s interval${cost.withinLivenessBound ? '' : ` and past the two-interval liveness bound of ${Math.round(cost.stalledAfterMs / 1000)}s`} (${Math.round(cost.durationMs / 1000)}s in all, ${Math.round(cost.childWaitMs / 1000)}s of it waiting on child processes): ${cost.breakdown}${cost.culprit ? `. ${cost.culprit.timed ? `The ${cost.culprit.step} step is the slowest timed step, at ${Math.round(cost.culprit.ms / 1000)}s` : `The ${cost.culprit.step} bucket is the slowest, at ${Math.round(cost.culprit.ms / 1000)}s of work; it rolls up ${cycleBucketSteps[cost.culprit.step as CycleStepName]}, so no one step inside it is named`}. It is ${culpritShare(cost)}% of the cycle's own work` : ''}`, ...agentOwner('master', shorten), ...classified('loop-cost') });
   }
   // A cycle that keeps failing is retried in-process with backoff; past the bound it names the
   // failing call, because a restart would not clear a read that times out every time.

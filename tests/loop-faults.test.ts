@@ -25,6 +25,7 @@ import { noteCycleFailure, type CycleCost } from '../src/daemon/liveness.js';
 import * as livenessModule from '../src/daemon/liveness.js';
 import type { CycleMetrics } from '../src/daemon/state.js';
 import { timedCall } from '../src/master/timings.js';
+import * as deploymentModule from '../src/daemon/deployment.js';
 import { execFileSync } from 'node:child_process';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -1274,6 +1275,200 @@ test(`manual:fault-class-loop — GY-1344: failed cycles that met a control plan
   assert.deepEqual(state.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['plane-unavailable', 'deployment']]);
 });
 
+// ---- GY-1354: the deployment step dominating cycle cost --------------------------------------------
+//
+// GY-1354 names this file for its proof too, beside the GY-1336 lineage. Two loop-cost instances on
+// 2026-10-06 had the same shape: the deployment step's inline release-landing verification took most
+// of a cycle already past the 300s interval.
+// (1) cycle 12621: 450s of its own work, 381.9s of it in the deployment step;
+// (2) cycle 12624: 781s of its own work — past the 600s two-interval liveness bound — and 8.5s
+//     waiting on children, 587.1s of its work in the deployment step.
+// The step's reads now share a per-cycle budget (deploymentStepBudgetMs); a verification still
+// running at the bound stays in flight and a later cycle takes its answer. GY-1355 found the
+// production timings put most of those seconds in the faults step inside the coarse 'deployment'
+// bucket; the attribution case below replays the shape AC-2 names, a cycle whose slowest timed
+// step is the release-landing verification itself, and the replay bounds that step either way.
+
+const gy1354Instances = [
+  { id: 'loop-cost|loop|2026-10-06T01:52:51.656Z', kind: 'loop-cost', subject: 'loop', at: '2026-10-06T01:52:51.656Z', cycle: 12621, workMs: 450_000, childWaitMs: 0, deploymentMs: 381_900 },
+  { id: 'loop-cost|loop|2026-10-06T02:10:48.978Z', kind: 'loop-cost', subject: 'loop', at: '2026-10-06T02:10:48.978Z', cycle: 12624, workMs: 781_000, childWaitMs: 8_500, deploymentMs: 587_100 },
+];
+/** The cycle as it was measured: the deployment step's work and the rest spread over the other steps. */
+function measuredCycle(instance: typeof gy1354Instances[number]) {
+  const rest = instance.workMs - instance.deploymentMs, share = (part: number) => ({ ms: Math.round(rest * part), childWaitMs: 0 });
+  const steps = { observe: share(0.2), close: share(0.1), decisions: share(0.3), dispatch: share(0.2), merge: share(0.2), deployment: { ms: instance.deploymentMs + instance.childWaitMs, childWaitMs: instance.childWaitMs } };
+  const timings = { totalMs: instance.workMs, calls: [], slowCalls: 0, steps: [{ step: 'snapshot', ms: steps.observe.ms }, { step: 'decisions', ms: steps.decisions.ms }, { step: 'deployment verification', ms: instance.deploymentMs }] };
+  return { cycle: instance.cycle, at: instance.at, durationMs: instance.workMs + instance.childWaitMs, childWaitMs: instance.childWaitMs, workMs: instance.workMs, steps, timings } as unknown as DaemonState['metrics'][number];
+}
+
+test('manual:fault-class-loop — GY-1354 lists two instances, and both are replayed', () => {
+  assert.deepEqual(gy1354Instances.map(entry => entry.cycle), [12621, 12624]);
+});
+
+for (const instance of gy1354Instances) {
+  test(`unit:loop-cost-deployment-attribution — ${instance.id}: the loop-cost line names the deployment step and its share of the cycle`, () => {
+    const cost = cycleCost(measuredCycle(instance), intervalMs)!;
+    assert.equal(cost.withinInterval, false);
+    assert.equal(cost.withinLivenessBound, instance.cycle === 12621);
+    assert.equal(cost.slowest?.step, 'deployment');
+    const share = Math.round(100 * instance.deploymentMs / instance.workMs);
+    assert.ok(share >= 60, `the 12621/12624 shape: deployment at ${share}% of a cycle past the interval`);
+    const lines = loopAttention({ liveness: { state: 'running', lagMs: 0, stalledAfterMs: 2 * intervalMs, cycle: instance.cycle, lock: null, detail: '', restart: '', cost }, cost });
+    const line = lines.find(entry => entry.kind === 'loop-cost' || /on its own work/.test(entry.text))!;
+    assert.match(line.text, new RegExp(`Cycle ${instance.cycle} spent ${Math.round(instance.workMs / 1000)}s on its own work`));
+    assert.equal(livenessModule.culpritShare?.(cost), share);
+    assert.match(line.text, new RegExp(`The deployment verification step is the slowest timed step, at ${Math.round(instance.deploymentMs / 1000)}s. It is ${share}% of the cycle's own work`));
+    assert.match(line.next ?? '', /shorten the deployment verification step/);
+  });
+
+  test(`manual:loop-cost-cycle-replay — ${instance.id}: a verification taking the ${instance.deploymentMs / 1000}s it took no longer carries the cycle past the interval, and the delivery is still verified served`, async () => {
+    const at = Date.parse(instance.at) - instance.workMs;
+    mock.timers.enable({ apis: ['setTimeout', 'Date'], now: at });
+    try {
+      const master = burstConfig(), state = emptyDaemonState(master), sha = 'c'.repeat(40);
+      const delivered = { ...item('GY-1350', at, { stage: 'done' } as Partial<Work>), delivery: { mergedAt: iso(at - hour), mergeSha: sha, authorizationRevision: 1 } } as unknown as Work;
+      let reads = 0;
+      const effects = quietEffects(() => Date.now(), () => [delivered], {
+        observeDeployment: () => { reads++; return new Promise(resolve => setTimeout(() => resolve({ source: 'endpoint', sha, at: iso(Date.now()), reason: null, deployed: ['GY-1350'], pending: [], requests: 0, derived: 1, retained: 0 }), instance.deploymentMs)); },
+      });
+      const started = Date.now();
+      while (state.deployment?.sha !== sha && Date.now() - started < 30 * minute) {
+        const result = await drive(runCycle(master, state, effects, () => Date.now()));
+        const cost = cycleCost(result.metrics, intervalMs)!;
+        assert.ok(cost.withinInterval && cost.withinLivenessBound, `cycle ${result.metrics.cycle} fits: ${cost.breakdown}`);
+        assert.ok(result.metrics.steps!.deployment.ms <= deploymentModule.deploymentStepBudgetMs(intervalMs) + faultObservationBudgetMs(intervalMs) + 2_000, `the deployment step is bounded: ${result.metrics.steps!.deployment.ms}ms`);
+        assert.deepEqual(loopAttention({ liveness: { state: 'running', lagMs: 0, stalledAfterMs: 2 * intervalMs, cycle: result.metrics.cycle, lock: null, detail: '', restart: '', cost }, cost }).filter(line => /on its own work/.test(line.text)), [], 'no loop-cost line');
+        mock.timers.tick(30_000);
+      }
+      assert.equal(reads, 1, 'one verification, carried across cycles');
+      assert.deepEqual(state.deployment?.deployed, ['GY-1350'], 'the delivery is verified served once its verification lands');
+    } finally { mock.timers.reset(); }
+  });
+}
+// ---- GY-1357: the faults step ran 100-150s past its observation budget --------------------------
+//
+// GY-1357 names this file for its proof too. On c67ed34548f2, with GY-1345's single-flight
+// observation loaded, cycles ran p50 148s / p95 181s against the 60s bound, the faults step 103.7s of
+// one 148.4s cycle. faultObservationBudgetMs bounded only the observation's reads: the filings and
+// the diagnoses' decision requests ran after it unbounded, each re-reading the work snapshot
+// (3.3-4.9s) and some asking for a decision (about 4s). The whole step now shares the budget: a
+// filing or request that does not fit is carried to the next cycle, and the snapshot a refused
+// decision is decided afresh from is read once per step, not once per class.
+
+const gy1357 = { at: Date.parse('2026-10-06T05:30:00.000Z'), intervalMs: 60_000, snapshotMs: 4_000, decideMs: 4_000 };
+/** The classes recurring at once in the replay: eight filings of 8s each are 64s, past the 60s bound when run inline. */
+const gy1357Classes: FaultClass[] = ['loop', 'decision', 'scope', 'merge', 'proof', 'resources', 'configuration', 'stalled-gate'];
+function gy1357Config() {
+  return masterConfigSchema.parse({ ...JSON.parse(JSON.stringify(config())), run: { proofWorkflow: 'acceptance.yml', intervalSeconds: gy1357.intervalMs / 1000 } });
+}
+function recurringInstances(at: number): FaultInstance[] {
+  return gy1357Classes.flatMap(faultClass => [0, 1, 2].map(index => ({ id: `${faultClass}|GY-${index + 1}|${index}`, kind: 'blocker', faultClass, subject: `GY-${index + 1}`, text: 'an instance', at: iso(at - (index + 1) * minute), lastSeenAt: iso(at), linkedTo: null }) as FaultInstance));
+}
+
+test(`manual:fault-class-loop — GY-1357: filings that each cost a ${gy1357.snapshotMs / 1000}s snapshot read and a ${gy1357.decideMs / 1000}s decide answer keep the faults step in its budget and the cycle in its 60s bound; carried filings are filed once, later`, async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'], now: gy1357.at });
+  try {
+    const master = gy1357Config(), state = emptyDaemonState(master), filed: { faultClass: string; key: string; cycle: number }[] = [];
+    state.faults.instances = recurringInstances(gy1357.at);
+    let snapshotReads = 0, decides = 0;
+    const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    const effects = quietEffects(() => Date.now(), () => [], {
+      faultClassPolicy: { threshold: 3, windowHours: 24 },
+      // As production's filings did: each read the whole work snapshot and asked for a decision before it answered.
+      fileFaultClass: async (input, key) => {
+        await wait(gy1357.snapshotMs); snapshotReads += 1;
+        await wait(gy1357.decideMs); decides += 1;
+        filed.push({ faultClass: String(input.origin?.faultClass?.class), key, cycle: state.cycle });
+        return item(`GY-${4000 + filed.length}`, Date.now(), { title: input.title, origin: input.origin } as Partial<Work>);
+      },
+    } as Partial<DaemonEffects>);
+    const budget = faultObservationBudgetMs(gy1357.intervalMs);
+    for (let cycle = 0; cycle < 4; cycle++) {
+      const result = await drive(runCycle(master, state, effects, () => Date.now()));
+      const faults = result.metrics.timings?.steps.find(entry => entry.step === 'faults')?.ms ?? result.metrics.steps!.deployment.ms;
+      assert.ok(faults <= budget, `cycle ${cycle}: the faults step took ${faults}ms against its ${budget}ms budget`);
+      const cost = cycleCost(result.metrics, gy1357.intervalMs)!;
+      assert.ok(cost.withinInterval, `cycle ${cycle}: ${cost.breakdown}`);
+      const line = loopAttention({ liveness: { state: 'running', lagMs: 1_000, stalledAfterMs: 2 * gy1357.intervalMs, cycle: cost.cycle, lock: null, detail: '', restart: '', cost }, cost }).find(entry => entry.kind === 'loop-cost');
+      assert.ok(!line || !/faults step/.test(`${line.text} ${line.next ?? ''}`), `cycle ${cycle}: the loop-cost attention names the faults step: ${line?.text}`);
+      mock.timers.tick(gy1357.intervalMs);
+    }
+    assert.ok(filed.some(entry => entry.cycle > filed[0].cycle), 'some filings were carried to a later cycle');
+    assert.equal(filed.length, gy1357Classes.length, `every recurring class filed, once: ${JSON.stringify(filed)}`);
+    assert.equal(new Set(filed.map(entry => entry.faultClass)).size, gy1357Classes.length, 'no class filed twice');
+    assert.equal(snapshotReads, filed.length);
+    assert.equal(decides, filed.length);
+    for (const faultClass of gy1357Classes) assert.equal(state.actions[faultActionKey(faultClass)]?.state, 'done', faultClass);
+    const seeded = new Set(recurringInstances(gy1357.at).map(entry => entry.id));
+    assert.ok(state.faults.instances.filter(entry => seeded.has(entry.id)).every(entry => entry.linkedTo), `every instance is linked to its class's one item: ${JSON.stringify(state.faults.instances.filter(entry => !entry.linkedTo))}`);
+    assert.equal(state.actions['faults:carried']?.faultClass, undefined, 'a carry is no fault');
+    assert.match(state.actions['faults:carried']?.detail ?? '', /^The faults step fitted every filing and decision request in its budget/);
+  } finally { mock.timers.reset(); }
+});
+
+test('unit:faults-step-within-budget — a filing the remaining budget cannot fit is carried untouched: no started row, no request, and the next cycle files it under the same key', async () => {
+  const at = gy1357.at, keys: string[] = [];
+  const state = emptyDaemonState(config());
+  state.faults.instances = recurringInstances(at).filter(entry => entry.faultClass === 'loop');
+  const effects = { persist: async () => {}, faultClassPolicy: { threshold: 3, windowHours: 24 },
+    fileFaultClass: async (input: { title: string }, key: string) => { keys.push(key); return item('GY-4100', at, { title: input.title }); } } as unknown as DaemonEffects;
+  const performed: DaemonAction[] = [];
+  let clock = at;
+  const spent = faultsStep.filingBudget({}, at + 1_000, 30_000, () => clock);
+  await fileRecurringFaultClasses(state, effects, [], at, () => clock, performed, spent);
+  assert.deepEqual(keys, [], 'nothing was requested past the budget');
+  assert.equal(state.actions[faultActionKey('loop')], undefined, 'no started row is left behind');
+  assert.deepEqual(spent.carried, ['the loop class filing']);
+  assert.ok(state.faults.instances.every(entry => !entry.linkedTo), 'the instances still count toward the class');
+  state.cycle += 1; clock = at + gy1357.intervalMs;
+  const fresh = faultsStep.filingBudget({}, clock + 30_000, 30_000, () => clock);
+  await fileRecurringFaultClasses(state, effects, [], clock, () => clock, performed, fresh);
+  assert.equal(keys.length, 1);
+  assert.equal(state.actions[faultActionKey('loop')].state, 'done');
+  await fileRecurringFaultClasses(state, effects, [], clock, () => clock, performed, faultsStep.filingBudget({}, clock + 30_000, 30_000, () => clock));
+  assert.equal(keys.length, 1, 'filed exactly once');
+  // The expected cost is the slowest recent filing, never past half the budget: one slow answer does not carry every later filing.
+  let now = at;
+  const owner = {}, measured = faultsStep.filingBudget(owner, at + 30_000, 30_000, () => now);
+  await measured.spend(async () => { now += 25_000; });
+  now = at;
+  assert.equal(faultsStep.filingBudget(owner, at + 15_000, 30_000, () => now).fits(), true, 'capped at half the budget');
+  assert.equal(faultsStep.filingBudget(owner, at + 14_000, 30_000, () => now).fits(), false);
+  assert.equal(faultsStep.filingBudget({}, at + faultsStep.faultFilingEstimateMs - 1, 30_000, () => now).fits(), false, 'unmeasured, a filing is taken to cost the estimate');
+});
+
+test('unit:faults-step-within-budget — the diagnoses move on inside the budget: the snapshot a refused decision is decided afresh from is read once per step, and a move that does not fit is carried', async () => {
+  clearDiagnoses();
+  const at = gy1357.at, master = gy1357Config(), state = emptyDaemonState(master);
+  const subjects = ['GY-1304', 'GY-1305', 'GY-1306'].map(key => recurring(key, 'loop', at - minute));
+  for (const subject of subjects) state.diagnoses[subject.key] = { subject: subject.key, kind: 'recurring', faultClass: 'loop', work: subject.key, state: 'diagnosed', startedAt: iso(at - hour), updatedAt: iso(at - minute),
+    runs: [], diagnosis: { subject: subject.key, cause: 'The cause', evidence: { logLines: ['a line'], commands: [] }, faultClass: 'loop', covering: 'GY-50' } as never, fix: null, decision: null, answeredBy: null, retryAt: null, refusedAt: null, detail: '' };
+  let clock = at, reads = 0;
+  const asked: string[] = [];
+  const moved = subjects.map(subject => ({ ...subject, revision: 2 }) as Work);
+  // Every close is refused for the loop's own write moving the item, then asked again at the revision read afresh; each answer costs 4s.
+  const decide: DiagnosticianEffects['decide'] = async work => { clock += gy1357.decideMs; asked.push(`${work.key}@${work.revision}`); if (work.revision < 2) throw raced(2); return { id: `decision-${work.key}` }; };
+  const effects = { diagnostician: { ...diagnostician(() => 'diagnose', []), decide }, persist: async () => {}, herdr: () => ({ agents: [], available: true }),
+    snapshot: async () => { reads += 1; clock += gy1357.snapshotMs; return { work: [...moved, covering], now: iso(clock) }; },
+    decisions: async () => ({ decisions: [] }), approver: async () => ({ agentName: 'gy-approver', pane: null }) } as unknown as DaemonEffects;
+  const isolate = async (_kind: string, _item: unknown, _name: string, body: () => Promise<unknown>) => body();
+  const cycle = { config: master, state, effects, now: () => clock, snapshot: { work: [...subjects, covering], now: iso(at) }, clock: at, performed: [] as DaemonAction[], agents: [], credentials: {}, isolate } as unknown as Cycle;
+  await faultsStep.faultStep(cycle, {});
+  await diagnosesSettled();
+  assert.equal(reads, 1, 'one snapshot read for the step, shared by every refused decision');
+  assert.ok(clock - at <= faultObservationBudgetMs(gy1357.intervalMs), `the step spent ${clock - at}ms`);
+  const closing = subjects.filter(subject => state.diagnoses[subject.key].state === 'closing').map(subject => subject.key);
+  const waiting = subjects.filter(subject => state.diagnoses[subject.key].state === 'diagnosed').map(subject => subject.key);
+  assert.ok(closing.length >= 1 && waiting.length >= 1, `some moved on and the rest were carried: ${JSON.stringify({ closing, waiting })}`);
+  assert.match(state.actions['faults:carried']?.detail ?? '', /carried to the next cycle rather than run inline: the diagnosis of GY-130/);
+  // The next step moves the carried ones on; none is asked twice once its decision stands.
+  clock += gy1357.intervalMs;
+  await faultsStep.faultStep({ ...cycle, now: () => clock, clock, snapshot: { work: [...moved, covering], now: iso(clock) }, performed: [] } as unknown as Cycle, {});
+  assert.deepEqual(subjects.map(subject => state.diagnoses[subject.key].state), ['closing', 'closing', 'closing']);
+  for (const subject of subjects) assert.equal(asked.filter(entry => entry === `${subject.key}@2`).length, 1, `${subject.key} decided once at its current revision: ${asked}`);
+  assert.deepEqual(diagnosisFaults(state), [], 'no loop fault');
+});
+
 // ---- GY-1356: the coordinator HEAD moved forward under the running loop -------------------------
 //
 // At 2026-10-06T05:31:54.601Z the loop recorded escalation:dirty-checkout: its checkout's HEAD had
@@ -1307,7 +1502,12 @@ async function divergence() {
   git('checkout', '--quiet', '--detach', loaded);
   return { root, git, loaded, successor, foreign, unmerged };
 }
-function recoveringGuard(root: string, state: DaemonState) {
+/** GY-1359: the deployment step verified a delivery served by `sha`, the trigger a recovery waits on. */
+function serving(state: DaemonState, sha: string) {
+  state.deployment = { source: 'github-deployment', sha, at: '2026-10-06T05:30:00.000Z', reason: null, deployed: ['GY-1338'], pending: [] };
+  return state;
+}
+function recoveringGuard(root: string, state: DaemonState, options: { restartSelf?: () => Promise<void> } = {}) {
   const restarts = { executors: [] as string[], self: 0, recovers: 0 };
   const run = (command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8' });
   const guard = coordinatorCheckoutGuard({
@@ -1317,7 +1517,7 @@ function recoveringGuard(root: string, state: DaemonState) {
       restarts.recovers++;
       return upgradeModule.recoverMovedHead(config(), current, from, to, { root, run, now: () => Date.parse('2026-10-06T05:31:54.601Z'),
         restartExecutors: async commit => { restarts.executors.push(commit); return { result: 'restarted', reason: null, coordinator: { commit }, held: [], restarted: [], unsupervised: [], forgotten: [] }; },
-        restartSelf: async () => { restarts.self++; } });
+        restartSelf: options.restartSelf ?? (async () => { restarts.self++; }) });
     },
   });
   return { guard, restarts };
@@ -1327,7 +1527,7 @@ const skippedUpgrade = async () => ({ outcome: 'skipped' as const, reason: 'no d
 test('unit:upgrade-head-divergence-recovers — a HEAD moved forward to a descendant under the running loop is recovered onto: the executors restart and the loop re-executes, with no drift escalation', async () => {
   assert.equal(typeof upgradeModule.recoverMovedHead, 'function', 'the loop has a recovery for a moved HEAD');
   const repo = await divergence();
-  const state = emptyDaemonState(config());
+  const state = serving(emptyDaemonState(config()), repo.successor);
   const { guard, restarts } = recoveringGuard(repo.root, state);
   assert.equal(await guard.start(repo.loaded), null);
   assert.equal(guard.expected(), repo.loaded);
@@ -1350,7 +1550,7 @@ test('unit:upgrade-head-divergence-recovers — a HEAD moved forward to a descen
 
 test('unit:upgrade-head-divergence-recovers — drift raised before the recovery is settled by it', async () => {
   const repo = await divergence();
-  const state = emptyDaemonState(config());
+  const state = serving(emptyDaemonState(config()), repo.successor);
   const { guard, restarts } = recoveringGuard(repo.root, state);
   await guard.start(repo.loaded);
   repo.git('checkout', '--quiet', '--detach', repo.successor);
@@ -1365,7 +1565,7 @@ test('unit:upgrade-head-divergence-recovers — drift raised before the recovery
 test('unit:upgrade-head-divergence-recovers — a move that is not a clean detached descendant on the base branch still stands down, and is tried once', async () => {
   for (const move of ['foreign', 'dirty', 'branch', 'unmerged'] as const) {
     const repo = await divergence();
-    const state = emptyDaemonState(config());
+    const state = serving(emptyDaemonState(config()), repo.successor);
     const { guard, restarts } = recoveringGuard(repo.root, state);
     await guard.start(repo.loaded);
     if (move === 'foreign') repo.git('checkout', '--quiet', '--detach', repo.foreign);
@@ -1384,4 +1584,79 @@ test('unit:upgrade-head-divergence-recovers — a move that is not a clean detac
     assert.equal(guard.expected(), repo.loaded);
     assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed', `${move}: the drift is attention`);
   }
+});
+
+// ---- GY-1359: a forward move is classified by ancestry ------------------------------------------
+//
+// The recovery adopts merged code once a verified release serves it. A forward move it cannot adopt
+// by itself is attention naming a restart onto the checkout's own HEAD; only dirty, non-detached and
+// non-forward states keep the rollback refusal, and none of them reaches the self-upgrade.
+
+test('unit:coordinator-non-forward-drift-still-refused — a dirty tree, a branch HEAD or a move the loaded commit is not an ancestor of refuses the self-upgrade, naming the paths or the HEAD', async () => {
+  for (const move of ['foreign', 'dirty', 'branch'] as const) {
+    const repo = await divergence();
+    const state = serving(emptyDaemonState(config()), repo.successor);
+    const { guard, restarts } = recoveringGuard(repo.root, state);
+    let upgrades = 0;
+    const selfUpgrade = async () => { upgrades++; return skippedUpgrade(); };
+    await guard.start(repo.loaded);
+    if (move === 'foreign') repo.git('checkout', '--quiet', '--detach', repo.foreign);
+    else if (move === 'branch') repo.git('checkout', '--quiet', '-B', 'side', repo.successor);
+    else { repo.git('checkout', '--quiet', '--detach', repo.successor); writeFileSync(join(repo.root, 'src', 'loop.ts'), 'export const version = 9;\n'); }
+    for (let cycle = 0; cycle < 2; cycle++) {
+      const { refusal, upgraded } = await guard.betweenCycles(selfUpgrade);
+      assert.ok(refusal, `${move}: the guard refuses`);
+      assert.equal(upgraded, null, `${move}: nothing is upgraded`);
+      if (move === 'dirty') assert.match(refusal, /src\/loop\.ts/, 'the dirty paths are named');
+      else {
+        const head = (move === 'foreign' ? repo.foreign : repo.successor).slice(0, 12);
+        assert.match(refusal, new RegExp(`moved from ${repo.loaded.slice(0, 12)} to ${head}`), `${move}: the HEAD is named`);
+        assert.match(refusal, new RegExp(`checkout --detach ${repo.loaded.slice(0, 12)}`), `${move}: a non-forward or branch move keeps the rollback remedy`);
+      }
+    }
+    assert.equal(upgrades, 0, `${move}: the self-upgrade never runs`);
+    assert.equal(restarts.self, 0, `${move}: nothing re-executes`);
+    assert.equal(guard.expected(), repo.loaded);
+    assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed', `${move}: the refusal is attention`);
+  }
+});
+
+test('unit:forward-drift-escalation-names-restart — a forward move no verified release serves yet is attention naming a restart onto its own HEAD, and is recovered once a release serves it', async () => {
+  const repo = await divergence();
+  const state = emptyDaemonState(config());
+  const { guard, restarts } = recoveringGuard(repo.root, state);
+  await guard.start(repo.loaded);
+  repo.git('checkout', '--quiet', '--detach', repo.successor);
+  const successor = repo.successor.slice(0, 12), loaded = repo.loaded.slice(0, 12);
+  for (let cycle = 0; cycle < 2; cycle++) {
+    const { refusal, upgraded } = await guard.betweenCycles(skippedUpgrade);
+    assert.equal(upgraded, null);
+    assert.match(refusal ?? '', new RegExp(`moved from ${loaded} forward to ${successor}`));
+    assert.match(refusal ?? '', /no delivered item is verified deployed yet/);
+    assert.match(refusal ?? '', new RegExp(`leave the checkout at ${successor} and restart the loop onto its own HEAD`));
+    assert.doesNotMatch(refusal ?? '', /checkout --detach/, 'never a rollback to the stale loaded commit');
+  }
+  assert.equal(restarts.recovers, 1, 'one attempt per HEAD and release');
+  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed');
+  serving(state, repo.successor);
+  assert.equal((await guard.betweenCycles(skippedUpgrade)).upgraded?.outcome, 'upgraded', 'a release verified later is retried');
+  assert.equal(restarts.self, 1);
+  assert.equal(guard.expected(), repo.successor);
+  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done');
+});
+
+test('unit:forward-drift-escalation-names-restart — a forward move the loop cannot re-execute onto (no supervisor unit) names a restart, never a rollback', async () => {
+  const repo = await divergence();
+  const state = serving(emptyDaemonState(config()), repo.successor);
+  const { guard, restarts } = recoveringGuard(repo.root, state, { restartSelf: async () => { throw new Error('this loop runs under no graphyard-master supervisor unit, so it cannot re-execute itself'); } });
+  await guard.start(repo.loaded);
+  repo.git('checkout', '--quiet', '--detach', repo.successor);
+  const { refusal, upgraded } = await guard.betweenCycles(skippedUpgrade);
+  assert.equal(upgraded, null);
+  assert.deepEqual(restarts.executors, [repo.successor], 'the executors were restarted onto it');
+  assert.match(refusal ?? '', /no graphyard-master supervisor unit/);
+  assert.match(refusal ?? '', new RegExp(`restart the loop onto its own HEAD`));
+  assert.doesNotMatch(refusal ?? '', /checkout --detach/);
+  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed');
+  assert.equal(guard.expected(), repo.loaded, 'the loop still runs the code it loaded');
 });

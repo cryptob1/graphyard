@@ -15,7 +15,8 @@ import { GitHub, idleObservationSeconds, processJob } from '../src/github.js';
 import { GitHubCacheStore } from '../src/github-cache.js';
 import { GitHubChargeLedger } from '../src/github-charges.js';
 import { createHash } from 'node:crypto';
-import { Refusal, type Principal, type Work } from '../src/model.js';
+import { Refusal, deploySmokeProof, type Principal, type Work } from '../src/model.js';
+import * as deploymentStep from '../src/daemon/deployment.js';
 import { approverSessionName, assessContainment, atomicPrivateWrite, automaticReviewerConcurrency, containmentPhase, containmentQuarantines, decisionInput, dispatchWork, DispatchReservedError, loadMasterConfig, masterConfigSchema, profileConcurrency, reclaimableAgent, setupMaster, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { readAccountStartFailures, readProfileLaunchRecords, workerLaunchStatus, worktreeFailure } from '../src/master/dispatch.js';
 import { readControlPlaneClock, unmeasured } from '../src/master/containment.js';
@@ -136,6 +137,8 @@ const principals = {
   approver: { id: 'graphyard-approver', role: 'admin', sessionKind: 'ai' },
   coordinator: { id: 'graphyard-master', role: 'coordinator' },
   producer: { id: 'proof-runner', role: 'producer', proofs: [PROOF] },
+  // The slow-deployment day's deliveries ask for a post-deployment smoke proof (GY-1354), which only this producer may run.
+  smoker: { id: 'smoke-runner', role: 'producer', proofs: [deploySmokeProof] },
 } satisfies Record<string, Principal>;
 const workers: WorkerProfile[] = ['one', 'two', 'three'].map(name => ({ name, principal: `worker-${name}`, agentName: `soak-worker-${name}`, mode: 'launch', kind: 'claude', credentialFile: `/outside/${name}.token`, agentArgs: [], approvals: 'auto', environment: {} }) as WorkerProfile);
 // The slow-server day's roster (GY-1286): worker capacity enough to staff every item at once.
@@ -561,7 +564,7 @@ async function api(principal: Principal, method: 'GET' | 'POST', path: string, b
  * (`rejected`).
  */
 let days = 0;
-async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; slowDeployment?: { from: number; to: number; observationMs: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
   staleDiagnosis?: boolean;
@@ -593,6 +596,8 @@ async function simulateDay(options: { hours: number; backlog?: boolean; master?:
     // GY-1286: the slow-server day staffs every item at once, so their decisions fall due together.
     : options.slowDecisions ? masterConfigSchema.parse({ ...soakConfig, workers: [...workers, ...extraWorkers] })
     : options.master ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, masterSessionMinutes: options.master.sessionMinutes, masterHeartbeatMinutes: options.master.heartbeatMinutes } })
+    // GY-1354: the slow-deployment day's deliveries ask for a smoke proof the loop requests from this workflow.
+    : options.slowDeployment ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, smokeWorkflow: 'smoke.yml' } })
     : options.decomposition ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, research: { command: 'pi', model: 'research-pi-model' }, decomposition: { concurrency: options.decomposition.concurrency ?? 2 } } })
     : soakConfig;
   // The spent producer request (GY-496) is a main-day fault, like the blind window and the split:
@@ -786,7 +791,8 @@ async function simulateDay(options: { hours: number; backlog?: boolean; master?:
     } : {};
     const criteria = [{ id: 'AC-1', text: plan.scoped.has(n) || (options.remedies && n === remedyItem) ? `Item ${n} behaves, with its fixture ${fixture(n)}` : `Item ${n} behaves`, proofs: [PROOF] },
       ...(n === plan.attested ? [{ id: 'AC-2', text: `Item ${n} is attested`, proofs: [MANUAL] }] : [])];
-    let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria, ...scopeIntake, ...docsIntake, ...broadIntake }, id());
+    const smokeIntake = options.slowDeployment ? { policy: { checks: ['test', 'typecheck'], review: true, deploySmoke: true } } : {};
+    let work = await engine.execute(principals.operator, 'create', null, { title: `Soak item ${n}`, plannedFiles: files(n), criteria, ...scopeIntake, ...docsIntake, ...broadIntake, ...smokeIntake }, id());
     if (n === plan.exhaustedReviewer) work = await engine.execute(principals.operator, 'reviewpolicy', work.id, { provider: 'agent', expectedPolicyRevision: work.policyRevision, reason: 'Reviewed by the reviewer bots',
       reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' }, { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer' }] }, id());
     items.push(work);
@@ -1993,6 +1999,35 @@ async function simulateDay(options: { hours: number; backlog?: boolean; master?:
       }));
     };
   }
+  // ---- GY-1354: the slow-deployment day. Inside the window the release observation answers
+  // ---- `observationMs` after it is asked, as cycle 12624's did in 587.1s: the cycle that asks spends the
+  // ---- deployment step's whole budget on it and is cut, and the read stays in flight across cycles.
+  const deploymentDay = { cycles: [] as { cycle: number; elapsed: number; spentMs: number; cut: boolean; pending: number }[], started: 0, landed: 0, inFlight: 0, maxInFlight: 0,
+    records: [] as string[], smokes: [] as string[], land: () => {} };
+  if (options.slowDeployment) {
+    const window = options.slowDeployment, { observeDeployment } = effects;
+    const budget = deploymentStep.deploymentStepBudgetMs(config.run.intervalSeconds * 1000);
+    const inWindow = () => { const at = clock.now() - dayStart; return at >= window.from && at < window.to; };
+    let landing: { at: number; answer: () => void } | null = null;
+    // Checked before each cycle: a release fast again answers the read in flight; inside the window it answers once its time is up.
+    deploymentDay.land = () => { if (landing && (!inWindow() || clock.now() >= landing.at)) { const read = landing; landing = null; read.answer(); } };
+    effects.observeDeployment = (delivered, containment) => {
+      if (!inWindow()) return observeDeployment(delivered, containment);
+      deploymentDay.started++; deploymentDay.inFlight++; deploymentDay.maxInFlight = Math.max(deploymentDay.maxInFlight, deploymentDay.inFlight);
+      // The asking cycle waits its budget out on the read, as on the slow-observation day.
+      const waited = budget - 200;
+      fenced.drift += waited;
+      return moveClock(waited).then(() => new Promise<Awaited<ReturnType<typeof observeDeployment>>>(resolve => {
+        landing = { at: clock.now() - waited + window.observationMs, answer: () => { deploymentDay.inFlight--; deploymentDay.landed++; resolve(observeDeployment(delivered, containment)); } };
+      }));
+    };
+    // The loop's real route for the deployment record (src/daemon/effects.ts), so a smoke request follows it.
+    effects.recordDeployment = async (item, observation) => {
+      deploymentDay.records.push(item.key);
+      return api(principals.coordinator, 'POST', `work/${item.id}/deployment`, { sha: observation.sha, mergeSha: item.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt });
+    };
+    effects.requestSmoke = async item => { deploymentDay.smokes.push(item.key); };
+  }
   if (options.staleRelease) {
     // The backlog's history reads take real time, as a slow control plane's do; master status's own
     // decision report is the attention the loop classifies, so an owed stale release reaches the fault step.
@@ -2557,10 +2592,12 @@ async function simulateDay(options: { hours: number; backlog?: boolean; master?:
           // An adopted run that already ended is applied on adoption, before the cycle judges its decision.
           headless.adoptedEnded++; await run.settled; headless.settling.delete(run.directory); await new Promise(resolve => setImmediate(resolve));
         }
+        if (options.slowDeployment) { deploymentDay.land(); await new Promise(resolve => setImmediate(resolve)); }
         const cycleStart = clock.now(); budgetDay.cycleSlow = 0;
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
         if (options.staleRelease) { staleReleaseDay.steps.push({ elapsed, ms: result.metrics.steps?.decisions?.ms ?? 0, backlogReads: staleReleaseDay.backlogReads }); staleReleaseDay.backlogReads = 0; }
         if (options.slowDecisions) budgetDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, slow: budgetDay.cycleSlow, deferred: [...state.decisionsDeferred] });
+        if (options.slowDeployment) deploymentDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, cut: result.actions.some(action => action.kind === 'deployment' && /spent its \d+s budget/.test(action.detail)), pending: deploymentStep.deploymentReadsPending(state) });
         if (options.slowObservation) observationDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, cut: result.actions.some(action => action.kind === 'fault' && /spent its \d+s observation budget/.test(action.detail)), pending: faultsStep.observationReadsPending(state) });
         if (options.workspaceFailure) for (const [name, entry] of Object.entries(state.profiles)) if (/worktree/.test(entry.reason ?? '')) workspaceCooled.push(`+${Math.round(elapsed / minute)} min ${name}: ${entry.reason}`);
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
@@ -2706,7 +2743,7 @@ async function simulateDay(options: { hours: number; backlog?: boolean; master?:
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, staleMerges, restartLog, guardDay, budgetDay, observationDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain };
+    wakes, staleMerges, restartLog, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain };
 }
 
 /**
@@ -4457,6 +4494,37 @@ test('unit:soak-invariants-hold — a control plane too slow to observe within t
   assert.equal(faultsStep.observationReadsPending(state), 0, 'nothing is left in flight at the end of the day');
   assert.match(state.actions['faults:deferred']?.detail ?? '', /^The faults step observed every source within its budget/);
   assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'loop-cost').map(entry => entry.text), [], 'no loop-cost instance opens for slow plane reads');
+});
+
+test('unit:soak-invariants-hold — a release observation too slow to answer within the deployment step\'s budget for an hour and a quarter: the step is cut while the observation is in flight, never more than one such read is in flight however many cycles run, every cycle stays within the interval, the read in flight is taken once it lands, every delivery still gets its deployment record and smoke request, no loop-cost fault opens, and every invariant holds', { timeout: 600_000 }, async () => {
+  // GY-1354: cycle 12624's window, longer. The release observation answers fifteen minutes after it
+  // is asked, so a cut read stays in flight across a dozen one-minute cycles while the day's items are
+  // delivered; each asks for a smoke proof, so its deployment record and smoke request wait on the read.
+  const slow = { from: 60 * minute, to: 135 * minute, observationMs: 15 * minute };
+  const { final, violations, failures, lost, deploymentDay, state } = await simulateDay({
+    hours: 4, slowDeployment: slow,
+    plan: { items: 4, leftovers: 0, slowRecompute: 0, releaseEveryMs: 1_000, workMs: 50 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, attested: 0, exhaustedReviewer: 0, unstable: 0, lowLane: 0, outOfQueue: { item: 4, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 4 } },
+  });
+  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all four items are delivered');
+  assert.deepEqual(violations, [], 'every system invariant holds while the step is cut and once the release answers');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no worker lost its lease');
+  const cycles = deploymentDay.cycles, cut = cycles.filter(entry => entry.cut);
+  assert.ok(cut.length >= 30, `the window cut the step across many cycles (${cut.length} cut of ${cycles.length})`);
+  assert.equal(deploymentDay.maxInFlight, 1, `never more than one release observation in flight (${deploymentDay.started} started)`);
+  assert.ok(deploymentDay.started <= Math.ceil((slow.to - slow.from) / slow.observationMs) + 2, `about one read per landing, not one a cycle: ${deploymentDay.started} started over ${cut.length} cut cycles`);
+  assert.ok(deploymentDay.landed >= deploymentDay.started - 1 && deploymentDay.landed >= 2, `the reads in flight land and are taken (${deploymentDay.landed} of ${deploymentDay.started})`);
+  assert.deepEqual(cycles.filter(entry => entry.spentMs > soakConfig.run.intervalSeconds * 1000).map(entry => `cycle ${entry.cycle} +${Math.round(entry.elapsed / minute)} min: ${entry.spentMs}ms`), [], 'every cycle stays within the interval');
+  assert.deepEqual(cycles.filter(entry => entry.pending > 1).map(entry => `cycle ${entry.cycle}: ${entry.pending}`), [], 'at most the one observation is pending after any cycle');
+  assert.deepEqual(cycles.filter(entry => entry.elapsed >= slow.to + 2 * minute && entry.cut).map(entry => `+${Math.round(entry.elapsed / minute)} min`), [], 'once the release answers, no observation is cut');
+  assert.equal(deploymentStep.deploymentReadsPending(state), 0, 'nothing is left in flight at the end of the day');
+  assert.match(state.actions['deployment:deferred']?.detail ?? '', /^The deployment step verified within its budget/);
+  // The second confidence layer resumes once the window passes: every delivery is recorded as served and its smoke proof requested, once.
+  const keys = final.map(item => item.key).sort();
+  assert.deepEqual([...deploymentDay.records].sort(), keys, 'each delivery is recorded as deployed exactly once');
+  assert.deepEqual([...deploymentDay.smokes].sort(), keys, 'each deployed delivery has its smoke proof requested exactly once');
+  assert.ok(final.every(item => item.delivery?.deployment), 'every delivery carries its deployment observation');
+  assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'loop-cost').map(entry => entry.text), [], 'no loop-cost instance opens for a slow release observation');
 });
 
 test('unit:soak-invariants-hold — releases requested outside any diagnosis that go stale in backlog are asked again by the loop once per stale decision against the current revision, each put to an approver that judges and is closed, a release that keeps racing escalates exactly once at the bound, no owed-decision fault is counted while the loop is still asking, a large slow backlog is read side by side and kept, and every invariant holds', { timeout: 600_000 }, async () => {
