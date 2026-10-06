@@ -2,6 +2,7 @@
 import { type AttentionItem, agentOwner } from '../master.js';
 import { classified, noteFault } from '../model/fault-classes.js';
 import { boundDaemonState, type CycleFailures, type CycleMetrics, type CycleStepName, type CycleSteps, type DaemonState, liveProcess, message, type StepCost } from './state.js';
+import { readlinkSync } from 'node:fs';
 import { approverWait, type LatencyBudget, type SilenceReport } from './metrics.js';
 import type { DaemonEffects } from './effects.js';
 import { slowestSteps } from '../master/timings.js';
@@ -93,15 +94,31 @@ export function cycleTimes(metrics: Pick<CycleMetrics, 'at' | 'durationMs'>[], n
   return { windowMs, cycles: durations.length, p50Ms: rank(0.5), p95Ms: rank(0.95) };
 }
 
+/** The host's initial PID namespace (Linux PROC_PID_INIT_INO): only a reader in it sees every host pid. */
+const hostPidNamespace = 'pid:[4026531836]';
+
+/**
+ * Whether the lock's process is alive as this reader can tell: true when it sees it, false when it
+ * shares the host's PID namespace and does not, and null when it is confined to a namespace of its
+ * own (a sandboxed agent session), where a pid it cannot see says nothing about the host (GY-1369).
+ * Without /proc (macOS) there are no PID namespaces, so the probe is authoritative.
+ */
+export function hostPidProbe(pid: number, namespace: () => string | null = () => { try { return readlinkSync('/proc/self/ns/pid'); } catch { return null; } }): boolean | null {
+  if (liveProcess(pid)) return true;
+  const own = namespace();
+  return own === null || own === hostPidNamespace ? false : null;
+}
+
 /**
  * Whether the loop is cycling, from its own cursor. Nothing else in the installation notices a
  * coordinator that stopped: the work simply stops moving. Two intervals without a completed cycle
  * is a stall, and no lock at all — or a lock whose process is gone on this host — is an absence.
  * A measured cycle that itself accounts for the lag is `slow`, not stalled: the loop is inside a
  * long cycle, and the cost says whether that cycle is computing (a step to shorten) or waiting on
- * a child (a provider to look at), so nobody restarts a loop that is still cycling.
+ * a child (a provider to look at), so nobody restarts a loop that is still cycling. A reader that
+ * cannot tell whether the pid lives (confined to its own PID namespace) judges by the stall bound.
  */
-export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCycleAt'> & Partial<Pick<DaemonState, 'failures' | 'metrics'>>, now: number, intervalMs: number, hostId?: string): LoopLiveness {
+export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCycleAt'> & Partial<Pick<DaemonState, 'failures' | 'metrics'>>, now: number, intervalMs: number, hostId?: string, probe: (pid: number) => boolean | null = hostPidProbe): LoopLiveness {
   const cost = cycleCost(state.metrics?.at(-1) ?? null, intervalMs);
   const lastCycleAt = state.lastCycleAt ? Date.parse(state.lastCycleAt) : Number.NaN;
   const lagMs = Number.isFinite(lastCycleAt) ? Math.max(0, now - lastCycleAt) : null;
@@ -111,7 +128,7 @@ export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCy
   const stalledAfterMs = 2 * intervalMs + (backoff ? Math.max(0, backoff.dueAt - lastCycleAt) : 0);
   const restart = 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)';
   const lock = state.lock;
-  const gone = !!lock && !!hostId && lock.host === hostId && !liveProcess(lock.pid);
+  const gone = !!lock && !!hostId && lock.host === hostId && probe(lock.pid) === false;
   if (!lock || gone) {
     return { state: 'absent', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost,
       detail: gone ? `No master loop is running: the cursor's lock (pid ${lock!.pid} on ${lock!.host}) names a process that is gone, last cycle ${state.lastCycleAt ?? 'never'}. Nothing is dispatching, deciding or merging until it is restarted.`

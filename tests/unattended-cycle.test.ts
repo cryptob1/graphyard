@@ -725,8 +725,10 @@ test('integration:loop-liveness — an absent or stalled loop is the top attenti
   state.lock = { id: 'lock', pid: 2 ** 22 - 1, host: master.hostId, startedAt: new Date(clockStart).toISOString(), heartbeatAt: new Date(now - minute).toISOString() };
   state.lastCycleAt = new Date(now - minute).toISOString();
   state.cycle = 12;
-  assert.equal(loopLiveness(state, now, intervalMs, master.hostId).state, 'absent');
-  assert.match(loopLiveness(state, now, intervalMs, master.hostId).detail, /names a process that is gone/);
+  // Read from the host's PID namespace, where a pid it cannot see is gone (GY-1369).
+  const hostReader = (pid: number) => pid === process.pid;
+  assert.equal(loopLiveness(state, now, intervalMs, master.hostId, hostReader).state, 'absent');
+  assert.match(loopLiveness(state, now, intervalMs, master.hostId, hostReader).detail, /names a process that is gone/);
 
   // A live process that has not completed a cycle for more than two intervals is stalled.
   state.lock = { ...state.lock, pid: process.pid };
