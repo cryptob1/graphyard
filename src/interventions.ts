@@ -410,14 +410,6 @@ export function detectPatterns(interventions: Intervention[], work: readonly Wor
   }).sort((a, b) => b.count - a.count);
 }
 
-/**
- * Whether the server's own tick runs the pattern scan (GY-1372). Off by default: its ledger query
- * held the whole tick once the events table grew (2026-09-23), so an operator opts in. The
- * interventions report carries this state, so master status reads it rather than assuming.
- */
-export const interventionScanVariable = 'GRAPHYARD_INTERVENTION_PATTERNS';
-export const interventionScan = (env: NodeJS.ProcessEnv = process.env) => ({ enabled: env[interventionScanVariable] === '1', variable: interventionScanVariable });
-
 /** The control plane acting as itself when it opens work from feedback; the ledger names it as every other control-plane write is named. */
 export const controlPlaneActor: Principal = { id: 'graphyard', role: 'admin', sessionKind: 'ai' };
 const minutes = (value: number) => `${Math.round(value / 60_000)} min`;
