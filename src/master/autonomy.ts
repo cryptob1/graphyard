@@ -1,5 +1,5 @@
 // Concern: agent identities and autonomy — approver and escalation launches, and the autonomy commands.
-import { randomUUID, randomBytes } from 'node:crypto';
+import { createHash, randomUUID, randomBytes } from 'node:crypto';
 import { wholeDocument } from '../model/work-summary.js';
 import { readFile, mkdir, lstat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -21,7 +21,7 @@ import { createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
 import { allocateManagedCheckout, failureText, settleCheckout } from './worktrees.js';
 import { herdrAttach } from './dispatch.js';
 import type { SessionHandleInput } from '../model/sessions.js';
-import type { FilesystemProbe, SessionCheckout } from '../install/worktree-root.js';
+import { dataDirectory, type FilesystemProbe, type SessionCheckout } from '../install/worktree-root.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { liveReviewRequest } from '../model/dispatch.js';
 import { narrowRoleRuntime, piRuntimeSchema } from '../runner/payloads.js';
@@ -417,13 +417,13 @@ export async function launchApprover(root: string, work: Work, decision: string,
   // The registry session is kept with the launch: the loop ends it once the decision is judged, or
   // the moment the session is spent.
   const session = selected?.account.fleet.session ?? null;
-  // The record is part of the launch: without it an adopted session's spent account and registry
-  // slot are unknown, so a launch whose record cannot be written is closed and fails.
-  // It names the item and decision too (GY-403), so the loop watches a session `master approver`
-  // launched exactly as one of its own, and closes it once its decision settles.
-  try { await saveApproverLaunch(root, { agentName: name, account: spentOn, runtime: kind, session, launchedAt: new Date().toISOString(), work: work.key, decision, checkout: checkout.directory }); }
+  // The record names the spent account, registry slot, item and decision (GY-403), so the loop adopts and closes the session.
+  // Kept off the checkout (GY-1339): an unwritable location leaves it unrecorded and the started runtime judging; other failures close it.
+  let record: ApproverLaunchRecord;
+  try { record = await saveApproverLaunch(root, { agentName: name, account: spentOn, runtime: kind, session, launchedAt: new Date().toISOString(), work: work.key, decision, checkout: checkout.directory }); }
   catch (error) { const failure = await abandonLaunch(error, pane, tabId, selected, `approver launch record for ${work.key} could not be written: ${failureText(error).slice(0, 300)}`, run); await settleCheckout(root, checkout.directory); throw failure; }
   return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane! as string | null, delivery, focusChanged: false, runtime: kind as string, session,
+    ...(record.unrecorded ? { unrecorded: record.unrecorded } : {}),
     account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped }
       : chosen?.account ? { environment: chosen.account.name, kind, reason: `the first healthy account of profile ${chosen.profile}`, skipped: chosen.skipped } : null,
     run: null as RunRecord | null, settled: undefined as Promise<RunRecord> | undefined };
@@ -440,22 +440,43 @@ export const approverLaunchSchema = z.object({ agentName: z.string().max(200), a
   /** The item and decision it judges (GY-403): the loop registers the session in its approval watch from these. */
   work: z.string().max(40).nullable().default(null), decision: z.string().max(100).nullable().default(null), /** Its own managed directory, kept from reclaim while this record is (GY-866). */ checkout: z.string().max(4096).optional() }).strict();
 export type ApproverLaunch = z.infer<typeof approverLaunchSchema>;
-const approverLaunchesPath = async (root: string) => resolve(await localDirectory(root), 'approvers', 'launches.json');
-/** Every approver launch recorded on this host within the last day. */
-export async function readApproverLaunches(root: string): Promise<ApproverLaunch[]> {
-  try { return z.array(approverLaunchSchema).parse(JSON.parse(await readFile(await approverLaunchesPath(root), 'utf8'))); } catch { return []; }
+/** Where approver launches are recorded (GY-1339): the managed data root keyed by checkout, since the doctor's checkout is read-only (EROFS). */
+export const approverLaunchesFile = (root: string, environment: Record<string, string | undefined> = process.env) =>
+  resolve(dataDirectory(environment), 'approver-launches', `${createHash('sha256').update(resolve(root)).digest('hex').slice(0, 12)}.json`);
+/** The record's place before GY-1339, still read, and written only when the data root refuses writes. */
+const checkoutApproverLaunchesFile = (root: string) => resolve(root, '.graphyard', 'approvers', 'launches.json');
+const readLaunchFile = async (file: string): Promise<ApproverLaunch[]> => { try { return z.array(approverLaunchSchema).parse(JSON.parse(await readFile(file, 'utf8'))); } catch { return []; } };
+/** Every approver launch recorded on this host within the last day: the data root's records, after any the checkout still holds. */
+export async function readApproverLaunches(root: string, environment: Record<string, string | undefined> = process.env, now = Date.now()): Promise<ApproverLaunch[]> {
+  const [checkout, data] = await Promise.all([readLaunchFile(checkoutApproverLaunchesFile(root)), readLaunchFile(approverLaunchesFile(root, environment))]);
+  // The checkout's file is rewritten only when the data root refuses writes, so its old records are aged out here.
+  return [...checkout.filter(entry => now - Date.parse(entry.launchedAt) < escalationSessionMs && !data.some(newer => newer.agentName === entry.agentName)), ...data];
 }
 export async function readApproverLaunch(root: string, agentName: string): Promise<ApproverLaunch | null> {
   return (await readApproverLaunches(root)).findLast(entry => entry.agentName === agentName) ?? null;
 }
-/** Record the launch of `launch.agentName`, replacing an earlier one of that name; records past a day are dropped. */
-export async function saveApproverLaunch(root: string, launch: z.input<typeof approverLaunchSchema>, now = Date.now()) {
-  const file = await approverLaunchesPath(root);
-  let kept: ApproverLaunch[] = [];
-  try { kept = z.array(approverLaunchSchema).parse(JSON.parse(await readFile(file, 'utf8'))); } catch { /* a missing or unreadable record starts empty */ }
-  kept = kept.filter(entry => entry.agentName !== launch.agentName && now - Date.parse(entry.launchedAt) < escalationSessionMs);
-  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-  await atomicPrivateWrite(file, [...kept, approverLaunchSchema.parse(launch)].slice(-retainedEscalationSessions));
+/** Where a launch record was written, or why it could not be: `unrecorded` names every location that refused it. */
+export interface ApproverLaunchRecord { file: string | null; unrecorded?: string }
+/** Record the launch of `launch.agentName`, replacing an earlier one and dropping records past a day: to the data root, else the
+ * checkout; when both refuse writes (EROFS, EACCES, EPERM) it is returned unrecorded, never closing a started runtime. Other failures throw. */
+export async function saveApproverLaunch(root: string, launch: z.input<typeof approverLaunchSchema>, now = Date.now(),
+  options: { environment?: Record<string, string | undefined>; write?: (file: string, value: unknown) => Promise<void> } = {}): Promise<ApproverLaunchRecord> {
+  const environment = options.environment ?? process.env;
+  const write = options.write ?? (async (file: string, value: unknown) => { await mkdir(dirname(file), { recursive: true, mode: 0o700 }); await atomicPrivateWrite(file, value); });
+  const kept = (await readApproverLaunches(root, environment, now)).filter(entry => entry.agentName !== launch.agentName && now - Date.parse(entry.launchedAt) < escalationSessionMs);
+  const records = [...kept, approverLaunchSchema.parse(launch)].slice(-retainedEscalationSessions);
+  const refused: string[] = [];
+  for (const file of [approverLaunchesFile(root, environment), checkoutApproverLaunchesFile(root)]) {
+    try {
+      await write(file, records);
+      return { file };
+    } catch (error) {
+      const code = (error as { code?: string } | null)?.code ?? '';
+      if (!['EROFS', 'EACCES', 'EPERM'].includes(code)) throw error;
+      refused.push(`${file} (${code}: ${failureText(error).split('\n')[0]!.slice(0, 200)})`);
+    }
+  }
+  return { file: null, unrecorded: `the approver launch record could not be written to ${refused.join(' or ')}` };
 }
 /** The approver role's accounts as `roleCapacity` reads them: whether any is left, and each one's reset. */
 export async function approverRoleHealth(config: MasterConfig, probe: EnvironmentProbe = {}) {
