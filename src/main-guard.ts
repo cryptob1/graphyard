@@ -18,9 +18,13 @@
 // never approved and is abandoned.
 //
 // The guard never holds anything. A revert gets one attempt: one that conflicts, whose checks fail
-// or do not conclude, or that GitHub refuses to merge is closed and recorded `abandoned`, which the
-// loop raises as one attention line naming the merge, the failing check and the revert PR. A merge
-// already reverted or abandoned is never tried again, so the next red main is judged afresh.
+// or do not conclude, or that is not the exact inverse is closed and recorded `abandoned`. Within
+// that attempt a mechanical refusal of the approval or the merge — GitHub's approval rule, or the
+// approver App — is retried (GY-1332): the next tick approves afresh and merges again on the App's
+// ruleset bypass, and only after `revertLandingAttempts` refusals is it abandoned as
+// `approval-refused`. An abandoned revert is marked `red`: the loop raises its attention line every
+// cycle until main's failing required check passes again (cycle-delivery.ts reads main's check runs).
+// A merge already reverted or abandoned is never tried again, so the next red main is judged afresh.
 //
 // The judgement and the reopen are pure; the GitHub job loop runs the guard with the App's client
 // (`guardGitHubMain` in github.ts) and the loop raises the attention (cycle-delivery.ts).
@@ -49,7 +53,21 @@ export interface MainGuardRevert {
   revertSha: string | null;
   /** Once merged, the rework reason the reopened item carries (`mainGuardReason`); once abandoned, why. */
   reason: string | null;
+  /** Once abandoned, which kind of failure gave it up (GY-1332); absent on records older than it. */
+  cause?: MainGuardAbandonCause;
+  /** The mechanical refusals of its approval or merge so far, oldest first; each one is retried until `revertLandingAttempts`. */
+  refusals?: string[];
+  /** Abandoned while main's required check fails: its attention line is raised every cycle until that check passes on main again. */
+  red?: boolean;
 }
+/**
+ * Why a revert was abandoned: GitHub's approval rule or the approver App refused its approval or
+ * merge (`approval-refused`), its own checks failed or did not conclude, it conflicts or could not be
+ * opened, it is not the exact inverse, or it was closed or moved under the guard.
+ */
+export type MainGuardAbandonCause = 'approval-refused' | 'checks-failed' | 'timeout' | 'conflict' | 'not-inverse' | 'closed' | 'head-moved' | 'unopened';
+/** How many approve-then-merge attempts a revert gets before a mechanical refusal abandons it: the first and two retries. */
+export const revertLandingAttempts = 3;
 
 export interface CheckRun { name: string; result: string; appId: number; id?: number }
 export type CommitVerdict = { verdict: 'pass' } | { verdict: 'fail'; failing: string[] } | { verdict: 'pending' };
@@ -232,9 +250,9 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
     await ports.record(work, revert);
     tick.steps.push({ key: work.key, mergeSha: revert.mergeSha, state: revert.state, reason: revert.reason });
   };
-  const abandon = async (work: Work, revert: MainGuardRevert, reason: string) => {
+  const abandon = async (work: Work, revert: MainGuardRevert, cause: MainGuardAbandonCause, reason: string) => {
     if (revert.revert) await ports.closeRevert(revert.revert.pr, `Closed by Graphyard's main guard after one attempt: ${reason}`).catch(error => tick.errors.push(`closing revert PR #${revert.revert!.pr}: ${message(error)}`));
-    await write(work, { ...revert, state: 'abandoned', settledAt: at, reason });
+    await write(work, { ...revert, state: 'abandoned', settledAt: at, reason, cause, red: true });
   };
 
   // 1. Settle every revert in flight: merged, merged now, or abandoned after its one attempt.
@@ -246,30 +264,40 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
       const pull = await ports.pull(pr);
       const merged = async (revertSha: string | null) => write(work, { ...revert, state: 'merged', settledAt: at, revertSha, reason: mainGuardReason(work, { ...revert, revertSha }) });
       if (pull.merged) { await merged(pull.mergeSha); continue; }
-      if (!pull.open) { await abandon(work, revert, `revert PR #${pr} was closed without merging`); continue; }
-      if (pull.mergeable === false) { await abandon(work, revert, `revert PR #${pr} conflicts with main`); continue; }
-      if (pull.head !== head) { await abandon(work, revert, `revert PR #${pr}'s head moved from ${head.slice(0, 12)} to ${pull.head.slice(0, 12)}`); continue; }
+      if (!pull.open) { await abandon(work, revert, 'closed', `revert PR #${pr} was closed without merging`); continue; }
+      if (pull.mergeable === false) { await abandon(work, revert, 'conflict', `revert PR #${pr} conflicts with main`); continue; }
+      if (pull.head !== head) { await abandon(work, revert, 'head-moved', `revert PR #${pr}'s head moved from ${head.slice(0, 12)} to ${pull.head.slice(0, 12)}`); continue; }
       const own = commitVerdict(await ports.checks(head), options.required, options.ciAppIds);
-      if (own.verdict === 'fail') { await abandon(work, revert, `revert PR #${pr}'s own required checks failed: ${own.failing.join(', ')}`); continue; }
+      if (own.verdict === 'fail') { await abandon(work, revert, 'checks-failed', `revert PR #${pr}'s own required checks failed: ${own.failing.join(', ')}`); continue; }
       if (own.verdict === 'pending') {
-        if (now.getTime() - Date.parse(revert.at) > (options.checksTimeoutMs ?? revertChecksTimeoutMs)) await abandon(work, revert, `revert PR #${pr}'s required checks did not conclude within ${Math.round((options.checksTimeoutMs ?? revertChecksTimeoutMs) / 60_000)} minutes`);
+        if (now.getTime() - Date.parse(revert.at) > (options.checksTimeoutMs ?? revertChecksTimeoutMs)) await abandon(work, revert, 'timeout', `revert PR #${pr}'s required checks did not conclude within ${Math.round((options.checksTimeoutMs ?? revertChecksTimeoutMs) / 60_000)} minutes`);
         continue;
       }
       // Only a revert that is exactly the inverse of the merge it names is approved or merged, and
       // a head is verified and approved once: later ticks only ask GitHub to merge it.
-      if (!approved.has(`${pr}@${head}`)) {
+      const approval = `${pr}@${head}`;
+      let refusal: string | null = null;
+      if (!approved.has(approval)) {
         let refused: string | null;
         try { refused = revertInverseRefusal(await ports.mergeChanges(revert.mergeSha), await ports.revertChanges(pr)); }
         catch (error) { refused = `its diff could not be compared with the merge's: ${message(error)}`; }
-        if (refused) { await abandon(work, revert, `revert PR #${pr} is not exactly the inverse of merge ${revert.mergeSha.slice(0, 12)}, so it is neither approved nor merged: ${refused}`); continue; }
-        try { await ports.approveRevert(pr, head, `Graphyard's main guard: this revert is exactly the inverse of ${work.key}'s merge ${revert.mergeSha} and its required checks passed at ${head}.`); }
-        catch (error) { await abandon(work, revert, `the revert approver could not approve revert PR #${pr}: ${message(error)}`); continue; }
-        approved.add(`${pr}@${head}`);
+        if (refused) { await abandon(work, revert, 'not-inverse', `revert PR #${pr} is not exactly the inverse of merge ${revert.mergeSha.slice(0, 12)}, so it is neither approved nor merged: ${refused}`); continue; }
+        try {
+          await ports.approveRevert(pr, head, `Graphyard's main guard: this revert is exactly the inverse of ${work.key}'s merge ${revert.mergeSha} and its required checks passed at ${head}.`);
+          approved.add(approval);
+        } catch (error) { refusal = `the revert approver could not approve revert PR #${pr}: ${message(error)}`; }
       }
-      let sha: string | null;
+      // A refused approval still tries the merge on the App's ruleset bypass; a refused merge, or an
+      // approval refused while the merge did not land, is retried from a fresh approval next tick.
+      let sha: string | null = null;
       try { sha = await ports.mergeRevert(work, { pr, head, failing: revert.failing }); }
-      catch (error) { await abandon(work, revert, `GitHub refused to merge revert PR #${pr}: ${message(error)}`); continue; }
-      if (sha) await merged(sha);
+      catch (error) { refusal = [refusal, `GitHub refused to merge revert PR #${pr}: ${message(error)}`].filter(Boolean).join('; '); }
+      if (sha) { await merged(sha); continue; }
+      if (!refusal) continue;
+      approved.delete(approval);
+      const refusals = [...revert.refusals ?? [], refusal];
+      if (refusals.length < revertLandingAttempts) { await write(work, { ...revert, refusals }); continue; }
+      await abandon(work, { ...revert, refusals }, 'approval-refused', approvalRefusedReason(revert, refusals));
     } catch (error) { tick.errors.push(`${work.key} revert of ${revert.mergeSha.slice(0, 12)}: ${message(error)}`); }
   }
 
@@ -288,30 +316,50 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
   const base: MainGuardRevert = { mergeSha: broken.culprit, pr: work.submission?.pr ?? null, failing: broken.failing, revert: null, state: 'opened', at, settledAt: null, revertSha: null, reason: null };
   try {
     const opened = await ports.openRevert(work, broken.culprit, `${work.key}'s merge ${broken.culprit.slice(0, 12)} broke main: ${broken.failing.join(', ')} failed on it while its parent ${broken.parent.slice(0, 12)} passed. Graphyard's main guard reverts it so main is green again; ${work.key} is reopened for a rework round.`);
-    if ('refusal' in opened) await write(work, { ...base, state: 'abandoned', settledAt: at, reason: opened.refusal });
+    if ('refusal' in opened) await write(work, { ...base, state: 'abandoned', settledAt: at, reason: opened.refusal, cause: 'conflict', red: true });
     else await write(work, { ...base, revert: opened });
   } catch (error) {
     // One attempt: a revert that could not be opened is abandoned, never retried.
-    await write(work, { ...base, state: 'abandoned', settledAt: at, reason: `the revert could not be opened: ${message(error)}` }).catch(failure => tick.errors.push(`${work.key}: ${message(failure)}`));
+    await write(work, { ...base, state: 'abandoned', settledAt: at, reason: `the revert could not be opened: ${message(error)}`, cause: 'unopened', red: true }).catch(failure => tick.errors.push(`${work.key}: ${message(failure)}`));
   }
   return tick;
 }
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
+/** What main still owes after a revert is abandoned: its failing checks stay red until the next merge to main re-runs CI. */
+const staysRed = (failing: readonly string[]) => `main's required check${failing.length === 1 ? '' : 's'} ${failing.join(', ') || 'that failed'} ${failing.length === 1 ? 'stays' : 'stay'} red until the next merge to main re-runs CI`;
+/** The abandonment reason of a revert GitHub's approval rule or the approver App refused every attempt to land (GY-1332). */
+export function approvalRefusedReason(revert: Pick<MainGuardRevert, 'revert' | 'failing'>, refusals: readonly string[]): string {
+  return `GitHub's approval rule refused revert PR #${revert.revert?.pr ?? '?'} on all ${refusals.length} approve-then-merge attempts (last: ${refusals.at(-1) ?? 'no detail'}); ${staysRed(revert.failing)}`;
+}
+const causeText: Record<MainGuardAbandonCause, string> = {
+  'approval-refused': 'approval-rule refusal', 'checks-failed': 'its checks failed', timeout: 'its checks timed out', conflict: 'conflict',
+  'not-inverse': 'not the exact inverse', closed: 'closed', 'head-moved': 'head moved', unopened: 'could not be opened',
+};
+
 /**
  * The attention lines the loop raises, one per abandoned revert (cycle-delivery.ts records each
- * once under `key`): the merge, the failing checks, the revert PR and why it could not merge.
+ * under `key`): the merge, the failing checks, the revert PR, why it could not merge (its cause) and
+ * that main stays red until the next merge re-runs CI. A `red` line (GY-1332) is raised every cycle
+ * while main's `failing` checks have not passed again, then once more as `recovered`; a line of a
+ * record older than GY-1332, or with no failing check named, is raised once.
  *
  * `since` keeps "once" true after the loop's cursor retires the line's row (GY-1250 review): the
  * cursor prunes its oldest resolved rows, so a missing row alone cannot tell "never raised" from
  * "raised and pruned". A revert abandoned at or before `since` — the oldest row the cursor still
  * holds, once it holds as many as it keeps — could have been raised and pruned (its row was recorded
  * after it was abandoned), so it is not raised again; one abandoned later is newer than every
- * retained row, so it cannot have been pruned, and is raised once.
+ * retained row, so it cannot have been pruned, and is raised once. A red line is re-recorded every
+ * cycle, so its row is never the oldest: a pruned one had stopped, which only recovery does.
  */
-export function mainGuardAttention(all: Pick<Work, 'key' | 'mainGuardReverts'>[], since = -Infinity): { key: string; work: string; text: string }[] {
-  return all.flatMap(work => (work.mainGuardReverts ?? []).filter(revert => revert.state === 'abandoned' && !(Date.parse(revert.settledAt ?? revert.at) <= since)).map(revert => ({
-    key: `escalation:main-guard:${revert.mergeSha}`, work: work.key,
-    text: `Main guard: ${work.key}'s merge ${revert.mergeSha.slice(0, 12)}${revert.pr ? ` (PR #${revert.pr})` : ''} broke main (${revert.failing.join(', ') || 'required checks failed'}) and could not be reverted automatically: ${revert.revert ? `revert PR #${revert.revert.pr}` : 'no revert PR'} — ${revert.reason ?? 'abandoned'}. The guard does not retry it and holds nothing; fix main forward with a new item.`,
-  })));
+export function mainGuardAttention(all: Pick<Work, 'key' | 'mainGuardReverts'>[], since = -Infinity): { key: string; work: string; text: string; red: string[]; recovered: string }[] {
+  return all.flatMap(work => (work.mainGuardReverts ?? []).filter(revert => revert.state === 'abandoned' && !(Date.parse(revert.settledAt ?? revert.at) <= since)).map(revert => {
+    const head = `Main guard: ${work.key}'s merge ${revert.mergeSha.slice(0, 12)}${revert.pr ? ` (PR #${revert.pr})` : ''} broke main (${revert.failing.join(', ') || 'required checks failed'}) and could not be reverted automatically${revert.cause ? ` [${causeText[revert.cause]}]` : ''}: ${revert.revert ? `revert PR #${revert.revert.pr}` : 'no revert PR'} — ${revert.reason ?? 'abandoned'}.`;
+    const red = revert.red ? revert.failing : [];
+    return {
+      key: `escalation:main-guard:${revert.mergeSha}`, work: work.key, red,
+      text: red.length ? `${head} Main is still red: ${staysRed(red)} (a forward fix, an unrelated merge or a later revert); this line is raised every cycle until it passes.` : `${head} The guard does not retry it and holds nothing; fix main forward with a new item.`,
+      recovered: `${head} Main's ${red.join(', ')} passed again; nothing is owed.`,
+    };
+  }));
 }

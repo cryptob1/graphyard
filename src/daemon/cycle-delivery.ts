@@ -74,16 +74,25 @@ export async function mergeStep(cycle: Cycle) {
     if (state.actions[key]?.state === 'done') return;
     performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: `${item.key} was merged on GitHub (${item.observation!.mergeSha?.slice(0, 12) ?? 'merge commit unknown'} at ${item.observation!.mergedAt ?? 'an unrecorded time'}) though its gates had not passed on that head: ${unauthorizedMergeViolation}. It stays at the merge stage until a two-party decision reconciles it: graphyard master decide ${item.key} merge REASON, then graphyard master approver ${item.key} DECISION; Graphyard re-checks the record at the merge cutoff and delivers on the approved decision`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   });
-  //    A revert the main guard abandoned (GY-1250) is raised once, as one attention line naming the
-  //    merge, the failing check and the revert PR; nothing waits on it. Once the cursor holds as
-  //    many resolved rows as pruneDaemonState keeps, a revert abandoned before the oldest of them
-  //    may have had its row retired, so it is not raised again (`mainGuardAttention`'s `since`).
+  //    A revert the main guard abandoned (GY-1250) is raised as one attention line naming the
+  //    merge, the failing check and the revert PR; nothing waits on it. One abandoned while main's
+  //    check failed (`red`, GY-1332) is raised every cycle until main's latest run of each failing
+  //    check passes, then once more as recovered; an older record is raised once. Once the cursor
+  //    holds as many resolved rows as pruneDaemonState keeps, a revert abandoned before the oldest of
+  //    them may have had its row retired, so it is not raised again (`mainGuardAttention`'s `since`).
   const abandoned = (cycle.snapshot?.work ?? []).filter(item => item.mainGuardReverts?.some(revert => revert.state === 'abandoned'));
   if (abandoned.length) {
     const resolved = Object.entries(state.actions).filter(([key, action]) => (action.state === 'done' || action.state === 'failed') && !state.faults.failing[key]);
     const since = resolved.length >= retainedActions ? Math.min(...resolved.map(([, action]) => Date.parse(action.at))) : -Infinity;
     for (const line of mainGuardAttention(abandoned, since)) {
-      if (!state.actions[line.key]) performed.push(await record(state, line.key, { kind: 'escalation', work: line.work, principal: null, state: 'done', detail: line.text, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      const previous = state.actions[line.key];
+      const raise = async (detail: string) => { performed.push(await record(state, line.key, { kind: 'escalation', work: line.work, principal: null, state: 'done', detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist)); };
+      // Without a reader of main's check runs the loop cannot tell when main is green again, so it raises the line once.
+      if (!line.red.length || !effects.baseCheck) { if (!previous) await raise(line.text); continue; }
+      if (previous?.detail === line.recovered) continue;
+      // A check whose run on main cannot be read is not known to pass: main is still red.
+      const passed = await Promise.all(line.red.map(check => effects.baseCheck!(check).then(base => base.state === 'passed', () => false)));
+      await raise(passed.every(Boolean) ? line.recovered : line.text);
     }
   }
 }
