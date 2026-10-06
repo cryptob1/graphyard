@@ -16,8 +16,8 @@ import type { Work } from './work.js';
 // late. These are the properties the running system must keep. The loop checks every one of them
 // each cycle (src/daemon/faults.ts), reports each violation as a fault with its class — so a class
 // that recurs files one structural item, like any other fault — and `master status` prints one
-// line per invariant with its threshold and its reading. `tests/soak.test.ts` holds every one of
-// them over a simulated day of the real loop, so a change that breaks one fails CI.
+// line per invariant with its threshold and its reading. The soak suites (`tests/soak-*.test.ts`)
+// hold every one of them over simulated days of the real loop, so a change that breaks one fails CI.
 // ---------------------------------------------------------------------------
 
 export const systemInvariants = ['follow-ups-per-parent', 'lingering-sessions', 'refresh-churn', 'merge-stall', 'cycle-p90', 'untriaged-backlog', 'deploy-lease-loss'] as const;

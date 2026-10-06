@@ -32,6 +32,12 @@ export function listTestFiles(root = repositoryRoot) {
   return readdirSync(join(root, 'tests')).filter(name => name.endsWith('.test.ts')).sort().map(name => `tests/${name}`);
 }
 
+/** The soak (GY-404): every tests/soak*.test.ts file, one suite per concern since GY-1363. */
+export const soakSuite = /^tests\/soak(?:-[\w-]+)?\.test\.ts$/;
+const timingBudgetTests = ['tests/work-snapshot-latency.test.ts', 'tests/cycle-latency.test.ts', 'tests/server-scale.test.ts', 'tests/healthz-bounded.test.ts', 'tests/interventions-scale.test.ts'];
+/** A test file's release-candidate suite, `soak` or `timing-budget`, or null for a pre-merge file. */
+export const releaseCandidateKind = file => soakSuite.test(file) ? 'soak' : timingBudgetTests.includes(file) ? 'timing-budget' : null;
+export const isReleaseCandidateTest = file => releaseCandidateKind(file) !== null;
 /**
  * The suites the pre-merge gate never runs (GY-1093): the soak, and every test whose verdict is a
  * wall-clock budget, so it measures the runner as much as the change. They run only against a
@@ -39,14 +45,9 @@ export function listTestFiles(root = repositoryRoot) {
  * acceptance, container recovery and chart jobs, never as a required pull-request check.
  */
 export const releaseCandidateTests = {
-  'tests/soak.test.ts': 'soak',
-  'tests/work-snapshot-latency.test.ts': 'timing-budget',
-  'tests/cycle-latency.test.ts': 'timing-budget',
-  'tests/server-scale.test.ts': 'timing-budget',
-  'tests/healthz-bounded.test.ts': 'timing-budget',
-  'tests/interventions-scale.test.ts': 'timing-budget',
+  ...Object.fromEntries(listTestFiles().filter(file => soakSuite.test(file)).map(file => [file, 'soak'])),
+  ...Object.fromEntries(timingBudgetTests.map(file => [file, 'timing-budget'])),
 };
-export const isReleaseCandidateTest = file => Object.hasOwn(releaseCandidateTests, file);
 
 /** The test files the required `test` check runs: every file except the release-candidate suites. */
 export function preMergeTestFiles(root = repositoryRoot) {

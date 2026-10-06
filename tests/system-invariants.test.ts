@@ -202,7 +202,7 @@ test('unit:reviewer-repeat-question — the review of a change to the loop, mast
     const text = prompt(['docs/master-agent.md', file]);
     assert.ok(text.includes(`This change touches ${file}`), `${file} is named: ${text}`);
     assert.match(text, /what it does when repeated across many cycles, heads and items/);
-    assert.match(text, /must be covered by tests\/soak\.test\.ts/);
+    assert.match(text, /must be covered by the soak suites \(tests\/soak-\*\.test\.ts\)/);
     assert.match(text, /without that coverage is a BLOCKING finding/);
   }
   for (const files of [['src/model/work.ts', 'docs/coordination.md'], ['src/github-cache.ts', 'src/masterful.ts', 'src/daemonic/x.ts']]) assert.doesNotMatch(prompt(files), /repeated across many cycles/, `${files.join(', ')} runs on no loop cycle`);
@@ -216,7 +216,7 @@ test('unit:reviewer-repeat-question — the review of a change to the loop, mast
   assert.ok(start >= 0, 'docs/master-agent.md has the section');
   const section = guide.slice(start, guide.indexOf('\n## ', start)).replace(/\s+/g, ' ');
   for (const phrase of [...systemInvariants.map(invariant => `\`${invariant}\``), '`follow-ups-per-parent` (1 open)', '`lingering-sessions` (30 min)', '`refresh-churn` (3 per own head)', '`merge-stall` (10 min)', '`cycle-p90` (30 s)', '`untriaged-backlog` (24 h)', '`deploy-lease-loss` (0)',
-    'daemon.invariants.lines', '`invariants` in `.graphyard/master.json`', 'tests/soak.test.ts'])
+    'daemon.invariants.lines', '`invariants` in `.graphyard/master.json`', 'tests/soak-*.test.ts'])
     assert.ok(section.includes(phrase), `docs/master-agent.md lists: ${phrase}`);
   assert.ok(guide.split(/\s+/).filter(Boolean).length <= 1_200, 'the page stays within its word budget (tests/docs-budget.test.ts holds the whole set)');
 });

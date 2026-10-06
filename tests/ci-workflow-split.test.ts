@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { isReleaseCandidateTest, listTestFiles, preMergeTestFiles, readDurations, releaseCandidateTests, repositoryRoot, shardFiles } from '../scripts/ci-tests.mjs';
+import { isReleaseCandidateTest, listTestFiles, releaseCandidateKind, preMergeTestFiles, readDurations, releaseCandidateTests, repositoryRoot, shardFiles } from '../scripts/ci-tests.mjs';
 import { policySchema } from '../src/model/policy.js';
 import { readWorkflow } from '../src/protection.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -81,7 +81,7 @@ test('unit:fast-gate-required-set — the required CI checks exclude the soak, c
   const kinds = new Set(Object.values(releaseCandidateTests));
   assert.deepEqual([...kinds].sort(), ['soak', 'timing-budget']);
   for (const file of Object.keys(releaseCandidateTests)) assert.ok(existsSync(join(repositoryRoot, file)), `${file} exists`);
-  assert.ok(isReleaseCandidateTest('tests/soak.test.ts'), 'the soak is a release-candidate suite');
+  assert.ok(listTestFiles().filter(file => /^tests\/soak/.test(file)).every(isReleaseCandidateTest), 'the soak is a release-candidate suite');
   const dir = await temporaryDirectory('ci-workflow-split'), out = join(dir, 'selected.txt');
   execFileSync(process.execPath, ['scripts/ci-tests.mjs', 'select', '--out', out], { cwd: repositoryRoot, env: { ...process.env, GITHUB_EVENT_NAME: 'push', GITHUB_STEP_SUMMARY: '' }, stdio: ['ignore', 'ignore', 'ignore'] });
   const selected = readFileSync(out, 'utf8').split('\n').filter(Boolean);
@@ -146,6 +146,14 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
   const listed = execFileSync(process.execPath, ['scripts/ci-tests.mjs', 'release-candidate'], { cwd: repositoryRoot, encoding: 'utf8' }).split('\n').filter(Boolean);
   assert.deepEqual(listed, listTestFiles().filter(isReleaseCandidateTest));
   assert.deepEqual([...listed].sort(), Object.keys(releaseCandidateTests).sort());
+  // The soak runs as one suite per concern (GY-1363), each file of it here and none over 1,500 lines.
+  const soaks = listTestFiles().filter(file => /^tests\/soak/.test(file));
+  assert.ok(soaks.length >= 4, `the soak is split per concern: ${soaks.join(', ')}`);
+  for (const file of soaks) {
+    assert.equal(releaseCandidateKind(file), 'soak', `${file} is the release-candidate soak suite`);
+    assert.ok(listed.includes(file), `${file} runs on the release candidate`);
+    assert.ok(read(file).split('\n').length <= 1500, `${file} stays within 1,500 lines`);
+  }
   assert.deepEqual([...listed, ...preMergeTestFiles()].sort(), listTestFiles(), 'every test file runs in exactly one of the two gates');
   // No job here shares a name with a required check, so none can ever be required of a pull request.
   const required = policySchema.parse({}).checks;
