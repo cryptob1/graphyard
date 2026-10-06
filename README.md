@@ -6,11 +6,13 @@
 Backlog → Ready → Build → Review → Test → Acceptance → Merge → Done
 ```
 
+**Start with [From zero to a running Graphyard](docs/setup-from-zero.md)**: the one ordered setup checklist, a new repository to a merged first item.
+
 [Install](docs/install.md) · [How it works](docs/how-graphyard-works.md) · [Onboard a repository](docs/onboarding.md) · [Documentation](docs/README.md)
 
 ## Install
 
-From your repository:
+From your repository ([checklist](docs/setup-from-zero.md) step 3):
 
 ```sh
 node /path/to/graphyard/bin/graphyard.mjs install --provider railway --repo OWNER/REPO --plan   # then --apply
