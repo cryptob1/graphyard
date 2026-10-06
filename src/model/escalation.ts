@@ -8,6 +8,19 @@ export function leaseLossEpoch(escalation: Escalation): number | null {
   const match = escalation.trigger === 'lease-loss' ? /^Worker .+ lost lease epoch (\d+)$/.exec(escalation.reason) : null;
   return match ? Number(match[1]) : null;
 }
+/**
+ * GY-1375. Whether a lease-loss is the lapse of an attempt whose worker never started: the
+ * implementation session the launcher registered for that owner and epoch (`principal:epoch`) ended
+ * with the launch's own failure (registeredLaunch in session-state.ts) and no pane. That lapse is the
+ * launch's outcome, which the dispatch step records and classifies — a plane-wide one is no fault —
+ * so it is no session-liveness instance of its own. On 6 October 2026 GY-1373's epoch 1 lapsed while
+ * its launch waited out a control-plane outage, and the lapse counted beside the outage that caused it.
+ */
+export function lapsedBeforeStart(work: Pick<Work, 'sessions'>, escalation: Escalation): boolean {
+  const epoch = leaseLossEpoch(escalation), owner = /^Worker (.+) lost lease epoch \d+$/.exec(escalation.reason)?.[1];
+  const session = epoch === null ? undefined : (work.sessions ?? []).find(entry => entry.kind === 'implementation' && entry.id === `${owner}:${epoch}`);
+  return !!session && session.state === 'finished' && !session.pane && !!session.outcome?.startsWith('the launch failed before the session started');
+}
 // An implementation lease ends at `submit`: the candidate is bound and the worker's job is
 // done. A lease that still lapses under that epoch — one a worker kept renewing past its
 // submission — is expected lifecycle, not an abandoned assignment. The same holds for a lapse
