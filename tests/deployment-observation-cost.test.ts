@@ -245,8 +245,8 @@ test('integration:cycle-time-attributed — the cycle reports where its time wen
     assert.equal(attention[0].subject, 'loop');
     assert.match(attention[0].text, /Cycle 0 spent 80s on its own work, longer than the 20s interval/);
     assert.match(attention[0].text, /deployment 80s/);
-    assert.match(attention[0].text, /The deployment step is the slowest, at 80s of work/);
-    assert.match(attention[0].next, /shorten the deployment step rather than restarting a loop that is still cycling/);
+    assert.match(attention[0].text, /The deployment verification step is the slowest timed step, at 80s/);
+    assert.match(attention[0].next, /shorten the deployment verification step rather than restarting a loop that is still cycling/);
     assert.equal(attention[0].human, false);
 
     // Mid-cycle, past the two-interval liveness bound, the measured cycle explains the silence:
@@ -255,11 +255,11 @@ test('integration:cycle-time-attributed — the cycle reports where its time wen
     const slow = loopLiveness(state, midCycle, intervalMs, master.hostId);
     assert.equal(slow.state, 'slow');
     assert.match(slow.detail, /past the two-interval bound of 40s, but cycle 0 took 80s of its own: .*deployment 80s/);
-    assert.match(slow.detail, /inside a slow cycle, not stalled; the deployment step is the one to shorten/);
+    assert.match(slow.detail, /inside a slow cycle, not stalled; the deployment verification step is the one to shorten/);
     const slowItems = loopAttention({ liveness: slow });
     assert.equal(slowItems.length, 1, 'the slow cycle is one attention item, not a stall and a cost');
     assert.match(slowItems[0].text, /deployment 80s/);
-    assert.match(slowItems[0].next, /shorten the deployment step/);
+    assert.match(slowItems[0].next, /shorten the deployment verification step/);
     assert.equal(/is stalled/.test(slowItems[0].text), false);
 
     // Past that cycle's own cost, nothing explains the silence any more: it is a stall again.

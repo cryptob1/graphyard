@@ -1,0 +1,30 @@
+{
+  "id": "board",
+  "title": "The board places a new item in its backlog group",
+  "description": "GET /api/board answers every open group with its counts, and an item just created appears in the backlog group with its key and title.",
+  "tags": ["api", "board"],
+  "target": "uat",
+  "steps": [
+    {
+      "kind": "http", "name": "create an item to find", "method": "POST", "path": "/api/work",
+      "body": {
+        "title": "E2E case {{case}} run {{run}}",
+        "description": "Created by the board E2E case.",
+        "type": "chore", "priority": 3,
+        "criteria": [{ "id": "AC-1", "text": "The board lists work created by an E2E case", "proofs": ["manual:e2e-case-created"] }],
+        "policy": { "checks": ["test"], "review": true }
+      },
+      "status": 200,
+      "save": { "id": "id", "key": "key" }
+    },
+    {
+      "kind": "http", "name": "read the board", "method": "GET", "path": "/api/board", "status": 200,
+      "expect": [
+        { "path": "groups.needs-you", "type": "array" },
+        { "path": "groups.moving", "type": "array" },
+        { "path": "counts.backlog", "type": "number" },
+        { "path": "groups.backlog", "includes": { "id": "{{id}}", "key": "{{key}}", "title": "E2E case {{case}} run {{run}}", "group": "backlog" } }
+      ]
+    }
+  ]
+}
