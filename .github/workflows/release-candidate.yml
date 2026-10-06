@@ -58,6 +58,9 @@ jobs:
             exit 0
           fi
           [[ "$GITHUB_REF" == refs/heads/main ]] || { echo "candidates are cut only by the workflow on main, not $GITHUB_REF" >&2; exit 1; }
+          # The pre-cut check (docs/validation.md#release-contract): a broken binding in e2e/contract.json
+          # fails the cut, naming each outcome and case, before any rc/ tag is written.
+          node bin/graphyard.mjs release contract
           node bin/graphyard.mjs release cut --trigger "${{ github.event_name == 'schedule' && 'schedule' || 'manual' }}" | tee cut.json
           echo "id=$(node -p "const r=require('./cut.json'); r.cut ? r.candidate.id : ''")" >> "$GITHUB_OUTPUT"
           echo "sha=$(node -p "const r=require('./cut.json'); r.cut ? r.candidate.sha : ''")" >> "$GITHUB_OUTPUT"
@@ -208,10 +211,10 @@ jobs:
         # repository case under e2e/cases/ targeted at uat (docs/validation.md), writing its report for
         # the next step. Those four exercise
         # the UAT deployment itself; the long suites ran on runners at the candidate SHA, so each
-        # long-suite job's result above joins the record as a suite of its own. A failure files one
-        # follow-up item naming the failing
-        # suite and the candidate SHA; only that filing uses GRAPHYARD_TOKEN, which no --suite
-        # command is given.
+        # long-suite job's result above joins the record as a suite of its own. A failing or flaky
+        # required case files one release hold per failed outcome of e2e/contract.json, read from
+        # that report; any other failure files one follow-up item naming the failing suite and the
+        # candidate SHA; only that filing uses GRAPHYARD_TOKEN, which no --suite command is given.
         run: |
           # The suite commands expand their variables when the suite runs, not here.
           # shellcheck disable=SC2016

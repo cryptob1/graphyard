@@ -4,6 +4,7 @@
   "description": "GET /api/tests answers every case with its window of recent runs, and the dashboard's Tests page renders after sign-in.",
   "tags": ["dashboard", "tests"],
   "target": "uat",
+  "required": true,
   "steps": [
     { "kind": "http", "name": "read the test summary", "method": "GET", "path": "/api/tests", "status": 200, "expect": [{ "path": "window", "equals": 20 }, { "path": "cases", "type": "array" }] },
     { "kind": "browser", "action": "open", "path": "/" },

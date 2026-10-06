@@ -4,6 +4,7 @@
   "description": "POST /api/work creates an item with its criteria, replaying the create under the same idempotency key returns the same item, and GET /api/work lists it.",
   "tags": ["api", "work"],
   "target": "uat",
+  "required": true,
   "steps": [
     {
       "kind": "http", "name": "create the item", "method": "POST", "path": "/api/work",

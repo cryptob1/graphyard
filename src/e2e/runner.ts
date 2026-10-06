@@ -6,9 +6,15 @@ import { describeStep, loadCases, registeredRevision, scenarioDefinition, type A
 /**
  * The E2E case runner (GY-1351): runs repository cases (src/e2e/case.ts) against one base URL with
  * one credential, each step under its own timeout and each case retried `retries` times (zero by
- * default, so a flaky case shows as a failure rather than being retried into a pass). Its report
- * names each case's outcome, the step that failed and why, and the commit the target served; each
- * result is then appended to the run history of the scenario revision the case is registered as.
+ * default). Its report names each case's outcome, the step that failed and why, and the commit the
+ * target served; each attempt is then appended to the run history of the scenario revision the
+ * case is registered as.
+ *
+ * Every case in a run ends in one verdict (GY-1378): `passed`; `failed` (every attempt failed);
+ * `flaky` (an attempt failed and a later one passed at the same served SHA — both attempts are kept,
+ * and it never counts as passed until an evidence decision accepts it); or `unrun` (a required case
+ * failed earlier and the run stopped, naming that case in `stoppedBy`). Unrun is neither a failure
+ * nor a pass.
  */
 export const defaultStepTimeoutMs = 30_000;
 
@@ -31,21 +37,34 @@ export interface E2ePage {
 }
 
 export interface FailingStep { index: number; name: string; reason: string }
+export type CaseVerdict = 'passed' | 'failed' | 'flaky' | 'unrun';
+export interface AttemptResult { attempt: number; outcome: 'pass' | 'fail'; durationMs: number; executed: number; failingStep: FailingStep | null }
 export interface CaseOutcome {
-  id: string; title: string; file: string; outcome: 'pass' | 'fail'; durationMs: number; attempts: number;
+  id: string; title: string; file: string;
+  /** The last attempt's result; null for a case the run never executed. */
+  outcome: 'pass' | 'fail' | null;
+  verdict: CaseVerdict; required: boolean;
+  /** For an unrun case: the required case whose failure stopped the run. */
+  stoppedBy?: string;
+  durationMs: number; attempts: number;
+  /** Every attempt in order, so a flaky case keeps its failure beside its pass. */
+  attemptResults: AttemptResult[];
   /** The steps the last attempt ran, the failing one included. */
   executed: number;
+  /** The last attempt's failing step, or for a flaky case the step its failed attempt stopped at. */
   failingStep: FailingStep | null;
   /** The registered revision the run was appended to, or why it was not recorded. */
   recorded?: { revision: number } | { error: string };
 }
 export interface E2eReport {
   runId: string; url: string; environment: string; sha: string | null; startedAt: string; finishedAt: string;
-  passed: number; failed: number; cases: CaseOutcome[];
+  passed: number; failed: number; flaky?: number; unrun?: number; cases: CaseOutcome[];
 }
 export interface RunOptions {
   url: string; token: string; environment?: string; runId?: string;
   stepTimeoutMs?: number; retries?: number;
+  /** Stop at the first required case that fails: every case after it is unrun, naming it. */
+  stopOnRequiredFailure?: boolean;
   fetcher?: typeof fetch; launcher?: E2eLauncher; now?: () => number;
 }
 
@@ -171,68 +190,133 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
   const startedAt = new Date(now()).toISOString();
   const sha = await readServed(options.url, fetcher, stepTimeoutMs);
   const outcomes: CaseOutcome[] = [];
+  let stoppedBy: string | null = null;
   for (const entry of cases) {
+    const { id, title, required } = entry.definition;
+    if (stoppedBy) { outcomes.push({ id, title, file: entry.file, outcome: null, verdict: 'unrun', required, stoppedBy, durationMs: 0, attempts: 0, attemptResults: [], executed: 0, failingStep: null }); continue; }
     const started = now();
-    let attempts = 0, result: { executed: number; failingStep: FailingStep | null };
-    do { attempts++; result = await attemptCase(entry, { url: options.url, token: options.token, stepTimeoutMs, runId, attempt: attempts, fetcher, launcher: launch }); }
-    while (result.failingStep && attempts <= retries);
-    outcomes.push({ id: entry.definition.id, title: entry.definition.title, file: entry.file, outcome: result.failingStep ? 'fail' : 'pass', durationMs: Math.max(0, now() - started), attempts, executed: result.executed, failingStep: result.failingStep });
+    const attemptResults: AttemptResult[] = [];
+    do {
+      const began = now();
+      const result = await attemptCase(entry, { url: options.url, token: options.token, stepTimeoutMs, runId, attempt: attemptResults.length + 1, fetcher, launcher: launch });
+      attemptResults.push({ attempt: attemptResults.length + 1, outcome: result.failingStep ? 'fail' : 'pass', durationMs: Math.max(0, now() - began), ...result });
+    } while (attemptResults.at(-1)!.outcome === 'fail' && attemptResults.length <= retries);
+    const last = attemptResults.at(-1)!;
+    // A pass after a failure is flaky only when both attempts are bound to one served commit; at an unreported commit it is a failure.
+    const verdict: CaseVerdict = last.outcome === 'fail' || (attemptResults.length > 1 && !sha) ? 'failed' : attemptResults.length > 1 ? 'flaky' : 'passed';
+    outcomes.push({ id, title, file: entry.file, outcome: last.outcome, verdict, required, durationMs: Math.max(0, now() - started), attempts: attemptResults.length, attemptResults,
+      executed: last.executed, failingStep: last.failingStep ?? attemptResults.find(attempt => attempt.failingStep)?.failingStep ?? null });
+    if (verdict === 'failed' && required && options.stopOnRequiredFailure) stoppedBy = id;
   }
-  const failed = outcomes.filter(outcome => outcome.outcome === 'fail').length;
-  return { runId, url: options.url, environment: options.environment ?? new URL(options.url).host, sha, startedAt, finishedAt: new Date(now()).toISOString(), passed: outcomes.length - failed, failed, cases: outcomes };
+  const tally = (verdict: CaseVerdict) => outcomes.filter(outcome => outcome.verdict === verdict).length;
+  return { runId, url: options.url, environment: options.environment ?? new URL(options.url).host, sha, startedAt, finishedAt: new Date(now()).toISOString(),
+    passed: tally('passed'), failed: tally('failed'), flaky: tally('flaky'), unrun: tally('unrun'), cases: outcomes };
 }
 
+/** An accepted flaky result (GY-1378): the evidence decision that accepted one case of one run at one exact SHA. */
+export interface FlakyAcceptance { case: string; runId: string; sha: string; decision: string }
+
 /**
- * Append each case's result as a run of the scenario revision it is registered as. A case whose
- * file no registered revision matches is not recorded — `graphyard e2e sync` registers it — and
- * the report says so; recording never changes a case's outcome.
+ * Pure: the release verdict of a run (GY-1378). Blocking are the required cases that failed and the
+ * required cases that were flaky with no evidence decision accepting that case, run and exact SHA.
+ * Unrun cases are reported apart, never as failures and never as passes, and optional cases never
+ * block. A report naming no served SHA can bind no acceptance.
+ */
+export function releaseVerdict(report: Pick<E2eReport, 'runId' | 'sha' | 'cases'>, acceptances: readonly FlakyAcceptance[] = []) {
+  const accepted = (id: string) => !!report.sha && acceptances.some(entry => entry.case === id && entry.runId === report.runId && entry.sha === report.sha);
+  const of = (verdict: CaseVerdict) => report.cases.filter(outcome => outcome.verdict === verdict);
+  const blocking = report.cases.filter(outcome => outcome.required && (outcome.verdict === 'failed' || (outcome.verdict === 'flaky' && !accepted(outcome.id))));
+  return {
+    passed: blocking.length === 0, blocking, flaky: of('flaky'), unrun: of('unrun'),
+    acceptedFlaky: of('flaky').filter(outcome => outcome.required && accepted(outcome.id)),
+    optionalFailures: report.cases.filter(outcome => !outcome.required && (outcome.verdict === 'failed' || outcome.verdict === 'flaky')),
+  };
+}
+
+/** The run id one attempt is recorded under: the run's own for a single attempt, `RUN:attempt-N` when a case took several. */
+export const attemptRunId = (runId: string, outcome: Pick<CaseOutcome, 'attempts'>, attempt: number) => outcome.attempts > 1 ? `${runId}:attempt-${attempt}` : runId;
+
+/**
+ * Append each attempt of each case as a run of the scenario revision it is registered as, so a
+ * flaky case's failed attempt stays beside its pass. A case whose file no registered revision
+ * matches is not recorded — `graphyard e2e sync` registers it — and the report says so; an unrun
+ * case has nothing to record. Recording never changes a case's outcome.
  */
 export async function recordRuns(api: Api, cases: readonly CaseFile[], report: E2eReport) {
   let registry: { id: string; revision: number }[];
   try { registry = await api('scenarios'); }
   catch (error) { for (const outcome of report.cases) outcome.recorded = { error: `could not read the scenario registry: ${message(error)}` }; return report; }
   for (const outcome of report.cases) {
+    if (outcome.verdict === 'unrun') continue;
     const entry = cases.find(candidate => candidate.definition.id === outcome.id)!;
     const revision = registeredRevision(registry, scenarioDefinition(entry));
     if (revision === null) { outcome.recorded = { error: `no registered revision matches ${entry.file}; run graphyard e2e sync` }; continue; }
+    // A report written before attempts were kept carries only the last attempt.
+    const attempts = outcome.attemptResults?.length ? outcome.attemptResults : [{ attempt: outcome.attempts, outcome: outcome.outcome ?? 'fail', durationMs: outcome.durationMs, executed: outcome.executed, failingStep: outcome.failingStep }];
     try {
-      await api(`scenarios/${encodeURIComponent(outcome.id)}/runs`, { revision, runId: report.runId, baseUrl: report.url, sha: report.sha, environment: report.environment,
-        durationMs: outcome.durationMs, outcome: outcome.outcome, executed: outcome.executed, failingStep: outcome.failingStep }, `e2e-run:${report.runId}:${outcome.id}`);
+      for (const attempt of attempts) {
+        const runId = attemptRunId(report.runId, { attempts: attempts.length }, attempt.attempt);
+        await api(`scenarios/${encodeURIComponent(outcome.id)}/runs`, { revision, runId, baseUrl: report.url, sha: report.sha, environment: report.environment,
+          durationMs: attempt.durationMs, outcome: attempt.outcome, executed: attempt.executed, failingStep: attempt.failingStep }, `e2e-run:${runId}:${outcome.id}`);
+      }
       outcome.recorded = { revision };
     } catch (error) { outcome.recorded = { error: message(error) }; }
   }
   return report;
 }
 
+const verdictWord: Record<CaseVerdict, string> = { passed: 'PASS', failed: 'FAIL', flaky: 'FLAKY', unrun: 'UNRUN' };
+const stepLine = (step: FailingStep) => `step ${step.index + 1} ${step.name}: ${step.reason}`;
+
 /** The report in words: one line per case, the failing step and reason under each failure. */
 export function summarize(report: E2eReport) {
-  const lines = report.cases.map(outcome => `${outcome.outcome === 'pass' ? 'PASS' : 'FAIL'} ${outcome.id} (${outcome.durationMs} ms)`
-    + (outcome.failingStep ? `\n     step ${outcome.failingStep.index + 1} ${outcome.failingStep.name}: ${outcome.failingStep.reason}` : '')
-    + (outcome.recorded && 'error' in outcome.recorded ? `\n     not recorded: ${outcome.recorded.error}` : ''));
+  const lines = report.cases.map(outcome => {
+    const verdict = outcome.verdict ?? (outcome.outcome === 'pass' ? 'passed' : 'failed');
+    const head = `${verdictWord[verdict]} ${outcome.id}${outcome.required ? '' : ' (optional)'}`;
+    if (verdict === 'unrun') return `${head}: not run, the run stopped at required case ${outcome.stoppedBy}`;
+    return `${head} (${outcome.durationMs} ms)`
+      + (verdict === 'flaky' && outcome.failingStep ? `\n     attempt 1 failed at ${stepLine(outcome.failingStep)}; attempt ${outcome.attempts} passed at ${report.sha}` : '')
+      + (verdict === 'failed' && outcome.failingStep ? `\n     ${stepLine(outcome.failingStep)}` : '')
+      + (outcome.recorded && 'error' in outcome.recorded ? `\n     not recorded: ${outcome.recorded.error}` : '');
+  });
+  const extra = [report.flaky ? `${report.flaky} flaky` : '', report.unrun ? `${report.unrun} unrun` : ''].filter(Boolean);
   return [`E2E run ${report.runId} against ${report.url} (${report.environment}, serving ${report.sha ?? 'an unreported commit'})`, ...lines,
-    `${report.passed} passed, ${report.failed} failed`].join('\n');
+    [`${report.passed} passed, ${report.failed} failed`, ...extra].join(', ')].join('\n');
 }
 
-/** A failing report in one line, for a release validation suite's detail and its follow-up item. */
-export const failureDetail = (report: E2eReport) => report.cases.filter(outcome => outcome.failingStep)
-  .map(outcome => `case ${outcome.id} failed at step ${outcome.failingStep!.index + 1} (${outcome.failingStep!.name}): ${outcome.failingStep!.reason}`).join('; ');
+const caseFailure = (outcome: CaseOutcome) => outcome.verdict === 'flaky'
+  ? `case ${outcome.id} was flaky: it failed at step ${outcome.failingStep!.index + 1} (${outcome.failingStep!.name}) and passed on attempt ${outcome.attempts}; it blocks until an evidence decision accepts it`
+  : `case ${outcome.id} failed at step ${outcome.failingStep!.index + 1} (${outcome.failingStep!.name}): ${outcome.failingStep!.reason}`;
+/** A failing report in one line, for a release validation suite's detail and its follow-up item: the blocking cases, then the unrun ones apart. */
+export const failureDetail = (report: E2eReport) => {
+  const verdict = releaseVerdict(report);
+  return [verdict.blocking.filter(outcome => outcome.failingStep).map(caseFailure).join('; '),
+    verdict.unrun.length ? `unrun after required case ${verdict.unrun[0].stoppedBy} stopped the run: ${verdict.unrun.map(outcome => outcome.id).join(', ')}` : '',
+    verdict.optionalFailures.length ? `optional, not blocking: ${verdict.optionalFailures.map(outcome => `${outcome.id} ${outcome.verdict}`).join(', ')}` : ''].filter(Boolean).join('; ');
+};
 
 /**
  * The `e2e` suite of `release validate` (GY-1351): every case targeted at `uat` against the UAT
- * deployment with the UAT principal's token. A failing case fails the suite, and so the candidate's
- * UAT validation, exactly as the other suites do; the detail names each failing case and step, so
- * the follow-up item a failed candidate files names them too.
+ * deployment with the UAT principal's token, in id order. A release run retries a failing case once
+ * (a pass on the retry is flaky, never passed) and stops at the first required case that fails, so
+ * the cases after it are unrun. Only the release verdict's blocking cases — required cases that
+ * failed or were flaky — fail the suite; optional cases run and are recorded but never fail it
+ * (GY-1378). The detail names each blocking case and step, then the unrun cases apart.
  */
+export const releaseRetries = 1;
 export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { fetcher?: typeof fetch; launcher?: E2eLauncher; stepTimeoutMs?: number; report?: (report: E2eReport) => Promise<void> } = {}) => ({
   name: 'e2e',
   run: async (url: string, candidate: { id: string } | null) => {
     const selected = cases.filter(entry => entry.definition.target === 'uat');
     if (!selected.length) return { name: 'e2e', passed: false, detail: 'no E2E case targets uat, so the suite exercised nothing' };
-    const report = await runCases(selected, { url, token, environment: 'uat', runId: candidate ? `rc-${candidate.id}` : undefined, fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs });
+    const report = await runCases(selected, { url, token, environment: 'uat', runId: candidate ? `rc-${candidate.id}` : undefined, fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs,
+      retries: releaseRetries, stopOnRequiredFailure: true });
     await options.report?.(report);
-    return report.failed
-      ? { name: 'e2e', passed: false, detail: `${report.failed} of ${report.cases.length} E2E cases failed: ${failureDetail(report)}` }
-      : { name: 'e2e', passed: true, detail: `${report.passed} E2E case${report.passed === 1 ? '' : 's'} passed against UAT serving ${report.sha ?? 'an unreported commit'}` };
+    const verdict = releaseVerdict(report), detail = failureDetail(report);
+    const executed = report.cases.length - verdict.unrun.length;
+    return !verdict.passed
+      ? { name: 'e2e', passed: false, detail: `${verdict.blocking.length} of ${executed} E2E cases ${verdict.blocking.every(outcome => outcome.verdict === 'flaky') ? 'were flaky' : 'failed'}: ${detail}` }
+      : { name: 'e2e', passed: true, detail: `${report.passed} E2E case${report.passed === 1 ? '' : 's'} passed against UAT serving ${report.sha ?? 'an unreported commit'}${detail ? `; ${detail}` : ''}` };
   },
 });
 

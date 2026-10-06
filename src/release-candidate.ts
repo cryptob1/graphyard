@@ -17,7 +17,8 @@ import { join } from 'node:path';
  * `rc-uat/ID` and only a passing record whose deployment served the candidate SHA lets
  * `release/production` move to it, recorded as `rc-production/ID`. A failed candidate files one
  * follow-up item naming the failing suite and the SHA, changes nothing about the deliveries it
- * contains, and the next cut proceeds from main's tip (fix forward).
+ * contains, and the next cut proceeds from main's tip (fix forward). A failure the release contract
+ * attributes to a customer outcome is a release hold instead (src/release-holds.ts, GY-1378).
  */
 
 export const uatBranch = 'release/uat';
@@ -37,11 +38,23 @@ export interface ReleaseCandidate {
   items: CandidateItem[];
 }
 export interface SuiteResult { name: string; passed: boolean; detail: string }
+/** One case of the candidate's e2e release run (GY-1378), as its UAT record keeps it. */
+export interface E2eCaseRecord {
+  case: string; verdict: 'passed' | 'failed' | 'flaky' | 'unrun'; required: boolean; stoppedBy?: string; attempts: number;
+  failingStep: { index: number; name: string; reason: string } | null;
+}
+/** The e2e release run bound to the candidate: its run id, the SHA UAT served, every case's verdict and the blocking ones. */
+export interface E2eRecord { runId: string; sha: string; cases: E2eCaseRecord[]; blocking: string[] }
 export interface UatRecord {
   id: string; sha: string; result: 'passed' | 'failed'; deployedSha: string | null; at: string; suites: SuiteResult[];
   /** The follow-up item a failed candidate filed, once filed. */
   followUp: string | null;
+  e2e?: E2eRecord | null;
+  /** The release holds the validation opened, attached to or cleared (src/release-holds.ts). */
+  holds?: { kind: 'open' | 'attach' | 'clear'; outcome: string; hold: string; item: string | null }[];
 }
+/** An applied evidence decision (GY-1378): one flaky case of one run accepted at one exact SHA. */
+export interface FlakyAcceptance { case: string; runId: string; sha: string; decision: string }
 export interface ProductionRecord { id: string; sha: string; at: string }
 export interface CommitSummary { sha: string; subject: string; body: string }
 
@@ -103,17 +116,34 @@ export function assessUat(candidate: ReleaseCandidate, input: { deployedSha: str
 /**
  * Pure: whether production may move to a candidate. Only a candidate whose recorded UAT
  * validation passed on its exact SHA is promotable, and only forward: a candidate older than the
- * one production already runs is a rollback, which goes through recovery, not promotion.
+ * one production already runs is a rollback, which goes through recovery, not promotion. A
+ * candidate whose only blockers were flaky required cases is promotable once an evidence decision
+ * accepts each of them for its release run at the candidate's exact SHA (GY-1378); an acceptance at
+ * any other SHA or run counts for nothing.
  */
-export function assessPromotion(candidate: ReleaseCandidate, uat: UatRecord | null, current: ProductionRecord | null) {
+export function assessPromotion(candidate: ReleaseCandidate, uat: UatRecord | null, current: ProductionRecord | null, acceptances: readonly FlakyAcceptance[] = []) {
   const refusals: string[] = [];
   if (!uat) refusals.push(`Candidate ${candidate.id} has no UAT validation record; deploy it to UAT and validate it first`);
   else {
     if (uat.sha !== candidate.sha || uat.deployedSha !== candidate.sha) refusals.push(`Candidate ${candidate.id}'s UAT record is for ${uat.deployedSha ?? 'no deployment'}, not its SHA ${candidate.sha}`);
-    if (uat.result !== 'passed') refusals.push(`Candidate ${candidate.id} failed UAT (${failingSuites(uat).map(suite => suite.name).join(', ')}); cut a newer candidate after the fix`);
+    const flaky = unacceptedFlaky(candidate, uat, acceptances);
+    if (flaky?.length) refusals.push(`Candidate ${candidate.id}'s required E2E case${flaky.length > 1 ? 's' : ''} ${flaky.join(', ')} ${flaky.length > 1 ? 'were' : 'was'} flaky at ${candidate.sha} in run ${uat.e2e!.runId}; an evidence decision must accept ${flaky.length > 1 ? 'each' : 'it'} at that exact SHA before promotion`);
+    else if (!flaky && uat.result !== 'passed') refusals.push(`Candidate ${candidate.id} failed UAT (${failingSuites(uat).map(suite => suite.name).join(', ')}); cut a newer candidate after the fix`);
   }
   if (current && current.id > candidate.id) refusals.push(`Production already runs newer candidate ${current.id}; an older candidate is a rollback, not a promotion`);
   return { promotable: refusals.length === 0, refusals, sha: candidate.sha, already: current?.sha === candidate.sha };
+}
+
+/**
+ * For a candidate that failed UAT only because required E2E cases were flaky — the e2e suite the
+ * one failing suite, its run bound to the candidate SHA and every blocking case flaky — the flaky
+ * cases no acceptance covers (empty when all are accepted); null for any other failure or a pass.
+ */
+export function unacceptedFlaky(candidate: ReleaseCandidate, uat: UatRecord, acceptances: readonly FlakyAcceptance[] = []): string[] | null {
+  const e2e = uat.e2e;
+  if (uat.result === 'passed' || !e2e || e2e.sha !== candidate.sha || !e2e.blocking.length) return null;
+  if (!failingSuites(uat).every(suite => suite.name === 'e2e') || !e2e.blocking.every(id => e2e.cases.find(entry => entry.case === id)?.verdict === 'flaky')) return null;
+  return e2e.blocking.filter(id => !acceptances.some(entry => entry.case === id && entry.runId === e2e.runId && entry.sha === candidate.sha));
 }
 
 export const failingSuites = (uat: UatRecord) => uat.suites.filter(suite => !suite.passed);
@@ -123,8 +153,8 @@ export const failingSuites = (uat: UatRecord) => uat.suites.filter(suite => !sui
  * SHA, and lists the deliveries the candidate carried for context only: they stay delivered, and
  * the fix arrives as new work merged to main and carried by a later candidate.
  */
-export function followUpItem(candidate: ReleaseCandidate, uat: UatRecord) {
-  const failing = failingSuites(uat);
+export function followUpItem(candidate: ReleaseCandidate, uat: UatRecord, except: readonly string[] = []) {
+  const failing = failingSuites(uat).filter(suite => !except.includes(suite.name));
   if (uat.result !== 'failed' || !failing.length) throw new Error(`Candidate ${candidate.id} did not fail UAT; it files no follow-up`);
   const first = failing[0];
   const carried = candidate.items.length ? candidate.items.map(item => `${item.key} (${item.mergeSha.slice(0, 12)})`).join(', ') : 'no named deliveries';
@@ -472,12 +502,21 @@ export function deployToUat(git: Git, id: string, base: string, now = new Date()
 }
 
 /**
- * Validate a candidate on UAT and record the verdict once. A failed candidate files its one
- * follow-up before the record is written, keyed by the candidate so a retry never files twice;
- * a filing that fails still records the verdict, and `release follow-up` files it later.
+ * What a validation's release holds did (src/release-holds.ts, GY-1378): `e2e` is the case verdicts
+ * to keep on the record, `covered` the suites whose failure the holds answer (no follow-up names
+ * them), and `write` records the hold entries once the UAT record is written.
+ */
+export interface HoldOutcome { e2e: E2eRecord | null; holds: NonNullable<UatRecord['holds']>; covered: string[]; filingError: string | null; write: () => void }
+
+/**
+ * Validate a candidate on UAT and record the verdict once. A failure the release holds attribute to
+ * customer outcomes is filed as those holds; any other failing suite files the candidate's one
+ * follow-up, keyed by the candidate so a retry never files twice. Both are filed before the record
+ * is written; a filing that fails still records the verdict, and `release follow-up` files it later.
  */
 export async function validateAndRecord(git: Git, id: string, url: string, suites: readonly Suite[], options: { base: string; push: boolean; timeoutMs: number;
-  file?: (item: ReturnType<typeof followUpItem>, requestId: string) => Promise<string>; now?: () => Date; fetcher?: typeof fetch; sleep?: (ms: number) => Promise<void> }) {
+  file?: (item: ReturnType<typeof followUpItem>, requestId: string) => Promise<string>; now?: () => Date; fetcher?: typeof fetch; sleep?: (ms: number) => Promise<void>;
+  holds?: (candidate: ReleaseCandidate, record: UatRecord) => Promise<HoldOutcome> }) {
   syncLedger(git, options.base);
   const ledger = readLedger(git);
   const candidate = findCandidate(ledger, id);
@@ -485,20 +524,23 @@ export async function validateAndRecord(git: Git, id: string, url: string, suite
   if (existing) throw new Error(`Candidate ${candidate.id} was already validated on UAT (${existing.result} at ${existing.at}); cut a new candidate to validate again`);
   const record = await validate(candidate, url, suites, options);
   let filingError: string | null = null;
-  if (record.result === 'failed' && options.file) {
-    try { record.followUp = await options.file(followUpItem(candidate, record), followUpRequestId(candidate.id)); }
+  const holds = options.holds ? await options.holds(candidate, record) : null;
+  if (holds) { Object.assign(record, { e2e: holds.e2e, holds: holds.holds }); filingError = holds.filingError; }
+  if (record.result === 'failed' && options.file && failingSuites(record).some(suite => !holds?.covered.includes(suite.name))) {
+    try { record.followUp = await options.file(followUpItem(candidate, record, holds?.covered), followUpRequestId(candidate.id)); }
     catch (error) { filingError = error instanceof Error ? error.message : String(error); }
   }
   writeRecord(git, `${uatTagPrefix}${candidate.id}`, candidate.sha, record, options.push);
+  holds?.write();
   return { record, followUp: record.result === 'failed' ? record.followUp ?? null : null, filingError };
 }
 
 /** Promote a candidate: `release/production` moves to its exact SHA, only after UAT passed on it. */
-export function promote(git: Git, id: string, options: { base: string; push: boolean; now: Date }) {
+export function promote(git: Git, id: string, options: { base: string; push: boolean; now: Date; acceptances?: readonly FlakyAcceptance[] }) {
   syncLedger(git, options.base);
   const ledger = readLedger(git);
   const candidate = findCandidate(ledger, id);
-  const assessment = assessPromotion(candidate, ledger.uat.find(record => record.id === candidate.id) ?? null, ledger.production[0] ?? null);
+  const assessment = assessPromotion(candidate, ledger.uat.find(record => record.id === candidate.id) ?? null, ledger.production[0] ?? null, options.acceptances);
   if (!assessment.promotable) return { promoted: false as const, candidate: candidate.id, refusals: assessment.refusals };
   deployBranch(git, productionBranch, candidate.sha, ledger.production[0]?.sha);
   if (!ledger.production.some(record => record.id === candidate.id)) writeRecord(git, `${productionTagPrefix}${candidate.id}`, candidate.sha, { id: candidate.id, sha: candidate.sha, at: options.now.toISOString() } satisfies ProductionRecord, options.push);
@@ -509,6 +551,7 @@ export function promote(git: Git, id: string, options: { base: string; push: boo
 export const ledgerStatus = (ledger: Ledger) => ledger.candidates.map(candidate => {
   const uat = ledger.uat.find(record => record.id === candidate.id) ?? null;
   return { id: candidate.id, sha: candidate.sha, cutAt: candidate.cutAt, trigger: candidate.trigger, items: candidate.items.map(item => item.key),
-    uat: uat ? { result: uat.result, at: uat.at, failing: failingSuites(uat).map(suite => suite.name), followUp: uat.followUp } : null,
+    uat: uat ? { result: uat.result, at: uat.at, failing: failingSuites(uat).map(suite => suite.name), followUp: uat.followUp,
+      ...(uat.e2e ? { blocking: uat.e2e.blocking, unrun: uat.e2e.cases.filter(entry => entry.verdict === 'unrun').map(entry => entry.case) } : {}), ...(uat.holds?.length ? { holds: uat.holds } : {}) } : null,
     production: ledger.production.find(record => record.id === candidate.id)?.at ?? null };
 });

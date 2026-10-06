@@ -14,7 +14,9 @@ import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import type { CaseRun } from '../src/scenarios.js';
 import { caseDirectory, loadCases, parseCase, scenarioDefinition, selectCases, syncCases, type CaseFile } from '../src/e2e/case.js';
-import { recordRuns, runCases, summarize, type E2eLauncher, type E2ePage } from '../src/e2e/runner.js';
+import { e2eSuite, recordRuns, runCases, summarize, type E2eLauncher, type E2ePage } from '../src/e2e/runner.js';
+import * as runner from '../src/e2e/runner.js';
+import { assessPromotion, assessUat, type ReleaseCandidate } from '../src/release-candidate.js';
 import { commands } from '../src/cli/index.js';
 import { TestsView } from '../web/pages/tests.js';
 
@@ -228,7 +230,7 @@ test('unit:e2e-tracking-history — the Tests page lists each E2E case with last
   assert.equal(entry.latest.result, 'pass'); assert.equal(entry.latest.sha, sha(25)); assert.equal(entry.latest.environment, 'staging');
   assert.equal(entry.passRate, 19 / 20);
   assert.equal(entry.flaky, true); assert.match(entry.flakyReason, new RegExp(`passed and failed on commit ${sha(23).slice(0, 8)}`));
-  assert.deepEqual(entry.e2e, { tags: ['api', 'tracked'], target: 'uat' });
+  assert.deepEqual(entry.e2e, { tags: ['api', 'tracked'], target: 'uat', required: false });
   const failed = entry.history.find((run: CaseRun) => run.result === 'fail');
   assert.deepEqual(failed.e2e.failingStep, { index: 0, name: 'GET /api/tests', reason: 'expected status 200, got 503' });
   const older = (await call(`tests/tracked/runs?before=${entry.history.at(-1).seq}&limit=50`, operator)).body;
@@ -243,7 +245,7 @@ test('unit:e2e-tracking-history — the Tests page lists each E2E case with last
   const html = renderToStaticMarkup(createElement(TestsView, { data: summary, error: '', loading: false, filter: 'all', setFilter: () => {}, retry: () => {}, api: async () => ({}), canEdit: false }));
   const row = html.slice(html.indexOf('data-case="tracked"'));
   const text = row.slice(0, row.indexOf('</tr>')).replace(/<[^>]+>/g, ' ').replace(/&quot;/g, '"').replace(/\s+/g, ' ');
-  assert.match(text, /E2E case · e2e\/cases\/tracked\.json · targets uat · api, tracked/);
+  assert.match(text, /E2E case · e2e\/cases\/tracked\.json · targets uat · optional, never blocks a release · api, tracked/, 'an optional case is marked optional (GY-1378)');
   assert.match(text, /passed 55555555 on staging/);
   assert.match(text, /95% of 20 runs/);
   assert.match(text, /flaky: passed and failed on commit 33333333/);
@@ -259,4 +261,136 @@ test('unit:e2e-tracking-history — the Tests page lists each E2E case with last
     durationMs: 1, outcome, executed: 1, failingStep: outcome === 'fail' ? { index: 0, name: 'GET /api/tests', reason: 'expected status 200, got 500' } : null })).status, 200);
   const unreported = (await call('tests', operator)).body.cases.find((c: any) => c.id === 'local');
   assert.equal(unreported.latest.sha, 'unknown'); assert.equal(unreported.flaky, false, 'no pseudo-commit makes a case flaky');
+});
+
+/** Cases that each read `/api/ID`, and a UAT serving `sha` whose answers follow `answers[ID]` call by call (the last one repeats). */
+const verdictCases = (specs: Record<string, { required: boolean }>) => Object.entries(specs).map(([id, spec]) =>
+  ({ file: `e2e/cases/${id}.json`, definition: parseCase(`e2e/cases/${id}.json`, JSON.stringify({ id, title: `Case ${id}`, target: 'uat', required: spec.required, steps: [{ kind: 'http', name: `read ${id}`, method: 'GET', path: `/api/${id}`, status: 200 }] })) }));
+function verdictTarget(sha: string | null, answers: Record<string, number[]>) {
+  const calls = new Map<string, number>();
+  return (async (target: URL | string) => {
+    const path = new URL(String(target)).pathname;
+    if (path === '/healthz') return new Response(JSON.stringify({ ok: true, commit: sha ?? 'unknown' }));
+    const id = path.slice('/api/'.length), n = calls.get(id) ?? 0; calls.set(id, n + 1);
+    const statuses = answers[id] ?? [200];
+    const status = statuses[Math.min(n, statuses.length - 1)];
+    return new Response(status === 200 ? '{}' : '{"error":"broken"}', { status });
+  }) as typeof fetch;
+}
+
+test('unit:e2e-case-verdict-states — a release run ends each case passed, failed, unrun (naming the case that stopped it) or flaky (both attempts kept); only failed and unaccepted-flaky required cases block, and unrun cases are reported apart', async () => {
+  const sha = '1'.repeat(40);
+  // In id order: a passes, b fails then passes on its retry (flaky), c fails both attempts and stops the run, d (required) and e (optional) never run.
+  const cases = verdictCases({ 'verdict-a': { required: true }, 'verdict-b': { required: true }, 'verdict-c': { required: true }, 'verdict-d': { required: true }, 'verdict-e': { required: false } });
+  const target = verdictTarget(sha, { 'verdict-b': [500, 200], 'verdict-c': [500] });
+  const report = await runCases(cases, { url: 'https://uat.example.test', token: 't', runId: 'rc-verdicts', fetcher: target, retries: 1, stopOnRequiredFailure: true });
+  const of = (id: string) => report.cases.find(entry => entry.id === id)!;
+  assert.deepEqual(report.cases.map(entry => [entry.id, entry.verdict]), [['verdict-a', 'passed'], ['verdict-b', 'flaky'], ['verdict-c', 'failed'], ['verdict-d', 'unrun'], ['verdict-e', 'unrun']]);
+  assert.deepEqual(of('verdict-b').attemptResults.map(attempt => attempt.outcome), ['fail', 'pass'], 'a flaky case keeps its failed attempt beside its pass');
+  assert.deepEqual(of('verdict-b').failingStep, { index: 0, name: 'read verdict-b', reason: 'expected status 200, got 500: {"error":"broken"}' });
+  assert.equal(of('verdict-c').attempts, 2); assert.deepEqual(of('verdict-c').attemptResults.map(attempt => attempt.outcome), ['fail', 'fail']);
+  assert.equal(of('verdict-d').stoppedBy, 'verdict-c'); assert.equal(of('verdict-e').stoppedBy, 'verdict-c', 'every case after the stop is unrun, naming the case that stopped it');
+  assert.equal(of('verdict-d').outcome, null); assert.equal(of('verdict-d').attempts, 0);
+  assert.deepEqual([report.passed, report.failed, report.flaky, report.unrun], [1, 1, 1, 2], 'unrun cases count neither as failures nor as passes');
+
+  // The verdict: the failed required case and the flaky one block; the unrun ones are listed apart.
+  const verdict = runner.releaseVerdict(report);
+  assert.equal(verdict.passed, false);
+  assert.deepEqual(verdict.blocking.map(entry => entry.id), ['verdict-b', 'verdict-c']);
+  assert.deepEqual(verdict.unrun.map(entry => entry.id), ['verdict-d', 'verdict-e']);
+  assert.ok(!verdict.blocking.some(entry => entry.verdict === 'unrun'));
+  // An acceptance of the flaky case for this run at this SHA leaves only the failure blocking; one at another SHA or run accepts nothing.
+  assert.deepEqual(runner.releaseVerdict(report, [{ case: 'verdict-b', runId: 'rc-verdicts', sha, decision: 'd-1' }]).blocking.map(entry => entry.id), ['verdict-c']);
+  assert.deepEqual(runner.releaseVerdict(report, [{ case: 'verdict-b', runId: 'rc-verdicts', sha: '2'.repeat(40), decision: 'd-2' }, { case: 'verdict-b', runId: 'rc-other', sha, decision: 'd-3' }]).blocking.map(entry => entry.id), ['verdict-b', 'verdict-c']);
+
+  const words = summarize(report);
+  assert.match(words, /PASS verdict-a/); assert.match(words, /FLAKY verdict-b .*\n {5}attempt 1 failed at step 1 read verdict-b: expected status 200, got 500/);
+  assert.match(words, /FAIL verdict-c/); assert.match(words, /UNRUN verdict-d: not run, the run stopped at required case verdict-c/); assert.match(words, /UNRUN verdict-e \(optional\)/);
+  assert.match(words, /1 passed, 1 failed, 1 flaky, 2 unrun$/);
+
+  // The e2e suite of release validate runs the same way: one retry, stop at a required failure, and a detail naming the blockers and the unrun cases apart.
+  const suite = await e2eSuite(cases, 't', { fetcher: verdictTarget(sha, { 'verdict-b': [500, 200], 'verdict-c': [500] }) }).run('https://uat.example.test', { id: 'verdicts' });
+  assert.equal(suite.passed, false);
+  assert.equal(suite.detail, '2 of 3 E2E cases failed: case verdict-b was flaky: it failed at step 1 (read verdict-b) and passed on attempt 2; it blocks until an evidence decision accepts it; '
+    + 'case verdict-c failed at step 1 (read verdict-c): expected status 200, got 500: {"error":"broken"}; unrun after required case verdict-c stopped the run: verdict-d, verdict-e');
+  // Optional cases never block: an optional failure leaves the suite passing, and it does not stop the run.
+  const optional = verdictCases({ 'optional-a': { required: false }, 'optional-b': { required: true } });
+  const relaxed = await e2eSuite(optional, 't', { fetcher: verdictTarget(sha, { 'optional-a': [500] }) }).run('https://uat.example.test', null);
+  assert.equal(relaxed.passed, true, relaxed.detail); assert.match(relaxed.detail, /optional, not blocking: optional-a failed/);
+  // A pass after a failure at an unreported commit is no flaky result bound to a SHA: it is a failure.
+  const unbound = await runCases(cases.slice(1, 2), { url: 'https://uat.example.test', token: 't', fetcher: verdictTarget(null, { 'verdict-b': [500, 200] }), retries: 1 });
+  assert.equal(unbound.cases[0].verdict, 'failed');
+
+  // Recording keeps both attempts of the flaky case as runs of its revision; the unrun cases record nothing.
+  await syncCases(apiAs(operator), cases);
+  await recordRuns(apiAs(operator), cases, report);
+  const runs = (await call('tests/verdict-b/runs', operator)).body.runs as CaseRun[];
+  assert.deepEqual(runs.map(run => [run.run.id, run.result, run.sha]).sort(), [['rc-verdicts:attempt-1', 'fail', sha], ['rc-verdicts:attempt-2', 'pass', sha]]);
+  assert.equal((await call('tests/verdict-d/runs', operator)).body.runs.length, 0);
+  assert.equal(of('verdict-d').recorded, undefined);
+  // The Tests page marks a required case required.
+  const summary = (await call('tests', operator)).body;
+  assert.equal(summary.cases.find((entry: any) => entry.id === 'verdict-a').e2e.required, true);
+  const html = renderToStaticMarkup(createElement(TestsView, { data: summary, error: '', loading: false, filter: 'all', setFilter: () => {}, retry: () => {}, api: async () => ({}), canEdit: false }));
+  const row = html.slice(html.indexOf('data-case="verdict-a"'));
+  assert.match(row.slice(0, row.indexOf('</tr>')).replace(/<[^>]+>/g, ' '), /targets uat · +required/);
+});
+
+test('unit:e2e-flaky-evidence-decision — a flaky required case blocks promotion until an evidence decision requested and approved by two different agents accepts it, bound to the case, run and exact SHA', async () => {
+  // GY-1378's release holds module, loaded here so that without it this case fails on its own.
+  const { acceptancesFrom, e2eRecord, holdItem } = await import('../src/release-holds.js');
+  const sha = '3'.repeat(40), other = '4'.repeat(40);
+  const agents = { requester: { id: 'evidence-requester', capabilities: ['decision:attest'] }, approver: { id: 'evidence-approver', capabilities: ['decision:approve'] } };
+  const agentToken = (id: string) => `${id}-${'e'.repeat(32)}`;
+  for (const agent of Object.values(agents)) await apiAs(operator)('operator-agents', { id: agent.id, displayName: agent.id, capabilities: agent.capabilities, scope: { repositories: ['owner/project'], workItems: ['*'] }, token: agentToken(agent.id), reason: 'Release agents decide flaky evidence' });
+  const as = async (id: string, path: string, body?: unknown) => {
+    const response = await fetch(`${url}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${agentToken(id)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: response.status, body: await response.json() as any };
+  };
+
+  // Candidate C at `sha`: the required case flakes in its release run, which is recorded attempt by attempt.
+  const cases = verdictCases({ 'evidence-flaky': { required: true } });
+  await syncCases(apiAs(operator), cases);
+  const candidate: ReleaseCandidate = { id: '20261006T120000Z', sha, cutAt: '2026-10-06T12:00:00.000Z', trigger: 'manual', since: null, items: [] };
+  let report: any;
+  const suite = await e2eSuite(cases, 't', { fetcher: verdictTarget(sha, { 'evidence-flaky': [500, 200] }), report: async written => { report = written; } }).run('https://uat.example.test', candidate);
+  assert.equal(suite.passed, false); assert.match(suite.detail, /1 of 1 E2E cases were flaky: case evidence-flaky was flaky/);
+  await recordRuns(apiAs(operator), cases, report);
+  const uat = { ...assessUat(candidate, { deployedSha: sha, suites: [suite], now: new Date('2026-10-06T12:30:00Z') }), e2e: e2eRecord(report, candidate) };
+  assert.deepEqual(uat.e2e!.blocking, ['evidence-flaky']);
+  const blocked = assessPromotion(candidate, uat, null);
+  assert.equal(blocked.promotable, false);
+  assert.match(blocked.refusals.join(' '), /required E2E case evidence-flaky was flaky at 3{40} in run rc-20261006T120000Z; an evidence decision must accept it at that exact SHA before promotion/);
+
+  // The decision is recorded on the release hold item the flaky case landed in.
+  const hold = await apiAs(operator)('work', holdItem({ kind: 'open', outcome: 'evidence-outcome', hold: 'evidence-outcome', candidate: candidate.id, sha, at: '2026-10-06T12:30:00.000Z',
+    cases: [{ case: 'evidence-flaky', verdict: 'flaky', candidate: candidate.id, sha, runId: report.runId, attempts: 2, failingStep: report.cases[0].failingStep }] }, candidate));
+  const input = { case: 'evidence-flaky', runId: report.runId, sha };
+  const requested = await as(agents.requester.id, `work/${hold.key}/decide`, { action: 'evidence', input, reason: 'The retry passed at the same SHA and the failure was a transient 500 from a cold UAT' });
+  assert.equal(requested.status, 200, JSON.stringify(requested.body)); assert.equal(requested.body.state, 'requested');
+  const acceptances = async () => acceptancesFrom((await as(agents.requester.id, `work/${hold.key}/decisions`)).body.decisions);
+  assert.deepEqual(await acceptances(), [], 'a requested decision accepts nothing');
+  assert.equal(assessPromotion(candidate, uat, null, await acceptances()).promotable, false, 'the block holds before the decision is approved');
+
+  // Self-approval is refused through the existing decision path; a second agent approves.
+  const self = await as(agents.requester.id, `work/${hold.key}/approve`, { decision: requested.body.id, reason: 'Approving my own request' });
+  assert.equal(self.status, 403); assert.match(self.body.error, /Self-approval refused/);
+  const approved = await as(agents.approver.id, `work/${hold.key}/approve`, { decision: requested.body.id, reason: 'Both attempts are recorded at that SHA; the failure is transient' });
+  assert.equal(approved.status, 200, JSON.stringify(approved.body)); assert.equal(approved.body.state, 'applied');
+  assert.equal(approved.body.approvedBy, agents.approver.id); assert.equal(approved.body.requestedBy, agents.requester.id);
+  const accepted = await acceptances();
+  assert.deepEqual(accepted, [{ case: 'evidence-flaky', runId: report.runId, sha, decision: requested.body.id }]);
+  assert.deepEqual(assessPromotion(candidate, uat, null, accepted), { promotable: true, refusals: [], sha, already: false }, 'the block clears for that SHA');
+
+  // It never carries to another SHA: the same case flaky on a later candidate at another SHA is still blocked by it.
+  const later: ReleaseCandidate = { ...candidate, id: '20261006T140000Z', sha: other };
+  let laterReport: any;
+  const laterSuite = await e2eSuite(cases, 't', { fetcher: verdictTarget(other, { 'evidence-flaky': [500, 200] }), report: async written => { laterReport = written; } }).run('https://uat.example.test', later);
+  const laterUat = { ...assessUat(later, { deployedSha: other, suites: [laterSuite], now: new Date('2026-10-06T14:30:00Z') }), e2e: e2eRecord(laterReport, later) };
+  assert.equal(assessPromotion(later, laterUat, null, accepted).promotable, false);
+  // And the decision path refuses an acceptance with no recorded flaky result behind it: another SHA, or a run that never flaked.
+  const unrecorded = await as(agents.requester.id, `work/${hold.key}/decide`, { action: 'evidence', input: { ...input, sha: other }, reason: 'Accept the later flake too' });
+  assert.equal(unrecorded.status, 409); assert.match(unrecorded.body.error, /no recorded flaky result in run rc-20261006T120000Z at 4{40}/);
+  const short = await as(agents.requester.id, `work/${hold.key}/decide`, { action: 'evidence', input: { ...input, sha: sha.slice(0, 12) }, reason: 'A short SHA' });
+  assert.equal(short.status, 400, 'an acceptance names the full 40-character SHA');
 });

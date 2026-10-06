@@ -18,6 +18,8 @@ export const scenarioSchema = z.object({
   testPath: z.string().min(1).max(1000),
   /** Set by the E2E case repository (src/e2e/case.ts); a case defined by hand has none. */
   tags: z.array(z.string().min(1).max(40)).max(20).optional(),
+  /** Whether a release requires the case (GY-1378); an optional case runs and is recorded but never blocks. */
+  required: z.boolean().optional(),
   expectedRevision: z.number().int().min(0).default(0),
 }).strict();
 export type Scenario = Omit<z.infer<typeof scenarioSchema>, 'expectedRevision'> & { revision: number; hash: string; createdAt: string; createdBy: string };
@@ -67,13 +69,13 @@ export type TrackedCase = Omit<CaseSummary, 'latest' | 'lastFailure' | 'history'
   latest: CaseRun | null; lastFailure: CaseRun | null; history: CaseRun[];
   /** Passed runs over judged runs (neither skipped nor withdrawn) in the history window, or null when none was judged. */
   passRate?: number | null;
-  /** A repository E2E case (src/e2e/case.ts): its file's tags and target; null for a case defined by hand. */
-  e2e?: { tags: string[]; target: string } | null;
+  /** A repository E2E case (src/e2e/case.ts): its file's tags, target and whether a release requires it; null for a case defined by hand. */
+  e2e?: { tags: string[]; target: string; required: boolean } | null;
 };
 
 /**
  * The Tests page's read (GY-1351): every case's bounded summary, each with its pass rate over the
- * history window and, for a repository E2E case, its tags and target from the latest revision.
+ * history window and, for a repository E2E case, its tags, target and required mark from the latest revision.
  */
 export async function trackedCases(db: Store['pool']): Promise<{ window: number; cases: TrackedCase[] }> {
   const summary = await testSummary(db);
@@ -85,7 +87,7 @@ export async function trackedCases(db: Store['pool']): Promise<{ window: number;
     const unknown = entry.history.some(run => run.sha === 'unknown')
       && (({ flaky, reason }) => ({ flaky, flakyReason: reason }))(flakiness(entry.history.map(run => run.sha === 'unknown' ? { ...run, sha: `unknown-${run.seq}` } : run) as ScenarioRun[]));
     return { ...entry, ...(unknown || {}), passRate: judged.length ? judged.filter(run => run.result === 'pass').length / judged.length : null,
-      e2e: definition?.runner === caseRunner ? { tags: definition.tags ?? [], target: definition.environment } : null };
+      e2e: definition?.runner === caseRunner ? { tags: definition.tags ?? [], target: definition.environment, required: definition.required ?? false } : null };
   }) };
 }
 

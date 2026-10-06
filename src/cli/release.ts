@@ -1,12 +1,17 @@
+import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { defineCommands } from './registry.js';
 import { releaseLeaseCommand } from './lease.js';
 import {
   apiSuite, assessProductionServing, awaitServing, commandSuite, cut, deployToUat, endpointSuite, findCandidate, followUpItem, followUpRequestId, gitIn,
-  ledgerStatus, promote, readLedger, readServed, syncLedger, validateAndRecord, type CutTrigger, type Suite,
+  ledgerStatus, promote, readLedger, readRecords, readServed, syncLedger, unacceptedFlaky, validateAndRecord, writeRecord, type CutTrigger, type FlakyAcceptance, type Suite,
 } from '../release-candidate.js';
+import { acceptancesFrom, foldHolds, foldRecord, holdItemsFor, holdTag, holdTagPrefix, releaseHolds, type HoldRecord } from '../release-holds.js';
+import { checkRepositoryContract, contractFile, loadContract } from '../e2e/case.js';
 
 const switches = new Set(['no-push', 'api']);
-const subcommands = new Set(['cut', 'status', 'uat', 'validate', 'follow-up', 'promote', 'verify']);
+const subcommands = new Set(['contract', 'cut', 'status', 'uat', 'validate', 'follow-up', 'holds', 'fold', 'promote', 'verify']);
 /** Flags after the subcommand: `--name value` pairs, repeatable, and bare `--flag` switches. */
 function flags(args: string[]) {
   const values = new Map<string, string[]>(); const positional: string[] = [];
@@ -21,7 +26,13 @@ function flags(args: string[]) {
 }
 
 const workKey = (created: any) => String(created?.key ?? created?.work?.key ?? created?.id);
-const usage = 'Use release cut [--trigger schedule|manual] | release status | release uat ID | release validate ID --url URL [--api] [--check PATH]... [--suite NAME=COMMAND]... | release follow-up ID | release promote ID | release verify --url URL';
+const usage = 'Use release contract | release cut [--trigger schedule|manual] | release status | release uat ID | release validate ID --url URL [--api] [--check PATH]... [--suite NAME=COMMAND]... [--e2e-report FILE] | release follow-up ID | release holds | release fold OUTCOME --decision ID | release promote ID | release verify --url URL';
+
+/** Every applied evidence decision on the hold items the candidate's failures landed in (GY-1378). */
+async function acceptancesOf(api: (path: string) => Promise<any>, git: ReturnType<typeof gitIn>, candidate: string): Promise<FlakyAcceptance[]> {
+  const items = holdItemsFor(foldHolds(readRecords<HoldRecord>(git, holdTagPrefix)), candidate);
+  return (await Promise.all(items.map(async key => acceptancesFrom((await api(`work/${encodeURIComponent(key)}/decisions`)).decisions)))).flat();
+}
 
 /** Release candidates: cut from main, validated on UAT, the exact SHA promoted to production. */
 export const releaseCommands = defineCommands([
@@ -29,6 +40,9 @@ export const releaseCommands = defineCommands([
     name: 'release',
     help: [
       ...releaseLeaseCommand.help,
+      '  release contract              The pre-cut check: every case e2e/contract.json binds exists,',
+      '                                validates, targets uat and is required, and every required case',
+      '                                is bound to an outcome; refusals name the outcome and case',
       '  release cut [--trigger schedule|manual] [--base main] [--no-push]',
       "                                Record main's tip as a release candidate (tag rc/ID) with the",
       '                                deliveries it carries; merges to main never pause',
@@ -37,9 +51,16 @@ export const releaseCommands = defineCommands([
       '  release validate ID --url URL [--api] [--check PATH]... [--suite NAME=COMMAND]... [--wait SECONDS]',
       '                                Run the suites against UAT serving the candidate and record the',
       '                                verdict; --api drives the deployed API with GRAPHYARD_UAT_TOKEN;',
-      '                                a failure files one follow-up item naming suite and SHA',
+      '                                a failure files one release hold per failed contract outcome',
+      '                                (--e2e-report, default GRAPHYARD_E2E_REPORT) and one follow-up',
+      '                                naming any other failing suite and the SHA',
       '  release follow-up ID          File the follow-up of a failed candidate whose filing failed',
-      '  release promote ID|latest     Deploy a UAT-passed candidate to production by its exact SHA',
+      '  release holds                 Every release hold: its outcomes, attached cases and state',
+      '  release fold OUTCOME --decision ID',
+      '                                Fold an outcome\'s open hold into another\'s, as the applied fold',
+      '                                decision ID on its hold item (another agent approved) names',
+      '  release promote ID|latest     Deploy a UAT-passed candidate to production by its exact SHA;',
+      '                                flaky required cases need applied evidence decisions at that SHA',
       '  release verify --url URL [--wait SECONDS]',
       '                                Check production serves a promoted candidate and name it',
     ],
@@ -51,10 +72,25 @@ export const releaseCommands = defineCommands([
         if (!work) throw new Error(`Unknown work item ${id}`);
         return releaseLeaseCommand.run(context, work);
       }
-      const git = gitIn(repositoryRoot());
+      const root = repositoryRoot(), git = gitIn(root);
       const options = flags(args);
       const base = options.one('base') ?? 'main', push = options.one('no-push') === undefined;
       const target = options.positional[0] ?? 'latest';
+      if (id === 'contract') { const result = await checkRepositoryContract(root); print(result); if (!result.passed) process.exitCode = 1; return; }
+      if (id === 'holds') { syncLedger(git, base); return print(foldHolds(readRecords<HoldRecord>(git, holdTagPrefix)).map(({ records: _records, ...hold }) => hold)); }
+      if (id === 'fold') {
+        const decision = options.one('decision'), outcome = options.positional[0];
+        if (!decision || !outcome) throw new Error(usage);
+        syncLedger(git, base);
+        const holds = foldHolds(readRecords<HoldRecord>(git, holdTagPrefix));
+        const item = holds.find(hold => hold.state === 'open' && hold.outcomes.includes(outcome))?.item;
+        if (!item) throw new Error(`Outcome ${outcome} has no open release hold with a filed item`);
+        const listed = (await api(`work/${encodeURIComponent(item)}/decisions`)).decisions.find((entry: any) => entry.id === decision);
+        if (!listed) throw new Error(`Decision ${decision} is not recorded on hold item ${item}`);
+        const record = foldRecord(holds, listed, new Date(), outcome);
+        writeRecord(git, holdTag(record), record.sha!, record, push);
+        return print(record);
+      }
       if (id === 'cut') {
         const trigger = (options.one('trigger') ?? 'manual') as CutTrigger;
         if (trigger !== 'schedule' && trigger !== 'manual') throw new Error('--trigger is schedule or manual');
@@ -63,7 +99,11 @@ export const releaseCommands = defineCommands([
       if (id === 'status' || !id) { syncLedger(git, base); return print(ledgerStatus(readLedger(git))); }
       if (id === 'uat') return print(deployToUat(git, target, base));
       if (id === 'promote') {
-        const result = promote(git, target, { base, push, now: new Date() });
+        syncLedger(git, base);
+        const ledger = readLedger(git), candidate = findCandidate(ledger, target), uat = ledger.uat.find(record => record.id === candidate.id);
+        // Only a candidate held by flaky cases alone reads the control plane's evidence decisions; an unreachable one leaves it held.
+        const acceptances = uat && unacceptedFlaky(candidate, uat)?.length ? await acceptancesOf(api, git, candidate.id).catch(error => { console.error(`Could not read evidence decisions: ${error.message}`); return []; }) : [];
+        const result = promote(git, target, { base, push, now: new Date(), acceptances });
         print(result); if (!result.promoted) process.exitCode = 1; return;
       }
       const url = options.one('url');
@@ -81,8 +121,12 @@ export const releaseCommands = defineCommands([
           if (!name || !command) throw new Error(`--suite takes NAME=COMMAND, got ${entry}`);
           suites.push(commandSuite(name, command));
         }
-        const result = await validateAndRecord(git, target, url, suites, { base, push, timeoutMs: waitMs,
-          file: async (item, requestId) => workKey(await api('work', item, requestId)) });
+        const file = async (item: object, requestId: string) => workKey(await api('work', item, requestId));
+        // GY-1378: the e2e suite's report, written by its command, decides the release holds against the candidate checkout's contract.
+        const reportFile = options.one('e2e-report') ?? process.env.GRAPHYARD_E2E_REPORT;
+        const contract = existsSync(join(root, contractFile)) ? await loadContract(root).catch(error => { console.error(`No release holds: ${error.message}`); return null; }) : null;
+        const holds = reportFile ? releaseHolds(git, { contract, push, file, report: async () => existsSync(reportFile) ? JSON.parse(await readFile(reportFile, 'utf8')) : null }) : undefined;
+        const result = await validateAndRecord(git, target, url, suites, { base, push, timeoutMs: waitMs, file, holds });
         print(result); if (result.record.result !== 'passed') process.exitCode = 1; return;
       }
       if (id === 'follow-up') {

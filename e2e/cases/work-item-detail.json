@@ -8,6 +8,7 @@
     "work"
   ],
   "target": "uat",
+  "required": true,
   "steps": [
     {
       "kind": "http",

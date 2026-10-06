@@ -84,7 +84,7 @@ export function TestsView({ data, error, loading, filter, setFilter, retry, api,
       <table className="sessions-table test-cases" aria-label="Test cases"><thead><tr><th scope="col">Case</th><th scope="col">Latest result</th><th scope="col">Pass rate</th><th scope="col">Last change</th><th scope="col">Failures</th><th scope="col">Linked work</th></tr></thead>
         <tbody>{shown.map(entry => <tr key={entry.id} data-case={entry.id}>
           <th scope="row" id={`case-${entry.id}`}><span className="mono"><Term term="end-to-end test">e2e:</Term>{entry.id}</span>{entry.title ?? <span className="amber">not in the registry</span>}
-            {entry.e2e && <><br/><small className="muted">E2E case · {entry.testPath} · targets {entry.e2e.target}{entry.e2e.tags.length ? ` · ${entry.e2e.tags.join(', ')}` : ''}</small></>}
+            {entry.e2e && <><br/><small className="muted">E2E case · {entry.testPath} · targets {entry.e2e.target} · {entry.e2e.required ? <strong>required</strong> : 'optional, never blocks a release'}{entry.e2e.tags.length ? ` · ${entry.e2e.tags.join(', ')}` : ''}</small></>}
             {entry.flaky && <strong className="flaky-flag" title={entry.flakyReason ?? ''}> · flaky: {entry.flakyReason}</strong>}
             <details><summary><a href={`#case-${entry.id}`}>History</a> · {entry.runs} {entry.runs === 1 ? 'run' : 'runs'}</summary>
               {entry.purpose && <p className="muted">{entry.purpose}</p>}
