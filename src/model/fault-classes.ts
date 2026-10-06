@@ -65,10 +65,10 @@ export const faultCatalogue = {
   'proof': ['proof-gap', 'timing-failure', 'nonexercising-proof', 'escalation:evidence-policy-conflict', 'action:proof'],
   'capacity': ['reviewer-exhausted', 'role-capacity', 'concurrency-starved', 'fleet-capacity', 'action:failover', 'action:capacity'],
   'resources': ['disk-pressure', 'memory-pressure', 'resource-bound', 'ledger-refusal', 'action:reclaim'],
-  'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'retry-stopped', 'action:fault', 'action:diagnosis'],
+  'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'retry-stopped'],
   'human-decision': ['human-request', 'sudo', 'action:human'],
   'stalled-gate': ['gate', 'blocker', 'stalled-item', 'stalled-action', 'actorless', 'action:blocker'],
-  'unclassified': ['unclassified'],
+  'unclassified': ['unclassified', 'action:fault', 'action:diagnosis'], // GY-1338: these name a step, not a cause
 } as const satisfies Record<FaultClass, readonly string[]>;
 export type FaultKind = typeof faultCatalogue[FaultClass][number];
 

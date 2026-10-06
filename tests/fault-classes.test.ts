@@ -84,9 +84,11 @@ test('unit:fault-classes — every existing attention kind maps to exactly one c
       'nonexercising-proof', 'retry-stopped', 'review-settlement', 'launch-review']],
     ['work item record', ['containment', 'human-request', 'scope-request', 'proof-gap', 'role-capacity', 'scope-violation', 'blocker', 'sandbox-blocker', 'workflow-permission']],
   ];
+  // GY-1338: a failed `fault` or `diagnosis` action names a step, not a cause, so it is catalogued as unclassified.
+  const unclassifiedActions = ['action:fault', 'action:diagnosis'];
   for (const [source, kinds] of sources) for (const kind of kinds) {
     assert.ok(isFaultKind(kind), `${source}: ${kind} is in the catalogue`);
-    assert.notEqual(faultClassOf(kind), 'unclassified', `${source}: ${kind} has a class`);
+    if (!unclassifiedActions.includes(kind)) assert.notEqual(faultClassOf(kind), 'unclassified', `${source}: ${kind} has a class`);
   }
   assert.equal(faultClassOf('lease-loss'), 'unclassified', 'a kind nobody catalogued is unclassified, never silently put somewhere');
   assert.equal(faultClassOf('escalation:lease-loss'), 'session-liveness');
@@ -230,6 +232,29 @@ test('unit:fault-classes — master status and the dashboard group open problems
   assert.deepEqual(statusFaults(lagging).filter(fault => fault.kind === 'production').map(fault => fault.text), lagging.production.attention);
   assert.match(render(quiet, troubled), /data-fault-class="configuration"[^>]*>(?:(?!<\/li>)[\s\S])*<strong>3<\/strong>/, 'the status-level problems are counted under their class');
   assert.match(render([], troubled), /data-fault-class="configuration"[^>]*>(?:(?!<\/li>)[\s\S])*<strong>3<\/strong>/, 'with no work at all the status-level problems are still grouped');
+});
+
+test('unit:fault-catalogue-action-kinds — a failed fault or diagnosis action is unclassified, never a loop instance, and loop keeps every other kind it lists on main', async () => {
+  // GY-1338: the step that failed is not the cause — the doctor's filing, the diagnostician's decide.
+  assert.equal(faultClassOf('action:fault'), 'unclassified');
+  assert.equal(faultClassOf('action:diagnosis'), 'unclassified');
+  assert.ok(isFaultKind('action:fault') && isFaultKind('action:diagnosis'), 'still catalogued, under unclassified');
+  // Every kind main's loop entry listed, but the two moved out; later additions to the entry are allowed.
+  const mainLoopKinds = ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'retry-stopped'];
+  for (const kind of mainLoopKinds) assert.equal(faultClassOf(kind), 'loop', `${kind} stays loop`);
+  assert.ok(!(faultCatalogue.loop as readonly string[]).some(kind => kind === 'action:fault' || kind === 'action:diagnosis'));
+  // Three failed actions of the moved kinds, each its own run, reach no loop recurrence threshold.
+  const state = emptyDaemonState(config());
+  for (const [index, [kind, key]] of ([['fault', 'doctor:1'], ['fault', 'doctor:2:file:merge'], ['diagnosis', 'diagnosis:GY-1333']] as const).entries()) {
+    const stored = storeAction(state, key, { kind, work: null, principal: null, state: 'failed', detail: `failed ${index}`, attempts: 1, epoch: null, cycle: index, at: iso(index * 60_000) });
+    assert.equal(stored.faultClass, 'unclassified');
+  }
+  assert.deepEqual(state.faults.instances.map(entry => entry.faultClass), ['unclassified', 'unclassified', 'unclassified'], 'each failure is still recorded');
+  const threshold = { ...policy, threshold: 3 };
+  assert.deepEqual(recurringClasses(state.faults.instances, [], threshold, clock + 5 * 60_000).filter(entry => entry.faultClass === 'loop'), [], 'none counts toward the loop class');
+  // A loop kind the entry keeps still counts.
+  for (let index = 0; index < 3; index++) storeAction(state, `loop:${index}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: 'the loop missed its budget', attempts: 1, epoch: null, cycle: index, at: iso(index * 60_000) }, 'loop-cost');
+  assert.deepEqual(recurringClasses(state.faults.instances, [], threshold, clock + 5 * 60_000).filter(entry => entry.faultClass === 'loop').map(entry => [entry.count, entry.file]), [[3, true]]);
 });
 
 test('unit:recurring-class-item — below the threshold nothing is filed', async () => {

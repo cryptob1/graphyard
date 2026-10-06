@@ -13,7 +13,7 @@ import { dispatchFailureBlockAfter, noteDispatchFailure } from '../src/daemon/di
 import { dispatchFailureAttention } from '../src/auto-dispatch.js';
 import { providerLimit } from '../src/model/capacity.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { actionableSubjects, cycleCost, daemonEffects, emptyDaemonState, loopAttention, loopLiveness, runCycle, trackSilence, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { actionableSubjects, cycleCost, daemonEffects, emptyDaemonState, storeAction, loopAttention, loopLiveness, runCycle, trackSilence, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { reworkWokenObservationMaxAgeMs } from '../src/daemon/decisions.js';
 import { clearDiagnoses, diagnosesSettled, diagnosisLimitHoldMs, diagnosisReport, diagnosisStep, diagnosticianGate, diagnosticianHeldUntil, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
 import type { Cycle } from '../src/daemon/cycle.js';
@@ -718,6 +718,23 @@ test(`manual:fault-class-loop — ${gy1336Instances[2].id}: a fix released after
   assert.deepEqual(diagnosisFaults(state), [], 'no action:diagnosis loop fault');
 });
 
+test('manual:fault-class-loop — GY-1338: GY-1336\'s three instances, failed again, are unclassified and file no loop item', async () => {
+  // Each of GY-1336's instances was a failed action of a catch-all kind: the doctor's (action:fault)
+  // and the diagnostician's (action:diagnosis). Whatever failed inside those steps, it is no longer
+  // counted as the loop failing to cycle, so the three no longer reach the loop class threshold.
+  const state = emptyDaemonState(config()), at = Date.parse(gy1336Instances[2].at), filed: string[] = [];
+  for (const instance of gy1336Instances) {
+    const kind = instance.kind === 'action:fault' ? 'fault' : 'diagnosis';
+    const stored = storeAction(state, instance.subject, { kind, work: null, principal: null, state: 'failed', detail: instance.id, attempts: 1, epoch: null, cycle: 1, at: instance.at });
+    assert.equal(stored.faultClass, 'unclassified', instance.id);
+  }
+  assert.deepEqual(state.faults.instances.map(entry => [entry.kind, entry.faultClass]), gy1336Instances.map(entry => [entry.kind, 'unclassified']));
+  const effects = { persist: async () => {}, faultClassPolicy: { threshold: 3, windowHours: 24 },
+    fileFaultClass: async (input: { title: string; origin?: { faultClass?: { class: string } } }) => { filed.push(input.origin?.faultClass?.class ?? input.title); return item('GY-1336', at); } } as unknown as DaemonEffects;
+  await fileRecurringFaultClasses(state, effects, [], at, () => at, []);
+  assert.ok(!filed.includes('loop'), 'no loop item is filed');
+});
+
 // ---- GY-1345: one plane-wide control-plane window files five loop faults ------------------------
 //
 // GY-1345 names this file for its proof too. From 01:39 to 02:01Z on 2026-10-06 the production
@@ -796,11 +813,11 @@ test(`unit:plane-wide-refusal-records-no-loop-fault — ${gy1345Instances[2].id}
   await isolatedStep(state, effects, [subject, covering], [], at + 5 * minute);
   assert.equal(state.diagnoses['GY-1304'].state, 'closing', 'the next cycle requests it again');
   assert.deepEqual(loopFaults(state), []);
-  // A refusal that is not plane-wide still fails the step as before.
+  // A refusal that is not plane-wide still fails the step as before — a fault, unclassified since GY-1338.
   clearDiagnoses();
   const other = await diagnosed(async () => { throw new Error('Graphyard refused work/work-GY-1304/decide (403): not permitted'); }, at - minute);
   await isolatedStep(other.state, other.effects, [other.subject, covering], [], at);
-  assert.deepEqual(loopFaults(other.state).map(entry => entry.kind), ['action:diagnosis']);
+  assert.deepEqual(other.state.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['action:diagnosis', 'unclassified']]);
 });
 
 test(`unit:plane-wide-refusal-records-no-loop-fault — ${gy1345Instances[4].id}: a class filing refused 502 is retried under the same key and the class does not count its own failure`, async () => {
@@ -1160,7 +1177,7 @@ test(`manual:fault-class-loop — ${gy1344Instances[4].id}: a class filing the p
   assert.deepEqual(instancesOf(state, 'action:fault'), []);
 });
 
-test(`manual:fault-class-loop — ${gy1344Instances[4].id}: a class filing the plane judged and refused is still a loop fault`, async () => {
+test(`manual:fault-class-loop — ${gy1344Instances[4].id}: a class filing the plane judged and refused is still a fault`, async () => {
   const at = Date.parse(gy1344Instances[4].at), master = config(), state = emptyDaemonState(master);
   state.faults.instances = gy1344Instances.slice(1, 4).map(entry => ({ ...entry, faultClass: 'loop', text: 'an instance', lastSeenAt: entry.at, linkedTo: null }));
   const effects = { persist: async () => {}, faultClassPolicy: { threshold: 3, windowHours: 24 },

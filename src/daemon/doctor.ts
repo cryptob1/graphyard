@@ -284,10 +284,16 @@ const invalidFiling = (file: DoctorFile, error: unknown) =>
  * it filed — on the cursor and the control plane.
  */
 export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: DoctorRunRecord, payload: { findings: DoctorFinding[]; actions: DoctorAction[]; filed: DoctorFile[] }, now: () => number) {
-  const { state, effects: daemon, snapshot, performed } = cycle;
+  const { state, effects: daemon, performed } = cycle;
   const key = keyOf([run.at, ...payload.findings.map(finding => finding.subject)]);
+  // GY-1338: a run settles minutes after the cycle that launched it, and items filed meanwhile are
+  // not in that cycle's snapshot: a run started before GY-1332 existed filed GY-1333 for the same
+  // class. Its filings are deduplicated against a read taken now; without one, they wait for the
+  // retry, which deduplicates against its own cycle's snapshot, rather than file blind.
+  const fresh = payload.filed.length ? await daemon.snapshot().then(read => read.work, () => null) : cycle.snapshot.work;
+  const work = fresh ?? cycle.snapshot.work;
   const note = async (subject: string, detail: string, outcome: DaemonAction['state'] = 'done', kind: DaemonAction['kind'] = 'fault') => {
-    const itemKey = subjectKey(snapshot.work, subject);
+    const itemKey = subjectKey(work, subject);
     performed.push(await record(state, `${key}:${subject}:${performed.length}`, { kind, work: itemKey, principal: null, state: outcome, detail, attempts: 1, cycle: state.cycle }, now(), daemon.persist));
   };
   // A finding the doctor could not act on — a human-only decision, a fault with no item to act
@@ -299,10 +305,15 @@ export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: 
   // tried five read-only forms filed "Recurring loop faults" for a loop that never stopped (GY-1295).
   for (const action of payload.actions)
     await note(action.subject, `${action.outcome === 'applied' ? 'Ran' : 'Was refused'} \`${action.command}\`: ${action.detail}`.slice(0, 2000));
-  const deduped = dedupDoctorFiles(payload.filed, snapshot.work);
+  const deduped = dedupDoctorFiles(payload.filed, work);
   for (const { file, covered } of deduped) {
     if (covered) { await note('installation', `Not filing "${file.title}": the ${file.faultClass} fault class is already covered by an open item`); continue; }
     const filingKey = `${key}:file:${file.faultClass}`;
+    if (!fresh) {
+      state.doctor.pendingFiles = [...state.doctor.pendingFiles.filter(entry => entry.key !== filingKey), { key: filingKey, at: run.at, file }].slice(-40);
+      await note('installation', `Not filing "${file.title}" yet: the open items could not be read when the run settled, so it is filed on a later cycle if no open item covers the ${file.faultClass} fault class`);
+      continue;
+    }
     let input: DoctorFileInput;
     try { input = doctorFileItem(file, `The pipeline doctor found a ${file.faultClass} fault no open item covers: ${file.description.slice(0, 1500)}`); }
     catch (error) { await note('installation', invalidFiling(file, error), 'done', 'escalation'); continue; }

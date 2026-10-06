@@ -681,7 +681,7 @@ test('fault-class-loop — a doctor command its allowlist refused and a decision
 
 // GY-1318 instance 2: doctor:2026-10-05T15:21:52.963Z — "no report: zai/glm-5.3-flash exit; zai/glm-5.3
 // cancelled": the primary's model died and the fallback was cancelled by the loop's own shutdown.
-test('unit:doctor-no-report-not-a-loop-fault — a doctor run that returns no report stays failed, posted and retried, and opens no loop fault; one whose report cannot be applied still does', async () => {
+test('unit:doctor-no-report-not-a-loop-fault — a doctor run that returns no report stays failed, posted and retried, and opens no loop fault; one whose report cannot be applied still opens a fault', async () => {
   clearDoctorRuns();
   const loopFaults = (state: DaemonState) => state.faults.instances.filter(entry => faultClassOf(entry.kind) === 'loop');
   const posted: string[] = [];
@@ -723,7 +723,8 @@ test('unit:doctor-no-report-not-a-loop-fault — a doctor run that returns no re
   assert.deepEqual(loopFaults(died.state), []);
   clearDoctorRuns();
 
-  // The bound is not weakened: a report that cannot be applied is still a loop fault.
+  // The bound is not weakened: a report that cannot be applied is still a fault — unclassified since
+  // GY-1338, for a failed doctor action names the step that did not finish, not the loop's cause.
   const report = { findings: [{ subject: 'GY-74', check: 'blocked' as const, detail: 'blocked', unactionable: false }], actions: [], filed: [] };
   const unappliable: DoctorEffects = { ...exiting, runner: async () => ({ runtime: 'pi', model: 'test/model', release: async () => {}, runner: {
     name: 'pi', start: (_prompt: string, options: { tool: string }) => ({ id: 'run', events: [], onEvent: () => () => {}, cancel: () => {},
@@ -733,7 +734,7 @@ test('unit:doctor-no-report-not-a-loop-fault — a doctor run that returns no re
   await doctorStep(unapplied);
   await doctorRunsSettled();
   assert.match(unapplied.state.doctor.runs[0].detail, /Applying the report failed/);
-  assert.deepEqual(loopFaults(unapplied.state).map(entry => entry.kind), ['action:fault'], 'an apply failure still opens its loop fault');
+  assert.deepEqual(unapplied.state.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['action:fault', 'unclassified']], 'an apply failure still opens its fault');
   clearDoctorRuns();
 });
 
@@ -797,7 +798,7 @@ test(`manual:fault-class-loop — GY-1336 ${gy1336Doctor.filing}: a doctor filin
   clearDoctorRuns();
 });
 
-test(`manual:fault-class-loop — GY-1336 ${gy1336Doctor.filing}: a refused filing queued for its retry is no loop fault, a retry refused again is, and one the checks can never take is escalated instead of retried`, async () => {
+test(`manual:fault-class-loop — GY-1336 ${gy1336Doctor.filing}: a refused filing queued for its retry is no fault, a retry refused again is, and one the checks can never take is escalated instead of retried`, async () => {
   clearDoctorRuns();
   let refuse = true;
   const doctor = filingDoctor([mainGuardFiling(['unit:guard-retry'])], async input => {
@@ -811,7 +812,7 @@ test(`manual:fault-class-loop — GY-1336 ${gy1336Doctor.filing}: a refused fili
   assert.deepEqual(loopFaultsOf(replay.state), [], 'queued for the retry, it is no loop fault');
   replay.state.cycle += 1;
   await doctorStep(cycle([item()], { doctor, state: replay.state }));
-  assert.deepEqual(loopFaultsOf(replay.state).map(entry => entry.kind), ['action:fault'], 'a retry refused again is still a loop fault');
+  assert.deepEqual(replay.state.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['action:fault', 'unclassified']], 'a retry refused again is still a fault, unclassified since GY-1338');
   clearDoctorRuns();
 
   // A post-merge proof no normalising can mend: the create checks refuse it on every attempt.
@@ -824,5 +825,68 @@ test(`manual:fault-class-loop — GY-1336 ${gy1336Doctor.filing}: a refused fili
   assert.equal(escalations.length, 1, 'it is raised for the master instead');
   assert.match(escalations[0].detail, /fails the checks master create applies, so it is not filed; file it by hand/);
   assert.deepEqual(loopFaultsOf(refused.state), [], 'no loop fault instance');
+  clearDoctorRuns();
+});
+
+// ---- GY-1338: a settled run deduplicates against the open items when it settles -----------------
+//
+// GY-1338 replays GY-1336's third shape at its source: a doctor run launched before GY-1332 existed
+// (created 00:17:48Z) settled at 00:30:34Z and filed GY-1333 for the merge class GY-1332 already
+// covered, because it deduplicated against the snapshot of the cycle that launched it.
+const gy1338 = { launched: '2026-10-06T00:10:00.000Z', covering: '2026-10-06T00:17:48.544Z', settled: '2026-10-06T00:30:34.922Z' };
+const gy1332 = () => item({ id: 'id-GY-1332', key: 'GY-1332', stage: 'backlog', createdAt: gy1338.covering,
+  origin: { faultClass: { class: 'merge', threshold: 1, windowHours: 1, count: 1, detectedAt: gy1338.covering, instances: [] } } } as Partial<Work>);
+
+test('unit:doctor-report-dedup-fresh-snapshot — a settled run deduplicates its filings against the open items read when it settles, not the launching cycle\'s snapshot', async () => {
+  clearDoctorRuns();
+  const filed: string[] = [];
+  const doctor = filingDoctor([mainGuardFiling(['unit:guard-retry'])], async input => { filed.push(input.title); return item({ id: 'id-GY-1333', key: 'GY-1333' }); });
+  // The launching cycle saw no merge item; by the time the run settles, GY-1332 is open.
+  let current = [item()];
+  const replay = cycle([item()], { doctor, clock: Date.parse(gy1338.launched), effects: { snapshot: async () => ({ work: current, now: gy1338.settled }) } });
+  current = [item(), gy1332()];
+  await doctorStep(replay);
+  await doctorRunsSettled();
+  assert.deepEqual(filed, [], 'no duplicate of GY-1332 is filed');
+  assert.equal(replay.state.doctor.runs[0].state, 'reported');
+  assert.match(replay.state.doctor.runs[0].detail, /0 filed, 1 deduplicated/);
+  assert.ok(Object.values(replay.state.actions).some(action => /already covered by an open item/.test(action.detail)), 'recorded as covered');
+  assert.deepEqual(replay.state.faults.instances, [], 'no fault');
+  clearDoctorRuns();
+
+  // With no covering item when it settles, the run files as before.
+  const uncovered = cycle([item()], { doctor });
+  await doctorStep(uncovered);
+  await doctorRunsSettled();
+  assert.deepEqual(filed, [mainGuardFiling([]).title]);
+  clearDoctorRuns();
+
+  // Unable to read the open items when it settles, the run files nothing blind: the filing waits for
+  // the retry, which deduplicates against its own cycle's snapshot, with no failed action.
+  filed.length = 0;
+  const unread = cycle([item()], { doctor, effects: { snapshot: async () => { throw new Error('Graphyard refused work-snapshot (502): Application failed to respond'); } } });
+  await doctorStep(unread);
+  await doctorRunsSettled();
+  assert.deepEqual(filed, []);
+  assert.equal(unread.state.doctor.pendingFiles.length, 1, 'kept for the retry');
+  assert.deepEqual(Object.values(unread.state.actions).filter(action => action.state === 'failed'), []);
+  unread.state.cycle += 1;
+  await doctorStep(cycle([item(), gy1332()], { doctor, state: unread.state }));
+  assert.deepEqual(filed, [], 'the retry sees GY-1332 and drops it');
+  assert.deepEqual(unread.state.doctor.pendingFiles, []);
+  assert.deepEqual(unread.state.faults.instances, []);
+  clearDoctorRuns();
+});
+
+test(`manual:fault-class-loop — GY-1336 GY-1333: the run that filed GY-1333 at ${gy1338.settled}, replayed, files no duplicate of GY-1332`, async () => {
+  clearDoctorRuns();
+  const filed: string[] = [];
+  const doctor = filingDoctor([mainGuardFiling(['integration: main guard retries a refused revert'])], async input => { filed.push(input.title); return item({ id: 'id-GY-1333', key: 'GY-1333' }); });
+  const launched = cycle([item()], { doctor, clock: Date.parse(gy1338.launched), effects: { snapshot: async () => ({ work: [item(), gy1332()], now: gy1338.settled }) } });
+  await doctorStep(launched);
+  await doctorRunsSettled();
+  assert.deepEqual(filed, [], 'GY-1333 is not filed');
+  assert.deepEqual(launched.state.doctor.pendingFiles, []);
+  assert.deepEqual(loopFaultsOf(launched.state), []);
   clearDoctorRuns();
 });
