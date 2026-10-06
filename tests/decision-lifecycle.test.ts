@@ -14,6 +14,7 @@ import { standingEscalations, type Observation, type Principal, type Work } from
 import { Store } from '../src/store.js';
 import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { samePin } from '../src/server/decision-ledger.js';
+import { workFaults } from '../src/model/fault-classes.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-75: a decision whose approval is refused on a revision race must never stay 'requested'
@@ -144,6 +145,69 @@ test('integration:decision-stale-on-revision-race — an approval refused on a r
   assert.equal(late.status, 409); assert.match(late.body.error, /already stale/);
   const takeBack = await withdraw(master.token, work, requested.body.id, 'Too late for that');
   assert.equal(takeBack.status, 409); assert.match(takeBack.body.error, /already stale/);
+});
+
+// GY-1348, replayed from GY-1335's decision ec973978-b52f-4e61-a5dd-5fc9afbcd144: the loop's own
+// rescoping requirements decision retired criteria a successor carries, the independent approver
+// judged "nothing is weakened" and approved it, and its application raised requirement-weakening
+// anyway — holding the merge gate and counting as a scope fault until a second resolve decision.
+const narrowing = (work: Work) => ({ expectedPolicyRevision: work.policyRevision, criteria: [work.criteria[0]], dependencies: [], plannedFiles: work.plannedFiles, exclusiveResources: [], producerProofs: [] });
+const weakeningFaults = (work: Work) => workFaults(work, Date.now()).filter(fault => fault.kind === 'escalation:requirement-weakening');
+const mergeReasons = (work: Work) => work.gates.find(gate => gate.name === 'merge')?.reasons ?? [];
+
+test('unit:decision-requirements-approval-resolves-weakening — the requirement-weakening an approved requirements decision raises is resolved by that approval, citing the decision, the approver and the approval reason', async () => {
+  let work = await candidate('approved-rescoping');
+  const requested = await decide(master.token, work, 'requirements', narrowing(work), 'Rescope: AC-2 is carried by its successor item');
+  assert.equal(requested.status, 200, JSON.stringify(requested.body));
+  const approvalReason = 'The successor carries the retired AC-2 with its proof, so nothing is weakened';
+  const applied = await approve(approver.token, work, requested.body.id, approvalReason);
+  assert.equal(applied.status, 200, JSON.stringify(applied.body));
+  assert.equal(applied.body.state, 'applied', JSON.stringify(applied.body));
+  work = await reload(work.id);
+  assert.deepEqual(work.criteria.map(ac => ac.id), ['AC-1'], 'the narrowing applied');
+  assert.deepEqual(work.retiredCriterionIds, ['AC-2']);
+  assert.deepEqual(standingEscalations(work), [], 'no escalation stands');
+  assert.ok(!mergeReasons(work).some(reason => /requirement-weakening/.test(reason)), `the merge gate names no requirement-weakening: ${mergeReasons(work)}`);
+  const recorded = await events(work);
+  const resolved = recorded.filter(row => row.kind === 'escalation.resolved');
+  assert.equal(resolved.length, 1, JSON.stringify(recorded.map(row => row.kind)));
+  const details = resolved[0].payload.details;
+  assert.equal(details.trigger, 'requirement-weakening');
+  assert.equal(details.decision, requested.body.id);
+  assert.equal(details.approvedBy, approver.id);
+  assert.equal(details.approvalReason, approvalReason);
+  assert.equal(details.resolvedBy, master.id);
+  assert.match(details.escalation.reason, /retires AC-2/);
+  // A replay of the approval answers from its receipt and resolves nothing twice.
+  const listed = await ok(master.token, 'GET', `work/${work.key}/decisions`);
+  assert.match(listed.decisions.find((entry: any) => entry.id === requested.body.id).outcome, /requirement-weakening it raised is resolved by this approval/);
+});
+
+test('unit:fault-class-scope-approved-rescoping-counts-no-instance — an approved rescoping leaves no escalation:requirement-weakening instance for the faults step', async () => {
+  let work = await candidate('approved-rescoping-faults');
+  const requested = await decide(master.token, work, 'requirements', narrowing(work), 'Rescope: AC-2 moves to a successor');
+  assert.equal((await approve(approver.token, work, requested.body.id, 'Nothing is weakened')).body.state, 'applied');
+  work = await reload(work.id);
+  assert.deepEqual(weakeningFaults(work), []);
+  assert.deepEqual(workFaults(work, Date.now()).filter(fault => fault.faultClass === 'scope'), []);
+});
+
+test('unit:direct-requirements-weakening-still-escalates — a narrowing that is not an approved decision raises requirement-weakening, holds the merge gate and counts as a scope instance until resolved', async () => {
+  let work = await candidate('direct-rescoping');
+  work = await engine.execute(operator, 'requirements', work.id, { ...narrowing(work), reason: 'An operator narrows directly' }, randomUUID());
+  assert.deepEqual(standingEscalations(work).map(entry => entry.trigger), ['requirement-weakening']);
+  assert.ok(mergeReasons(work).some(reason => /Unresolved requirement-weakening escalation requires operator resolution/.test(reason)), `the merge gate holds: ${mergeReasons(work)}`);
+  assert.deepEqual(weakeningFaults(work).map(fault => fault.faultClass), ['scope']);
+  // An approved decision applied afterwards, raising nothing of its own, never clears the operator's standing escalation.
+  work = await reload(work.id);
+  const growth = { ...narrowing(work), criteria: [...work.criteria, { id: 'AC-3', text: 'Changelog', proofs: ['manual:changelog'] }] };
+  const requested = await decide(master.token, work, 'requirements', growth, 'Add the changelog criterion');
+  assert.equal(requested.status, 200, JSON.stringify(requested.body));
+  assert.equal((await approve(approver.token, work, requested.body.id, 'Additive')).body.state, 'applied');
+  work = await reload(work.id);
+  assert.deepEqual(standingEscalations(work).map(entry => entry.trigger), ['requirement-weakening'], 'the direct revision\'s escalation still stands');
+  assert.equal((await events(work)).filter(row => row.kind === 'escalation.resolved').length, 0);
+  assert.deepEqual(weakeningFaults(work).map(fault => fault.faultClass), ['scope']);
 });
 
 test('integration:decision-pinning-scope — resolve is pinned to what it acts on and attest to the candidate head and policy, so unrelated item changes do not invalidate them', async () => {

@@ -94,6 +94,8 @@ export async function scopeStep(cycle: Cycle) {
   //    What this pass decides is kept, so the budget below measures what is still waiting rather
   //    than what has just been answered.
   const settled = new Map<string, Work>();
+  // Items whose widening this cycle answered an ask no longer open (GY-1348): nothing more is said about that ask.
+  const superseded = new Set<string>();
   // 2a. A refused request for files a review finding on the item's own change names. The finding
   //     is the grounds the item's criteria lack: the loop reads it with its own GitHub access and
   //     widens by exactly those files as the master's own additive intent, once per request and
@@ -179,6 +181,16 @@ export async function scopeStep(cycle: Cycle) {
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Widened ${item.key} with ${namePaths(paths)} on ${widenedOn(scoped.grounds!, paths.length)}: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
       return at;
     } catch (error) {
+      // The ask this widening answers was answered, withdrawn or re-asked meanwhile, or its attempt
+      // lost the lease (GY-1348): the engine refused the moot widening by design, and the fresh ask
+      // is judged on its own next cycle. A handled outcome, as the decide path records it (GY-955).
+      const moot = supersededScopeAsk(error);
+      if (moot) {
+        superseded.add(item.id);
+        performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done',
+          detail: boundDetail(`Not widened ${item.key}: ${moot} — the ask at ${request.at} by epoch ${request.epoch} was ${supersededScopeNote}`), attempts, cycle: state.cycle }, now(), effects.persist));
+        return null;
+      }
       const transient = transientScopeRefusal(error);
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed', detail: boundDetail(`Could not widen ${item.key} on a review finding or a planned file's successor${transient ? ` (${transient}, ${transientScopeRetry})` : ''}: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist, scopeRefusalFault(transient, previous)));
       return null;
@@ -228,6 +240,7 @@ export async function scopeStep(cycle: Cycle) {
           : `Refused ${item.key}'s scope request for ${request.paths.length ? namePaths(request.paths) : 'no path'} ${waited}: ${decision.reason}`),
         attempts, cycle: state.cycle }, now(), effects.persist));
       const widenedAt = decision.state === 'refused' ? await widenOnFindings(decided, decided.scopeRequest ?? { ...request, decision }) : null;
+      if (superseded.has(item.id)) return;
       if (widenedAt) {
         if (routed) state.scope.push(scopeMeasurementSchema.parse({ work: item.key, epoch: request.epoch, at: widenedAt, waitedMs: Math.max(0, Date.parse(widenedAt) - Date.parse(request.at)), state: 'approved' }));
         return;
@@ -294,7 +307,8 @@ export async function successorStep(cycle: Cycle, settled: ReadonlyMap<string, W
     if (item.observation?.merged || !(item.plannedFiles ?? []).length) return;
     const key = `successors:${item.id}:${item.policyRevision}`;
     const previous = state.actions[key];
-    if (previous && !readyToRetry(previous, state.cycle)) return;
+    // A re-plan refused because the ask it answered was no longer open is tried afresh next cycle (GY-1348).
+    if (previous && !readyToRetry(previous, state.cycle) && !previous.detail.includes(supersededScopeNote)) return;
     const attempts = (previous?.attempts ?? 0) + 1;
     try {
       const read = await effects.baseSuccessions!(item.createdAt);
@@ -309,6 +323,12 @@ export async function successorStep(cycle: Cycle, settled: ReadonlyMap<string, W
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: null, epoch: item.epoch, state: 'done',
         detail: boundDetail(`Re-planned ${item.key} with ${namePaths([...missing])}, the successors of planned files the base branch split or renamed: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
+      const moot = supersededScopeAsk(error);
+      if (moot) {
+        performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: null, epoch: item.epoch, state: 'done',
+          detail: boundDetail(`Not re-planned ${item.key} onto the successors of its planned files: ${moot} — the ask was ${supersededScopeNote}`), attempts, cycle: state.cycle }, now(), effects.persist));
+        return;
+      }
       const transient = transientScopeRefusal(error);
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: null, epoch: item.epoch, state: 'failed',
         detail: boundDetail(`Could not re-plan ${item.key} onto the successors of its planned files${transient ? ` (${transient}, ${transientScopeRetry})` : ''}: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist, scopeRefusalFault(transient, previous)));
@@ -329,6 +349,21 @@ export function transientScopeRefusal(error: unknown): string | null {
   if (error instanceof RefusedResponse && error.status >= 500) return 'the control plane answered 5xx';
   if (/Policy revision changed; reload before revising/.test(message(error))) return 'the item moved past the revision the loop read';
   return null;
+}
+/** What a widening refused for an ask no longer open says, so its record reads as the handled outcome it is (GY-1348). */
+export const supersededScopeNote = 'answered, withdrawn or re-asked meanwhile; the fresh ask is judged on its own';
+/**
+ * GY-1348. Why the control plane refused one of the loop's widenings because the ask it answers no
+ * longer stands, or null: the scope request it names was answered, withdrawn or re-asked meanwhile
+ * (a worker's re-ask merges into the open request under its own `at`), or the attempt that asked no
+ * longer holds the lease. The engine's refusal is the design (engine.ts, `answers`); the loop only
+ * records it as handled, never as a scope fault.
+ */
+export function supersededScopeAsk(error: unknown): string | null {
+  const text = message(error);
+  if (/The scope request this widening answers is no longer open/.test(text)) return 'the scope request it answers is no longer open';
+  const lease = /Epoch (\d+), which asked for this scope, no longer holds the lease/.exec(text);
+  return lease ? `epoch ${lease[1]}, which asked for this scope, no longer holds the lease` : null;
 }
 /**
  * The fault kind a refused scope action is noted under: a transient refusal judged nothing about the

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
-import { Refusal, demand, resolveEscalation, standingEscalations, type Principal, type Work } from '../model.js';
+import { Refusal, demand, resolveEscalation, standingEscalations, type EscalationTrigger, type Principal, type Work } from '../model.js';
 import { save, wakeJob } from '../store.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, standingRefusal, approvalApplyGraceMs, type Decision, type DecisionState } from '../model/approval.js';
 import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
@@ -275,18 +275,39 @@ async function finish(db: Db, work: Work, approver: Principal, decisionId: strin
  * lock and with the same effects: one trigger cleared, gates re-evaluated, history appended.
  */
 async function resolveInTransaction(services: Services, db: Db, now: Date, work: Work, decision: DecisionRecord, approver: Principal, approvalReason: string) {
-  const target = standingEscalations(work).find(entry => entry.trigger === decision.input.trigger)!;
-  resolveEscalation(work, decision.input.trigger);
+  return resolveStanding(services, db, now, work, decision, decision.input.trigger, decision.reason, approver, approvalReason);
+}
+async function resolveStanding(services: Services, db: Db, now: Date, work: Work, decision: DecisionRecord, trigger: EscalationTrigger, reason: string, approver: Principal, approvalReason: string) {
+  const target = standingEscalations(work).find(entry => entry.trigger === trigger)!;
+  resolveEscalation(work, trigger);
   const all = (await lockedWork(db, [work.id])).map(item => item.id === work.id ? work : item);
   services.engine.evaluate(work, all, now);
   // The engine's auto-dispatch ledger entries for this evaluation; the method is internal to the
   // engine's own transactions, and this is one of them.
   await (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, work, now);
-  const details = { trigger: decision.input.trigger, escalation: target, resolvedBy: decision.requestedBy, approvedBy: approver.id, decision: decision.id, sessionKind: 'ai', reason: decision.reason, approvalReason, at: now.toISOString() };
+  const details = { trigger, escalation: target, resolvedBy: decision.requestedBy, approvedBy: approver.id, decision: decision.id, sessionKind: 'ai', reason, approvalReason, at: now.toISOString() };
   await save(db, work, decision.requestedBy, 'resolve', now, details);
   await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, decision.requestedBy, 'escalation.resolved', JSON.stringify({ details })]);
   if (work.submission) await wakeJob(db, work.id);
-  return `Resolved ${decision.input.trigger} on ${work.key}`;
+  return `Resolved ${trigger} on ${work.key}`;
+}
+
+/**
+ * GY-1348. The requirement-weakening escalation an approved requirements decision's own application
+ * raised is resolved by that approval, in the same pass: the independent approver already judged the
+ * narrowing, so it neither holds the merge gate nor stands as a fault waiting on a second resolve.
+ * Only the escalation this application raised is resolved — one the engine stamped with the
+ * application's own time and requester — so one an operator's direct revision or any other writer
+ * raised stands exactly as before. A replayed application finds it resolved already and does nothing.
+ */
+async function resolveDecidedWeakening(services: Services, decision: DecisionRecord, applied: Work, approver: Principal, approvalReason: string) {
+  const raised = standingEscalations(applied).find(entry => entry.trigger === 'requirement-weakening' && entry.actor === decision.requestedBy && entry.at === applied.updatedAt);
+  if (!raised) return null;
+  return services.engine.store.transaction(async (db, now) => {
+    const work = await findWork(db, applied.id);
+    if (!work || !standingEscalations(work).some(entry => entry.trigger === 'requirement-weakening' && entry.at === raised.at && entry.actor === raised.actor)) return null;
+    return resolveStanding(services, db, now, work, decision, 'requirement-weakening', `The requirements decision ${decision.id} that raised it was approved by ${approver.id}: ${decision.reason}`.slice(0, 2000), approver, approvalReason);
+  });
 }
 
 export async function applyThroughEngine(services: Services, decision: DecisionRecord, approver: Principal, approvalReason: string) {
@@ -297,7 +318,11 @@ export async function applyThroughEngine(services: Services, decision: DecisionR
   switch (decision.action) {
     case 'release': await engine.execute(actor, 'ready', decision.workId, { expectedRevision: input.expectedRevision, reason }, key); return 'Released to ready';
     case 'unblock': await engine.execute(actor, 'unblock', decision.workId, { reason, expectedRevision: input.expectedRevision }, key); return 'Blocker cleared';
-    case 'requirements': { const work = await engine.execute(actor, 'requirements', decision.workId, { ...input, reason }, key); return `Requirements revised to policy revision ${work.policyRevision}`; }
+    case 'requirements': {
+      const work = await engine.execute(actor, 'requirements', decision.workId, { ...input, reason }, key);
+      const resolved = await resolveDecidedWeakening(services, decision, work, approver, approvalReason);
+      return `Requirements revised to policy revision ${work.policyRevision}${resolved ? `; the requirement-weakening it raised is resolved by this approval` : ''}`;
+    }
     case 'rework': await engine.execute(actor, 'rework', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Rework authorized';
     case 'recover': await engine.execute(actor, 'recover', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Containment quarantine recovered';
     case 'attest': await engine.execute(actor, 'evidence', decision.workId, input, key, { attestation: { decision: decision.id, requestedBy: decision.requestedBy, approvedBy: approver.id } }); return `${input.proof} attested ${input.result} for ${input.sha}`;
