@@ -320,6 +320,7 @@
     "tests/docs-glossary.test.ts": 291,
     "tests/docs-obligation.test.ts": 2401,
     "tests/docs-sync-followups.test.ts": 744,
+    "tests/e2e-cases.test.ts": 4500,
     "tests/ended-attempt-fence.test.ts": 1929,
     "tests/ended-attempt-frees-slot.test.ts": 1221,
     "tests/escalation-context.test.ts": 5837,

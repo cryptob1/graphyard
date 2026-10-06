@@ -204,7 +204,9 @@ jobs:
         # UAT must keep serving the candidate SHA, which is checked again after the last suite:
         # `endpoints` probes /healthz?strict and /, `api` creates, replays and lists a work item and
         # reads the board and status through UAT's own API, and `browser` loads the dashboard UAT
-        # serves in Chromium, signs in with the UAT token and opens the Work view. Those three exercise
+        # serves in Chromium, signs in with the UAT token and opens the Work view, and `e2e` runs every
+        # repository case under e2e/cases/ targeted at uat (docs/validation.md), writing its report for
+        # the next step. Those four exercise
         # the UAT deployment itself; the long suites ran on runners at the candidate SHA, so each
         # long-suite job's result above joins the record as a suite of its own. A failure files one
         # follow-up item naming the failing
@@ -215,6 +217,7 @@ jobs:
           # shellcheck disable=SC2016
           node bin/graphyard.mjs release validate "${{ needs.candidate.outputs.id }}" --url "$UAT_URL" --wait 1200 --api \
             --suite 'browser=node --import tsx --eval "import(\"./src/release-candidate.ts\").then(m => m.runBrowserSuite())"' \
+            --suite 'e2e=node --import tsx --eval "import(\"./src/e2e/runner.ts\").then(m => m.runE2eSuite())"' \
             --suite 'container-acceptance=test "$CONTAINER_ACCEPTANCE" = success' \
             --suite 'container-recovery=test "$CONTAINER_RECOVERY" = success' \
             --suite 'chart=test "$CHART" = success'
@@ -224,6 +227,19 @@ jobs:
           CHART: ${{ needs.chart.result }}
           UAT_URL: ${{ vars.UAT_URL }}
           GRAPHYARD_UAT_TOKEN: ${{ secrets.GRAPHYARD_UAT_TOKEN }}
+          GRAPHYARD_E2E_REPORT: ${{ runner.temp }}/e2e-report.json
+          GRAPHYARD_CANDIDATE_ID: ${{ needs.candidate.outputs.id }}
+          GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
+          GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
+      - name: Record the E2E case runs on the control plane's Tests page
+        # Best effort and after the verdict: recording never decides promotion. The suite command
+        # never holds the release credential, so this step records the report it wrote.
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/e2e-report.json" ]]; then node bin/graphyard.mjs e2e record "$RUNNER_TEMP/e2e-report.json"; else echo 'The e2e suite wrote no report; nothing to record'; fi
+        env:
           GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
           GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
   promote:
