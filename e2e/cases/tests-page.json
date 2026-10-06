@@ -1,0 +1,16 @@
+{
+  "id": "tests-page",
+  "title": "The Tests page lists the test cases and their history",
+  "description": "GET /api/tests answers every case with its window of recent runs, and the dashboard's Tests page renders after sign-in.",
+  "tags": ["dashboard", "tests"],
+  "target": "uat",
+  "steps": [
+    { "kind": "http", "name": "read the test summary", "method": "GET", "path": "/api/tests", "status": 200, "expect": [{ "path": "window", "equals": 20 }, { "path": "cases", "type": "array" }] },
+    { "kind": "browser", "action": "open", "path": "/" },
+    { "kind": "browser", "action": "fill", "label": "Access token", "value": "{{token}}" },
+    { "kind": "browser", "action": "click", "role": "button", "text": "Open control plane", "exact": false },
+    { "kind": "browser", "action": "click", "role": "button", "text": "Tests" },
+    { "kind": "browser", "action": "expectText", "role": "heading", "text": "Tests" },
+    { "kind": "browser", "action": "expectText", "text": "its latest trusted result, and its history", "exact": false }
+  ]
+}

@@ -1,0 +1,121 @@
+{
+  "id": "work-item-detail",
+  "title": "An item's detail page shows its criteria",
+  "description": "GET /api/work/ID \u2014 the read the item's dashboard page is built on \u2014 answers the item with its criteria, proofs and gates by id and by key, and opening the item from the Work view in the dashboard shows its criterion.",
+  "tags": [
+    "api",
+    "dashboard",
+    "work"
+  ],
+  "target": "uat",
+  "steps": [
+    {
+      "kind": "http",
+      "name": "create the item",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "title": "E2E case {{case}} run {{run}}",
+        "description": "Created by the work-item-detail E2E case.",
+        "type": "chore",
+        "priority": 3,
+        "criteria": [
+          {
+            "id": "AC-1",
+            "text": "The detail page shows this criterion",
+            "proofs": [
+              "manual:e2e-case-detail"
+            ]
+          }
+        ],
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        }
+      },
+      "status": 200,
+      "save": {
+        "id": "id",
+        "key": "key"
+      }
+    },
+    {
+      "kind": "http",
+      "name": "read the item by id",
+      "method": "GET",
+      "path": "/api/work/{{id}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "key",
+          "equals": "{{key}}"
+        },
+        {
+          "path": "criteria",
+          "includes": {
+            "id": "AC-1",
+            "text": "The detail page shows this criterion",
+            "proofs": [
+              "manual:e2e-case-detail"
+            ]
+          }
+        },
+        {
+          "path": "gates",
+          "type": "array"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "read the item by key",
+      "method": "GET",
+      "path": "/api/work/{{key}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "id",
+          "equals": "{{id}}"
+        }
+      ]
+    },
+    {
+      "kind": "browser",
+      "action": "open",
+      "path": "/"
+    },
+    {
+      "kind": "browser",
+      "action": "fill",
+      "label": "Access token",
+      "value": "{{token}}"
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "role": "button",
+      "text": "Open control plane",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "unfold the backlog group",
+      "action": "click",
+      "text": "Backlog",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "text": "E2E case {{case}} run {{run}}",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "The detail page shows this criterion"
+    }
+  ]
+}

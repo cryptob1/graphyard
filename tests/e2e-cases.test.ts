@@ -1,0 +1,254 @@
+import { after, before, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import EmbeddedPostgres from 'embedded-postgres';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { Store } from '../src/store.js';
+import { Engine } from '../src/engine.js';
+import { server } from '../src/server.js';
+import type { Principal, Work } from '../src/model.js';
+import type { ScenarioRun } from '../src/model/test-cases.js';
+import { caseDirectory, loadCases, parseCase, scenarioDefinition, selectCases, syncCases, type CaseFile } from '../src/e2e/case.js';
+import { recordRuns, runCases, summarize, type E2eLauncher, type E2ePage } from '../src/e2e/runner.js';
+import { commands } from '../src/cli/index.js';
+import { TestsView } from '../web/pages/tests.js';
+
+// GY-1351: the E2E case repository. Cases are files under e2e/cases/, registered as scenario
+// revisions, run against a base URL by `graphyard e2e run`, and tracked on the Tests page.
+const operator: Principal = { id: 'operator', role: 'admin' };
+const worker: Principal = { id: 'implementer', role: 'worker' };
+const principals = [operator, worker];
+const tokens = new Map(principals.map(p => [p.id, `${p.id}-${'t'.repeat(32)}`]));
+const root = new URL('..', import.meta.url).pathname;
+const cli = new URL('../bin/graphyard.mjs', import.meta.url).pathname;
+
+let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
+
+before(async () => {
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1351;
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('e2e-cases'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  await database.initialise(); await database.start(); await database.createDatabase('e2e_cases_test');
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/e2e_cases_test`); await store.init();
+  engine = new Engine(store, [15368], 120, 'owner/project');
+  http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })), null);
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  url = `http://127.0.0.1:${(http.address() as any).port}`;
+});
+after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); });
+
+/** The CLI's authenticated request helper, as one principal. */
+const apiAs = (actor: Principal) => async (path: string, data?: unknown, key: string = randomUUID()) => {
+  const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST',
+    headers: { Authorization: `Bearer ${tokens.get(actor.id)}`, 'Content-Type': 'application/json', 'Idempotency-Key': key },
+    body: data === undefined ? undefined : JSON.stringify(data) });
+  const body = await response.json() as any;
+  if (!response.ok) throw Object.assign(new Error(body?.error ?? `HTTP ${response.status}`), { status: response.status });
+  return body;
+};
+const call = async (path: string, actor: Principal, data?: unknown) => {
+  const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST',
+    headers: { Authorization: `Bearer ${tokens.get(actor.id)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: data === undefined ? undefined : JSON.stringify(data) });
+  return { status: response.status, body: await response.json() as any };
+};
+/** A scratch repository holding the given case files under e2e/cases/. */
+async function repository(files: Record<string, unknown>) {
+  const dir = await temporaryDirectory('e2e-repo');
+  await mkdir(join(dir, caseDirectory), { recursive: true });
+  for (const [name, content] of Object.entries(files)) await writeFile(join(dir, caseDirectory, name), typeof content === 'string' ? content : JSON.stringify(content, null, 2));
+  return dir;
+}
+const http200 = (id: string, extra: Record<string, unknown> = {}) => ({ id, title: `Case ${id}`, tags: ['api'], target: 'uat', steps: [{ kind: 'http', method: 'GET', path: '/api/tests', status: 200 }], ...extra });
+const refusal = (file: string, value: unknown) => { try { parseCase(file, typeof value === 'string' ? value : JSON.stringify(value)); return null; } catch (error) { return (error as Error).message; } };
+
+test('unit:e2e-case-format — a case is a JSON file under e2e/cases/ with id, title, tags, target and http and browser steps; a malformed case is refused naming the file and field', async () => {
+  const shipped = await loadCases(root);
+  const ids = shipped.map(entry => entry.definition.id);
+  for (const id of ['sign-in', 'create-work-item', 'board', 'work-item-detail', 'tests-page']) assert.ok(ids.includes(id), `the repository ships the ${id} case`);
+  assert.ok(shipped.length >= 5);
+  assert.ok(shipped.every(entry => entry.file === `e2e/cases/${entry.definition.id}.json`));
+  assert.ok(shipped.some(entry => entry.definition.steps.some(step => step.kind === 'browser')) && shipped.some(entry => entry.definition.steps.some(step => step.kind === 'http')), 'the shipped cases drive both the API and the dashboard');
+  assert.deepEqual(selectCases(shipped, { tag: 'dashboard' }).map(entry => entry.definition.id).sort(), ['sign-in', 'tests-page', 'work-item-detail']);
+  assert.equal(selectCases(shipped, { id: 'board' }).length, 1);
+  assert.throws(() => selectCases(shipped, { id: 'missing' }), /No E2E case missing/);
+
+  const file = 'e2e/cases/broken.json';
+  assert.match(refusal(file, { ...http200('broken'), steps: [{ kind: 'http', method: 'GET', path: '/api/tests' }] })!, /^e2e\/cases\/broken\.json: steps\.0\.status: /);
+  assert.match(refusal(file, { ...http200('broken'), target: 'production' })!, /broken\.json: target: /);
+  assert.match(refusal(file, { ...http200('broken'), steps: [{ kind: 'browser', action: 'click', role: 'button' }, { kind: 'http', method: 'GET', path: '/', status: 200 }] })!, /broken\.json: steps\.0\.text: a browser click step needs text/);
+  assert.match(refusal(file, { ...http200('broken'), steps: [{ kind: 'http', method: 'GET', path: '/', status: 200, expect: [{ path: 'a', equals: 1, exists: true }] }] })!, /steps\.0\.expect\.0: an assertion names exactly one/);
+  assert.match(refusal(file, { ...http200('broken'), steps: [{ kind: 'browser', action: 'open', path: '/' }] })!, /broken\.json: steps: a case checks something/);
+  assert.match(refusal(file, { ...http200('broken'), owner: 'me' })!, /broken\.json: \(case\): Unrecognized key/);
+  assert.match(refusal(file, { ...http200('broken'), steps: [{ kind: 'shell', run: 'true' }] })!, /broken\.json: steps\.0\.kind: /);
+  assert.match(refusal(file, http200('other'))!, /broken\.json: id: the case id "other" must match its file name "broken"/);
+  assert.match(refusal(file, '{ not json')!, /broken\.json: \(case\): not valid JSON/);
+  assert.equal(refusal(file, http200('broken')), null);
+  // Loading a directory refuses every malformed file at once, each by name.
+  const dir = await repository({ 'good.json': http200('good'), 'bad.json': { ...http200('bad'), tags: ['Not A Tag'] } });
+  await assert.rejects(loadCases(dir), /e2e\/cases\/bad\.json: tags\.0: a tag is lower-case/);
+});
+
+test('unit:e2e-case-sync-revisions — e2e sync registers each case as a scenario revision; editing a case adds a new immutable revision and e2e:ID proofs keep their pinned revision', async () => {
+  const dir = await repository({ 'sync-a.json': http200('sync-a'), 'sync-b.json': http200('sync-b', { tags: ['api', 'board'] }) });
+  const cases = await loadCases(dir);
+  const api = apiAs(operator);
+  assert.deepEqual(await syncCases(api, cases), [{ id: 'sync-a', revision: 1, change: 'created' }, { id: 'sync-b', revision: 1, change: 'created' }]);
+  assert.deepEqual((await syncCases(api, cases)).map(result => result.change), ['unchanged', 'unchanged'], 'syncing again changes nothing');
+  const first = (await api('scenarios')).find((scenario: any) => scenario.id === 'sync-b');
+  assert.equal(first.testPath, 'e2e/cases/sync-b.json'); assert.equal(first.environment, 'uat'); assert.equal(first.runner, 'graphyard-e2e'); assert.deepEqual(first.tags, ['api', 'board']);
+  const unregistered = await loadCases(await repository({ 'sync-c.json': http200('sync-c') }));
+  await assert.rejects(syncCases(apiAs(worker), unregistered), /Operator permission required/, 'only an operator registers cases');
+
+  // An item requiring e2e:sync-a pins revision 1; editing the case publishes revision 2 and leaves revision 1 and the pin as they were.
+  const pinned = await engine.execute(operator, 'create', null, { title: 'Pinned to sync-a', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'sync-a passes', proofs: ['e2e:sync-a'] }] }, randomUUID()) as Work;
+  assert.equal(pinned.scenarioRequirements[0].revision, 1);
+  await writeFile(join(dir, caseDirectory, 'sync-a.json'), JSON.stringify(http200('sync-a', { steps: [{ kind: 'http', method: 'GET', path: '/api/tests', status: 200, expect: [{ path: 'window', equals: 20 }] }] })));
+  const edited = await loadCases(dir);
+  assert.deepEqual(await syncCases(api, edited), [{ id: 'sync-a', revision: 2, change: 'revised' }, { id: 'sync-b', revision: 1, change: 'unchanged' }]);
+  const revisions = (await api('scenarios')).filter((scenario: any) => scenario.id === 'sync-a');
+  assert.deepEqual(revisions.map((scenario: any) => scenario.revision), [2, 1]);
+  assert.equal(revisions[1].hash, (await store.pool.query('SELECT document FROM scenarios WHERE id=$1 AND revision=1', ['sync-a'])).rows[0].document.hash);
+  assert.notEqual(revisions[0].hash, revisions[1].hash);
+  await assert.rejects(store.pool.query("UPDATE scenarios SET document = document WHERE id='sync-a'"), /append-only/, 'a revision never changes');
+  assert.equal((await engine.store.list()).find(w => w.id === pinned.id)!.scenarioRequirements[0].revision, 1, 'the existing proof keeps pinning revision 1');
+  const later = await engine.execute(operator, 'create', null, { title: 'Pinned to the edit', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'sync-a passes', proofs: ['e2e:sync-a'] }] }, randomUUID()) as Work;
+  assert.equal(later.scenarioRequirements[0].revision, 2, 'new work pins the edited revision');
+  // The shipped cases register cleanly too.
+  assert.ok((await syncCases(api, await loadCases(root))).every(result => result.revision === 1 && result.change !== 'revised'));
+});
+
+test('unit:e2e-runner-results — e2e run runs passing and failing cases against a server, prints each failing step, writes a JSON report, exits non-zero and records each run', async () => {
+  const failing = { id: 'wrong-status', title: 'A case expecting the wrong answer', tags: ['api'], target: 'any', steps: [
+    { kind: 'http', name: 'read the board', method: 'GET', path: '/api/board', status: 200 },
+    { kind: 'http', name: 'expect a missing item', method: 'GET', path: '/api/work/NOPE-1', status: 200 },
+    { kind: 'http', method: 'GET', path: '/api/tests', status: 200 }] };
+  const dir = await repository({ 'wrong-status.json': failing });
+  // The shipped API-only cases run for real against this control plane; their browser siblings need a built dashboard.
+  for (const id of ['create-work-item', 'board']) await cp(join(root, caseDirectory, `${id}.json`), join(dir, caseDirectory, `${id}.json`));
+  const cases = await loadCases(dir);
+  assert.ok(cases.every(entry => entry.definition.steps.every(step => step.kind === 'http')));
+  await syncCases(apiAs(operator), cases);
+  const report = join(dir, 'report.json');
+  const { GRAPHYARD_TOKEN_FILE: _file, ...inherited } = process.env;
+  const env = { ...inherited, GRAPHYARD_URL: url, GRAPHYARD_TOKEN: tokens.get(operator.id)!, GRAPHYARD_REPOSITORY_ROOT: dir };
+  const runCli = (...args: string[]) => new Promise<{ code: number; stdout: string; stderr: string }>(resolve =>
+    execFile(process.execPath, [cli, 'e2e', 'run', ...args], { cwd: dir, env, timeout: 120_000 }, (error, stdout, stderr) => resolve({ code: error ? Number((error as any).code ?? 1) : 0, stdout, stderr })));
+
+  // The shipped API cases pass against a real control plane; the failing case makes the run exit non-zero.
+  const mixed = await runCli('--tag', 'api', '--url', url, '--report', report);
+  assert.equal(mixed.code, 1, 'the api tag includes the failing case');
+  const all = JSON.parse(await readFile(report, 'utf8'));
+  const outcome = (id: string) => all.cases.find((entry: any) => entry.id === id);
+  for (const id of ['create-work-item', 'board']) assert.equal(outcome(id).outcome, 'pass', `${id}: ${JSON.stringify(outcome(id).failingStep)}`);
+  assert.deepEqual(outcome('wrong-status').failingStep, { index: 1, name: 'expect a missing item', reason: outcome('wrong-status').failingStep.reason });
+  assert.match(outcome('wrong-status').failingStep.reason, /expected status 200, got 404/);
+  assert.equal(outcome('wrong-status').executed, 2, 'a case stops at its failing step');
+  assert.equal(outcome('wrong-status').attempts, 1, 'no retry by default');
+  assert.equal(all.passed, 2); assert.equal(all.failed, 1); assert.equal(all.url, url);
+  const served = (await (await fetch(`${url}/healthz`)).json() as any).commit;
+  assert.equal(all.sha, /^[0-9a-f]{40}$/.test(served ?? '') ? served : null, 'the report names the commit the target served');
+  assert.match(mixed.stdout, /FAIL wrong-status/); assert.match(mixed.stdout, /step 2 expect a missing item: expected status 200, got 404/); assert.match(mixed.stdout, /PASS board/);
+  assert.match(mixed.stdout, /2 passed, 1 failed/);
+
+  // Each result is a run of the case's registered revision, with the base URL, SHA, duration, outcome and failing step.
+  const runs = (await call('tests/wrong-status/runs', operator)).body.runs as ScenarioRun[];
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].result, 'fail'); assert.equal(runs[0].scenarioRevision, 1); assert.equal(runs[0].run.kind, 'e2e'); assert.equal(runs[0].run.id, all.runId);
+  assert.deepEqual(runs[0].e2e, { baseUrl: url, durationMs: outcome('wrong-status').durationMs, failingStep: outcome('wrong-status').failingStep });
+  assert.equal(runs[0].environment, new URL(url).host); assert.equal(runs[0].sha, all.sha ?? 'unknown');
+  const passed = (await call('tests/board/runs', operator)).body.runs as ScenarioRun[];
+  assert.equal(passed[0].result, 'pass'); assert.equal(passed[0].e2e!.failingStep, null);
+
+  // One case passing exits zero; --no-record leaves history alone.
+  const one = await runCli('board', '--url', url, '--report', report, '--no-record', '--environment', 'local');
+  assert.equal(one.code, 0, one.stderr);
+  assert.equal(JSON.parse(await readFile(report, 'utf8')).environment, 'local');
+  assert.equal((await call('tests/board/runs', operator)).body.runs.length, 1);
+  // A token is never an argument.
+  const refused = await runCli('--all', '--url', url, '--token', 'secret');
+  assert.notEqual(refused.code, 0); assert.match(refused.stderr, /never takes a token as an argument/);
+  assert.ok(commands.find(command => command.name === 'e2e')?.help.some(line => line.includes('e2e run')));
+
+  // In process: a per-case retry, a per-step timeout, and an unsynced case reported as not recorded.
+  let calls = 0;
+  const flaky = (async () => new Response(++calls % 2 ? '{}' : '[]', { status: calls % 2 ? 500 : 200 })) as typeof fetch;
+  const retried = await runCases(cases.filter(entry => entry.definition.id === 'wrong-status'), { url: 'http://target.test', token: 't', fetcher: flaky, retries: 1 });
+  assert.equal(retried.cases[0].attempts, 2);
+  const hang = (async (_: unknown, init?: RequestInit) => new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted by the step timeout'))))) as typeof fetch;
+  const timed = await runCases([cases.find(entry => entry.definition.id === 'board')!], { url: 'http://target.test', token: 't', fetcher: hang, stepTimeoutMs: 50 });
+  assert.equal(timed.cases[0].outcome, 'fail'); assert.match(timed.cases[0].failingStep!.reason, /abort|within 50 ms/);
+  const unsynced: CaseFile = { file: 'e2e/cases/unsynced.json', definition: parseCase('e2e/cases/unsynced.json', JSON.stringify(http200('unsynced'))) };
+  const local = await runCases([unsynced], { url, token: tokens.get(operator.id)! });
+  await recordRuns(apiAs(operator), [unsynced], local);
+  assert.deepEqual(local.cases[0].recorded, { error: 'no registered revision matches e2e/cases/unsynced.json; run graphyard e2e sync' });
+  assert.match(summarize(local), /not recorded: no registered revision/);
+});
+
+test('unit:e2e-runner-results — browser steps open, fill, click and expect text on one page, and a page that never shows the text fails that step', async () => {
+  const actions: string[] = [];
+  const page = (missing: string): E2ePage => {
+    const locator = (what: string) => ({ first: () => locator(what), click: async () => { actions.push(`click ${what}`); }, fill: async (value: string) => { actions.push(`fill ${what}=${value}`); },
+      waitFor: async () => { if (what.includes(missing)) throw new Error(`Timeout waiting for ${what}`); actions.push(`see ${what}`); } });
+    return { on: () => undefined, goto: async target => { actions.push(`open ${target}`); }, getByLabel: label => locator(label), getByRole: (role, options) => locator(`${role}:${options.name}:${options.exact}`),
+      getByText: text => locator(`text:${text}`), close: async () => {} };
+  };
+  let launches = 0;
+  const launcher = (missing: string): E2eLauncher => ({ launch: async () => { launches++; return { newPage: async () => page(missing), close: async () => {} }; } });
+  const signIn = (await loadCases(root)).filter(entry => entry.definition.id === 'sign-in');
+  const health = (async () => new Response('{}')) as typeof fetch;
+  const ok = await runCases(signIn, { url: 'https://uat.example.test', token: 'uat-token', launcher: launcher('nothing'), fetcher: health });
+  assert.equal(ok.cases[0].outcome, 'pass', JSON.stringify(ok.cases[0].failingStep));
+  assert.deepEqual(actions, ['open https://uat.example.test/', 'fill Access token=uat-token', 'click button:Open control plane:false', 'see navigation:Primary:true', 'see heading:Work:true']);
+  assert.equal(launches, 1);
+  const bad = await runCases(signIn, { url: 'https://uat.example.test', token: 'uat-token', launcher: launcher('heading:Work'), fetcher: health });
+  assert.deepEqual(bad.cases[0].failingStep, { index: 4, name: 'expect heading "Work"', reason: 'Timeout waiting for heading:Work:true' });
+});
+
+test('unit:e2e-tracking-history — the Tests page lists each E2E case with last outcome, SHA, environment, pass rate and flaky flag over 20 runs, and each failed run\'s failing step; the route reads bounded history', async () => {
+  const dir = await repository({ 'tracked.json': http200('tracked', { tags: ['api', 'tracked'] }) });
+  const [tracked] = await loadCases(dir);
+  await syncCases(apiAs(operator), [tracked]);
+  const sha = (n: number) => String(n % 10).repeat(40);
+  const record = (n: number, outcome: 'pass' | 'fail', environment = 'uat') => call('scenarios/tracked/runs', operator, { revision: 1, runId: `run-${n}`, baseUrl: 'https://uat.example.test', sha: sha(n), environment,
+    durationMs: 100 + n, outcome, executed: 1, failingStep: outcome === 'fail' ? { index: 0, name: 'GET /api/tests', reason: `expected status 200, got 50${n % 10}` } : null });
+  // 25 runs: the first five fail; of the last 20, run 23 fails on the same commit run 13 passed on.
+  for (let n = 1; n <= 25; n++) assert.equal((await record(n, n <= 5 || n === 23 ? 'fail' : 'pass', n === 25 ? 'staging' : 'uat')).status, 200);
+  assert.equal((await record(25, 'pass', 'staging')).status, 200, 'a retried report is the same run');
+  assert.equal((await store.pool.query("SELECT count(*) AS n FROM scenario_runs WHERE scenario='tracked'")).rows[0].n, '25');
+
+  const summary = (await call('tests', operator)).body;
+  const entry = summary.cases.find((c: any) => c.id === 'tracked');
+  assert.equal(summary.window, 20);
+  assert.equal(entry.history.length, 20, 'the summary reads at most the window of runs');
+  assert.equal(entry.runs, 25); assert.equal(entry.failures, 6);
+  assert.equal(entry.latest.result, 'pass'); assert.equal(entry.latest.sha, sha(25)); assert.equal(entry.latest.environment, 'staging');
+  assert.equal(entry.passRate, 19 / 20);
+  assert.equal(entry.flaky, true); assert.match(entry.flakyReason, new RegExp(`passed and failed on commit ${sha(23).slice(0, 8)}`));
+  assert.deepEqual(entry.e2e, { tags: ['api', 'tracked'], target: 'uat' });
+  const failed = entry.history.find((run: ScenarioRun) => run.result === 'fail');
+  assert.deepEqual(failed.e2e.failingStep, { index: 0, name: 'GET /api/tests', reason: 'expected status 200, got 503' });
+  const older = (await call(`tests/tracked/runs?before=${entry.history.at(-1).seq}&limit=50`, operator)).body;
+  assert.equal(older.runs.length, 5); assert.ok(older.runs.every((run: ScenarioRun) => run.result === 'fail' && run.e2e?.failingStep));
+
+  // Recording is an operator's command bound to a registered revision.
+  assert.equal((await call('scenarios/tracked/runs', worker, { revision: 1, runId: 'w', baseUrl: 'https://x.test', sha: null, environment: 'uat', durationMs: 1, outcome: 'pass', executed: 1, failingStep: null })).status, 403);
+  assert.equal((await call('scenarios/tracked/runs', operator, { revision: 9, runId: 'r9', baseUrl: 'https://x.test', sha: null, environment: 'uat', durationMs: 1, outcome: 'pass', executed: 1, failingStep: null })).status, 404);
+  assert.equal((await call('scenarios/tracked/runs', operator, { revision: 1, runId: 'r10', baseUrl: 'https://x.test', sha: null, environment: 'uat', durationMs: 1, outcome: 'fail', executed: 1, failingStep: null })).status, 400, 'a failure names its step');
+
+  // The page renders the case's outcome, commit, environment, pass rate, flaky flag and each failed run's step.
+  const html = renderToStaticMarkup(createElement(TestsView, { data: summary, error: '', loading: false, filter: 'all', setFilter: () => {}, retry: () => {}, api: async () => ({}), canEdit: false }));
+  const row = html.slice(html.indexOf('data-case="tracked"'));
+  const text = row.slice(0, row.indexOf('</tr>')).replace(/<[^>]+>/g, ' ').replace(/&quot;/g, '"').replace(/\s+/g, ' ');
+  assert.match(text, /E2E case · e2e\/cases\/tracked\.json · targets uat · api, tracked/);
+  assert.match(text, /passed 55555555 on staging/);
+  assert.match(text, /95% of 20 runs/);
+  assert.match(text, /flaky: passed and failed on commit 33333333/);
+  assert.match(text, /failed at step 1 GET \/api\/tests: expected status 200, got 503/);
+  assert.match(text, /e2e run run-25 · https:\/\/uat\.example\.test/);
+  assert.match(row, /href="#case-tracked"/);
+  assert.ok(scenarioDefinition(tracked).steps.length === 1);
+});

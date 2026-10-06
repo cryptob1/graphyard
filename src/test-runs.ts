@@ -2,6 +2,7 @@ import type { Evidence, Work } from './model.js';
 import { demand } from './model.js';
 import { flakiness, flakyWindow, runKey, scenarioRun, type ScenarioRun } from './model/test-cases.js';
 import type { Scenario } from './scenarios.js';
+import { caseRunner } from './e2e/case.js';
 
 type Queryable = { query: (text: string, values?: unknown[]) => Promise<{ rows: any[] }> };
 
@@ -36,6 +37,10 @@ export interface CaseSummary {
   staleRevision: boolean;
   runs: number; failures: number; lastFailure: ScenarioRun | null;
   flaky: boolean; flakyReason: string | null;
+  /** Passed runs over judged runs (neither skipped nor withdrawn) in the history window, or null when none was judged. */
+  passRate?: number | null;
+  /** A repository E2E case (GY-1351): its file's tags and target; null for a case defined by hand. */
+  e2e?: { tags: string[]; target: string } | null;
   /** The newest runs, newest first, `historyWindow` at most; older runs page through `runHistory`. */
   history: ScenarioRun[];
 }
@@ -68,10 +73,13 @@ export async function testSummary(db: Queryable): Promise<{ window: number; case
       if (!entry.criteria.includes(link.criterion)) entry.criteria.push(link.criterion);
       byWork.set(link.key, entry);
     }
+    const judged = history.filter(run => !run.withdrawn && run.result !== 'skipped');
     cases.push({ id, title: definition?.title ?? null, purpose: definition?.purpose ?? null, testPath: definition?.testPath ?? null, environment: definition?.environment ?? null,
       revision: definition?.revision ?? null, changed: definition ? { at: definition.createdAt, by: definition.createdBy } : null, links: [...byWork.values()],
       latest, staleRevision: !!latest && !!definition && latest.scenarioRevision !== null && latest.scenarioRevision < definition.revision,
-      runs: Number(total?.runs ?? 0), failures, lastFailure, ...(({ flaky, reason }) => ({ flaky, flakyReason: reason }))(flakiness(history)), history });
+      runs: Number(total?.runs ?? 0), failures, lastFailure, ...(({ flaky, reason }) => ({ flaky, flakyReason: reason }))(flakiness(history)),
+      passRate: judged.length ? judged.filter(run => run.result === 'pass').length / judged.length : null,
+      e2e: definition?.runner === caseRunner ? { tags: definition.tags ?? [], target: definition.environment } : null, history });
   }
   return { window: historyWindow, cases };
 }

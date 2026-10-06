@@ -11,6 +11,8 @@ import {
   apiSuite, assessProductionServing, commandSuite, cut, deployToUat, endpointSuite, gitIn, itemsFromCommits, ledgerStatus, productionBranch, promote, readLedger,
   servedRevision, uatBranch, validateAndRecord, type ReleaseCandidate, type Suite,
 } from '../src/release-candidate.js';
+import { loadCases, parseCase } from '../src/e2e/case.js';
+import { e2eSuite } from '../src/e2e/runner.js';
 
 const run = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
@@ -263,4 +265,54 @@ test('integration:failed-candidate-fix-forward — a failed candidate files one 
   assert.deepEqual(next.candidate.items.map((item: any) => item.key), ['GY-900', 'GY-41'], 'nothing reached production, so the failed candidate\'s delivery rides the next one');
   const status = ledgerStatus(readLedger(repo.git));
   assert.deepEqual(status.map(entry => [entry.id, entry.uat?.result ?? null, entry.uat?.followUp ?? null]), [[next.candidate.id, null, null], [candidate.id, 'failed', 'GY-900']]);
+});
+
+test('unit:release-candidate-e2e-suite — UAT runs every case targeted at uat as the e2e suite of release validate; a failing case fails the candidate and its follow-up names the case and step', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/release-candidate.yml', import.meta.url), 'utf8');
+  const validateStep = workflow.slice(workflow.indexOf('node bin/graphyard.mjs release validate'), workflow.indexOf('- name: Record the E2E case runs'));
+  assert.match(validateStep, /--suite 'e2e=node --import tsx --eval "import\(\\"\.\/src\/e2e\/runner\.ts\\"\)\.then\(m => m\.runE2eSuite\(\)\)"'/, 'the uat job runs the e2e suite inside release validate');
+  assert.match(validateStep, /GRAPHYARD_UAT_TOKEN: \$\{\{ secrets\.GRAPHYARD_UAT_TOKEN \}\}/, 'the runner reads UAT\'s token from the uat environment secret');
+  assert.match(validateStep, /UAT_URL: \$\{\{ vars\.UAT_URL \}\}/);
+  assert.match(workflow, /e2e record "\$RUNNER_TEMP\/e2e-report\.json"/, 'a later step records the report with the release credential');
+  assert.match(workflow, /- name: Record the E2E case runs[^]*?continue-on-error: true/, 'recording never decides promotion');
+  const shipped = await loadCases(new URL('..', import.meta.url).pathname);
+  assert.ok(shipped.filter(entry => entry.definition.target === 'uat').length >= 5, 'the shipped cases run on UAT');
+
+  // Against UAT serving the candidate: one case targeted at uat fails its second step, and a case targeted at any is not run.
+  const repo = await repository();
+  const sha = repo.merge('GY-51', 501);
+  const { candidate } = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-01T12:00:00Z'), push: true }) as any;
+  const asked: string[] = [];
+  const uat = (async (url: URL | string, init: RequestInit = {}) => {
+    const path = new URL(String(url)).pathname; asked.push(`${init.method ?? 'GET'} ${path} ${new Headers(init.headers).get('authorization') ?? ''}`.trim());
+    if (path === '/healthz') return new Response(JSON.stringify({ ok: true, commit: sha, revision: 'unknown' }));
+    if (path === '/api/board') return new Response(JSON.stringify({ groups: { backlog: [] } }));
+    return new Response('{"error":"broken"}', { status: 500 });
+  }) as typeof fetch;
+  const file = (id: string, target: string, steps: unknown[]) => ({ file: `e2e/cases/${id}.json`, definition: parseCase(`e2e/cases/${id}.json`, JSON.stringify({ id, title: id, target, steps })) });
+  const cases = [
+    file('board-reads', 'uat', [{ kind: 'http', method: 'GET', path: '/api/board', status: 200, expect: [{ path: 'groups.backlog', type: 'array' }] }]),
+    file('tests-read', 'uat', [{ kind: 'http', method: 'GET', path: '/api/board', status: 200 }, { kind: 'http', name: 'read the tests', method: 'GET', path: '/api/tests', status: 200 }]),
+    file('local-only', 'any', [{ kind: 'http', method: 'GET', path: '/api/never', status: 200 }]),
+  ];
+  const filed: any[] = [];
+  const result = await validateAndRecord(repo.git, candidate.id, 'https://uat.example.test', [recordingSuite('endpoints', true, []), e2eSuite(cases, 'uat-token', { fetcher: uat })],
+    { base: 'main', push: true, timeoutMs: 0, fetcher: uat, file: async item => { filed.push(item); return 'GY-951'; } });
+  assert.equal(result.record.result, 'failed');
+  const e2e = result.record.suites.find(suite => suite.name === 'e2e')!;
+  assert.equal(e2e.passed, false);
+  assert.equal(e2e.detail, '1 of 2 E2E cases failed: case tests-read failed at step 2 (read the tests): expected status 200, got 500: {"error":"broken"}');
+  assert.ok(asked.every(line => !line.includes('/api/never')), 'a case targeted at any does not run on UAT');
+  assert.ok(asked.filter(line => line.includes('/api/')).every(line => line.endsWith('Bearer uat-token')), 'cases drive UAT with the UAT token');
+  assert.equal(filed.length, 1);
+  assert.match(filed[0].title, /failed UAT suite e2e/);
+  assert.match(filed[0].description, /case tests-read failed at step 2 \(read the tests\)/, 'the follow-up names the failing case and step');
+  const refused = promote(repo.git, candidate.id, { base: 'main', push: true, now: new Date() });
+  assert.equal(refused.promoted, false); assert.match(refused.refusals!.join(' '), /failed UAT \(e2e\)/, 'a failing case blocks promotion like any suite');
+
+  // The same cases all passing pass the suite; no case targeted at uat is a failure, never a vacuous pass.
+  const passing = await e2eSuite(cases.slice(0, 1), 'uat-token', { fetcher: uat }).run('https://uat.example.test', candidate);
+  assert.deepEqual(passing, { name: 'e2e', passed: true, detail: `1 E2E case passed against UAT serving ${sha}` });
+  const none = await e2eSuite(cases.slice(2), 'uat-token', { fetcher: uat }).run('https://uat.example.test', candidate);
+  assert.equal(none.passed, false); assert.match(none.detail, /no E2E case targets uat/);
 });
