@@ -251,7 +251,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   // files they match: those matches are the checkout's writes attributed to the attempts most
   // likely to have made them.
   const checkoutOf = async () => options.checkout?.() ?? await readCoordinatorCheckout(coordinatorCheckoutRoot(config.cliPath));
-  const guard = coordinatorCheckoutGuard({ state: () => state, read: checkoutOf, agents: raw.agents, snapshot: raw.snapshot, persist: effects.persist, now, log });
+  const guard = coordinatorCheckoutGuard({ state: () => state, read: checkoutOf, agents: raw.agents, snapshot: raw.snapshot, persist: effects.persist, now, log, recover: effects.recoverHead });
   try {
     const startRefusal = await guard.start(raw.loadedRelease?.commit ?? null);
     if (startRefusal) {
@@ -300,7 +300,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       // fed on each poll so that wait is not mistaken for a hung loop (GY-916).
       const keepAlive = watchdog.supervised ? async () => { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } } : undefined;
       const selfUpgrade = effects.selfUpgrade;
-      await guard.betweenCycles(stopping || !selfUpgrade ? undefined : current => selfUpgrade(current, keepAlive));
+      await guard.betweenCycles(stopping || !selfUpgrade ? undefined : current => selfUpgrade(current, keepAlive), stopping ? undefined : keepAlive);
       // The keep-alive says the process is alive, which a failed cycle leaves true: the watchdog
       // is for a cycle that hangs, and a thrown one has just proved it did not.
       if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
@@ -337,11 +337,14 @@ const escalationKey = 'escalation:dirty-checkout';
  * the sessions whose panes point at the checkout — and the loop neither self-upgrades nor restarts
  * from it until it is clean and back at that commit. The commit the loop runs is the HEAD it
  * loaded its code from; every move its own alignment makes rewrites the expectation, and anything
- * else that moves HEAD under a running loop is drift.
+ * else that moves HEAD under a running loop is drift — unless it moved forward (GY-1356): a clean,
+ * detached HEAD that descends from the commit the loop runs is adopted through `recover`, which
+ * restarts the executors and re-executes the loop onto it, instead of pinning the loop to stale code.
  */
 export function coordinatorCheckoutGuard(deps: {
   state: () => DaemonState; read: () => Promise<CoordinatorCheckout>; agents: DaemonEffects['agents']; snapshot: DaemonEffects['snapshot'];
   persist: DaemonEffects['persist']; now: () => number; log: (line: string) => void; applies?: (root: string) => boolean; enrichMs?: number;
+  recover?: DaemonEffects['recoverHead'];
 }) {
   const applies = deps.applies ?? checkoutGuardApplies, enrichMs = deps.enrichMs ?? 10 * 60_000;
   let expectedHead: string | null = null, enriched: { refusal: string; detail: string; at: number } | null = null;
@@ -364,6 +367,21 @@ export function coordinatorCheckoutGuard(deps: {
       if (!inside || cwd === managed || cwd.startsWith(`${managed}${sep}`)) return [];
       return [`${agent.name ?? agent.agent ?? 'an unnamed session'} (pane ${agent.pane_id ?? 'unknown'}, cwd ${agent.cwd})`];
     });
+  };
+  // GY-1356: a HEAD that moved forward is recovered onto, never stood down on. A recovery refused
+  // for a HEAD (not a descendant, not detached) or failed is tried once per HEAD; the drift the
+  // guard then reports stands until HEAD moves again or the loop is restarted.
+  let unrecovered: string | null = null;
+  const recoverDrift = async (checkout: CoordinatorCheckout, keepAlive?: () => Promise<void>): Promise<SelfUpgradeOutcome | null> => {
+    const from = expectedHead, to = checkout.commit;
+    if (!deps.recover || !from || !to || to === unrecovered || !applies(checkout.root) || coordinatorCheckoutRefusal(checkout, 'the master loop') || !headDrift(checkout)) return null;
+    let recovered: SelfUpgradeOutcome;
+    try { recovered = await deps.recover(deps.state(), from, to, keepAlive); }
+    catch (error) { recovered = { outcome: 'failed', reason: message(error) }; }
+    deps.log(`[graphyard-master] moved HEAD ${to.slice(0, 12)} (from ${from.slice(0, 12)}) ${recovered.outcome === 'upgraded' ? 'recovered' : 'not recovered'}: ${describeSelfUpgrade(recovered)}`);
+    if (recovered.outcome !== 'upgraded') { unrecovered = to; return null; }
+    expectedHead = to;
+    return recovered;
   };
   const escalate = async (checkout: CoordinatorCheckout) => {
     if (!applies(checkout.root)) return null;
@@ -413,8 +431,12 @@ export function coordinatorCheckoutGuard(deps: {
      * The between-cycles read, then the self-upgrade only when the checkout stands clean and at
      * the commit the loop runs. The loop's own alignment is the one move it sanctions.
      */
-    async betweenCycles(selfUpgrade?: (state: DaemonState) => Promise<SelfUpgradeOutcome>) {
-      const refusal = await escalate(await deps.read());
+    async betweenCycles(selfUpgrade?: (state: DaemonState) => Promise<SelfUpgradeOutcome>, keepAlive?: () => Promise<void>) {
+      const checkout = await deps.read();
+      // A forward move adopted here settles any drift attention it raised, and is this cycle's upgrade.
+      const recovered = selfUpgrade ? await recoverDrift(checkout, keepAlive) : null;
+      if (recovered) { await escalate(checkout); return { refusal: null, upgraded: recovered }; }
+      const refusal = await escalate(checkout);
       if (refusal || !selfUpgrade) return { refusal, upgraded: null };
       let upgraded: SelfUpgradeOutcome | null = null;
       try {
