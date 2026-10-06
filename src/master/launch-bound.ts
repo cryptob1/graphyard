@@ -1,3 +1,4 @@
+// Concern: the overall bound on one session launch and the runtime-naming failure past it (GY-1373).
 import type { MasterRun } from './profiles.js';
 import { agentStartCeilingMs, launchStartMs } from './launch.js';
 
