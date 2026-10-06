@@ -1,4 +1,4 @@
-import { after, before, test } from 'node:test';
+import { after, before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -489,11 +489,12 @@ let pgServer: EmbeddedPostgres, pgPort: number, store: Store, engine: Engine, ht
 const stores: Store[] = [];
 const listeners: ReturnType<typeof server>[] = [];
 /**
- * A control plane on its own database of the shared Postgres server, which every later day then
- * runs against. Days share one by default; a day that needs none of the earlier days' items starts
- * a fresh one, since the loop's reconciliation and job passes read every item the database holds,
- * so each earlier day's items make every cycle of a later day slower: the days late in the file ran
- * past their bounds on a slow CI runner (GY-971).
+ * A control plane on its own database of the shared Postgres server. Every test starts on a fresh
+ * one (the `beforeEach` below): the loop's reconciliation and job passes read every item the
+ * database holds, so on a shared plane each earlier day's items made every cycle of a later day
+ * slower — the days late in the file ran past their bounds on a slow CI runner (GY-971), and the
+ * whole file past the release-candidate job's 45-minute timeout (GY-1360) — and a later day's loop
+ * acted on items an earlier day left open, which its own assertions never staged.
  */
 async function controlPlane(database: string) {
   await pgServer.createDatabase(database);
@@ -502,8 +503,8 @@ async function controlPlane(database: string) {
   const setup = new pg.Client({ connectionString: connection });
   await setup.connect();
   for (const statement of clockSql) await setup.query(statement);
-  // A later plane starts at the simulated time the earlier days reached.
-  if (stores.length) await setup.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]);
+  // A plane starts at the simulated time the earlier days reached.
+  await setup.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]);
   await setup.query(`ALTER DATABASE ${database} SET search_path = public, pg_catalog`);
   await setup.end();
   store = new Store(connection); await store.init();
@@ -520,7 +521,6 @@ before(async () => {
   pgServer = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('soak'), user: 'graphyard', password: 'testing-only', port: pgPort, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pgServer.initialise(); await pgServer.start();
   clock.install(start);
-  await controlPlane('soak_test');
   // The fixture coordinator checkout the simulated launches confine against (GY-888).
   coordinatorBase = await temporaryDirectory('soak-coordinator');
   coordinatorRoot = join(coordinatorBase, 'coordinator');
@@ -539,6 +539,8 @@ after(async () => {
   for (const store of stores) await store.close();
   if (pgServer) await pgServer.stop();
 });
+let planes = 0;
+beforeEach(() => controlPlane(`soak_day_${++planes}`));
 
 const id = () => randomUUID();
 async function api(principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown, key: string = id()) {
@@ -4907,9 +4909,6 @@ test('unit:soak-invariants-hold — review findings classified mechanical under 
   // that item is reworked and delivered like any change request. The plan, the hold, the rework
   // decision and the fresh-read judgement repeat per cycle, head and item, which is why they live here.
   const mechanical = { applied: 2, rejected: 5 };
-  // The day needs none of the earlier days' items, so it runs last, on a control plane of its own:
-  // its cycles stay as fast as the first day's, and no earlier day reads its plane.
-  await controlPlane('soak_mechanical');
   const { items, final, violations, failures, lost, github, actionKeys, mechanical: world } = await simulateDay({
     hours: 6, mechanical,
     plan: { items: 6, leftovers: 2, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, exhaustedReviewer: 0, outOfQueue: { item: 6, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 6 } },
