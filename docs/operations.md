@@ -32,10 +32,6 @@ graphyard unblock GY-N "reason"                                         # unowne
 
 Never attest a stop you have not confirmed; merged work changes only via follow-up items.
 
-## Main guard revert approver
-
-Main's last-push-approval rule refuses a revert the control-plane App pushed, so an armed [main guard](delivery.md#pre-merge-gate-and-release-candidate-validation) needs a second App installed on the repository (the reviewer App serves) as its approver. Provisioning carries its credentials and refuses an armed guard without them ([Railway](deployment.md#manual-fallback)). Redeploy, then verify: `/api/status` `mainGuard.revertApprover` names that App, `mainGuard.attention` is empty, and `graphyard doctor` lists `revert-approver` ready.
-
 ## Worker host keyring proxy
 
 A confined master, approver or proof producer reads its GitHub login (`gh auth git-credential`) through a keyring-only D-Bus proxy; workers and reviewers use their own credential. Install once per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service` and `graphyard-secrets-bus-filter.service` to `~/.config/systemd/user/`, then `systemctl --user daemon-reload && systemctl --user enable --now graphyard-secrets-bus.socket` (disable an earlier-enabled `graphyard-secrets-bus.service` first). It listens at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` unless `GRAPHYARD_SECRETS_BUS` names another; without it the bus is masked and sessions push with `GH_TOKEN`.
@@ -59,3 +55,7 @@ The filter cannot select keyring items: keep other secrets out of that keyring, 
 ## Resources and disk
 
 `resourceRegistry` declares bounded resources, reported in `resources` ([remedies](operations-reference.md#control-plane-resources)). The loop removes finished worktrees after `run.reclaimIdleHours` (never dirty or unpushed), stale test temp entries and idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed) seen by two passes. `disk` attention below `run.diskThresholdGb`. Every non-master session's checkout lives under `run.worktreeRoot`. Each cycle a dirty coordinator checkout, or a HEAD other than the commit the loop runs, raises `escalation:dirty-checkout` naming the paths, HEAD and sessions pointing at it, and blocks self-upgrade until clean.
+
+## Main guard revert approver
+
+Main's last-push-approval rule refuses a revert the control-plane App pushed, so an armed [main guard](delivery.md#pre-merge-gate-and-release-candidate-validation) needs a second App installed on the repository (the reviewer App serves) as its approver. Provisioning carries its credentials and refuses an armed guard without them ([Railway](deployment.md#manual-fallback)). Redeploy, then verify: `/api/status` `mainGuard.revertApprover` names that App, `mainGuard.attention` is empty, and `graphyard doctor` lists `revert-approver` ready.
