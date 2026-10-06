@@ -6,12 +6,14 @@ import path from 'node:path';
 import type { Work } from '../src/model.js';
 import type { WorkOrigin } from '../src/model/interventions.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
+import { cycleFaults, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { workFaults } from '../src/model/fault-classes.js';
 import { scopeRequestAttention } from '../src/cli/owed-report.js';
 import { decideScopeRequest, followUpPaths, impliedScopes, namedPaths, plannedCompanions, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
 import { peerModuleGround, importingTestGround } from '../src/model/scope-companions.js';
 import { automaticScopeGrounds } from '../src/daemon/cycle-scope.js';
 import { derivePlannedFiles } from '../src/model/work.js';
+import { RefusedResponse } from '../src/model/refusal.js';
 
 // GY-1085 names this file for its proof: manual:fault-class-scope. The master loop filed 9 scope
 // faults in 24 hours on 1 October 2026. Every one was a live attempt's scope request that the
@@ -281,4 +283,48 @@ test('manual:fault-class-scope — GY-1116: a dotted API name in a finding is pr
   assert.equal(derived.plannedFiles.includes('store.init'), false, 'the follow-up item does not plan store.init');
   const implied = impliedScopes([{ id: 'AC-1', text: 'x' }], [], gy1048.origin, gy1048.description);
   assert.equal(implied.some(entry => entry.scope === 'store.init'), false, 'store.init implies no scope');
+});
+
+// GY-1348, the three instances GY-1347 lists (class scope, count 3, detected 2026-10-06T03:06:13.542Z).
+// Two were the loop's own finding-grounded widening refused 409 because a worker's re-ask had moved
+// the open request's `at` meanwhile — GY-1336 at 01:00:17.250Z and GY-1345 at 02:58:05.147Z (cycle
+// 12630) — filed as a failed action:scope although the fresh ask was widened through the decision
+// path minutes later. The third was GY-1335's requirement-weakening, raised at 02:07:25.037Z by
+// applying the rescoping decision ec973978-b52f-4e61-a5dd-5fc9afbcd144 the independent approver had
+// approved at 02:07:14.359Z as weakening nothing. Against the base each subtest fails.
+const raced = [
+  { subject: 'GY-1336', id: '1bfdf5f3-0324-4fb0-9f67-39b3fc42e299', epoch: 1, asked: '2026-10-06T00:56:33.344Z', refusedAt: '2026-10-06T00:56:42.028Z', observedAt: '2026-10-06T01:00:17.250Z' },
+  { subject: 'GY-1345', id: '1886ead0-aac0-4c78-a664-07ef9c5ae029', epoch: 1, asked: '2026-10-06T02:57:15.933Z', refusedAt: '2026-10-06T02:57:20.134Z', observedAt: '2026-10-06T02:58:05.147Z' },
+];
+for (const entry of raced) test(`manual:fault-class-scope — action:scope|${entry.subject}|${entry.observedAt}: a widening whose ask was re-asked meanwhile is recorded handled, no scope fault`, async () => {
+  const work = standing({ id: entry.subject, subject: entry.subject, observedAt: entry.observedAt, epoch: entry.epoch, requestedAt: entry.asked, refusedAt: entry.refusedAt,
+    paths: ['src/daemon/cycle-dispatch.ts'], plannedFiles: ['src/daemon/cycle-scope.ts'], settled: 'the fresh ask widened through the decision path' });
+  const widened: string[] = [];
+  const effects = {
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [work], now: entry.observedAt }), closeSession: () => {}, dispatch: async () => {},
+    requestProof: () => {}, observeDeployment: async () => ({ source: 'unavailable', sha: null, at: entry.observedAt, reason: 'replay', deployed: [], pending: [] }),
+    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    reviewFindings: async () => [{ ground: 'review thread PRRT_replay', text: 'src/daemon/cycle-dispatch.ts:40 still dispatches the stale item' }],
+    basePaths: async (paths: string[]) => new Set(paths),
+    // The control plane's answer as cycle 12630 journalled it: the request the widening answers was re-asked meanwhile.
+    widenScope: async (item: Work) => { widened.push(item.key); throw new RefusedResponse(`Graphyard refused work/${entry.id}/requirements (409): The scope request this widening answers is no longer open`, 409, { error: 'The scope request this widening answers is no longer open' }); },
+  } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config());
+  await runCycle(config(), state, effects, () => Date.parse(entry.observedAt));
+  assert.deepEqual(widened, [entry.subject], 'the loop attempted the widening the instance records');
+  const scope = Object.values(state.actions).filter(action => action.kind === 'scope' && action.work === entry.subject);
+  assert.deepEqual(scope.map(action => action.state), ['done'], JSON.stringify(scope));
+  assert.match(scope[0].detail, /no longer open — the ask at .* was answered, withdrawn or re-asked meanwhile; the fresh ask is judged on its own/);
+  assert.deepEqual(state.faults.instances.filter(instance => instance.kind === 'action:scope'), []);
+});
+
+test('manual:fault-class-scope — escalation:requirement-weakening|GY-1335|2026-10-06T02:10:48.978Z: an approved rescoping\'s escalation is resolved by its approval, a direct one still counts', () => {
+  const work = standing({ id: 'GY-1335', subject: 'GY-1335', observedAt: '2026-10-06T02:10:48.978Z', epoch: 1, requestedAt: '2026-10-06T01:29:04.048Z', paths: [], plannedFiles: ['src/'], settled: 'resolved by its approval' });
+  work.scopeRequest = null;
+  const escalation = { trigger: 'requirement-weakening' as const, reason: 'Requirement revision retires AC-1, AC-2, AC-5 and narrows proofs for no criterion', at: '2026-10-06T02:07:25.037Z', actor: 'graphyard-master-graphyard-operator' };
+  // As the base left it: the escalation stands and is a scope instance every cycle. A direct revision still does (AC-4).
+  assert.deepEqual(workFaults({ ...work, escalations: [escalation] } as Work, Date.parse('2026-10-06T02:10:48.978Z')).map(fault => `${fault.faultClass}:${fault.kind}`), ['scope:escalation:requirement-weakening']);
+  // The candidate resolves it in the application of the approved decision (tests/decision-lifecycle.test.ts,
+  // unit:decision-requirements-approval-resolves-weakening): nothing stands, so nothing is counted.
+  assert.deepEqual(workFaults({ ...work, escalations: [] } as Work, Date.parse('2026-10-06T02:10:48.978Z')), []);
 });

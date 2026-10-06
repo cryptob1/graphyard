@@ -17,6 +17,9 @@ import { regressionRefusals } from '../src/regression-guard.js';
 import { basePaths, findingScope, namesPath, negatesPath, readReviewFindings } from '../src/review-scope.js';
 import type { Observation, Principal, ScopeFile, Work } from '../src/model.js';
 import { workFaults } from '../src/model/fault-classes.js';
+import { successorWidening } from '../src/model/successors.js';
+import { mootScopeWidening, supersededScopeAsk, supersededScopeNote } from '../src/daemon/cycle-scope.js';
+import { RefusedResponse } from '../src/model/refusal.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-85: an additive scope request is decided by the loop, not by a master command. A worker
@@ -495,7 +498,7 @@ test('integration:scope-from-review-finding — a refused request for a file a r
     widenScope: async (item, asked, paths, reason) => {
       attempted.push(item.id);
       const answer = await call(master.token, 'POST', `work/${item.id}/requirements`, answeringWidening(item, asked, paths, reason));
-      if (answer.status !== 200) throw new Error(answer.body.error ?? JSON.stringify(answer.body));
+      if (answer.status !== 200) throw new RefusedResponse(answer.body.error ?? JSON.stringify(answer.body), answer.status, answer.body);
       return answer.body;
     },
   };
@@ -505,7 +508,8 @@ test('integration:scope-from-review-finding — a refused request for a file a r
   assert.ok(!raced.plannedFiles.includes('src/merge-queue.ts'), `not widened: ${raced.plannedFiles}`);
   assert.equal(raced.lease, null);
   const refused = state.actions[`${scopeKey(raced, stale)}:finding:${raced.policyRevision}`];
-  assert.equal(refused.state, 'failed');
+  // The refusal is the handled outcome of a moot widening (GY-1348), recorded done, never a scope fault.
+  assert.equal(refused.state, 'done');
   assert.match(refused.detail, /no longer open|no longer holds the lease/);
   // A request that no longer stands — withdrawn, or asked afresh — is refused the same way, however live the lease.
   let asked = await claimed('request asked afresh during the finding reads');
@@ -550,8 +554,10 @@ test('integration:scope-from-review-finding — a refused request for a file a r
   assert.ok(pushed.lease && pushed.scopeRequest, 'the lease and the request both still stand');
   assert.ok(!pushed.plannedFiles.includes('src/merge-queue.ts'), `not widened: ${pushed.plannedFiles}`);
   const moved = state.actions[`${scopeKey(pushed, pushed.scopeRequest!)}:finding:${pushed.policyRevision}`];
-  assert.equal(moved.state, 'failed');
-  assert.match(moved.detail, /read for aaaaaaaaaaaa, which is no longer the item's head/);
+  // The plane's own 409 for a moved head is a moot widening (GY-1347): recorded done, re-read for the new head.
+  assert.equal(moved.state, 'done', moved.detail);
+  assert.match(moved.detail, /the head its findings were read for moved/);
+  assert.ok(!moved.detail.includes(supersededScopeNote), 'a moved head supersedes no ask');
 });
 
 test('unit:review-finding-scope — only a file on the base that a finding names literally is granted; a missing file, a directory, a longer path or an unnamed file is not', async () => {
@@ -906,4 +912,130 @@ test('unit:scope-fault-class-instances-removed — GY-945\'s and GY-883\'s asks,
   assert.ok(fixtures.every(path => lanesNow.plannedFiles.includes(path)), `${lanesNow.plannedFiles}`);
   const widened = Object.values(state.actions).find(action => action.work === lanes.key && /^Widened /.test(action.detail));
   assert.match(widened?.detail ?? '', /imports src\/model\.ts, which re-exports planned file src\/model\/(policy|gates)\.ts/, widened?.detail);
+});
+
+// GY-1348: a finding-grounded widening or a successor re-plan that answers an ask no longer open —
+// answered, withdrawn or re-asked meanwhile, or asked by an attempt that lost its lease — is refused
+// by the engine in its own transaction, by design. The loop records that refusal as the handled
+// outcome it is: done, naming the superseded ask, with no action:scope fault instance, and the
+// fresh ask is decided on its own next cycle. Replayed from GY-1336 (2026-10-06T01:00:17.250Z) and
+// GY-1345 (02:58:05.147Z): a worker's re-ask merged into the open request under its own `at` while
+// the loop read the findings for the earlier one.
+const scopeInstances = (state: DaemonState, work: Work) => state.faults.instances.filter(instance => instance.kind === 'action:scope' && instance.subject === work.key);
+const refusing = (overrides: Partial<DaemonEffects> = {}): Partial<DaemonEffects> => ({
+  basePaths: async paths => new Set(paths),
+  widenScope: async (item, asked, paths, reason) => {
+    const answer = await call(master.token, 'POST', `work/${item.id}/requirements`, answeringWidening(item, asked, paths, reason));
+    if (answer.status !== 200) throw new RefusedResponse(`Graphyard refused work/${item.id}/requirements (${answer.status}): ${answer.body.error ?? JSON.stringify(answer.body)}`, answer.status, answer.body);
+    return answer.body;
+  },
+  ...overrides,
+});
+
+test('unit:auto-scope-superseded-ask-recorded-done — a widening whose ask was re-asked during the finding reads is recorded done naming the superseded ask, with no scope fault, and the fresh ask is decided next cycle', async () => {
+  let work = await claimed('re-asked while the loop reads findings');
+  await request(work, { paths: ['src/merge-queue.ts'], reason: 'The reviewer finding names src/merge-queue.ts:85-97' });
+  const first = (await reload(work.id)).scopeRequest!;
+  const findings = [{ ground: 'review thread PRRT_reask01', text: 'Not fixed: src/merge-queue.ts:85-97 still marks every item; see also src/cli/master-status.ts:128.' }];
+  let reasked = false;
+  const effects = refusing({ reviewFindings: async item => {
+    if (item.id === work.id && !reasked) { reasked = true; await request(item, { paths: ['src/merge-queue.ts', 'src/cli/master-status.ts'], reason: 'Both files the finding names' }); }
+    return findings;
+  } });
+  const state = emptyDaemonState(loopConfig());
+  await cycle(state, effects);
+  work = await reload(work.id);
+  assert.ok(reasked);
+  assert.notEqual(work.scopeRequest!.at, first.at, 'the re-ask moved the open request');
+  assert.ok(!work.plannedFiles.includes('src/merge-queue.ts'), 'the moot widening applied nothing');
+  const moot = state.actions[`${scopeKey(work, first)}:finding:${work.policyRevision}`];
+  assert.equal(moot.state, 'done', moot.detail);
+  assert.match(moot.detail, /the scope request it answers was already answered: it is no longer open/);
+  assert.ok(moot.detail.includes(`the ask at ${first.at} by epoch ${first.epoch} was ${supersededScopeNote}`), moot.detail);
+  assert.equal(moot.faultClass, undefined);
+  assert.deepEqual(scopeInstances(state, work), [], 'no action:scope fault instance');
+  assert.deepEqual(failedScope(state).filter(action => action.work === work.key), []);
+  assert.ok(!escalations(state).some(entry => entry.key === `escalation:scope:${work.id}:${first.at}`), 'the superseded ask is not escalated');
+  // The fresh ask is decided on the loop's next cycle, on its own.
+  await cycle(state, effects);
+  work = await reload(work.id);
+  assert.ok(['src/merge-queue.ts', 'src/cli/master-status.ts'].every(path => work.plannedFiles.includes(path)), `the fresh ask is widened: ${work.plannedFiles}`);
+  assert.equal(work.scopeRequest, null);
+  assert.deepEqual(scopeInstances(state, work), []);
+});
+
+test('unit:auto-scope-lost-lease-recorded-done — a widening whose asking attempt lost its lease during the finding reads is recorded done, with no scope fault', async () => {
+  let work = await claimed('lease lapses while the loop reads findings');
+  await request(work, { paths: ['src/merge-queue.ts'], reason: 'The reviewer finding names src/merge-queue.ts:85-97' });
+  const asked = (await reload(work.id)).scopeRequest!;
+  const effects = refusing({ reviewFindings: async item => {
+    if (item.id === work.id) {
+      // The lease lapses without reconciliation having cleared it: the request is still open, its attempt holds no live lease.
+      const document = await reload(work.id);
+      document.lease = { ...document.lease!, expiresAt: '2000-01-01T00:00:00Z' };
+      await store.pool.query('UPDATE work_items SET document=$2::jsonb WHERE id=$1', [document.id, JSON.stringify(document)]);
+    }
+    return [{ ground: 'review thread PRRT_lapse01', text: 'src/merge-queue.ts:85-97 still marks every item' }];
+  } });
+  const state = emptyDaemonState(loopConfig());
+  await cycle(state, effects);
+  work = await reload(work.id);
+  assert.ok(!work.plannedFiles.includes('src/merge-queue.ts'), 'nothing widens outside a live attempt');
+  const moot = state.actions[`${scopeKey(work, asked)}:finding:${work.policyRevision}`];
+  assert.equal(moot.state, 'done', moot.detail);
+  assert.match(moot.detail, /the attempt that asked for it no longer holds the lease/);
+  assert.ok(moot.detail.includes(`the ask at ${asked.at} by epoch ${asked.epoch} was ${supersededScopeNote}`), moot.detail);
+  assert.deepEqual(scopeInstances(state, work), []);
+});
+
+test('unit:scope-replan-superseded-ask-recorded-done — a successor re-plan refused because its ask is no longer open is recorded done, with no scope fault, and re-planned afresh next cycle', async () => {
+  let work = await ok(master.token, 'POST', 'work', { ...input('re-plan races an ask'), plannedFiles: ['src/widget/Replanned.ts'] }) as Work;
+  work = await ok(master.token, 'POST', `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Ready for the re-plan race' }) as Work;
+  work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
+  const successor = 'src/widget/replanned/index.ts';
+  let refuse = true; const replanned: string[] = [];
+  const effects: Partial<DaemonEffects> = {
+    baseSuccessions: async () => ({ tip: 'f'.repeat(40), successions: [{ from: 'src/widget/Replanned.ts', to: successor, commit: 'c'.repeat(40), similarity: 90 }], files: new Set([successor]) }),
+    replan: async (item, paths, reason) => {
+      if (item.id !== work.id) return undefined;
+      replanned.push(item.id);
+      if (refuse) throw new RefusedResponse(`Graphyard refused work/${item.id}/requirements (409): The scope request this widening answers is no longer open`, 409, { error: 'The scope request this widening answers is no longer open' });
+      return ok(master.token, 'POST', `work/${item.id}/requirements`, successorWidening(item, paths, reason));
+    },
+  };
+  const state = emptyDaemonState(loopConfig());
+  await cycle(state, effects);
+  const key = `successors:${work.id}:${work.policyRevision}`;
+  assert.equal(state.actions[key].state, 'done', state.actions[key].detail);
+  assert.match(state.actions[key].detail, /^Not re-planned .*the scope request it answers was already answered: it is no longer open — the ask was answered, withdrawn or re-asked meanwhile/);
+  assert.deepEqual(scopeInstances(state, work), []);
+  refuse = false;
+  await cycle(state, effects);
+  work = await reload(work.id);
+  assert.equal(replanned.length, 2, 'the re-plan is tried afresh on the next cycle');
+  assert.ok(work.plannedFiles.includes(successor), `${work.plannedFiles}`);
+  assert.deepEqual(scopeInstances(state, work), []);
+});
+
+test('unit:auto-scope-superseded-widening-still-refused — the engine still refuses a widening that answers a request no longer open or an attempt without the lease; nothing widens outside a decision', async () => {
+  let asked = await claimed('superseded widening still refused');
+  await request(asked, { paths: ['src/merge-queue.ts'], reason: 'The reviewer finding names src/merge-queue.ts:85-97' });
+  const first = (await reload(asked.id)).scopeRequest!;
+  await request(asked, { paths: ['src/merge-queue.ts', 'src/cli/master-status.ts'], reason: 'Both files the finding names' });
+  asked = await reload(asked.id);
+  const superseded = await call(master.token, 'POST', `work/${asked.id}/requirements`, answeringWidening(asked, first, ['src/merge-queue.ts'], 'stale request'));
+  assert.equal(superseded.status, 409, JSON.stringify(superseded.body));
+  assert.match(JSON.stringify(superseded.body), /scope request this widening answers is no longer open/);
+  const plane = (error: string) => new RefusedResponse(`Graphyard refused work/${asked.id}/requirements (409): ${error}`, 409, { error });
+  assert.equal(supersededScopeAsk(plane(superseded.body.error)), 'the scope request it answers was already answered: it is no longer open');
+  const unchanged = await reload(asked.id);
+  assert.equal(unchanged.policyRevision, asked.policyRevision, 'nothing widened');
+  assert.ok(!unchanged.plannedFiles.includes('src/merge-queue.ts'));
+  // The lease line is the same handled refusal; a moved head is moot but asks nothing superseded; any other refusal is neither.
+  assert.equal(supersededScopeAsk(plane('Epoch 4, which asked for this scope, no longer holds the lease')), 'the attempt that asked for it no longer holds the lease');
+  const moved = plane("The findings this widening rests on were read for aaaaaaaaaaaa, which is no longer the item's head");
+  assert.equal(supersededScopeAsk(moved), null);
+  assert.match(mootScopeWidening(moved)!, /head its findings were read for moved/);
+  assert.equal(supersededScopeAsk(plane('Operator agents cannot remove planned-file containment')), null);
+  assert.equal(supersededScopeAsk(new Error(superseded.body.error)), null, 'a message merely quoting the refusal is not it');
 });

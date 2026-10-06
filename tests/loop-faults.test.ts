@@ -1,8 +1,16 @@
-import { afterEach, test } from 'node:test';
+import { afterEach, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import type { Work } from '../src/model.js';
-import { faultClassItem, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
+import { classifyAttention, faultClassItem, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
+// Namespace imports for what GY-1345 adds, so a run against the base fails its cases rather than the module's load.
+import * as blockerClass from '../src/model/blocker-class.js';
+import * as faultsStep from '../src/daemon/faults.js';
+import { fileRecurringFaultClasses } from '../src/daemon/faults.js';
+import { faultActionKey } from '../src/daemon/state.js';
+import { record as recordAction } from '../src/daemon/effects.js';
+import { dispatchFailureBlockAfter, noteDispatchFailure } from '../src/daemon/dispatch-failures.js';
+import { dispatchFailureAttention } from '../src/auto-dispatch.js';
 import { providerLimit } from '../src/model/capacity.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { actionableSubjects, cycleCost, daemonEffects, emptyDaemonState, storeAction, loopAttention, loopLiveness, runCycle, trackSilence, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
@@ -12,9 +20,6 @@ import type { Cycle } from '../src/daemon/cycle.js';
 import { diagnosticianSettings, diagnosisSettled } from '../src/runner/payloads.js';
 import type { RunFailure, RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import { RefusedResponse } from '../src/model/refusal.js';
-import { classifyAttention } from '../src/model/fault-classes.js';
-import { dispatchFailureAttention } from '../src/auto-dispatch.js';
-import { fileRecurringFaultClasses } from '../src/daemon/faults.js';
 import { noteCycleFailure } from '../src/daemon/liveness.js';
 import { timedCall } from '../src/master/timings.js';
 
@@ -730,6 +735,268 @@ test('manual:fault-class-loop — GY-1338: GY-1336\'s three instances, failed ag
   assert.ok(!filed.includes('loop'), 'no loop item is filed');
 });
 
+// ---- GY-1345: one plane-wide control-plane window files five loop faults ------------------------
+//
+// GY-1345 names this file for its proof too. From 01:39 to 02:01Z on 2026-10-06 the production
+// control plane answered writes 502 "Application failed to respond", reads in 1-21s, and the
+// dispatcher's ticks ran into their 30s timeout. The loop counted each consequence as its own failure:
+// (1) GY-1337: an approver's considered refusal of a duplicate release settled the diagnosis with the
+//     default fault kind, though the decision class already counts the refusal (decision-refused);
+// (2) dispatch: six ticks timed out in a row and raised the standing dispatch-failures line;
+// (3) GY-1339: a release decide refused 502 threw out to cycle.isolate, an action:diagnosis fault;
+// (4) loop: cycle 12621's faults step read the slow plane for 372s, past the 300s interval;
+// (5) fault:loop: filing the recurring loop class was refused 502 — the class counted its own failure to file itself.
+// Each is replayed below; each test fails on the base, where it opens a loop-class fault instance.
+
+const gy1345Instances = [
+  { id: 'action:diagnosis|GY-1337|2026-10-06T01:39:23.103Z', kind: 'action:diagnosis', subject: 'GY-1337', at: '2026-10-06T01:39:23.103Z' },
+  { id: 'dispatch-failures|dispatch|2026-10-06T01:44:37.500Z', kind: 'dispatch-failures', subject: 'dispatch', at: '2026-10-06T01:44:37.500Z' },
+  { id: 'action:diagnosis|GY-1339|2026-10-06T01:52:16.705Z', kind: 'action:diagnosis', subject: 'GY-1339', at: '2026-10-06T01:52:16.705Z' },
+  { id: 'loop-cost|loop|2026-10-06T01:52:51.656Z', kind: 'loop-cost', subject: 'loop', at: '2026-10-06T01:52:51.656Z' },
+  { id: 'action:fault|fault:loop|2026-10-06T01:55:25.208Z', kind: 'action:fault', subject: 'fault:loop', at: '2026-10-06T01:55:25.208Z' },
+];
+/** The refusals and the timeout, word for word as the window recorded them. */
+const decide502 = 'Graphyard refused work/0e2e01dc-cbd9-4d41-9b88-4f917acb7bb5/decisions (502): {"status":"error","code":502,"message":"Application failed to respond","request_id":"JKn5sxMXSLKpQMhF9fVATg"}';
+const file502 = 'Graphyard refused work (502): {"status":"error","code":502,"message":"Application failed to respond","request_id":"ZLTChWnfSliwZLfq0_TJvA"}';
+const tickTimeout = 'The operation was aborted due to timeout';
+const { itemSpecificPlaneError } = blockerClass;
+const planeWideFailure = (text: string | null) => blockerClass.planeWideFailure(text);
+const faultObservationBudgetMs = (intervalMs: number) => faultsStep.faultObservationBudgetMs(intervalMs);
+const loopFaults = (state: DaemonState) => state.faults.instances.filter(entry => entry.faultClass === 'loop');
+/** One diagnosis step whose isolate records a throw as the cycle's does: a failed action of the step's kind, with its default fault kind. */
+async function isolatedStep(state: DaemonState, effects: DiagnosticianEffects, work: Work[], history: Decisions, at: number) {
+  const fx = { diagnostician: effects, persist: async () => {}, snapshot: async () => ({ work, now: iso(at) }), decisions: async () => ({ decisions: history }),
+    approver: async () => ({ agentName: 'gy-approver', pane: null }) } as unknown as DaemonEffects;
+  const performed: DaemonAction[] = [];
+  const cycle = { config: config(), state, effects: fx, now: () => at, snapshot: { work, now: iso(at) }, clock: at, performed,
+    isolate: async (kind: 'diagnosis', target: Work | null, name: string, body: () => Promise<unknown>) => {
+      try { return await body(); } catch (error) {
+        const key = `isolated:${kind}:${target?.id ?? name}`;
+        performed.push(await recordAction(state, key, { kind, work: target?.key ?? null, principal: null, state: 'failed', detail: `Handling ${name} in the ${kind} step threw: ${(error as Error).message}`, attempts: 1, cycle: state.cycle }, at, fx.persist));
+      }
+    } } as unknown as Cycle;
+  await diagnosisStep(cycle);
+  await diagnosesSettled();
+  return performed;
+}
+
+test('manual:fault-class-loop — GY-1345 lists five instances, and every one is replayed', () => {
+  assert.deepEqual(gy1345Instances.map(entry => entry.subject), ['GY-1337', 'dispatch', 'GY-1339', 'loop', 'fault:loop']);
+});
+
+test('unit:plane-wide-failure-shapes — one recognizer reads every shape the window produced as the plane\'s, and an item-specific HTTP 500 as the item\'s', () => {
+  for (const text of [decide502, file502, tickTimeout, 'Application failed to respond', 'HTTP 502 Bad Gateway', 'Graphyard refused work/x/session (503): upstream', 'HTTP 504',
+    '{"status":504,"message":"timeout"}', 'connect ECONNREFUSED 10.0.0.1:443', 'read ECONNRESET', 'socket hang up', `server GET status: ${tickTimeout}`, 'the database is out of memory'])
+    assert.equal(planeWideFailure(text), true, text);
+  for (const text of ['Graphyard refused work/x/decide (500): {"status":500,"message":"Internal server error"}', 'Graphyard refused work/x/decide (409): Task revision changed (now 2)',
+    'Graphyard refused work/x/decide (403): not permitted', 'The operation was aborted', 'spawn ENOMEM', 'FATAL ERROR: JavaScript heap out of memory', null, ''])
+    assert.equal(planeWideFailure(text), false, String(text));
+  // itemSpecificPlaneError is unchanged: a 500 the item's own request met stays the item's, whatever else the text says.
+  assert.equal(itemSpecificPlaneError('Graphyard refused work/x/decide (500): {"status":500,"message":"Internal server error"}'), true);
+  assert.equal(itemSpecificPlaneError(`HTTP 500 then ${tickTimeout}`), true, 'the timeout shape does not change what the blocker probe reads as item-specific');
+  assert.equal(itemSpecificPlaneError(`(500) and ${decide502}`), false);
+});
+
+test(`unit:plane-wide-refusal-records-no-loop-fault — ${gy1345Instances[2].id}: a decide refused 502 keeps the diagnosis's state for the next cycle and opens no loop fault`, async () => {
+  const at = Date.parse(gy1345Instances[2].at), asked: string[] = [];
+  let plane: 'down' | 'up' = 'down';
+  const decide: DiagnosticianEffects['decide'] = async work => { asked.push(work.key); if (plane === 'down') throw new Error(decide502); return { id: 'decision-after' }; };
+  const { state, effects, subject } = await diagnosed(decide, at - minute);
+  const performed = await isolatedStep(state, effects, [subject, covering], [], at);
+  assert.deepEqual(asked, ['GY-1304']);
+  assert.deepEqual(loopFaults(state), [], 'no action:diagnosis loop fault');
+  assert.deepEqual(performed.filter(action => action.state === 'failed' && action.faultClass), [], 'the row is kept for retry with no fault class');
+  const noted = performed.find(action => action.kind === 'diagnosis' && /failed plane-wide/.test(action.detail));
+  assert.ok(noted && !noted.faultClass, JSON.stringify(performed));
+  assert.equal(state.diagnoses['GY-1304'].state, 'diagnosed', 'the entry keeps its state');
+  plane = 'up';
+  await isolatedStep(state, effects, [subject, covering], [], at + 5 * minute);
+  assert.equal(state.diagnoses['GY-1304'].state, 'closing', 'the next cycle requests it again');
+  assert.deepEqual(loopFaults(state), []);
+  // A refusal that is not plane-wide still fails the step as before.
+  clearDiagnoses();
+  const other = await diagnosed(async () => { throw new Error('Graphyard refused work/work-GY-1304/decide (403): not permitted'); }, at - minute);
+  await isolatedStep(other.state, other.effects, [other.subject, covering], [], at);
+  assert.deepEqual(loopFaults(other.state).map(entry => entry.kind), ['action:diagnosis']);
+});
+
+test(`unit:plane-wide-refusal-records-no-loop-fault — ${gy1345Instances[4].id}: a class filing refused 502 is retried under the same key and the class does not count its own failure`, async () => {
+  const at = Date.parse(gy1345Instances[4].at), filed: string[] = [];
+  const state = emptyDaemonState(config());
+  state.faults.instances = [0, 1, 2].map(index => ({ id: `loop-cost|loop|${index}`, kind: 'loop-cost', faultClass: 'loop', subject: 'loop', text: 'a cycle past its interval', at: iso(at - (index + 1) * minute), lastSeenAt: iso(at), linkedTo: null }) as FaultInstance);
+  let plane: 'down' | 'up' = 'down';
+  const effects = { persist: async () => {}, faultClassPolicy: { threshold: 3, windowHours: 24 },
+    fileFaultClass: async (input: { title: string }, key: string) => { filed.push(key); if (plane === 'down') throw new Error(file502); return item('GY-1344', at, { title: input.title }); } } as unknown as DaemonEffects;
+  const performed: DaemonAction[] = [];
+  await fileRecurringFaultClasses(state, effects, [], at, () => at, performed);
+  const action = state.actions[faultActionKey('loop')];
+  assert.equal(action.state, 'failed', 'kept failed for readyToRetry');
+  assert.equal(action.faultClass, undefined, 'the action carries no fault kind');
+  assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'action:fault'), [], 'no action:fault loop instance');
+  state.cycle += 1; plane = 'up';
+  await fileRecurringFaultClasses(state, effects, [], at + 5 * minute, () => at + 5 * minute, performed);
+  assert.equal(filed.length, 2);
+  assert.equal(filed[1], filed[0], 'the retry files under the same idempotency key');
+  assert.equal(state.actions[faultActionKey('loop')].state, 'done');
+});
+
+test(`unit:refused-decision-no-loop-fault — ${gy1345Instances[0].id}: an approver's refusal settles the diagnosis with no fault kind, and is counted once, in the decision class`, async () => {
+  const at = Date.parse(gy1345Instances[0].at), decision = 'a8f608d9-54f5-48af-811f-b0a86ce1c1e7';
+  const reason = 'The diagnosis is sound, but releasing it would duplicate work that is already in review. GY-1337 is in stage review with open PR #815';
+  const state = emptyDaemonState(config()), starts: string[] = [];
+  const subject = recurring('GY-1337', 'decision', at - hour), fix = item('GY-1340', at, { stage: 'backlog' } as Partial<Work>);
+  state.diagnoses['GY-1337'] = { subject: 'GY-1337', kind: 'recurring', faultClass: 'decision', work: 'GY-1337', state: 'releasing', startedAt: iso(at - hour), updatedAt: iso(at - minute),
+    runs: [], diagnosis: { subject: 'GY-1337', cause: 'The cause', evidence: { logLines: ['a line'], commands: [] }, faultClass: 'decision', covering: null } as never, fix: 'GY-1340',
+    decision: { id: decision, action: 'release', work: 'GY-1340', approver: 'gy-approver' }, answeredBy: null, retryAt: null, refusedAt: null, detail: '' };
+  const refused = [{ id: decision, action: 'release', state: 'refused', input: {}, approvedBy: null, outcome: null, refusal: { reason } }] as unknown as Decisions;
+  const performed = await isolatedStep(state, diagnostician(() => 'diagnose', starts), [subject, fix], refused, at);
+  assert.equal(state.diagnoses['GY-1337'].state, 'refused');
+  const settled = performed.find(action => action.kind === 'diagnosis' && action.state === 'failed');
+  assert.ok(settled && !settled.faultClass, JSON.stringify(performed));
+  assert.deepEqual(loopFaults(state), [], 'no action:diagnosis loop fault');
+  // The same refusal as the decision report raises it: the decision class's one instance.
+  const [line] = classifyAttention([{ subject: 'GY-1340', text: `Decision ${decision} (release) was refused by graphyard-approver-graphyard: ${reason}` }]);
+  assert.deepEqual([line.kind, line.faultClass], ['decision-refused', 'decision']);
+});
+
+test(`unit:plane-wide-dispatch-tick-not-counted — ${gy1345Instances[1].id}: ticks timing out on the plane raise no dispatch-failures line; an item-specific tick failure still does`, () => {
+  const at = gy1345Instances[1].at;
+  const timedOut = { consecutiveFailures: 6, lastSuccessAt: '2026-10-06T02:00:08.805Z', lastFailure: { at: '2026-10-06T02:01:31.908Z', reason: tickTimeout } };
+  // The master still sees that nothing launches, but as the outage (GY-1344's plane-unavailable, deployment class), never a dispatch-failures loop fault.
+  for (const reason of [tickTimeout, decide502])
+    assert.deepEqual(classifyAttention(dispatchFailureAttention({ ...timedOut, lastFailure: { at, reason } })).map(line => [line.kind, line.faultClass]), [['plane-unavailable', 'deployment']], reason);
+  const own = dispatchFailureAttention({ ...timedOut, lastFailure: { at, reason: 'Herdr refused agent start: workspace w1V not found' } });
+  assert.deepEqual(classifyAttention(own).map(line => [line.subject, line.kind, line.faultClass]), [['dispatch', 'dispatch-failures', 'loop']]);
+  const persisting = dispatchFailureAttention({ ...timedOut, lastFailure: { at, reason: `the dispatch cursor could not be persisted: ${tickTimeout}`, field: 'lastTick.reasons[0]' } });
+  assert.equal(persisting.length, 1, 'a tick that could not persist names its own field and stands');
+  // An item's dispatch failing on the plane never counts toward the dispatch-failure blocker; its own cause still does.
+  const state = emptyDaemonState(config());
+  for (let epoch = 0; epoch < 2 * dispatchFailureBlockAfter; epoch++) assert.equal(noteDispatchFailure(state, { id: 'work-GY-9', key: 'GY-9', epoch }, tickTimeout, at).count, 0);
+  assert.equal(state.dispatchFailures['work-GY-9'], undefined);
+  const counts = [0, 1, 2].map(epoch => noteDispatchFailure(state, { id: 'work-GY-9', key: 'GY-9', epoch }, 'fatal: worktree already holds branch graphyard/gy-9-1', at).count);
+  assert.deepEqual(counts, [1, 2, dispatchFailureBlockAfter]);
+  assert.equal(noteDispatchFailure(state, { id: 'work-GY-9', key: 'GY-9', epoch: 3 }, decide502, at).count, 0, 'a plane-wide failure meanwhile neither counts nor ends the item\'s own run');
+  assert.equal((state.dispatchFailures as Record<string, { count: number }>)['work-GY-9'].count, dispatchFailureBlockAfter);
+});
+
+test(`unit:plane-wide-dispatch-tick-not-counted — ${gy1345Instances[1].id}: an item's dispatch failing on the plane cools no profile, while its own cause still does`, async () => {
+  const master = masterConfigSchema.parse({ ...burstConfig(), workers: [{ name: 'builder', principal: 'worker-a', agentName: 'agent-builder', mode: 'launch', kind: 'claude', credentialFile: '/outside/builder.token' }] });
+  const at = Date.parse(gy1345Instances[1].at), work = item('GY-9', at, { stage: 'build', ready: true, epoch: 1 } as Partial<Work>);
+  const cycleWith = async (failure: string) => {
+    const state = emptyDaemonState(master);
+    const effects = { agents: () => [], credentials: async (profiles: { name: string }[]) => Object.fromEntries(profiles.map(entry => [entry.name, { available: true, reason: null }])),
+      snapshot: async () => ({ work: [work], now: iso(at) }), closeSession: () => {}, dispatch: async () => { throw new Error(failure); }, requestProof: () => {},
+      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(at), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {} } as unknown as DaemonEffects;
+    await runCycle(master, state, effects, () => at);
+    return state;
+  };
+  for (const failure of [decide502, tickTimeout]) {
+    const state = await cycleWith(failure);
+    assert.equal(state.actions[`dispatch:${work.id}:1`]?.state, 'failed', failure);
+    assert.equal(state.profiles['builder'], undefined, `no profile cool-off for ${failure}`);
+    assert.match(state.actions[`dispatch:${work.id}:1`].detail, /plane-wide control-plane failure, which cools no profile/);
+  }
+  const own = await cycleWith('Herdr refused agent start: workspace w1V not found');
+  assert.ok(own.profiles['builder']?.cooldownUntil, 'an item-specific failure still cools the profile');
+});
+
+// Cycle 12621 replayed: the control plane's status answered in 21.3s and the attention master status
+// adds, which reads every open item, in 350.8s — the 372.1s the faults step spent.
+const slowStatusMs = 21_300, slowAttentionMs = 350_800;
+/** Run `running` to its end on the mocked clock, a step at a time. */
+async function drive<T>(running: Promise<T>, stepMs = 500): Promise<T> {
+  let settled = false;
+  running.then(() => { settled = true; }, () => { settled = true; });
+  for (let turns = 0; !settled && turns < 20_000; turns++) { await new Promise(resolve => setImmediate(resolve)); if (!settled) mock.timers.tick(stepMs); }
+  return running;
+}
+type PlaneReads = { attention: number; inFlight?: number; maxInFlight?: number };
+function slowPlane(reads: PlaneReads, attentionMs = () => slowAttentionMs) {
+  return {
+    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => ({ work: [item('GY-9', Date.now(), { stage: 'build', ready: true })], now: iso(Date.now()), jobs: [] }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(Date.now()), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    controlPlane: () => new Promise(resolve => setTimeout(() => resolve({}), slowStatusMs)),
+    reportedAttention: () => {
+      reads.attention += 1; reads.inFlight = (reads.inFlight ?? 0) + 1; reads.maxInFlight = Math.max(reads.maxInFlight ?? 0, reads.inFlight);
+      return new Promise(resolve => setTimeout(() => { reads.inFlight! -= 1; resolve({ items: [{ subject: 'GY-9', text: 'GY-9 escalation context overflows', kind: 'context-overflow' }] }); }, attentionMs()));
+    },
+    persist: async () => {},
+  } as unknown as DaemonEffects;
+}
+
+test(`unit:fault-observation-budget — ${gy1345Instances[3].id}: a plane answering slower than the bound no longer carries the faults step past the interval`, async () => {
+  const at = Date.parse(gy1345Instances[3].at) - 464_000;
+  mock.timers.enable({ apis: ['setTimeout', 'Date'], now: at });
+  try {
+    const master = burstConfig(), state = emptyDaemonState(master), reads = { attention: 0 };
+    const result = await drive(runCycle(master, state, slowPlane(reads), () => Date.now()));
+    const cost = cycleCost(result.metrics, intervalMs)!;
+    assert.ok(cost.withinInterval, `the cycle spent ${cost.workMs}ms of work against the ${intervalMs}ms interval: ${cost.breakdown}`);
+    assert.ok(result.metrics.steps!.deployment.ms <= faultObservationBudgetMs(intervalMs) + 1_000, `the faults step stopped at its ${faultObservationBudgetMs(intervalMs)}ms budget: ${result.metrics.steps!.deployment.ms}ms`);
+    assert.equal(reads.attention, 1);
+    assert.match(state.actions['faults:deferred']?.detail ?? '', /spent its 60s observation budget before the attention master status adds answered/);
+    assert.equal(state.actions['faults:deferred'].faultClass, undefined);
+  } finally { mock.timers.reset(); }
+});
+
+test('unit:fault-observation-budget — the step stops reading, marks the cycle partial so nothing standing ends, and later cycles take the read in flight once it lands rather than starting another', async () => {
+  const at = Date.parse(gy1345Instances[3].at);
+  mock.timers.enable({ apis: ['setTimeout', 'Date'], now: at });
+  try {
+    const master = burstConfig(), state = emptyDaemonState(master), reads: PlaneReads = { attention: 0 };
+    let attentionMs = 1_000;
+    const effects = slowPlane(reads, () => attentionMs);
+    await drive(runCycle(master, state, effects, () => Date.now()));
+    const standing = Object.keys(state.faults.open).filter(key => key.startsWith('context-overflow|GY-9'));
+    assert.equal(standing.length, 1, `the fast observation opens the fault the attention shows: ${JSON.stringify(state.faults.open)}`);
+    const observedAt = state.faults.observedAt;
+    // The plane slows: past the budget the attention read is left unread.
+    attentionMs = slowAttentionMs;
+    mock.timers.tick(intervalMs);
+    const before = Date.now();
+    await drive(runCycle(master, state, effects, () => Date.now()));
+    assert.ok(Date.now() - before <= faultObservationBudgetMs(intervalMs) + 5_000, `the cycle did not wait for the read: ${Date.now() - before}ms`);
+    assert.deepEqual(Object.keys(state.faults.open).filter(key => key.startsWith('context-overflow|GY-9')), standing, 'an unread source ends no standing fault');
+    assert.equal(state.faults.observedAt, observedAt, 'the cut observation does not count as one');
+    assert.equal(faultsStep.observationReadsPending(state), 1, 'the cut read is kept in flight');
+    // The next cycle, inside faultObservationIntervalMs of the cut one, observes again: it takes the read in flight, and does not wait on it.
+    mock.timers.tick(30_000);
+    const again = Date.now();
+    await drive(runCycle(master, state, effects, () => Date.now()));
+    assert.ok(Date.now() - again <= slowStatusMs + 5_000, `a cycle finding the read in flight waits only on its own status read, not its budget again: ${Date.now() - again}ms`);
+    assert.equal(reads.attention, 2, 'the next cycle starts no second read while the first is in flight');
+    assert.match(state.actions['faults:deferred'].detail, /takes the answer of the read still in flight once it lands rather than starting another/);
+    // Cycles go on at the actionable cadence until the read lands; the cycle that takes its answer observes fully.
+    for (let cycles = 0; cycles < 12 && !/^The faults step observed every source/.test(state.actions['faults:deferred'].detail); cycles++) {
+      mock.timers.tick(30_000);
+      await drive(runCycle(master, state, effects, () => Date.now()));
+    }
+    assert.equal(reads.attention, 2, 'the answer of the read in flight is taken, not read again');
+    assert.match(state.actions['faults:deferred'].detail, /^The faults step observed every source within its budget/);
+    assert.notEqual(state.faults.observedAt, observedAt, 'the answer taken counts as an observation');
+    assert.equal(faultsStep.observationReadsPending(state), 0, 'a taken answer frees its slot');
+  } finally { mock.timers.reset(); }
+});
+
+test(`unit:fault-observation-budget — ${gy1345Instances[3].id}: cycles every 30s against a plane answering in ${slowAttentionMs / 1000}s keep at most one observation read in flight, and every cycle stays within its interval`, async () => {
+  const at = Date.parse(gy1345Instances[3].at);
+  mock.timers.enable({ apis: ['setTimeout', 'Date'], now: at });
+  try {
+    const master = burstConfig(), state = emptyDaemonState(master), reads: PlaneReads = { attention: 0 }, effects = slowPlane(reads);
+    const started = Date.now();
+    while (Date.now() - started < 30 * minute) {
+      const result = await drive(runCycle(master, state, effects, () => Date.now()));
+      assert.ok(cycleCost(result.metrics, intervalMs)!.withinInterval, `cycle ${state.cycle} past its interval`);
+      assert.ok(faultsStep.observationReadsPending(state) <= 2, 'at most one read per source is pending');
+      mock.timers.tick(30_000);
+    }
+    assert.equal(reads.maxInFlight, 1, `never more than one attention read in flight (${reads.attention} started over 30 minutes)`);
+    // One read per landing, plus the one still in flight: about one every 350s, not one every cycle.
+    assert.ok(reads.attention <= Math.ceil(30 * minute / slowAttentionMs) + 1, `${reads.attention} reads in 30 minutes`);
+  } finally { mock.timers.reset(); }
+});
+
 // ---- GY-1344: five loop faults in one control-plane outage on 2026-10-06 ------------------------
 //
 // GY-1344 names this file for its proof too. Between about 01:39 and 02:01Z the control plane
@@ -795,9 +1062,11 @@ test(`manual:fault-class-loop — ${gy1344Instances[0].id}: a release refused wh
   state.diagnoses['GY-1337'] = { subject: 'GY-1337', kind: 'recurring', faultClass: 'decision', work: 'GY-1337', state: 'releasing', startedAt: iso(at - hour), updatedAt: iso(at - minute),
     runs: [], diagnosis: null, fix: 'GY-1340', decision: { id: 'release-1', action: 'release', work: 'GY-1340', approver: 'gy-approver' }, answeredBy: null, retryAt: null, refusedAt: null, detail: '' };
   const refused = [{ id: 'release-1', action: 'release', state: 'refused', input: {}, approvedBy: null, outcome: null, refusal: { reason: 'Not the cause' } }] as unknown as Decisions;
-  await decideStep(state, diagnostician(() => 'diagnose', starts), [open, fix], () => [open, fix], refused, at);
-  assert.equal(state.diagnoses['GY-1337'].state, 'refused');
-  assert.equal(diagnosisFaults(state).length, 1, 'a refusal of a fix for an open item is still the master\'s to act on');
+  const performed = await decideStep(state, diagnostician(() => 'diagnose', starts), [open, fix], () => [open, fix], refused, at);
+  assert.equal(state.diagnoses['GY-1337'].state, 'refused', 'a refusal of a fix for an open item is still the master\'s to act on');
+  assert.equal(performed.filter(action => action.state === 'failed').length, 1);
+  // GY-1345: the decision class counts the refusal (decision-refused), so the diagnosis opens no loop fault for it too.
+  assert.deepEqual(diagnosisFaults(state), []);
 });
 
 test(`manual:fault-class-loop — ${gy1344Instances[1].id}: dispatcher ticks failing on a control plane that does not answer are the outage, not a loop fault`, () => {

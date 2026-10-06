@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { createSchema, type Work } from '../model.js';
 import { providerLimit, type ExhaustionSignal } from '../model/capacity.js';
 import { isClosed } from '../model/closure.js';
+import { planeWideRefusal } from '../model/blocker-class.js';
 import { closesFaultClass, faultClassMeaning, openFaultClassItem, type FaultClass, type FaultInstance, type FaultKind } from '../model/fault-classes.js';
 import { guardBroadScope } from '../master/autonomy.js';
 import { diagnosisPayloadSchema, diagnosisSettled, graphyardTools, type DiagnosisPayload, type DiagnosisRecord, type DiagnosticianSettings } from '../runner/payloads.js';
@@ -293,7 +294,7 @@ export async function diagnosisStep(cycle: Cycle) {
   // A refusal that came back since the last cycle is folded first, so it holds this cycle's launches.
   for (const entry of Object.values(state.diagnoses)) {
     const outcome = entry.state === 'running' ? outcomes.get(entry.subject) : undefined;
-    if (outcome && !outcome.diagnosis && outcome.limit) await cycle.isolate('diagnosis', snapshot.work.find(candidate => candidate.key === entry.work) ?? null, `the diagnosis of ${entry.subject}`, () => advance(cycle, diagnostician, entry, note));
+    if (outcome && !outcome.diagnosis && outcome.limit) await cycle.isolate('diagnosis', snapshot.work.find(candidate => candidate.key === entry.work) ?? null, `the diagnosis of ${entry.subject}`, () => ridePlane(entry, note, () => advance(cycle, diagnostician, entry, note)));
   }
   const gate = diagnosticianGate(state, clock);
   for (const subject of gate === 'held' ? [] : gate === 'probe' ? probeSubject(state, subjects) : subjects) {
@@ -302,7 +303,24 @@ export async function diagnosisStep(cycle: Cycle) {
   for (const entry of Object.values(state.diagnoses)) {
     if (diagnosisSettled(entry)) continue;
     const item = entry.work ? snapshot.work.find(candidate => candidate.key === entry.work) ?? null : null;
-    await cycle.isolate('diagnosis', item, `the diagnosis of ${entry.subject}`, () => advance(cycle, diagnostician, entry, note));
+    await cycle.isolate('diagnosis', item, `the diagnosis of ${entry.subject}`, () => ridePlane(entry, note, () => advance(cycle, diagnostician, entry, note)));
+  }
+}
+
+/**
+ * GY-1345: a control-plane call the diagnosis makes — the fix item's filing, the decide request,
+ * the decision history, the fresh snapshot — that fails plane-wide (planeWideRefusal: a 502
+ * "Application failed to respond", a refused connection, a call that ran into its timeout) is the
+ * plane's window, not the loop failing to diagnose. On 2026-10-06 one such window threw GY-1339's
+ * release decide out to cycle.isolate, which recorded it as an action:diagnosis loop fault. It is
+ * recorded failed with no fault kind, the entry keeps its state, and the next cycle moves it on from there:
+ * the fix files under the same idempotency key, and the decision is requested afresh.
+ */
+async function ridePlane(entry: DiagnosisRecord, note: Note, body: () => Promise<unknown>) {
+  try { await body(); }
+  catch (error) {
+    if (!planeWideRefusal(error)) throw error;
+    await note(entry, 'failed', `The control plane failed plane-wide while the diagnosis of ${entry.subject} was moved on (${message(error)}); it stays ${entry.state} and the next cycle moves it on from there`, null);
   }
 }
 
@@ -390,7 +408,10 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
       return note(entry, 'done', `The ${decision.action} decision ${decision.id} on ${decision.work} was ${current.state} (${current.refusal?.reason ?? current.outcome ?? 'no reason recorded'}), but ${entry.work} is no longer open, so its diagnosis is not acted on`, null);
     }
     entry.state = current.state === 'refused' ? 'refused' : 'failed';
-    return note(entry, 'failed', `The ${decision.action} decision ${decision.id} on ${decision.work} was ${current.state}: ${current.refusal?.reason ?? current.outcome ?? 'no reason recorded'}; the diagnosis stands for the master to act on`);
+    // GY-1345: an approver's refusal is a considered judgement the decision class already counts
+    // (decision-refused), so it settles the entry with no fault kind: one refusal, one instance.
+    return note(entry, 'failed', `The ${decision.action} decision ${decision.id} on ${decision.work} was ${current.state}: ${current.refusal?.reason ?? current.outcome ?? 'no reason recorded'}; the diagnosis stands for the master to act on`,
+      current.state === 'refused' ? null : undefined);
   }
   if (current.state === 'stale' || current.state === 'withdrawn') return rerequest(cycle, diagnostician, entry, target, current, note);
   if (current.state !== 'applied') return;
@@ -489,7 +510,7 @@ async function launchApprover(cycle: Cycle, entry: DiagnosisRecord, work: Work, 
     const launched = await cycle.effects.approver(work, decision.id);
     decision.approver = launched.agentName;
     await note(entry, 'done', `Launched approver ${launched.agentName} for ${decision.action} decision ${decision.id} on ${work.key}`);
-  } catch (error) { await note(entry, 'failed', `Could not launch the approver for ${decision.action} decision ${decision.id} on ${work.key}: ${message(error)}; it is launched again next cycle`); }
+  } catch (error) { await note(entry, 'failed', `Could not launch the approver for ${decision.action} decision ${decision.id} on ${work.key}: ${message(error)}; it is launched again next cycle`, planeWideRefusal(error) ? null : undefined); }
 }
 
 /** The subject is answered by `by`: an invariant violation's instance is linked to it; a recurring item's closure already names it. */

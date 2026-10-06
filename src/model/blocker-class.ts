@@ -1,4 +1,5 @@
 import { humanRequestBlocker } from './human-request.js';
+import { RefusedResponse, planeUnavailable } from './refusal.js';
 import { namedPaths, pathScopeContains, scopeRefusalBlocker } from './scope.js';
 import { widenedPlannedFiles } from './scope-collapse.js';
 // Types only from work.ts: work.ts reaches this module through its own field types.
@@ -74,6 +75,26 @@ const controlPlane = new RegExp(String.raw`\binternal (?:server )?error\b|\bHTTP
 // being down, unreachable or overloaded (502-504, refused or reset connections) is the whole plane's.
 const requestServerError = /\bHTTP 500\b|\(500\)|\b500 Internal\b|"status":\s*500\b|\binternal (?:server )?error\b/i;
 const planeWideError = /\bHTTP 50[234]\b|\(50[234]\)|\b50[234] (?:Bad Gateway|Service Unavailable|Gateway)|"(?:status|code)":\s*50[234]\b|ECONNREFUSED|ECONNRESET|socket hang up|(?<!git )fetch failed|Application failed to respond|server (?:is )?(?:down|unavailable|unreachable)|\b(?:out of memory|ENOMEM)\b/i;
+// A server call the loop or the dispatcher made that ran into its own timeout (AbortSignal.timeout's
+// TimeoutError): while the plane is slow, every call does, whichever item it was for.
+const serverCallTimeout = /\bThe operation was aborted due to timeout\b/;
+// planeWideError's shapes without its bare memory alternative: a host's own ENOMEM is the host's, and
+// the plane's memory counts only when the text names the server (planeMemory), as for blockers.
+const planeWideShape = new RegExp(planeWideError.source.replace(String.raw`|\b(?:out of memory|ENOMEM)\b`, '') + `|${planeMemory}`, 'i');
+/**
+ * Whether a failure is the control plane's as a whole (GY-1345): down, unreachable or overloaded —
+ * Railway's "Application failed to respond", an HTTP or body 502-504, a refused or reset
+ * connection, a socket hang up, the server out of memory — or a server call that ran into its own timeout. One plane-wide
+ * window fails every step that writes or reads, so the loop rides it out and retries; it is no
+ * failure of the step that met it. An item-specific HTTP 500 is not one (itemSpecificPlaneError).
+ */
+export const planeWideFailure = (text: string | null | undefined) => !!text && (planeWideShape.test(text) || serverCallTimeout.test(text));
+/**
+ * Whether a thrown failure is plane-wide. A response the server refused carries its status and body,
+ * so it is read structurally (GY-1344's planeUnavailable): a 502 the server judged itself, with its own
+ * `error` field, is the item's; any other failure is read from its text.
+ */
+export const planeWideRefusal = (error: unknown) => error instanceof RefusedResponse ? planeUnavailable(error) : planeWideFailure(error instanceof Error ? error.message : typeof error === 'string' ? error : null);
 /** Whether a control-plane blocker is a server error the item's own request met (GY-1055): the server's health cannot show it fixed. */
 export function itemSpecificPlaneError(text: string | null | undefined) {
   return !!text && requestServerError.test(text) && !planeWideError.test(text);

@@ -562,6 +562,30 @@ test('integration:dispatcher-tick-failure-visible — a tick that cannot persist
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test('unit:plane-wide-dispatch-tick-not-counted — ticks timing out on the control plane raise no dispatch-failures line, are retried on the backoff, and the dispatcher recovers on its own (GY-1345); an item-specific failure still stands', async () => {
+  const directory = await temporaryDirectory('dispatch-plane-wide');
+  try {
+    const config = masterConfig(await coordinatorToken(directory));
+    const item = requestedWork();
+    // 01:52-02:01Z on 2026-10-06: six ticks in a row ran into their timeout, then the plane answered again.
+    let timedOut = 6;
+    const cursor = emptyDispatchCursor(config), stopping = new AbortController(), standing: string[] = [];
+    const effects = stubEffects(() => [item], [], {
+      snapshot: async () => { if (timedOut > 0) { timedOut--; throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); } return { work: [item], now: new Date().toISOString() }; },
+      persist: async current => { standing.push(...dispatchFailureAttention(dispatchSummary(current, clock, 10_000)).map(line => line.kind ?? 'dispatch-failures')); if (current.consecutiveFailures === 0 && current.lastSuccessAt) stopping.abort(); },
+    });
+    const log: string[] = [];
+    await runAutoDispatch(config, cursor, effects, { intervalMs: 50, retryMinMs: 1, signal: stopping.signal, log: line => log.push(line) });
+    assert.ok(log.some(line => /tick failed \(6 in a row, retrying in \d+ms\): The operation was aborted due to timeout/.test(line)), log.join('\n'));
+    assert.ok(standing.length, 'the master still sees that nothing launches');
+    assert.deepEqual([...new Set(standing)], ['plane-unavailable'], 'no tick of the window raised the dispatch-failures loop line: it reads as the outage (GY-1344)');
+    assert.equal(cursor.consecutiveFailures, 0, 'the dispatcher recovered on its own'); assert.ok(cursor.lastSuccessAt);
+    // The same streak on a cause of the dispatcher's own still stands.
+    const own = dispatchFailureAttention({ consecutiveFailures: 6, lastSuccessAt: null, lastFailure: { at: new Date(clock).toISOString(), reason: 'Herdr refused agent start: workspace w1V not found' } });
+    assert.deepEqual(own.map(line => [line.subject, line.kind ?? 'dispatch-failures']), [['dispatch', 'dispatch-failures']]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test('integration:instant-exit-classified — a session Herdr cannot find seconds after its launch is classified from its pane: a provider limit notice holds the account and relaunches the request on the next account, and any other cause is recorded with the pane\'s last words', async () => {
   const root = await temporaryDirectory('instant-exit'), credentialDirectory = await temporaryDirectory('instant-exit-credentials'), homes = await temporaryDirectory('instant-exit-homes');
   try {
