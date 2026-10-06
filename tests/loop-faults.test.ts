@@ -1307,7 +1307,12 @@ async function divergence() {
   git('checkout', '--quiet', '--detach', loaded);
   return { root, git, loaded, successor, foreign, unmerged };
 }
-function recoveringGuard(root: string, state: DaemonState) {
+/** GY-1359: the deployment step verified a delivery served by `sha`, the trigger a recovery waits on. */
+function serving(state: DaemonState, sha: string) {
+  state.deployment = { source: 'github-deployment', sha, at: '2026-10-06T05:30:00.000Z', reason: null, deployed: ['GY-1338'], pending: [] };
+  return state;
+}
+function recoveringGuard(root: string, state: DaemonState, options: { restartSelf?: () => Promise<void> } = {}) {
   const restarts = { executors: [] as string[], self: 0, recovers: 0 };
   const run = (command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8' });
   const guard = coordinatorCheckoutGuard({
@@ -1317,7 +1322,7 @@ function recoveringGuard(root: string, state: DaemonState) {
       restarts.recovers++;
       return upgradeModule.recoverMovedHead(config(), current, from, to, { root, run, now: () => Date.parse('2026-10-06T05:31:54.601Z'),
         restartExecutors: async commit => { restarts.executors.push(commit); return { result: 'restarted', reason: null, coordinator: { commit }, held: [], restarted: [], unsupervised: [], forgotten: [] }; },
-        restartSelf: async () => { restarts.self++; } });
+        restartSelf: options.restartSelf ?? (async () => { restarts.self++; }) });
     },
   });
   return { guard, restarts };
@@ -1327,7 +1332,7 @@ const skippedUpgrade = async () => ({ outcome: 'skipped' as const, reason: 'no d
 test('unit:upgrade-head-divergence-recovers — a HEAD moved forward to a descendant under the running loop is recovered onto: the executors restart and the loop re-executes, with no drift escalation', async () => {
   assert.equal(typeof upgradeModule.recoverMovedHead, 'function', 'the loop has a recovery for a moved HEAD');
   const repo = await divergence();
-  const state = emptyDaemonState(config());
+  const state = serving(emptyDaemonState(config()), repo.successor);
   const { guard, restarts } = recoveringGuard(repo.root, state);
   assert.equal(await guard.start(repo.loaded), null);
   assert.equal(guard.expected(), repo.loaded);
@@ -1350,7 +1355,7 @@ test('unit:upgrade-head-divergence-recovers — a HEAD moved forward to a descen
 
 test('unit:upgrade-head-divergence-recovers — drift raised before the recovery is settled by it', async () => {
   const repo = await divergence();
-  const state = emptyDaemonState(config());
+  const state = serving(emptyDaemonState(config()), repo.successor);
   const { guard, restarts } = recoveringGuard(repo.root, state);
   await guard.start(repo.loaded);
   repo.git('checkout', '--quiet', '--detach', repo.successor);
@@ -1365,7 +1370,7 @@ test('unit:upgrade-head-divergence-recovers — drift raised before the recovery
 test('unit:upgrade-head-divergence-recovers — a move that is not a clean detached descendant on the base branch still stands down, and is tried once', async () => {
   for (const move of ['foreign', 'dirty', 'branch', 'unmerged'] as const) {
     const repo = await divergence();
-    const state = emptyDaemonState(config());
+    const state = serving(emptyDaemonState(config()), repo.successor);
     const { guard, restarts } = recoveringGuard(repo.root, state);
     await guard.start(repo.loaded);
     if (move === 'foreign') repo.git('checkout', '--quiet', '--detach', repo.foreign);
@@ -1384,4 +1389,79 @@ test('unit:upgrade-head-divergence-recovers — a move that is not a clean detac
     assert.equal(guard.expected(), repo.loaded);
     assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed', `${move}: the drift is attention`);
   }
+});
+
+// ---- GY-1359: a forward move is classified by ancestry ------------------------------------------
+//
+// The recovery adopts merged code once a verified release serves it. A forward move it cannot adopt
+// by itself is attention naming a restart onto the checkout's own HEAD; only dirty, non-detached and
+// non-forward states keep the rollback refusal, and none of them reaches the self-upgrade.
+
+test('unit:coordinator-non-forward-drift-still-refused — a dirty tree, a branch HEAD or a move the loaded commit is not an ancestor of refuses the self-upgrade, naming the paths or the HEAD', async () => {
+  for (const move of ['foreign', 'dirty', 'branch'] as const) {
+    const repo = await divergence();
+    const state = serving(emptyDaemonState(config()), repo.successor);
+    const { guard, restarts } = recoveringGuard(repo.root, state);
+    let upgrades = 0;
+    const selfUpgrade = async () => { upgrades++; return skippedUpgrade(); };
+    await guard.start(repo.loaded);
+    if (move === 'foreign') repo.git('checkout', '--quiet', '--detach', repo.foreign);
+    else if (move === 'branch') repo.git('checkout', '--quiet', '-B', 'side', repo.successor);
+    else { repo.git('checkout', '--quiet', '--detach', repo.successor); writeFileSync(join(repo.root, 'src', 'loop.ts'), 'export const version = 9;\n'); }
+    for (let cycle = 0; cycle < 2; cycle++) {
+      const { refusal, upgraded } = await guard.betweenCycles(selfUpgrade);
+      assert.ok(refusal, `${move}: the guard refuses`);
+      assert.equal(upgraded, null, `${move}: nothing is upgraded`);
+      if (move === 'dirty') assert.match(refusal, /src\/loop\.ts/, 'the dirty paths are named');
+      else {
+        const head = (move === 'foreign' ? repo.foreign : repo.successor).slice(0, 12);
+        assert.match(refusal, new RegExp(`moved from ${repo.loaded.slice(0, 12)} to ${head}`), `${move}: the HEAD is named`);
+        assert.match(refusal, new RegExp(`checkout --detach ${repo.loaded.slice(0, 12)}`), `${move}: a non-forward or branch move keeps the rollback remedy`);
+      }
+    }
+    assert.equal(upgrades, 0, `${move}: the self-upgrade never runs`);
+    assert.equal(restarts.self, 0, `${move}: nothing re-executes`);
+    assert.equal(guard.expected(), repo.loaded);
+    assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed', `${move}: the refusal is attention`);
+  }
+});
+
+test('unit:forward-drift-escalation-names-restart — a forward move no verified release serves yet is attention naming a restart onto its own HEAD, and is recovered once a release serves it', async () => {
+  const repo = await divergence();
+  const state = emptyDaemonState(config());
+  const { guard, restarts } = recoveringGuard(repo.root, state);
+  await guard.start(repo.loaded);
+  repo.git('checkout', '--quiet', '--detach', repo.successor);
+  const successor = repo.successor.slice(0, 12), loaded = repo.loaded.slice(0, 12);
+  for (let cycle = 0; cycle < 2; cycle++) {
+    const { refusal, upgraded } = await guard.betweenCycles(skippedUpgrade);
+    assert.equal(upgraded, null);
+    assert.match(refusal ?? '', new RegExp(`moved from ${loaded} forward to ${successor}`));
+    assert.match(refusal ?? '', /no delivered item is verified deployed yet/);
+    assert.match(refusal ?? '', new RegExp(`leave the checkout at ${successor} and restart the loop onto its own HEAD`));
+    assert.doesNotMatch(refusal ?? '', /checkout --detach/, 'never a rollback to the stale loaded commit');
+  }
+  assert.equal(restarts.recovers, 1, 'one attempt per HEAD and release');
+  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed');
+  serving(state, repo.successor);
+  assert.equal((await guard.betweenCycles(skippedUpgrade)).upgraded?.outcome, 'upgraded', 'a release verified later is retried');
+  assert.equal(restarts.self, 1);
+  assert.equal(guard.expected(), repo.successor);
+  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done');
+});
+
+test('unit:forward-drift-escalation-names-restart — a forward move the loop cannot re-execute onto (no supervisor unit) names a restart, never a rollback', async () => {
+  const repo = await divergence();
+  const state = serving(emptyDaemonState(config()), repo.successor);
+  const { guard, restarts } = recoveringGuard(repo.root, state, { restartSelf: async () => { throw new Error('this loop runs under no graphyard-master supervisor unit, so it cannot re-execute itself'); } });
+  await guard.start(repo.loaded);
+  repo.git('checkout', '--quiet', '--detach', repo.successor);
+  const { refusal, upgraded } = await guard.betweenCycles(skippedUpgrade);
+  assert.equal(upgraded, null);
+  assert.deepEqual(restarts.executors, [repo.successor], 'the executors were restarted onto it');
+  assert.match(refusal ?? '', /no graphyard-master supervisor unit/);
+  assert.match(refusal ?? '', new RegExp(`restart the loop onto its own HEAD`));
+  assert.doesNotMatch(refusal ?? '', /checkout --detach/);
+  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed');
+  assert.equal(guard.expected(), repo.loaded, 'the loop still runs the code it loaded');
 });
