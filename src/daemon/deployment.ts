@@ -4,6 +4,7 @@ import { productionEnvironmentFromEnv } from '../flow-analytics.js';
 import type { ChildRun } from '../child-runner.js';
 import type { Work } from '../model.js';
 import type { MasterConfig } from '../master.js';
+import { actionableIntervalMs } from './liveness.js';
 import { boundDeployment, type ContainmentRetention, type DeploymentObservation, deploymentObservationSchema, message, type PromotionState, retainedContainments } from './state.js';
 
 export function deploymentDetail(observation: DeploymentObservation) {
@@ -285,6 +286,53 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
   const reasons = [inactive, stale ? `Containment was derived without a fresh base branch: ${stale}` : null].filter(Boolean);
   return deploymentObservationSchema.parse({ source, sha, at, reason: reasons.length ? reasons.join('; ') : null, deployed: deployed.slice(-200), pending: pending.slice(-200),
     requests, derived, retained: retainedCount, containment: { release: sha, settled: Object.fromEntries(keep) } });
+}
+
+// ——— The step's per-cycle budget (GY-1354) ———
+
+/**
+ * What the deployment step's reads — the release observation and the promotion check — may spend in
+ * one cycle before the step moves on. While the plane and GitHub answered slowly on 2026-10-06 the
+ * observation's listing pages, status reads and ancestry checks ran inline for 381.9s of cycle
+ * 12621's 450s and 587.1s of cycle 12624's 781s, past the two-interval liveness bound. Like the
+ * decisions step (GY-1286) and the faults step's observation (GY-1345), a fifth of the interval and
+ * never under the 30s actionable cadence: a read still running at the bound is left in flight, the
+ * last verified observation stands, and a later cycle takes the answer once it lands.
+ */
+export const deploymentStepBudgetMs = (intervalMs: number) => Math.max(actionableIntervalMs, Math.round(intervalMs * 0.2));
+/** A read the budget cut: its verification goes on in flight and a later cycle takes its answer. */
+export const stillVerifying = Symbol('still verifying');
+export type Settled<T> = { ok: true; value: T } | { ok: false; error: unknown };
+/**
+ * The step's reads in flight, per loop state and read. One left behind by the budget keeps running
+ * — that is the verification's progress — so a cycle finding it here starts no other and does not
+ * wait on it again: it takes the answer if it has landed and moves on otherwise. A slow window then
+ * costs only the cycle that asked its budget, and never stacks reads on the source too slow to answer one.
+ */
+const verifying = new WeakMap<object, Map<string, Promise<Settled<unknown>>>>();
+/** How many of the deployment step's reads `owner` has in flight or answered but not yet taken. */
+export function deploymentReadsPending(owner: object) { return verifying.get(owner)?.size ?? 0; }
+/**
+ * `read()`'s outcome, settled so a read left behind rejects nowhere, or `stillVerifying` once
+ * `deadline` passes — at once for a read an earlier cycle started that has not landed. Single-flight
+ * per owner and name across cycles; an answer taken frees its slot for the next cycle's read.
+ */
+export async function withinDeploymentBudget<T>(owner: object, name: string, read: () => Promise<T>, deadline: number, now: () => number): Promise<Settled<T> | typeof stillVerifying> {
+  let reads = verifying.get(owner);
+  if (!reads) verifying.set(owner, reads = new Map());
+  let pending = reads.get(name) as Promise<Settled<T>> | undefined;
+  const started = !pending;
+  if (!pending) {
+    pending = Promise.resolve().then(read).then(value => ({ ok: true as const, value }), error => ({ ok: false as const, error }));
+    reads.set(name, pending);
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<typeof stillVerifying>(resolve => { timer = setTimeout(() => resolve(stillVerifying), Math.max(0, started ? deadline - now() : 0)); });
+  try {
+    const answer = await Promise.race([pending, expired]);
+    if (answer !== stillVerifying && reads.get(name) === pending) reads.delete(name);
+    return answer;
+  } finally { clearTimeout(timer); }
 }
 
 // ——— Promotion (GY-1302): the loop, not GitHub's cron, moves production along. ———

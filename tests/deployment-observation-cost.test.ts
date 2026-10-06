@@ -1,10 +1,11 @@
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cycleCost, daemonSummary, deploymentListingPages, deploymentPageSize, emptyDaemonState, loopAttention, loopLiveness, maxDeploymentRequests, observeDeployment, runCycle, type ContainmentRetention, type CycleSteps, type DaemonEffects } from '../src/master-daemon.js';
+import * as deploymentModule from '../src/daemon/deployment.js';
 import { inFlightShadowBound } from '../src/daemon/deployment.js';
 import { masterConfigSchema, masterSettingsFromArgs, type MasterConfig, type MasterRun } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -631,4 +632,76 @@ test('unit:deployment-observation-inactive-release — the newest production dep
     assert.equal(paged.source, 'unavailable', 'the deactivated release on page two is behind 100 newer attempts');
     assert.equal(paged.requests, 4);
   } finally { await rm(fixture.directory, { recursive: true, force: true }); }
+});
+
+// ---- GY-1354: the deployment step's per-cycle budget ----------------------------------------------
+
+/** Run `running` to its end on the mocked clock, a step at a time. */
+async function drive<T>(running: Promise<T>, stepMs = 500): Promise<T> {
+  let settled = false;
+  running.then(() => { settled = true; }, () => { settled = true; });
+  for (let turns = 0; !settled && turns < 20_000; turns++) { await new Promise(resolve => setImmediate(resolve)); if (!settled) mock.timers.tick(stepMs); }
+  return running;
+}
+
+test('unit:deployment-step-cycle-budget — a release-landing verification slower than the budget is left in flight and resumed, not polled inline: every cycle fits its interval, one read is in flight, and the delivery is verified served once it lands', async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'], now: clock });
+  try {
+    const master = config('/outside/coordinator.token', { run: { intervalSeconds: 300 } as Partial<MasterRun> });
+    const intervalMs = 300_000, budgetMs = deploymentModule.deploymentStepBudgetMs(intervalMs);
+    assert.equal(budgetMs, 60_000, 'a fifth of the 300s interval');
+    assert.equal(deploymentModule.deploymentStepBudgetMs(20_000), 30_000, 'never under the 30s actionable cadence');
+    const state = emptyDaemonState(master);
+    const delivered = delivery('GY-1', 'a'.repeat(40), iso(-60_000)), sha = 'a'.repeat(40);
+    // The last verified observation, which must stand while the next one is in flight.
+    state.deployment = { source: 'endpoint', sha: 'b'.repeat(40), at: iso(-600_000), reason: null, deployed: [], pending: ['GY-1'], requests: 0, derived: 1, retained: 0, containment: null };
+    let reads = 0, inFlight = 0, maxInFlight = 0;
+    const effects = cycleEffects({
+      snapshot: async () => ({ work: [delivered], now: new Date(Date.now()).toISOString() }),
+      // Cycle 12624's shape: the observation takes 587.1s to answer.
+      observeDeployment: () => { reads++; inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+        return new Promise(resolve => setTimeout(() => { inFlight--; resolve({ source: 'endpoint', sha, at: new Date(Date.now()).toISOString(), reason: null, deployed: ['GY-1'], pending: [], requests: 0, derived: 1, retained: 0 }); }, 587_100)); },
+    });
+    const first = await drive(runCycle(master, state, effects, () => Date.now()));
+    const cost = cycleCost(first.metrics, intervalMs)!;
+    assert.ok(cost.withinInterval && cost.withinLivenessBound, `the cycle fits: ${cost.breakdown}`);
+    assert.ok(first.metrics.steps!.deployment.ms <= budgetMs + 1_000, `the step stopped at its budget: ${first.metrics.steps!.deployment.ms}ms`);
+    assert.equal(state.deployment!.sha, 'b'.repeat(40), 'the last verified observation stands');
+    assert.deepEqual(state.deployment!.pending, ['GY-1']);
+    assert.equal(deploymentModule.deploymentReadsPending(state), 1, 'the cut read is kept in flight');
+    assert.match(state.actions['deployment:deferred']?.detail ?? '', /spent its 60s budget before the release observation finished, so the last verified observation stands/);
+    assert.equal(state.actions['deployment:deferred'].faultClass, undefined, 'a bounded step is no fault');
+    // Cycles go on at the actionable cadence; none waits on the read again, none starts another.
+    for (let cycles = 0; cycles < 30 && deploymentModule.deploymentReadsPending(state); cycles++) {
+      mock.timers.tick(30_000);
+      const before = Date.now();
+      const next = await drive(runCycle(master, state, effects, () => Date.now()));
+      assert.ok(Date.now() - before <= 5_000, `a cycle finding the read in flight does not wait on it: ${Date.now() - before}ms`);
+      assert.ok(cycleCost(next.metrics, intervalMs)!.withinInterval);
+    }
+    assert.equal(reads, 1, 'the answer of the read in flight is taken, not read again');
+    assert.equal(maxInFlight, 1);
+    assert.equal(deploymentModule.deploymentReadsPending(state), 0, 'a taken answer frees its slot');
+    // The verification is still correct once it lands: the delivery is verified served.
+    assert.equal(state.deployment!.sha, sha);
+    assert.deepEqual(state.deployment!.deployed, ['GY-1']);
+    assert.match(state.actions['deployment:deferred'].detail, /^The deployment step verified within its budget/);
+    // A fast observation answers in the cycle that asked, with nothing deferred.
+    mock.timers.tick(30_000);
+    const fast = emptyDaemonState(master);
+    await drive(runCycle(master, fast, cycleEffects({ snapshot: async () => ({ work: [delivered], now: new Date(Date.now()).toISOString() }),
+      observeDeployment: async () => ({ source: 'endpoint', sha, at: new Date(Date.now()).toISOString(), reason: null, deployed: ['GY-1'], pending: [], requests: 0, derived: 1, retained: 0 }) }), () => Date.now()));
+    assert.deepEqual(fast.deployment!.deployed, ['GY-1']);
+    assert.equal(fast.actions['deployment:deferred'], undefined);
+  } finally { mock.timers.reset(); }
+});
+
+test('unit:deployment-step-cycle-budget — a failed observation still lands as unavailable in the cycle that asked', async () => {
+  const master = config('/outside/coordinator.token');
+  const state = emptyDaemonState(master);
+  const delivered = delivery('GY-1', 'a'.repeat(40), iso(-60_000));
+  await runCycle(master, state, cycleEffects({ snapshot: async () => ({ work: [delivered], now: iso(0) }), observeDeployment: async () => { throw new Error('gh: timed out'); } }), () => clock);
+  assert.equal(state.deployment!.source, 'unavailable');
+  assert.match(state.deployment!.reason ?? '', /gh: timed out/);
+  assert.equal(deploymentModule.deploymentReadsPending(state), 0);
 });

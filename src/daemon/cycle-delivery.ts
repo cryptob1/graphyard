@@ -8,7 +8,7 @@ import { readyToRetry } from './sessions.js';
 import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, githubPause, observationWakeDue, standingVerdict } from './decisions.js';
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
-import { defaultPromoteEveryMinutes, deploymentDetail, promotionCycle, promotionWorkflow } from './deployment.js';
+import { defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, stillVerifying, withinDeploymentBudget } from './deployment.js';
 import { mainGuardAttention } from '../main-guard.js';
 
 /**
@@ -106,8 +106,14 @@ export async function deploymentStep(cycle: Cycle) {
   const delivered = snapshot.work.filter(item => item.stage === 'done' && item.delivery)
     .sort((a, b) => Date.parse(a.delivery!.mergedAt) - Date.parse(b.delivery!.mergedAt));
   const deploymentKey = `deployment:${delivered.at(-1)?.delivery?.mergeSha ?? 'none'}`;
-  try {
-    const observation = await effects.observeDeployment(delivered, state.deployment?.containment ?? null);
+  // GY-1354: the step's reads share one per-cycle budget. A read still running at the bound is left
+  // in flight and the last verified observation stands; a later cycle takes its answer, not a new read.
+  const budgetMs = deploymentStepBudgetMs(config.run.intervalSeconds * 1000), deadline = now() + budgetMs, deferred: string[] = [];
+  const observed = await withinDeploymentBudget(state, 'observation', () => effects.observeDeployment(delivered, state.deployment?.containment ?? null), deadline, now);
+  if (observed === stillVerifying) deferred.push('the release observation');
+  else try {
+    if (!observed.ok) throw observed.error;
+    const observation = observed.value;
     state.deployment = deploymentObservationSchema.parse(boundDeployment(observation));
     if (detailChanged(state.actions[deploymentKey], deploymentDetail(state.deployment))) {
       performed.push(await record(state, deploymentKey, { kind: 'deployment', work: null, principal: null, state: observation.source === 'unavailable' ? 'failed' : 'done', detail: deploymentDetail(state.deployment), attempts: (state.actions[deploymentKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
@@ -131,32 +137,40 @@ export async function deploymentStep(cycle: Cycle) {
   //       cycle's read and dispatch stamps are kept, so a failure never repeats every cycle.
   const promotion = effects.promotion, promotionFailure = 'promotion:failed';
   if (promotion && readyToRetry(state.actions[promotionFailure], state.cycle)) {
-    const result = await promotionCycle(state.promotion ?? null, promotion, { now: now(), everyMinutes: config.run.promoteEveryMinutes ?? defaultPromoteEveryMinutes });
-    state.promotion = result.state;
-    if (result.failure) {
-      const detail = `Promotion could not be checked or dispatched: ${result.failure}`;
-      performed.push(await record(state, promotionFailure, { kind: 'deployment', work: null, principal: null, state: 'failed', detail, attempts: (state.actions[promotionFailure]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-    } else if (state.actions[promotionFailure]) delete state.actions[promotionFailure];
-    if (result.dispatched) performed.push(await record(state, `promotion:${result.state.mainSha}`, { kind: 'deployment', work: null, principal: null, state: 'done', detail: result.state.reason ?? `Dispatched ${promotionWorkflow}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+    const checked = await withinDeploymentBudget(state, 'promotion', () => promotionCycle(state.promotion ?? null, promotion, { now: now(), everyMinutes: config.run.promoteEveryMinutes ?? defaultPromoteEveryMinutes }), deadline, now);
+    if (checked === stillVerifying) deferred.push('the promotion check');
+    else {
+      if (!checked.ok) throw checked.error;
+      const result = checked.value;
+      state.promotion = result.state;
+      if (result.failure) {
+        const detail = `Promotion could not be checked or dispatched: ${result.failure}`;
+        performed.push(await record(state, promotionFailure, { kind: 'deployment', work: null, principal: null, state: 'failed', detail, attempts: (state.actions[promotionFailure]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+      } else if (state.actions[promotionFailure]) delete state.actions[promotionFailure];
+      if (result.dispatched) performed.push(await record(state, `promotion:${result.state.mainSha}`, { kind: 'deployment', work: null, principal: null, state: 'done', detail: result.state.reason ?? `Dispatched ${promotionWorkflow}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+    }
   }
 
   // 7b. The second confidence layer. For each delivery whose policy asks for a smoke proof: record
   //     the observation on Graphyard once the release serves its merge, ask the provider to run the
   //     trusted smoke workflow against exactly that commit, and escalate a failed verdict with
   //     rollback guidance. The loop never produces the verdict: the workflow's producer does.
-  const observed = state.deployment;
+  const served = state.deployment;
+  let smokeDeferred = 0;
   for (const item of delivered.filter(candidate => deploySmokeRequired(candidate.policy))) await isolate('smoke', item, item.key, async () => {
+    // Past the budget nothing more is started: every record and request below is keyed, so the next cycle resumes where this one stopped.
+    if (now() >= deadline) { smokeDeferred++; return; }
     const delivery = item.delivery!;
     if (!delivery.deployment) {
-      if (observed?.source === 'unavailable' || !observed?.sha || !observed.deployed.includes(item.key)) return;
-      const key = `deployment:record:${item.id}:${observed.sha}`;
+      if (served?.source === 'unavailable' || !served?.sha || !served.deployed.includes(item.key)) return;
+      const key = `deployment:record:${item.id}:${served.sha}`;
       if (state.actions[key] && state.actions[key].state !== 'failed') return;
       if (!readyToRetry(state.actions[key], state.cycle)) return;
       const attempts = (state.actions[key]?.attempts ?? 0) + 1;
-      await record(state, key, { kind: 'deployment', work: item.key, principal: null, state: 'started', detail: `Recording that ${observed.sha.slice(0, 12)} from ${observed.source} serves ${item.key}`, attempts, cycle: state.cycle }, now(), effects.persist);
+      await record(state, key, { kind: 'deployment', work: item.key, principal: null, state: 'started', detail: `Recording that ${served.sha.slice(0, 12)} from ${served.source} serves ${item.key}`, attempts, cycle: state.cycle }, now(), effects.persist);
       try {
-        await effects.recordDeployment(item, { sha: observed.sha, source: observed.source as 'endpoint' | 'github-deployment', observedAt: observed.at });
-        performed.push(await record(state, key, { kind: 'deployment', work: item.key, principal: null, state: 'done', detail: `Recorded deployment ${observed.sha.slice(0, 12)} (${observed.source}) covering ${item.key} merge ${delivery.mergeSha.slice(0, 12)}; the smoke proof may now be requested`, attempts, cycle: state.cycle }, now(), effects.persist));
+        await effects.recordDeployment(item, { sha: served.sha, source: served.source as 'endpoint' | 'github-deployment', observedAt: served.at });
+        performed.push(await record(state, key, { kind: 'deployment', work: item.key, principal: null, state: 'done', detail: `Recorded deployment ${served.sha.slice(0, 12)} (${served.source}) covering ${item.key} merge ${delivery.mergeSha.slice(0, 12)}; the smoke proof may now be requested`, attempts, cycle: state.cycle }, now(), effects.persist));
       } catch (error) {
         performed.push(await record(state, key, { kind: 'deployment', work: item.key, principal: null, state: 'failed', detail: `Could not record the deployment for ${item.key}: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
       }
@@ -184,4 +198,18 @@ export async function deploymentStep(cycle: Cycle) {
       performed.push(await record(state, key, { kind: 'smoke', work: item.key, principal: null, state: 'failed', detail: `Could not request ${config.run.smokeWorkflow} for ${item.key}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
     }
   });
+  if (smokeDeferred) deferred.push(`${smokeDeferred} deliveries' deployment records and smoke requests`);
+  await noteDeploymentBudget(cycle, budgetMs, deferred);
+}
+
+/** Record a budget-cut step, so the journal and `master status` say verification is in flight rather than blind; a full step supersedes the last cut once. */
+async function noteDeploymentBudget(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'performed'>, budgetMs: number, deferred: string[]) {
+  const { state, effects, now, performed } = cycle, key = 'deployment:deferred', standing = state.actions[key];
+  const within = 'The deployment step verified within its budget';
+  if (!deferred.length) {
+    if (standing && !standing.detail.startsWith(within)) performed.push(await record(state, key, { kind: 'deployment', work: null, principal: null, state: 'done', attempts: standing.attempts + 1, cycle: state.cycle, detail: `${within}; nothing is left in flight` }, now(), effects.persist, null));
+    return;
+  }
+  performed.push(await record(state, key, { kind: 'deployment', work: null, principal: null, state: 'done', attempts: (standing?.attempts ?? 0) + 1, cycle: state.cycle,
+    detail: `The deployment step spent its ${Math.round(budgetMs / 1000)}s budget before ${deferred.join(' and ')} finished, so the last verified observation stands and a later cycle resumes: it takes the answer of the read still in flight once it lands rather than starting another` }, now(), effects.persist, null));
 }
