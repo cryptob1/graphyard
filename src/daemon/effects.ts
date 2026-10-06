@@ -42,7 +42,7 @@ import { onceAnnotations, timingFaultAttention, type ReportedAttention } from '.
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
-import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, type SelfUpgradeOutcome } from './upgrade.js';
+import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
@@ -158,6 +158,8 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    */
   /** `keepAlive` feeds the supervisor's watchdog while the upgrade waits on the executors. */
   selfUpgrade?: (state: DaemonState, keepAlive?: () => Promise<void>) => Promise<SelfUpgradeOutcome>;
+  /** GY-1356: adopts a coordinator HEAD that moved forward from `from` to `to` under the running loop, restarting onto it. */
+  recoverHead?: (state: DaemonState, from: string, to: string, keepAlive?: () => Promise<void>) => Promise<SelfUpgradeOutcome>;
   /**
    * GY-437: the release this process loaded, read from its checkout when the effects are built at
    * startup, before anything can move the checkout. The loop records it on the cursor over whatever
@@ -558,6 +560,17 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     if (memory && memory !== writtenMemory) await writeProjectMemory(root, state.projectMemory).then(() => { writtenMemory = memory; }, () => {});
     return writeDaemonState(current(), state);
   };
+  const upgradeDeps = (keepAlive?: () => Promise<void>): SelfUpgradeDeps => ({ root, run, // shared with the moved-HEAD recovery (GY-1356)
+    restartExecutors: to => restartExecutors(current(), { actions: () => asCoordinator('actions'), coordinatorCommit: to, onWait: keepAlive }),
+    restartSelf: async () => {
+      const unit = detectLoopSupervisorUnit();
+      if (!unit) throw new Error('this loop runs under no graphyard-master supervisor unit, so it cannot re-execute itself; run it under the packaged unit (examples/master/graphyard-master.service), or restart it by hand with systemctl --user restart graphyard-master');
+      // --no-block queues the restart; systemd's stop then ends this wait, and reaches this process too (upgrade.ts restartEndedBySupervisorStop).
+      await awaitSupervisorRestart(() => run('systemctl', ['--user', '--no-block', 'restart', unit]));
+    },
+    alignUnit: () => alignRunningLoopUnit(root, current()),
+    persist: persistLoop,
+  });
   return Object.defineProperties({
     agents: () => listHerdrAgents(run).catch(() => []),
     panes: async () => { try { return { panes: await listHerdrPanes(run), available: true }; } catch { return { panes: [], available: false }; } },
@@ -776,18 +789,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // re-executes itself only through the supervisor unit it actually runs under, detected from
     // its own cgroup like an executor's.
     loadedRelease: readRelease(root),
-    selfUpgrade: (state, keepAlive) => performSelfUpgrade(current(), state, {
-      root, run,
-      restartExecutors: to => restartExecutors(current(), { actions: () => asCoordinator('actions'), coordinatorCommit: to, onWait: keepAlive }),
-      restartSelf: async () => {
-        const unit = detectLoopSupervisorUnit();
-        if (!unit) throw new Error('this loop runs under no graphyard-master supervisor unit, so it cannot re-execute itself; run it under the packaged unit (examples/master/graphyard-master.service), or restart it by hand with systemctl --user restart graphyard-master');
-        // --no-block queues the restart; systemd's stop then ends this wait, and reaches this process too (upgrade.ts restartEndedBySupervisorStop).
-        await awaitSupervisorRestart(() => run('systemctl', ['--user', '--no-block', 'restart', unit]));
-      },
-      alignUnit: () => alignRunningLoopUnit(root, current()),
-      persist: persistLoop,
-    }),
+    selfUpgrade: (state, keepAlive) => performSelfUpgrade(current(), state, upgradeDeps(keepAlive)),
+    recoverHead: (state, from, to, keepAlive) => recoverMovedHead(current(), state, from, to, upgradeDeps(keepAlive)),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
     masterSession: masterSessionEffects(root, current, run),
     persist: persistLoop,
