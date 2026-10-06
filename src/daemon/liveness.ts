@@ -94,23 +94,35 @@ export function cycleTimes(metrics: Pick<CycleMetrics, 'at' | 'durationMs'>[], n
 }
 
 /**
- * Whether the loop is cycling, from its own cursor. Nothing else in the installation notices a
- * coordinator that stopped: the work simply stops moving. Two intervals without a completed cycle
- * is a stall, and no lock at all — or a lock whose process is gone on this host — is an absence.
- * A measured cycle that itself accounts for the lag is `slow`, not stalled: the loop is inside a
- * long cycle, and the cost says whether that cycle is computing (a step to shorten) or waiting on
- * a child (a provider to look at), so nobody restarts a loop that is still cycling.
- *
- * The pid is probed only from the PID namespace the lock was taken in (GY-1370): a reader inside a
- * sandbox with its own namespace sees no host process, so there the lock's pid is never evidence of
- * an absence, and the cycle-lag rule alone judges the loop. A lock that recorded no namespace was
- * taken on the host, so it is probed only from the host's initial namespace.
+ * Whether this reader can probe the lock's pid at all: a pid means something only in the PID
+ * namespace it was taken in (GY-1370), and a sandbox with a namespace of its own sees no host
+ * process. A lock that recorded no namespace was taken on the host, so only the host's initial
+ * namespace probes it. Without /proc (macOS) there are no PID namespaces, so every reader probes.
  */
 export function pidProbeable(lock: Pick<NonNullable<DaemonState['lock']>, 'pidNamespace'>, readerNamespace: string | null) {
   if (lock.pidNamespace) return readerNamespace === lock.pidNamespace;
   return readerNamespace === null || readerNamespace === initialPidNamespace;
 }
-export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCycleAt'> & Partial<Pick<DaemonState, 'failures' | 'metrics'>>, now: number, intervalMs: number, hostId?: string, readerNamespace: string | null = pidNamespace()): LoopLiveness {
+
+/**
+ * Whether the lock's process is alive as this reader can tell: true when it sees it, false when it
+ * can probe the lock's namespace and does not, and null when it cannot probe it (a confined agent
+ * session, GY-1369), where a pid it cannot see says nothing about the host.
+ */
+export function hostPidProbe(pid: number, namespace: () => string | null = pidNamespace, recorded?: string | null): boolean | null {
+  return pidProbeable({ pidNamespace: recorded }, namespace()) ? liveProcess(pid) : null;
+}
+
+/**
+ * Whether the loop is cycling, from its own cursor. Nothing else in the installation notices a
+ * coordinator that stopped: the work simply stops moving. Two intervals without a completed cycle
+ * is a stall, and no lock at all — or a lock whose process is gone on this host — is an absence.
+ * A measured cycle that itself accounts for the lag is `slow`, not stalled: the loop is inside a
+ * long cycle, and the cost says whether that cycle is computing (a step to shorten) or waiting on
+ * a child (a provider to look at), so nobody restarts a loop that is still cycling. A reader that
+ * cannot probe the pid (outside the lock's PID namespace) judges by the stall bound alone and says so.
+ */
+export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCycleAt'> & Partial<Pick<DaemonState, 'failures' | 'metrics'>>, now: number, intervalMs: number, hostId?: string, probe: (pid: number, recorded?: string | null) => boolean | null = (pid, recorded) => hostPidProbe(pid, pidNamespace, recorded)): LoopLiveness {
   const cost = cycleCost(state.metrics?.at(-1) ?? null, intervalMs);
   const lastCycleAt = state.lastCycleAt ? Date.parse(state.lastCycleAt) : Number.NaN;
   const lagMs = Number.isFinite(lastCycleAt) ? Math.max(0, now - lastCycleAt) : null;
@@ -120,10 +132,9 @@ export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCy
   const stalledAfterMs = 2 * intervalMs + (backoff ? Math.max(0, backoff.dueAt - lastCycleAt) : 0);
   const restart = 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)';
   const lock = state.lock;
-  const local = !!lock && !!hostId && lock.host === hostId;
-  const probeable = !lock || pidProbeable(lock, readerNamespace);
-  const gone = local && probeable && !liveProcess(lock!.pid);
-  const unprobed = local && !probeable ? `; pid ${lock!.pid} could not be probed from this PID namespace (${readerNamespace ?? 'unknown'}, the lock was taken in ${lock!.pidNamespace ?? 'the host\'s'}), so the cycle lag alone judges the loop` : '';
+  const alive = !!lock && !!hostId && lock.host === hostId ? probe(lock.pid, lock.pidNamespace) : true;
+  const gone = alive === false;
+  const unprobed = alive === null ? `; pid ${lock!.pid} could not be probed from this PID namespace (the lock was taken in ${lock!.pidNamespace ?? 'the host\'s initial one'}), so the cycle lag alone judges the loop` : '';
   if (!lock || gone) {
     return { state: 'absent', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost,
       detail: gone ? `No master loop is running: the cursor's lock (pid ${lock!.pid} on ${lock!.host}) names a process that is gone, last cycle ${state.lastCycleAt ?? 'never'}. Nothing is dispatching, deciding or merging until it is restarted.`

@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { acquireDaemonLock, daemonStateSchema, emptyDaemonState, loopLiveness, type DaemonState } from '../src/master-daemon.js';
+import { acquireDaemonLock, daemonStateSchema, emptyDaemonState, loopAttention, loopLiveness, type DaemonState } from '../src/master-daemon.js';
+import { hostPidProbe } from '../src/daemon/liveness.js';
 // A namespace import, so the symbols GY-1370 adds read as missing test cases on a base without them, not a failed load.
 import * as daemon from '../src/master-daemon.js';
 
@@ -10,6 +11,8 @@ const config = { url: 'http://127.0.0.1:1', repository: 'owner/repo' } as Parame
 // A pid that is certainly gone: a child that already exited and was reaped.
 const deadPid = () => { const child = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' }); return Number(child.stdout); };
 const foreign = 'pid:[4026539999]';
+// A reader in the given PID namespace, as loopLiveness probes from it.
+const from = (namespace: string | null) => (pid: number, recorded?: string | null) => hostPidProbe(pid, () => namespace, recorded);
 function cursor(lock: Partial<NonNullable<DaemonState['lock']>>, lastCycleAt: number) {
   const state = emptyDaemonState(config);
   state.lock = { id: 'lock', pid: deadPid(), host: 'machine-a', startedAt: new Date(lastCycleAt).toISOString(), heartbeatAt: new Date(lastCycleAt).toISOString(), ...lock };
@@ -22,31 +25,31 @@ test('unit:loop-liveness-foreign-namespace — a reader outside the lock\'s PID 
   const now = Date.parse('2026-10-06T10:51:00Z');
   const recorded = 'pid:[4026531836]';
   // GY-1369: a sandboxed diagnostician read the host loop's lock and could not see its pid.
-  const recent = loopLiveness(cursor({ pidNamespace: recorded }, now - 5_000), now, interval, 'machine-a', foreign);
+  const recent = loopLiveness(cursor({ pidNamespace: recorded }, now - 5_000), now, interval, 'machine-a', from(foreign));
   assert.equal(recent.state, 'running', 'a recent last cycle is a running loop whatever the probe says');
   assert.match(recent.detail, /could not be probed from this PID namespace/);
-  assert.match(recent.detail, new RegExp(`pid:\\[4026539999\\].*pid:\\[4026531836\\]`), 'the detail names both namespaces');
+  assert.match(recent.detail, /the lock was taken in pid:\[4026531836\]/, 'the detail names the lock\'s namespace');
 
-  const lagging = loopLiveness(cursor({ pidNamespace: recorded }, now - 3 * interval), now, interval, 'machine-a', foreign);
+  const lagging = loopLiveness(cursor({ pidNamespace: recorded }, now - 3 * interval), now, interval, 'machine-a', from(foreign));
   assert.equal(lagging.state, 'stalled', 'past two intervals the lag rule judges it stalled, not absent');
   assert.match(lagging.detail, /is stalled; pid \d+ could not be probed from this PID namespace/);
 
   const slowCursor = cursor({ pidNamespace: recorded }, now - 3 * interval);
   slowCursor.metrics = [{ cycle: 12706, at: new Date(now - 3 * interval).toISOString(), durationMs: 5 * interval } as DaemonState['metrics'][number]];
-  const slow = loopLiveness(slowCursor, now, interval, 'machine-a', foreign);
+  const slow = loopLiveness(slowCursor, now, interval, 'machine-a', from(foreign));
   assert.equal(slow.state, 'slow', 'a measured long cycle still explains the lag');
   assert.match(slow.detail, /could not be probed from this PID namespace/);
 
   // The same lock read from its own namespace: a pid that is truly gone is an absent loop.
-  const own = loopLiveness(cursor({ pidNamespace: recorded }, now - 5_000), now, interval, 'machine-a', recorded);
+  const own = loopLiveness(cursor({ pidNamespace: recorded }, now - 5_000), now, interval, 'machine-a', from(recorded));
   assert.equal(own.state, 'absent');
   assert.match(own.detail, /names a process that is gone/);
   // And a live pid in the reader's own namespace is running, with no probe caveat.
-  const live = loopLiveness(cursor({ pid: process.pid, pidNamespace: recorded }, now - 5_000), now, interval, 'machine-a', recorded);
+  const live = loopLiveness(cursor({ pid: process.pid, pidNamespace: recorded }, now - 5_000), now, interval, 'machine-a', from(recorded));
   assert.equal(live.state, 'running');
   assert.doesNotMatch(live.detail, /could not be probed/);
   // A lock on another host is never probed at all, so it never carries the caveat either.
-  assert.doesNotMatch(loopLiveness(cursor({ host: 'machine-b', pidNamespace: recorded }, now - 5_000), now, interval, 'machine-a', foreign).detail, /could not be probed/);
+  assert.doesNotMatch(loopLiveness(cursor({ host: 'machine-b', pidNamespace: recorded }, now - 5_000), now, interval, 'machine-a', from(foreign)).detail, /could not be probed/);
 });
 
 test('unit:loop-liveness-foreign-namespace — the lock records the namespace it was taken in, and the cursor keeps it', () => {
@@ -67,11 +70,40 @@ test('unit:loop-liveness-foreign-namespace — a lock written before the namespa
   assert.equal(daemon.pidProbeable({}, foreign), false);
   assert.equal(daemon.pidProbeable({ pidNamespace: foreign }, null), false, 'a reader that cannot name its namespace cannot match a recorded one');
 
-  const host = loopLiveness(legacy(), now, interval, 'machine-a', daemon.initialPidNamespace);
+  const host = loopLiveness(legacy(), now, interval, 'machine-a', from(daemon.initialPidNamespace));
   assert.equal(host.state, 'absent', 'on the host a gone pid is still an absent loop');
-  const sandboxed = loopLiveness(legacy(), now, interval, 'machine-a', foreign);
+  const sandboxed = loopLiveness(legacy(), now, interval, 'machine-a', from(foreign));
   assert.equal(sandboxed.state, 'running', 'a sandboxed reader files no loop fault from an invisible pid');
-  assert.match(sandboxed.detail, /could not be probed from this PID namespace \(pid:\[4026539999\], the lock was taken in the host's\)/);
-  const stalled = loopLiveness(cursor({}, now - 3 * interval), now, interval, 'machine-a', foreign);
+  assert.match(sandboxed.detail, /could not be probed from this PID namespace \(the lock was taken in the host's initial one\)/);
+  const stalled = loopLiveness(cursor({}, now - 3 * interval), now, interval, 'machine-a', from(foreign));
   assert.equal(stalled.state, 'stalled');
+});
+
+// GY-1369: every agent session runs confined to a PID namespace of its own, so the live loop's pid
+// is invisible to it. Such a reader read "names a process that is gone" while the loop cycled.
+const now = Date.parse('2026-10-06T11:20:00.000Z');
+const intervalMs = 300_000;
+const unseen = 2 ** 22 - 1;
+const state = (lastCycleAt: string) => ({ cycle: 12712, lastCycleAt,
+  lock: { id: 'lock', pid: unseen, host: 'vishrog', startedAt: '2026-10-06T11:13:53.515Z', heartbeatAt: lastCycleAt } });
+
+test('unit:loop-liveness-confined-reader — a pid outside the reader\'s own PID namespace is unknown, not gone, so a cycling loop raises no loop-liveness attention', () => {
+  assert.equal(hostPidProbe(process.pid, () => 'pid:[4026535170]'), null, 'a pid number names nothing outside the namespace it was taken in (GY-1370)');
+  assert.equal(hostPidProbe(process.pid, () => 'pid:[4026535170]', 'pid:[4026535170]'), true, 'a pid it sees in the lock\'s own namespace is alive');
+  assert.equal(hostPidProbe(unseen, () => 'pid:[4026531836]'), false, 'the host namespace sees every host pid');
+  assert.equal(hostPidProbe(unseen, () => null), false, 'without PID namespaces the probe is authoritative');
+  assert.equal(hostPidProbe(unseen, () => 'pid:[4026535170]'), null, 'a confined reader cannot tell');
+
+  const confined = () => null;
+  const cycling = loopLiveness(state('2026-10-06T11:14:50.470Z'), now, intervalMs, 'vishrog', confined);
+  assert.equal(cycling.state, 'running');
+  assert.deepEqual(loopAttention({ liveness: cycling }), []);
+
+  // A loop that really died still surfaces to that reader, on the two-interval stall bound.
+  const dead = loopLiveness(state('2026-10-06T11:05:00.000Z'), now, intervalMs, 'vishrog', confined);
+  assert.equal(dead.state, 'stalled');
+  assert.match(loopAttention({ liveness: dead })[0].next, /graphyard master restart/);
+
+  // The host's own reading still reports the gone process at once.
+  assert.match(loopLiveness(state('2026-10-06T11:14:50.470Z'), now, intervalMs, 'vishrog', () => false).detail, /names a process that is gone/);
 });

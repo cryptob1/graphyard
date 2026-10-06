@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { actionableSubjects, approvalStep, approvalWatchSchema, approverJudgeBoundMs, cycleDelay, daemonEffects, daemonSummary, decisionKey, emptyDaemonState, latencyBudget, latencyTargets, loopAttention, loopLiveness, maxApproverLaunches, mergeableCandidate, observeItemClock, pidNamespace, reconcilePendingActions, routineDecision, runCycle, runDaemon, silenceBudgetMs, standingVerdict, trackSilence, watchdogPlan, withheldDecision, workerStopped, writeDaemonState, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { actionableSubjects, approvalStep, approvalWatchSchema, approverJudgeBoundMs, cycleDelay, daemonEffects, daemonSummary, decisionKey, emptyDaemonState, latencyBudget, latencyTargets, loopAttention, loopLiveness, maxApproverLaunches, mergeableCandidate, observeItemClock, reconcilePendingActions, routineDecision, runCycle, runDaemon, silenceBudgetMs, standingVerdict, trackSilence, watchdogPlan, withheldDecision, workerStopped, writeDaemonState, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { approverSessionName, decisionInput, launchApprover, listHerdrAgents, masterConfigSchema, type ContainmentAssessment, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import { expandTypedCommand, requestOf } from './helpers/launch-shell.js';
@@ -721,12 +721,14 @@ test('integration:loop-liveness — an absent or stalled loop is the top attenti
   assert.match(absentItems[0].next, /graphyard master restart/);
   assert.match(absentItems[0].next, /systemctl --user restart graphyard-master/);
 
-  // A lock whose process is gone on this host, taken in this PID namespace (GY-1370), is an absence, not a stall.
-  state.lock = { id: 'lock', pid: 2 ** 22 - 1, host: master.hostId, startedAt: new Date(clockStart).toISOString(), heartbeatAt: new Date(now - minute).toISOString(), pidNamespace: pidNamespace() };
+  // A lock whose process is gone on this host is an absence, not a stall.
+  state.lock = { id: 'lock', pid: 2 ** 22 - 1, host: master.hostId, startedAt: new Date(clockStart).toISOString(), heartbeatAt: new Date(now - minute).toISOString() };
   state.lastCycleAt = new Date(now - minute).toISOString();
   state.cycle = 12;
-  assert.equal(loopLiveness(state, now, intervalMs, master.hostId).state, 'absent');
-  assert.match(loopLiveness(state, now, intervalMs, master.hostId).detail, /names a process that is gone/);
+  // Read from the host's PID namespace, where a pid it cannot see is gone (GY-1369).
+  const hostReader = (pid: number) => pid === process.pid;
+  assert.equal(loopLiveness(state, now, intervalMs, master.hostId, hostReader).state, 'absent');
+  assert.match(loopLiveness(state, now, intervalMs, master.hostId, hostReader).detail, /names a process that is gone/);
 
   // A live process that has not completed a cycle for more than two intervals is stalled.
   state.lock = { ...state.lock, pid: process.pid };
