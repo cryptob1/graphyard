@@ -1,7 +1,7 @@
 <!-- page: Understand or contribute | 2 | gaps a fresh setup hit, and their fixes. -->
 # Setup-from-zero audit
 
-GY-1352 walked [the checklist](setup-from-zero.md) on 2026-10-06 (UTC) as a fresh agent would, on the compose path: a scratch repository (`git init`, one `node --test` suite, a `pull_request` CI workflow, `origin` an unused GitHub name), with `GRAPHYARD_CONFIG_HOME` and `GRAPHYARD_AGENT_ENVIRONMENTS` empty scratch directories. It ran `install --plan`, `install --apply` (image, Postgres, server, health, `0600` tokens) up to the GitHub App confirmation page (a human step; nothing was created on GitHub, and the containers were removed), `init --scan`, `doctor` and `master environments`, and `doctor` against this repository's live installation.
+GY-1352 walked [the checklist](setup-from-zero.md) on 2026-10-06, 05:01–05:28 UTC, as a fresh agent would, on the compose path: a scratch repository (`git init`, one `node --test` suite, a `pull_request` CI workflow, `origin` an unused GitHub name), with `GRAPHYARD_CONFIG_HOME` and `GRAPHYARD_AGENT_ENVIRONMENTS` empty scratch directories. It ran `install --plan`, `install --apply` (image, Postgres, server, health, `0600` tokens) up to the GitHub App confirmation page (a human step; nothing was created on GitHub, and the containers were removed), `init --scan`, `doctor` and `master environments`, and `doctor` against this repository's live installation.
 
 Every gap is fixed in this pull request; none needed a follow-up item. Rows 8, 9, 23 and 24 came from the first round's independent review; tests, not a re-walk, pin their fixes.
 

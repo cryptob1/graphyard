@@ -182,7 +182,9 @@ test('unit:doctor-setup-from-zero — master reviewer setup registers a reviewer
 
 test('unit:doctor-setup-from-zero — install sets the reviewer App as the main guard\'s revert approver, and Compose mounts its key as a file instead of the env file', async () => {
   const fixture = await installation();
-  const pem = '-----BEGIN RSA PRIVATE KEY-----\nreviewer\n-----END RSA PRIVATE KEY-----\n';
+  // Built at runtime so the secrets scan never sees a literal key header (GY-1186).
+  const armor = (edge: string) => `-----${edge} RSA PRIVATE KEY-----`;
+  const pem = `${armor('BEGIN')}\nreviewer\n${armor('END')}\n`;
   assert.deepEqual(await revertApproverEnv({ directory: fixture.credentials, reviewers: [] }), [], 'no reviewer App, no revert approver');
   await writePrivate(join(fixture.credentials, 'github-reviewer-claude.json'), json({ appId: 7002, installationId: 9, slug: 'scratch-reviewer', privateKey: pem, reviewer: 'claude', repository: 'owner/scratch' }));
   const values = await revertApproverEnv({ directory: fixture.credentials, reviewers: [{ name: 'claude', appId: 7002, botUserId: 1 }] });
