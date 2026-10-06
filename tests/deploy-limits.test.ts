@@ -12,6 +12,7 @@ import { delegationLimitAssignments, readDeployedDelegationLimits } from '../src
 import { capacityForPrincipals } from '../src/cli/install.js';
 import { controlPlaneAttention } from '../src/master.js';
 import { revertApproverVariables } from '../src/main-guard.js';
+// @ts-expect-error Dependency-free provisioning script.
 import { revertApproverAssignment, revertApproverVariables as provisionedApproverVariables, verifyRevertApprover } from '../scripts/provision-railway.mjs';
 import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -143,7 +144,7 @@ test('unit:provision-sets-revert-approver-credentials — provisioning sets the 
   assert.equal(set.error, undefined); assert.equal(set.appId, 200);
   assert.deepEqual(set.variables, { GRAPHYARD_REVERT_APPROVER_APP_ID: '200', GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID: '300', GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY: pem });
   // A key file is read, and an unreadable server still provisions (the guard counts as armed).
-  const fromFile = await revertApproverAssignment({ appId: '200', installationId: '300', privateKeyFile: '/keys/approver.pem' }, null, async path => { assert.equal(path, '/keys/approver.pem'); return pem; });
+  const fromFile = await revertApproverAssignment({ appId: '200', installationId: '300', privateKeyFile: '/keys/approver.pem' }, null, async (path: string) => { assert.equal(path, '/keys/approver.pem'); return pem; });
   assert.equal(fromFile.variables!.GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY, pem);
   // The control-plane App can never approve its own reverts, and a bad key is refused without echoing it.
   assert.match((await revertApproverAssignment({ appId: 100, installationId: 300, privateKey: pem }, armedLive(null))).error!, /App 100 is the control-plane App/);
