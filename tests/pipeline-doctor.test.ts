@@ -736,3 +736,93 @@ test('unit:doctor-no-report-not-a-loop-fault — a doctor run that returns no re
   assert.deepEqual(loopFaults(unapplied.state).map(entry => entry.kind), ['action:fault'], 'an apply failure still opens its loop fault');
   clearDoctorRuns();
 });
+
+// ---- GY-1336: manual:fault-class-loop, the doctor's two instances -------------------------------
+//
+// Instance 1, doctor:2026-10-05T23:32:04.689Z ("no report: zai/glm-5.3-flash exit; zai/glm-5.3
+// cancelled"), is GY-1318's no-report shape: the base already records it with no fault kind (the
+// test above). It recurred because the loop process that raised it still ran code from before
+// GY-1318's merge (21:41Z) until its upgrade at 23:33Z cancelled the fallback; it is replayed below
+// under its own timestamp. Instance 2, doctor:3379f2b6c361998f7abec8ee:file:merge, is a filing the
+// create checks refused for a model-authored proof ID, recorded as a failed loop action although the
+// filing was by design kept for a retry — and a retry of the same content would be refused again.
+const gy1336Doctor = { noReport: '2026-10-05T23:32:04.689Z', filing: 'doctor:3379f2b6c361998f7abec8ee:file:merge' };
+const loopFaultsOf = (state: DaemonState) => state.faults.instances.filter(entry => faultClassOf(entry.kind) === 'loop');
+/** A doctor whose one report asks `filed` filed, and whose control plane files through `file`. */
+function filingDoctor(filed: unknown[], file: DoctorEffects['file']): DoctorEffects {
+  const report = { findings: [], actions: [], filed };
+  return { settings: doctorSettingsSchema.parse({}) as DoctorEffects['settings'], cwd: '/checkout', env: {}, file, recordRun: async () => {},
+    runner: async () => ({ runtime: 'pi', model: 'zai/glm-5.3', release: async () => {}, runner: {
+      name: 'pi', start: (_prompt: string, options: { tool: string }) => ({ id: 'run', events: [], onEvent: () => () => {}, cancel: () => {},
+        result: async () => ({ ok: true as const, tool: options.tool, payload: report, payloads: [report] }) }) } as unknown as Runner }) };
+}
+/** The filing instance 2 asked for: its title, with a proof ID written as prose. */
+const mainGuardFiling = (proofs: string[]) => ({ faultClass: 'merge' as const, priority: 1, plannedFiles: ['src/daemon/main-guard.ts'],
+  title: 'Main-guard revert PRs are refused by GitHub\'s approval rule and the guard abandons after one attempt, leaving a required check failing on main 38-90 minutes until an unrelated merge recovers it',
+  description: 'evidence', criteria: [{ id: 'AC-1', text: 'A refused revert is retried until main is green', proofs }] });
+
+test(`manual:fault-class-loop — GY-1336 doctor:${gy1336Doctor.noReport}: a doctor run whose fallback the loop's own upgrade cancelled opens no loop fault`, async () => {
+  clearDoctorRuns();
+  const doctor: DoctorEffects = { ...filingDoctor([], async () => { throw new Error('nothing is filed'); }),
+    runner: async attempt => ({ runtime: 'pi', model: attempt === 'primary' ? 'zai/glm-5.3-flash' : 'zai/glm-5.3', release: async () => {}, runner: {
+      name: 'pi', start: () => {
+        let cancelled!: () => void;
+        const held = new Promise<void>(resolve => { cancelled = resolve; });
+        return { id: attempt, events: [], onEvent: () => () => {}, cancel: () => cancelled(),
+          result: async () => attempt === 'primary' ? { ok: false as const, failure: { reason: 'exit' as const, detail: 'pi exited 1' }, payloads: [] }
+            : (await held, { ok: false as const, failure: { reason: 'cancelled' as const, detail: 'the loop is upgrading itself' }, payloads: [] }) };
+      } } as unknown as Runner }) };
+  const replay = cycle([item()], { doctor, clock: Date.parse(gy1336Doctor.noReport) });
+  await doctorStep(replay);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  await stopDoctorRuns('the loop is upgrading itself');
+  assert.equal(replay.state.doctor.runs[0].detail, 'no report: zai/glm-5.3-flash exit; zai/glm-5.3 cancelled', 'the instance\'s own detail');
+  assert.deepEqual(loopFaultsOf(replay.state), [], 'no loop fault instance');
+  clearDoctorRuns();
+});
+
+test(`manual:fault-class-loop — GY-1336 ${gy1336Doctor.filing}: a doctor filing whose proof IDs are prose is normalised and filed, with no loop fault`, async () => {
+  clearDoctorRuns();
+  const filed: { key: string; criteria: { id: string; proofs: string[] }[] }[] = [];
+  const doctor = filingDoctor([mainGuardFiling(['integration: main guard retries a refused revert', 'Unit:guard/retry', 'the revert merges', 'manual:fault-class-merge'])],
+    async (input, key) => { filed.push({ key, criteria: input.criteria }); return item({ id: 'id-GY-1332', key: 'GY-1332', title: input.title }); });
+  const replay = cycle([item()], { doctor });
+  await doctorStep(replay);
+  await doctorRunsSettled();
+  assert.equal(filed.length, 1, 'the filing reaches the control plane');
+  assert.deepEqual(filed[0].criteria.map(criterion => criterion.proofs), [['integration:main-guard-retries-a-refused-revert', 'unit:guard/retry', 'manual:the-revert-merges', 'manual:fault-class-merge']]);
+  assert.deepEqual(replay.state.doctor.pendingFiles, [], 'nothing is left to retry');
+  assert.deepEqual(Object.values(replay.state.actions).filter(action => action.state === 'failed'), [], 'no failed action');
+  assert.deepEqual(loopFaultsOf(replay.state), [], 'no loop fault instance');
+  clearDoctorRuns();
+});
+
+test(`manual:fault-class-loop — GY-1336 ${gy1336Doctor.filing}: a refused filing queued for its retry is no loop fault, a retry refused again is, and one the checks can never take is escalated instead of retried`, async () => {
+  clearDoctorRuns();
+  let refuse = true;
+  const doctor = filingDoctor([mainGuardFiling(['unit:guard-retry'])], async input => {
+    if (refuse) throw new Error('Graphyard refused work (503): the control plane is unavailable');
+    return item({ id: 'id-GY-1332', key: 'GY-1332', title: input.title });
+  });
+  const replay = cycle([item()], { doctor });
+  await doctorStep(replay);
+  await doctorRunsSettled();
+  assert.equal(replay.state.doctor.pendingFiles.length, 1, 'the refused filing is kept for its retry');
+  assert.deepEqual(loopFaultsOf(replay.state), [], 'queued for the retry, it is no loop fault');
+  replay.state.cycle += 1;
+  await doctorStep(cycle([item()], { doctor, state: replay.state }));
+  assert.deepEqual(loopFaultsOf(replay.state).map(entry => entry.kind), ['action:fault'], 'a retry refused again is still a loop fault');
+  clearDoctorRuns();
+
+  // A post-merge proof no normalising can mend: the create checks refuse it on every attempt.
+  const unmendable = filingDoctor([mainGuardFiling(['e2e:deploy-smoke'])], async () => { throw new Error('never reached'); });
+  const refused = cycle([item()], { doctor: unmendable });
+  await doctorStep(refused);
+  await doctorRunsSettled();
+  assert.deepEqual(refused.state.doctor.pendingFiles, [], 'it is not retried');
+  const escalations = Object.values(refused.state.actions).filter(action => action.kind === 'escalation');
+  assert.equal(escalations.length, 1, 'it is raised for the master instead');
+  assert.match(escalations[0].detail, /fails the checks master create applies, so it is not filed; file it by hand/);
+  assert.deepEqual(loopFaultsOf(refused.state), [], 'no loop fault instance');
+  clearDoctorRuns();
+});
