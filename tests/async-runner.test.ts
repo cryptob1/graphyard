@@ -276,7 +276,9 @@ test('unit:child-wait-attributed — every cycle step reports its own childWaitM
     assert.match(waiting.breakdown, /^6\.8s of its own work and 79\.2s waiting on child processes; deployment 6s, dispatch 80s \(79\.2s waiting\)/);
 
     // The same eighty seconds computed rather than waited: past the bound, with a step to shorten.
-    const computed = cycleMetricsSchema.parse({ ...metrics, childWaitMs: 0, workMs: 86_000, steps: { ...metrics.steps!, dispatch: { ms: 80_000, childWaitMs: 0 } } });
+    // Its timings say the same (GY-1355: the loop-cost lines name the slowest timed step).
+    const computed = cycleMetricsSchema.parse({ ...metrics, childWaitMs: 0, workMs: 86_000, steps: { ...metrics.steps!, dispatch: { ms: 80_000, childWaitMs: 0 } },
+      timings: { ...metrics.timings!, steps: [{ step: 'dispatch', ms: 80_000 }, ...metrics.timings!.steps.filter(step => step.step !== 'dispatch')] } });
     const busy = cycleCost(computed, 20_000)!;
     assert.deepEqual({ withinInterval: busy.withinInterval, withinLivenessBound: busy.withinLivenessBound, slowest: busy.slowest, longestWait: busy.longestWait }, { withinInterval: false, withinLivenessBound: false, slowest: { step: 'dispatch', ms: 80_000, childWaitMs: 0 }, longestWait: null });
 
@@ -306,7 +308,7 @@ test('unit:child-wait-attributed — every cycle step reports its own childWaitM
     const overrun = loopAttention({ liveness: after(computed, 5_000) });
     assert.equal(overrun.length, 1);
     assert.match(overrun[0].text, /^Cycle 0 spent 86s on its own work, longer than the 20s interval and past the two-interval liveness bound of 40s \(86s in all, 0s of it waiting on child processes\)/);
-    assert.match(overrun[0].text, /The dispatch step is the slowest, at 80s of work/);
+    assert.match(overrun[0].text, /The dispatch step is the slowest timed step, at 80s/);
 
     // Where an operator reads it: `master status` carries the cost beside the metrics, and the
     // cycle budget carries each cycle's waits beside its duration.
