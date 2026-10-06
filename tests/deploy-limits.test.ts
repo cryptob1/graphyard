@@ -11,6 +11,9 @@ import { defaultDelegationLimits, delegationLimitDrift, delegationLimits, requir
 import { delegationLimitAssignments, readDeployedDelegationLimits } from '../src/install/limits.js';
 import { capacityForPrincipals } from '../src/cli/install.js';
 import { controlPlaneAttention } from '../src/master.js';
+import { revertApproverVariables } from '../src/main-guard.js';
+// @ts-expect-error Dependency-free provisioning script.
+import { revertApproverAssignment, revertApproverVariables as provisionedApproverVariables, verifyRevertApprover } from '../scripts/provision-railway.mjs';
 import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -114,7 +117,7 @@ test('integration:deploy-limit-install — installers derive the variables from 
   assert.match(generated.drift[0].reason, /GRAPHYARD_MAX_REVIEWERS=4 no longer covers the 5 producer principals/);
   // The Railway IaC preserves every variable the adapters set, so `railway config apply` cannot drop them.
   const iac = await script('.railway/railway.ts');
-  for (const variable of ['GRAPHYARD_PRINCIPALS', 'GRAPHYARD_MAX_SLICE_LEADS', 'GRAPHYARD_MAX_ENGINEERS_PER_LEAD', 'GRAPHYARD_MIN_REVIEWERS', 'GRAPHYARD_MAX_REVIEWERS', 'RAILWAY_API_TOKEN']) assert.match(iac, new RegExp(`${variable}: preserve\\(\\)`), `.railway/railway.ts preserves ${variable}`);
+  for (const variable of ['GRAPHYARD_PRINCIPALS', 'GRAPHYARD_MAX_SLICE_LEADS', 'GRAPHYARD_MAX_ENGINEERS_PER_LEAD', 'GRAPHYARD_MIN_REVIEWERS', 'GRAPHYARD_MAX_REVIEWERS', 'RAILWAY_API_TOKEN', ...revertApproverVariables]) assert.match(iac, new RegExp(`${variable}: preserve\\(\\)`), `.railway/railway.ts preserves ${variable}`);
 
   // `init --scan --apply` prints the lines for the principals it registered and compares them with the deployment.
   const principalsFile = join(await temporaryDirectory('init-capacity'), 'principals.json');
@@ -128,6 +131,58 @@ test('integration:deploy-limit-install — installers derive the variables from 
   assert.match(unreachable.next, /no drift can be reported because the server could not be read \(Configure GRAPHYARD_URL\)/);
   const predates = await capacityForPrincipals(principalsFile, async () => ({ ok: true }));
   assert.match(predates.next, /reports no delegationLimits; deploy main first/);
+});
+
+// GY-1353: provisioning carries the main guard's revert approver App, so an armed guard is never
+// provisioned without one, and verifies the live deployment reports it after the redeploy.
+const pem = '-----BEGIN RSA PRIVATE KEY-----\nnot-a-real-key\n-----END RSA PRIVATE KEY-----\n';
+const armedLive = (revertApprover: number | null, githubAppId = 100) => ({ githubAppId, mainGuard: { armed: true, required: ['test', 'typecheck'], revertApprover, attention: revertApprover ? null : 'missing' } });
+
+test('unit:provision-sets-revert-approver-credentials — provisioning sets the three revert approver variables from the operator record, the key only over stdin and never printed, and --verify checks the live deployment', async () => {
+  assert.deepEqual(provisionedApproverVariables, [...revertApproverVariables], 'the script sets exactly the variables the control plane reads');
+  const set = await revertApproverAssignment({ appId: 200, installationId: 300, privateKey: pem }, armedLive(null));
+  assert.equal(set.error, undefined); assert.equal(set.appId, 200);
+  assert.deepEqual(set.variables, { GRAPHYARD_REVERT_APPROVER_APP_ID: '200', GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID: '300', GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY: pem });
+  // A key file is read, and an unreadable server still provisions (the guard counts as armed).
+  const fromFile = await revertApproverAssignment({ appId: '200', installationId: '300', privateKeyFile: '/keys/approver.pem' }, null, async (path: string) => { assert.equal(path, '/keys/approver.pem'); return pem; });
+  assert.equal(fromFile.variables!.GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY, pem);
+  // The control-plane App can never approve its own reverts, and a bad key is refused without echoing it.
+  assert.match((await revertApproverAssignment({ appId: 100, installationId: 300, privateKey: pem }, armedLive(null))).error!, /App 100 is the control-plane App/);
+  const badKey = (await revertApproverAssignment({ appId: 200, installationId: 300, privateKey: 'secret-value' }, null)).error!;
+  assert.match(badKey, /must be the PEM/); assert.doesNotMatch(badKey, /secret-value/);
+  // The script sends the key over --stdin, sets only the two ids as arguments, and prints no credential.
+  const adapter = await readFile(new URL('../scripts/provision-railway.mjs', import.meta.url), 'utf8');
+  assert.match(adapter, /'--stdin', 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY'\], \{ input: approver\.variables\.GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY, stdio: \['pipe', 'ignore', 'inherit'\] \}/);
+  assert.match(adapter, /revertApproverVariables\.slice\(0, 2\)/);
+  assert.match(adapter, /--revert-approver-stdin/); assert.match(adapter, /parseApprover\(/); assert.match(adapter, /revert-approver\.json/);
+  for (const line of adapter.split('\n').filter(line => /console\.(log|error)/.test(line))) assert.doesNotMatch(line, /privateKey|variables\.GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY|record\)/, `no credential printed: ${line.trim()}`);
+  // --verify: ready only once the live main guard reports this approver with no attention.
+  assert.deepEqual(verifyRevertApprover(armedLive(200), 200), { ok: true, line: "The deployment's main guard reports revert approver App 200; graphyard doctor lists revert-approver ready" });
+  assert.equal(verifyRevertApprover(armedLive(null), 200).ok, false);
+  assert.match(verifyRevertApprover(armedLive(201), 200).line, /App 201, not 200/);
+  assert.match(verifyRevertApprover({}, 200).line, /does not report the main guard/);
+});
+
+test('unit:provision-names-missing-revert-approver — with the guard armed and no approver record, provisioning fails naming all three variables; a disarmed guard or an already-deployed approver provisions', async () => {
+  for (const live of [null, armedLive(null)]) {
+    const missing = await revertApproverAssignment(null, live);
+    assert.equal(missing.variables, undefined);
+    for (const variable of revertApproverVariables) assert.match(missing.error!, new RegExp(variable), `the failure names ${variable}`);
+    assert.match(missing.error!, /other than the control-plane App/);
+  }
+  assert.match((await revertApproverAssignment({ appId: 0, installationId: 300, privateKey: pem }, null)).error!, new RegExp(revertApproverVariables.join(', ')));
+  assert.deepEqual(await revertApproverAssignment(null, { mainGuard: { armed: false, required: [], revertApprover: null, attention: null } }), { variables: null, appId: null, note: 'the main guard is not armed; no revert approver is needed' });
+  assert.equal((await revertApproverAssignment(null, armedLive(200))).appId, 200);
+  // Without a live answer the service's Railway variables decide: the guard arms only under GitHub delivery.
+  const readKey = async () => pem;
+  assert.match((await revertApproverAssignment(null, null, readKey, { GITHUB_APP_ID: '100' })).error!, new RegExp(revertApproverVariables.join(', ')));
+  assert.equal((await revertApproverAssignment(null, null, readKey, {})).note, 'the main guard is not armed; no revert approver is needed');
+  assert.equal((await revertApproverAssignment(null, null, readKey, { GITHUB_APP_ID: '100', GRAPHYARD_REVERT_APPROVER_APP_ID: '200', GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID: '300', GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY: pem })).appId, 200);
+  assert.match((await revertApproverAssignment({ appId: 100, installationId: 300, privateKey: pem }, null, readKey, { GITHUB_APP_ID: '100' })).error!, /App 100 is the control-plane App/);
+  // The script stops before setting anything when the assignment fails.
+  const adapter = await readFile(new URL('../scripts/provision-railway.mjs', import.meta.url), 'utf8');
+  assert.ok(adapter.indexOf('if (approver.error)') < adapter.indexOf("'variable', 'set'"), 'the failure precedes every railway variable set');
+  assert.match(adapter, /'variable', 'list', '--service', 'graphyard', '--json'\], \{ encoding: 'utf8', stdio: \['ignore', 'pipe', 'ignore'\] \}/, 'the deployed variables are read, never printed');
 });
 
 test('manual:deploy-limit-docs — the deployment, install, operations and master guides document the variables, derivation, drift and observation', async () => {
