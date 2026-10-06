@@ -4,6 +4,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { z } from 'zod';
 import type { ChildRun } from '../child-runner.js';
+import { planeUnavailable } from '../model/refusal.js';
 
 /**
  * The external calls a cycle or a status build makes, by who answers them: the Graphyard server's
@@ -28,6 +29,8 @@ export const timingsSchema = z.object({
   steps: z.array(stepTimingSchema).max(recordedStepLimit),
   calls: z.array(callTimingSchema).max(recordedCallLimit),
   slowCalls: z.number().int().min(0),
+  /** Wall time at least one server request was in flight that the control plane then did not answer (GY-1344); absent when none. */
+  planeWaitMs: z.number().int().min(0).optional(),
 }).strict();
 export type StepTiming = z.infer<typeof stepTimingSchema>;
 export type CallTiming = z.infer<typeof callTimingSchema>;
@@ -45,6 +48,7 @@ export class Timings {
   private readonly calls: CallTiming[] = [];
   private slow = 0;
   private active: string | null = null;
+  private readonly unanswered: [number, number][] = [];
   constructor(private readonly now: () => number = Date.now) { this.started = now(); }
   /** Adds `ms` to a step, creating it in first-run order. */
   add(step: string, ms: number) { this.steps.set(step, (this.steps.get(step) ?? 0) + Math.max(0, Math.round(ms))); }
@@ -63,8 +67,20 @@ export class Timings {
     this.calls.sort((a, b) => b.ms - a.ms);
     if (this.calls.length > recordedCallLimit) this.calls.length = recordedCallLimit;
   }
+  /** The recorder's own clock, which the requests the plane did not answer are placed on. */
+  clock() { return this.now(); }
+  /** Records a server request the control plane did not answer (`planeUnavailable`), from its start to its end. */
+  planeWait(from: number, to: number) { if (to > from) this.unanswered.push([from, to]); }
+  /** The wall time covered by the requests the plane did not answer, overlaps counted once. */
+  planeWaitMs() {
+    let total = 0, reach = -Infinity;
+    for (const [from, to] of [...this.unanswered].sort((a, b) => a[0] - b[0])) { if (to > reach) { total += to - Math.max(from, reach); reach = to; } }
+    return Math.round(total);
+  }
   report(): TimingReport {
-    return { totalMs: Math.max(0, Math.round(this.now() - this.started)), steps: [...this.steps].slice(0, recordedStepLimit).map(([step, ms]) => ({ step, ms })), calls: this.calls.map(call => ({ ...call })), slowCalls: this.slow };
+    const planeWaitMs = this.planeWaitMs();
+    return { totalMs: Math.max(0, Math.round(this.now() - this.started)), steps: [...this.steps].slice(0, recordedStepLimit).map(([step, ms]) => ({ step, ms })), calls: this.calls.map(call => ({ ...call })), slowCalls: this.slow,
+      ...(planeWaitMs ? { planeWaitMs } : {}) };
   }
 }
 
@@ -79,9 +95,16 @@ export const currentTimings = () => context.getStore();
 export async function timedCall<T>(kind: ExternalCallKind, name: string, body: () => Promise<T> | T, now: () => number = Date.now): Promise<T> {
   const timings = currentTimings();
   if (!timings) return body();
-  const at = now();
-  try { return await body(); }
-  finally { timings.call(kind, name, now() - at); }
+  const at = now(), from = timings.clock();
+  try {
+    const result = await body();
+    // A proxy's 502-504 in place of the server's answer is the plane not answering, as a refused or timed-out request is.
+    if (kind === 'server' && result instanceof Response && result.status >= 502 && result.status <= 504) timings.planeWait(from, timings.clock());
+    return result;
+  } catch (error) {
+    if (kind === 'server' && planeUnavailable(error)) timings.planeWait(from, timings.clock());
+    throw error;
+  } finally { timings.call(kind, name, now() - at); }
 }
 
 /**

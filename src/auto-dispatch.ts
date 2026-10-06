@@ -22,6 +22,7 @@ import { currentEvidence } from './model/evidence.js';
 import { judgeHostMemory, memoryDeferral, readHostMemory, reclaimResources, type HostMemoryReading } from './master-resources.js';
 import { unexercisedFindings } from './model/mechanical-proofs.js';
 import { classified, launchWaitKind, launchWaitWording } from './model/fault-classes.js';
+import { planeUnavailableText } from './model/refusal.js';
 export { hostMemoryHold, loopMemoryAttention } from './master-resources.js';
 
 /**
@@ -1454,7 +1455,9 @@ function tickFailureAttention(dispatch: { consecutiveFailures?: number; lastSucc
   const failures = dispatch.consecutiveFailures ?? 0, failure = dispatch.lastFailure;
   if (failures < dispatchFailureAttentionThreshold || !failure) return [];
   const persisted = failure.field ? ` The tick could not persist ${failure.field}${failure.request ? `, composed for the ${failure.kind} request ${failure.request} on ${failure.work}` : ''}.` : '';
+  // GY-1344: ticks failing on a control plane that does not answer are that outage, not the dispatcher's own fault.
   return [{ subject: 'dispatch', text: `The dispatcher has failed ${failures} ticks in a row (last at ${failure.at}; last successful tick ${dispatch.lastSuccessAt ?? 'none since it started'}), so no reviewer or producer session is being launched for any item: ${failure.reason}${persisted}`,
+    ...(!failure.field && planeUnavailableText(failure.reason) ? { kind: 'plane-unavailable' as const } : {}),
     ...agentOwner('master', failure.field
       ? 'graphyard master restart re-reads and repairs the dispatch cursor; a tick that still cannot persist names the field above, and the request it was composed for is the one to look at'
       : 'Fix what the reason names — the control plane URL and coordinator credential in .graphyard/master.json, or Herdr — then graphyard master restart if the loop does not recover on its own') }];

@@ -11,6 +11,12 @@ import { clearDiagnoses, diagnosesSettled, diagnosisLimitHoldMs, diagnosisReport
 import type { Cycle } from '../src/daemon/cycle.js';
 import { diagnosticianSettings, diagnosisSettled } from '../src/runner/payloads.js';
 import type { RunFailure, RunOptions, RunResult, Runner } from '../src/runner/types.js';
+import { RefusedResponse } from '../src/model/refusal.js';
+import { classifyAttention } from '../src/model/fault-classes.js';
+import { dispatchFailureAttention } from '../src/auto-dispatch.js';
+import { fileRecurringFaultClasses } from '../src/daemon/faults.js';
+import { noteCycleFailure } from '../src/daemon/liveness.js';
+import { timedCall } from '../src/master/timings.js';
 
 // GY-1092 names this file for its proof: manual:fault-class-loop. The master loop filed ten loop
 // faults in a day, and they share one cause: the loop recorded as its own failure a wait that
@@ -705,4 +711,197 @@ test(`manual:fault-class-loop — ${gy1336Instances[2].id}: a fix released after
   assert.equal(state.diagnoses['GY-1333'].answeredBy, 'GY-1334');
   assert.deepEqual(performed.filter(action => action.state === 'failed'), []);
   assert.deepEqual(diagnosisFaults(state), [], 'no action:diagnosis loop fault');
+});
+
+// ---- GY-1344: five loop faults in one control-plane outage on 2026-10-06 ------------------------
+//
+// GY-1344 names this file for its proof too. Between about 01:39 and 02:01Z the control plane
+// answered nothing — Railway's 502 "Application failed to respond", or no answer before the
+// request's 30s timeout — and the loop counted every consequence of that one condition as a loop
+// fault of its own:
+// (1) GY-1337's diagnosis: its fix's release was refused as duplicating PR #815, GY-1337's own
+//     fix, merged at 01:33:44Z — the recurring item had been delivered meanwhile, and only the
+//     applied path (GY-1336) knew to answer that;
+// (2) the dispatcher failed three ticks in a row on reads the plane did not answer;
+// (3) GY-1339's diagnosis decide was refused 502 and threw out of decideFresh into the step's isolate;
+// (4) cycle 12621 spent 450s, 372s of it in the deployment step, waiting on reads that timed out;
+// (5) the loop class's own filing was refused 502, and the failed filing counted toward the class.
+// The plane not answering is now one condition: what met it is retried with no fault, the
+// dispatcher's and failed cycles' lines name the outage (deployment class), and time on requests
+// it did not answer is not the loop's own work.
+
+const gy1344Instances = [
+  { id: 'action:diagnosis|GY-1337|2026-10-06T01:39:23.103Z', kind: 'action:diagnosis', subject: 'GY-1337', at: '2026-10-06T01:39:23.103Z' },
+  { id: 'dispatch-failures|dispatch|2026-10-06T01:44:37.500Z', kind: 'dispatch-failures', subject: 'dispatch', at: '2026-10-06T01:44:37.500Z' },
+  { id: 'action:diagnosis|GY-1339|2026-10-06T01:52:16.705Z', kind: 'action:diagnosis', subject: 'GY-1339', at: '2026-10-06T01:52:16.705Z' },
+  { id: 'loop-cost|loop|2026-10-06T01:52:51.656Z', kind: 'loop-cost', subject: 'loop', at: '2026-10-06T01:52:51.656Z' },
+  { id: 'action:fault|fault:loop|2026-10-06T01:55:25.208Z', kind: 'action:fault', subject: 'fault:loop', at: '2026-10-06T01:55:25.208Z' },
+];
+/** Railway's answer for an application that does not respond, as the loop's operator-agent requests receive it. */
+const railwayBody = { status: 'error', code: 502, message: 'Application failed to respond', request_id: 'x' };
+const railway = (path: string) => new RefusedResponse(`Graphyard refused ${path} (502): ${JSON.stringify(railwayBody)}`, 502, railwayBody);
+const timedOut = () => new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+/** A loop's effects with nothing to do but what each replay adds. */
+function quietEffects(at: () => number, work: () => Work[], extra: Partial<DaemonEffects> = {}): DaemonEffects {
+  return { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => ({ work: work(), now: iso(at()), jobs: [] }),
+    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(at()), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    persist: async () => {}, ...extra } as DaemonEffects;
+}
+const instancesOf = (state: DaemonState, kind: string) => state.faults.instances.filter(entry => entry.kind === kind);
+
+test('manual:fault-class-loop — GY-1344 lists five instances, and every one is replayed', () => {
+  assert.deepEqual(gy1344Instances.map(entry => entry.subject), ['GY-1337', 'dispatch', 'GY-1339', 'loop', 'fault:loop']);
+});
+
+test(`manual:fault-class-loop — ${gy1344Instances[0].id}: a release refused after the recurring item was delivered answers the diagnosis, with no loop fault`, async () => {
+  const at = Date.parse(gy1344Instances[0].at), starts: string[] = [];
+  const state = emptyDaemonState(config());
+  // The fix the diagnosis filed for GY-1337 (its key is illustrative), and GY-1337 delivered by PR #815 at 01:33:44Z.
+  const fix = item('GY-1340', at, { stage: 'backlog', ready: false } as Partial<Work>);
+  const delivered = { ...recurring('GY-1337', 'decision', at - hour), stage: 'done' } as unknown as Work;
+  state.diagnoses['GY-1337'] = { subject: 'GY-1337', kind: 'recurring', faultClass: 'decision', work: 'GY-1337', state: 'releasing', startedAt: iso(at - hour), updatedAt: iso(at - minute),
+    runs: [], diagnosis: { subject: 'GY-1337', cause: 'The cause', evidence: { logLines: ['a line'], commands: [] }, faultClass: 'decision', covering: null } as never, fix: 'GY-1340',
+    decision: { id: 'release-1', action: 'release', work: 'GY-1340', approver: 'gy-approver' }, answeredBy: null, retryAt: null, refusedAt: null, detail: '' };
+  const refused = [{ id: 'release-1', action: 'release', state: 'refused', input: {}, approvedBy: null, outcome: null,
+    refusal: { reason: "GY-1340 duplicates GY-1337's own fix, PR #815, merged at 01:33:44Z" } }] as unknown as Decisions;
+  const performed = await decideStep(state, diagnostician(() => 'diagnose', starts), [delivered, fix], () => [delivered, fix], refused, at);
+  assert.equal(state.diagnoses['GY-1337'].state, 'answered');
+  assert.deepEqual(performed.filter(action => action.state === 'failed'), [], 'no failed loop action');
+  assert.deepEqual(diagnosisFaults(state), [], 'no action:diagnosis loop fault');
+});
+
+test(`manual:fault-class-loop — ${gy1344Instances[0].id}: a release refused while the recurring item is still open stands for the master, as before`, async () => {
+  const at = Date.parse(gy1344Instances[0].at), starts: string[] = [];
+  const state = emptyDaemonState(config());
+  const fix = item('GY-1340', at, { stage: 'backlog', ready: false } as Partial<Work>), open = recurring('GY-1337', 'decision', at - hour);
+  state.diagnoses['GY-1337'] = { subject: 'GY-1337', kind: 'recurring', faultClass: 'decision', work: 'GY-1337', state: 'releasing', startedAt: iso(at - hour), updatedAt: iso(at - minute),
+    runs: [], diagnosis: null, fix: 'GY-1340', decision: { id: 'release-1', action: 'release', work: 'GY-1340', approver: 'gy-approver' }, answeredBy: null, retryAt: null, refusedAt: null, detail: '' };
+  const refused = [{ id: 'release-1', action: 'release', state: 'refused', input: {}, approvedBy: null, outcome: null, refusal: { reason: 'Not the cause' } }] as unknown as Decisions;
+  await decideStep(state, diagnostician(() => 'diagnose', starts), [open, fix], () => [open, fix], refused, at);
+  assert.equal(state.diagnoses['GY-1337'].state, 'refused');
+  assert.equal(diagnosisFaults(state).length, 1, 'a refusal of a fix for an open item is still the master\'s to act on');
+});
+
+test(`manual:fault-class-loop — ${gy1344Instances[1].id}: dispatcher ticks failing on a control plane that does not answer are the outage, not a loop fault`, () => {
+  for (const reason of ['The operation was aborted due to timeout', `Graphyard refused work-snapshot (502): ${JSON.stringify(railwayBody)}`]) {
+    const lines = classifyAttention(dispatchFailureAttention({ consecutiveFailures: 3, lastSuccessAt: '2026-10-06T01:39:02.000Z', lastFailure: { at: gy1344Instances[1].at, reason } }));
+    assert.equal(lines.length, 1, 'the master still sees that nothing is being launched');
+    assert.equal(lines[0].kind, 'plane-unavailable', reason);
+    assert.equal(lines[0].faultClass, 'deployment', 'one outage, counted in the class of a production that does not answer');
+  }
+  // A tick that fails for any other reason is still the dispatcher's own fault.
+  const own = classifyAttention(dispatchFailureAttention({ consecutiveFailures: 3, lastSuccessAt: null, lastFailure: { at: gy1344Instances[1].at, reason: 'herdr: command not found' } }));
+  assert.equal(own[0].kind, 'dispatch-failures');
+  assert.equal(own[0].faultClass, 'loop');
+});
+
+test(`manual:fault-class-loop — ${gy1344Instances[2].id}: a diagnosis decide the plane answers 502 is retried next cycle with no loop fault`, async () => {
+  let now = Date.parse(gy1344Instances[2].at), down = true;
+  const asked: string[] = [], starts: string[] = [];
+  const subject = recurring('GY-1339', 'configuration', now - hour), cover = item('GY-50', now, { stage: 'build', title: 'The cause the runs share' } as Partial<Work>);
+  const master = config(), state = emptyDaemonState(master);
+  state.diagnoses['GY-1339'] = { subject: 'GY-1339', kind: 'recurring', faultClass: 'configuration', work: 'GY-1339', state: 'diagnosed', startedAt: iso(now - hour), updatedAt: iso(now - minute),
+    runs: [], diagnosis: { subject: 'GY-1339', cause: 'The cause the runs share', evidence: { logLines: ['a line'], commands: [] }, faultClass: 'configuration', covering: 'GY-50' } as never,
+    fix: null, decision: null, answeredBy: null, retryAt: null, refusedAt: null, detail: '' };
+  const decide: DiagnosticianEffects['decide'] = async work => { asked.push(work.key); if (down) throw railway(`work/${work.id}/decide`); return { id: 'close-1' }; };
+  const effects = quietEffects(() => now, () => [subject, cover], { diagnostician: { ...diagnostician(() => 'diagnose', starts), decide },
+    decisions: async () => ({ decisions: [] }) as never, approver: async () => ({ agentName: 'gy-approver', pane: null }) } as Partial<DaemonEffects>);
+  const first = await runCycle(master, state, effects, () => now);
+  assert.deepEqual(asked, ['GY-1339']);
+  const failed = first.actions.filter(action => action.state === 'failed' && action.kind === 'diagnosis');
+  assert.ok(failed.length && failed.every(action => !action.faultClass), `the row is kept for retry, with no fault class: ${JSON.stringify(failed)}`);
+  assert.deepEqual(diagnosisFaults(state), [], 'no action:diagnosis loop fault');
+  assert.equal(state.diagnoses['GY-1339'].state, 'diagnosed', 'the diagnosis waits for the next cycle');
+  down = false; now += 5 * minute;
+  await runCycle(master, state, effects, () => now);
+  assert.equal(state.diagnoses['GY-1339'].state, 'closing', 'once the plane answers, the close is requested');
+  assert.deepEqual(diagnosisFaults(state), []);
+});
+
+test(`manual:fault-class-loop — ${gy1344Instances[2].id}: a decide the plane judged and refused still fails the step as the loop's fault`, async () => {
+  const now = Date.parse(gy1344Instances[2].at), starts: string[] = [];
+  const subject = recurring('GY-1339', 'configuration', now - hour), cover = item('GY-50', now, { stage: 'build', title: 'The cause the runs share' } as Partial<Work>);
+  const master = config(), state = emptyDaemonState(master);
+  state.diagnoses['GY-1339'] = { subject: 'GY-1339', kind: 'recurring', faultClass: 'configuration', work: 'GY-1339', state: 'diagnosed', startedAt: iso(now - hour), updatedAt: iso(now - minute),
+    runs: [], diagnosis: { subject: 'GY-1339', cause: 'The cause the runs share', evidence: { logLines: ['a line'], commands: [] }, faultClass: 'configuration', covering: 'GY-50' } as never,
+    fix: null, decision: null, answeredBy: null, retryAt: null, refusedAt: null, detail: '' };
+  const decide: DiagnosticianEffects['decide'] = async work => { throw new RefusedResponse(`Graphyard refused work/${work.id}/decide (403): not permitted`, 403, { error: 'not permitted' }); };
+  await runCycle(master, state, quietEffects(() => now, () => [subject, cover], { diagnostician: { ...diagnostician(() => 'diagnose', starts), decide } } as Partial<DaemonEffects>), () => now);
+  assert.equal(diagnosisFaults(state).length, 1);
+  // A 502 the server itself answered — a GitHub refusal it passed on, with its own error field — was judged, so it is no outage.
+  const github = new RefusedResponse('Graphyard refused work/x/merge (502): GitHub merge failed (403): rate limited', 502, { error: 'GitHub merge failed (403): rate limited' });
+  const state2 = emptyDaemonState(master);
+  state2.diagnoses['GY-1339'] = { ...state.diagnoses['GY-1339'], state: 'diagnosed', decision: null };
+  await runCycle(master, state2, quietEffects(() => now, () => [subject, cover], { diagnostician: { ...diagnostician(() => 'diagnose', starts), decide: async () => { throw github; } } } as Partial<DaemonEffects>), () => now);
+  assert.equal(diagnosisFaults(state2).length, 1);
+});
+
+/**
+ * Cycle 12621, replayed: the deployment step's reads each run into the 30s request timeout while
+ * the plane does not answer, twelve of them, as the 372s it spent there says; the server is asked
+ * through the same timed call the loop's effects make, so the cycle measures what it waited on.
+ */
+async function replayOutageCycle(answer: 'timeout' | 'slow') {
+  let now = Date.parse(gy1344Instances[3].at) - 450_000;
+  const master = burstConfig(), state = emptyDaemonState(master);
+  const effects = quietEffects(() => now, () => [], {
+    observeDeployment: async () => {
+      for (let read = 0; read < 12; read++) await timedCall('server', 'GET deployment', async () => { now += 31_000; if (answer === 'timeout') throw timedOut(); return {}; }).catch(() => undefined);
+      if (answer === 'timeout') throw timedOut();
+      return { source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] };
+    },
+  });
+  return { result: await runCycle(master, state, effects, () => now), state };
+}
+
+test(`manual:fault-class-loop — ${gy1344Instances[3].id}: a cycle's time on requests the plane did not answer is not the loop's own work`, async () => {
+  const { result } = await replayOutageCycle('timeout');
+  const cost = cycleCost(result.metrics, intervalMs)!;
+  assert.ok(cost.durationMs > intervalMs, `the cycle still took ${cost.durationMs}ms in all`);
+  assert.ok(cost.withinInterval, `its own work fits the interval: ${cost.breakdown}`);
+  assert.equal(cost.planeWaitMs, 12 * 31_000);
+  assert.match(cost.breakdown, /372s on requests the control plane did not answer/);
+});
+
+test(`manual:fault-class-loop — ${gy1344Instances[3].id}: a server that answers slowly is still the loop's cost`, async () => {
+  const { result } = await replayOutageCycle('slow');
+  const cost = cycleCost(result.metrics, intervalMs)!;
+  assert.ok(!cost.withinInterval, `answered requests are the loop's work: ${cost.breakdown}`);
+  assert.equal(cost.planeWaitMs ?? 0, 0);
+});
+
+test(`manual:fault-class-loop — ${gy1344Instances[4].id}: a class filing the plane answers 502 is retried with no loop fault`, async () => {
+  const at = Date.parse(gy1344Instances[4].at), master = config(), state = emptyDaemonState(master);
+  // The loop instances standing at 01:55, past the threshold of three with no open loop item.
+  state.faults.instances = gy1344Instances.slice(0, 4).filter(entry => entry.kind !== 'action:diagnosis' || entry.subject === 'GY-1339')
+    .concat(gy1344Instances.slice(0, 1)).map(entry => ({ ...entry, faultClass: 'loop', text: 'an instance', lastSeenAt: entry.at, linkedTo: null }));
+  let down = true;
+  const filed: string[] = [];
+  const effects = { persist: async () => {}, faultClassPolicy: { threshold: 3, windowHours: 24 },
+    fileFaultClass: async (input: { title: string }) => { if (down) throw railway('work'); filed.push(input.title); return item('GY-1344', at, { title: input.title } as Partial<Work>); } } as unknown as DaemonEffects;
+  const performed: DaemonAction[] = [];
+  await fileRecurringFaultClasses(state, effects, [], at, () => at, performed);
+  assert.equal(performed.at(-1)?.state, 'failed');
+  assert.equal(performed.at(-1)?.faultClass, undefined, 'stored for retry with no fault class');
+  assert.deepEqual(instancesOf(state, 'action:fault'), [], 'the failed filing is no loop instance');
+  down = false; state.cycle += 1;
+  await fileRecurringFaultClasses(state, effects, [], at + 5 * minute, () => at + 5 * minute, performed);
+  assert.equal(filed.length, 1, 'the next cycle files it');
+  assert.deepEqual(instancesOf(state, 'action:fault'), []);
+});
+
+test(`manual:fault-class-loop — ${gy1344Instances[4].id}: a class filing the plane judged and refused is still a loop fault`, async () => {
+  const at = Date.parse(gy1344Instances[4].at), master = config(), state = emptyDaemonState(master);
+  state.faults.instances = gy1344Instances.slice(1, 4).map(entry => ({ ...entry, faultClass: 'loop', text: 'an instance', lastSeenAt: entry.at, linkedTo: null }));
+  const effects = { persist: async () => {}, faultClassPolicy: { threshold: 3, windowHours: 24 },
+    fileFaultClass: async () => { throw new RefusedResponse('Graphyard refused work (400): invalid', 400, { error: 'invalid' }); } } as unknown as DaemonEffects;
+  await fileRecurringFaultClasses(state, effects, [], at, () => at, []);
+  assert.equal(instancesOf(state, 'action:fault').length, 1);
+});
+
+test(`manual:fault-class-loop — GY-1344: failed cycles that met a control plane not answering are counted once, as the outage`, async () => {
+  const master = config(), state = emptyDaemonState(master);
+  for (let attempt = 0; attempt < 3; attempt++) await noteCycleFailure(state, railway('work-snapshot'), 'cycle', { now: Date.parse('2026-10-06T01:45:00.000Z') + attempt * minute, intervalMs, persist: async () => {} });
+  assert.deepEqual(state.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['plane-unavailable', 'deployment']]);
 });
