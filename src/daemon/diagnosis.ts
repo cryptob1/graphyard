@@ -383,6 +383,12 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
   if (!current) return;
   if (current.state === 'requested' && !decision.approver) return launchApprover(cycle, entry, target, note);
   if (current.state === 'refused' || current.state === 'failed') {
+    // GY-1344: the recurring item was delivered meanwhile, and the approver refused the release as
+    // duplicating that delivery (GY-1337's PR #815): its own delivery answered it, as GY-1266 does.
+    if (entry.kind === 'recurring' && (!subjectItem || subjectItem.stage === 'done')) {
+      entry.state = 'answered'; entry.answeredBy = subjectItem ? answeringItem(subjectItem) : null;
+      return note(entry, 'done', `The ${decision.action} decision ${decision.id} on ${decision.work} was ${current.state} (${current.refusal?.reason ?? current.outcome ?? 'no reason recorded'}), but ${entry.work} is no longer open, so its diagnosis is not acted on`, null);
+    }
     entry.state = current.state === 'refused' ? 'refused' : 'failed';
     return note(entry, 'failed', `The ${decision.action} decision ${decision.id} on ${decision.work} was ${current.state}: ${current.refusal?.reason ?? current.outcome ?? 'no reason recorded'}; the diagnosis stands for the master to act on`);
   }
@@ -391,6 +397,8 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
   if (entry.state === 'releasing') {
     await note(entry, 'done', `${decision.work} was released on the approved decision ${decision.id} (approved by ${current.approvedBy})`);
     if (entry.kind === 'invariant') return answer(state, entry, decision.work, note);
+    // GY-1336: the recurring item was delivered or closed meanwhile — there is nothing left to close.
+    if (!subjectItem || subjectItem.stage === 'done') return answer(state, entry, decision.work, note, `${entry.work} is no longer open, so it is not closed; its fix ${decision.work} was released on decision ${decision.id}`);
     return request(cycle, diagnostician, entry, subjectItem!, 'close', { kind: 'duplicate', ref: decision.work },
       `${entry.work} is answered by ${decision.work}, the root-cause fix released on decision ${decision.id}, so it is closed as its duplicate; a recurrence after ${decision.work} is delivered files afresh`, note);
   }
@@ -408,6 +416,8 @@ async function request(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
   return launchApprover(cycle, entry, target, note);
 }
 const revisionRaced = (error: unknown) => /Task revision changed/.test(message(error));
+/** GY-1336: the item was delivered after the cycle's snapshot, so the server refuses any decision on it. */
+const deliveredMeanwhile = (error: unknown) => /Delivered work is immutable/.test(message(error));
 /**
  * GY-1318: the request names the item's revision from the cycle's snapshot, and the loop's own next
  * write can move the item before the request lands — the server refuses it "Task revision changed
@@ -417,11 +427,16 @@ const revisionRaced = (error: unknown) => /Task revision changed/.test(message(e
  * counted from the item's own decision history). A retry spent, raced again or no longer applicable
  * is no failure of the loop: it records no fault, the entry keeps its state, and the next cycle
  * decides afresh from the fresh snapshot. Any other refusal still throws.
+ *
+ * GY-1336: the other leg of the same race is the item delivered after the snapshot — the server
+ * refuses "Delivered work is immutable" (GY-1333's instance). It is reloaded the same way, found
+ * no longer applicable, and recorded with no fault; the next cycle's snapshot shows it done, and
+ * the diagnosis is answered as for any item closed while it was diagnosed (GY-1266).
  */
 async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, entry: DiagnosisRecord, work: Work, action: 'release' | 'close', input: Record<string, unknown>, reason: string, note: Note) {
   try { return { decision: await diagnostician.decide(work, action, reason, input), target: work }; }
   catch (error) {
-    if (!revisionRaced(error)) throw error;
+    if (!revisionRaced(error) && !deliveredMeanwhile(error)) throw error;
     const why = `The ${action} request on ${work.key} for the diagnosis of ${entry.subject} was refused: ${message(error)}`;
     const fresh = (await cycle.effects.snapshot()).work.find(candidate => candidate.id === work.id);
     const applicable = !!fresh && !isClosed(fresh) && fresh.stage !== 'done' && (action === 'close' || (fresh.stage === 'backlog' && !fresh.ready));
@@ -431,7 +446,7 @@ async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, en
     if (spent >= maxDecisionRequests) { await note(entry, 'done', `${why}; ${spent} ${action} request(s) already settled without applying, so it is not asked again here and the next cycle decides afresh`, null); return null; }
     try { return { decision: await diagnostician.decide(fresh, action, reason, input), target: fresh }; }
     catch (again) {
-      if (!revisionRaced(again)) throw again;
+      if (!revisionRaced(again) && !deliveredMeanwhile(again)) throw again;
       await note(entry, 'done', `${why}; asked again against revision ${fresh.revision} and refused again (${message(again)}), so the next cycle decides afresh`, null);
       return null;
     }

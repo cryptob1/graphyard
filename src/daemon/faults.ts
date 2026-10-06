@@ -24,6 +24,7 @@ import { baseRefreshConflict } from '../merge-queue.js';
 import { mergeBaseDismissal } from '../merge-base-ancestry.js';
 import { containmentGraceMs, containmentPhase } from '../model/containment.js';
 import { openAction } from '../model/next-action.js';
+import { planeUnavailable } from '../model/refusal.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
 export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[];
@@ -60,7 +61,7 @@ export interface FaultSources {
  * restates a fault the item's own record shows (the same kind, or a kind in `restatements`) is that
  * fault, so it is not counted twice; a different fault of the same class on the item is its own
  * instance. Nor is the one-hour dwell line (`gate`) or containment grace window (`containment-grace`) counted,
- * nor a lapsed fence the loop is still settling (containmentInMotion), nor a line whose `inMotionUntil` has not passed (GY-1315), which are the ordinary pace of work — a gate nothing moves is `stalled-item`. Failed actions are not read here:
+ * nor a lapsed fence the loop is still settling (containmentInMotion) or the owed line restating its escalation (owedContainmentLine), nor a line whose `inMotionUntil` has not passed (GY-1315), which are the ordinary pace of work — a gate nothing moves is `stalled-item`. Failed actions are not read here:
  * the action history retains failures long after they stopped mattering, so each is noted once, as it happens, by storeAction.
  */
 export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, sources: FaultSources = {}): FaultObservation[] {
@@ -70,6 +71,8 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
   const byKey = new Map(work.map(item => [item.key, item]));
   const own = work.flatMap(item => workFaults(item, now, routes)).filter(fault => !(containmentKinds.has(fault.kind) && containmentInMotion(byKey.get(fault.subject), now)));
   const derived: FaultObservation[] = [], attributed: FaultObservation[] = [];
+  // The owed lines that restate a standing fence's escalation (owedContainmentLine): past the settle bound they are the item's own `containment` fault.
+  const fenceLines = new Set<FaultObservation>();
   const { config } = sources;
   if (config) {
     let status: { work: any[]; attentionItems: AttentionItem[] } = { work: [], attentionItems: [] };
@@ -85,9 +88,14 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
         && !(item.kind === 'base-conflict' && baseConflictInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'owed-decision' && owedReworkLine(byKey.get(item.subject), item.text) && reworkDecisionInMotion(byKey.get(item.subject), now))
+        && !(item.kind === 'owed-decision' && owedContainmentLine(byKey.get(item.subject), item.text) && !standingFence(byKey.get(item.subject), now))
         && !(item.inMotionUntil && Date.parse(item.inMotionUntil) > now))
         if (item.kind === 'resource-bound' && item.resource) attributed.push({ kind: item.kind, faultClass: item.faultClass, subject: `resource:${item.resource}`, text: item.text.slice(0, 500) });
-        else derived.push({ kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) });
+        else {
+          const fault: FaultObservation = { kind: item.kind, faultClass: item.faultClass, subject: item.subject, text: item.text.slice(0, 500) };
+          if (item.kind === 'owed-decision' && owedContainmentLine(byKey.get(item.subject), item.text)) fenceLines.add(fault);
+          derived.push(fault);
+        }
     // GY-1272: a symptom the report attributes to a registered resource is that resource's one fault, on the resource's own subject:
     // one spent GitHub budget holding five subjects at once was six instances of its class. The resource's own line stands for it,
     // and where none was listed the first symptom does.
@@ -108,7 +116,7 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
   // predate the rule's decision this cycle took, so the line can still name a refusal the approver is about to judge (GY-1085).
   const settling = new Set(work.filter(item => item.scopeRequest && !standingScopeRequest(item, now, routes)).map(item => item.key));
   const shown = new Set([...own.map(fault => `${fault.subject}|${fault.kind}`), ...[...settling].map(key => `${key}|scope-request`)]);
-  return [...own, ...derived.filter(fault => ![fault.kind, ...(restatements[fault.kind] ?? [])].some(kind => shown.has(`${fault.subject}|${kind}`)))];
+  return [...own, ...derived.filter(fault => ![fault.kind, ...(restatements[fault.kind] ?? []), ...(fenceLines.has(fault) ? ['containment'] : [])].some(kind => shown.has(`${fault.subject}|${kind}`)))];
 }
 /** Whether the loop recorded the settlement of the item's standing fence: its settle action for the fence's epoch is done. */
 const fenceSettled = (state: Pick<DaemonState, 'actions'>, item: Work) =>
@@ -135,6 +143,22 @@ export function containmentInMotion(work: Work | undefined, now: number): boolea
   if (phase.state === 'grace') return true;
   return !!phase.lapsedAt && now - Date.parse(phase.lapsedAt) - containmentGraceMs <= containmentSettleWaitBoundMs;
 }
+/**
+ * GY-1337. Whether an owed line names the item's containment escalation: its open action escalates
+ * the `containment` trigger and the line carries that action's own owed decision (`needsHuman.decision`,
+ * "resolving GY-N's containment refusal"). It restates the fence, not a separate judgement, so it
+ * is counted as the fence is: never while the fence is in motion (containmentInMotion) or settled
+ * this cycle, and past the settle bound as the item's own `containment` fault, not a second one.
+ * On 5 October 2026 GY-1329's line counted as an `owed-decision` 15s after its lease lapsed, inside
+ * the grace window that kept the fence itself from counting.
+ */
+export function owedContainmentLine(work: Work | undefined, text: string): boolean {
+  const action = work && openAction(work);
+  const decision = action?.kind === 'escalate' && action.inputs.kind === 'escalate' && action.inputs.trigger === 'containment' ? action.needsHuman?.decision : undefined;
+  return !!decision && text.includes(decision);
+}
+/** Whether the item still holds a fence the loop is not settling: standing and past containmentInMotion's bound. */
+const standingFence = (work: Work | undefined, now: number) => !!work?.containmentQuarantine && !containmentInMotion(work, now);
 /** How long a confirmed base conflict may stand on a head before it counts as a merge fault (GY-1129). */
 export const baseConflictWaitBoundMs = 30 * 60_000;
 /**
@@ -276,7 +300,9 @@ export async function fileRecurringFaultClasses(state: DaemonState, effects: Dae
       work.push(filed);
       performed.push(await record(state, key, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} for the recurring ${recurrence.faultClass} fault class (${recurrence.count} ≥ ${policy.threshold} in ${policy.windowHours} hours), linking ${recurrence.recent.length} instance(s); later instances link to it`, attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
-      performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the item for the recurring ${recurrence.faultClass} fault class: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
+      // GY-1344: a control plane that did not answer refused nothing about the filing; it is retried on the backoff and is no loop fault.
+      const unanswered = planeUnavailable(error);
+      performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the item for the recurring ${recurrence.faultClass} fault class${unanswered ? ' (the control plane did not answer, so it is filed on a later cycle)' : ''}: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist, unanswered ? null : undefined));
     }
   }
 }

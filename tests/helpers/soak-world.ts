@@ -321,8 +321,10 @@ export class SimulatedGitHub {
   baseCheck(check: string): BaseCheck {
     const tip = this.tip, commit = this.commits.get(tip)!, jobId = Number.parseInt(tip.slice(0, 7), 16);
     if (clock.now() - commit.at < this.options.ciMs) return { check, baseSha: tip, state: 'pending', jobId: null, url: null, tests: null };
+    // GY-1332: in the main guard's world main's `test` is red too while it holds a merge that broke it.
+    const guardRed = check === 'test' && !!this.options.mainGuard && this.commitChecks(tip, clock.now()).some(run => run.name === 'test' && run.result === 'failure');
     const failed = check === 'test' && this.failing(tip);
-    return { check, baseSha: tip, state: failed ? 'failed' : 'passed', jobId, url: null, tests: failed ? [this.baseFailure.test] : [] };
+    return { check, baseSha: tip, state: failed || guardRed ? 'failed' : 'passed', jobId, url: null, tests: failed ? [this.baseFailure.test] : guardRed ? null : [] };
   }
   /** Whether this pull request's head conflicts with the base tip: a docs conflict the base has moved past. */
   conflicting(pr: PullRequest) { return pr.open && this.docsConflicts.has(pr.key) && !this.contains(pr.head, this.tip); }

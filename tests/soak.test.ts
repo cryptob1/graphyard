@@ -2537,11 +2537,12 @@ async function simulateDay(options: { hours: number; backlog?: boolean; master?:
         if (options.workspaceFailure) for (const [name, entry] of Object.entries(state.profiles)) if (/worktree/.test(entry.reason ?? '')) workspaceCooled.push(`+${Math.round(elapsed / minute)} min ${name}: ${entry.reason}`);
         reportedDispatches += result.actions.filter(action => action.kind === 'dispatch' && action.state === 'done').length;
         escalations.push(...result.actions.filter(action => action.kind === 'escalation').map(action => action.detail));
-        // GY-1250: once the abandoned revert's line is raised, a busy cycle's resolved rows retire
-        // its row from the cursor, so "raised once" must hold without it.
+        // GY-1250: once the abandoned revert's line is raised as recovered (GY-1332: it repeats while
+        // main is red), a busy cycle's resolved rows retire its row from the cursor, so "never raised
+        // again" must hold without it.
         if (guardDay) {
           const lineKey = Object.keys(state.actions).find(key => key.startsWith('escalation:main-guard:'));
-          if (lineKey && !guardDay.filled) {
+          if (lineKey && !guardDay.filled && /passed again/.test(state.actions[lineKey].detail)) {
             for (let row = 0; row < retainedActions + 20; row++) state.actions[`dispatch:filler:${row}`] = { kind: 'dispatch', work: null, principal: null, state: 'done', detail: 'filler', attempts: 1, epoch: null, cycle: state.cycle, at: new Date(clock.now()).toISOString() } as never;
             guardDay.filled = true;
           } else if (guardDay.filled && !lineKey) guardDay.linePruned = true;
@@ -3678,7 +3679,7 @@ test('unit:soak-invariants-hold — an item whose worktree the host cannot build
   assert.ok(!failedRecord || /workspace could not be prepared/.test(failedRecord[1].detail), 'a kept failure record names the workspace, not the profile');
 });
 
-test('unit:soak-invariants-hold — under GitHub delivery the main guard across a day: a merge that breaks main is reverted once and its item reopened and delivered again, a revert that fails its own checks is given up with exactly one attention line that survives the cursor pruning its row, no revert pull request is left open, and the guard reads a bounded amount per tick', { timeout: 600_000 }, async () => {
+test('unit:soak-invariants-hold — under GitHub delivery the main guard across a day: a merge that breaks main is reverted once and its item reopened and delivered again, a revert that fails its own checks is given up with an attention line repeated while main is red and raised once as recovered, never again after the cursor prunes its row, no revert pull request is left open, and the guard reads a bounded amount per tick', { timeout: 600_000 }, async () => {
   // GY-1250: the guard runs in the job loop (`processJob`) every tick and the loop raises an
   // abandoned revert's attention line from the item's record every cycle, so both repeat per tick,
   // per item and per merge and belong in this world. GitHub merges what passes; items two and four
@@ -3728,8 +3729,13 @@ test('unit:soak-invariants-hold — under GitHub delivery the main guard across 
   assert.equal(kept.delivery?.mergeSha, brokenBy(givenUp).mergeSha, 'nothing withdrew the delivery whose revert was given up');
   assert.ok(reverts.find(revert => revert.key === givenUp)!.closed, 'its revert pull request was closed');
   assert.deepEqual(reverts.find(revert => revert.key === givenUp)!.approvals, [], 'the revert whose checks failed was never approved');
+  // GY-1332: the line repeats every cycle while main's test is red, then is raised once as recovered and never again.
   const lines = escalations.filter(detail => detail.startsWith('Main guard:'));
-  assert.equal(lines.length, 1, `exactly one attention line across the day: ${lines.join(' | ')}`);
+  const red = lines.filter(detail => /Main is still red/.test(detail)), recovered = lines.filter(detail => /passed again; nothing is owed/.test(detail));
+  assert.ok(red.length >= 2, `the line repeats while main is red: ${red.length}`);
+  assert.equal(recovered.length, 1, `the line is raised once as recovered: ${lines.join(' | ')}`);
+  assert.equal(lines.at(-1), recovered[0], 'nothing is raised after main passed again');
+  assert.equal(lines.length, red.length + recovered.length);
   assert.match(lines[0], new RegExp(`${givenUp}'s merge ${brokenBy(givenUp).mergeSha.slice(0, 12)}.*\\(test\\).*revert PR #\\d+`));
   assert.ok(guardDay!.filled && guardDay!.linePruned, 'the cursor retired the line\'s row, and the line was not raised again');
   assert.ok(guardDay!.fixedAt !== null, 'main was fixed forward after the revert was given up');
