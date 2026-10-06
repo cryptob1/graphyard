@@ -223,7 +223,7 @@ export const installCommands = defineCommands([
       if (live && ['admin', 'reader'].includes(live.actor?.role)) { try { definitions = (await api('validation/definitions')).definitions; } catch { definitions = null; } }
       const readiness = readinessChecklist(profile, {
         repository: discovered.repository ?? null,
-        server: { url: base, reachable: !!live, role: live?.actor?.role, github: !!live?.github, githubPermissions: live?.githubPermissions ?? {}, appPermissions, failure },
+        server: { url: base, reachable: !!live, role: live?.actor?.role, github: !!live?.github, githubPermissions: live?.githubPermissions ?? {}, appPermissions, mainGuard: live?.mainGuard ?? null, failure },
         setup: 'error' in setup ? { proposal: null, appliedAt: null, githubApp: null, drift: [], unreadable: [String(setup.error)] } : { ...setup, unreadable: setup.unreadable.filter((entry): entry is string => typeof entry === 'string') },
         proposal: stored?.proposal ?? null,
         validation: definitions ? summarizeDefinitions(definitions) : null,
@@ -239,6 +239,7 @@ export const installCommands = defineCommands([
         setup,
         appPermissions: appPermissions ? { verifiedAt: appPermissions.verifiedAt, missing: appPermissions.missing, attention: appPermissions.attention, installationUrl: appPermissions.installationUrl } : null,
         heldJobs: live?.heldJobs ?? 0,
+        mainGuard: live?.mainGuard ?? null,
         build: live?.build ?? null,
         delegationLimits: delegationLimits ? { limits: delegationLimits.limits, deployed: delegationLimits.deployed, drift: delegationLimits.drift, attention: delegationLimits.attention } : null,
         production: production ? { provider: production.provider, serving: production.serving, running: production.running, aheadBy: production.ahead?.by ?? null, incidents: production.incidents, attention: production.attention, error: production.error } : null,

@@ -5,7 +5,7 @@ import { parseEventHistoryQuery, readEventHistory } from '../../events-history.j
 import { catchUpPipelineTimelines, pipelineBackfillState } from '../../pipeline-backfill.js';
 import { delegationSnapshot } from '../../delegation.js';
 import { describeUnserved, durablePresence, executorRegistry, executorReport, loopPresenceHeader, loopPresenceInterval, loopRegistry, presenceQuery, reportedLoopMerger } from '../../model/executor-presence.js';
-import { installationSettingsUrl } from '../../github.js';
+import { installationSettingsUrl, mainGuardStatus } from '../../github.js';
 import { controlPlanePermissions, requiredPermissions } from '../../github-permissions.js';
 import { releaseInfo, schemaVersion } from '../../release.js';
 import { openHumanOnly } from '../../model/human-request.js';
@@ -71,6 +71,9 @@ export const statusRoutes = defineRoutes('status', [
         // the build/protocol the CLI checks before brokering a merge. Production names work
         // items across the repository, so a scoped operator agent does not see it.
         delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment, ciAppIds: engine.ciAppIds, mergeQueue: { rerunFailedChecks: engine.rerunFailedChecks },
+        // The main guard (GY-1335): whether it is armed and whether a revert it opens can pass main's
+        // last-push-approval rule, which doctor and master status raise before any merge breaks main.
+        mainGuard: await mainGuardStatus(engine.store.pool, github),
         // The documentation policy this control plane stamps on new items, which doctor compares
         // with the checkout's committed graphyard.json (GY-293).
         documentation: engine.documentation,
