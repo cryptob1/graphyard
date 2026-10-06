@@ -104,7 +104,7 @@ async function stubControlPlane(work: Record<string, unknown>) {
     let body = ''; request.on('data', chunk => body += chunk);
     request.on('end', () => {
       response.setHeader('Content-Type', 'application/json');
-      if (request.method === 'GET' && request.url === '/api/work') return response.end(JSON.stringify([work]));
+      if (request.method === 'GET' && (request.url === `/api/work/${work.id}` || request.url === `/api/work/${work.key}`)) return response.end(JSON.stringify(work));
       if (request.method === 'POST' && request.url === `/api/work/${work.id}/submit`) { submitted.push(JSON.parse(body)); return response.end(JSON.stringify({ key: work.key, stage: 'build', submission: JSON.parse(body) })); }
       response.statusCode = 404; response.end('{}');
     });
