@@ -20,7 +20,7 @@ To add one: write the file, run it, open a pull request. `graphyard e2e sync` (`
 
 **Tests** shows each case's last outcome, SHA and environment, pass rate and flaky flag over its last 20 runs, and each failed run's step.
 
-**Every release candidate runs the `uat` cases**: the `e2e` suite of [`release validate`](delivery.md#release-candidates) runs them against UAT with `GRAPHYARD_UAT_URL` and `GRAPHYARD_UAT_TOKEN`. A failing case fails UAT, blocks promotion and files a follow-up naming case and step; `graphyard e2e record REPORT` then records the runs.
+**Every release candidate runs the `uat` cases**: the `e2e` suite of [`release validate`](delivery.md#release-candidates) runs them against UAT with `GRAPHYARD_UAT_URL` and `GRAPHYARD_UAT_TOKEN`. A failing case fails UAT, blocks promotion and files a follow-up naming case and step (a `--suite` command's detail is what it writes to `GRAPHYARD_SUITE_DETAIL`); `graphyard e2e record REPORT` then records the runs.
 
 ## Candidates, requests, reports
 

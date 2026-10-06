@@ -1,4 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 /**
  * Release candidates: one moving main, a frozen candidate, UAT, then that exact SHA in production.
@@ -233,12 +236,19 @@ export interface Suite { name: string; run: (url: string, candidate: ReleaseCand
 /**
  * A command run with `GRAPHYARD_UAT_URL` set to the deployment. It never sees `GRAPHYARD_TOKEN`, the
  * release credential that files a failed candidate's follow-up: only that filing step needs it.
+ * A command that knows what failed (the e2e suite names the case and step) writes that to the file
+ * `GRAPHYARD_SUITE_DETAIL` names, and it becomes the suite's detail, so the follow-up names it too.
  */
 export const commandSuite = (name: string, command: string, timeoutMs = 3_600_000): Suite => ({ name, run: async url => {
   const { GRAPHYARD_TOKEN: _release, ...env } = process.env;
-  const child = spawnSync('bash', ['-c', command], { stdio: 'inherit', timeout: timeoutMs, env: { ...env, GRAPHYARD_UAT_URL: url } });
-  const passed = child.status === 0;
-  return { name, passed, detail: passed ? `\`${command}\` passed` : `\`${command}\` exited ${child.status ?? child.signal}` };
+  const scratch = mkdtempSync(join(tmpdir(), 'graphyard-suite-'));
+  const detailFile = join(scratch, 'detail');
+  try {
+    const child = spawnSync('bash', ['-c', command], { stdio: 'inherit', timeout: timeoutMs, env: { ...env, GRAPHYARD_UAT_URL: url, GRAPHYARD_SUITE_DETAIL: detailFile } });
+    const passed = child.status === 0;
+    const written = existsSync(detailFile) ? readFileSync(detailFile, 'utf8').trim().slice(0, 4000) : '';
+    return { name, passed, detail: written || (passed ? `\`${command}\` passed` : `\`${command}\` exited ${child.status ?? child.signal}`) };
+  } finally { rmSync(scratch, { recursive: true, force: true }); }
 } });
 
 export const endpointSuite = (paths: readonly string[], fetcher: typeof fetch = fetch): Suite => ({ name: 'endpoints', run: async url => {

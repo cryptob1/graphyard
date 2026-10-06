@@ -237,20 +237,29 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
 });
 
 /**
- * Run the e2e suite as a `release validate --suite` command, from the candidate's own checkout:
- * `GRAPHYARD_UAT_URL` is the deployment the validation set and `GRAPHYARD_UAT_TOKEN` the UAT
- * principal the api and browser suites use. Like every suite command it never holds the release
- * credential, so it only writes its report to `GRAPHYARD_E2E_REPORT`; the workflow's next step
- * records that report with `graphyard e2e record`.
+ * Run the e2e suite as a `release validate --suite` command, from the candidate's own checkout (or
+ * `GRAPHYARD_E2E_ROOT`): `GRAPHYARD_UAT_URL` is the deployment the validation set and
+ * `GRAPHYARD_UAT_TOKEN` the UAT principal the api and browser suites use. The suite's one-line
+ * detail, naming each failing case and step, goes to the file `GRAPHYARD_SUITE_DETAIL` names, which
+ * the command suite reads back as its detail, so the failed candidate's follow-up names them. Like
+ * every suite command it never holds the release credential, so it only writes its report to
+ * `GRAPHYARD_E2E_REPORT`; the workflow's next step records that report with `graphyard e2e record`.
  */
-export async function runE2eSuite(env: NodeJS.ProcessEnv = process.env, root = process.cwd()) {
-  const url = env.GRAPHYARD_UAT_URL, token = env.GRAPHYARD_UAT_TOKEN;
-  if (!url || !token) throw new Error('The e2e suite needs GRAPHYARD_UAT_URL and GRAPHYARD_UAT_TOKEN');
-  const result = await e2eSuite(await loadCases(root), token, { report: async report => {
-    console.log(summarize(report));
-    if (env.GRAPHYARD_E2E_REPORT) await writeFile(env.GRAPHYARD_E2E_REPORT, `${JSON.stringify(report, null, 2)}\n`);
-  } }).run(url, env.GRAPHYARD_CANDIDATE_ID ? { id: env.GRAPHYARD_CANDIDATE_ID } : null);
-  console.log(result.detail);
-  if (!result.passed) process.exitCode = 1;
-  return result;
+export async function runE2eSuite(env: NodeJS.ProcessEnv = process.env, root = env.GRAPHYARD_E2E_ROOT ?? process.cwd()) {
+  const detail = async (text: string) => { if (env.GRAPHYARD_SUITE_DETAIL) await writeFile(env.GRAPHYARD_SUITE_DETAIL, `${text}\n`); };
+  try {
+    const url = env.GRAPHYARD_UAT_URL, token = env.GRAPHYARD_UAT_TOKEN;
+    if (!url || !token) throw new Error('The e2e suite needs GRAPHYARD_UAT_URL and GRAPHYARD_UAT_TOKEN');
+    const result = await e2eSuite(await loadCases(root), token, { report: async report => {
+      console.log(summarize(report));
+      if (env.GRAPHYARD_E2E_REPORT) await writeFile(env.GRAPHYARD_E2E_REPORT, `${JSON.stringify(report, null, 2)}\n`);
+    } }).run(url, env.GRAPHYARD_CANDIDATE_ID ? { id: env.GRAPHYARD_CANDIDATE_ID } : null);
+    console.log(result.detail);
+    await detail(result.detail);
+    if (!result.passed) process.exitCode = 1;
+    return result;
+  } catch (error) {
+    await detail(`the e2e suite could not run: ${error instanceof Error ? error.message : String(error)}`);
+    throw error;
+  }
 }

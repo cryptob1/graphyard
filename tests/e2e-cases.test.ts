@@ -251,4 +251,12 @@ test('unit:e2e-tracking-history — the Tests page lists each E2E case with last
   assert.match(text, /e2e run run-25 · https:\/\/uat\.example\.test/);
   assert.match(row, /href="#case-tracked"/);
   assert.ok(scenarioDefinition(tracked).steps.length === 1);
+
+  // Runs against a target that reported no commit share no commit: a pass then a fail is not flaky.
+  const [local] = await loadCases(await repository({ 'local.json': http200('local') }));
+  await syncCases(apiAs(operator), [local]);
+  for (const [n, outcome] of [[1, 'pass'], [2, 'fail']] as const) assert.equal((await call('scenarios/local/runs', operator, { revision: 1, runId: `local-${n}`, baseUrl: 'http://127.0.0.1:1', sha: null, environment: 'local',
+    durationMs: 1, outcome, executed: 1, failingStep: outcome === 'fail' ? { index: 0, name: 'GET /api/tests', reason: 'expected status 200, got 500' } : null })).status, 200);
+  const unreported = (await call('tests', operator)).body.cases.find((c: any) => c.id === 'local');
+  assert.equal(unreported.latest.sha, 'unknown'); assert.equal(unreported.flaky, false, 'no pseudo-commit makes a case flaky');
 });

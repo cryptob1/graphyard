@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { admin, demand, type Principal } from './model.js';
-import type { RunIdentity, ScenarioRun } from './model/test-cases.js';
+import { flakiness, type RunIdentity, type ScenarioRun } from './model/test-cases.js';
 import { testSummary, type CaseSummary } from './test-runs.js';
 import { caseRunner } from './e2e/case.js';
 import type { Store } from './store.js';
@@ -81,7 +81,10 @@ export async function trackedCases(db: Store['pool']): Promise<{ window: number;
   return { window: summary.window, cases: summary.cases.map(entry => {
     const judged = entry.history.filter(run => !run.withdrawn && run.result !== 'skipped');
     const definition = definitions.get(entry.id);
-    return { ...entry, passRate: judged.length ? judged.filter(run => run.result === 'pass').length / judged.length : null,
+    // A run whose target reported no commit is stored on `unknown`; such runs share no commit, so they never make a case flaky together.
+    const unknown = entry.history.some(run => run.sha === 'unknown')
+      && (({ flaky, reason }) => ({ flaky, flakyReason: reason }))(flakiness(entry.history.map(run => run.sha === 'unknown' ? { ...run, sha: `unknown-${run.seq}` } : run) as ScenarioRun[]));
+    return { ...entry, ...(unknown || {}), passRate: judged.length ? judged.filter(run => run.result === 'pass').length / judged.length : null,
       e2e: definition?.runner === caseRunner ? { tags: definition.tags ?? [], target: definition.environment } : null };
   }) };
 }
