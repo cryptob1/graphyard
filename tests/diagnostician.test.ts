@@ -627,3 +627,38 @@ test('unit:diagnosis-release-stale-recurrence-reproduced — the loop moves the 
   assert.equal(entry.answeredBy, fixKey);
   assert.equal((await store.list()).find(work => work.id === recurringItem.id)!.stage, 'done');
 });
+
+// GY-1374, instance decision-refused|GY-1367|2026-10-06T10:50:22.760Z: GY-1365 (recurring
+// configuration faults) was parked at 10:04:21 on a human-only decision — register the revert
+// approver App and set its credentials on the control plane. Its diagnosis filed GY-1367 for that
+// same operator act at 10:18 and asked to release it, and the approver refused: a release dispatches
+// to worker executors an item no worker may perform. The parked decision answers the diagnosis.
+const parked1365 = { at: iso(-10 * minute), id: 'b9b064b3-ac8f-4c35-b7ee-7b12baa443eb', kind: 'money-or-accounts', epoch: 1, requestedBy: 'graphyard-opencode-1',
+  needed: 'Register or choose the revert approver GitHub App, install it on the repository, set GRAPHYARD_REVERT_APPROVER_APP_ID, GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID and GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY on the production control plane via scripts/provision-railway.mjs operator input, and redeploy',
+  reason: 'Registering that App and handing its private key to production is reserved for the operator, the same as the GY-1313 Railway token' };
+
+test('manual:fault-class-decision — decision-refused|GY-1367|2026-10-06T10:50:22.760Z: a recurring item parked on a human-only decision files no fix and asks no release', async () => {
+  const operatorFix = { ...fix, title: 'Operator: provision the main guard\'s revert approver App on the production control plane', plannedFiles: ['.graphyard/revert-approver.json'] };
+  const h = harness(() => diagnosis('GY-101', { faultClass: 'configuration', fix: operatorFix }));
+  const state = emptyDaemonState(config());
+  const subject = { ...recurring(state), ready: true, humanRequest: parked1365 } as unknown as Work;
+  const work = [subject];
+  const fx = effects(h, () => work, () => clock);
+  await step(state, fx, work, clock);
+  const performed = await step(state, fx, work, clock + minute);
+  assert.deepEqual(h.filed, [], 'no fix item is filed for the act the human was asked for');
+  assert.deepEqual(h.requested, [], 'no release is put to an approver, so none can be refused');
+  assert.equal(state.diagnoses['GY-101'].state, 'answered');
+  assert.equal(state.diagnoses['GY-101'].answeredBy, 'GY-101');
+  assert.ok(!performed.some(action => action.state === 'failed'), JSON.stringify(performed));
+  assert.match(state.diagnoses['GY-101'].detail, /parked on a human-only decision \(money-or-accounts/);
+
+  // Once the human answers, the item is a worker's again, and a diagnosis files and releases its fix as before.
+  const h2 = harness(() => diagnosis('GY-101', { fix }));
+  const state2 = emptyDaemonState(config());
+  const answered = [{ ...recurring(state2), ready: true, humanRequest: { ...parked1365, answer: { at: iso(-minute), by: 'operator', text: 'done' } } } as unknown as Work];
+  const fx2 = effects(h2, () => answered, () => clock);
+  await step(state2, fx2, answered, clock);
+  await step(state2, fx2, answered, clock + minute);
+  assert.deepEqual(h2.requested.map(entry => entry.action), ['release']);
+});

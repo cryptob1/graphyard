@@ -650,6 +650,23 @@ export function refusalNamedIn(error: unknown, action: 'rework' | 'recover' = 'r
   return new RegExp(`Decision ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \\(${action}\\) with this input\\b`).exec(text)?.[1] ?? null;
 }
 /**
+ * The actions whose standing request the loop adopts on the server's word alone (GY-1374): they bind
+ * nothing a standing one could disagree with, unlike a merge or attest (its candidate), a resolve (its
+ * trigger) or a requirements decision (its scope request), each of which the history read must judge.
+ */
+export const adoptedOnRefusal: readonly RoutineDecisionAction[] = ['rework', 'recover', 'close'];
+/**
+ * The requested decision of `action` a refused request names as already standing on the item, or
+ * null (GY-1374). The server keeps one request per action and refuses a second "Decision ID (ACTION)
+ * is already requested on GY-N; wait for it". The loop's history read can miss it — a rework or
+ * recover read that failed is taken as empty — and GY-1352's rework round was then logged failed
+ * while the very decision it asked for stood, requested and awaiting its approver.
+ */
+export function standingNamedIn(error: unknown, action: RoutineDecisionAction): string | null {
+  const text = error instanceof Error ? error.message : String(error);
+  return new RegExp(`Decision ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) \\(${action}\\) is already requested on `).exec(text)?.[1] ?? null;
+}
+/**
  * Whether the loop may attest that the item's previous worker is stopped. `rework` and `recover`
  * carry that attestation and the engine lowers the containment fence on it, so it rests only on
  * what was verified: no lease is held, and either no fence stands — the worker's own supervisor
