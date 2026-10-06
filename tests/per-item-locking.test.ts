@@ -302,6 +302,12 @@ test('unit:reconcile-uncontended-under-load 30 items reconciled beside lease ren
       await sleep(Math.max(0, everyMs - (performance.now() - started)));
     }
   };
+  // Every tick measured evaluates every live item (GY-1361): a pass evaluates only what moved unless a
+  // face moved or the full-evaluation bound passed (GY-1124), and the first tick, opening up to 2 s
+  // in, could open before any observation save had landed and evaluate only the renewed rows: on a
+  // starved runner (one core beside eight busy loops) it evaluated 2, and the 30-item check failed.
+  const fullEvery = engine.reconcileFullEvaluationMs;
+  engine.reconcileFullEvaluationMs = 0;
   queryLatencyMs = 5;
   try {
     // Each at or above production's rate: a supervisor renews every 25 s (here 5 s), an observation
@@ -316,7 +322,7 @@ test('unit:reconcile-uncontended-under-load 30 items reconciled beside lease ren
         [observed[Math.floor(Math.random() * observed.length)].id, JSON.stringify({ owner: 'gone-worker', epoch: 1, expiresAt: new Date(Date.now() - 1000).toISOString() })]), 'lapse'),
       loop(2_000, async () => { const started = performance.now(); await engine.reconcile(); ticks.push(performance.now() - started); }, 'tick'),
     ]);
-  } finally { queryLatencyMs = 0; }
+  } finally { queryLatencyMs = 0; engine.reconcileFullEvaluationMs = fullEvery; }
   const recorded = engine.reconcileTicks.slice(ticksBefore);
   assert.deepEqual(failures, [], 'every renewal, observation, snapshot read and tick succeeded');
   assert.ok(ticks.length >= 8, `the server ticked ${ticks.length} times`);
