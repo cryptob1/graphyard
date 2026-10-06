@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { listTestFiles, releaseCandidateTests, repositoryRoot } from '../scripts/ci-tests.mjs';
 import { paneSweepLimit } from '../src/daemon/cycle-reclaim.js';
 import { memoryActionKey } from '../src/daemon/cycle-dispatch.js';
 import { diagnosisSettled } from '../src/runner/payloads.js';
@@ -28,6 +30,23 @@ import { assertLaunchesConfined, memoryDay, simulateDay } from './helpers/soak-s
  * every suite asserts the system invariants after every cycle.
  */
 soakControlPlanes('soak-day', 404);
+
+test('unit:soak-invariants-hold — the soak runs as one suite per concern (GY-1363): at least four tests/soak-*.test.ts files, each the release-candidate soak suite and within 1,500 lines, no test name in two of them, and no tests/soak.test.ts holding them all', () => {
+  const suites = listTestFiles().filter(file => /^tests\/soak-[\w-]+\.test\.ts$/.test(file));
+  assert.ok(suites.length >= 4, `the soak is split per concern: ${suites.join(', ')}`);
+  assert.ok(!existsSync(join(repositoryRoot, 'tests/soak.test.ts')), 'no single file holds every soak scenario');
+  const owners = new Map<string, string[]>();
+  for (const file of suites) {
+    assert.equal(releaseCandidateTests[file], 'soak', `${file} runs as the release-candidate soak suite`);
+    const lines = readFileSync(join(repositoryRoot, file), 'utf8').split('\n');
+    assert.ok(lines.length <= 1500, `${file} stays within 1,500 lines (${lines.length})`);
+    for (const line of lines) {
+      const name = line.match(/^test\('((?:[^'\\]|\\.)*)'/)?.[1];
+      if (name) owners.set(name, [...owners.get(name) ?? [], file]);
+    }
+  }
+  for (const [name, files] of owners) assert.equal(files.length, 1, `${name} is held by exactly one suite: ${files.join(', ')}`);
+});
 
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 360_000 }, async () => {
   const began = performance.now();
