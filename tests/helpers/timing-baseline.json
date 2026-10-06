@@ -348,6 +348,7 @@
     "tests/fault-class-configuration.test.ts": 1671,
     "tests/fault-class-containment.test.ts": 986,
     "tests/fault-class-decision.test.ts": 621,
+    "tests/fault-class-human-decision.test.ts": 3500,
     "tests/fault-class-deployment.test.ts": 338,
     "tests/fault-class-scope.test.ts": 760,
     "tests/fault-class-unclassified.test.ts": 522,

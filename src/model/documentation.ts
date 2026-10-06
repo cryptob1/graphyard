@@ -253,15 +253,23 @@ export function docsHeadroomText(headroom: DocsHeadroom, base: string): string |
 /** The open trim item the loop filed, if any. */
 export const openDocsTrimItem = <W extends { title: string; stage: string; closed?: unknown }>(work: readonly W[]) =>
   work.find(item => item.title.startsWith(docsTrimTitle) && item.stage !== 'done' && !item.closed) ?? null;
+/**
+ * What the trim item may give up to reach its target (GY-1366). The criterion used to demand both
+ * the target and that everything documented stay documented: once tightening ran out, the two
+ * conflicted and the worker parked the item on a goals decision. The operator answered that
+ * question once ("cut hard", GY-1070) and was asked it again (GY-998, GY-1292), so the trade-off
+ * is the criterion's own: detail goes, accuracy and the command and route index stay.
+ */
+export const docsTrimLatitude = 'detail-level documentation may be dropped to reach it; what remains stays accurate to the code, and every CLI command and HTTP route documented before the change stays named at least once';
 /** The item the loop files once for a saturated set: the largest pages and the headroom to restore. */
 export function docsTrimItem(headroom: DocsHeadroom, base: string) {
   return {
     title: `${docsTrimTitle}: ${headroom.total} of ${headroom.budget} words on ${base}`.slice(0, 200), type: 'bug' as const, priority: 1,
     description: [
       `The master loop filed this item itself: the budgeted documentation (${listed(headroom.paths)}) totals ${headroom.total} words on ${base} against the ${headroom.budget}-word budget ${repositoryConfigFile} configures (${docsBudgetProof}), within ${Math.round(docsHeadroomWarning * 100)}% of it. Every item documents its change, so two queued items that each pass the budget alone overflow it together on a merge-queue tip.`,
-      `Trim the set to ${headroom.target} words or fewer (${Math.round(docsHeadroomTarget * 100)}% headroom) by tightening prose and linking instead of restating; do not remove any documented behaviour, command, configuration or API. Start with the largest pages: ${pageList(headroom.largest)}.`,
+      `Trim the set to ${headroom.target} words or fewer (${Math.round(docsHeadroomTarget * 100)}% headroom) by tightening prose and linking instead of restating. Where that is not enough, drop detail-level documentation: the target wins, so this needs no human decision. Keep what remains accurate to the code and every CLI command and HTTP route named at least once. Start with the largest pages: ${pageList(headroom.largest)}.`,
     ].join('\n\n'),
-    criteria: [{ id: 'AC-1', text: `The budgeted documentation (${listed(headroom.paths)}) totals at most ${headroom.target} words (at least ${Math.round(docsHeadroomTarget * 100)}% under the ${headroom.budget}-word budget) and every behaviour, command, configuration and API documented before the change is still documented after it`, proofs: [docsBudgetProof] }],
+    criteria: [{ id: 'AC-1', text: `The budgeted documentation (${listed(headroom.paths)}) totals at most ${headroom.target} words (at least ${Math.round(docsHeadroomTarget * 100)}% under the ${headroom.budget}-word budget); ${docsTrimLatitude}`, proofs: [docsBudgetProof] }],
     reason: `The documentation is ${headroom.total} of ${headroom.budget} words on ${base} and no open item restores its headroom`,
   };
 }
