@@ -303,19 +303,21 @@ export function endFailingRuns(state: Pick<DaemonState, 'actions' | 'faults'>, p
  * operator-agent identity, listing the instances; while that item is open, every later instance is
  * linked to it instead of filing another. Nothing is filed below the threshold.
  */
-export async function fileRecurringFaultClasses(state: DaemonState, effects: DaemonEffects, work: Work[], clock: number, now: () => number, performed: DaemonAction[]) {
+export async function fileRecurringFaultClasses(state: DaemonState, effects: DaemonEffects, work: Work[], clock: number, now: () => number, performed: DaemonAction[], budget?: FilingBudget) {
   const policy = effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env);
   for (const recurrence of recurringClasses(state.faults.instances, work, policy, clock, standingFaultClassItem)) {
     if (recurrence.item) { for (const instance of recurrence.unlinked) instance.linkedTo = recurrence.item.key; continue; }
     if (!recurrence.file || !effects.fileFaultClass) continue;
     const key = faultActionKey(recurrence.faultClass), previous = state.actions[key];
     if (previous && previous.state !== 'done' && !readyToRetry(previous, state.cycle)) continue;
+    // GY-1357: a filing the step's remaining budget cannot fit is carried, untouched, to the next cycle, which recounts the class and files it then.
+    if (budget && !budget.fits()) { budget.carried.push(`the ${recurrence.faultClass} class filing`); continue; }
     const attempts = previous?.state === 'done' ? 1 : (previous?.attempts ?? 0) + 1;
     // The same instances always file under the same key, so a retry after a lost reply returns the item already filed.
     const idempotency = `fault-class:${recurrence.faultClass}:${createHash('sha256').update(recurrence.recent.map(entry => entry.id).sort().join(',')).digest('hex').slice(0, 32)}`;
     await record(state, key, { kind: 'fault', work: null, principal: null, state: 'started', detail: `Filing one item for the recurring ${recurrence.faultClass} fault class: ${recurrence.count} instances in ${policy.windowHours} hours`, attempts, cycle: state.cycle }, now(), effects.persist);
     try {
-      const filed = await effects.fileFaultClass(faultClassItem(recurrence, policy, clock), idempotency);
+      const filed = await spend(budget, () => effects.fileFaultClass!(faultClassItem(recurrence, policy, clock), idempotency));
       for (const instance of recurrence.recent) instance.linkedTo = filed.key;
       work.push(filed);
       performed.push(await record(state, key, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} for the recurring ${recurrence.faultClass} fault class (${recurrence.count} ≥ ${policy.threshold} in ${policy.windowHours} hours), linking ${recurrence.recent.length} instance(s); later instances link to it`, attempts, cycle: state.cycle }, now(), effects.persist));
@@ -388,7 +390,7 @@ const docsTrimEpisodeOpen = (action: DaemonAction | undefined) => action?.state 
  * more — only restored headroom lets a later saturation file again. A set with its headroom files
  * nothing, and neither does a loop without the operator-agent identity.
  */
-export async function fileDocsTrim(state: DaemonState, effects: Pick<DaemonEffects, 'fileFaultClass' | 'persist'>, work: Work[], docs: ReportedAttention['docs'], now: () => number, performed: DaemonAction[]) {
+export async function fileDocsTrim(state: DaemonState, effects: Pick<DaemonEffects, 'fileFaultClass' | 'persist'>, work: Work[], docs: ReportedAttention['docs'], now: () => number, performed: DaemonAction[], budget?: FilingBudget) {
   const previous = state.actions[docsTrimActionKey];
   if (!docs?.headroom.saturated) {
     if (docs && docsTrimEpisodeOpen(previous))
@@ -397,13 +399,14 @@ export async function fileDocsTrim(state: DaemonState, effects: Pick<DaemonEffec
   }
   if (!effects.fileFaultClass || openDocsTrimItem(work) || docsTrimEpisodeOpen(previous)) return;
   if (previous && previous.state !== 'done' && !readyToRetry(previous, state.cycle)) return;
+  if (budget && !budget.fits()) { budget.carried.push('the documentation trim filing'); return; }
   const attempts = previous?.state === 'done' ? 1 : (previous?.attempts ?? 0) + 1;
   // One key per base and total, so a retry after a lost reply returns the item already filed.
   const idempotency = `docs-headroom:${docs.base}:${docs.headroom.total}`;
   await record(state, docsTrimActionKey, { kind: 'fault', work: null, principal: null, state: 'started', detail: `Filing one item to restore documentation headroom: ${docs.headroom.total} of ${docs.headroom.budget} words on ${docs.base}`, attempts, cycle: state.cycle }, now(), effects.persist);
   try {
     // The trim item goes through the same operator-agent intent route as a fault-class item; it names no class.
-    const filed = await effects.fileFaultClass(docsTrimItem(docs.headroom, docs.base), idempotency);
+    const filed = await spend(budget, () => effects.fileFaultClass!(docsTrimItem(docs.headroom, docs.base), idempotency));
     work.push(filed);
     performed.push(await record(state, docsTrimActionKey, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} to restore documentation headroom (${docs.headroom.total} of ${docs.headroom.budget} words on ${docs.base}); nothing more is filed until headroom is restored`, attempts, cycle: state.cycle }, now(), effects.persist));
   } catch (error) {
@@ -479,6 +482,48 @@ async function withinBudget<T>(owner: object, source: string, read: () => Promis
 }
 const observedWithin = 'The faults step observed every source within its budget';
 /**
+ * GY-1357: what one filing or decision request of the faults step is taken to cost before the loop
+ * has timed one. On 2026-10-06 each re-read the work snapshot (3.3-4.9s) and some asked for a
+ * decision (about 4s), and run after the observation with no bound they held the step at 100-150s.
+ */
+export const faultFilingEstimateMs = 10_000;
+/** The recent filings' own costs, per loop state: the slowest of them is what the next one is expected to take. */
+const filingCosts = new WeakMap<object, number[]>();
+/**
+ * The rest of the faults step's budget, after the observation: a filing (a recurring class's item,
+ * the documentation trim item) or a diagnosis's move (its fix's filing, its decision request, its
+ * approver) starts only while what remains fits the slowest recent one — never more than half the
+ * budget, so a plane that once answered slowly does not carry every filing for ever. One that does
+ * not fit is carried, untouched: the next cycle recounts it from the same records and files it then,
+ * under the same idempotency key, so nothing is dropped or filed twice.
+ */
+export interface FilingBudget { fits: () => boolean; spend: <T>(body: () => Promise<T>) => Promise<T>; carried: string[] }
+export function filingBudget(owner: object, deadline: number, budgetMs: number, now: () => number): FilingBudget {
+  let costs = filingCosts.get(owner);
+  if (!costs) filingCosts.set(owner, costs = []);
+  const recent = costs, expected = () => Math.min(Math.round(budgetMs / 2), recent.length ? Math.max(...recent) : faultFilingEstimateMs);
+  return { carried: [], fits: () => deadline - now() >= expected(),
+    async spend(body) {
+      const started = now();
+      try { return await body(); } finally { recent.push(Math.max(0, now() - started)); if (recent.length > 8) recent.shift(); }
+    } };
+}
+const spend = <T>(budget: FilingBudget | undefined, body: () => Promise<T>) => budget ? budget.spend(body) : body();
+/**
+ * The cycle the diagnoses move on in, inside the faults step's budget: each move runs only while it
+ * fits (FilingBudget), and the work snapshot a refused decision is decided afresh from is read at
+ * most once per step and shared, never once per class — or, past what the budget fits, is the cycle's own.
+ */
+function budgetedCycle(cycle: Cycle, budget: FilingBudget): Cycle {
+  let fresh: ReturnType<DaemonEffects['snapshot']> | undefined;
+  const effects: DaemonEffects = Object.create(cycle.effects, { snapshot: { value: () => fresh ??= budget.fits() ? cycle.effects.snapshot() : Promise.resolve(cycle.snapshot) } });
+  const isolate: Cycle['isolate'] = async (kind, item, name, body) => {
+    if (!budget.fits()) { budget.carried.push(name); return undefined; }
+    return cycle.isolate(kind, item, name, () => budget.spend(body));
+  };
+  return { ...cycle, effects, isolate };
+}
+/**
  * Step 7b: classify what this cycle saw standing wrong and file one item per recurring class.
  * Standing faults are observed at most once per faultObservationIntervalMs; failed actions are noted as
  * they happen, so every cycle still ends silent failing runs and files a class that reached its threshold.
@@ -491,14 +536,16 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   const { config, state, effects, now, snapshot, clock, performed, agents, credentials } = cycle;
   // The cadence is the loop's own time, as the reads it spaces out are: the snapshot's clock need not move between cycles.
   const policy = effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env), last = state.faults.observedAt ? Date.parse(state.faults.observedAt) : Number.NaN, local = now();
+  const budgetMs = faultObservationBudgetMs(config.run.intervalSeconds * 1000), deadline = local + budgetMs, unreadSources: string[] = [];
+  const filings = filingBudget(state, deadline, budgetMs, now);
   if (local >= last && local - last < faultObservationIntervalMs) { // a local clock that went back observes again
     endFailingRuns(state, policy, clock);
-    return fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
+    await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed, filings);
+    return noteCarried(cycle, filings.carried);
   }
   const lastObservedAt = state.faults.observedAt;
   state.faults.observedAt = new Date(local).toISOString();
   let partial = false, reported: ReportedAttention | undefined;
-  const budgetMs = faultObservationBudgetMs(config.run.intervalSeconds * 1000), deadline = local + budgetMs, unreadSources: string[] = [];
   const herdrRead = effects.herdr ? await Promise.resolve(effects.herdr()).catch(() => ({ agents: [] as HerdrAgent[], available: false })) : { agents, available: true };
   const seen = herdrRead.available ? herdrRead.agents : [];
   const status = effects.controlPlane ? await withinBudget(state, 'status', () => effects.controlPlane!().then(value => ({ value, failed: false }), () => ({ value: null, failed: true })), deadline, now) : null;
@@ -525,12 +572,26 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
     agents: herdrRead.available ? seen : null, build: controlPlane?.build?.commit ?? null });
   trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available, scopeRoutes: !!effects.decide && !!effects.approver }), ...invariantFaults(invariants)],
     new Date(clock).toISOString(), partial || (herdrRead.available ? false : new Set<string>([...herdrFaultKinds, invariantFaultKind('lingering-sessions')])));
-  await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed);
-  await fileDocsTrim(state, effects, snapshot.work, reported?.docs, now, performed);
+  // GY-1357: the filings and the diagnoses' moves share what the observation left of the budget.
+  await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed, filings);
+  await fileDocsTrim(state, effects, snapshot.work, reported?.docs, now, performed, filings);
   // 7c. Each recurring-fault item filed (this cycle included) and each invariant violation past its
   //     bound gets its diagnosis, and each diagnosis moves on by one decision (GY-439). A plane too slow
   //     to be observed within the budget would only time out the diagnoses' requests too: they wait for the next cycle.
-  if (!unreadSources.length) await diagnosisStep(cycle);
+  if (!unreadSources.length) await diagnosisStep(budgetedCycle(cycle, filings));
+  await noteCarried(cycle, filings.carried);
+}
+
+const carriedNone = 'The faults step fitted every filing and decision request in its budget';
+/** Record what the step carried to the next cycle, so the journal says it was bounded rather than lost; a cycle that carries nothing supersedes the last carry once. */
+async function noteCarried(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'performed'>, carried: string[]) {
+  const { state, effects, now, performed } = cycle, key = 'faults:carried', standing = state.actions[key];
+  if (!carried.length) {
+    if (standing && !standing.detail.startsWith(carriedNone)) performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'done', attempts: standing.attempts + 1, cycle: state.cycle, detail: `${carriedNone}; nothing was carried` }, now(), effects.persist, null));
+    return;
+  }
+  performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'done', attempts: (standing?.attempts ?? 0) + 1, cycle: state.cycle,
+    detail: `The faults step's budget did not fit ${carried.length} filing(s) or decision request(s), so they are carried to the next cycle rather than run inline: ${carried.slice(0, 8).join('; ')}${carried.length > 8 ? `; and ${carried.length - 8} more` : ''}` }, now(), effects.persist, null));
 }
 
 /** Record a cut observation, so the journal and `master status` say the step was bounded rather than blind; a full one supersedes the last cut once. */
