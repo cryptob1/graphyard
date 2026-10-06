@@ -74,6 +74,17 @@ const controlPlane = new RegExp(String.raw`\binternal (?:server )?error\b|\bHTTP
 // being down, unreachable or overloaded (502-504, refused or reset connections) is the whole plane's.
 const requestServerError = /\bHTTP 500\b|\(500\)|\b500 Internal\b|"status":\s*500\b|\binternal (?:server )?error\b/i;
 const planeWideError = /\bHTTP 50[234]\b|\(50[234]\)|\b50[234] (?:Bad Gateway|Service Unavailable|Gateway)|"(?:status|code)":\s*50[234]\b|ECONNREFUSED|ECONNRESET|socket hang up|(?<!git )fetch failed|Application failed to respond|server (?:is )?(?:down|unavailable|unreachable)|\b(?:out of memory|ENOMEM)\b/i;
+// A server call the loop or the dispatcher made that ran into its own timeout (AbortSignal.timeout's
+// TimeoutError): while the plane is slow, every call does, whichever item it was for.
+const serverCallTimeout = /\bThe operation was aborted due to timeout\b/;
+/**
+ * Whether a failure is the control plane's as a whole (GY-1345): down, unreachable or overloaded —
+ * Railway's "Application failed to respond", an HTTP or body 502-504, a refused or reset
+ * connection, a socket hang up — or a server call that ran into its own timeout. One plane-wide
+ * window fails every step that writes or reads, so the loop rides it out and retries; it is no
+ * failure of the step that met it. An item-specific HTTP 500 is not one (itemSpecificPlaneError).
+ */
+export const planeWideFailure = (text: string | null | undefined) => !!text && (planeWideError.test(text) || serverCallTimeout.test(text));
 /** Whether a control-plane blocker is a server error the item's own request met (GY-1055): the server's health cannot show it fixed. */
 export function itemSpecificPlaneError(text: string | null | undefined) {
   return !!text && requestServerError.test(text) && !planeWideError.test(text);

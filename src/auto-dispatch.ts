@@ -22,6 +22,7 @@ import { currentEvidence } from './model/evidence.js';
 import { judgeHostMemory, memoryDeferral, readHostMemory, reclaimResources, type HostMemoryReading } from './master-resources.js';
 import { unexercisedFindings } from './model/mechanical-proofs.js';
 import { classified, launchWaitKind, launchWaitWording } from './model/fault-classes.js';
+import { planeWideFailure } from './model/blocker-class.js';
 export { hostMemoryHold, loopMemoryAttention } from './master-resources.js';
 
 /**
@@ -1453,6 +1454,11 @@ function tickFailureAttention(dispatch: { consecutiveFailures?: number; lastSucc
     ...agentOwner('master', 'graphyard master restart re-reads the dispatch cursor beside the coordinator credential and repairs an over-long string in it; a cursor for another server or repository is removed by hand first') }];
   const failures = dispatch.consecutiveFailures ?? 0, failure = dispatch.lastFailure;
   if (failures < dispatchFailureAttentionThreshold || !failure) return [];
+  // GY-1345: a tick that failed on the control plane as a whole (a 502, a refused connection, a call
+  // run into its timeout) is the plane's window, not the dispatcher's: the tick is retried on its
+  // backoff and the dispatcher recovers once the plane answers, so it raises no standing line. A
+  // tick that failed to persist names its own field, and stands whatever the reason quotes.
+  if (!failure.field && planeWideFailure(failure.reason)) return [];
   const persisted = failure.field ? ` The tick could not persist ${failure.field}${failure.request ? `, composed for the ${failure.kind} request ${failure.request} on ${failure.work}` : ''}.` : '';
   return [{ subject: 'dispatch', text: `The dispatcher has failed ${failures} ticks in a row (last at ${failure.at}; last successful tick ${dispatch.lastSuccessAt ?? 'none since it started'}), so no reviewer or producer session is being launched for any item: ${failure.reason}${persisted}`,
     ...agentOwner('master', failure.field
