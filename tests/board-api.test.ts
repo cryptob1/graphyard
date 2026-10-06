@@ -71,7 +71,7 @@ function scenario(): Work[] {
 const boardRoute = statusRoutes.routes.find(route => route.method === 'GET' && route.path === '/api/board')!;
 async function served(work: Work[]): Promise<Board> {
   const pool = { query: async (sql: string) => sql.includes('clock_timestamp') ? { rows: [{ now: new Date(NOW) }] } : { rows: [] } };
-  const services = { engine: { store: { pool, list: async () => work }, ciAppIds: [1] }, production: null };
+  const services = { engine: { store: { pool, fleet: async () => work }, ciAppIds: [1] }, production: null };
   return boardRoute.handle({ actor: { id: 'operator', role: 'admin' }, services, operatorVisible: (items: unknown[]) => items } as any, []) as Promise<Board>;
 }
 const humanRows = (work: Work[]) => openHumanOnly(work.map(item => ({ work: item, decisions: [] })), NOW);

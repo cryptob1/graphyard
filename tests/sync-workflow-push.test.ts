@@ -82,7 +82,7 @@ function item(overrides: Partial<Work> = {}): Work {
 /** The store slice the push uses: the item, and the history rows it appends. */
 function store(work: Work) {
   const events: { workId: string; actor: string; kind: string; payload: any }[] = [];
-  return { events, engine: { store: { list: async () => [work], transaction: async (fn: any) => fn({ query: async (_sql: string, [workId, actor, kind, payload]: any[]) => { events.push({ workId, actor, kind, payload: JSON.parse(payload) }); } }, new Date()) } as any } };
+  return { events, engine: { store: { workDocument: async () => work, transaction: async (fn: any) => fn({ query: async (_sql: string, [workId, actor, kind, payload]: any[]) => { events.push({ workId, actor, kind, payload: JSON.parse(payload) }); } }, new Date()) } as any } };
 }
 
 /**

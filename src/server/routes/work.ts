@@ -138,7 +138,7 @@ export const workRoutes = defineRoutes('work', [
       await refuseLead(context, id ?? null, attempted);
       const raw = await context.body();
       if (attempted === 'evidence' && id && actor.role !== 'worker') {
-        const item = (await engine.store.list()).find(w => w.id === id || w.key === id);
+        const item = await engine.store.workDocument(id);
         const dependent = item ? producerIndependenceRefusal(actor as Principal, item, engine.principals) : null;
         if (item && dependent) {
           // An unparsable body is still a recorded refusal; the engine repeats this decision.

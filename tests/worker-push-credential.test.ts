@@ -89,7 +89,7 @@ test('unit:worker-session-scoped-push-credential — a worker launched under its
     // Claimed 3.5 hours ago: the implementation time box (4 h) ends before GitHub's one-hour token does.
     const claimedAt = new Date(now.getTime() - roleSessionMaximumMs.implementation + 30 * 60_000).toISOString();
     const leased = (overrides: Partial<Work> = {}) => item({ stage: 'build', epoch: 4, lease: { owner: 'worker-a', epoch: 4, expiresAt: new Date(now.getTime() + 120_000).toISOString() }, lastAssignment: { owner: 'worker-a', epoch: 4, claimedAt }, ...overrides });
-    const services = (work: Work) => ({ engine: { store: { list: async () => [work] } }, github, repository: 'owner/project' }) as unknown as Parameters<typeof issuePushCredential>[0];
+    const services = (work: Work) => ({ engine: { store: { workDocument: async () => work } }, github, repository: 'owner/project' }) as unknown as Parameters<typeof issuePushCredential>[0];
     const issued = await issuePushCredential(services(leased()), worker, 'GY-999', { epoch: 4 }, now);
     assert.equal(requests.length, 1);
     assert.equal(requests[0].url, 'https://api.github.com/app/installations/5678/access_tokens');
@@ -544,12 +544,12 @@ test('GY-1066 — no worker token from a merge-queue bypass App, the lease check
     };
     for (const [name, moved] of Object.entries(moves)) {
       let reads = 0;
-      const services = { engine: { store: { list: async () => [reads++ === 0 ? leased : moved] } }, github, repository: 'owner/project' } as unknown as Parameters<typeof issuePushCredential>[0];
+      const services = { engine: { store: { workDocument: async () => reads++ === 0 ? leased : moved } }, github, repository: 'owner/project' } as unknown as Parameters<typeof issuePushCredential>[0];
       const revoked: string[] = [];
       await assert.rejects(issuePushCredential(services, worker, 'GY-999', { epoch: 4 }, now, async value => { revoked.push(value); }), /was submitted|Lease missing, expired, or superseded/, name);
       assert.deepEqual(revoked, [token(`mint${mints}`)], `the token minted for a ${name} lease is revoked`);
     }
-    const kept = { engine: { store: { list: async () => [leased] } }, github, repository: 'owner/project' } as unknown as Parameters<typeof issuePushCredential>[0];
+    const kept = { engine: { store: { workDocument: async () => leased } }, github, repository: 'owner/project' } as unknown as Parameters<typeof issuePushCredential>[0];
     assert.equal((await issuePushCredential(kept, worker, 'GY-999', { epoch: 4 }, now, async () => { throw new Error('a held lease revokes nothing'); })).token, token(`mint${mints}`));
 
     // 3. Revocation is confirmed only by GitHub's 204 (or a 401: the token no longer authenticates).

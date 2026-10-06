@@ -43,7 +43,8 @@ export const statusRoutes = defineRoutes('status', [
       // merge-queue deadlock shape, raised by master status rather than left for someone to diagnose.
       const starvedJobs = actor.role === 'operator-agent' ? [] : await engine.store.starvedJobs();
       const observedAt = (await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
-      const work = await engine.store.list();
+      // Settled deliveries as the work index's summary (GY-1376): this read never loads every document.
+      const work = await engine.store.fleet();
       const visibleWork = operatorVisible(work);
       // What waits on the operator, derived from the human-only rule table (model/human-request.ts)
       // and carried on the read every client already polls, so the dashboard's Needs you page is
@@ -103,7 +104,7 @@ export const statusRoutes = defineRoutes('status', [
     async handle({ actor, services, operatorVisible }) {
       const { engine, production } = services;
       const now = ((await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
-      const work = operatorVisible(await engine.store.list());
+      const work = operatorVisible(await engine.store.fleet());
       return boardFromStatus(work, now, { humanOnly: openHumanOnly(await humanOnlySubjects(services, work), now), productionEnvironment: await resolvedProductionEnvironment(engine.store.pool),
         production: actor.role === 'operator-agent' ? null : production?.status() ?? null, ciAppIds: engine.ciAppIds });
     },
@@ -249,7 +250,7 @@ export const statusRoutes = defineRoutes('status', [
       // An approver judges decisions resting on the ledger (GY-642), so one scoped to every item
       // reads it whole; the read grants nothing, and every other operator agent names its item.
       const wholeLedger = actor.role === 'operator-agent' && !!actor.capabilities?.includes('decision:approve') && !!actor.scope?.workItems.includes('*');
-      if (actor.role === 'operator-agent' && !wholeLedger) { demand(query.work, 'Operator-agent history reads require a scoped work item', 403); const item = (await services.engine.store.list()).find(w => w.id === query.work); demand(item && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
+      if (actor.role === 'operator-agent' && !wholeLedger) { demand(query.work, 'Operator-agent history reads require a scoped work item', 403); const item = await services.engine.store.workDocument(query.work!); demand(item && item.id === query.work && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
       const history = await readEventHistory(services.engine.store.pool, query);
       return query.view === 'rows' ? history.events : history;
     },

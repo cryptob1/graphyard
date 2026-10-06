@@ -40,8 +40,7 @@ export async function readEscalationContext(services: Services, actor: Principal
   demand(['admin', 'coordinator', 'operator-agent', 'reader'].includes(actor.role), 'Escalation context is not available to this role', 403);
   const query = querySchema.parse(Object.fromEntries(params));
   const budget = (() => { try { return contextBudget(env, query.budget); } catch (error) { throw new Refusal((error as Error).message, 400); } })();
-  const graph = await services.engine.store.list();
-  const work = graph.find(item => item.id === id || item.key === id);
+  const work = await services.engine.store.workDocument(id);
   demand(work, 'Work item not found', 404);
   demand(actor.role !== 'operator-agent' || operatorScopeIncludes(actor, work!), 'Work item is outside this operator-agent scope', 403);
   const standing = standingEscalations(work!);
