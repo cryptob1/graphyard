@@ -47,7 +47,7 @@ export const everyone: Principal[] = [...Object.values(principals), ...[...worke
 export const credentials = everyone.map(principal => ({ ...principal, token: `${principal.id}-token-${'x'.repeat(32)}` }));
 export const token = (principal: Principal) => credentials.find(entry => entry.id === principal.id)!.token;
 export const reviewerApps = [{ id: 'claude-reviewer', runtime: 'claude', appId: 55_001, botUserId: 55_002 }, { id: 'cursor-reviewer', runtime: 'cursor', appId: 66_001, botUserId: 66_002 }];
-export const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
+export const launcher = fileURLToPath(new URL('../../bin/graphyard.mjs', import.meta.url));
 export const soakConfig: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository, baseBranch: 'main', githubAppId: 1234,
   hostId: 'soak-host', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers,
   operatorAgent: { id: principals.operatorAgent.id, credentialFile: '/outside/operator.token' }, approver: { id: principals.approver.id, credentialFile: '/outside/approver.token' },
