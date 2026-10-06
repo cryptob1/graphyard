@@ -32,6 +32,10 @@ graphyard unblock GY-N "reason"                                         # unowne
 
 Never attest a stop you have not confirmed; merged work changes only via follow-up items.
 
+## Main guard revert approver
+
+Main's last-push-approval rule refuses a revert the control-plane App pushed, so an armed [main guard](delivery.md#pre-merge-gate-and-release-candidate-validation) needs a second App installed on the repository (the reviewer App serves) as its approver. Write `{"appId", "installationId", "privateKey"}` (or `"privateKeyFile"`) to `.graphyard/revert-approver.json` (mode 0600), or pipe it with `--revert-approver-stdin`, and run `node scripts/provision-railway.mjs`: it sets the three `GRAPHYARD_REVERT_APPROVER_*` variables, the key over stdin, prints none, and refuses an armed guard without them. Redeploy, then verify: `GRAPHYARD_URL=… node scripts/provision-railway.mjs --verify` exits 0 once `/api/status` `mainGuard.revertApprover` names that App, and `graphyard doctor` lists `revert-approver` ready.
+
 ## Worker host keyring proxy
 
 A confined master, approver or proof producer reads its GitHub login (`gh auth git-credential`) through a keyring-only D-Bus proxy; workers and reviewers use their own credential. Install once per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service` and `graphyard-secrets-bus-filter.service` to `~/.config/systemd/user/`, then `systemctl --user daemon-reload && systemctl --user enable --now graphyard-secrets-bus.socket` (disable an earlier-enabled `graphyard-secrets-bus.service` first). It listens at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` unless `GRAPHYARD_SECRETS_BUS` names another; without it the bus is masked and sessions push with `GH_TOKEN`.
