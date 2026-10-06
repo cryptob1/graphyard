@@ -45,6 +45,11 @@ export interface ResourceReading {
   overdue?: number;
   /** The bound is a default nobody configured (the plane's database): the reading is reported, but reaching it is not a resource at its bound. */
   advisory?: boolean;
+  /**
+   * The loop's own reclaim is current over the resource and what holds it lies outside its reach
+   * (GY-1379): a low reading is reported, but raises nothing until it passes the resource's hard line.
+   */
+  answered?: boolean;
   /** Requests waiting on this resource; a full slot pool with nobody waiting is the fleet working, not a warning. */
   waiting?: number;
 }
@@ -66,7 +71,9 @@ export interface ResourceInputs {
   work: Work[];
   plane: PlaneResources | null;
   /** The loop's liveness, with its own verdict (`state`): the executor-liveness reading faults only on a lag the verdict does not vouch for (GY-1317). */
-  loop: { state: LoopState; lagMs: number | null; stalledAfterMs: number; detail: string } | null;
+  loop: { state: LoopState; lagMs: number | null; stalledAfterMs: number; detail: string;
+    /** Read by the loop itself, mid-cycle (GY-1379): it is cycling, so whatever lag it reads is the cycle under way, never a stall. */
+    self?: boolean } | null;
   /** `movedAt`: when the checkout first moved onto code the loop has not loaded (epoch ms), absent when it has not. */
   revision: { behind: number; loaded: string; checkout: string; movedAt?: number } | null;
   /**
@@ -147,8 +154,11 @@ export const unownedPaneConfirmMs = 120_000;
  * fifteen minutes, so the bound gives the upgrade two of them.
  */
 export const selfUpgradeBoundMs = 30 * 60_000;
-/** Whether the loop's own liveness verdict vouches for its lag (GY-1317): running, with a lag inside the stall bound. */
-export const vouchedLag = (loop: NonNullable<ResourceInputs['loop']>) => loop.state === 'running' && loop.lagMs !== null && loop.lagMs < loop.stalledAfterMs;
+/**
+ * Whether the loop's own liveness verdict vouches for its lag (GY-1317): running, with a lag inside
+ * the stall bound — or read by the loop itself, which is the cycling it would vouch for (GY-1379).
+ */
+export const vouchedLag = (loop: NonNullable<ResourceInputs['loop']>) => loop.state === 'running' && (loop.self === true || (loop.lagMs !== null && loop.lagMs < loop.stalledAfterMs));
 /**
  * The upgrade's bound for this loop (GY-1255): the upgrade runs between cycles, so a loop whose
  * `run` config spaces cycles further apart than the fixed bound allows gets its own stalled bound
@@ -348,8 +358,9 @@ export const resourceRegistry: ResourceDefinition[] = [
       const loop = input.loop;
       if (!loop) return [{ id: '', used: null, bound: null, detail: 'the daemon cursor could not be read', reclaimable: 0 }];
       const vouched = vouchedLag(loop);
-      return [{ id: '', used: loop.lagMs, bound: loop.stalledAfterMs, reclaimable: 0, ...(vouched ? { warnBelow: 0 } : {}),
-        detail: `${loop.detail}; the loop's liveness verdict is ${loop.state}${vouched ? ', which vouches for the lag within the stall bound' : ''}` }];
+      // Read by the loop itself, the lag may pass the bound (a long cycle, or the restart before it): the loop's cycling answers it (GY-1379).
+      return [{ id: '', used: loop.lagMs, bound: loop.stalledAfterMs, reclaimable: 0, ...(vouched ? { warnBelow: 0 } : {}), ...(loop.self ? { answered: true } : {}),
+        detail: `${loop.detail}; the loop's liveness verdict is ${loop.state}${loop.self ? ', read by the loop itself mid-cycle, so the lag is the cycle under way' : vouched ? ', which vouches for the lag within the stall bound' : ''}` }];
     },
   },
   {
@@ -405,13 +416,28 @@ export const resourceRegistry: ResourceDefinition[] = [
     reclaim: `the loop's reclaim pass scans its own tmpdir and /tmp, each once, and removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours that no live process holds, at most ${tmpReclaimLimitPerCycle} per cycle`,
     remedy: 'graphyard master run --once reclaims now; find what else fills /tmp (ls /tmp | sort | uniq -c) and stop the process leaking it',
     warnBelow: bound => Math.ceil(bound / 4), symptoms: [],
-    read: input => [input.tmp
-      ? { id: '', used: input.tmp.totalInodes - input.tmp.freeInodes, bound: input.tmp.totalInodes, reclaimable: 0,
-        detail: describeTmpInodes(input.tmp) }
-      : { id: '', used: null, bound: null, detail: 'the host temporary directory\'s inodes could not be read', reclaimable: 0 }],
+    // The quarter-free line is an early warning on a filesystem-wide count every process on the host
+    // fills (GY-1379): while the loop's latest pass is current and scanned the measured directory, it
+    // has taken back all it may, so a reading above a tenth free is reported and raises nothing.
+    read: input => {
+      if (!input.tmp) return [{ id: '', used: null, bound: null, detail: 'the host temporary directory\'s inodes could not be read', reclaimable: 0 }];
+      const answered = tmpPassAnswers(input.tmp, input.now);
+      return [{ id: '', used: input.tmp.totalInodes - input.tmp.freeInodes, bound: input.tmp.totalInodes, reclaimable: 0, ...(answered ? { answered } : {}),
+        detail: `${describeTmpInodes(input.tmp)}${answered ? `; that pass is current over ${input.tmp.path}, so what remains is outside its reach and only falling below a tenth free raises attention` : ''}` }];
+    },
   },
 ];
 
+/** How recent the loop's latest /tmp pass must be to answer a low tmp-inodes reading: two loaded cycles (GY-1379). */
+export const tmpPassCurrentMs = 30 * 60_000;
+/**
+ * Whether the loop's own /tmp pass answers a low tmp-inodes reading (GY-1379): it finished within
+ * `tmpPassCurrentMs`, scanned the measured directory, and the volume is still above a tenth free.
+ */
+export function tmpPassAnswers(tmp: TmpInodes, now: number) {
+  const at = tmp.latest ? Date.parse(tmp.latest.at) : Number.NaN;
+  return Number.isFinite(at) && now - at < tmpPassCurrentMs && tmp.measuredScanned === true && tmp.freeInodes >= tenthOf(tmp.totalInodes);
+}
 const entries = (count: number) => `${count} entr${count === 1 ? 'y' : 'ies'}`;
 /** The tmp-inodes detail: free inodes, this user's share, the latest pass's count and the last count that was not 0. */
 function describeTmpInodes(tmp: TmpInodes) {
@@ -468,11 +494,12 @@ export const describeReading = (reading: ResourceReading) =>
  * where its threshold allows. Two resources are judged on what nothing live is using: a name held
  * by a running session, or a slot pool full with nobody waiting, is the fleet working; and a name a
  * finished session holds raises it only once its reclaim is overdue. A default bound nobody
- * configured (advisory) is reported but raises nothing: reaching a guess is not a bound (GY-1089).
+ * configured (advisory) is reported but raises nothing: reaching a guess is not a bound (GY-1089);
+ * nor does an early warning the loop's own reclaim already answers (GY-1379).
  */
 export function needsAttention(reading: ResourceReading) {
   if (reading.state !== 'low' && reading.state !== 'exhausted') return false;
-  if (reading.advisory) return false;
+  if (reading.advisory || reading.answered) return false;
   if (reading.resource === 'agent-names') return (reading.overdue ?? 0) > 0;
   if (reading.resource === 'session-slots') return (reading.waiting ?? 0) > 0;
   return true;

@@ -72,7 +72,7 @@ A silent hour: `master status` points to `https://github.com/settings/apps/APP-S
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default 10 GiB); `tmp-inodes`: free `/tmp` inodes, roots scanned (TMPDIR, `/tmp`); `loaded-revision` counts code moves. Neither faults on a reclaim under way: `loaded-revision` while the self-upgrade's owed restart was retried within its bound, `agent-names` until the reclaim pass has seen the pane unowned 10 minutes.
+Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default 10 GiB); `tmp-inodes`, free `/tmp` (TMPDIR, `/tmp`); `loaded-revision` counts code moves. No reading faults while its remedy acts: an owed restart retried within bound, a pane unowned under 10 minutes, the loop's own lag, `/tmp` above a tenth free after a pass within 30 minutes.
 
 ## Storage retention
 

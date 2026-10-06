@@ -15,6 +15,7 @@ import { nextActionKinds, type NextActionKind } from './model/next-action.js';
 import { agentOwner, assertOutsideWorktrees, closeHerdrPane, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, neverStarted, neverStartedReason, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { withLaunchedRuntime } from './master/launch.js';
+import { boundedLaunch, launchBoundMs } from './master/launch-bound.js';
 import { capacityRefusal } from './fleet.js';
 import { answeredByPendingReview, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, type ReviewRecord } from './reviewer.js';
 import { answeredByPendingSession, independentProducerProfiles, launchProducer, reconcileProducers, requestAttemptLimit, sessionRetry, type ProducerRecord } from './producer.js';
@@ -376,7 +377,8 @@ export const botReviewerLine = (bot: { login: string; state: string; since: stri
 export const botReviewReadTimeoutMs = 5_000;
 
 export interface DispatchEffects {
-  snapshot: () => Promise<{ work: Work[]; now: string }>;
+  /** The work snapshot, read within `timeoutMs`: the tick's own read bound, which grows while ticks fail (GY-1373). */
+  snapshot: (timeoutMs?: number) => Promise<{ work: Work[]; now: string }>;
   /** Herdr's agent list, or null when Herdr could not be read; read asynchronously, never blocking the loop beside it. */
   agents: () => HerdrAgent[] | null | Promise<HerdrAgent[] | null>;
   credentials: (profiles: ProducerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null }>>;
@@ -694,17 +696,17 @@ async function launchWithFailover<P extends { name: string }>(profiles: P[], lau
  * every open request that has none. Each launch is recorded by the launcher's own ledger before
  * the tick moves on, so a kill between two launches leaves nothing to repeat.
  */
-export async function runDispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number = Date.now, readTimeoutMs = dispatchReadTimeoutMs, botReadTimeoutMs = botReviewReadTimeoutMs): Promise<DispatchTick> {
+export async function runDispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number = Date.now, readTimeoutMs = dispatchReadTimeoutMs, botReadTimeoutMs = botReviewReadTimeoutMs, launchBound = launchBoundMs(config)): Promise<DispatchTick> {
   // Every step of the tick is timed, and its external calls are recorded against it rather than
   // against the cycle running beside it in the same process (GY-377).
   const timings = new Timings(now);
-  const tick = await withTimings(timings, () => dispatchTick(config, cursor, effects, now, readTimeoutMs, botReadTimeoutMs, timings));
+  const tick = await withTimings(timings, () => dispatchTick(config, cursor, effects, now, readTimeoutMs, botReadTimeoutMs, timings, launchBound));
   tick.timings = timings.report();
   return tick;
 }
 
-async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number, readTimeoutMs: number, botReadTimeoutMs: number, timings: Timings): Promise<DispatchTick> {
-  const snapshot = await timings.step('snapshot', () => boundedRead(effects.snapshot, readTimeoutMs));
+async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number, readTimeoutMs: number, botReadTimeoutMs: number, timings: Timings, launchBound: number): Promise<DispatchTick> {
+  const snapshot = await timings.step('snapshot', () => boundedRead(() => effects.snapshot(readTimeoutMs), readTimeoutMs));
   const observedAt = snapshot.now;
   const clock = Number.isFinite(Date.parse(observedAt)) ? Date.parse(observedAt) : now();
   const tick: DispatchTick = { at: new Date(clock).toISOString(), launched: [], refused: [], waiting: [], skipped: 0, closed: [], closeFailures: [] };
@@ -777,6 +779,9 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   const record = (item: Work) => effects.recordSession ? (handle: SessionHandleInput) => effects.recordSession!(item, handle) : undefined;
   const coordinates = (profile: { agentName: string; concurrency?: number }, request: DispatchRequest, result: unknown) => ({ pane: (result as { pane?: string | null } | undefined)?.pane ?? null, agentName: launchedName(profile, request, result) });
   const attachTo = (pane: string) => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`;
+  // Each launch is bounded on its own (GY-1373): one its runtime never acknowledges fails as that
+  // request's refusal naming the runtime, and the launches step — and with it the tick — goes on.
+  const withinBound = <T>(handle: SessionHandleInput, start: () => Promise<T>) => () => boundedLaunch(start, { runtime: handle.runtime, host: config.hostId, subject: handle.subject ?? handle.id, boundMs: launchBound });
   /**
    * The slots recorded sessions still hold. A handle is the durable record of a live session, so a
    * session this host has not listed yet — or one another host launched — holds its profile's slot
@@ -1038,7 +1043,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
           // reading this host's local ledger, and the session report observes it from the start.
           const launched = await launchInTurns(review, withRoom(), candidate => room(candidate, reviews).free > 0, candidate => {
             const handle = launchedSessionHandle('review', review, `${item.key}: review ${review.sha.slice(0, 12)} (PR #${review.pr})`, config.hostId, undefined, candidate.kind, config.herdrWorkspace);
-            return registeredLaunch(record(item), handle, withLaunchedRuntime(handle, () => effects.launchReview(item, review, candidate, inventory(), observedAt)), result => coordinates(candidate, review, result), attachTo);
+            return registeredLaunch(record(item), handle, withinBound(handle, withLaunchedRuntime(handle, () => effects.launchReview(item, review, candidate, inventory(), observedAt))), result => coordinates(candidate, review, result), attachTo);
           }, effects.holdAccount ? exhaustedAtLaunch('review', item, review) : undefined);
           if (!launched) busy();
           else {
@@ -1107,7 +1112,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
             try {
               const launched = await launchInTurns(request, usable(), eligible, candidate => {
                 const handle = launchedSessionHandle('proof', request, `${item.key}: ${request.group} proofs on ${request.sha.slice(0, 12)} (${(request.proofs ?? []).join(', ')})`, config.hostId, undefined, candidate.kind, config.herdrWorkspace, candidate.principal);
-                return registeredLaunch(record(item), handle, withLaunchedRuntime(handle, () => effects.launchProducer(item, request, candidate, inventory(), observedAt)), result => coordinates(candidate, request, result), attachTo);
+                return registeredLaunch(record(item), handle, withinBound(handle, withLaunchedRuntime(handle, () => effects.launchProducer(item, request, candidate, inventory(), observedAt))), result => coordinates(candidate, request, result), attachTo);
               }, effects.holdAccount ? exhaustedAtLaunch('producer', item, request) : undefined);
               if (!launched) busy();
               else {
@@ -1226,7 +1231,7 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
 }
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
-export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: () => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: ChildRun; log?: (line: string) => void; now?: () => number }): DispatchEffects {
+export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: (timeoutMs?: number) => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: ChildRun; log?: (line: string) => void; now?: () => number }): DispatchEffects {
   // The dispatcher's own bounded asynchronous runner (GY-125): a `herdr agent start` that takes
   // its whole thirty seconds is awaited here, and the cycle's snapshot read beside it is served.
   // Its children and server calls are timed against the tick that made them (GY-377).
@@ -1252,7 +1257,7 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
   });
   const mutate = (path: string, body: unknown, requestId?: string) => timedCall('server', serverCallName('POST', path), () => post(path, body, requestId));
   return {
-    snapshot: () => timedCall('server', 'GET work-snapshot', deps.snapshot),
+    snapshot: timeoutMs => timedCall('server', 'GET work-snapshot', () => deps.snapshot(timeoutMs)),
     agents: () => listHerdrAgents(run).then(herdrSessionListing).catch(() => null),
     credentials: profiles => inspectProducerCredentials(root, profiles),
     reconcileReviews: (work, agents) => reconcileReviews(root, current(), { run, work, agents }),

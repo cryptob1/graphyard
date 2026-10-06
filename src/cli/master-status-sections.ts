@@ -147,7 +147,11 @@ export async function assembleReportedAttention(
   const decisions = await timedStep('attention: decisions', () => sections.optional('decisions', 'GET /api/work/:id/decisions', () => terminalDecisions(masterApi, snapshot.work, { approvals: observed.approvals, runtime: observed.runtime, now: Date.now() }),
     () => ({ listed: [], attentionItems: [] as AttentionItem[], unanswered: [], refused: 0 })));
   const throughput = await timedStep('attention: throughput', () => throughputStatus(root, coordinator, snapshot.work));
-  const resources = await timedStep('attention: resources', () => resourceStatus(root, master, { reviews: observed.reviews, producers: observed.producers, agents: observed.runtime.available ? observed.runtime.agents : null, work: snapshot.work, loop: observed.loop }));
+  // The readings judge the snapshot's leases and sessions at the snapshot's own instant (GY-1379): the
+  // loop reads this at the end of a cycle that can run ten minutes, and a two-minute lease taken at its
+  // start read against the wall clock then is a live worker misread as gone.
+  const at = Date.parse(snapshot.now);
+  const resources = await timedStep('attention: resources', () => resourceStatus(root, master, { reviews: observed.reviews, producers: observed.producers, agents: observed.runtime.available ? observed.runtime.agents : null, work: snapshot.work, loop: observed.loop }, Number.isFinite(at) ? { now: at } : {}));
   const derived = await timedStep('attention: derived', () => derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } }));
   if (!derived.executors.presence.available && /^GET \/api\/actions failed/.test(derived.executors.presence.reason)) sections.mark('executors', 'GET /api/actions', derived.executors.presence.reason);
   const docs = await timedStep('docs budget', () => docsBudgetAttention(root, master.baseBranch, generatedFiles));

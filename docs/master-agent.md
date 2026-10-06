@@ -46,7 +46,7 @@ Every `run.doctor.intervalMinutes` (default 10) the loop's [doctor](onboarding.m
 
 ## Research and diagnosis
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); quota refusals read `waiting` in `daemon.diagnoses` until `retryAt`, then probe; `stale`/`withdrawn` decisions and stale backlog releases re-requested (≤3), then escalated (fault after 30m); raced/delivered/[plane-wide](operations.md#incident-decision-tree) requests retry; restart-lost diagnoses and approver refusals file no `loop` fault. Base conflicts under 30m and restart-resumed merges aren't `merge` faults.
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); human-only parks: no fix; quota refusals wait in `daemon.diagnoses` until `retryAt`, then probe; `stale`/`withdrawn` decisions and stale backlog releases re-requested (≤3), then escalated (30m fault); raced/delivered/[plane-wide](operations.md#incident-decision-tree) requests retry; restart-lost diagnoses, approver refusals: no `loop` fault. Base conflicts under 30m and restart-resumed merges aren't `merge` faults.
 
 ## Machine-filed backlog
 

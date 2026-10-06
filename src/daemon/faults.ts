@@ -25,6 +25,7 @@ import { baseRefreshConflict } from '../merge-queue.js';
 import { mergeBaseDismissal } from '../merge-base-ancestry.js';
 import { containmentGraceMs, containmentPhase } from '../model/containment.js';
 import { openAction } from '../model/next-action.js';
+import { carriedDecision } from '../model/concerns.js';
 import { masterTurnWaitBoundMs } from './decisions.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
@@ -205,12 +206,17 @@ export function reworkDecisionInMotion(work: Work | undefined, now: number): boo
  */
 export function owedEscalationInMotion(work: Work | undefined, text: string, now: number): boolean {
   const action = work && openAction(work);
-  if (action?.kind !== 'escalate' || action.inputs.kind !== 'escalate' || action.inputs.trigger === 'containment') return false;
-  const decision = action.needsHuman?.decision;
-  if (!decision || !text.includes(decision)) return false;
-  const row = (work!.actionQueue?.actions ?? []).find(entry => entry.kind === action.kind && entry.binding === action.binding);
-  const since = row?.requestedAt ? Date.parse(row.requestedAt) : Number.NaN;
-  return Number.isFinite(since) && now - since <= masterTurnWaitBoundMs;
+  if (!action) return false;
+  const inTurn = (at: string | null | undefined) => { const since = at ? Date.parse(at) : Number.NaN; return Number.isFinite(since) && now - since <= masterTurnWaitBoundMs; };
+  const decision = action.kind === 'escalate' && action.inputs.kind === 'escalate' && action.inputs.trigger !== 'containment' ? action.needsHuman?.decision : undefined;
+  if (decision && text.includes(decision)) {
+    const row = (work!.actionQueue?.actions ?? []).find(entry => entry.kind === action.kind && entry.binding === action.binding);
+    return inTurn(row?.requestedAt);
+  }
+  // GY-1374: an escalation the control plane raised while the item is worked is carried beside the
+  // running action, with no queue row of its own, and its line is owed from the escalation's own
+  // instant (humanNeededActions). It is the same master's turn: GY-1373's lease-loss counted 25s in.
+  return (action.carried ?? []).some(concern => concern.trigger !== 'containment' && text.includes(carriedDecision(work!.key, concern.trigger)) && inTurn(concern.at));
 }
 /** How long an approval dismissed for a merge-base change may stay in motion before it counts as a review-convergence fault (GY-1140). */
 export const mergeBaseDismissalWaitBoundMs = 30 * 60_000;
@@ -554,7 +560,10 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   const controlPlane = status === unread ? null : status?.value ?? null;
   const summary = daemonSummary(state, clock, config.run.intervalSeconds * 1000, config.hostId, policy);
   if (controlPlane && effects.reportedAttention) {
-    const read = await withinBudget(state, 'attention', () => effects.reportedAttention!(snapshot.work, controlPlane, { agents: seen, available: herdrRead.available, approvals: summary.approvals, loop: summary.liveness, now: new Date(clock).toISOString() })
+    // The loop reading its own cursor is cycling (GY-1379): the lag since its last completed cycle is the cycle under way, or the
+    // restart before it, which the loop-cost lines and the supervisor answer — the executor-liveness reading never counts it as a stall.
+    const self = { ...summary.liveness, state: 'running' as const, self: true };
+    const read = await withinBudget(state, 'attention', () => effects.reportedAttention!(snapshot.work, controlPlane, { agents: seen, available: herdrRead.available, approvals: summary.approvals, loop: self, now: new Date(clock).toISOString() })
       .then(value => ({ value, failed: false }), error => ({ value: { items: [{ subject: 'loop', text: `The loop could not read the attention master status adds to classify it: ${message(error)}`, kind: 'loop-failures' } as AttentionItem] } as ReportedAttention, failed: true })), deadline, now);
     if (read === unread) unreadSources.push('the attention master status adds');
     else { reported = read.value; if (read.failed) partial = true; }
