@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setupFromZeroChecks, setupLine, setupSteps, type SetupFromZeroInput } from '../src/setup-from-zero.js';
+import { setupFromZeroChecks, setupLine, setupSteps, type SetupFromZeroInput } from '../src/cli/install.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
