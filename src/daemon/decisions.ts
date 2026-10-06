@@ -685,6 +685,13 @@ export function withheldDecision(work: Work, config: ReviewCapConfig, now: numbe
  */
 export const approverJudgeBoundMs = 600_000, approverSettleMs = 60_000, maxApproverLaunches = 3, maxApproverCloses = 3, maxDecisionRequests = 3;
 /**
+ * GY-1346. The master session's turn: the loop wakes it on a changed subject and its heartbeat is
+ * 30 minutes at most by default, so a judgement only the master moves — asking for a decision and
+ * putting it to an approver, or resolving an escalation — is in motion for this long after the
+ * product hands it over, and counts as a decision fault only once it outlasts it.
+ */
+export const masterTurnWaitBoundMs = 30 * 60_000;
+/**
  * A headless approver run lost to something outside the loop (GY-453: killed, recording no exit)
  * judged nothing, so its launch is given back — but only this many times per decision. Past it, a
  * lost run spends its launch like any other ended session, so a decision whose approver keeps
