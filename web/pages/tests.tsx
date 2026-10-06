@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import Term from '../components/term';
-import type { ScenarioRun } from '../../src/model/test-cases';
-import type { CaseSummary } from '../../src/test-runs';
+import type { CaseRun, TrackedCase } from '../../src/scenarios';
 
 /** Each result in words and a mark; a skip is its own state and never reads as a pass. */
 export const resultLabel: Record<string, { mark: string; word: string; tone: string }> = {
@@ -13,21 +12,21 @@ const day = (at: string) => new Date(at).toLocaleString();
 const Commit = ({ sha }: { sha: string }) => <Term term="commit"><span className="mono">{sha.slice(0, 8)}</span></Term>;
 const Pr = ({ pr }: { pr: number | null }) => pr ? <> · <Term term="pull request">PR</Term> #{pr}</> : null;
 /** Where a run came from: its commit, pull request, item and its lane's own run identity. */
-export const RunLine = ({ run }: { run: ScenarioRun }) => run.e2e ? <E2eRunLine run={run} e2e={run.e2e}/> : <>
+export const RunLine = ({ run }: { run: CaseRun }) => run.e2e ? <E2eRunLine run={run} e2e={run.e2e}/> : <>
   <Result result={run.result}/> <Commit sha={run.sha}/><Pr pr={run.pr}/> · {run.workKey}
   {' · '}{run.run.url
     ? <a href={run.run.url} target="_blank" rel="noopener noreferrer">{run.run.kind} run {run.run.id.slice(0, 12)}{run.run.attempt ? ` attempt ${String(run.run.attempt).slice(0, 8)}` : ''} ↗</a>
     : <>{run.run.kind} run {run.run.id.slice(0, 12)}{run.run.attempt ? ` attempt ${String(run.run.attempt).slice(0, 8)}` : ''}</>}
   {run.scenarioRevision ? ` · v${run.scenarioRevision}` : ''} · {run.executed} executed / {run.skipped} skipped · {run.producer} · {day(run.at)}{run.withdrawn ? <strong className="amber"> · withdrawn</strong> : null}</>;
 /** A `graphyard e2e run` of a repository case: the target it ran against, how long it took, and the step that failed. */
-const E2eRunLine = ({ run, e2e }: { run: ScenarioRun; e2e: NonNullable<ScenarioRun['e2e']> }) => <>
+const E2eRunLine = ({ run, e2e }: { run: CaseRun; e2e: NonNullable<CaseRun['e2e']> }) => <>
   <Result result={run.result}/> {run.sha === 'unknown' ? 'unreported commit' : <Commit sha={run.sha}/>} on {run.environment}
   {' · '}e2e run {run.run.id.slice(0, 40)} · {e2e.baseUrl}{run.scenarioRevision ? ` · v${run.scenarioRevision}` : ''} · {(e2e.durationMs / 1000).toFixed(1)} s · {run.producer} · {day(run.at)}
   {e2e.failingStep && <><br/><small className="fail">failed at step {e2e.failingStep.index + 1} {e2e.failingStep.name}: {e2e.failingStep.reason}</small></>}</>;
 const percent = (rate: number) => `${Math.round(rate * 100)}%`;
 
 type Filter = 'all' | 'fail' | 'flaky' | 'never';
-const filters: { id: Filter; label: string; keep: (entry: CaseSummary) => boolean }[] = [
+const filters: { id: Filter; label: string; keep: (entry: TrackedCase) => boolean }[] = [
   { id: 'all', label: 'All', keep: () => true },
   { id: 'fail', label: 'Failing', keep: entry => entry.latest?.result === 'fail' },
   { id: 'flaky', label: 'Flaky', keep: entry => entry.flaky },
@@ -36,7 +35,7 @@ const filters: { id: Filter; label: string; keep: (entry: CaseSummary) => boolea
 
 /** One case's older runs, paged from the run ledger on request. */
 function OlderRuns({ api, id, after }: { api: (path: string) => Promise<any>; id: string; after: number | null }) {
-  const [runs, setRuns] = useState<ScenarioRun[]>([]);
+  const [runs, setRuns] = useState<CaseRun[]>([]);
   const [next, setNext] = useState<number | null>(after);
   const [error, setError] = useState('');
   if (after === null) return null;
@@ -52,7 +51,7 @@ function OlderRuns({ api, id, after }: { api: (path: string) => Promise<any>; id
  * from trusted runs bound to a commit and a run; the page itself writes nothing.
  */
 export default function TestsPage({ api, canEdit, setView }: { api: (path: string) => Promise<any>; canEdit: boolean; setView?: (view: string) => void }) {
-  const [data, setData] = useState<{ window: number; cases: CaseSummary[] } | null>(null);
+  const [data, setData] = useState<{ window: number; cases: TrackedCase[] } | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<Filter>('all');
@@ -68,7 +67,7 @@ export default function TestsPage({ api, canEdit, setView }: { api: (path: strin
 }
 
 /** The page as rendered from one read, so it can be drawn and tested without the network. */
-export function TestsView({ data, error, loading, filter, setFilter, retry, api, canEdit, setView }: { data: { window: number; cases: CaseSummary[] } | null; error: string; loading: boolean; filter: Filter; setFilter(filter: Filter): void; retry(): void; api: (path: string) => Promise<any>; canEdit: boolean; setView?: (view: string) => void }) {
+export function TestsView({ data, error, loading, filter, setFilter, retry, api, canEdit, setView }: { data: { window: number; cases: TrackedCase[] } | null; error: string; loading: boolean; filter: Filter; setFilter(filter: Filter): void; retry(): void; api: (path: string) => Promise<any>; canEdit: boolean; setView?: (view: string) => void }) {
   const cases = data?.cases ?? [];
   const shown = cases.filter(filters.find(f => f.id === filter)!.keep);
   const count = (id: Filter) => cases.filter(filters.find(f => f.id === id)!.keep).length;

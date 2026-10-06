@@ -12,7 +12,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
-import type { ScenarioRun } from '../src/model/test-cases.js';
+import type { CaseRun } from '../src/scenarios.js';
 import { caseDirectory, loadCases, parseCase, scenarioDefinition, selectCases, syncCases, type CaseFile } from '../src/e2e/case.js';
 import { recordRuns, runCases, summarize, type E2eLauncher, type E2ePage } from '../src/e2e/runner.js';
 import { commands } from '../src/cli/index.js';
@@ -155,12 +155,12 @@ test('unit:e2e-runner-results — e2e run runs passing and failing cases against
   assert.match(mixed.stdout, /2 passed, 1 failed/);
 
   // Each result is a run of the case's registered revision, with the base URL, SHA, duration, outcome and failing step.
-  const runs = (await call('tests/wrong-status/runs', operator)).body.runs as ScenarioRun[];
+  const runs = (await call('tests/wrong-status/runs', operator)).body.runs as CaseRun[];
   assert.equal(runs.length, 1);
   assert.equal(runs[0].result, 'fail'); assert.equal(runs[0].scenarioRevision, 1); assert.equal(runs[0].run.kind, 'e2e'); assert.equal(runs[0].run.id, all.runId);
   assert.deepEqual(runs[0].e2e, { baseUrl: url, durationMs: outcome('wrong-status').durationMs, failingStep: outcome('wrong-status').failingStep });
   assert.equal(runs[0].environment, new URL(url).host); assert.equal(runs[0].sha, all.sha ?? 'unknown');
-  const passed = (await call('tests/board/runs', operator)).body.runs as ScenarioRun[];
+  const passed = (await call('tests/board/runs', operator)).body.runs as CaseRun[];
   assert.equal(passed[0].result, 'pass'); assert.equal(passed[0].e2e!.failingStep, null);
 
   // One case passing exits zero; --no-record leaves history alone.
@@ -229,10 +229,10 @@ test('unit:e2e-tracking-history — the Tests page lists each E2E case with last
   assert.equal(entry.passRate, 19 / 20);
   assert.equal(entry.flaky, true); assert.match(entry.flakyReason, new RegExp(`passed and failed on commit ${sha(23).slice(0, 8)}`));
   assert.deepEqual(entry.e2e, { tags: ['api', 'tracked'], target: 'uat' });
-  const failed = entry.history.find((run: ScenarioRun) => run.result === 'fail');
+  const failed = entry.history.find((run: CaseRun) => run.result === 'fail');
   assert.deepEqual(failed.e2e.failingStep, { index: 0, name: 'GET /api/tests', reason: 'expected status 200, got 503' });
   const older = (await call(`tests/tracked/runs?before=${entry.history.at(-1).seq}&limit=50`, operator)).body;
-  assert.equal(older.runs.length, 5); assert.ok(older.runs.every((run: ScenarioRun) => run.result === 'fail' && run.e2e?.failingStep));
+  assert.equal(older.runs.length, 5); assert.ok(older.runs.every((run: CaseRun) => run.result === 'fail' && run.e2e?.failingStep));
 
   // Recording is an operator's command bound to a registered revision.
   assert.equal((await call('scenarios/tracked/runs', worker, { revision: 1, runId: 'w', baseUrl: 'https://x.test', sha: null, environment: 'uat', durationMs: 1, outcome: 'pass', executed: 1, failingStep: null })).status, 403);

@@ -15,9 +15,8 @@ export interface RunIdentity {
   /** `ci`: a GitHub Actions job read back by the control plane; `github-actions`: a producer's
    * attested workflow run; `validation`: a validation request, identified per attempt so a
    * retried request records each attempt's own result; `producer`: a bound producer session,
-   * identified by the evidence record it wrote; `e2e`: a `graphyard e2e run` of a repository case
-   * (GY-1351), identified by its run id. */
-  kind: 'ci' | 'github-actions' | 'validation' | 'producer' | 'e2e';
+   * identified by the evidence record it wrote. */
+  kind: 'ci' | 'github-actions' | 'validation' | 'producer';
   id: string; attempt: number | string | null; url: string | null;
 }
 export interface ScenarioRun {
@@ -27,8 +26,6 @@ export interface ScenarioRun {
   run: RunIdentity; evidenceId: string; producer: string; at: string;
   /** Set at read time when the evidence behind the run was later revoked. */
   withdrawn?: boolean;
-  /** An E2E case run (GY-1351): the base URL it ran against, how long it took and the step that failed. */
-  e2e?: { baseUrl: string; durationMs: number; failingStep: { index: number; name: string; reason: string } | null };
 }
 
 /** The scenario an `e2e:` proof names; post-deployment smoke is a delivery check, not a case. */
