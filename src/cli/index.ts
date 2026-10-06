@@ -1,5 +1,5 @@
-import { createContext } from './context.js';
-import { resolveWork, type CliCommand } from './registry.js';
+import { createContext, resolveWork } from './context.js';
+import type { CliCommand } from './registry.js';
 import { installCommands } from './install.js';
 import { dbCommands } from './db.js';
 import { masterCommands } from './master.js';

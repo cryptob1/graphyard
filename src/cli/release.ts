@@ -1,4 +1,5 @@
-import { defineCommands, resolveWork } from './registry.js';
+import { defineCommands } from './registry.js';
+import { resolveWork } from './context.js';
 import { releaseLeaseCommand } from './lease.js';
 import {
   apiSuite, assessProductionServing, awaitServing, commandSuite, cut, deployToUat, endpointSuite, findCandidate, followUpItem, followUpRequestId, gitIn,

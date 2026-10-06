@@ -9,11 +9,11 @@ import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServ
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
 import { superviseSessionCredential, type MintedPushCredential } from '../worker-credential.js';
-import type { CliContext } from './context.js';
+import { resolveWork, type CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
 import { restoreAndReport } from './sync-restore.js';
 import { pushViaControlPlane } from './sync-push.js';
-import { defineCommands, resolveWork, workMutation } from './registry.js';
+import { defineCommands, workMutation } from './registry.js';
 import { keepBlockedWork } from './lease.js';
 import { agentsRenderers, agentsTemplateSources, localGeneratedManifest, regenerateGenerated } from './workspace-generated.js';
 import { createWorktree, restoreBranchWork } from './workspace-worktree.js';
