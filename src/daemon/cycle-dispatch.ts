@@ -23,7 +23,7 @@ import { researchHold, researchRunner, researchSettings, researchStep } from '..
 import { decompositionHold, decompositionSettings } from '../decomposition.js';
 import { decompositionStep } from '../decomposition-step.js';
 import { judgeHostMemory } from '../master-resources.js';
-import { dispatchBlockRetryMs, dispatchFailureBlockAfter, dispatchFailureBlocker, noteDispatchFailure } from './dispatch-failures.js';
+import { dispatchBlockRetryMs, dispatchFailureBlockAfter, dispatchFailureBlocker, noteDispatchFailure, planeWideFailure } from './dispatch-failures.js';
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
 export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) {
@@ -329,7 +329,7 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
         const workspace = workspaceDispatchFailure(message(error));
         if (!workspace) recordProfileFailure(state, current.profile, message(error), now());
         const run = noteDispatchFailure(state, item, message(error), new Date(now()).toISOString());
-        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}${workspace ? " (the item's workspace could not be prepared on this host; the profile is not cooled off and the item's next dispatch waits out a doubling backoff)" : ''}${run.count ? ` (failure ${run.count} of ${dispatchFailureBlockAfter} with this cause)` : ' (a fleet-idle cause, which never counts toward a dispatch-failure blocker)'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}${workspace ? " (the item's workspace could not be prepared on this host; the profile is not cooled off and the item's next dispatch waits out a doubling backoff)" : ''}${run.count ? ` (failure ${run.count} of ${dispatchFailureBlockAfter} with this cause)` : planeWideFailure(message(error)) ? ' (a plane-wide control-plane failure, which never counts toward a dispatch-failure blocker)' : ' (a fleet-idle cause, which never counts toward a dispatch-failure blocker)'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
         if (run.count && run.count >= dispatchFailureBlockAfter) performed.push(...await blockRepeatedFailure(item));
         return;
       }
