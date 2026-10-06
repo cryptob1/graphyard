@@ -1,0 +1,14 @@
+{
+  "id": "sign-in",
+  "title": "An operator signs in to the dashboard with an access token",
+  "description": "The dashboard the target serves accepts the token on its sign-in page, verifies it with the control plane, and renders the primary navigation and the Work view.",
+  "tags": ["dashboard", "smoke"],
+  "target": "uat",
+  "steps": [
+    { "kind": "browser", "action": "open", "path": "/" },
+    { "kind": "browser", "action": "fill", "label": "Access token", "value": "{{token}}" },
+    { "kind": "browser", "action": "click", "role": "button", "text": "Open control plane", "exact": false },
+    { "kind": "browser", "action": "expectText", "role": "navigation", "text": "Primary" },
+    { "kind": "browser", "action": "expectText", "role": "heading", "text": "Work" }
+  ]
+}

@@ -52,6 +52,9 @@ ending, not lease loss. CI, trusted evidence, independent review, and Graphyard'
 merge gate decide progression. Report blockers explicitly.
 Never use an operator/producer token for implementation or weaken proof requirements.
 Herdr runs sessions; Graphyard remains the source of ownership truth.
+To set Graphyard up or find what its setup is missing, follow Graphyard's
+docs/setup-from-zero.md: `doctor` prints one PASS or FAIL line per prerequisite under
+`setupFromZero`, and each FAIL line names the checklist step that fixes it.
 
 Every session Graphyard launches — a worker under `watch`, and the reviewer, proof-producer
 and approver sessions the master and its loop start — receives its instruction as the

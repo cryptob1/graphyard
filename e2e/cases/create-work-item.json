@@ -1,0 +1,23 @@
+{
+  "id": "create-work-item",
+  "title": "An operator creates a work item and finds it in the work list",
+  "description": "POST /api/work creates an item with its criteria, replaying the create under the same idempotency key returns the same item, and GET /api/work lists it.",
+  "tags": ["api", "work"],
+  "target": "uat",
+  "steps": [
+    {
+      "kind": "http", "name": "create the item", "method": "POST", "path": "/api/work",
+      "body": {
+        "title": "E2E case {{case}} run {{run}}",
+        "description": "Created by the create-work-item E2E case.",
+        "type": "chore", "priority": 3,
+        "criteria": [{ "id": "AC-1", "text": "The target accepts work created by an E2E case", "proofs": ["manual:e2e-case-created"] }],
+        "policy": { "checks": ["test"], "review": true }
+      },
+      "status": 200,
+      "expect": [{ "path": "title", "equals": "E2E case {{case}} run {{run}}" }, { "path": "stage", "equals": "backlog" }, { "path": "key", "type": "string" }],
+      "save": { "id": "id", "key": "key" }
+    },
+    { "kind": "http", "name": "list the work", "method": "GET", "path": "/api/work", "status": 200, "expect": [{ "path": "", "includes": { "id": "{{id}}", "key": "{{key}}" } }] }
+  ]
+}

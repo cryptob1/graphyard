@@ -15,7 +15,7 @@ import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerPro
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
 import { assertOutsideRepository, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord } from './secrets.js';
-import { readSavedApp, type SavedApp } from './manifest.js';
+import { readAppFile, readSavedApp, type SavedApp } from './manifest.js';
 import { localTransport, sshTransport, type Transport } from './transport.js';
 import { installIdFor, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PlannedPrincipal, type Provider } from './types.js';
 
@@ -99,7 +99,7 @@ export async function repositoryDelivery(root: string): Promise<{ policy: Delive
   return { policy: proposeDelivery(input, detectDeploy(input, stack), stack), committed: false };
 }
 
-const APP_HUMAN_STEP = 'Confirm the Graphyard GitHub App in the browser page the installer opens, and install it on the managed repository.';
+const APP_HUMAN_STEP = 'Confirm the Graphyard GitHub App in the browser page the installer opens, and install it on the managed repository; when GitHub asks to Confirm access, approve the GitHub Mobile prompt.';
 const CORE_HUMAN_STEPS = [
   'Authenticate the provider CLI and GitHub CLI once (the installer prints the exact command when either is missing).',
   'Approve the printed plan before rerunning with --apply.',
@@ -313,6 +313,22 @@ export function githubEnv(facts: AppFacts, ciAppIds: number[]): EnvValue[] {
   ];
 }
 
+/**
+ * The main guard reverts a broken base through a second App, never the control plane's own
+ * (GY-1352): the first reviewer App this install registered serves, read from its saved
+ * registration. Without one the guard cannot revert unaided, and readiness says so.
+ */
+export async function revertApproverEnv(session: Pick<InstallSession, 'reviewers' | 'directory'>): Promise<EnvValue[]> {
+  const reviewer = session.reviewers[0];
+  const app = reviewer ? await readAppFile(appCredentialFile(session, reviewer.name)) : null;
+  if (!app?.privateKey || app.privateKey === 'undefined') return [];
+  return [
+    { name: 'GRAPHYARD_REVERT_APPROVER_APP_ID', value: String(app.appId), secret: false },
+    { name: 'GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID', value: String(app.installationId), secret: false },
+    { name: 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY', value: app.privateKey, secret: true },
+  ];
+}
+
 const PENDING = 'generated on apply';
 const planValue = (value: EnvValue, materialized: boolean): PlanValue => value.secret
   ? { name: value.name, value: REDACTED, secret: true, ...(materialized ? { fingerprint: fingerprint(value.value) } : { note: PENDING }) }
@@ -417,8 +433,8 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   const reviewPhrase = plannedReviews > session.reviewCount
     ? `${plannedReviews} approving review(s), the stricter count this branch already requires`
     : `at least ${session.reviewCount} approving review(s) for the ${session.reviewPolicy} review policy`;
-  if (protection && !protectionOk) drift.push({ action: 'github.protection', field: 'branch protection', expected: `required checks ${[...session.requiredChecks, ...GRAPHYARD_CHECKS].join(', ')} with "up to date" off for the merge queue; at least ${session.reviewCount} approving review(s); admin enforcement; conversation resolution off (the reviewer's verdict is the review gate)`, observed: describeProtection(protection) });
-  actions.push({ id: 'github.protection', target: 'github', state: protectionOk ? 'satisfied' : protection ? 'update' : 'create', title: `Require status checks (${[...session.requiredChecks, ...GRAPHYARD_CHECKS].join(', ')}) with "require branches to be up to date" off, which the merge queue needs, ${reviewPhrase} and administrator enforcement, with conversation resolution off (the reviewer's verdict is the review gate), on ${session.inputs.baseBranch}` });
+  if (protection && !protectionOk) drift.push({ action: 'github.protection', field: 'branch protection', expected: `required checks ${[...session.requiredChecks, ...GRAPHYARD_CHECKS].join(', ')} with "up to date" off (a candidate merges on the base it was built on); at least ${session.reviewCount} approving review(s); admin enforcement; conversation resolution off (the reviewer's verdict is the review gate)`, observed: describeProtection(protection) });
+  actions.push({ id: 'github.protection', target: 'github', state: protectionOk ? 'satisfied' : protection ? 'update' : 'create', title: `Require status checks (${[...session.requiredChecks, ...GRAPHYARD_CHECKS].join(', ')}) with "require branches to be up to date" off, so a candidate merges on the base it was built on, ${reviewPhrase} and administrator enforcement, with conversation resolution off (the reviewer's verdict is the review gate), on ${session.inputs.baseBranch}` });
   // The release-candidate pipeline's environments (GY-1102): free wiring, then every UAT and
   // production resource the deployment adapter would create, cost-bearing ones marked human.
   if (candidateModel) {
@@ -426,7 +442,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     actions.push(...wiringActions(session.delivery.context, ghReady ? await observeReleaseWiring(gh, session.inputs.repository) : null));
     actions.push(...session.delivery.adapter.plan(session.delivery.context));
   }
-  if (session.inputs.reviewer) actions.push({ id: 'github.reviewer', target: 'github', state: record?.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer) ? 'satisfied' : 'create', title: `Register the reviewer App "${session.inputs.reviewer}" and add its identity to GRAPHYARD_REVIEWER_APPS`, human: 'One additional browser confirmation, because a reviewer is a separate GitHub identity with no control-plane authority.' });
+  if (session.inputs.reviewer) actions.push({ id: 'github.reviewer', target: 'github', state: record?.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer) ? 'satisfied' : 'create', title: `Register the reviewer App "${session.inputs.reviewer}", add its identity to GRAPHYARD_REVIEWER_APPS, and set it as the main guard's revert approver (GRAPHYARD_REVERT_APPROVER_*)`, human: 'One additional browser confirmation, because a reviewer is a separate GitHub identity with no control-plane authority.' });
 
   // A local Compose install serves loopback only, so GitHub can never deliver to it. Saying
   // so in the plan keeps an agent from chasing an unconfirmable step as if it were a failure.
@@ -522,7 +538,7 @@ export async function applyInstall(session: InstallSession, plan: InstallPlan): 
  * outside every Git checkout — the runbook's hard rule, which the default would otherwise
  * break by writing `<repository>/.graphyard/github-app.json`.
  */
-const appCredentialFile = (session: InstallSession, reviewer?: string) =>
+const appCredentialFile = (session: Pick<InstallSession, 'directory'>, reviewer?: string) =>
   resolve(session.directory, reviewer ? `github-reviewer-${reviewer}.json` : 'github-app.json');
 
 async function performInstall(session: InstallSession, plan: InstallPlan): Promise<InstallSummary> {
@@ -570,7 +586,9 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   const gh = githubCli(context.transport);
   const ciApps = await detectCiAppIds(gh, session.inputs.repository, session.inputs.baseBranch, facts.appId);
   log(`CI App identities on ${session.inputs.baseBranch}: ${ciApps.map(app => `${app.slug} (${app.appId})`).join(', ') || 'none observed yet'}`);
-  await adapter.setEnv(context, [...coreEnv(session), ...githubEnv(facts, ciApps.map(app => app.appId))]);
+  const revertApprover = await revertApproverEnv(session);
+  for (const value of revertApprover) if (value.secret) vault.add(value.value);
+  await adapter.setEnv(context, [...coreEnv(session), ...githubEnv(facts, ciApps.map(app => app.appId)), ...revertApprover]);
   await adapter.deploy(context);
   if (!await waitForHealth(session, url)) throw new Error('The service did not return to health after the GitHub credentials were written');
 
@@ -594,7 +612,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     || (await detectCiAppIds(gh, session.inputs.repository, session.inputs.baseBranch, null)).some(entry => entry.appId === facts.appId);
   const applied = protectionSatisfied(protectionInputs, current) ? null : await applyProtection(gh, { ...protectionInputs, graphyardAppId: mergeCheckExists ? facts.appId : null });
   const protectionDetail = applied
-    ? `required checks ${applied.required_status_checks.checks.map(check => check.context).join(', ')} ("up to date" off for the merge queue); ${applied.required_pull_request_reviews.required_approving_review_count} approving review(s); admin enforcement`
+    ? `required checks ${applied.required_status_checks.checks.map(check => check.context).join(', ')} ("up to date" off: a candidate merges on the base it was built on); ${applied.required_pull_request_reviews.required_approving_review_count} approving review(s); admin enforcement`
     : `already matches the ${session.reviewPolicy} review policy`;
 
   // The release pipeline's free wiring, then the adapter's environments: paid ones only with
@@ -736,8 +754,9 @@ function nextSteps(session: InstallSession, url: string, mergeCheckExists: boole
   const steps = [
     host ? 'Open the signIn link once to sign in to the dashboard as the admin; it works a single time, then use Agents → Connect an account for each runtime.'
       : `Open ${url} and sign in with the credential in ${tokenFile(session.directory, principalOfRole(session.principals, 'admin').id)}.`,
-    'Create the first work item with acceptance criteria, mark it ready, and dispatch a worker.',
+    'Create the first work item: write it like examples/work.json and run "graphyard master create FILE"; the supervised master loop dispatches, reviews and merges it (docs/setup-from-zero.md step 12).',
   ];
+  if (!session.reviewers.length && !session.inputs.reviewer) steps.push(`No reviewer App is registered, so no independent review can pass: rerun with --reviewer NAME (docs/setup-from-zero.md step 5).`);
   if (!mergeCheckExists) steps.push(`Rerun "graphyard install --provider ${session.context.provider} --repo ${session.inputs.repository} --apply" after Graphyard publishes "${CHECK_NAME}" on the first pull request, so branch protection can require the App-bound check.`);
   if (!webhook.delivered) steps.push(`Webhook delivery is unconfirmed: ${webhook.detail}`);
   if (host) steps.push(`Everything runs on the host as the ${host.layout.user} account; nobody logs into it. Accounts start unconnected until connected from the dashboard.`);

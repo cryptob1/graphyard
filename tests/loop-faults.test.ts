@@ -20,7 +20,10 @@ import type { Cycle } from '../src/daemon/cycle.js';
 import { diagnosticianSettings, diagnosisSettled } from '../src/runner/payloads.js';
 import type { RunFailure, RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import { RefusedResponse } from '../src/model/refusal.js';
-import { noteCycleFailure } from '../src/daemon/liveness.js';
+import { noteCycleFailure, type CycleCost } from '../src/daemon/liveness.js';
+// A namespace import for what GY-1355 adds, so a run against the base fails its cases rather than the module's load.
+import * as livenessModule from '../src/daemon/liveness.js';
+import type { CycleMetrics } from '../src/daemon/state.js';
 import { timedCall } from '../src/master/timings.js';
 import * as deploymentModule from '../src/daemon/deployment.js';
 
@@ -736,6 +739,75 @@ test('manual:fault-class-loop — GY-1338: GY-1336\'s three instances, failed ag
   assert.ok(!filed.includes('loop'), 'no loop item is filed');
 });
 
+// ---- GY-1355: the loop-cost lines named the coarse 'deployment' bucket for the faults step ------
+//
+// GY-1355 names this file for its proof too, beside the GY-1336 lineage. Cycles 12621 and 12624 on
+// 2026-10-06 spent 450s and 781s of their own work, past the 300s interval (and, for 12624, the
+// 600s liveness bound). The cycle folds four timed steps — deployment verification, faults, triage
+// and doctor — into the one coarse 'deployment' bucket, and the loop-cost attention named that
+// bucket: "The deployment step is the slowest … shorten the deployment step". Its own timings
+// (metrics.timings) say the faults step's observation took 372.1s/577.9s and the release-landing
+// verification 8.7s/8.4s, so GY-1354 was filed against the wrong step. Replayed in the production
+// shape, as the cursor recorded it.
+
+const gy1355Instances = [
+  { cycle: 12621, at: '2026-10-06T01:52:51.656Z', workMs: 450_000, faults: 372_072, verification: 8_681, deployment: 381_934, decisions: 58_862 },
+  { cycle: 12624, at: '2026-10-06T02:10:30.000Z', workMs: 781_000, faults: 577_948, verification: 8_414, deployment: 587_055, decisions: 148_184 },
+];
+const productionIntervalMs = 300_000;
+function productionCycle(entry: typeof gy1355Instances[number], timings = true): CycleMetrics {
+  const observe = entry.workMs - entry.deployment - entry.decisions, zero = { ms: 0, childWaitMs: 0 };
+  return { cycle: entry.cycle, at: entry.at, durationMs: entry.workMs, childWaitMs: 0, workMs: entry.workMs, open: 4, actions: 59,
+    steps: { observe: { ms: observe, childWaitMs: 0 }, close: zero, decisions: { ms: entry.decisions, childWaitMs: 0 }, dispatch: zero, merge: zero, deployment: { ms: entry.deployment, childWaitMs: 0 } },
+    ...(timings ? { timings: { totalMs: entry.workMs, calls: [], slowCalls: 37, steps: [{ step: 'snapshot', ms: observe }, { step: 'decisions', ms: entry.decisions },
+      { step: 'deployment verification', ms: entry.verification }, { step: 'faults', ms: entry.faults }, { step: 'triage', ms: 400 }, { step: 'doctor', ms: entry.deployment - entry.faults - entry.verification - 400 }] } } : {}) } as CycleMetrics;
+}
+const costLine = (cost: CycleCost) => loopAttention({ liveness: { state: 'running', lagMs: 1_000, stalledAfterMs: 2 * productionIntervalMs, cycle: cost.cycle, lock: null, detail: '', restart: '', cost }, cost })
+  .find(entry => entry.kind === 'loop-cost');
+
+for (const entry of gy1355Instances) {
+  test(`manual:fault-class-loop — GY-1355 cycle ${entry.cycle}: the loop-cost attention names the faults step, never deployment as the step to shorten`, () => {
+    const cost = cycleCost(productionCycle(entry), productionIntervalMs)!;
+    assert.equal(cost.slowest?.step, 'deployment', 'the coarse bucket is still the slowest bucket, and the breakdown keeps it');
+    const line = costLine(cost);
+    assert.ok(line, 'the cycle past its interval raises the loop-cost line');
+    assert.match(line.text, new RegExp(`The faults step is the slowest timed step, at ${Math.round(entry.faults / 1000)}s`));
+    assert.match(line.next ?? '', /shorten the faults step rather than restarting/);
+    for (const text of [line.text, line.next ?? '']) {
+      assert.doesNotMatch(text, /[Tt]he deployment step/, text);
+      assert.doesNotMatch(text, /shorten the deployment/, text);
+    }
+  });
+}
+
+test('unit:loop-cost-timed-step-attribution — the slowest timed step names the loop-cost line whenever the cycle recorded timings; the coarse bucket only without them', () => {
+  const [entry] = gy1355Instances;
+  const timed = cycleCost(productionCycle(entry), productionIntervalMs)!;
+  assert.deepEqual(timed.culprit, { step: 'faults', ms: entry.faults, timed: true, phrase: 'the faults step' });
+  assert.deepEqual(timed.slowestSteps[0], { step: 'faults', ms: entry.faults }, 'the same step slowCycleAttention names');
+  // A slow cycle, still inside it: the liveness detail and its advice name the timed step too.
+  const lock = { id: 'loop', pid: process.pid, host: 'machine-a', startedAt: entry.at, heartbeatAt: entry.at };
+  const slow = loopLiveness({ lock, cycle: entry.cycle + 1, lastCycleAt: entry.at, metrics: [productionCycle(gy1355Instances[1])] }, Date.parse(entry.at) + 700_000, productionIntervalMs, 'machine-a');
+  assert.equal(slow.state, 'slow');
+  assert.match(slow.detail, /the faults step is the one to shorten/);
+  assert.match(loopAttention({ liveness: slow })[0].next ?? '', /shorten the faults step/);
+  // A cycle recorded before timings existed falls back to the bucket.
+  const untimed = cycleCost(productionCycle(entry, false), productionIntervalMs)!;
+  assert.equal(untimed.culprit?.step, 'deployment');
+  assert.equal(untimed.culprit?.timed, false);
+});
+
+test('unit:deployment-bucket-rollup-named — a coarse bucket reported as slowest is named as the roll-up it is, never as the release-landing verification', () => {
+  for (const entry of gy1355Instances) {
+    const line = costLine(cycleCost(productionCycle(entry, false), productionIntervalMs)!)!;
+    assert.match(line.text, new RegExp(`The deployment bucket is the slowest, at ${Math.round(entry.deployment / 1000)}s of work; it rolls up the deployment verification, faults, triage and doctor steps, so no one step inside it is named`));
+    assert.match(line.next ?? '', /shorten the deployment bucket, which rolls up the deployment verification, faults, triage and doctor steps/);
+    assert.doesNotMatch(`${line.text} ${line.next}`, /[Tt]he deployment step/);
+  }
+  // Every coarse bucket has its roll-up named.
+  assert.deepEqual(Object.keys(livenessModule.cycleBucketSteps ?? {}), ['observe', 'close', 'decisions', 'dispatch', 'merge', 'deployment']);
+});
+
 // ---- GY-1345: one plane-wide control-plane window files five loop faults ------------------------
 //
 // GY-1345 names this file for its proof too. From 01:39 to 02:01Z on 2026-10-06 the production
@@ -1009,7 +1081,7 @@ test(`unit:fault-observation-budget — ${gy1345Instances[3].id}: cycles every 3
 //     applied path (GY-1336) knew to answer that;
 // (2) the dispatcher failed three ticks in a row on reads the plane did not answer;
 // (3) GY-1339's diagnosis decide was refused 502 and threw out of decideFresh into the step's isolate;
-// (4) cycle 12621 spent 450s, 372s of it in the deployment step, waiting on reads that timed out;
+// (4) cycle 12621 spent 450s, 372s of it in the faults step (inside the coarse 'deployment' bucket), waiting on reads that timed out;
 // (5) the loop class's own filing was refused 502, and the failed filing counted toward the class.
 // The plane not answering is now one condition: what met it is retried with no fault, the
 // dispatcher's and failed cycles' lines name the outage (deployment class), and time on requests
@@ -1125,20 +1197,21 @@ test(`manual:fault-class-loop — ${gy1344Instances[2].id}: a decide the plane j
 });
 
 /**
- * Cycle 12621, replayed: the deployment step's reads each run into the 30s request timeout while
- * the plane does not answer, twelve of them, as the 372s it spent there says; the server is asked
- * through the same timed call the loop's effects make, so the cycle measures what it waited on.
+ * Cycle 12621, replayed: the faults step's observation reads (GY-1355: the production timings put
+ * the 372s in the faults step, not the deployment verification, which took 8.7s) each run into the
+ * 30s request timeout while the plane does not answer, twelve of them; the server is asked through
+ * the same timed call the loop's effects make, so the cycle measures what it waited on.
  */
 async function replayOutageCycle(answer: 'timeout' | 'slow') {
   let now = Date.parse(gy1344Instances[3].at) - 450_000;
   const master = burstConfig(), state = emptyDaemonState(master);
   const effects = quietEffects(() => now, () => [], {
-    observeDeployment: async () => {
-      for (let read = 0; read < 12; read++) await timedCall('server', 'GET deployment', async () => { now += 31_000; if (answer === 'timeout') throw timedOut(); return {}; }).catch(() => undefined);
+    controlPlane: async () => {
+      for (let read = 0; read < 12; read++) await timedCall('server', 'GET status', async () => { now += 31_000; if (answer === 'timeout') throw timedOut(); return {}; }).catch(() => undefined);
       if (answer === 'timeout') throw timedOut();
-      return { source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] };
+      return {};
     },
-  });
+  } as Partial<DaemonEffects>);
   return { result: await runCycle(master, state, effects, () => now), state };
 }
 
@@ -1156,6 +1229,7 @@ test(`manual:fault-class-loop — ${gy1344Instances[3].id}: a server that answer
   const cost = cycleCost(result.metrics, intervalMs)!;
   assert.ok(!cost.withinInterval, `answered requests are the loop's work: ${cost.breakdown}`);
   assert.equal(cost.planeWaitMs ?? 0, 0);
+  assert.equal(cost.culprit?.step, 'faults', 'the reads were the faults step\'s observation, and the cost names it');
 });
 
 test(`manual:fault-class-loop — ${gy1344Instances[4].id}: a class filing the plane answers 502 is retried with no loop fault`, async () => {
@@ -1202,7 +1276,10 @@ test(`manual:fault-class-loop — GY-1344: failed cycles that met a control plan
 // (2) cycle 12624: 781s of its own work — past the 600s two-interval liveness bound — and 8.5s
 //     waiting on children, 587.1s of its work in the deployment step.
 // The step's reads now share a per-cycle budget (deploymentStepBudgetMs); a verification still
-// running at the bound stays in flight and a later cycle takes its answer.
+// running at the bound stays in flight and a later cycle takes its answer. GY-1355 found the
+// production timings put most of those seconds in the faults step inside the coarse 'deployment'
+// bucket; the attribution case below replays the shape AC-2 names, a cycle whose slowest timed
+// step is the release-landing verification itself, and the replay bounds that step either way.
 
 const gy1354Instances = [
   { id: 'loop-cost|loop|2026-10-06T01:52:51.656Z', kind: 'loop-cost', subject: 'loop', at: '2026-10-06T01:52:51.656Z', cycle: 12621, workMs: 450_000, childWaitMs: 0, deploymentMs: 381_900 },
@@ -1212,7 +1289,8 @@ const gy1354Instances = [
 function measuredCycle(instance: typeof gy1354Instances[number]) {
   const rest = instance.workMs - instance.deploymentMs, share = (part: number) => ({ ms: Math.round(rest * part), childWaitMs: 0 });
   const steps = { observe: share(0.2), close: share(0.1), decisions: share(0.3), dispatch: share(0.2), merge: share(0.2), deployment: { ms: instance.deploymentMs + instance.childWaitMs, childWaitMs: instance.childWaitMs } };
-  return { cycle: instance.cycle, at: instance.at, durationMs: instance.workMs + instance.childWaitMs, childWaitMs: instance.childWaitMs, workMs: instance.workMs, steps } as unknown as DaemonState['metrics'][number];
+  const timings = { totalMs: instance.workMs, calls: [], slowCalls: 0, steps: [{ step: 'snapshot', ms: steps.observe.ms }, { step: 'decisions', ms: steps.decisions.ms }, { step: 'deployment verification', ms: instance.deploymentMs }] };
+  return { cycle: instance.cycle, at: instance.at, durationMs: instance.workMs + instance.childWaitMs, childWaitMs: instance.childWaitMs, workMs: instance.workMs, steps, timings } as unknown as DaemonState['metrics'][number];
 }
 
 test('manual:fault-class-loop — GY-1354 lists two instances, and both are replayed', () => {
@@ -1230,8 +1308,9 @@ for (const instance of gy1354Instances) {
     const lines = loopAttention({ liveness: { state: 'running', lagMs: 0, stalledAfterMs: 2 * intervalMs, cycle: instance.cycle, lock: null, detail: '', restart: '', cost }, cost });
     const line = lines.find(entry => entry.kind === 'loop-cost' || /on its own work/.test(entry.text))!;
     assert.match(line.text, new RegExp(`Cycle ${instance.cycle} spent ${Math.round(instance.workMs / 1000)}s on its own work`));
-    assert.match(line.text, new RegExp(`The deployment step is the slowest, at ${Math.round(instance.deploymentMs / 1000)}s of work, ${share}% of the cycle's own`));
-    assert.match(line.next ?? '', /shorten the deployment step/);
+    assert.equal(livenessModule.culpritShare?.(cost), share);
+    assert.match(line.text, new RegExp(`The deployment verification step is the slowest timed step, at ${Math.round(instance.deploymentMs / 1000)}s. It is ${share}% of the cycle's own work`));
+    assert.match(line.next ?? '', /shorten the deployment verification step/);
   });
 
   test(`manual:loop-cost-cycle-replay — ${instance.id}: a verification taking the ${instance.deploymentMs / 1000}s it took no longer carries the cycle past the interval, and the delivery is still verified served`, async () => {
