@@ -1,13 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Observation, Work } from '../src/model.js';
-import { openReviewConflict, reconcileReviewConflict, reviewConflictAttention, settledReviewConflict, type ReviewConflict } from '../src/model/review-conflict.js';
+import * as reviewConflicts from '../src/model/review-conflict.js';
+import { openReviewConflict, reconcileReviewConflict, reviewConflictAttention, type ReviewConflict } from '../src/model/review-conflict.js';
 import { agentRequestAttention } from '../src/cli/loop-report.js';
 import type { AgentRequest } from '../src/model/agent-requests.js';
 
 // GY-1364: on 2026-10-06 master status listed review-conflict lines for GY-100 (head e9a5521c608c,
 // PR #116) and GY-947 (head f68b3e9ef5be, PR #521), both delivered, and a note on GY-1318, also
 // Done, "decided by nobody". No action could clear any of them. Each test is named for its proof.
+// `settledReviewConflict` is read through a namespace so the file loads on a base that lacks it.
+
+const settledReviewConflict = (item: Work): string | null => {
+  assert.equal(typeof reviewConflicts.settledReviewConflict, 'function', 'settledReviewConflict is exported');
+  return reviewConflicts.settledReviewConflict(item);
+};
 
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
 const H = sha40('e9a5521c608c'), B = sha40('b1'), H2 = sha40('c2');
