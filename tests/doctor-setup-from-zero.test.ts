@@ -8,6 +8,9 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setupFromZeroChecks, setupLine, setupSteps, type SetupFromZeroInput } from '../src/cli/install.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { detectStack } from '../src/onboarding.js';
+import { appManifest, reviewerAppManifest } from '../src/github-setup.js';
+import { frameworkReportFormats } from '../src/readiness.js';
 
 /**
  * GY-1352 AC-3: `graphyard doctor` reports each prerequisite docs/setup-from-zero.md depends on as a
@@ -139,4 +142,21 @@ test('unit:doctor-setup-from-zero — graphyard doctor prints the named lines fo
     reviewerApps = [{ id: 'scratch-reviewer', runtime: 'claude', appId: 7002, botUserId: 1 }];
     assert.equal((await doctor()).setupFromZero.ready, true, 'a reviewer App the server serves counts as bound');
   } finally { server.close(); }
+});
+
+test('unit:doctor-setup-from-zero — a scratch repository whose tests run on Node\'s built-in runner is detected, so test-formats does not ask for a suite it already has', () => {
+  const scan = (test: string) => detectStack({ files: ['package.json'], contents: { 'package.json': JSON.stringify({ name: 'scratch', scripts: { test } }) } });
+  assert.deepEqual(scan('node --test').frameworks, ['node:test']);
+  assert.deepEqual(scan('node --import tsx --test tests/').frameworks, ['node:test']);
+  assert.deepEqual(scan('node scripts/run.js && echo --test').frameworks, [], 'a --test outside the node command is not the runner');
+  assert.equal(frameworkReportFormats['node:test'].format, 'junit-xml-v1');
+});
+
+test('unit:doctor-setup-from-zero — a local Compose install registers its App on the loopback origin with the webhook off; any other plain-HTTP origin is still refused', () => {
+  const local = appManifest('owner/scratch', 'http://127.0.0.1:4310', 'http://127.0.0.1:4311');
+  assert.equal(local.url, 'http://127.0.0.1:4310');
+  assert.deepEqual(local.hook_attributes, { url: 'http://127.0.0.1:4310/api/github/webhook', active: false });
+  assert.equal(appManifest('owner/scratch', 'https://graphyard.example', 'http://127.0.0.1:4311').hook_attributes.active, true);
+  assert.equal(reviewerAppManifest('claude', 'owner/scratch', 'http://localhost:4310', 'http://127.0.0.1:4311').url, 'http://localhost:4310');
+  assert.throws(() => appManifest('owner/scratch', 'http://graphyard.example', 'http://127.0.0.1:4311'), /HTTPS origin/);
 });

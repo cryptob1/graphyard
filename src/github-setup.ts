@@ -12,9 +12,12 @@ const escape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('"',
 function manifestOrigin(repository: string, deployment: string) {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Expected owner/repository');
   const url = new URL(deployment);
-  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error('Use the deployed HTTPS origin, without credentials or a path');
+  // A local Compose install serves plain HTTP on loopback (GY-1352): GitHub never reaches it, so its
+  // App is registered with the webhook off and the control plane polls instead.
+  if ((url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback(url))) || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error('Use the deployed HTTPS origin (or http:// on loopback for a local Compose install), without credentials or a path');
   return url.origin;
 }
+const loopback = (url: URL) => ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
 /**
  * A reviewer App is a separate identity with no control-plane authority: it reads code and
  * writes pull request comments, and never publishes Graphyard's own gate check.
@@ -35,7 +38,7 @@ export function appManifest(repository: string, deployment: string, callback: st
   const origin = manifestOrigin(repository, deployment);
   const url = new URL(origin);
   return { name: `Graphyard ${repository.replace('/', '-')}`, url: url.origin, public: false,
-    hook_attributes: { url: `${url.origin}/api/github/webhook`, active: true },
+    hook_attributes: { url: `${url.origin}/api/github/webhook`, active: !loopback(url) },
     redirect_url: `${callback}/created`, setup_url: `${callback}/installed`,
     // Exactly the declared control-plane set; the merge queue's Contents: write lives there.
     default_permissions: requiredPermissions(controlPlanePermissions),

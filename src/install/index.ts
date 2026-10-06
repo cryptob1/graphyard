@@ -99,7 +99,7 @@ export async function repositoryDelivery(root: string): Promise<{ policy: Delive
   return { policy: proposeDelivery(input, detectDeploy(input, stack), stack), committed: false };
 }
 
-const APP_HUMAN_STEP = 'Confirm the Graphyard GitHub App in the browser page the installer opens, and install it on the managed repository.';
+const APP_HUMAN_STEP = 'Confirm the Graphyard GitHub App in the browser page the installer opens, and install it on the managed repository; when GitHub asks to Confirm access, approve the GitHub Mobile prompt.';
 const CORE_HUMAN_STEPS = [
   'Authenticate the provider CLI and GitHub CLI once (the installer prints the exact command when either is missing).',
   'Approve the printed plan before rerunning with --apply.',
@@ -417,8 +417,8 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   const reviewPhrase = plannedReviews > session.reviewCount
     ? `${plannedReviews} approving review(s), the stricter count this branch already requires`
     : `at least ${session.reviewCount} approving review(s) for the ${session.reviewPolicy} review policy`;
-  if (protection && !protectionOk) drift.push({ action: 'github.protection', field: 'branch protection', expected: `required checks ${[...session.requiredChecks, ...GRAPHYARD_CHECKS].join(', ')} with "up to date" off for the merge queue; at least ${session.reviewCount} approving review(s); admin enforcement; conversation resolution off (the reviewer's verdict is the review gate)`, observed: describeProtection(protection) });
-  actions.push({ id: 'github.protection', target: 'github', state: protectionOk ? 'satisfied' : protection ? 'update' : 'create', title: `Require status checks (${[...session.requiredChecks, ...GRAPHYARD_CHECKS].join(', ')}) with "require branches to be up to date" off, which the merge queue needs, ${reviewPhrase} and administrator enforcement, with conversation resolution off (the reviewer's verdict is the review gate), on ${session.inputs.baseBranch}` });
+  if (protection && !protectionOk) drift.push({ action: 'github.protection', field: 'branch protection', expected: `required checks ${[...session.requiredChecks, ...GRAPHYARD_CHECKS].join(', ')} with "up to date" off (a candidate merges on the base it was built on); at least ${session.reviewCount} approving review(s); admin enforcement; conversation resolution off (the reviewer's verdict is the review gate)`, observed: describeProtection(protection) });
+  actions.push({ id: 'github.protection', target: 'github', state: protectionOk ? 'satisfied' : protection ? 'update' : 'create', title: `Require status checks (${[...session.requiredChecks, ...GRAPHYARD_CHECKS].join(', ')}) with "require branches to be up to date" off, so a candidate merges on the base it was built on, ${reviewPhrase} and administrator enforcement, with conversation resolution off (the reviewer's verdict is the review gate), on ${session.inputs.baseBranch}` });
   // The release-candidate pipeline's environments (GY-1102): free wiring, then every UAT and
   // production resource the deployment adapter would create, cost-bearing ones marked human.
   if (candidateModel) {
@@ -594,7 +594,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     || (await detectCiAppIds(gh, session.inputs.repository, session.inputs.baseBranch, null)).some(entry => entry.appId === facts.appId);
   const applied = protectionSatisfied(protectionInputs, current) ? null : await applyProtection(gh, { ...protectionInputs, graphyardAppId: mergeCheckExists ? facts.appId : null });
   const protectionDetail = applied
-    ? `required checks ${applied.required_status_checks.checks.map(check => check.context).join(', ')} ("up to date" off for the merge queue); ${applied.required_pull_request_reviews.required_approving_review_count} approving review(s); admin enforcement`
+    ? `required checks ${applied.required_status_checks.checks.map(check => check.context).join(', ')} ("up to date" off: a candidate merges on the base it was built on); ${applied.required_pull_request_reviews.required_approving_review_count} approving review(s); admin enforcement`
     : `already matches the ${session.reviewPolicy} review policy`;
 
   // The release pipeline's free wiring, then the adapter's environments: paid ones only with
@@ -736,8 +736,9 @@ function nextSteps(session: InstallSession, url: string, mergeCheckExists: boole
   const steps = [
     host ? 'Open the signIn link once to sign in to the dashboard as the admin; it works a single time, then use Agents → Connect an account for each runtime.'
       : `Open ${url} and sign in with the credential in ${tokenFile(session.directory, principalOfRole(session.principals, 'admin').id)}.`,
-    'Create the first work item with acceptance criteria, mark it ready, and dispatch a worker.',
+    'Create the first work item: write it like examples/work.json and run "graphyard master create FILE"; the supervised master loop dispatches, reviews and merges it (docs/setup-from-zero.md step 12).',
   ];
+  if (!session.reviewers.length && !session.inputs.reviewer) steps.push(`No reviewer App is registered, so no independent review can pass: rerun with --reviewer NAME (docs/setup-from-zero.md step 5).`);
   if (!mergeCheckExists) steps.push(`Rerun "graphyard install --provider ${session.context.provider} --repo ${session.inputs.repository} --apply" after Graphyard publishes "${CHECK_NAME}" on the first pull request, so branch protection can require the App-bound check.`);
   if (!webhook.delivered) steps.push(`Webhook delivery is unconfirmed: ${webhook.detail}`);
   if (host) steps.push(`Everything runs on the host as the ${host.layout.user} account; nobody logs into it. Accounts start unconnected until connected from the dashboard.`);

@@ -315,6 +315,7 @@
     "tests/dispatch-race-guard.test.ts": 34959,
     "tests/dispatch-recovers-from-jam.test.ts": 998,
     "tests/dispatch-reservation-followups.test.ts": 268,
+    "tests/doctor-setup-from-zero.test.ts": 2600,
     "tests/docs-budget-headroom.test.ts": 1492,
     "tests/docs-budget.test.ts": 428,
     "tests/docs-glossary.test.ts": 291,
