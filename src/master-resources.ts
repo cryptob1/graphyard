@@ -941,8 +941,9 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   // it: a host with thousands of leftovers never stalls a cycle, and each cycle records what the
   // last finished pass freed. Ages are judged on the host's real clock, never the cycle's `now`,
   // which a caller may set anywhere: a directory is old only when it truly is.
-  // `tmpRoot` (one) or `tmpRoots` names the directories scanned and `tmpPass` the pass itself, for a caller that must
-  // keep the sweep off the host's /tmp or watch it run; the loop passes neither.
+  // `tmpRoot` (one) or `tmpRoots` names the directories scanned and `tmpPass` the pass itself,
+  // for a caller that must keep the sweep off the host's /tmp or watch it run; the loop passes
+  // neither.
   const tmp = namesOnly ? null : takeTmpReclaim(() => (options.tmpPass ?? reclaimTmpDirectories)(loopTmpReclaimOptions(options.tmpRoots ?? (options.tmpRoot === undefined ? undefined : [options.tmpRoot]))));
   if (tmp) {
     report.tmp = { removed: tmp.removed.length, bytes: tmp.bytes };
