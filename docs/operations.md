@@ -34,7 +34,7 @@ Never attest a stop you have not confirmed; merged work changes only via follow-
 
 ## Main guard revert approver
 
-Main's last-push-approval rule refuses a revert the control-plane App pushed, so an armed [main guard](delivery.md#pre-merge-gate-and-release-candidate-validation) needs a second App installed on the repository (the reviewer App serves) as its approver. Write `{"appId", "installationId", "privateKey"}` (or `"privateKeyFile"`) to `.graphyard/revert-approver.json` (mode 0600), or pipe it with `--revert-approver-stdin`, and run `node scripts/provision-railway.mjs`: it sets the three `GRAPHYARD_REVERT_APPROVER_*` variables, the key over stdin, prints none, and refuses an armed guard without them. Redeploy, then verify: `GRAPHYARD_URL=… node scripts/provision-railway.mjs --verify` exits 0 once `/api/status` `mainGuard.revertApprover` names that App, and `graphyard doctor` lists `revert-approver` ready.
+Main's last-push-approval rule refuses a revert the control-plane App pushed, so an armed [main guard](delivery.md#pre-merge-gate-and-release-candidate-validation) needs a second App installed on the repository (the reviewer App serves) as its approver. Provisioning carries its credentials and refuses an armed guard without them ([Railway](deployment.md#manual-fallback)). Redeploy, then verify: `/api/status` `mainGuard.revertApprover` names that App, `mainGuard.attention` is empty, and `graphyard doctor` lists `revert-approver` ready.
 
 ## Worker host keyring proxy
 

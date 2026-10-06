@@ -44,3 +44,4 @@ Otherwise set the variables table by hand, then `node "$GRAPHYARD_CLI" github-se
 - Compose: `cp .env.example .env`, replace secrets, `docker compose --profile full up -d`; TLS on 4310, Postgres private.
 - Kubernetes: `helm install graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials …`.
 - Railway: `railway init`, `railway add --database postgres`, set variables, `railway up`.
+- Railway revert approver: `node scripts/provision-railway.mjs` sets the three `GRAPHYARD_REVERT_APPROVER_*` variables from `.graphyard/revert-approver.json` (mode 0600; `{"appId", "installationId", "privateKey"}` or `"privateKeyFile"`) or `--revert-approver-stdin`, sends the key over stdin, prints none, and refuses an armed guard without them; after the redeploy, `GRAPHYARD_URL=… node scripts/provision-railway.mjs --verify` exits 0 once the live guard names that App.
