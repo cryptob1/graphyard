@@ -554,7 +554,10 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   const controlPlane = status === unread ? null : status?.value ?? null;
   const summary = daemonSummary(state, clock, config.run.intervalSeconds * 1000, config.hostId, policy);
   if (controlPlane && effects.reportedAttention) {
-    const read = await withinBudget(state, 'attention', () => effects.reportedAttention!(snapshot.work, controlPlane, { agents: seen, available: herdrRead.available, approvals: summary.approvals, loop: summary.liveness, now: new Date(clock).toISOString() })
+    // The loop reading its own cursor is cycling (GY-1379): the lag since its last completed cycle is the cycle under way, or the
+    // restart before it, which the loop-cost lines and the supervisor answer — the executor-liveness reading never counts it as a stall.
+    const self = { ...summary.liveness, state: 'running' as const, self: true };
+    const read = await withinBudget(state, 'attention', () => effects.reportedAttention!(snapshot.work, controlPlane, { agents: seen, available: herdrRead.available, approvals: summary.approvals, loop: self, now: new Date(clock).toISOString() })
       .then(value => ({ value, failed: false }), error => ({ value: { items: [{ subject: 'loop', text: `The loop could not read the attention master status adds to classify it: ${message(error)}`, kind: 'loop-failures' } as AttentionItem] } as ReportedAttention, failed: true })), deadline, now);
     if (read === unread) unreadSources.push('the attention master status adds');
     else { reported = read.value; if (read.failed) partial = true; }
