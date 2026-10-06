@@ -1,12 +1,12 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, readdir, readFile, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isProfileSession, neverStartedReason, privateFile, profileConcurrency, worktreesDirectory, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
-import { describeTmpReclaim, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
+import { describeTmpReclaim, hostTmpRoots, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
 import { upgradeTouchesCode } from './daemon/upgrade.js';
 import type { LoopState } from './daemon/liveness.js';
 import type { Work } from './model.js';
@@ -80,12 +80,16 @@ export interface ResourceInputs {
   /** The host temporary directory's inodes, and what the loop's last /tmp pass removed (GY-1074); absent or null when unread. */
   tmp?: TmpInodes | null;
 }
+/** The latest finished /tmp pass: its count, when it was recorded and the directories it scanned (GY-1081, GY-1368). */
+export interface TmpPassRecord { removed: number; at: string; roots?: string[] }
 export interface TmpInodes {
   path: string; totalInodes: number; freeInodes: number;
   /** What the last /tmp pass to remove anything removed, and when it was recorded. */
   removed: number | null; removedAt: string | null;
   /** The latest finished /tmp pass's own count, often 0 (GY-1081); null before any pass is recorded. */
-  latest?: { removed: number; at: string } | null;
+  latest?: TmpPassRecord | null;
+  /** Whether the latest pass's roots include the directory measured here, by realpath; null when no pass named its roots (GY-1368). */
+  measuredScanned?: boolean | null;
   /**
    * This user's own top-level entries in the directory, and how many carry a test temp name
    * (GY-1081): the per-user quota is not readable without quotactl, so this is what the reading can
@@ -397,8 +401,8 @@ export const resourceRegistry: ResourceDefinition[] = [
     // statfs reports the filesystem's free inodes, not what remains of this user's quota: a quota is
     // not readable without quotactl, so the reading warns early rather than claiming to track it.
     bound: 'the inode count of the filesystem holding the host temporary directory (filesystem-wide, not the per-user quota, which can break shells first), so it warns at a quarter free',
-    usage: 'statfs of the host temporary directory (os.tmpdir())', owner: 'test runs and sessions on the coordinator host, and the loop\'s /tmp reclaim pass (src/tmp-reclaim.ts)',
-    reclaim: `the loop's reclaim pass removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours that no live process holds, at most ${tmpReclaimLimitPerCycle} per cycle`,
+    usage: 'statfs of the host temporary directory (os.tmpdir() of the reading process)', owner: 'test runs and sessions on the coordinator host, and the loop\'s /tmp reclaim pass (src/tmp-reclaim.ts)',
+    reclaim: `the loop's reclaim pass scans its own tmpdir and /tmp, each once, and removes this user's test temp entries (${testTempPatterns.map(pattern => `${pattern.source.slice(1)}*`).join(', ')}) older than ${testTempMinAgeMs / 3_600_000} hours that no live process holds, at most ${tmpReclaimLimitPerCycle} per cycle`,
     remedy: 'graphyard master run --once reclaims now; find what else fills /tmp (ls /tmp | sort | uniq -c) and stop the process leaking it',
     warnBelow: bound => Math.ceil(bound / 4), symptoms: [],
     read: input => [input.tmp
@@ -411,9 +415,11 @@ export const resourceRegistry: ResourceDefinition[] = [
 const entries = (count: number) => `${count} entr${count === 1 ? 'y' : 'ies'}`;
 /** The tmp-inodes detail: free inodes, this user's share, the latest pass's count and the last count that was not 0. */
 function describeTmpInodes(tmp: TmpInodes) {
-  const parts = [`${tmp.path}: ${tmp.freeInodes} of ${tmp.totalInodes} inodes free`];
+  const parts = [`measured ${tmp.path}: ${tmp.freeInodes} of ${tmp.totalInodes} inodes free`];
   if (tmp.own) parts.push(`${tmp.own.capped ? 'at least ' : ''}${entries(tmp.own.entries)} at its top level are this user's (${tmp.own.testTemp} with test temp names); the per-user quota itself is not readable`);
-  if (tmp.latest) parts.push(`the loop's latest /tmp pass removed ${entries(tmp.latest.removed)} at ${tmp.latest.at}`);
+  if (tmp.latest) parts.push(`the loop's latest /tmp pass removed ${entries(tmp.latest.removed)} at ${tmp.latest.at}${tmp.latest.roots ? `, scanning ${tmp.latest.roots.join(' and ')}` : ''}`);
+  // A pass over another directory than the one warned about removes nothing here: say so (GY-1368).
+  if (tmp.measuredScanned === false) parts.push(`that pass did not scan ${tmp.path}`);
   if (tmp.removed === null) parts.push('the loop has recorded no /tmp pass that removed anything');
   else if (!tmp.latest || tmp.latest.at !== tmp.removedAt) parts.push(`the last pass to remove anything removed ${entries(tmp.removed)}${tmp.removedAt ? ` at ${tmp.removedAt}` : ''}`);
   return parts.join('; ');
@@ -648,7 +654,10 @@ export async function readTmpInodes(root: string, path = tmpdir(), volume: (path
     const file = await readReclaimFile(root);
     const last = file.reports.filter(report => report.tmp?.removed).at(-1);
     const own = await countOwnEntries(path, uid).catch(() => null);
-    return { path, totalInodes, freeInodes, removed: last ? last.tmp.removed : null, removedAt: last?.at ?? null, latest: file.tmpLatest ?? null, own };
+    const latest = file.tmpLatest ?? null, real = (directory: string) => realpath(directory).catch(() => directory);
+    const measured = await real(path);
+    const measuredScanned = latest?.roots ? (await Promise.all(latest.roots.map(real))).includes(measured) : null;
+    return { path, totalInodes, freeInodes, removed: last ? last.tmp.removed : null, removedAt: last?.at ?? null, latest, measuredScanned, own };
   } catch { return null; }
 }
 
@@ -667,7 +676,7 @@ export const resourceReportFile = (root: string) => resolve(root, '.graphyard/re
 const retainedReports = 50;
 
 /** `tmpLatest`: the latest finished /tmp pass, recorded even when it removed nothing (GY-1081). */
-interface ReclaimFile { version: 1; reports: ResourceReclaimReport[]; seen: Record<string, string>; tmpLatest?: { removed: number; at: string } | null }
+interface ReclaimFile { version: 1; reports: ResourceReclaimReport[]; seen: Record<string, string>; tmpLatest?: TmpPassRecord | null }
 async function readReclaimFile(root: string): Promise<ReclaimFile> {
   try { await privateFile(resourceReportFile(root)); const body = JSON.parse(await readFile(resourceReportFile(root), 'utf8')); return { version: 1, reports: body.reports ?? [], seen: body.seen ?? {}, tmpLatest: body.tmpLatest ?? null }; }
   catch { return { version: 1, reports: [], seen: {} }; }
@@ -764,10 +773,11 @@ export function owedUpgrade(state: { upgrade?: { pending: { from: string | null;
  */
 /**
  * The loop's bounds for one /tmp pass — at most `tmpReclaimLimitPerCycle` directories and
- * `tmpReclaimWorkMsPerCycle` of removal — over `tmpRoot`, the host's temporary directory unless the
- * caller names another (a test's scratch root, so it never sweeps the developer's real /tmp).
+ * `tmpReclaimWorkMsPerCycle` of removal — over `tmpRoots`, or the host's temporary directories
+ * (`hostTmpRoots`: this process's tmpdir and /tmp, each once, GY-1368) unless the caller names
+ * others (a test's scratch roots, so it never sweeps the developer's real /tmp).
  */
-export const loopTmpReclaimOptions = (tmpRoot?: string): TmpReclaimOptions => ({ limit: tmpReclaimLimitPerCycle, workMs: tmpReclaimWorkMsPerCycle, ...(tmpRoot ? { tmpRoot } : {}) });
+export const loopTmpReclaimOptions = (tmpRoots?: readonly string[]): TmpReclaimOptions => ({ limit: tmpReclaimLimitPerCycle, workMs: tmpReclaimWorkMsPerCycle, tmpRoots: tmpRoots ?? hostTmpRoots() });
 /** The loop's /tmp pass in flight, and the report of the last one to finish, not yet recorded. */
 let tmpPass: Promise<void> | null = null;
 let tmpFinished: TmpReclaimReport | null = null;
@@ -797,7 +807,7 @@ export const settleTmpReclaim = async () => { await tmpPass; };
  * inside its bound however long the cycle takes. It fails, reaps and sweeps nothing, and keeps the
  * stuck-session clocks the full pass records.
  */
-export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'> & { workers?: ProfileSet['workers'] }, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void>; tmpRoot?: string; tmpPass?: (options: TmpReclaimOptions) => Promise<TmpReclaimReport>; namesOnly?: boolean; gates?: ReclaimGates } = {}): Promise<ResourceReclaimReport> {
+export async function reclaimResources(root: string, config: Pick<ProfileSet, 'reviewers' | 'producers'> & { workers?: ProfileSet['workers'] }, observed: { work: Work[]; agents: HerdrAgent[] | null }, options: { now?: number; closePane?: (pane: string) => void | Promise<void>; tmpRoot?: string; tmpRoots?: readonly string[]; tmpPass?: (options: TmpReclaimOptions) => Promise<TmpReclaimReport>; namesOnly?: boolean; gates?: ReclaimGates } = {}): Promise<ResourceReclaimReport> {
   const now = options.now ?? Date.now();
   const gates = options.gates ?? reclaimGates;
   const close = options.closePane ?? (pane => { closeHerdrPane(pane); });
@@ -931,16 +941,17 @@ export async function reclaimResources(root: string, config: Pick<ProfileSet, 'r
   // it: a host with thousands of leftovers never stalls a cycle, and each cycle records what the
   // last finished pass freed. Ages are judged on the host's real clock, never the cycle's `now`,
   // which a caller may set anywhere: a directory is old only when it truly is.
-  // `tmpRoot` names the directory scanned and `tmpPass` the pass itself, for a caller that must
-  // keep the sweep off the host's /tmp or watch it run; the loop passes neither.
-  const tmp = namesOnly ? null : takeTmpReclaim(() => (options.tmpPass ?? reclaimTmpDirectories)(loopTmpReclaimOptions(options.tmpRoot)));
+  // `tmpRoot` (one) or `tmpRoots` names the directories scanned and `tmpPass` the pass itself,
+  // for a caller that must keep the sweep off the host's /tmp or watch it run; the loop passes
+  // neither.
+  const tmp = namesOnly ? null : takeTmpReclaim(() => (options.tmpPass ?? reclaimTmpDirectories)(loopTmpReclaimOptions(options.tmpRoots ?? (options.tmpRoot === undefined ? undefined : [options.tmpRoot]))));
   if (tmp) {
     report.tmp = { removed: tmp.removed.length, bytes: tmp.bytes };
     report.errors.push(...tmp.errors.map(error => `Tmp reclaim: ${error}`));
   }
   const took = !!(report.reaped.review || report.reaped.producer || report.closed.length || report.released.length || report.tmp.removed || report.errors.length);
   // A finished pass is recorded as the latest even when it removed nothing, so status never shows an old count as current.
-  const tmpLatest = tmp ? { removed: tmp.removed.length, at: report.at } : file.tmpLatest ?? null;
+  const tmpLatest = tmp ? { removed: tmp.removed.length, at: report.at, ...(tmp.roots ? { roots: tmp.roots } : {}) } : file.tmpLatest ?? null;
   if (took || tmp || JSON.stringify(seen) !== JSON.stringify(file.seen)) {
     try {
       await withReclaimLock(root, async () => {
