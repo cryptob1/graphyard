@@ -14,7 +14,7 @@ export const operatorAgentRoutes = defineRoutes('operator-agents', [
     method: 'GET', path: '/api/principals',
     async handle({ actor, services }) {
       demand(['admin', 'coordinator', 'operator-agent'].includes(actor.role), 'The principal roster is available to admin, coordinator and operator-agent identities', 403);
-      const now = Date.now(), leased = (await services.engine.store.list()).filter(work => work.lease && Date.parse(work.lease.expiresAt) > now);
+      const now = Date.now(), leased = (await services.engine.store.fleet()).filter(work => work.lease && Date.parse(work.lease.expiresAt) > now);
       return { principals: services.principals.map(({ actor: principal }) => ({ id: principal.id, role: principal.role, sessionKind: principal.sessionKind ?? null,
         leases: leased.filter(work => work.lease!.owner === principal.id).map(work => work.key) })) };
     },

@@ -364,6 +364,13 @@ async function hotRead(path: string) {
   const text = await response.text(); assert.equal(response.status, 200, text.slice(0, 500));
   return JSON.parse(text);
 }
+/** A POST whose answer may be a refusal: the status, the body drained. */
+async function hotPost(path: string, body: unknown) {
+  const response = await fetch(`${hotOrigin}/api/${path}`, { method: 'POST', body: JSON.stringify(body), signal: AbortSignal.timeout(60_000),
+    headers: { Authorization: `Bearer ${coordinatorToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() } });
+  await response.text();
+  return response.status;
+}
 /** Where results go while `settledDocumentsRead` watches; null otherwise. */
 let resultSink: ((result: any) => void) | null = null;
 /**
@@ -423,7 +430,7 @@ test('integration:hot-paths-read-no-settled-documents — the observation claim,
   assert.equal(worker.peers.length, 1, 'the landability verdict was published');
   assert.equal(worker.peers[0].length, HOT_SETTLED + HOT_OPEN, 'against the whole fleet, settled deliveries as their summaries');
   assert.deepEqual([...job.keys], [], `the observation job read settled documents: ${[...job.keys].slice(0, 5).join(', ')}`);
-  for (const [name, path] of [['/api/status', 'status'], ['/api/board', 'board']] as const) {
+  for (const [name, path] of [['/api/status', 'status'], ['/api/board', 'board'], ['/api/actions', 'actions'], ['/api/delegation', 'delegation'], ['/api/principals', 'principals']] as const) {
     const read = await settledDocumentsRead(() => hotRead(path));
     assert.deepEqual([...read.keys], [], `${name} read ${read.keys.size} settled documents (${read.bytes} bytes)`);
   }
@@ -434,6 +441,14 @@ test('integration:hot-paths-read-no-settled-documents — the observation claim,
   const one = await settledDocumentsRead(() => hotStore.workDocument(settled.key));
   assert.deepEqual([...one.keys], [settled.key]); assert.equal(one.value!.id, settled.id);
   assert.equal(await hotStore.workDocument('GY-404'), undefined);
+  // The routes that look one item up by id or key — a resync and a closed question — read that row
+  // alone, whatever they then answer: an open item's lookup reads no settled document.
+  const candidate = { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 1 };
+  for (const ref of [open.key, open.id]) for (const [path, body] of [['resync', { wake: false }], ['closed-question', { proof: 'closed:hot-path', ...candidate }]] as const) {
+    const read = await settledDocumentsRead(() => hotPost(`work/${encodeURIComponent(ref)}/${path}`, body));
+    assert.ok(read.value < 500, `POST ${path} for ${ref} answered ${read.value}`);
+    assert.deepEqual([...read.keys], [], `POST ${path} for ${ref} read ${read.keys.size} settled documents (${read.bytes} bytes)`);
+  }
 });
 
 // The bound: a fraction of what reading every document takes on the same store. Each path still
@@ -459,7 +474,7 @@ test('integration:drilldown-reads-no-settled-documents — a flow drill-down rea
   // And it answers within a fraction of the full list's time on the same store, each sample a fresh read.
   const listMs = await fullListMs();
   const { warmup, samples } = await steadyState(flowDrilldownRead, { warmup: 2, samples: HOT_PATH_SAMPLES });
-  assertTiming({ name: 'drilldown-reads-no-settled-documents.latency', test: 'integration:drilldown-reads-no-settled-documents', statistic: 'median', fraction: 0.5, budgetMs: Math.round(listMs * HOT_PATH_FRACTION), samples, warmup });
+  assertTiming({ name: `drilldown-reads-no-settled-documents.latency`, test: 'integration:drilldown-reads-no-settled-documents', statistic: 'median', fraction: 0.5, budgetMs: Math.round(listMs * HOT_PATH_FRACTION), samples, warmup });
 });
 
 test('integration:hot-path-latency-bounded — an observation job claim, GET /api/status and GET /api/board each answer within a fraction of the full list\'s time on the same store', async () => {

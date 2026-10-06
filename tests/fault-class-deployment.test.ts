@@ -36,7 +36,7 @@ function memoryStore(work: Work[]) {
     if (sql.includes('kind=$1')) return { rows: events.filter(row => row.kind === params[0]).reverse() };
     throw new Error(`unexpected query ${sql}`);
   } };
-  return { store: { pool, list: async () => work } as unknown as Store, events };
+  return { store: { pool, list: async () => work, fleet: async () => work } as unknown as Store, events };
 }
 
 /**
