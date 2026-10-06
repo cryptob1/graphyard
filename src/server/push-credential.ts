@@ -32,7 +32,7 @@ export async function issuePushCredential(services: Pick<Services, 'engine' | 'g
   const parsed = pushCredentialRequest.safeParse(input);
   demand(parsed.success, 'A push credential request names the lease epoch: {"epoch": N}', 422);
   const { epoch } = parsed.data;
-  const find = async () => (await services.engine.store.list()).find(item => item.id === id || item.key === id);
+  const find = () => services.engine.store.workDocument(id);
   const work = await find();
   mintable(work, actor, epoch, now);
   demand(services.github, 'GitHub integration is required to mint a worker push credential', 503);

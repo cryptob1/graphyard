@@ -391,7 +391,7 @@ export class ProductionWatch {
     } else if (!report.serving) report.aheadError = 'Production commit is unknown: no provider deployment list is configured and the build reports no commit (set GRAPHYARD_BUILD_SHA or RAILWAY_GIT_COMMIT_SHA)';
     else report.aheadError = 'Base branch comparison needs the GitHub App';
 
-    const delivered = (await this.store.list()).filter(item => item.stage === 'done' && item.delivery && now - Date.parse(item.delivery.mergedAt) <= (this.options.windowMs ?? DEPLOYMENT_WINDOW_MS))
+    const delivered = (await this.store.fleet()).filter(item => item.stage === 'done' && item.delivery && now - Date.parse(item.delivery.mergedAt) <= (this.options.windowMs ?? DEPLOYMENT_WINDOW_MS))
       .sort((a, b) => Date.parse(a.delivery!.mergedAt) - Date.parse(b.delivery!.mergedAt));
     report.deployed = []; report.pending = [];
     const inWindow = new Set(delivered.map(item => item.id));

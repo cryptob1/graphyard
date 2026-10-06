@@ -1752,7 +1752,8 @@ export class Engine {
     const replay = async () => (await this.store.pool.query('SELECT result FROM receipts WHERE actor=$1 AND key=$2', [actor.id, derived])).rows[0]?.result as Work | undefined;
     const prior = await replay();
     if (prior) return { assigned: prior, offered: 1, refused: [] as { key: string; reason: string }[], replayed: true };
-    const all = await this.store.list();
+    // Open items whole, settled deliveries as the work index's summary (GY-1376): no settled item has a dispatch to offer.
+    const all = await this.store.fleet();
     const now = new Date((await this.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now);
     const offers = openActions(all, now, ['dispatch'])
       .filter(entry => entry.row.inputs.kind === 'dispatch' && entry.row.inputs.target === 'implementation')
@@ -1792,7 +1793,7 @@ export class Engine {
   async resyncWork(actor: Principal, id: string, input: unknown = {}) {
     demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
     const data = resyncSchema.parse(input ?? {});
-    const before = (await this.store.list()).find(item => item.id === id || item.key === id);
+    const before = await this.store.workDocument(id);
     demand(before, `Unknown work item ${id}`, 404);
     const wake = data.wake !== false;
     // The observation job only exists for an item with a candidate to observe; waking it for one
@@ -1808,7 +1809,7 @@ export class Engine {
     // next cycle, so it waits on no tick; waiting held its decisions step up to the request's 30s
     // timeout per wake, one wake after another.
     if (wake && data.wait !== false) await this.reconcile().catch(error => { console.warn(`reconciliation tick failed during the resync of ${before!.key}: ${error instanceof Error ? error.message : String(error)}`); });
-    const work = (await this.store.list()).find(item => item.id === before!.id)!;
+    const work = (await this.store.workItem(before!.id))!;
     // Without `since`, the claim of the item's own `resync` row is the instant a reading must beat.
     const since = data.since ?? work.actionQueue?.actions.find(row => row.kind === 'resync' && row.state === 'claimed')?.claim?.claimedAt ?? null;
     const observedAt = work.observation?.at ?? null;

@@ -180,7 +180,7 @@ export async function controlPlaneSyncPush(services: { engine: { store: Store };
   const parsed = syncPushRequest.safeParse(input);
   demand(parsed.success, `A sync push request names the epoch and the commit as graphyard sync --push-via-control-plane sends them: ${parsed.success ? '' : parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`, 422);
   const request = parsed.data;
-  const work = (await services.engine.store.list()).find(item => item.id === id || item.key === id);
+  const work = await services.engine.store.workDocument(id);
   demand(work, 'Work not found', 404);
   activeLease(work, actor, request.epoch, now);
   demand(work.submission?.epoch !== request.epoch, `${work.key} epoch ${request.epoch} was submitted; its attempt pushes nothing more`);

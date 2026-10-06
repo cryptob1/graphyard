@@ -24,7 +24,7 @@ export const actionRoutes = defineRoutes('actions', [
   {
     method: 'GET', path: '/api/actions',
     async handle({ url, services, operatorVisible }) {
-      const work: Work[] = operatorVisible(await services.engine.store.list());
+      const work: Work[] = operatorVisible(await services.engine.store.fleet());
       const now = new Date((await services.engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now);
       const kind = url.searchParams.get('kind');
       if (kind) demand((nextActionKinds as readonly string[]).includes(kind), `Unknown action kind ${kind}`, 400);

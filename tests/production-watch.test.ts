@@ -33,7 +33,7 @@ function memoryStore(work: Work[]) {
     if (sql.includes('kind=$1')) return { rows: events.filter(row => row.kind === params[0]).reverse().slice(0, limit) };
     throw new Error(`unexpected query ${sql}`);
   } };
-  return { store: { pool, list: async () => work } as unknown as Store, events, reads };
+  return { store: { pool, list: async () => work, fleet: async () => work } as unknown as Store, events, reads };
 }
 function delivered(count: number): Work[] {
   return Array.from({ length: count }, (_, index) => ({ id: `work-${index + 1}`, key: `GY-${index + 1}`, stage: 'done',
@@ -323,7 +323,7 @@ test('unit:fault-class-deployment-rollout-grace — the deployment class opens n
   const build = { commit: sha(0) as string | null, protocol: buildIdentity({}).protocol, source: 'GRAPHYARD_BUILD_SHA' as const };
   const work = Array.from({ length: merges }, (_, index) => ({ id: `work-${index + 1}`, key: `GY-${9100 + index}`, stage: 'done', delivery: { mergedAt: new Date(mergeAt(index)).toISOString(), mergeSha: repo.commits[index + 1], authorizationRevision: 1 } })) as unknown as Work[];
   const { store } = memoryStore(work);
-  (store as any).list = async () => work.filter(item => Date.parse(item.delivery!.mergedAt) <= clock);
+  (store as any).list = (store as any).fleet = async () => work.filter(item => Date.parse(item.delivery!.mergedAt) <= clock);
   const cadence = new ProductionWatch(store, { provider: null, github: repo.github, build, baseBranch: 'main', now: () => clock });
   const candidateRecord: FaultRecord = { instances: [], open: {}, failing: {} }, baseRecord: FaultRecord = { instances: [], open: {}, failing: {} };
   const deployment = (production: ReturnType<typeof productionSummary>) => statusFaults({ github: {}, production }).filter(fault => fault.faultClass === 'deployment');

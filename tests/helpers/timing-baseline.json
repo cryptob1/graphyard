@@ -615,7 +615,7 @@
     "tests/verify-before-review.test.ts": 6361,
     "tests/verify-sandbox-scope.test.ts": 1325,
     "tests/vite-config-loader.test.ts": 139,
-    "tests/work-snapshot-latency.test.ts": 94943,
+    "tests/work-snapshot-latency.test.ts": 109943,
     "tests/worker-push-credential.test.ts": 4639,
     "tests/worker-push-rights.test.ts": 16375,
     "tests/worker-sandbox.test.ts": 3744,

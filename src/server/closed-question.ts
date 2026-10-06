@@ -55,7 +55,7 @@ export async function judgeClosedQuestion(services: Services, actor: Principal, 
   const replayed = (await services.engine.store.pool.query('SELECT fingerprint, result FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
   if (replayed) { demand(replayed.fingerprint === fingerprint, 'Idempotency key reused with different input'); return replayed.result; }
 
-  const work = refusal((await services.engine.store.list()).find(item => item.id === id || item.key === id), data);
+  const work = refusal(await services.engine.store.workDocument(id), data);
   const question = closedQuestionFor(work, data.proof)!;
   const responder = services.responder;
   demand(responder, `No closed-question responder is configured; ${data.proof} takes its ordinary path`, 503);

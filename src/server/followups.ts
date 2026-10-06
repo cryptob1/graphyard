@@ -61,9 +61,9 @@ export async function recordTriage(services: Services, caller: Principal, id: st
  * applied. The merge creates no item: it adds to one already filed.
  */
 export async function applyTriageClosure(services: Services, actor: Principal, workId: string, input: { kind: 'superseded' | 'obsolete' | 'duplicate'; ref: string | null; reason: string; triageAt: string }, decision: string, key: string) {
-  const all = await services.engine.store.list();
-  const work = all.find(item => item.id === workId); demand(work, 'Work item not found', 404);
-  const target = input.kind === 'duplicate' && input.ref ? all.find(item => item.key === input.ref) : undefined;
+  const work = await services.engine.store.workDocument(workId); demand(work, 'Work item not found', 404);
+  const found = input.kind === 'duplicate' && input.ref ? await services.engine.store.workDocument(input.ref) : undefined;
+  const target = found?.key === input.ref ? found : undefined;
   const parent = target ? followUpParent(target) : null;
   if (target && parent && target.stage !== 'done') {
     const findings = followUpParent(work!) ? followUpEntries(work!) : [{ path: null, text: `${work!.key}: ${work!.title}`.slice(0, 2000) }];

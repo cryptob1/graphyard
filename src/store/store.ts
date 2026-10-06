@@ -7,6 +7,7 @@ import { noteSaved } from './locked-read.js';
 import { advisoryLocks } from './locks.js';
 import { StaleWrite, lockItem, staleWriteAttempts, type StoreTransactionOptions } from './item-lock.js';
 import { saveDocument } from './document-write.js';
+import { workDocument } from './bounded-snapshot.js';
 export { saveDocument, rewriteDocument } from './document-write.js';
 import { runStartupMigration } from './migration-locks.js';
 // The startup migration's engine lives beside its locks and its recorded state (migration-locks.ts);
@@ -135,6 +136,27 @@ export class Store {
   /** One item's document by its id, without reading the fleet (GY-1052). */
   async workItem(id: string): Promise<Work | undefined> {
     return (await this.pool.query('SELECT document FROM work_items WHERE id=$1', [id])).rows[0]?.document;
+  }
+  /** One item's whole document by id or display key, matched on the work index so no other document is read (GY-1376). */
+  async workDocument(idOrKey: string): Promise<Work | undefined> { return (await workDocument(this.pool, idOrKey)) ?? undefined; }
+  /**
+   * The fleet for a per-request or per-job path (GY-1376): every open item's document whole and each
+   * settled delivery as the work index's stored summary, as the coordination snapshot reads them, so
+   * no settled document is read at all. `list()` read all of them (20.7 MB, ~23 s in production) on
+   * every observation claim, status and board read. `limit` keeps the first items by number;
+   * `reports` reads on the report pool.
+   */
+  async fleet(options: { limit?: number; reports?: boolean } = {}): Promise<Work[]> {
+    const client = await (options.reports ? this.reportPool : this.pool).connect(), limit = options.limit ?? null;
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      const settled = (await client.query('SELECT number, summary AS document FROM work_index WHERE settled ORDER BY number LIMIT $1', [limit])).rows;
+      const live = (await client.query('SELECT w.number, w.document FROM work_items w WHERE NOT EXISTS (SELECT 1 FROM work_index i WHERE i.id = w.id AND i.settled) ORDER BY w.number LIMIT $1', [limit])).rows;
+      await client.query('COMMIT');
+      const rows = [...settled, ...live].sort((a, b) => Number(a.number) - Number(b.number));
+      return (limit === null ? rows : rows.slice(0, limit)).map(row => row.document);
+    } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
+    finally { client.release(); }
   }
   async workSnapshot(): Promise<{ work: Work[]; now: string; jobs: IntegrationJob[] }> {
     const row = (await this.pool.query("SELECT COALESCE(jsonb_agg(document ORDER BY number), '[]'::jsonb) AS work, statement_timestamp() AS observed_at, (SELECT COALESCE(jsonb_agg(jsonb_build_object('work_id',work_id,'available_at',available_at,'locked_until',locked_until,'error',error,'held_until',held_until,'deferred_reason',deferred_reason,'unobserved',unobserved)), '[]'::jsonb) FROM jobs) AS jobs FROM work_items")).rows[0];

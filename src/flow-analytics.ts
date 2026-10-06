@@ -530,7 +530,9 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   // One extra work item and one extra deployment probe their own scan bounds, so an
   // exhausted bound is reported as partial coverage instead of silently dropping the
   // newest records.
-  const workRows: Work[] = (await store.reportPool.query('SELECT document FROM work_items ORDER BY number LIMIT $1', [flowLimits.work + 1])).rows.map(r => r.document);
+  // Open items whole and each settled delivery as the work index's summary (GY-1376): the report
+  // and every drill-down read no finished item's document, only the decision state it draws from.
+  const workRows: Work[] = await store.fleet({ limit: flowLimits.work + 1, reports: true });
   const workTruncated = workRows.length > flowLimits.work;
   const work: Work[] = workRows.slice(0, flowLimits.work);
   const included = work.filter(item => (!query.type || item.type === query.type) && (!query.slice || workSlices(item).slices.includes(query.slice)));

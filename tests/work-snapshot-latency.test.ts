@@ -9,6 +9,8 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store, storeConnectionTimeoutMs, storeStatementTimeoutMs } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
+import { processJob } from '../src/github.js';
+import { invalidateFlowReports } from '../src/flow-analytics.js';
 import { evidenceIndependenceRefusals, type Evidence, type Work } from '../src/model.js';
 import { reconcileAutoDispatch, type DispatchRequest } from '../src/model/dispatch.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
@@ -93,6 +95,8 @@ before(async () => {
   config = masterConfigSchema.parse({ version: 1, url: origin, credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
 });
 after(async () => {
+  if (hotHttp) await new Promise<void>(resolve => hotHttp.close(() => resolve()));
+  if (hotStore) await hotStore.close();
   if (http) await new Promise<void>(resolve => http.close(() => resolve()));
   if (store) await store.close(); if (database) await database.stop();
   if (directory) await rm(directory, { recursive: true, force: true });
@@ -307,4 +311,182 @@ test('integration:cycle-within-interval — a coordination cycle over the 100-it
   assert.equal(regressed.withinInterval, false); assert.equal(regressed.overruns, (overran ? 1 : 0) + 1); assert.deepEqual(regressed.lastOverrun, { cycle: slow.cycle, at: slow.at, durationMs: slow.durationMs, childWaitMs: slow.childWaitMs, workMs: slow.workMs });
   assert.equal(regressed.p95Ms, slow.durationMs);
   assert.deepEqual(cycleBudget({ metrics: [] }, intervalMs), { intervalMs, measured: 0, lastCycle: null, withinInterval: null, p95Ms: null, overruns: 0, lastOverrun: null });
+});
+
+// GY-1376: the hot paths on a ledger whose settled deliveries dwarf its open work, as production's
+// did (1,375 items, 20.7 MB): 1,000 settled deliveries, each carrying the histories a finished item
+// keeps (every attempt, every finished session, superseded evidence and dispatch requests), and
+// 10 open items. Every finished history entry carries `settled-history:<key>`, which only a settled
+// item's whole document holds: the work index's summary of it drops those histories.
+const HOT_SETTLED = 1_000, HOT_OPEN = 10, SETTLED_HISTORY = 80;
+const settledMarker = /settled-history:(GY-S\d+)/g;
+let hotStore: Store; let hotHttp: ReturnType<typeof server>; let hotOrigin: string;
+
+function settledItem(index: number, now: Date): Work {
+  const work = ledgerItem(index, now) as any, key = `GY-S${index + 1}`, at = new Date(now.getTime() - 3_600_000).toISOString();
+  const history = (n: number) => `settled-history:${key} entry ${n}`;
+  Object.assign(work, {
+    key, stage: 'done', gates: work.gates.map((gate: any) => ({ ...gate, passed: true, reasons: [] })),
+    delivery: { mergedAt: at, mergeSha: sha(index, 99), authorizationRevision: 400 },
+    evidence: work.evidence.map((entry: any) => ({ ...entry, artifacts: [], scopeFiles: entry.scopeFiles.slice(0, 2) })),
+    observation: { ...work.observation, merged: true, prState: 'closed', scopeFiles: work.observation.scopeFiles.slice(0, 10) },
+    pipeline: { submittedAt: at, reworkRounds: 1, attempts: Array.from({ length: SETTLED_HISTORY }, (_, n) => ({ epoch: n + 1, owner: 'worker-a', claimedAt: at, endedAt: at, end: 'expired', note: history(n) })) },
+    sessions: Array.from({ length: SETTLED_HISTORY }, (_, n) => ({ id: `worker-a:${n}`, kind: 'implementation', state: 'finished', startedAt: at, endedAt: at, updatedAt: at, outcome: history(n) })),
+  });
+  return work;
+}
+function openItem(index: number, now: Date): Work {
+  const work = ledgerItem(index, now) as any;
+  work.key = `GY-O${index + 1}`; work.stage = (['build', 'review', 'test', 'merge'] as const)[index % 4];
+  return work;
+}
+
+// Seeded on the first hot-path test's demand, so the snapshot tests above never wait on it.
+let seeded: Promise<void> | null = null;
+const hotPaths = () => seeded ??= (async () => {
+  await database.createDatabase('graphyard_hot_paths');
+  watchResults((store.pool as any).Client);
+  hotStore = new Store((store.pool as any).options.connectionString.replace(/graphyard_snapshot_test$/, 'graphyard_hot_paths')); await hotStore.init();
+  const now = new Date();
+  for (let index = 0; index < HOT_SETTLED; index++) { const item = settledItem(index, now); await hotStore.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [item.id, JSON.stringify(item)]); }
+  for (let index = 0; index < HOT_OPEN; index++) {
+    const item = openItem(index, now);
+    await hotStore.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [item.id, JSON.stringify(item)]);
+    await hotStore.pool.query('INSERT INTO jobs(work_id) VALUES($1)', [item.id]);
+  }
+  hotHttp = server(new Engine(hotStore, [15368], 120, 'owner/project'), [{ id: 'coordinator', role: 'coordinator', token: coordinatorToken }]);
+  await new Promise<void>(resolve => hotHttp.listen(0, '127.0.0.1', resolve));
+  hotOrigin = `http://127.0.0.1:${(hotHttp.address() as AddressInfo).port}`;
+})();
+
+async function hotRead(path: string) {
+  const response = await fetch(`${hotOrigin}/api/${path}`, { headers: { Authorization: `Bearer ${coordinatorToken}` }, signal: AbortSignal.timeout(60_000) });
+  const text = await response.text(); assert.equal(response.status, 200, text.slice(0, 500));
+  return JSON.parse(text);
+}
+/** A POST whose answer may be a refusal: the status, the body drained. */
+async function hotPost(path: string, body: unknown) {
+  const response = await fetch(`${hotOrigin}/api/${path}`, { method: 'POST', body: JSON.stringify(body), signal: AbortSignal.timeout(60_000),
+    headers: { Authorization: `Bearer ${coordinatorToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() } });
+  await response.text();
+  return response.status;
+}
+/** Where results go while `settledDocumentsRead` watches; null otherwise. */
+let resultSink: ((result: any) => void) | null = null;
+/**
+ * Every result a pg client returns passes `resultSink`. Installed before the hot-path store opens
+ * a connection: each connection binds `query` when the pool opens it (statements.ts), so a patch
+ * made later would never see that connection's statements.
+ */
+function watchResults(Client: { prototype: any }) {
+  const original = Client.prototype.query as (...args: any[]) => any;
+  Client.prototype.query = function (this: unknown, ...args: any[]) {
+    if (typeof args[0]?.submit === 'function') return original.apply(this, args);
+    const callback = typeof args.at(-1) === 'function' ? args.pop() : null;
+    const promise = original.apply(this, args).then((result: any) => { resultSink?.(result); return result; });
+    if (!callback) return promise;
+    promise.then((result: any) => callback(null, result), (error: unknown) => callback(error));
+  };
+}
+/**
+ * The settled documents `run` read, by key, and the bytes of the rows that carried them: every
+ * result any pool's client returned while it ran is scanned for the marker only a settled item's
+ * whole document holds, so a read of one shows up whichever path, pool or statement made it.
+ */
+async function settledDocumentsRead<T>(run: () => Promise<T>) {
+  const keys = new Set<string>(); let bytes = 0;
+  resultSink = result => {
+    for (const each of [result].flat()) for (const row of each?.rows ?? []) {
+      const text = JSON.stringify(row), found = [...text.matchAll(settledMarker)];
+      for (const match of found) keys.add(match[1]);
+      if (found.length) bytes += text.length;
+    }
+  };
+  try { return { value: await run(), keys, bytes }; } finally { resultSink = null; }
+}
+/** One observation job run as the server's workers run it, against the real store: the claim order, the claim, and the landability publication with its peers. */
+function observationWorker() {
+  const peers: Work[][] = [];
+  const engine = Object.assign(Object.create(new Engine(hotStore, [], 120, 'owner/project')), { observe: async (id: string) => (await hotStore.workItem(id))!, reconcileLanded: async () => {} });
+  const github = {
+    observe: async (work: Work) => work.observation!, publish: async () => {},
+    publishLandable: async (_target: Work, fleet: Work[]) => { peers.push(fleet); return { skipped: true }; },
+  };
+  return { peers, run: () => processJob(engine, github as any) };
+}
+const flowDrilldownRead = () => { invalidateFlowReports(hotStore); return hotRead('analytics/flow/drilldown?window=30&metric=throughput'); };
+
+test('integration:hot-paths-read-no-settled-documents — the observation claim, landability peers, /api/status, /api/board and lookups by id or key read no settled delivery\'s document; GET /api/work still answers whole documents', async () => {
+  await hotPaths();
+  assert.equal(Number((await hotStore.pool.query('SELECT count(*) FROM work_index WHERE settled')).rows[0].count), HOT_SETTLED, 'every seeded delivery is settled');
+  // The control: the full list reads every settled document, and the scan sees each one.
+  const full = await settledDocumentsRead(() => hotRead('work'));
+  assert.equal(full.value.length, HOT_SETTLED + HOT_OPEN); assert.equal(full.keys.size, HOT_SETTLED, 'GET /api/work keeps its full-document contract');
+  assert.ok(full.value.filter((item: Work) => item.stage === 'done').every((item: any) => item.pipeline.attempts.length === SETTLED_HISTORY));
+  // The observation job: its claim order and the landability peers it publishes against.
+  const worker = observationWorker();
+  const job = await settledDocumentsRead(worker.run);
+  assert.equal(job.value, true, 'an open item\'s job was claimed and run');
+  assert.equal(worker.peers.length, 1, 'the landability verdict was published');
+  assert.equal(worker.peers[0].length, HOT_SETTLED + HOT_OPEN, 'against the whole fleet, settled deliveries as their summaries');
+  assert.deepEqual([...job.keys], [], `the observation job read settled documents: ${[...job.keys].slice(0, 5).join(', ')}`);
+  for (const [name, path] of [['/api/status', 'status'], ['/api/board', 'board'], ['/api/actions', 'actions'], ['/api/delegation', 'delegation'], ['/api/principals', 'principals']] as const) {
+    const read = await settledDocumentsRead(() => hotRead(path));
+    assert.deepEqual([...read.keys], [], `${name} read ${read.keys.size} settled documents (${read.bytes} bytes)`);
+  }
+  // A lookup by key or id reads that one row: an open item's reads none of the settled documents,
+  // a settled item's reads its own and no other.
+  const open = full.value.find((item: Work) => item.stage !== 'done') as Work, settled = full.value.find((item: Work) => item.stage === 'done') as Work;
+  for (const ref of [open.key, open.id]) assert.deepEqual([...(await settledDocumentsRead(() => hotStore.workDocument(ref))).keys], []);
+  const one = await settledDocumentsRead(() => hotStore.workDocument(settled.key));
+  assert.deepEqual([...one.keys], [settled.key]); assert.equal(one.value!.id, settled.id);
+  assert.equal(await hotStore.workDocument('GY-404'), undefined);
+  // The routes that look one item up by id or key — a resync and a closed question — read that row
+  // alone, whatever they then answer: an open item's lookup reads no settled document.
+  const candidate = { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 1 };
+  for (const ref of [open.key, open.id]) for (const [path, body] of [['resync', { wake: false }], ['closed-question', { proof: 'closed:hot-path', ...candidate }]] as const) {
+    const read = await settledDocumentsRead(() => hotPost(`work/${encodeURIComponent(ref)}/${path}`, body));
+    assert.ok(read.value < 500, `POST ${path} for ${ref} answered ${read.value}`);
+    assert.deepEqual([...read.keys], [], `POST ${path} for ${ref} read ${read.keys.size} settled documents (${read.bytes} bytes)`);
+  }
+});
+
+// The bound: a fraction of what reading every document takes on the same store. Each path still
+// reads every open document and the index's summary of each settled one, so it is not free; it
+// must not grow with the settled items' histories.
+const HOT_PATH_FRACTION = 0.5, HOT_PATH_SAMPLES = 9;
+async function fullListMs() {
+  const { samples } = await steadyState(() => hotStore.list(), { warmup: 1, samples: 3 });
+  return [...samples].sort((a, b) => a - b)[1];
+}
+
+test('integration:drilldown-reads-no-settled-documents — a flow drill-down reads the window\'s items from the work index, never a settled delivery\'s document, and answers within a fraction of the full list\'s time', async () => {
+  await hotPaths();
+  for (const metric of ['throughput', 'lead-time', 'steps', 'wip']) {
+    invalidateFlowReports(hotStore);
+    const read = await settledDocumentsRead(() => hotRead(`analytics/flow/drilldown?window=30&metric=${metric}`));
+    assert.equal(read.value.metric, metric);
+    assert.deepEqual([...read.keys], [], `the ${metric} drill-down read ${read.keys.size} settled documents (${read.bytes} bytes)`);
+  }
+  // The report the drill-downs share a dataset with reads the same way.
+  invalidateFlowReports(hotStore);
+  assert.deepEqual([...(await settledDocumentsRead(() => hotRead('analytics/flow?window=30'))).keys], []);
+  // And it answers within a fraction of the full list's time on the same store, each sample a fresh read.
+  const listMs = await fullListMs();
+  const { warmup, samples } = await steadyState(flowDrilldownRead, { warmup: 2, samples: HOT_PATH_SAMPLES });
+  assertTiming({ name: `drilldown-reads-no-settled-documents.latency`, test: 'integration:drilldown-reads-no-settled-documents', statistic: 'median', fraction: 0.5, budgetMs: Math.round(listMs * HOT_PATH_FRACTION), samples, warmup });
+});
+
+test('integration:hot-path-latency-bounded — an observation job claim, GET /api/status and GET /api/board each answer within a fraction of the full list\'s time on the same store', async () => {
+  await hotPaths();
+  const listMs = await fullListMs(), budgetMs = Math.round(listMs * HOT_PATH_FRACTION);
+  // The claim alone: the fleet read its order is computed from, and the claim it orders. No job is
+  // due, so each sample is the claim every observation worker makes, not what one job then does.
+  await hotStore.pool.query("UPDATE jobs SET available_at = clock_timestamp() + interval '1 hour'");
+  const claim = async () => assert.equal(await observationWorker().run(), false, 'no job was due to claim');
+  for (const [name, read] of [['observation-claim', claim], ['status', () => hotRead('status')], ['board', () => hotRead('board')]] as const) {
+    const { warmup, samples } = await steadyState(read, { warmup: 2, samples: HOT_PATH_SAMPLES });
+    assertTiming({ name: `hot-path-latency-bounded.${name}`, test: 'integration:hot-path-latency-bounded', statistic: 'median', fraction: 0.5, budgetMs, samples, warmup });
+  }
+  await hotStore.pool.query('UPDATE jobs SET available_at = clock_timestamp()');
 });

@@ -2809,7 +2809,8 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   // pre-claim snapshot, so it can name an item already out of the band — harmless, priority being
   // advisory and the publication guard rechecking ownership. A job an observation webhook made
   // due is claimed ahead of all of it by `takeJob` itself (GY-806).
-  const all = await engine.store.list();
+  // Open items whole, settled deliveries as the work index's summary (GY-1376): never every document.
+  const all = await engine.store.fleet();
   // Review-requested items past half their bound join the protected prefix (GY-1114).
   const plan = observationClaim(all, Date.now(), budgetTight(github.budget?.()));
   const job = await engine.store.takeJob(plan.order, plan.headCount);
@@ -3037,7 +3038,7 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
           // Publishing before gateMerge ensures GitHub sees the required check satisfied at enqueue time (GY-1050).
           // Recomputing with the live store snapshot covers peer changes since job start (GY-1050).
           if (typeof github.publishLandable === 'function') {
-            const peers = await engine.store.list();
+            const peers = await engine.store.fleet();
             const target = work;
             const landable = await github.publishLandable(target, peers.map(item => item.id === target.id ? target : item), success => guard(target, success)(), true);
             if (landable?.skipped) {

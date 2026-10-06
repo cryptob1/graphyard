@@ -325,7 +325,7 @@ test('unit:webhook-driven-observation — a check_run delivery re-observes its i
   await store!.pool.query('UPDATE jobs SET available_at=now() WHERE work_id=$1', [woken.id]);
   const asMerging = (await store!.list()).map(entry => entry.id !== woken.id ? entry : { ...entry, stage: 'merge' as const, violations: [], leadHold: undefined,
     gates: entry.gates.map(gate => ({ ...gate, passed: true })), mergeAuthorization: { sha: entry.candidate!.sha, baseSha: entry.candidate!.baseSha, policyRevision: entry.policyRevision, at: new Date().toISOString() } } as Work);
-  t.mock.method(engine.store, 'list', async () => asMerging, { times: 1 });
+  t.mock.method(engine.store, 'fleet', async () => asMerging, { times: 1 });
   const beforeMerge = api.requests.length;
   assert.equal(await processJob(engine, github), true, 'the merge-band item was claimed');
   assert.ok(api.requests.length > beforeMerge, 'and observed, not skipped');
@@ -338,7 +338,7 @@ test('unit:webhook-driven-observation — a check_run delivery re-observes its i
   const preClaim = await store!.list();
   const merging = preClaim.map(entry => asMerging.find(other => other.id === entry.id && entry.id === woken.id) ?? entry);
   let reads = 0, itemReads = 0;
-  t.mock.method(engine.store, 'list', async () => { reads++; return preClaim; }, { times: 1 });
+  t.mock.method(engine.store, 'fleet', async () => { reads++; return preClaim; }, { times: 1 });
   t.mock.method(engine.store, 'workItem', async (id: string) => { itemReads++; return merging.find(entry => entry.id === id); }, { times: 1 });
   const beforeRace = api.requests.length;
   assert.equal(await processJob(engine, github), true, 'the item was claimed');
@@ -349,7 +349,7 @@ test('unit:webhook-driven-observation — a check_run delivery re-observes its i
   // A skip outside the merge band costs one read of the claimed item by its id (GY-1052): neither the
   // fleet nor anything else is read again, so an early-due poll never pays a second full fleet read.
   await store!.pool.query("UPDATE jobs SET available_at=now(), refreshed_until=now()+interval '1 hour', claimed_generation=generation, webhook_at=NULL WHERE work_id=$1", [woken.id]);
-  const fleetReads = t.mock.method(engine.store, 'list'), itemRead = t.mock.method(engine.store, 'workItem');
+  const fleetReads = t.mock.method(engine.store, 'fleet'), itemRead = t.mock.method(engine.store, 'workItem');
   const beforeSkip = api.requests.length;
   assert.equal(await processJob(engine, github), true, 'the poll was claimed');
   assert.equal(api.requests.length, beforeSkip, 'and skipped');

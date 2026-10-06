@@ -363,7 +363,7 @@ test('manual:review-followups-triaged GY-1050.6: processJob stops and requeues w
     loadParallelTips: async () => 0,
     loadRerunFailedChecks: async () => 0,
     store: {
-      list: async () => [work],
+      fleet: async () => [work],
       takeJob: async () => ({ work_id: work.id, token: 'tok', claimed_generation: 1 }),
       finishJob: async (id: string, token: string, err?: string, retry?: boolean, avail?: number, obs?: boolean) => {
         finishedArgs = { id, token, err, retry, obs };

@@ -512,8 +512,9 @@ export async function judgementToWork(engine: Engine, actor: Principal, judgemen
   const row = (await engine.store.pool.query("SELECT seq, actor, payload FROM events WHERE kind='judgement.recorded' AND payload->>'id'=$1", [judgementId])).rows[0];
   demand(row, 'Judgement not found', 404);
   const judgement = row.payload as Omit<Judgement, 'item' | 'seq'>;
-  const existing = (await engine.store.list()).find(item => item.origin?.judgement?.id === judgementId);
-  if (existing) return existing;
+  // The summary keeps `origin` (GY-1376): find the item without reading every document, then answer with its own.
+  const existing = (await engine.store.fleet()).find(item => item.origin?.judgement?.id === judgementId);
+  if (existing) return (await engine.store.workItem(existing.id)) ?? existing;
   const subject = judgement.work ? `${judgement.work.key} (${judgement.work.title})` : judgement.page!;
   const verdict = judgementVerdictLabel[judgement.verdict];
   return engine.execute(actor, 'create', null, {
