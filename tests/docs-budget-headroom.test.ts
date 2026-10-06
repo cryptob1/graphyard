@@ -47,10 +47,10 @@ test('unit:docs-headroom-kept — at 11,700 of 12,000 words master status raises
   const item = filed[0].input;
   assert.ok(item.title.startsWith(docsTrimTitle), item.title);
   assert.match(item.description, /Start with the largest pages: docs\/master-agent\.md \(700\)/);
-  assert.match(item.description, /do not remove any documented behaviour/);
+  assert.match(item.description, /drop detail-level documentation: the target wins, so this needs no human decision/);
   assert.equal(item.criteria.length, 1);
   assert.match(item.criteria[0].text, /at most 11400 words \(at least 5% under the 12000-word budget\)/);
-  assert.match(item.criteria[0].text, /every behaviour, command, configuration and API documented before the change is still documented after it/);
+  assert.match(item.criteria[0].text, /detail-level documentation may be dropped to reach it; .*every CLI command and HTTP route documented before the change stays named at least once$/);
   assert.deepEqual(item.criteria[0].proofs, [docsBudgetProof]);
   assert.equal(state.actions[docsTrimActionKey].work, 'GY-900');
   // A fresh loop (the action history lost) still files nothing while the open item stands.

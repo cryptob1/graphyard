@@ -25,7 +25,7 @@ A required check failure the base branch head fails too is a base failure: the l
 
 ## Documentation
 
-`docs/README.md`, `docs/protocol.md`: generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; [`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files-never-conflict) exempts them from the regression guard. README.md and `docs/` keep `graphyard.json`'s `wordBudget` (12,000 words, 1,200 per page; `tests/docs-budget.test.ts`), one topic per page. A page over its cap fails CI; the total only warns, and at 97% the loop files one trim item.
+`docs/README.md`, `docs/protocol.md`: generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; [`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files-never-conflict) exempts them from the regression guard. README.md and `docs/` keep `graphyard.json`'s `wordBudget` (12,000 words, 1,200 per page; `tests/docs-budget.test.ts`), one topic per page. A page over its cap fails CI; the total only warns, and at 97% the loop files one trim item, which may drop detail but keeps every CLI command and HTTP route named, so it never parks on the operator.
 
 ### Documentation that rarely conflicts
 
