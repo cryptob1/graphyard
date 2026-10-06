@@ -109,9 +109,12 @@ export function pidProbeable(lock: Pick<NonNullable<DaemonState['lock']>, 'pidNa
  * can probe the lock's namespace and does not, and null when it cannot probe it (a confined agent
  * session, GY-1369), where a pid it cannot see says nothing about the host.
  */
-export function hostPidProbe(pid: number, namespace: () => string | null = pidNamespace, recorded?: string | null): boolean | null {
+export function lockPidProbe(pid: number, namespace: () => string | null = pidNamespace, recorded?: string | null): boolean | null {
   return pidProbeable({ pidNamespace: recorded }, namespace()) ? liveProcess(pid) : null;
 }
+
+/** The probe's earlier name, kept for existing importers. */
+export const hostPidProbe = lockPidProbe;
 
 /**
  * Whether the loop is cycling, from its own cursor. Nothing else in the installation notices a
@@ -122,7 +125,7 @@ export function hostPidProbe(pid: number, namespace: () => string | null = pidNa
  * a child (a provider to look at), so nobody restarts a loop that is still cycling. A reader that
  * cannot probe the pid (outside the lock's PID namespace) judges by the stall bound alone and says so.
  */
-export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCycleAt'> & Partial<Pick<DaemonState, 'failures' | 'metrics'>>, now: number, intervalMs: number, hostId?: string, probe: (pid: number, recorded?: string | null) => boolean | null = (pid, recorded) => hostPidProbe(pid, pidNamespace, recorded)): LoopLiveness {
+export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCycleAt'> & Partial<Pick<DaemonState, 'failures' | 'metrics'>>, now: number, intervalMs: number, hostId?: string, probe: (pid: number, recorded?: string | null) => boolean | null = (pid, recorded) => lockPidProbe(pid, pidNamespace, recorded)): LoopLiveness {
   const cost = cycleCost(state.metrics?.at(-1) ?? null, intervalMs);
   const lastCycleAt = state.lastCycleAt ? Date.parse(state.lastCycleAt) : Number.NaN;
   const lagMs = Number.isFinite(lastCycleAt) ? Math.max(0, now - lastCycleAt) : null;
