@@ -14,7 +14,7 @@ import { changedTestFiles, judgeTimingCompanion, timingBaselineCompanion, timing
 import type { GitHubCacheStore } from './github-cache.js';
 import type { GitHubChargeLedger } from './github-charges.js';
 import { nextAction } from './model/next-action.js';
-import { applyMainGuardRevert, runMainGuard, type CommitVerdict, type FileChange, type MainCommit, type MainGuardRevert, type MainGuardTick } from './main-guard.js';
+import { applyMainGuardRevert, mainGuardReadiness, runMainGuard, type CommitVerdict, type MainGuardReadiness, type FileChange, type MainCommit, type MainGuardRevert, type MainGuardTick } from './main-guard.js';
 import { lockedWork } from './store/locked-read.js';
 import { save } from './store/store.js';
 export { CHECK_NAME, LANDABLE_CHECK };
@@ -2597,6 +2597,15 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
 }
 /** A file of a GitHub compare or pull request file list, as the main guard compares them. */
 const fileChange = (file: any): FileChange => ({ filename: String(file?.filename ?? ''), status: String(file?.status ?? ''), previousFilename: typeof file?.previous_filename === 'string' ? file.previous_filename : null, patch: typeof file?.patch === 'string' ? file.patch : null });
+/** The required checks the main guard judges main's commits by: those of the latest delivered item's policy. */
+export async function mainGuardRequired(pool: Pick<Engine['store']['pool'], 'query'>): Promise<string[]> {
+  return (await pool.query("SELECT document->'policy'->'checks' AS checks FROM work_items WHERE document->>'stage'='done' AND document ? 'delivery' ORDER BY number DESC LIMIT 1")).rows[0]?.checks ?? [];
+}
+/** What `/api/status` reports of the main guard (GY-1335): whether it is armed and the revert approver it would land a revert with. */
+export async function mainGuardStatus(pool: Pick<Engine['store']['pool'], 'query'>, github: Pick<GitHub, 'config' | 'mainHistory'> | null): Promise<MainGuardReadiness> {
+  const runs = !!github && typeof github.mainHistory === 'function';
+  return mainGuardReadiness({ github: runs, required: runs ? await mainGuardRequired(pool) : [], revertApprover: github?.config.revertApprover?.appId ?? null });
+}
 /** How often the job loop runs the main guard (see guardGitHubMain). */
 export const mainGuardIntervalMs = 30_000;
 /**
@@ -2607,7 +2616,7 @@ export const mainGuardIntervalMs = 30_000;
  */
 export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'evaluate'>, github: Pick<GitHub, 'mainHistory' | 'commitChecks' | 'openMainRevert' | 'revertPull' | 'mergeChanges' | 'revertChanges' | 'approveRevert' | 'mergeRevert' | 'closeRevert'>, now = new Date(), verdicts = new Map<string, CommitVerdict>(), approved = new Set<string>()): Promise<MainGuardTick> {
   const pool = engine.store.pool;
-  const required: string[] = (await pool.query("SELECT document->'policy'->'checks' AS checks FROM work_items WHERE document->>'stage'='done' AND document ? 'delivery' ORDER BY number DESC LIMIT 1")).rows[0]?.checks ?? [];
+  const required = await mainGuardRequired(pool);
   return runMainGuard({
     reverting: async () => (await pool.query("SELECT document FROM work_items WHERE document->'mainGuardReverts' @> '[{\"state\":\"opened\"}]'::jsonb ORDER BY number")).rows.map(row => row.document),
     culprit: async mergeSha => (await pool.query("SELECT document FROM work_items WHERE document->'delivery'->>'mergeSha'=$1 OR document->'mainGuardReverts' @> $2::jsonb ORDER BY number DESC LIMIT 1", [mergeSha, JSON.stringify([{ mergeSha }])])).rows[0]?.document ?? null,

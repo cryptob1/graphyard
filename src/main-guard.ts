@@ -276,14 +276,14 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
       // Only a revert that is exactly the inverse of the merge it names is approved or merged, and
       // a head is verified and approved once: later ticks only ask GitHub to merge it.
       const approval = `${pr}@${head}`;
-      let refusal: string | null = null;
+      let refusal: string | null = null, unconfigured = false;
       if (!approved.has(approval)) {
         let refused: string | null;
         try { refused = revertInverseRefusal(await ports.mergeChanges(revert.mergeSha), await ports.revertChanges(pr)); }
         catch (error) { refused = `its diff could not be compared with the merge's: ${message(error)}`; }
         if (refused) { await abandon(work, revert, 'not-inverse', `revert PR #${pr} is not exactly the inverse of merge ${revert.mergeSha.slice(0, 12)}, so it is neither approved nor merged: ${refused}`); continue; }
         try {
-          await ports.approveRevert(pr, head, `Graphyard's main guard: this revert is exactly the inverse of ${work.key}'s merge ${revert.mergeSha} and its required checks passed at ${head}.`);
+          unconfigured = await ports.approveRevert(pr, head, `Graphyard's main guard: this revert is exactly the inverse of ${work.key}'s merge ${revert.mergeSha} and its required checks passed at ${head}.`) === 'unconfigured';
           approved.add(approval);
         } catch (error) { refusal = `the revert approver could not approve revert PR #${pr}: ${message(error)}`; }
       }
@@ -291,7 +291,11 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
       // approval refused while the merge did not land, is retried from a fresh approval next tick.
       let sha: string | null = null;
       try { sha = await ports.mergeRevert(work, { pr, head, failing: revert.failing }); }
-      catch (error) { refusal = [refusal, `GitHub refused to merge revert PR #${pr}: ${message(error)}`].filter(Boolean).join('; '); }
+      catch (error) {
+        // GY-1335: with no revert approver App nobody but the last pusher stands behind the merge, so
+        // the refusal names the missing configuration rather than reading as a transient failure.
+        refusal = [refusal, `GitHub refused to merge revert PR #${pr}: ${message(error)}`, unconfigured ? `no revert approver App is configured (${revertApproverVariables.join(', ')}), so nobody other than the last pusher approved it` : null].filter(Boolean).join('; ');
+      }
       if (sha) { await merged(sha); continue; }
       if (!refusal) continue;
       approved.delete(approval);
@@ -364,4 +368,31 @@ export function mainGuardAttention(all: Pick<Work, 'key' | 'mainGuardReverts'>[]
       recovered: `${head} Main's ${red.join(', ')} passed again; nothing is owed.`,
     };
   }));
+}
+
+/** The deployment variables that register the independent revert approver App (GY-1291). */
+export const revertApproverVariables = ['GRAPHYARD_REVERT_APPROVER_APP_ID', 'GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID', 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY'] as const;
+/** What the control plane reports of the main guard on `/api/status` (GY-1335). */
+export interface MainGuardReadiness {
+  /** The guard runs: GitHub delivery with an App, and required checks to judge main's commits by. */
+  armed: boolean; required: string[];
+  /** The revert approver App's id, or null when none is configured. */
+  revertApprover: number | null;
+  /** Why the guard cannot land a revert as configured; null when nothing is owed. */
+  attention: string | null;
+}
+/**
+ * Whether the main guard can land a revert (GY-1335). Branch protection on main requires an
+ * approval from someone other than the last pusher, and the control-plane App pushes every revert,
+ * so without the revert approver App every revert merge is refused ("New changes require approval
+ * from someone other than the last pusher") and main stays red until an unrelated merge re-runs
+ * CI. That is a configuration fault known before any merge breaks main, so doctor and master
+ * status name it while the guard is armed, and stop once the approver is configured.
+ */
+export function mainGuardReadiness(facts: { github: boolean; required: readonly string[]; revertApprover: number | null }): MainGuardReadiness {
+  const armed = facts.github && facts.required.length > 0;
+  const attention = armed && facts.revertApprover === null
+    ? `The main guard's revert approver is missing: set ${revertApproverVariables.join(', ')} (or _PRIVATE_KEY_FILE) on the control plane to an App other than the control-plane App, e.g. the reviewer App. Main's last-push-approval rule (require_last_push_approval) refuses every revert merge the control-plane App pushed without another's approval, so after a merge that breaks main its required checks (${facts.required.join(', ')}) would stay red until an unrelated merge re-runs CI`
+    : null;
+  return { armed, required: [...facts.required], revertApprover: facts.revertApprover, attention };
 }

@@ -261,7 +261,7 @@ const fixture = (n: number) => `src/soak/item-${n}-fixture.ts`;
  * revert fails its own checks, and main is fixed forward by hand `fixAfterMs` after the guard gives
  * that revert up.
  */
-interface MainGuardDay { breaks: number; abandons: number; fixAfterMs: number }
+interface MainGuardDay { breaks: number; abandons?: number; fixAfterMs: number }
 /** One diagnostician run the soak's fake started: whose, which attempt, when, and whether its provider refused it for its limit. */
 interface DiagnosisRun { subject: string; attempt: 'primary' | 'fallback'; at: number; refused: boolean }
 // ---------------------------------------------------------------------------
@@ -838,11 +838,11 @@ async function simulateDay(options: { hours: number; backlog?: boolean; master?:
   if (options.unfinishedRun) github.unfinishedRunMs.set(items[options.unfinishedRun.item - 1].key, options.unfinishedRun.ms);
   // GY-1250: two items whose first merges break main though each passed CI alone; the second's
   // revert fails its own checks too, so the guard gives it up and main is fixed forward by hand.
-  const guardDay = options.mainGuard && { breaks: items[options.mainGuard.breaks - 1].key, abandons: items[options.mainGuard.abandons - 1].key, fixedAt: null as number | null,
+  const guardDay = options.mainGuard && { breaks: items[options.mainGuard.breaks - 1].key, abandons: options.mainGuard.abandons ? items[options.mainGuard.abandons - 1].key : null, fixedAt: null as number | null,
     filled: false, linePruned: false, fixAfterMs: options.mainGuard.fixAfterMs,
     /** The guard's GitHub requests per tick: what one `processJob` call that ran the guard asked. */
     ticks: [] as { at: number; requests: typeof github.guardRequests }[] };
-  if (guardDay) { github.breaksMain.add(guardDay.breaks); github.breaksMain.add(guardDay.abandons); github.revertFails.add(guardDay.abandons); }
+  if (guardDay) { github.breaksMain.add(guardDay.breaks); if (guardDay.abandons) { github.breaksMain.add(guardDay.abandons); github.revertFails.add(guardDay.abandons); } }
   // GitHub delivery is deployed with a standing direct-merge window (GRAPHYARD_DIRECT_MERGE_SINCE),
   // under which GitHub's own merges are delivered as operator-authorized.
   if (guardDay) engine.directMergeEnvironment = { since: new Date(dayStart).toISOString(), until: null, reason: 'GRAPHYARD_DIRECT_MERGE_SINCE is set in the deployment environment', setBy: 'deployment environment', enabledAt: new Date(dayStart).toISOString(), source: 'environment', event: null };
@@ -3727,6 +3727,48 @@ test('unit:soak-invariants-hold — under GitHub delivery the main guard across 
   const busiest = Math.max(...ticks.map(tick => tick.requests.length));
   assert.ok(busiest <= 8, `a tick makes at most 8 GitHub requests: ${busiest}`);
   assert.deepEqual(ticks.at(-1)!.requests.map(request => request.kind), ['history'], 'once main is green and concluded a tick is one history read');
+});
+
+test('unit:soak.main-guard-revert-lands — under GitHub delivery with main\'s last-push-approval rule, a merge that breaks main is reverted by a pull request the revert approver App approves at its verified head and the App merges head-bound, so main is green again without an unrelated merge and the item is delivered again', { timeout: 600_000 }, async () => {
+  // GY-1335: on 2026-10-05 five guard reverts were refused ("New changes require approval from someone
+  // other than the last pusher") because no revert approver was configured, and main stayed red until
+  // an unrelated merge. In this world GitHub refuses the App's merge of its own revert without another
+  // App's approval at that head, so a revert lands only through the approver.
+  const before = process.env.GRAPHYARD_DELIVERY;
+  process.env.GRAPHYARD_DELIVERY = 'github';
+  let day: Awaited<ReturnType<typeof simulateDay>>;
+  try {
+    day = await simulateDay({
+      hours: 4, mainGuard: { breaks: 2, fixAfterMs: 99 * hour },
+      plan: { items: 4, leftovers: 1, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, attested: 0, exhaustedReviewer: 0, unstable: 0, lowLane: 0, outOfQueue: { item: 4, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 4 } },
+    });
+  } finally { if (before === undefined) delete process.env.GRAPHYARD_DELIVERY; else process.env.GRAPHYARD_DELIVERY = before; }
+  const { items, final, violations, failures, lost, github, escalations } = day;
+  assert.deepEqual(violations, [], 'every system invariant holds across the revert');
+  assert.deepEqual(failures, [], 'no cycle failed');
+  assert.deepEqual(lost, [], 'no lease was lost');
+  const key = items[1].key, broken = github.broken.find(entry => entry.key === key);
+  assert.ok(broken, `the breaking merge landed: ${github.broken.map(entry => entry.key).join(', ')}`);
+  const reverts = [...github.reverts];
+  assert.deepEqual(reverts.map(([, revert]) => revert.mergeSha), [broken!.mergeSha], 'exactly the breaking merge was reverted, once');
+  const [number, revert] = reverts[0];
+  // Approved by the approver App at exactly the head the guard verified, then merged head-bound by the App.
+  assert.deepEqual(revert.approvals, [revert.head], 'the revert was approved at its verified head, once');
+  const kinds = github.guardRequests.filter(request => ['approve', 'merge', 'close'].includes(request.kind));
+  assert.deepEqual(kinds.map(request => request.kind), ['approve', 'merge'], 'approved, then merged on the first attempt, never closed');
+  assert.equal(kinds[0].pr, number); assert.equal(kinds[0].sha, revert.head);
+  assert.ok(revert.merged && !revert.open && revert.closed === null, 'the App merged the revert under the last-push-approval rule');
+  // Main is green from the revert's merge on: its test passes there, with no hand fix and no other merge needed.
+  const runs = github.commitChecks(revert.merged!.sha, revert.merged!.at + 60 * minute).filter(run => run.name === 'test');
+  assert.ok(runs.length && runs.every(run => run.result === 'success'), `main's test passes on the revert's merge: ${JSON.stringify(runs)}`);
+  // The item is reopened by the merged revert and delivered again; nothing was abandoned, so no main-guard line was raised.
+  const item = final.find(entry => entry.key === key)!;
+  assert.deepEqual(item.mainGuardReverts?.map(entry => entry.state), ['merged']);
+  assert.equal(item.stage, 'done'); assert.notEqual(item.delivery?.mergeSha, broken!.mergeSha, 'its delivery is the new merge');
+  assert.deepEqual(escalations.filter(detail => detail.startsWith('Main guard:')), [], 'a landed revert raises no main-guard attention');
+  // The rule this world enforces: the App's merge of a revert nobody else approved is refused.
+  const unapproved = github.openRevert(items[0].key, final.find(entry => entry.key === items[0].key)!.delivery!.mergeSha);
+  assert.throws(() => github.mergeRevertPull(unapproved.pr, unapproved.head), /require approval from someone other than the last pusher/);
 });
 
 test('unit:soak-invariants-hold — blocked work unblocks itself: every routine blocker is re-checked each cycle and cleared only once its cause is gone, the scope and decision blockers reach their approver, a repeating blocker is left to the master, and no approver session or cursor row outlives its blocker', { timeout: 600_000 }, async () => {

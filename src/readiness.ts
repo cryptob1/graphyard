@@ -1,5 +1,6 @@
 import { reportFormats, type ReportFormat } from './report-adapters.js';
 import type { SetupProposal } from './onboarding.js';
+import type { MainGuardReadiness } from './main-guard.js';
 
 /**
  * The completion profiles the delivery roadmap names. A profile says what "done" means
@@ -29,7 +30,9 @@ export interface ReadinessFacts {
   repository?: string | null;
   server?: { url: string; reachable: boolean; role?: string; github?: boolean; githubPermissions?: Record<string, string>; failure?: string;
     /** The server's App-permission preflight (GY-52), when it has run: authoritative over the raw permission map. */
-    appPermissions?: { verifiedAt: string | null; missing: { permission: string; required: string; granted?: string | null }[]; attention: string[] } | null } | null;
+    appPermissions?: { verifiedAt: string | null; missing: { permission: string; required: string; granted?: string | null }[]; attention: string[] } | null;
+    /** The main guard as the server reports it (GY-1335); absent from a server older than it. */
+    mainGuard?: MainGuardReadiness | null } | null;
   setup?: { proposal: string | null; appliedAt: string | null; githubApp: { appId: number; slug: string } | null; drift: string[]; unreadable: string[] } | null;
   proposal?: Pick<SetupProposal, 'stack' | 'ci' | 'checks' | 'proofs' | 'deploy' | 'environment' | 'profiles'> | null;
   /** Counts of enabled validation definitions the server holds, by kind and role. */
@@ -103,6 +106,14 @@ export function readinessChecklist(profile: CompletionProfile, facts: ReadinessF
     status: !github ? 'unknown' : preflight ? (shortfall.length ? 'missing' : 'ready') : lacking.length ? 'missing' : 'ready',
     detail: !github ? 'depends on the GitHub App' : preflight ? (shortfall.length ? `preflight ${preflight.verifiedAt}: ${shortfall.join(', ')}` : `preflight ${preflight.verifiedAt}: every declared permission is granted`) : lacking.length ? `insufficient: ${lacking.join(', ')}` : 'pull_requests, checks, contents and issues are granted',
     recovery: !github ? scanFirst.github : preflight ? (shortfall.length ? `Run \`graphyard github-setup --update-permissions\`: ${preflight.attention[0] ?? shortfall.join(', ')}` : null) : !lacking.length ? null : `Grant ${lacking.join(', ')} to the App under GitHub → Settings → Developer settings → GitHub Apps → Permissions, accept the new permissions on the installation, then rerun \`graphyard doctor\`` });
+
+  // GY-1335: an armed main guard without its revert approver cannot land a revert past main's
+  // last-push-approval rule, so the next merge that breaks main stays red; named before it does.
+  const guard = server?.reachable ? server.mainGuard ?? null : null;
+  item({ id: 'revert-approver', title: 'Main guard revert approver configured', profiles: all,
+    status: !guard ? 'unknown' : guard.attention ? 'missing' : 'ready',
+    detail: !guard ? (server?.reachable ? 'the server does not report the main guard' : 'depends on the control plane') : !guard.armed ? 'the main guard is not armed (no GitHub delivery with required checks)' : guard.attention ? `the main guard is armed on ${guard.required.join(', ')} with no revert approver App` : `revert approver App ${guard.revertApprover} approves the guard's reverts`,
+    recovery: !guard ? (server?.reachable ? 'Upgrade the control plane; this item is judged from its main guard report' : scanFirst.server) : guard.attention });
 
   const proposal = facts.proposal ?? null;
   item({ id: 'required-checks', title: 'Required CI checks discovered', profiles: all,
