@@ -5,6 +5,7 @@ import { boundDaemonState, type CycleFailures, type CycleMetrics, type CycleStep
 import { approverWait, type LatencyBudget, type SilenceReport } from './metrics.js';
 import type { DaemonEffects } from './effects.js';
 import { slowestSteps } from '../master/timings.js';
+import { planeUnavailable, planeUnavailableText } from '../model/refusal.js';
 
 // ---- The loop's own liveness ---------------------------------------------------------------
 export type LoopState = 'running' | 'slow' | 'stalled' | 'absent';
@@ -21,6 +22,8 @@ export interface LoopLiveness { state: LoopState; lagMs: number | null; stalledA
  */
 export interface CycleCost {
   cycle: number; at: string; durationMs: number; childWaitMs: number; workMs: number; intervalMs: number; stalledAfterMs: number;
+  /** Time on requests the control plane did not answer (GY-1344): its outage, so not in `workMs`. */
+  planeWaitMs: number;
   steps: CycleSteps | null;
   /** The step with the most of its own work, when any step worked at all. */
   slowest: { step: CycleStepName; ms: number; childWaitMs: number } | null;
@@ -42,17 +45,18 @@ export function cycleCost(metrics: CycleMetrics | null | undefined, intervalMs: 
   if (!metrics) return null;
   const steps = metrics.steps ?? null;
   const childWaitMs = metrics.childWaitMs ?? (steps ? Object.values(steps).reduce((total, step) => total + step.childWaitMs, 0) : 0);
-  const workMs = metrics.workMs ?? Math.max(0, metrics.durationMs - childWaitMs);
+  const planeWaitMs = metrics.planeWaitMs ?? 0;
+  const workMs = metrics.workMs ?? Math.max(0, metrics.durationMs - childWaitMs - planeWaitMs);
   const ordered = steps ? (Object.entries(steps) as [CycleStepName, StepCost][]).sort((a, b) => (b[1].ms - b[1].childWaitMs) - (a[1].ms - a[1].childWaitMs)) : [];
   const slowest = ordered.length && ordered[0][1].ms - ordered[0][1].childWaitMs > 0 ? { step: ordered[0][0], ms: ordered[0][1].ms - ordered[0][1].childWaitMs, childWaitMs: ordered[0][1].childWaitMs } : null;
   const waits = ordered.filter(([, cost]) => cost.childWaitMs > 0).sort((a, b) => b[1].childWaitMs - a[1].childWaitMs);
   const longestWait = waits.length ? { step: waits[0][0], childWaitMs: waits[0][1].childWaitMs } : null;
   // The timed steps name what ran (`dispatch`, `merges`, `close`); the coarse buckets are the fallback for a cycle recorded before them.
   const slowestTimed = metrics.timings?.steps.length ? slowestSteps(metrics.timings, 3) : ordered.slice(0, 3).map(([step, cost]) => ({ step, ms: cost.ms }));
-  return { cycle: metrics.cycle, at: metrics.at, durationMs: metrics.durationMs, childWaitMs, workMs, intervalMs, stalledAfterMs: 2 * intervalMs, steps, slowest, longestWait, slowestSteps: slowestTimed.map(step => ({ step: step.step, ms: step.ms })),
+  return { cycle: metrics.cycle, at: metrics.at, durationMs: metrics.durationMs, childWaitMs, workMs, planeWaitMs, intervalMs, stalledAfterMs: 2 * intervalMs, steps, slowest, longestWait, slowestSteps: slowestTimed.map(step => ({ step: step.step, ms: step.ms })),
     withinInterval: workMs <= intervalMs, withinLivenessBound: workMs <= 2 * intervalMs,
     breakdown: ordered.length
-      ? `${seconds(workMs)} of its own work and ${seconds(childWaitMs)} waiting on child processes; ${ordered.map(([step, cost]) => `${step} ${seconds(cost.ms)}${cost.childWaitMs ? ` (${seconds(cost.childWaitMs)} waiting)` : ''}`).join(', ')}`
+      ? `${seconds(workMs)} of its own work and ${seconds(childWaitMs)} waiting on child processes${planeWaitMs ? `, ${seconds(planeWaitMs)} on requests the control plane did not answer` : ''}; ${ordered.map(([step, cost]) => `${step} ${seconds(cost.ms)}${cost.childWaitMs ? ` (${seconds(cost.childWaitMs)} waiting)` : ''}`).join(', ')}`
       : 'no step breakdown was recorded for this cycle' };
 }
 
@@ -151,7 +155,8 @@ export async function noteCycleFailure(state: DaemonState, error: unknown, phase
   const last = { cycle: state.cycle, at, phase, call, reason: message(error).slice(0, 1000), delayMs, nextAt: new Date(options.now + delayMs).toISOString() };
   state.failures = { ...state.failures, consecutive, total: state.failures.total + 1, last };
   // A run of failures reaching the attention bound is one loop fault instance (GY-173), not one per retry.
-  if (consecutive === cycleFailureAttentionAfter) noteFault(state.faults, { ...classified('loop-failures'), subject: 'loop', text: `${consecutive} consecutive failed cycles, the last in ${describeFailingCall(last)}: ${last.reason}` }, at);
+  // GY-1344: cycles failing on a control plane that does not answer are that outage, not the loop's.
+  if (consecutive === cycleFailureAttentionAfter) noteFault(state.faults, { ...classified(planeUnavailable(error) ? 'plane-unavailable' : 'loop-failures'), subject: 'loop', text: `${consecutive} consecutive failed cycles, the last in ${describeFailingCall(last)}: ${last.reason}` }, at);
   // The cycle ended, failed, and the loop is alive: the counter and the heartbeat both say so.
   state.cycle += 1;
   state.lastCycleAt = at;
@@ -229,7 +234,7 @@ export function loopAttention(report: { liveness: LoopLiveness; silence?: Silenc
   const failures = report.failures;
   if (failures?.last && failures.consecutive >= cycleFailureAttentionAfter) items.push({ subject: 'loop',
     text: `The master loop has failed ${failures.consecutive} consecutive cycles, the last (cycle ${failures.last.cycle} at ${failures.last.at}) in ${describeFailingCall(failures.last)}: ${failures.last.reason}. It keeps cycling in-process, waiting ${Math.round(failures.last.delayMs / 1000)}s before the next attempt (due ${failures.last.nextAt}); a restart does not clear this`,
-    ...agentOwner('master', `graphyard master status shows daemon.failures with the failing call and its reason; clear what ${describeFailingCall(failures.last)} is refusing on`), ...classified('loop-failures') });
+    ...agentOwner('master', `graphyard master status shows daemon.failures with the failing call and its reason; clear what ${describeFailingCall(failures.last)} is refusing on`), ...classified(planeUnavailableText(failures.last.reason) ? 'plane-unavailable' : 'loop-failures') });
   const silence = report.silence;
   if (silence?.breached && silence.longest) items.push({ subject: silence.longest.work ?? 'loop', text: `Nothing has acted on ${silence.longest.detail} for ${Math.round(silence.longest.idleMs / 60_000)} minutes, past the ${Math.round(silence.budgetMs / 60_000)}-minute bound, while ${silence.actionable} subject(s) were actionable`,
     ...agentOwner('master', `graphyard master status shows the cycle's actions under daemon.actions; ${report.liveness.state === 'running' ? 'clear what is refusing the action' : report.liveness.state === 'slow' ? shorten : report.liveness.restart}`), ...classified(approverWait(silence.longest) ? 'decision-unanswered' : 'loop-silence') });

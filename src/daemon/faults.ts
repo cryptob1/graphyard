@@ -11,7 +11,7 @@ import { type DaemonAction, type DaemonState, faultActionKey, message } from './
 import { readyToRetry } from './sessions.js';
 import { type DaemonEffects, record } from './effects.js';
 import { actionableIntervalMs, loopAttention } from './liveness.js';
-import { planeWideFailure } from '../model/blocker-class.js';
+import { planeWideRefusal } from '../model/blocker-class.js';
 import { daemonSummary } from './run.js';
 import { baseFailureAttention } from './cycle-base-failures.js';
 import type { Cycle } from './cycle.js';
@@ -300,11 +300,10 @@ export async function fileRecurringFaultClasses(state: DaemonState, effects: Dae
       work.push(filed);
       performed.push(await record(state, key, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} for the recurring ${recurrence.faultClass} fault class (${recurrence.count} ≥ ${policy.threshold} in ${policy.windowHours} hours), linking ${recurrence.recent.length} instance(s); later instances link to it`, attempts, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
-      // GY-1345: a filing the control plane refused plane-wide (a 502, a refused connection, a call timed out) is the plane's
-      // window: the action stays failed for readyToRetry's backoff and files under the same key, but carries no fault kind, so
-      // the loop class does not count its own failure to file itself.
-      performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the item for the recurring ${recurrence.faultClass} fault class: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist,
-        planeWideFailure(message(error)) ? null : undefined));
+      // GY-1344: a control plane that did not answer refused nothing about the filing; it is retried on the backoff and is no loop fault.
+      // GY-1345: nor is any plane-wide refusal (a 502-504 body, a call timed out): the retry files under the same idempotency key.
+      const unanswered = planeWideRefusal(error);
+      performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the item for the recurring ${recurrence.faultClass} fault class${unanswered ? ' (the control plane did not answer, so it is filed on a later cycle)' : ''}: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist, unanswered ? null : undefined));
     }
   }
 }
@@ -389,7 +388,7 @@ export async function fileDocsTrim(state: DaemonState, effects: Pick<DaemonEffec
     performed.push(await record(state, docsTrimActionKey, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} to restore documentation headroom (${docs.headroom.total} of ${docs.headroom.budget} words on ${docs.base}); nothing more is filed until headroom is restored`, attempts, cycle: state.cycle }, now(), effects.persist));
   } catch (error) {
     performed.push(await record(state, docsTrimActionKey, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the documentation trim item: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist,
-      planeWideFailure(message(error)) ? null : undefined));
+      planeWideRefusal(error) ? null : undefined));
   }
 }
 /** The recurrences `master status` reports under daemon.faults: per class, the window's count and the item standing for it. */

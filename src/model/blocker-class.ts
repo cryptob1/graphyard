@@ -1,4 +1,5 @@
 import { humanRequestBlocker } from './human-request.js';
+import { RefusedResponse, planeUnavailable } from './refusal.js';
 import { namedPaths, pathScopeContains, scopeRefusalBlocker } from './scope.js';
 import { widenedPlannedFiles } from './scope-collapse.js';
 // Types only from work.ts: work.ts reaches this module through its own field types.
@@ -85,6 +86,12 @@ const serverCallTimeout = /\bThe operation was aborted due to timeout\b/;
  * failure of the step that met it. An item-specific HTTP 500 is not one (itemSpecificPlaneError).
  */
 export const planeWideFailure = (text: string | null | undefined) => !!text && (planeWideError.test(text) || serverCallTimeout.test(text));
+/**
+ * Whether a thrown failure is plane-wide. A response the server refused carries its status and body,
+ * so it is read structurally (GY-1344's planeUnavailable): a 502 the server judged itself, with its own
+ * `error` field, is the item's; any other failure is read from its text.
+ */
+export const planeWideRefusal = (error: unknown) => error instanceof RefusedResponse ? planeUnavailable(error) : planeWideFailure(error instanceof Error ? error.message : typeof error === 'string' ? error : null);
 /** Whether a control-plane blocker is a server error the item's own request met (GY-1055): the server's health cannot show it fixed. */
 export function itemSpecificPlaneError(text: string | null | undefined) {
   return !!text && requestServerError.test(text) && !planeWideError.test(text);
