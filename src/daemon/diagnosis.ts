@@ -413,7 +413,12 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
     return note(entry, 'failed', `The ${decision.action} decision ${decision.id} on ${decision.work} was ${current.state}: ${current.refusal?.reason ?? current.outcome ?? 'no reason recorded'}; the diagnosis stands for the master to act on`,
       current.state === 'refused' ? null : undefined);
   }
-  if (current.state === 'stale' || current.state === 'withdrawn') return rerequest(cycle, diagnostician, entry, target, current, note);
+  if (current.state === 'stale' || current.state === 'withdrawn') {
+    // GY-1371: a target already done — the fix delivered, the item to close closed — has nothing left
+    // to ask for: asked again, the server refuses it as immutable, every cycle, for ever.
+    if (target.stage === 'done') return settleNoLongerOpen(state, entry, target, `The ${decision.action} decision ${decision.id} on ${decision.work} was settled ${current.state}, but ${decision.work} is no longer open`, note);
+    return rerequest(cycle, diagnostician, entry, target, current, note);
+  }
   if (current.state !== 'applied') return;
   if (entry.state === 'releasing') {
     await note(entry, 'done', `${decision.work} was released on the approved decision ${decision.id} (approved by ${current.approvedBy})`);
@@ -461,7 +466,12 @@ async function decideFresh(cycle: Cycle, diagnostician: DiagnosticianEffects, en
     const why = `The ${action} request on ${work.key} for the diagnosis of ${entry.subject} was refused: ${message(error)}`;
     const fresh = (await cycle.effects.snapshot()).work.find(candidate => candidate.id === work.id);
     const applicable = !!fresh && !isClosed(fresh) && fresh.stage !== 'done' && (action === 'close' || (fresh.stage === 'backlog' && !fresh.ready));
-    if (!applicable) { await note(entry, 'done', `${why}; ${work.key} no longer needs the ${action}, so it is not asked again and the next cycle decides afresh`, null); return null; }
+    if (!applicable) {
+      // GY-1371: an entry already releasing or closing settles here; left in its state, the next cycle
+      // read its decisions and asked again, refused again, for every such entry.
+      if (entry.state === 'releasing' || entry.state === 'closing') { await settleNoLongerOpen(cycle.state, entry, fresh ?? null, `${why}; ${work.key} no longer needs the ${action}`, note, action); return null; }
+      await note(entry, 'done', `${why}; ${work.key} no longer needs the ${action}, so it is not asked again and the next cycle decides afresh`, null); return null;
+    }
     const history = cycle.effects.decisions ? (await cycle.effects.decisions(fresh)).decisions : [];
     const spent = history.filter(candidate => candidate.action === action && (candidate.state === 'stale' || candidate.state === 'withdrawn')).length;
     if (spent >= maxDecisionRequests) { await note(entry, 'done', `${why}; ${spent} ${action} request(s) already settled without applying, so it is not asked again here and the next cycle decides afresh`, null); return null; }
@@ -500,6 +510,18 @@ async function rerequest(cycle: Cycle, diagnostician: DiagnosticianEffects, entr
     : `${entry.work} is answered by ${input.ref}, so it is closed as its duplicate; requested again against revision ${target.revision} because decision ${decision.id} was settled ${current.state}`;
   await note(entry, 'done', `${why}; requesting it again against revision ${target.revision} (request ${spent + 1} of ${maxDecisionRequests})`);
   return request(cycle, diagnostician, entry, target, decision.action, input, reason, note);
+}
+
+/**
+ * GY-1371: the entry's decision target no longer needs its action, so the entry is answered, with
+ * no fault: by the target itself when it is a fix that was delivered or released meanwhile, by the
+ * item a closed target names as its answer, or as no longer open when nothing names one.
+ */
+async function settleNoLongerOpen(state: DaemonState, entry: DiagnosisRecord, target: Work | null, why: string, note: Note, action = entry.decision!.action) {
+  const by = !target ? null : action === 'release' && !isClosed(target) ? target.key : answeringItem(target);
+  if (by) return answer(state, entry, by, note, `${why}, so the diagnosis of ${entry.subject} is answered by ${by}`);
+  entry.state = 'answered'; entry.answeredBy = null;
+  await note(entry, 'done', `${why}, so the diagnosis of ${entry.subject} is answered as no longer open`, null);
 }
 
 /** The independent approver for the entry's decision; a launch that fails is tried again next cycle while the decision stands. */
