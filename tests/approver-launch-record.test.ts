@@ -6,7 +6,8 @@ import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { approverSessionName, atomicPrivateWrite, loadMasterConfig, runAutonomyCommand, setupMaster, type MasterConfig } from '../src/master.js';
-import { approverLaunchesFile, readApproverLaunch, readApproverLaunches, saveApproverLaunch } from '../src/master/autonomy.js';
+// A namespace import, so the base exercise (where approverLaunchesFile does not exist) loads the file and fails the cases.
+import * as autonomy from '../src/master/autonomy.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -93,9 +94,9 @@ test('integration:doctor-approver-launch — master approver run from a read-onl
       assert.equal(launched.unrecorded, undefined, 'its launch is recorded');
       assert.deepEqual(closed, [], 'the started approver is never closed for its bookkeeping');
       assert.equal(existsSync(join(root, '.graphyard', 'approvers', 'launches.json')), false, 'nothing is written into the read-only checkout');
-      const file = approverLaunchesFile(root, { GRAPHYARD_DATA_HOME: dataHome });
+      const file = autonomy.approverLaunchesFile(root, { GRAPHYARD_DATA_HOME: dataHome });
       assert.ok(file.startsWith(dataHome), 'the record lives under the managed data root');
-      const record = await readApproverLaunch(root, name);
+      const record = await autonomy.readApproverLaunch(root, name);
       assert.equal(record?.work, 'GY-1335', 'the loop reads the record the doctor wrote, naming the item it judges');
       assert.equal(record?.decision, decision);
     });
@@ -128,28 +129,28 @@ test('unit:approver-launch-record-writable — the launch record is written unde
   };
 
   // A writable data root takes the record; the checkout is untouched.
-  const written = await saveApproverLaunch(root, launch('gy-approver-a'), Date.now(), { environment });
-  assert.deepEqual(written, { file: approverLaunchesFile(root, environment) });
+  const written = await autonomy.saveApproverLaunch(root, launch('gy-approver-a'), Date.now(), { environment });
+  assert.deepEqual(written, { file: autonomy.approverLaunchesFile(root, environment) });
   assert.equal(existsSync(checkoutFile), false);
   assert.equal(JSON.parse(await readFile(written.file!, 'utf8'))[0].agentName, 'gy-approver-a');
 
   // A data root that refuses writes fails over to the checkout, keeping the records already made.
-  const failedOver = await saveApproverLaunch(root, launch('gy-approver-b'), Date.now(), { environment, write: refusing({ 'approver-launches': 'EROFS' }) });
+  const failedOver = await autonomy.saveApproverLaunch(root, launch('gy-approver-b'), Date.now(), { environment, write: refusing({ 'approver-launches': 'EROFS' }) });
   assert.deepEqual(failedOver, { file: checkoutFile });
   assert.deepEqual(JSON.parse(await readFile(checkoutFile, 'utf8')).map((entry: { agentName: string }) => entry.agentName), ['gy-approver-a', 'gy-approver-b']);
-  assert.deepEqual((await readApproverLaunches(root, environment)).map(entry => entry.agentName), ['gy-approver-b', 'gy-approver-a'], 'both locations are read; the data root\'s record of a name wins');
+  assert.deepEqual((await autonomy.readApproverLaunches(root, environment)).map(entry => entry.agentName), ['gy-approver-b', 'gy-approver-a'], 'both locations are read; the data root\'s record of a name wins');
 
   // Both refusing: the launch is returned unrecorded with each location and why, never thrown.
   for (const code of ['EROFS', 'EACCES', 'EPERM']) {
-    const unrecorded = await saveApproverLaunch(root, launch('gy-approver-c'), Date.now(), { environment, write: refusing({ 'approver-launches': code, '.graphyard': code }) });
+    const unrecorded = await autonomy.saveApproverLaunch(root, launch('gy-approver-c'), Date.now(), { environment, write: refusing({ 'approver-launches': code, '.graphyard': code }) });
     assert.equal(unrecorded.file, null);
     assert.match(unrecorded.unrecorded ?? '', new RegExp(`approver-launches.*\\(${code}: .* or .*launches\\.json \\(${code}: `));
   }
 
   // Any other failure is not a read-only location, and still fails the save.
-  await assert.rejects(saveApproverLaunch(root, launch('gy-approver-d'), Date.now(), { environment, write: refusing({ 'approver-launches': 'ENOSPC' }) }), /ENOSPC/);
+  await assert.rejects(autonomy.saveApproverLaunch(root, launch('gy-approver-d'), Date.now(), { environment, write: refusing({ 'approver-launches': 'ENOSPC' }) }), /ENOSPC/);
 
   // Checkout records past a day are aged out on read, since that file is rewritten only on failover.
   await writeFile(checkoutFile, JSON.stringify([{ ...launch('gy-approver-old'), launchedAt: new Date(Date.now() - 2 * 86_400_000).toISOString() }]));
-  assert.equal((await readApproverLaunches(root, environment)).some(entry => entry.agentName === 'gy-approver-old'), false);
+  assert.equal((await autonomy.readApproverLaunches(root, environment)).some(entry => entry.agentName === 'gy-approver-old'), false);
 });
