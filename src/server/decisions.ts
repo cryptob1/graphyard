@@ -217,12 +217,8 @@ export async function approveDecision(services: Services, caller: Principal, id:
       // accepted at once.
       if (decision!.action === 'resolve' && !resuming && samePin(resolvePin(work!), decision!.pin)
         && precondition?.startsWith('Task revision changed')) precondition = null;
-      // GY-1296: a release, an unblock or a diagnostician's closure is pinned to the item's whole
-      // revision, and the loop that requested it moves that revision itself — the approver session
-      // it launches is recorded on the very item, and each report of that session is saved there too. A revision that moved
-      // only in that bookkeeping (sessions, gates, next action, action queue: sameBesideBookkeeping)
-      // leaves what the requester judged in place, so the decision is judged at the current
-      // revision, and applied at it; any other change to the item still settles it stale below.
+      // GY-1296: a revision the requesting loop moved only in bookkeeping (its approver session,
+      // gates, next action, queue) is judged and applied at the current revision; see bookkeepingRebase.
       const judged = await bookkeepingRebase(db, decision!, work!);
       if (judged !== decision && !resuming) precondition = decisionPrecondition(judged.action, judged.input, work!);
       if (precondition) {
@@ -274,19 +270,19 @@ async function finish(db: Db, work: Work, approver: Principal, decisionId: strin
  * decision is the replacement for that session, so resolution is applied here, under the same
  * lock and with the same effects: one trigger cleared, gates re-evaluated, history appended.
  */
-async function resolveInTransaction(services: Services, db: Db, now: Date, work: Work, decision: DecisionRecord, approver: Principal, approvalReason: string) {
-  const target = standingEscalations(work).find(entry => entry.trigger === decision.input.trigger)!;
-  resolveEscalation(work, decision.input.trigger);
+async function resolveInTransaction(services: Services, db: Db, now: Date, work: Work, decision: DecisionRecord, approver: Principal, approvalReason: string, trigger = decision.input.trigger, reason = decision.reason) {
+  const target = standingEscalations(work).find(entry => entry.trigger === trigger)!;
+  resolveEscalation(work, trigger);
   const all = (await lockedWork(db, [work.id])).map(item => item.id === work.id ? work : item);
   services.engine.evaluate(work, all, now);
   // The engine's auto-dispatch ledger entries for this evaluation; the method is internal to the
   // engine's own transactions, and this is one of them.
   await (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, work, now);
-  const details = { trigger: decision.input.trigger, escalation: target, resolvedBy: decision.requestedBy, approvedBy: approver.id, decision: decision.id, sessionKind: 'ai', reason: decision.reason, approvalReason, at: now.toISOString() };
+  const details = { trigger, escalation: target, resolvedBy: decision.requestedBy, approvedBy: approver.id, decision: decision.id, sessionKind: 'ai', reason, approvalReason, at: now.toISOString() };
   await save(db, work, decision.requestedBy, 'resolve', now, details);
   await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, decision.requestedBy, 'escalation.resolved', JSON.stringify({ details })]);
   if (work.submission) await wakeJob(db, work.id);
-  return `Resolved ${decision.input.trigger} on ${work.key}`;
+  return `Resolved ${trigger} on ${work.key}`;
 }
 
 export async function applyThroughEngine(services: Services, decision: DecisionRecord, approver: Principal, approvalReason: string) {
@@ -297,7 +293,15 @@ export async function applyThroughEngine(services: Services, decision: DecisionR
   switch (decision.action) {
     case 'release': await engine.execute(actor, 'ready', decision.workId, { expectedRevision: input.expectedRevision, reason }, key); return 'Released to ready';
     case 'unblock': await engine.execute(actor, 'unblock', decision.workId, { reason, expectedRevision: input.expectedRevision }, key); return 'Blocker cleared';
-    case 'requirements': { const work = await engine.execute(actor, 'requirements', decision.workId, { ...input, reason }, key); return `Requirements revised to policy revision ${work.policyRevision}`; }
+    case 'requirements': {
+      const work = await engine.execute(actor, 'requirements', decision.workId, { ...input, reason }, key);
+      // GY-1348: the approval resolves the requirement-weakening this application raised (the engine stamps it
+      // with the decision's id, GY-1347); one any other writer raised stands. A replay finds it resolved.
+      const raised = (item?: Work) => !!item && standingEscalations(item).some(entry => entry.trigger === 'requirement-weakening' && entry.decision === decision.id);
+      const resolved = raised(work) && await engine.store.transaction(async (db, now) => { const item = await findWork(db, work.id); return raised(item)
+        && resolveInTransaction(services, db, now, item!, decision, approver, approvalReason, 'requirement-weakening', `Raised by requirements decision ${decision.id}, approved by ${approver.id}: ${decision.reason}`.slice(0, 2000)); });
+      return `Requirements revised to policy revision ${work.policyRevision}${resolved ? '; the requirement-weakening it raised is resolved by this approval' : ''}`;
+    }
     case 'rework': await engine.execute(actor, 'rework', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Rework authorized';
     case 'recover': await engine.execute(actor, 'recover', decision.workId, { reason, previousWorkerStopped: true }, key); return 'Containment quarantine recovered';
     case 'attest': await engine.execute(actor, 'evidence', decision.workId, input, key, { attestation: { decision: decision.id, requestedBy: decision.requestedBy, approvedBy: approver.id } }); return `${input.proof} attested ${input.result} for ${input.sha}`;
