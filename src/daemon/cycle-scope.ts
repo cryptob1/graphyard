@@ -179,6 +179,16 @@ export async function scopeStep(cycle: Cycle) {
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail: boundDetail(`Widened ${item.key} with ${namePaths(paths)} on ${widenedOn(scoped.grounds!, paths.length)}: ${grounds}`), attempts, cycle: state.cycle }, now(), effects.persist));
       return at;
     } catch (error) {
+      // The race this widening is bound against, lost: the request was answered or its attempt ended
+      // meanwhile, so the widening is moot — answered as the decide path answers it, never a fault (GY-1347).
+      const moot = mootScopeWidening(error);
+      if (moot) {
+        const detail = boundDetail(`Not widened ${item.key}: ${moot}`);
+        const entry = await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'done', detail, attempts, cycle: state.cycle }, now(), effects.persist);
+        // The same moot race read again on a recheck is not a new action.
+        if (!judged || previous.detail !== detail) performed.push(entry);
+        return null;
+      }
       const transient = transientScopeRefusal(error);
       performed.push(await record(state, key, { kind: 'scope', work: item.key, principal: request.requestedBy, epoch: request.epoch, state: 'failed', detail: boundDetail(`Could not widen ${item.key} on a review finding or a planned file's successor${transient ? ` (${transient}, ${transientScopeRetry})` : ''}: ${message(error)}`), attempts, cycle: state.cycle }, now(), effects.persist, scopeRefusalFault(transient, previous)));
       return null;
@@ -328,6 +338,22 @@ const transientScopeRetry = 'so it is retried next cycle on a fresh read';
 export function transientScopeRefusal(error: unknown): string | null {
   if (error instanceof RefusedResponse && error.status >= 500) return 'the control plane answered 5xx';
   if (/Policy revision changed; reload before revising/.test(message(error))) return 'the item moved past the revision the loop read';
+  return null;
+}
+/**
+ * GY-1347. Why the control plane refused the loop's widening as moot, or null: the widening names
+ * the request it answers, and a claim, a lease end or a push between the loop's reads and its post
+ * makes the plane refuse it (engine.ts, `data.answers`) rather than apply it — the design step 2a
+ * describes. On 6 October 2026 GY-1336 and GY-1345 each counted that refusal as a scope fault,
+ * while the decide path records the same race as already answered. A refusal with no response
+ * status (a message merely quoting one) is not read as moot.
+ */
+export function mootScopeWidening(error: unknown): string | null {
+  if (!(error instanceof RefusedResponse) || error.status !== 409) return null;
+  const text = message(error);
+  if (/The scope request this widening answers is no longer open/.test(text)) return 'the scope request it answers was already answered: it is no longer open';
+  if (/Epoch \d+, which asked for this scope, no longer holds the lease/.test(text)) return 'the attempt that asked for it no longer holds the lease';
+  if (/The findings this widening rests on were read for .*, which is no longer the item's head/.test(text)) return `the head its findings were read for moved; they are read again for the new head in ${findingRecheckMs / 1000}s`;
   return null;
 }
 /**

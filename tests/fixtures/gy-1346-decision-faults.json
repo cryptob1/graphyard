@@ -1,0 +1,336 @@
+{
+ "_source": "graphyard events GY-1335 --routine --payload full: payload.work of seq 2320036 (reconciled, 2026-10-06T03:05:50.809Z), the last snapshot before the loop observed owed-decision|GY-1335|2026-10-06T03:06:13.542Z; description and sessions emptied",
+ "work": {
+  "id": "ee99a47c-bda7-4892-a52b-acf4c8e96039",
+  "key": "GY-1335",
+  "lane": "high",
+  "type": "bug",
+  "epoch": 1,
+  "gates": [
+   {
+    "name": "ready",
+    "passed": true,
+    "reasons": []
+   },
+   {
+    "name": "build",
+    "passed": false,
+    "reasons": [
+     "Worker has not submitted implementation for this attempt",
+     "Pull request has not been independently observed"
+    ],
+    "verdict": {
+     "inputs": {
+      "key": "GY-1335",
+      "sha": null,
+      "baseSha": null,
+      "evidence": [],
+      "observed": null,
+      "landingBase": null,
+      "policyRevision": 2
+     },
+     "version": 1
+    }
+   },
+   {
+    "name": "review",
+    "passed": false,
+    "reasons": [
+     "A new independent GitHub approval after the requirement-review baseline is required"
+    ]
+   },
+   {
+    "name": "test",
+    "passed": false,
+    "reasons": [
+     "Required CI check test has not passed on the current candidate",
+     "Required CI check typecheck has not passed on the current candidate"
+    ],
+    "ciAppIds": [
+     15368
+    ]
+   },
+   {
+    "name": "merge",
+    "passed": false,
+    "reasons": [
+     "GitHub has not been observed at the current candidate",
+     "Pull request is not mergeable against the current base",
+     "Unresolved requirement-weakening escalation requires operator resolution: Requirement revision retires AC-1, AC-2, AC-5 and narrows proofs for no criterion"
+    ]
+   }
+  ],
+  "lease": {
+   "epoch": 1,
+   "owner": "graphyard-opencode-1",
+   "expiresAt": "2026-10-06T03:07:49.798Z"
+  },
+  "ready": true,
+  "stage": "build",
+  "title": "Main-guard reverts: classify the last-pusher approval-rule refusal, keep red-main visible every cycle, and surface the unconfigured revert approver before a red main",
+  "policy": {
+   "checks": [
+    "test",
+    "typecheck"
+   ],
+   "review": true
+  },
+  "blocker": null,
+  "criteria": [
+   {
+    "id": "AC-3",
+    "text": "Readiness surfaces the fault before a red main: doctor and master status's setup attention report the revert approver as missing \u2014 naming GRAPHYARD_REVERT_APPROVER_APP_ID/_INSTALLATION_ID/_PRIVATE_KEY and the last-push-approval rule on main \u2014 whenever GitHub delivery with required checks is armed and the approver is unconfigured, and clear once it is configured.",
+    "proofs": [
+     "unit:doctor.revert-approver-missing-names-variables",
+     "unit:master-status.setup-attention-revert-approver"
+    ]
+   },
+   {
+    "id": "AC-4",
+    "text": "With the revert approver configured, a guard revert of a merge that broke main is approved by the independent approver App at the verified head and merges under last-push protection; with it unconfigured, the refusal stays visible through AC-3 so the 2026-10-05 pattern (five silent abandonments, red main until an unrelated merge) cannot recur unnoticed.",
+    "proofs": [
+     "unit:github-http.approve-revert-then-merge-under-last-push-approval",
+     "unit:soak.main-guard-revert-lands"
+    ]
+   }
+  ],
+  "evidence": [],
+  "pipeline": {
+   "attempts": [
+    {
+     "end": null,
+     "epoch": 1,
+     "owner": "graphyard-opencode-1",
+     "endedAt": null,
+     "claimedAt": "2026-10-06T03:02:55.942Z"
+    }
+   ],
+   "backfill": {
+    "at": "2026-10-06T00:49:37.376Z",
+    "events": 6,
+    "passes": 1,
+    "source": "ledger",
+    "toEvent": "2318004",
+    "retained": true,
+    "fromEvent": "2317962",
+    "truncated": false
+   },
+   "submittedAt": null,
+   "reworkRounds": 0,
+   "interventions": {
+    "blocked": 0,
+    "requirements": 0
+   },
+   "resubmittedAt": null
+  },
+  "priority": 1,
+  "revision": 53,
+  "sessions": [],
+  "candidate": null,
+  "createdAt": "2026-10-06T00:45:30.976Z",
+  "proofGaps": [],
+  "updatedAt": "2026-10-06T03:05:50.455Z",
+  "escalation": {
+   "at": "2026-10-06T02:07:25.037Z",
+   "actor": "graphyard-master-graphyard-operator",
+   "reason": "Requirement revision retires AC-1, AC-2, AC-5 and narrows proofs for no criterion",
+   "trigger": "requirement-weakening"
+  },
+  "nextAction": {
+   "key": "GY-1335",
+   "gate": null,
+   "kind": "escalate",
+   "work": "ee99a47c-bda7-4892-a52b-acf4c8e96039",
+   "inputs": {
+    "kind": "escalate",
+    "detail": "Requirement revision retires AC-1, AC-2, AC-5 and narrows proofs for no criterion",
+    "trigger": "requirement-weakening"
+   },
+   "reason": "GY-1335 has a standing requirement-weakening escalation and nothing else to do: Requirement revision retires AC-1, AC-2, AC-5 and narrows proofs for no criterion",
+   "binding": "escalation:requirement-weakening:2026-10-06T02:07:25.037Z",
+   "llmRole": "resolve-escalation",
+   "refusal": null,
+   "needsHuman": {
+    "resolve": "graphyard master escalation GY-1335 requirement-weakening spawns a handler that follows precedent; a judgment nobody has taken before is graphyard master decide GY-1335 resolve '{\"trigger\":\"requirement-weakening\"}' REASON, then graphyard master approver GY-1335 DECISION",
+    "decision": "resolving GY-1335's requirement-weakening escalation"
+   }
+  },
+  "submission": null,
+  "violations": [],
+  "workspaces": [
+   {
+    "host": "vishrog",
+    "path": "/home/vish/code/graphyard/.graphyard/worktrees/GY-1335-1",
+    "epoch": 1,
+    "owner": "graphyard-opencode-1",
+    "branch": "graphyard/gy-1335-1"
+   }
+  ],
+  "actionQueue": {
+   "actions": [
+    {
+     "id": "312aeb3f43418da7b79b614bbdc07480",
+     "key": "GY-1335",
+     "gate": null,
+     "kind": "escalate",
+     "work": "ee99a47c-bda7-4892-a52b-acf4c8e96039",
+     "claim": null,
+     "state": "pending",
+     "inputs": {
+      "kind": "escalate",
+      "detail": "Requirement revision retires AC-1, AC-2, AC-5 and narrows proofs for no criterion",
+      "trigger": "requirement-weakening"
+     },
+     "reason": "GY-1335 has a standing requirement-weakening escalation and nothing else to do: Requirement revision retires AC-1, AC-2, AC-5 and narrows proofs for no criterion",
+     "binding": "escalation:requirement-weakening:2026-10-06T02:07:25.037Z",
+     "history": [
+      {
+       "at": "2026-10-06T03:02:55.942Z",
+       "event": "requested",
+       "reason": "GY-1335 has a standing requirement-weakening escalation and nothing else to do: Requirement revision retires AC-1, AC-2, AC-5 and narrows proofs for no criterion",
+       "result": null,
+       "executor": null,
+       "requester": "graphyard"
+      }
+     ],
+     "refusal": null,
+     "attempts": 0,
+     "requestedAt": "2026-10-06T03:02:55.942Z",
+     "requestedBy": "graphyard"
+    }
+   ],
+   "history": [
+    {
+     "id": "643e92b153367c6ff05353e9ba6cb841",
+     "key": "GY-1335",
+     "gate": "build",
+     "kind": "dispatch",
+     "work": "ee99a47c-bda7-4892-a52b-acf4c8e96039",
+     "claim": null,
+     "state": "done",
+     "inputs": {
+      "kind": "dispatch",
+      "epoch": 0,
+      "target": "implementation",
+      "priority": 1,
+      "plannedFiles": [
+       "src/main-guard.ts",
+       "src/github.ts",
+       "src/daemon/doctor.ts",
+       "src/master-status.ts",
+       "tests/main-guard.test.ts",
+       "tests/github-http.test.ts"
+      ]
+     },
+     "reason": "GY-1335 is ready and unassigned: Worker has not submitted implementation for this attempt",
+     "result": "done",
+     "binding": "dispatch:0",
+     "history": [
+      {
+       "at": "2026-10-06T03:02:37.558Z",
+       "event": "requested",
+       "reason": "GY-1335 is ready and unassigned: Worker has not submitted implementation for this attempt",
+       "result": null,
+       "executor": null,
+       "requester": "graphyard"
+      },
+      {
+       "at": "2026-10-06T03:02:40.420Z",
+       "event": "claimed",
+       "reason": "attempt 1 claimed by graphyard-master@vishrog/1 on vishrog",
+       "result": null,
+       "executor": "graphyard-master@vishrog/1",
+       "requester": "graphyard"
+      },
+      {
+       "at": "2026-10-06T03:04:35.889Z",
+       "event": "completed",
+       "reason": "dispatched GY-1335 to opencode-primary; the worker launcher claimed under graphyard-opencode-1",
+       "result": "done",
+       "executor": "graphyard-master@vishrog/1",
+       "requester": "graphyard"
+      }
+     ],
+     "refusal": "Worker has not submitted implementation for this attempt",
+     "attempts": 1,
+     "resolution": "dispatched GY-1335 to opencode-primary; the worker launcher claimed under graphyard-opencode-1",
+     "resolvedAt": "2026-10-06T03:04:35.889Z",
+     "requestedAt": "2026-10-06T03:02:37.558Z",
+     "requestedBy": "graphyard"
+    }
+   ]
+  },
+  "description": "",
+  "escalations": [
+   {
+    "at": "2026-10-06T02:07:25.037Z",
+    "actor": "graphyard-master-graphyard-operator",
+    "reason": "Requirement revision retires AC-1, AC-2, AC-5 and narrows proofs for no criterion",
+    "trigger": "requirement-weakening"
+   }
+  ],
+  "observation": null,
+  "speedTarget": 14400000,
+  "autoDispatch": {
+   "review": null,
+   "history": [],
+   "producers": []
+  },
+  "dependencies": [],
+  "implementers": [
+   "graphyard-opencode-1"
+  ],
+  "plannedFiles": [
+   "src/main-guard.ts",
+   "src/github.ts",
+   "src/daemon/doctor.ts",
+   "src/master-status.ts",
+   "tests/main-guard.test.ts",
+   "tests/github-http.test.ts"
+  ],
+  "scopeRequest": null,
+  "systemDriven": true,
+  "documentation": {
+   "id": "DOCS",
+   "text": "Documentation reflects this change: the diff updates this repository's documentation (docs/, AGENTS.md, README.md) for any user-visible behaviour, command, configuration or API it changes, or the worker states at submission that the change alters no documented behaviour.",
+   "paths": [
+    "docs/",
+    "AGENTS.md",
+    "README.md"
+   ],
+   "changelog": null
+  },
+  "reviewRequest": null,
+  "lastAssignment": {
+   "epoch": 1,
+   "owner": "graphyard-opencode-1",
+   "claimedAt": "2026-10-06T03:02:55.942Z"
+  },
+  "policyRevision": 2,
+  "producerProofs": [],
+  "stageEnteredAt": "2026-10-06T03:02:55.942Z",
+  "reworkRequested": false,
+  "exclusiveResources": [],
+  "mergeAuthorization": null,
+  "retiredCriterionIds": [
+   "AC-1",
+   "AC-2",
+   "AC-5"
+  ],
+  "scenarioRequirements": [],
+  "containmentQuarantine": {
+   "at": "2026-10-06T03:04:30.297Z",
+   "epoch": 1,
+   "owner": "graphyard-opencode-1",
+   "scope": {
+    "pid": 9769,
+    "unit": "graphyard-watch-9769-02bedc06-ceeb-4e59-8369-c10ea0625b21.scope"
+   },
+   "leaseExpiresAt": "2026-10-06T03:07:49.798Z",
+   "settlementHash": "2d226ec3ec6a0d03fd842b9cb94dba80e47b17c43d61c99f04259964644e87b1",
+   "launchExpiresAt": "2026-10-06T03:06:33.219Z",
+   "launchAcknowledgedAt": "2026-10-06T03:04:33.219Z"
+  },
+  "formalReviewResetRequired": true
+ }
+}

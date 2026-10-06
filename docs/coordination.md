@@ -23,7 +23,7 @@ Each nit is a `Nit: PATH:LINE — FINDING` line ending with its class: `(mechani
 
 `plannedFiles` bounds changes at `complete`, new heads and landings: files in scope, new files and touched `tests/helpers/timing-baseline.json` lines pass; others must match base byte-for-byte. Scope requests or audited revisions widen it.
 
-`evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: gate failures are its non-sticky refusals, published as required check `graphyard/landable`, never a verdict input.
+`evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: gate failures are its non-sticky refusals, published as required check `graphyard/landable`, never a verdict input. Its acceptance (proof) family gates no merge and is not published.
 
 Out-of-scope files three-way merge onto the landing commit: extended or base-only changes pass; reverts, deletions, rewrites refuse.
 

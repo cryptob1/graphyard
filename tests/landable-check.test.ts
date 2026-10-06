@@ -83,15 +83,22 @@ test('unit:landable-check-published — graphyard/landable concludes success on 
   const refused = item({ evidence: [], plannedFiles: ['src/store/other.ts'] });
   const verdict = evaluateLandability(refused, [refused], now);
   assert.equal(verdict.verdict, 'refused');
-  const reasons = verdict.verdict === 'refused' ? verdict.reasons : [];
-  assert.ok(reasons.some(entry => entry.gate === 'build') && reasons.some(entry => entry.gate === 'acceptance'), 'the fixture refuses on both families');
+  const all = verdict.verdict === 'refused' ? verdict.reasons : [];
+  assert.ok(all.some(entry => entry.gate === 'build') && all.some(entry => entry.gate === 'acceptance'), 'the fixture refuses on both families');
   const failure = landableCheckRun(refused, [refused], now)!;
   assert.equal(failure.conclusion, 'failure');
   assert.equal(failure.head_sha, head);
+  // Only the build family is published (GY-1331): since GY-1235 proofs gate nothing, so an unproven
+  // proof refuses no merge, and the required check would otherwise hold a head every gate passes.
+  const reasons = all.filter(entry => entry.gate === 'build');
   assert.equal(failure.output.title, `Refused: ${reasons.length} reason${reasons.length === 1 ? '' : 's'}`);
-  // Every refusal reason is in the summary, word for word, under the gate that gives it.
+  // Every build refusal reason is in the summary, word for word, under the gate that gives it.
   for (const entry of reasons) assert.ok(failure.output.summary.includes(`- ${entry.gate}: ${entry.reason}`), `summary names: ${entry.reason}`);
-  assert.match(failure.output.summary, /unit:own-proof/);
+  assert.doesNotMatch(failure.output.summary, /acceptance:|unit:own-proof needs trusted passing evidence/);
+  // A head refused only for its proofs is published landable: GitHub merges it on CI and review.
+  const unproven = item({ evidence: [] });
+  assert.ok(evaluateLandability(unproven, [unproven], now).verdict === 'refused', 'the verdict still names the unproven proof');
+  assert.equal(landableCheckRun(unproven, [unproven], now)!.conclusion, 'success');
 
   // Once protection and the merge-queue ruleset require graphyard/landable (AC-2), the verdict still
   // concludes success: Graphyard's own checks never become CI inputs to the verdict they publish.
@@ -123,10 +130,10 @@ test('unit:landable-check-published — graphyard/landable concludes success on 
   assert.equal(runs.length, 1);
   assert.equal(runs[0].conclusion, 'success');
 
-  // A policy revision the evidence no longer binds refuses again, on the same run.
-  const repoliced = item({ policyRevision: 2 });
-  assert.equal(evaluateLandability(repoliced, [repoliced], now).verdict, 'refused');
-  await github.publishLandable(repoliced, [repoliced]);
+  // A change of input the build gate reads refuses again, on the same run: the planned files no longer cover the change.
+  const replanned = item({ plannedFiles: ['src/store/other.ts'] });
+  assert.equal(evaluateLandability(replanned, [replanned], now).verdict, 'refused');
+  await github.publishLandable(replanned, [replanned]);
   assert.equal(writes.length, 3);
   assert.equal(runs[0].conclusion, 'failure');
 
@@ -212,12 +219,12 @@ test('unit:landable-check-required — the reconciled branch protection requires
 test('a refusal list longer than GitHub\'s summary bound keeps whole reasons and counts the ones it omits', () => {
   const work = item();
   const audit = evaluateLandability(work, [work], now);
-  const reasons = Array.from({ length: 200 }, (_, index) => ({ gate: 'acceptance' as const, reason: `reason ${index} ${'x'.repeat(500)}` }));
+  const reasons = Array.from({ length: 200 }, (_, index) => ({ gate: 'build' as const, reason: `reason ${index} ${'x'.repeat(500)}` }));
   const run = landableCheckRun(work, [work], now, { ...audit, verdict: 'refused', reasons })!;
   assert.equal(run.conclusion, 'failure');
   assert.equal(run.output.title, 'Refused: 200 reasons');
   assert.ok(run.output.summary.length <= 65_535, `${run.output.summary.length}`);
-  const kept = run.output.summary.split('\n').filter(line => /^- acceptance: reason \d+ x+$/.test(line)).length;
+  const kept = run.output.summary.split('\n').filter(line => /^- build: reason \d+ x+$/.test(line)).length;
   assert.ok(kept > 0 && kept < 200);
   assert.match(run.output.summary, new RegExp(`- … ${200 - kept} more reasons omitted: GitHub bounds a check summary at 65535 characters\\n\\nCandidate ${head}`));
 });
