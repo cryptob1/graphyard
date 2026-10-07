@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { execFileSync } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +29,7 @@ const hex = (letter: string) => letter.repeat(40);
 // Loaded inside each test, so a checkout without the re-execution fails its proofs as test cases.
 const reexecution = () => import('../src/daemon/reexec.js');
 const loopPredecessorVariable = 'GRAPHYARD_LOOP_PREDECESSOR';
+const successorReadyVariable = 'GRAPHYARD_LOOP_SUCCESSOR_READY';
 const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, '-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@example.com', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 async function fixture() {
@@ -61,60 +63,91 @@ const verified = (sha: string): DaemonState['deployment'] =>
   deploymentObservationSchema.parse({ source: 'endpoint', sha, at: iso(0), reason: null, deployed: ['GY-1365', 'GY-1385'], pending: [] });
 const restarted = (to: string) => ({ result: 'restarted' as const, reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] });
 
-/** The re-execution with its process effects recorded: what it spawned, and what it signalled. */
-function recordedReexecution(root: string, onKill: (pid: number, signal: NodeJS.Signals) => void = () => {}) {
-  const spawned: { command: string; args: string[]; cwd: string; detached: boolean; predecessor: string | undefined; unref: number }[] = [];
+/** A fake successor process: it reports ready as a real successor's setup does, unless told otherwise. */
+function successor(pid: number | undefined, env: NodeJS.ProcessEnv, behaviour: 'ready' | 'exit' | 'silent' = 'ready') {
+  const child = Object.assign(new EventEmitter(), { pid, exitCode: null as number | null, unrefs: 0, unref() { child.unrefs += 1; } });
+  setImmediate(() => {
+    if (behaviour === 'ready') writeFileSync(env[successorReadyVariable]!, `${pid}\n`);
+    if (behaviour === 'exit') { child.exitCode = 1; child.emit('exit', 1, null); }
+  });
+  return child;
+}
+
+/** The re-execution with its process effects recorded: what it spawned, opened, closed and signalled. */
+function recordedReexecution(root: string, onKill: (pid: number, signal: NodeJS.Signals) => void = () => {}, behaviour: 'ready' | 'exit' | 'silent' = 'ready') {
+  const spawned: { command: string; args: string[]; cwd: string; detached: boolean; predecessor: string | undefined; child: ReturnType<typeof successor> }[] = [];
   const killed: { pid: number; signal: NodeJS.Signals }[] = [];
+  const closed: number[] = [];
   const input: UnsupervisedReexecution = {
-    root, cliPath: launcher, logDirectory: root, execPath: '/usr/bin/node', pid: 4242, env: { PATH: '/usr/bin' },
-    open: () => 7,
+    root, cliPath: launcher, logDirectory: root, execPath: '/usr/bin/node', pid: 4242, env: { PATH: '/usr/bin' }, pollMs: 1, readyMs: 2_000,
+    open: () => 7, close: fd => { closed.push(fd); },
     spawn: (command, args, options) => {
-      const entry = { command, args, cwd: options.cwd, detached: options.detached, predecessor: options.env[loopPredecessorVariable], unref: 0 };
-      spawned.push(entry);
-      return { pid: 4343, unref: () => { entry.unref += 1; } };
+      const child = successor(4343, options.env, behaviour);
+      spawned.push({ command, args, cwd: options.cwd, detached: options.detached, predecessor: options.env[loopPredecessorVariable], child });
+      return child;
     },
     kill: (pid, signal) => { killed.push({ pid, signal }); onKill(pid, signal); },
   };
-  return { input, spawned, killed };
+  return { input, spawned, killed, closed };
 }
 
 test('unit:master-loop-supervised-restart — a loop no supervisor unit runs re-executes itself onto the checkout: it starts its successor detached and stops by its own SIGTERM, and the successor waits for it to exit', async () => {
   const { awaitLoopPredecessor, reexecuteUnsupervised } = await reexecution();
   assert.equal((await reexecution()).loopPredecessorVariable, loopPredecessorVariable);
   const { root, master } = await fixture();
-  // The successor is `master run` from the coordinator checkout, detached, told which loop it replaces.
+  // The successor is `master run` from the coordinator checkout, detached, told which loop it replaces;
+  // the loop stops only once the successor reports ready, and closes its copy of the log descriptor.
   const recorded = recordedReexecution(root);
-  assert.deepEqual(reexecuteUnsupervised(recorded.input), { successor: 4343 });
-  assert.deepEqual(recorded.spawned, [{ command: '/usr/bin/node', args: [launcher, 'master', 'run'], cwd: root, detached: true, predecessor: '4242', unref: 1 }]);
+  assert.deepEqual(await reexecuteUnsupervised(recorded.input), { successor: 4343 });
+  assert.deepEqual(recorded.spawned.map(({ child, ...entry }) => ({ ...entry, unrefs: child.unrefs })), [{ command: '/usr/bin/node', args: [launcher, 'master', 'run'], cwd: root, detached: true, predecessor: '4242', unrefs: 1 }]);
   assert.deepEqual(recorded.killed, [{ pid: 4242, signal: 'SIGTERM' }], 'and the running loop is stopped the way a supervisor stops it');
+  assert.deepEqual(recorded.closed, [7]);
 
-  // A successor that did not start leaves the running loop alone: no signal, a failure the upgrade records.
-  const unstarted = recordedReexecution(root);
-  assert.throws(() => reexecuteUnsupervised({ ...unstarted.input, spawn: () => ({ pid: undefined, unref: () => {} }) }), /did not start, so this loop keeps running/);
-  assert.deepEqual(unstarted.killed, []);
+  // A successor that exits during its setup, or never reports ready, leaves the running loop alone:
+  // no SIGTERM to it, a failure the upgrade records, and the descriptor still closed.
+  const exited = recordedReexecution(root, () => {}, 'exit');
+  await assert.rejects(reexecuteUnsupervised(exited.input), /exited before it was ready \(code 1\), so this loop keeps running/);
+  assert.deepEqual([exited.killed, exited.closed], [[], [7]]);
+  const silent = recordedReexecution(root, () => {}, 'silent');
+  await assert.rejects(reexecuteUnsupervised({ ...silent.input, readyMs: 20 }), /did not report ready within .* and was stopped, so this loop keeps running/);
+  assert.deepEqual(silent.killed, [{ pid: 4343, signal: 'SIGTERM' }], 'only the unready successor is stopped');
 
-  // A real detached process receives the argv and the predecessor it waits for.
+  // A real launch failure arrives as an 'error' event after spawn returns: it fails the re-execution,
+  // and this process — the loop — survives it, unsignalled.
+  const unsignalled: number[] = [];
+  await assert.rejects(reexecuteUnsupervised({ root, cliPath: launcher, logDirectory: root, execPath: join(root, 'missing-node'), pollMs: 1, kill: pid => { unsignalled.push(pid); } }),
+    /could not be launched: .*ENOENT.*so this loop keeps running/);
+  await delay(20);
+  assert.deepEqual(unsignalled, []);
+
+  // A real detached process receives the argv and the predecessor it waits for, and reports ready.
   const script = join(root, 'successor.mjs'), out = join(root, 'successor.json');
-  await writeFile(script, `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(out)}, JSON.stringify({ argv: process.argv.slice(2), predecessor: process.env.${loopPredecessorVariable}, cwd: process.cwd() }));\n`);
-  const real = reexecuteUnsupervised({ root, cliPath: script, logDirectory: root, kill: () => {} });
-  assert.ok(real.successor > 0);
-  let written: { argv: string[]; predecessor: string; cwd: string } | null = null;
-  for (let attempt = 0; attempt < 100 && !written; attempt++) { try { written = JSON.parse(await readFile(out, 'utf8')); } catch { await delay(50); } }
-  assert.deepEqual(written, { argv: ['master', 'run'], predecessor: String(process.pid), cwd: root });
+  await writeFile(script, `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(out)}, JSON.stringify({ argv: process.argv.slice(2), predecessor: process.env.${loopPredecessorVariable}, cwd: process.cwd() }));\nwriteFileSync(process.env.${successorReadyVariable}, String(process.pid));\n`);
+  const signalled: number[] = [];
+  const real = await reexecuteUnsupervised({ root, cliPath: script, logDirectory: root, pollMs: 5, kill: pid => { signalled.push(pid); } });
+  assert.ok(real.successor! > 0);
+  assert.deepEqual(signalled, [process.pid]);
+  assert.deepEqual(JSON.parse(await readFile(out, 'utf8')), { argv: ['master', 'run'], predecessor: String(process.pid), cwd: root });
 
-  // The successor waits for its predecessor before it reads the cursor; a process started otherwise does not wait.
+  // The successor reports ready, then waits for its predecessor before it reads the cursor, however
+  // long that loop's shutdown takes; where a unit is installed it leaves the unit time to take the lock.
+  // A process started otherwise does not wait.
+  const readyFile = join(root, 'ready-probe');
   let checks = 0;
-  assert.deepEqual(await awaitLoopPredecessor({ [loopPredecessorVariable]: '4242' }, { alive: () => ++checks < 3, pollMs: 1, self: 1 }), { waited: true, predecessor: 4242 });
+  assert.deepEqual(await awaitLoopPredecessor({ [loopPredecessorVariable]: '4242', [successorReadyVariable]: readyFile }, { alive: () => ++checks < 3, pollMs: 1, self: 1, unitInstalled: () => false }), { waited: true, predecessor: 4242, handover: false });
   assert.equal(checks, 3);
-  assert.deepEqual(await awaitLoopPredecessor({}, { alive: () => { throw new Error('never probed'); } }), { waited: false, predecessor: null });
-  await assert.rejects(awaitLoopPredecessor({ [loopPredecessorVariable]: '4242' }, { alive: () => true, pollMs: 1, timeoutMs: 5, self: 1 }), /did not stop within .* this successor exits rather than run beside it/);
+  assert.equal((await readFile(readyFile, 'utf8')).trim(), '1');
+  let polls = 0;
+  const handed = await awaitLoopPredecessor({ [loopPredecessorVariable]: '4242' }, { alive: () => ++polls < 200, pollMs: 1, self: 1, unitInstalled: () => true, handoverMs: 1 });
+  assert.deepEqual([handed, polls], [{ waited: true, predecessor: 4242, handover: true }, 200], 'no deadline gives up on a predecessor still shutting down');
+  assert.deepEqual(await awaitLoopPredecessor({}, { alive: () => { throw new Error('never probed'); } }), { waited: false, predecessor: null, handover: false });
 
   // The moved-HEAD recovery re-executes through the same path: a clean forward move served by a verified release loads.
   const state = emptyDaemonState(master);
   state.deployment = verified(hex('b'));
   const fake = new FakeGit(hex('b'), hex('b'));
   const recovery = recordedReexecution(root);
-  const recovered = await recoverMovedHead(master, state, hex('a'), hex('b'), { root, run: fake.run, restartExecutors: async to => restarted(to), restartSelf: async () => { reexecuteUnsupervised(recovery.input); }, now: () => clock });
+  const recovered = await recoverMovedHead(master, state, hex('a'), hex('b'), { root, run: fake.run, restartExecutors: async to => restarted(to), restartSelf: async () => { await reexecuteUnsupervised(recovery.input); }, now: () => clock });
   assert.deepEqual({ outcome: recovered.outcome, self: recovered.outcome === 'upgraded' && recovered.self }, { outcome: 'upgraded', self: true });
   assert.equal(recovery.spawned.length, 1);
   assert.equal(recovery.killed.length, 1);
@@ -145,7 +178,7 @@ test('unit:loop-self-upgrade-after-verified-deployment — once a delivery is ve
     loadedRelease: readRelease(repo),
     selfUpgrade: async (current: DaemonState) => {
       upgrades += 1;
-      return performSelfUpgrade(master, current, { root: repo, run: fake.run, restartExecutors: async to => restarted(to), restartSelf: async () => { reexecuteUnsupervised(recorded.input); }, now: () => clock });
+      return performSelfUpgrade(master, current, { root: repo, run: fake.run, restartExecutors: async to => restarted(to), restartSelf: async () => { await reexecuteUnsupervised(recorded.input); }, now: () => clock });
     },
   } as unknown as DaemonEffects;
   const bound = new AbortController();

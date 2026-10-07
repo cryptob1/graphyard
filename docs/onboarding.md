@@ -90,7 +90,7 @@ Run as an OS user whose GitHub credentials workers cannot read. `--browser-profi
 
 ### The loop must be supervised
 
-`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master.service` and runs `systemctl --user enable --now` and `loginctl enable-linger` (restarts on crash, reboot, hang); never a side effect: worker checkouts and temp directories are refused. Move: `master init --token-stdin --replace-supervisor` from the new checkout. `master status` shows `setup.supervisor`. A loop no unit runs (started by hand, no reachable user manager) still upgrades: it starts its successor `master run` detached (log `.graphyard/master-run.log`) and stops; the successor waits for it to exit.
+`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master.service` and runs `systemctl --user enable --now` and `loginctl enable-linger` (restarts on crash, reboot, hang); never a side effect: worker checkouts and temp directories are refused. Move: `master init --token-stdin --replace-supervisor` from the new checkout. `master status` shows `setup.supervisor`. A loop no unit runs (started by hand, no reachable user manager) still upgrades: it starts its successor `master run` detached (log `.graphyard/master-run.log`) and stops only once the successor reports ready (else it keeps running and retries); the successor waits for it to exit, then, if the unit is installed, leaves it 30 s to take the lock.
 
 ### The pipeline doctor (on by default)
 

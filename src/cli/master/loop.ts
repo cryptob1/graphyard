@@ -19,7 +19,7 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     if (coordinator.actor.role !== 'coordinator') throw new Error('The durable master loop requires a coordinator credential; operator, producer, and worker credentials are refused');
     if (coordinator.actor.proofs?.length) throw new Error('The durable master loop refuses a credential that is also allowed to produce evidence');
     assertProtocol(coordinator);
-    // A successor the loop started for itself (GY-1399) reads the cursor only once the loop it replaces has released it.
+    // A successor the loop started for itself (GY-1399) reports its setup passed, then reads the cursor only once the loop it replaces has released it.
     await awaitLoopPredecessor();
     const state = await readDaemonState(root, master);
     // The cycle and the dispatcher poll the bounded coordination view (by header, so an older
