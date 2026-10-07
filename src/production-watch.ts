@@ -140,8 +140,11 @@ export interface ProductionReport {
   provider: string | null; providerDescription: string | null; observedAt: string | null; error: string | null;
   /** The commit this process was built from, when the deployment says. */
   running: string | null;
-  /** The commit production serves: the provider's newest successful deployment, else the running build. */
-  serving: string | null; servingSource: 'provider' | 'build' | null;
+  /**
+   * The commit production serves: a fresh endpoint observation of the exact release (`liveEndpointRelease`),
+   * else the provider's newest successful deployment, else the running build.
+   */
+  serving: string | null; servingSource: 'endpoint' | 'provider' | 'build' | null;
   latest: ProviderDeployment | null;
   /** How far the branch production deploys (the release branch when there is one, else the base branch) is ahead of what production serves. */
   /**
@@ -356,14 +359,17 @@ export class ProductionWatch {
     }
     const newestSuccess = deployments.find(d => d.status === 'success');
     report.latest = deployments[0] ?? null;
-    report.serving = newestSuccess?.commit ?? this.options.build.commit;
-    report.servingSource = newestSuccess?.commit ? 'provider' : this.options.build.commit ? 'build' : null;
     report.ahead = null; report.aheadError = null; report.release = null;
     // The release branch production tracks, when there is one: a read that fails keeps the last tip
     // known, so a GitHub hiccup never measures production against main again.
     let tip: string | null = null, releaseUnknown = false;
     try { tip = await this.releaseTip(); if (!tip) this.releaseSeen = null; }
     catch (error) { tip = this.releaseSeen?.tip ?? null; releaseUnknown = !tip; report.aheadError = `Release branch ${this.options.releaseBranch} is unavailable: ${error instanceof Error ? error.message : String(error)}`; }
+    const delivered = (await this.store.fleet()).filter(item => item.stage === 'done' && item.delivery && now - Date.parse(item.delivery.mergedAt) <= (this.options.windowMs ?? DEPLOYMENT_WINDOW_MS))
+      .sort((a, b) => Date.parse(a.delivery!.mergedAt) - Date.parse(b.delivery!.mergedAt));
+    const live = liveEndpointRelease(delivered, deployments, newestSuccess, tip, now);
+    report.serving = live ?? newestSuccess?.commit ?? this.options.build.commit;
+    report.servingSource = live ? 'endpoint' : newestSuccess?.commit ? 'provider' : this.options.build.commit ? 'build' : null;
     if (tip) {
       if (this.releaseSeen?.tip !== tip) {
         this.releaseSeen = { tip, at: now };
@@ -391,8 +397,6 @@ export class ProductionWatch {
     } else if (!report.serving) report.aheadError = 'Production commit is unknown: no provider deployment list is configured and the build reports no commit (set GRAPHYARD_BUILD_SHA or RAILWAY_GIT_COMMIT_SHA)';
     else report.aheadError = 'Base branch comparison needs the GitHub App';
 
-    const delivered = (await this.store.fleet()).filter(item => item.stage === 'done' && item.delivery && now - Date.parse(item.delivery.mergedAt) <= (this.options.windowMs ?? DEPLOYMENT_WINDOW_MS))
-      .sort((a, b) => Date.parse(a.delivery!.mergedAt) - Date.parse(b.delivery!.mergedAt));
     report.deployed = []; report.pending = [];
     const inWindow = new Set(delivered.map(item => item.id));
     for (const map of [this.deployedIn, this.notIn, this.inRelease, this.notInRelease]) for (const id of map.keys()) if (!inWindow.has(id)) map.delete(id);
@@ -492,6 +496,38 @@ export class ProductionWatch {
     this.incidents.delete(item.id);
     await this.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [item.id, 'graphyard', RECOVERY_EVENT, JSON.stringify({ incidentId: open.id, key: item.key, mergeSha: open.mergeSha, serving: report.serving, since: open.since, at })]);
   }
+}
+
+/** How long an endpoint observation of the serving release outranks a provider list that has not caught up with it. */
+export const ENDPOINT_FRESH_MS = 3 * DEPLOYMENT_GRACE_MS;
+
+/**
+ * The release production's own endpoint was observed serving (`master verify-deployment`, source
+ * `endpoint`), when that observation outranks the provider list (GY-1420): GitHub's Railway
+ * deployment status can lag a release that is already live, and the watch then measured production
+ * against the previous release and raised missing-deployment incidents for a delivery the endpoint
+ * proved served. The observation counts only when it is fresh, names a full 40-character SHA — the
+ * release tip itself when production tracks a release branch — is newer than the provider's newest
+ * success, and the provider's newest deployment of that SHA, if it lists one, did not fail, crash or get removed. Anything short of
+ * that proof leaves the provider's answer standing, so a failed or unserved release is reported as before.
+ */
+export function liveEndpointRelease(delivered: Pick<Work, 'delivery'>[], deployments: ProviderDeployment[], newestSuccess: ProviderDeployment | undefined, tip: string | null, now: number): string | null {
+  const provided = newestSuccess ? Date.parse(newestSuccess.updatedAt ?? newestSuccess.createdAt) : -Infinity;
+  let best: { sha: string; at: number } | null = null;
+  for (const item of delivered) {
+    const observed = item.delivery?.deployment;
+    if (!observed || observed.source !== 'endpoint' || typeof observed.sha !== 'string') continue;
+    const sha = observed.sha.toLowerCase(), at = Date.parse(observed.observedAt);
+    if (!/^[0-9a-f]{40}$/.test(sha) || !Number.isFinite(at) || at > now + 60_000 || now - at > ENDPOINT_FRESH_MS || at <= provided) continue;
+    if (tip && sha !== tip) continue;
+    if (best && best.at >= at) continue;
+    best = { sha, at };
+  }
+  if (!best) return null;
+  if (newestSuccess?.commit?.toLowerCase() === best.sha) return null;
+  // The provider's newest attempt at that SHA decides whether it is running: a redeploy's older, removed attempt does not.
+  const attempt = deployments.find(d => d.commit?.toLowerCase() === best!.sha);
+  return attempt && ['failed', 'crashed', 'removed'].includes(attempt.status) ? null : best.sha;
 }
 
 function pendingKey(serving: string, workIds: string[]) { return workIds.length ? `${serving}:${[...workIds].sort().join(',')}` : ''; }
