@@ -128,16 +128,16 @@ test('unit:decisions-step-bounded — at the 2026-10-03 load (90 open items, 360
     hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
   const iso = (offset: number) => new Date(at + offset).toISOString();
   const uuid = (n: number, kind: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-${String(kind).padStart(12, '0')}`;
-  // A third of the items carry a lease-loss a newer attempt superseded, which the loop resolves
-  // through an approver; the rest need no decision. Every item has four decisions on record.
+  // A third of the items carry a lease-loss of an epoch between attempts that no dispatch is due to
+  // take, which the loop resolves through an approver; the rest need no decision. Every item has four decisions on record.
   const items = Array.from({ length: open }, (_, index) => {
     const n = index + 1, lost = { at: iso(-10 * minute), actor: 'graphyard', trigger: 'lease-loss', reason: 'Worker graphyard-claude-2 lost lease epoch 1' };
     return { id: uuid(n, 0), key: `GY-${n}`, title: `Item ${n}`, description: '', type: 'feature', priority: 1, dependencies: [], criteria: [],
       policy: { checks: ['test'], review: true }, plannedFiles: [`src/item-${n}.ts`], stage: 'build', revision: 51, policyRevision: 3,
-      createdAt: iso(-hour), updatedAt: iso(0), stageEnteredAt: iso(-5 * minute), ready: true, epoch: 2,
-      lease: { owner: 'graphyard-opencode-1', epoch: 2, expiresAt: iso(hour) }, workspaces: [], candidate: null, submission: null,
+      createdAt: iso(-hour), updatedAt: iso(0), stageEnteredAt: iso(-5 * minute), ready: true, epoch: n <= needing ? 1 : 2,
+      lease: n <= needing ? null : { owner: 'graphyard-opencode-1', epoch: 2, expiresAt: iso(hour) }, workspaces: [], candidate: null, submission: null,
       reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],
-      containmentQuarantine: { owner: 'graphyard-opencode-1', epoch: 2, at: iso(-5 * minute), settlementHash: 'a'.repeat(64) },
+      containmentQuarantine: n <= needing ? null : { owner: 'graphyard-opencode-1', epoch: 2, at: iso(-5 * minute), settlementHash: 'a'.repeat(64) },
       escalation: n <= needing ? lost : null, escalations: n <= needing ? [lost] : [] } as unknown as Work;
   });
   const histories = new Map(items.map((item, index) => [item.id, [1, 2, 3, 4].map(kind => ({ id: uuid(index + 1, kind), action: 'release', state: kind % 2 ? 'applied' : 'refused', input: {}, approvedBy: null }))]));
@@ -169,7 +169,7 @@ test('unit:decisions-step-bounded — at the 2026-10-03 load (90 open items, 360
 
   // Cycle one requests each resolve and launches its approver: one history read per request.
   const first = await cycle();
-  assert.equal(agents.length, needing, `every superseded lease-loss went to an approver: ${JSON.stringify(first.actions.slice(0, 4).map(action => action.detail))}`);
+  assert.equal(agents.length, needing, `every idle lease-loss went to an approver: ${JSON.stringify(first.actions.slice(0, 4).map(action => action.detail))}`);
   assert.ok(first.reads <= needing, `one read per item that needed a decision, none for the rest: ${first.reads}`);
   assert.ok(first.ms < 10_000, `cycle one's decisions step took ${first.ms} ms`);
   // Cycle two: the ledger moved for each request, so each is read once more, eight at a time.
@@ -232,15 +232,15 @@ test('unit:decisions-step-bounded — a history read slower than the step\'s dea
     hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
   const iso = (offset: number) => new Date(at + offset).toISOString();
   const uuid = (n: number, kind: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-${String(kind).padStart(12, '0')}`;
-  // Every item carries a lease-loss a newer attempt superseded, which the loop resolves through an approver.
+  // Every item carries a lease-loss of an epoch between attempts with no dispatch due, which the loop resolves through an approver.
   const items = Array.from({ length: open }, (_, index) => {
     const n = index + 1, lost = { at: iso(-10 * minute), actor: 'graphyard', trigger: 'lease-loss', reason: 'Worker graphyard-claude-2 lost lease epoch 1' };
     return { id: uuid(n, 0), key: `GY-${n}`, title: `Item ${n}`, description: '', type: 'feature', priority: 1, dependencies: [], criteria: [],
       policy: { checks: ['test'], review: true }, plannedFiles: [`src/item-${n}.ts`], stage: 'build', revision: 51, policyRevision: 3,
-      createdAt: iso(-hour), updatedAt: iso(0), stageEnteredAt: iso(-5 * minute), ready: true, epoch: 2,
-      lease: { owner: 'graphyard-opencode-1', epoch: 2, expiresAt: iso(4 * hour) }, workspaces: [], candidate: null, submission: null,
+      createdAt: iso(-hour), updatedAt: iso(0), stageEnteredAt: iso(-5 * minute), ready: true, epoch: 1,
+      lease: null, workspaces: [], candidate: null, submission: null,
       reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],
-      containmentQuarantine: { owner: 'graphyard-opencode-1', epoch: 2, at: iso(-5 * minute), settlementHash: 'a'.repeat(64) },
+      containmentQuarantine: null,
       escalation: lost, escalations: [lost] } as unknown as Work;
   });
   const [slowItem, failingItem] = items;
