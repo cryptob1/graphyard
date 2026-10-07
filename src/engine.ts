@@ -1038,8 +1038,9 @@ export class Engine {
         // judgement (GY-1388): a master or the doctor ran `master scope` minutes before the routed
         // decision arrived, and each was an intervention the product had already taken on. While that
         // decision is pending, or not yet requested within the bound the loop settles a scope ask in,
-        // only the loop's own answer (`answers`) or an applied decision widens for that ask.
-        const routedAsk = actor.role === 'operator-agent' && widening && !data.answers && !data.rule && !key.startsWith('decision:') ? routedScopeAsk(work, data.plannedFiles, now.getTime()) : null;
+        // only the loop's own answer (`answers`) or an applied decision (run as admin) widens for that
+        // ask. The Idempotency-Key is the client's to choose, so it exempts nothing.
+        const routedAsk = actor.role === 'operator-agent' && widening && !data.answers && !data.rule ? routedScopeAsk(work, data.plannedFiles, now.getTime()) : null;
         if (routedAsk) {
           const decisions = (await db.query(`SELECT r.payload->>'id' AS id, (SELECT s.kind FROM events s WHERE s.work_id=r.work_id AND s.seq>r.seq AND s.payload->>'id'=r.payload->>'id' AND s.kind IN ('decision.applied','decision.failed','decision.declined','decision.superseded','decision.stale','decision.withdrawn') LIMIT 1) AS ended
             FROM events r WHERE r.work_id=$1 AND r.kind='decision.requested' AND r.payload->>'action'='requirements' AND r.payload->'input'->'answers'->>'at'=$2 AND (r.payload->'input'->'answers'->>'epoch')::int=$3`, [work.id, routedAsk.at, routedAsk.epoch])).rows as { id: string; ended: string | null }[];

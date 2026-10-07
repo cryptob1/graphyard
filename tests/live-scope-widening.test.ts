@@ -36,8 +36,8 @@ let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<t
 const specFile: ScopeFile = { path: 'web/Widget.spec.tsx', status: 'modified', sha: 'c'.repeat(40), baseSha: 'd'.repeat(40), additions: 4, deletions: 2, binary: false };
 const reason = 'The browser specs assert the layout this item removes';
 
-const call = async (credential: string, method: 'GET' | 'POST', path: string, body?: unknown) => {
-  const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+const call = async (credential: string, method: 'GET' | 'POST', path: string, body?: unknown, key = randomUUID()) => {
+  const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   return { status: response.status, body: await response.json() as any };
 };
 const ok = async (credential: string, method: 'GET' | 'POST', path: string, body?: unknown) => {
@@ -522,6 +522,10 @@ test('integration:routed-scope-ask-not-pre-empted — GY-1388: a hand widening o
   const hand = await call(master.token, 'POST', `work/${work.id}/requirements`, { ...widen(work, [path]), reason: 'Additive, criteria unchanged' });
   assert.equal(hand.status, 409, JSON.stringify(hand.body));
   assert.match(hand.body.error, refusal, 'master requirements is the same hand widening');
+  // The Idempotency-Key is the client's: `GRAPHYARD_REQUEST_ID=decision:x master scope` is still a hand widening.
+  const forged = await call(master.token, 'POST', `work/${work.id}/requirements`, { ...widen(work, [path]), reason: 'Additive, criteria unchanged' }, `decision:${randomUUID()}`);
+  assert.equal(forged.status, 409, JSON.stringify(forged.body));
+  assert.match(forged.body.error, refusal, 'a decision-shaped key exempts nothing');
   // A widening that leaves the asked path alone pre-empts nothing.
   await ok(master.token, 'POST', `work/${work.id}/requirements`, { ...widen(work, ['docs/routed.md']), reason: 'The docs page is the item\'s own' });
   work = await reload(work.id);

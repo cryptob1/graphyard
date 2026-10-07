@@ -216,7 +216,7 @@ export function diagnosisPrompt(config: { repository: string; cliPath: string },
   return `You are the Graphyard diagnostician for ${config.repository}. Diagnose ${what}. Find the one root cause its instances share, as a senior engineer on this codebase would: read the evidence below, the repository in this checkout, and the control plane (${cli} status GY-N, ${cli} master status, gh pr view N). `
     + 'This session is read-only: never edit, commit, push, claim, release, close, merge or decide anything, and never ask anyone anything. '
     + `Then call the ${graphyardTools.diagnose} tool exactly once with subject "${input.subject}", the cause, the evidence it rests on (log lines quoted exactly, and the commands you ran with what they showed), the fault class the cause belongs to, and exactly one answer: `
-    + 'covering, the key of an existing open item (listed below) that already covers this cause, when one does; otherwise fix, the root-cause item to file — a title, a description stating the cause and evidence, the priority to release it at (0 highest to 4), testable criteria each with its proofs (such as unit:name), and the narrow plannedFiles the fix changes. Stop after the call.\n\n'
+    + 'covering, the key of an existing open item (listed below) that already covers this cause, when one does; otherwise fix, the root-cause item to file — a title, a description stating the cause and evidence, the priority to release it at (0 highest to 4), testable criteria each with its proofs (each a bare id such as unit:tmp-reclaim-retry — unit:, integration:, e2e: or manual: then letters, digits and ._/- only, no spaces or prose), and the narrow plannedFiles the fix changes. Stop after the call.\n\n'
     + `The evidence, as JSON:\n${clip(JSON.stringify(input), diagnosisEvidenceMax)}`;
 }
 /** The evidence's bound in the prompt: the prompt is one process argument, which Linux caps at 128 KiB. */
@@ -398,7 +398,7 @@ async function advance(cycle: Cycle, diagnostician: DiagnosticianEffects, entry:
     }
     let input: FixInput;
     try { input = fixItem(entry, diagnosis); }
-    catch (error) { entry.state = 'failed'; await note(entry, 'failed', `The diagnostician's fix item for ${entry.subject} fails the checks master create applies: ${message(error)}`); return; }
+    catch (error) { entry.state = 'failed'; await note(entry, 'failed', `The diagnostician's fix item for ${entry.subject} fails the checks master create applies: ${message(error)}`, 'fix-item'); return; }
     const fix = await diagnostician.file(input, `${diagnosisKey(entry.subject)}:fix`);
     entry.fix = fix.key;
     await note(entry, 'done', `Filed ${fix.key} (priority ${fix.priority}) for the root cause of ${entry.subject}: ${diagnosis.cause}`);
@@ -508,7 +508,7 @@ async function rerequest(cycle: Cycle, diagnostician: DiagnosticianEffects, entr
   const why = `The ${decision.action} decision ${decision.id} on ${decision.work} was settled ${current.state}: ${current.outcome ?? 'no reason recorded'}`;
   if (spent >= maxDecisionRequests) {
     entry.state = 'failed';
-    await note(entry, 'failed', `${why}; ${spent} ${decision.action} request(s) for the diagnosis of ${entry.subject} settled without applying, so it is not requested again`);
+    await note(entry, 'failed', `${why}; ${spent} ${decision.action} request(s) for the diagnosis of ${entry.subject} settled without applying, so it is not requested again`, 'decision-stale');
     const detail = `${decision.work} still needs the ${decision.action} the diagnosis of ${entry.subject} asked for, but ${spent} requests settled stale or withdrawn (last ${decision.id}). `
       + `${decision.action === 'release' ? 'Release it by hand' : 'Close it by hand'}: graphyard master decide ${decision.work} ${decision.action}${decision.action === 'close' ? ` '{"kind":"duplicate","ref":"${entry.fix ?? entry.diagnosis?.covering}"}'` : ''} REASON, then graphyard master approver ${decision.work} DECISION`;
     cycle.performed.push(await record(state, `escalation:diagnosis-stale:${decision.id}`, { kind: 'escalation', work: decision.work, principal: null, state: 'done', detail, attempts: 1, cycle: state.cycle }, now(), effects.persist));
