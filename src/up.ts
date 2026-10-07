@@ -5,7 +5,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { goalWorkItem, setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
-import { actionsDirectory, agentBrowserPage, passSudo, recordingPage, type BrowserPage, type RecordedStep } from './master-browser.js';
+import { actionsDirectory, agentBrowserPage, passSudo, recordingPage, sudoInstruction, type BrowserPage, type RecordedStep, type SudoOptions } from './master-browser.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
 
 /**
@@ -49,6 +49,13 @@ export interface UpRequest {
    * price (`--confirm-price X` or `--max-monthly N`) and the SSH key or machine it is reached with.
    */
   install?: { confirmPrice?: string | null; maxMonthly?: string | null; sshKey?: string | null; sshHost?: string | null; sshUser?: string | null };
+  /** GY-1442: Apps already installed on the account that install reuses instead of creating (`--reuse-app SLUG`). */
+  reuseApps?: string[];
+  /**
+   * How a Confirm-access prompt is passed: the passkey or password the page offers first, or GitHub
+   * Mobile first when the operator chose it (`--github-mobile`).
+   */
+  sudo?: SudoOptions['prefer'];
 }
 
 export type UpEvent =
@@ -225,7 +232,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   };
   const passed = request.install ?? {};
   const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, '--reviewer', request.reviewer, mode, ...(state.noHerdr ? ['--no-herdr'] : []),
-    ...([['--confirm-price', passed.confirmPrice], ['--max-monthly', passed.maxMonthly], ['--ssh-key', passed.sshKey], ['--ssh-host', passed.sshHost], ['--ssh-user', passed.sshUser]] as const).flatMap(([flag, value]) => value ? [flag, value] : [])];
+    ...([['--confirm-price', passed.confirmPrice], ['--max-monthly', passed.maxMonthly], ['--ssh-key', passed.sshKey], ['--ssh-host', passed.sshHost], ['--ssh-user', passed.sshUser]] as const).flatMap(([flag, value]) => value ? [flag, value] : []),
+    ...(request.reuseApps ?? []).flatMap(slug => ['--reuse-app', slug])];
   const rerun = () => `graphyard up --repo ${request.repository} --provider ${request.provider}${request.agent ? ' --agent' : ''}`;
   const step = async (name: UpStep, body: () => Promise<string | void>) => {
     if (state.completed.includes(name)) { deps.emit({ kind: 'step', step: name, state: 'skipped', detail: 'done by an earlier run' }); return; }
@@ -237,7 +245,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   try {
     // Agent mode creates the Apps in a browser; without a profile it would hand the whole App
     // creation to a person, which only a device approval may be. It stops before anything runs.
-    if (request.agent && !state.completed.includes('control-plane') && !deps.driveApp) throw new UpStop('Agent mode creates the GitHub Apps in a Chrome profile signed in to GitHub, and none is given or recorded: pass --browser-profile PROFILE and rerun graphyard up --agent.', upExitCodes.prerequisite);
+    // A reused App needs no browser (GY-1442), so --reuse-app lets agent mode start without one.
+    if (request.agent && !state.completed.includes('control-plane') && !deps.driveApp && !request.reuseApps?.length) throw new UpStop('Agent mode creates the GitHub Apps in a Chrome profile signed in to GitHub, and none is given or recorded: pass --browser-profile PROFILE and rerun graphyard up --agent.', upExitCodes.prerequisite);
 
     await step('preflight', async () => {
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -366,28 +375,32 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
 /** `graphyard up`'s flags. */
 export function upRequestFromArgs(args: string[]): UpRequest {
   const { values } = parseArgs({ args, options: { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, reviewer: { type: 'string' }, master: { type: 'string' }, goal: { type: 'string' }, 'browser-profile': { type: 'string' },
-    'confirm-price': { type: 'string' }, 'max-monthly': { type: 'string' }, 'ssh-key': { type: 'string' }, 'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' } }, allowPositionals: false });
+    'confirm-price': { type: 'string' }, 'max-monthly': { type: 'string' }, 'ssh-key': { type: 'string' }, 'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' },
+    'reuse-app': { type: 'string', multiple: true }, 'github-mobile': { type: 'boolean' } }, allowPositionals: false });
   if (!values.repo || !/^[\w.-]+\/[\w.-]+$/.test(values.repo)) throw new Error('Use graphyard up --repo OWNER/NAME [--provider compose|railway|hetzner] [--agent]');
   return { repository: values.repo, provider: values.provider ?? 'compose', agent: !!values.agent, reviewer: values.reviewer ?? 'claude', master: values.master ?? 'claude',
     goalFile: values.goal ?? null, browserProfile: values['browser-profile'] ?? null,
-    install: { confirmPrice: values['confirm-price'] ?? null, maxMonthly: values['max-monthly'] ?? null, sshKey: values['ssh-key'] ?? null, sshHost: values['ssh-host'] ?? null, sshUser: values['ssh-user'] ?? null } };
+    install: { confirmPrice: values['confirm-price'] ?? null, maxMonthly: values['max-monthly'] ?? null, sshKey: values['ssh-key'] ?? null, sshHost: values['ssh-host'] ?? null, sshUser: values['ssh-user'] ?? null },
+    ...(values['reuse-app']?.length ? { reuseApps: values['reuse-app'] } : {}), ...(values['github-mobile'] ? { sudo: 'mobile' as const } : {}) };
 }
 
 /**
  * Agent mode's App step (AC-5): the installer's manifest page, driven in the master's browser
  * profile — register the App, then install it on the repository alone (GitHub preselects it from
- * `repository_ids[]`). A Confirm-access prompt is passed the way every master browser flow passes
- * it (passSudo: GitHub Mobile is triggered, on the passkey-first page too) and its two-digit code
- * is the one thing handed to a person, after which the drive carries on by itself.
+ * `repository_ids[]`). A Confirm-access prompt is passed with passSudo, passkey or password first
+ * (GY-1442): the operator confirms at the handed-off link, and GitHub Mobile is triggered only when
+ * the page offers neither or the operator chose it (`--github-mobile`, `sudo: 'mobile'`); a Mobile
+ * code unapproved for a minute is handed off again with the passkey or password link beside it.
+ * The handoff is the one thing a person does, after which the drive carries on by itself.
  */
-export function browserAppDriver(options: { page: BrowserPage; repository: string; ids: () => { owner: number; repository: number }; sleep: (ms: number) => Promise<void>; timeoutMs?: number; record?: string; onClose?: (outcome: DriveOutcome) => Promise<void> | void }) {
+export function browserAppDriver(options: { page: BrowserPage; repository: string; ids: () => { owner: number; repository: number }; sleep: (ms: number) => Promise<void>; timeoutMs?: number; record?: string; sudo?: SudoOptions['prefer']; onClose?: (outcome: DriveOutcome) => Promise<void> | void }) {
   const { page } = options;
   const owner = options.repository.split('/')[0];
   const awaitSudo = async (handoff: Handoff) => {
     // passSudo's flow names the closest master browser flow; its rerun advice is this command's.
     try {
-      await passSudo(page, { flow: 'installation-accept', record: options.record ?? 'graphyard up', sleep: options.sleep, timeoutMs: options.timeoutMs ?? 600_000,
-        onCode: state => handoff(state.code ? `Approve the GitHub Mobile prompt on your phone and choose ${state.code}` : 'Confirm access to GitHub on your device (GitHub Mobile or your passkey)', { url: page.url(), code: state.code }) });
+      await passSudo(page, { flow: 'installation-accept', record: options.record ?? 'graphyard up', sleep: options.sleep, timeoutMs: options.timeoutMs ?? 600_000, prefer: options.sudo ?? 'passkey-or-password',
+        onCode: state => handoff(sudoInstruction(state), { url: state.fallback?.url ?? state.url ?? page.url(), code: state.code }) });
     } catch (error: any) { throw new Error(String(error?.message ?? error).replace(/rerun master browser installation-accept/g, 'rerun graphyard up --agent')); }
   };
   const press = async (kind: 'button' | 'link', text: string, handoff: Handoff) => {
@@ -442,7 +455,7 @@ export function recordedAppDriver(root: string, request: UpRequest, browser: { p
   const recorded = recordingPage(page(session), { directory, steps, now: () => new Date() });
   const drive = browserAppDriver({
     page: { ...recorded, open: url => { if (!created) { created = true; mkdirSync(directory, { recursive: true, mode: 0o700 }); } return recorded.open(url); } },
-    repository: request.repository, record: relative(root, directory), sleep: ms => new Promise(accept => setTimeout(accept, ms)),
+    repository: request.repository, record: relative(root, directory), sleep: ms => new Promise(accept => setTimeout(accept, ms)), sudo: request.sudo,
     ids: () => {
       const repo = JSON.parse(execFileSync('gh', ['api', `repos/${request.repository}`], { encoding: 'utf8', timeout: 30_000 }));
       return { owner: Number(repo.owner?.id), repository: Number(repo.id) };

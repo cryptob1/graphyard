@@ -58,7 +58,7 @@ Dispatch a [small item](onboarding.md#4-prove-the-first-pr); once `Graphyard / m
 
 **Sizing:** 3 GB per concurrent agent, 2 GB per verification slot, 2 GB base, max(10%, 4 GB) spare; confirmed with `--confirm-price` / `--max-monthly`.
 
-**GitHub App:** an App already saved for the repository (`--github-app FILE`, this install's, or the checkout's `.graphyard/github-app.json`) is reused once it mints a token, so one command reaches a running fleet; a webhook still serving another live installation stays there until `--migrate`. Only a first App registration is a human browser click.
+**GitHub App:** an App already saved for the repository (`--github-app FILE`, this install's, or the checkout's `.graphyard/github-app.json`) is reused once it mints a token; a webhook still serving another live installation stays there until `--migrate`. `--reuse-app SLUG` (or the App page's choice) reuses an App saved on this host and installed on the account: `gh` adds the repository once its permissions cover the role; one whose webhook serves another install is refused.
 
 **Moving:** `--migrate` stops the old loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; a failure before cutover releases the fence. Local logins move, others reconnect.
 

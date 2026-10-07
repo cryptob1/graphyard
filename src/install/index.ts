@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { chmod, readFile, writeFile } from 'node:fs/promises';
+import { chmod, readdir, readFile, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
@@ -15,8 +15,9 @@ import { applyProtection, appClient, configureWebhook, detectCiAppIds, effective
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
-import { assertOutsideRepository, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord } from './secrets.js';
+import { assertOutsideRepository, configHome, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord } from './secrets.js';
 import { AppStepPending, readAppFile, readSavedApp, type SavedApp } from './manifest.js';
+import { reuseExistingApp, savedRegistrations, type AppCredentials, type AppRole, type SavedRegistration } from '../github-setup.js';
 import { herdrBoundElsewhere, herdrPluginBinding, herdrRebindRefusal } from '../repository-setup.js';
 import { localTransport, sshTransport, type Transport } from './transport.js';
 import { installIdFor, providers, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PlannedPrincipal, type PreflightItem, type Provider } from './types.js';
@@ -45,7 +46,7 @@ export interface InstallDependencies {
   detectRuntimes?: (transport: Transport) => Promise<DetectedRuntime[]>;
   detectHerdr?: (transport: Transport) => Promise<HerdrState>;
   /** Runs the App-manifest browser flow and resolves once the human has confirmed. The registration credentials are written to `file`, which the installer keeps under the install directory, never inside a repository. */
-  githubApp?: (request: { root: string; repository: string; origin: string; file: string; reviewer?: string }) => Promise<AppFacts & { slug: string; botUserId?: number }>;
+  githubApp?: (request: { root: string; repository: string; origin: string; file: string; reviewer?: string; reuse?: AppPageReuse }) => Promise<AppFacts & { slug: string; botUserId?: number }>;
   registerProfiles?: (request: ProfileRequest) => Promise<ProfileRegistration>;
   runHerdr?: (args: string[]) => string;
   /** Test seam: exercise the orchestration against a scripted provider. */
@@ -72,7 +73,14 @@ export interface ProfileRequest {
  * Without either, a plugin bound elsewhere fails preflight instead of being silently repointed.
  */
 export interface HerdrChoice { herdr?: 'rebind' | 'skip' }
+/**
+ * GY-1442: Apps already installed on the account that the install reuses instead of creating one
+ * (`--reuse-app SLUG`, repeatable): each serves the role its saved registration on this host has.
+ */
+export interface ReuseChoice { reuseApps?: string[] }
 export type InstallRequest = InstallInputs & HerdrChoice;
+/** What the App page offers to reuse instead of creating an App, and the reuse itself. */
+export interface AppPageReuse { slugs: string[]; adopt: (slug: string) => Promise<AppCredentials & { installationId: number }> }
 
 /**
  * The install request the `install` command's flags describe. It lives beside `resumeCommand`,
@@ -87,11 +95,12 @@ export function installRequestFromArgs(args: string[]) {
     'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' }, 'ssh-key': { type: 'string' }, 'server-name': { type: 'string' }, workspace: { type: 'string' },
     'server-type': { type: 'string' }, location: { type: 'string' }, port: { type: 'string' }, logs: { type: 'boolean' },
     target: { type: 'string' }, local: { type: 'boolean' }, migrate: { type: 'boolean' }, 'max-monthly': { type: 'string' }, 'confirm-price': { type: 'string' },
-    'github-app': { type: 'string' },
+    'github-app': { type: 'string' }, 'reuse-app': { type: 'string', multiple: true },
     'create-environments': { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' },
   }, allowPositionals: false });
   if (values['herdr-rebind'] && values['no-herdr']) throw new Error('Choose either --herdr-rebind or --no-herdr');
   if (!values.repo) throw new Error('Use --repo OWNER/NAME');
+  for (const slug of values['reuse-app'] ?? []) if (!/^[a-z0-9][a-z0-9-]{0,99}$/i.test(slug)) throw new Error(`--reuse-app takes an App slug such as graphyard-owner-repo, not ${slug}`);
   // --target names a self-contained install (GY-717): an existing machine, or a Hetzner server it creates.
   if (values.target && values.provider) throw new Error('Use either --target host|hetzner (a self-contained host) or --provider (a server-only install)');
   if (values.target && !['host', 'hetzner'].includes(values.target)) throw new Error('Use --target host (an existing Linux machine) or --target hetzner (a server the installer creates)');
@@ -104,13 +113,14 @@ export function installRequestFromArgs(args: string[]) {
   // A count that silently became NaN would install a control plane with no worker principal
   // or an unusable port, so a non-numeric value stops the command instead.
   const count = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`--${flag} takes a whole number`); return parsed; };
-  const request: InstallRequest = { repository: values.repo,
+  const request: InstallRequest & ReuseChoice = { repository: values.repo,
     ...(values['herdr-rebind'] ? { herdr: 'rebind' as const } : values['no-herdr'] ? { herdr: 'skip' as const } : {}), provider: provider as InstallRequest['provider'],
     ...(values.target || provider === 'host' ? { selfContained: true } : {}),
     ...(values.local ? { local: true } : {}), ...(values.migrate ? { migrate: true } : {}),
     ...(values['max-monthly'] ? { maxMonthly: money('max-monthly', values['max-monthly']) } : {}),
     ...(values['confirm-price'] ? { confirmPrice: money('confirm-price', values['confirm-price']) } : {}),
     ...(values['github-app'] ? { githubAppFile: values['github-app'] } : {}),
+    ...(values['reuse-app']?.length ? { reuseApps: values['reuse-app'] } : {}),
     ...(values['base-branch'] ? { baseBranch: values['base-branch'] } : {}),
     ...(values.domain ? { domain: values.domain } : {}), ...(values.workers ? { workers: count('workers', values.workers) } : {}),
     ...(values.port ? { port: count('port', values.port) } : {}),
@@ -128,7 +138,7 @@ export function installRequestFromArgs(args: string[]) {
 }
 
 export interface InstallSession {
-  root: string; inputs: Required<Pick<InstallInputs, 'repository' | 'provider' | 'baseBranch'>> & InstallRequest;
+  root: string; inputs: Required<Pick<InstallInputs, 'repository' | 'provider' | 'baseBranch'>> & InstallRequest & ReuseChoice;
   installId: string; directory: string; adapter: ProviderAdapter; context: AdapterContext;
   principals: PlannedPrincipal[]; tokens: Map<string, string>; vault: Vault;
   record: InstallRecord | null; reviewers: { name: string; appId: number; botUserId: number }[];
@@ -145,6 +155,8 @@ export interface InstallSession {
   generatedFiles: { assignment: GeneratedFilesAssignment | null; error: string | null };
   /** The App registration this install reuses instead of the browser step, or why the named one cannot be. */
   savedApp: { app: SavedApp | null; error: string | null };
+  /** Every App registration saved on this host (GY-1442): what --reuse-app and the App page's reuse choose from. */
+  registrations: SavedRegistration[];
   /**
    * The repository's delivery model (GY-1102): the reviewed policy graphyard.json commits, or the
    * one a scan would propose when none is committed yet (`committed` false), with the adapter that
@@ -205,7 +217,50 @@ async function findSavedApp(root: string, directory: string, inputs: InstallInpu
   return { app: null, error: null };
 }
 
-export async function prepareInstall(cwd: string, rawInputs: InstallRequest, dependencies: InstallDependencies = {}, mode: 'plan' | 'apply' = 'apply'): Promise<InstallSession> {
+/** The App registrations saved on this host: every install directory under the config home, then the checkout's. */
+async function hostRegistrations(root: string, override?: string) {
+  const home = configHome(override);
+  const installs = await readdir(home, { withFileTypes: true }).then(entries => entries.filter(entry => entry.isDirectory()).map(entry => resolve(home, entry.name)).sort(), () => [] as string[]);
+  return savedRegistrations([...installs, resolve(root, '.graphyard'), resolve(mainCheckout(root), '.graphyard')]);
+}
+/** The App --reuse-app names for ROLE, judged by the role its saved registration has. */
+const reusedFor = (session: Pick<InstallSession, 'inputs' | 'registrations'>, role: AppRole) =>
+  (session.inputs.reuseApps ?? []).find(slug => session.registrations.find(entry => entry.app.slug.toLowerCase() === slug.toLowerCase())?.role === role) ?? null;
+/** `gh` on the install's transport (the host's login), resolving stdout or naming its failure. */
+const ghText = (session: InstallSession) => async (args: string[]) => {
+  const result = await githubCli(session.context.transport)(args, { allowFailure: true });
+  if (result.code !== 0) throw new Error(`gh ${args.slice(0, 4).join(' ')} failed: ${(result.stderr || result.stdout).trim().split('\n')[0] || `exit ${result.code}`}`);
+  return result.stdout;
+};
+/** Reuse SLUG as the ROLE App: read-only for the plan, adding the repository to its installation on apply. */
+function reuseApp(session: InstallSession, slug: string, role: AppRole, webhookUrl: string | null, apply: boolean) {
+  return reuseExistingApp({ slug, role, repository: session.inputs.repository, registrations: session.registrations, webhookUrl, gh: ghText(session), fetcher: session.deps.fetch, apply });
+}
+/** The --reuse-app preflight: every named App is saved here, fits a role this install fills, and passes reuseExistingApp's checks. */
+async function reusePreflight(session: InstallSession, ghReady: boolean): Promise<PreflightItem[]> {
+  const items: PreflightItem[] = [];
+  for (const slug of session.inputs.reuseApps ?? []) {
+    const name = `Reuse App ${slug}`;
+    const saved = session.registrations.find(entry => entry.app.slug.toLowerCase() === slug.toLowerCase());
+    const fix = 'Name an App whose registration an earlier install or github-setup saved on this host, or drop --reuse-app to register a new App in the browser';
+    if (!saved) { items.push({ name, ok: false, detail: `no registration for App ${slug} is saved on this host${session.registrations.length ? `; saved: ${session.registrations.map(entry => entry.app.slug).join(', ')}` : ''}`, fix }); continue; }
+    if (saved.role === 'reviewer' && !session.inputs.reviewer) { items.push({ name, ok: false, detail: `${slug} is a reviewer App and this install registers no reviewer`, fix: 'Add --reviewer NAME so the reused App serves as that reviewer' }); continue; }
+    if (saved.role === 'control-plane' && session.inputs.githubAppFile) { items.push({ name, ok: false, detail: '--github-app and --reuse-app both name the control-plane App', fix: 'Keep one of them' }); continue; }
+    if (!ghReady) { items.push({ name, ok: false, detail: 'adding the repository to the App\'s installation needs the GitHub CLI', fix: 'Authenticate gh (see the GitHub CLI check), then rerun' }); continue; }
+    try {
+      const reuse = await reuseApp(session, slug, saved.role, session.record?.url ? webhookUrlFor(session.record.url) : null, false);
+      items.push({ name, ok: true, detail: `the ${saved.role} App ${saved.app.slug} (app ${saved.app.appId}) holds the permissions it needs and is installed on ${reuse.account}${reuse.selection === 'all' ? ' for every repository' : `; --apply adds ${session.inputs.repository} to that installation`}` });
+    } catch (error) { items.push({ name, ok: false, detail: error instanceof Error ? error.message : String(error), fix }); }
+  }
+  return items;
+}
+/** The page's reuse offer for ROLE: every App of that role saved on this host, reused on the page's choice. */
+function pageReuse(session: InstallSession, role: AppRole, url: string): AppPageReuse | undefined {
+  const slugs = session.registrations.filter(entry => entry.role === role).map(entry => entry.app.slug);
+  return slugs.length ? { slugs, adopt: async slug => (await reuseApp(session, slug, role, role === 'control-plane' ? webhookUrlFor(url) : null, true)).app } : undefined;
+}
+
+export async function prepareInstall(cwd: string, rawInputs: InstallRequest & ReuseChoice, dependencies: InstallDependencies = {}, mode: 'plan' | 'apply' = 'apply'): Promise<InstallSession> {
   const provider = rawInputs.provider;
   if (!provider) throw new Error('Use --provider railway|hetzner|docker-host|compose, or --target host|hetzner');
   // A self-contained install puts the whole of Graphyard on one machine: an existing one (host) or
@@ -277,6 +332,8 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest, dep
   }
   const materialized = tokens.size === principals.length && !!context.databasePassword;
   const savedApp = await findSavedApp(root, directory, inputs);
+  const registrations = await hostRegistrations(root, dependencies.configHome);
+  for (const entry of registrations) { vault.add(entry.app.privateKey); if (entry.app.webhookSecret) vault.add(entry.app.webhookSecret); }
   if (savedApp.app) { vault.add(savedApp.app.facts.privateKey); if (savedApp.app.facts.webhookSecret) vault.add(savedApp.app.facts.webhookSecret); }
   const adapter = dependencies.adapter ?? (selfContained ? selfContainedAdapter(provider === 'host' ? existingMachineAdapter : adapterFor(provider)) : adapterFor(provider));
   const deployment: DeploymentContext = {
@@ -290,7 +347,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest, dep
     : delivery.committed ? requiredPullRequestChecks(delivery.policy) : detected.proposedChecks;
   return {
     root, inputs, installId, directory, adapter, context, principals, tokens, vault, record,
-    reviewers: record?.reviewers ?? [], mode, materialized, generatedFiles, savedApp,
+    reviewers: record?.reviewers ?? [], mode, materialized, generatedFiles, savedApp, registrations,
     delivery: { ...delivery, adapter: deploymentAdapters[delivery.policy.deploy.adapter], context: deployment },
     reviewPolicy, requiredChecks,
     reviewCount: reviewPolicy === 'agent' ? 0 : Math.max(0, inputs.reviewCount ?? 1),
@@ -593,6 +650,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   if (session.inputs.githubAppFile) preflight.push(session.savedApp.error
     ? { name: 'GitHub App registration', ok: false, detail: session.savedApp.error, fix: 'Name the JSON the manifest flow saved for this repository with --github-app FILE, or omit --github-app to register the App in the browser' }
     : { name: 'GitHub App registration', ok: true, detail: `reusing app ${session.savedApp.app!.facts.appId} from ${session.savedApp.app!.file}` });
+  preflight.push(...await reusePreflight(session, ghStatus.code === 0));
   const candidateModel = session.delivery.policy.mode === 'release-candidate';
   if (candidateModel) preflight.push(...await session.delivery.adapter.preflight(session.delivery.context));
   // Herdr's graphyard plugin, read before anything is planned around it: one already bound to
@@ -634,7 +692,9 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
 
   const appConfigured = !!record?.github;
   const saved = session.savedApp.app;
-  actions.push(appConfigured || !saved
+  const reusedApp = reusedFor(session, 'control-plane');
+  if (reusedApp && !appConfigured) actions.push({ id: 'github.app', target: 'github', state: 'update', title: `Reuse the GitHub App ${reusedApp} already installed on the account: add ${session.inputs.repository} to its installation with the host's gh login and verify the App reaches it; no browser step` });
+  else actions.push(appConfigured || !saved
     ? { id: 'github.app', target: 'github', state: appConfigured ? 'satisfied' : 'create', title: 'Register the Graphyard GitHub App through the manifest flow and install it on the managed repository', human: 'One browser confirmation: create the App, then choose the managed repository. GitHub returns the App ID, private key, and webhook secret directly to this machine.' }
     : { id: 'github.app', target: 'github', state: 'update', title: `Reuse the Graphyard GitHub App ${saved.facts.slug} (app ${saved.facts.appId}, installation ${saved.facts.installationId}) saved in ${saved.file}, after an installation token minted from it proves it still works; no browser step` });
   actions.push({ id: 'github.env', target: 'provider', state: appConfigured ? 'satisfied' : 'create', title: 'Write the App ID, installation ID, private key, and webhook secret to the server', values: [
@@ -663,7 +723,8 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     actions.push(...wiringActions(session.delivery.context, ghReady ? await observeReleaseWiring(gh, session.inputs.repository) : null));
     actions.push(...session.delivery.adapter.plan(session.delivery.context));
   }
-  if (session.inputs.reviewer) actions.push({ id: 'github.reviewer', target: 'github', state: record?.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer) ? 'satisfied' : 'create', title: `Register the reviewer App "${session.inputs.reviewer}", add its identity to GRAPHYARD_REVIEWER_APPS, and set it as the main guard's revert approver (GRAPHYARD_REVERT_APPROVER_*)`, human: 'One additional browser confirmation, because a reviewer is a separate GitHub identity with no control-plane authority.' });
+  const reusedReviewer = reusedFor(session, 'reviewer');
+  if (session.inputs.reviewer) actions.push({ id: 'github.reviewer', target: 'github', state: record?.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer) ? 'satisfied' : 'create', title: `${reusedReviewer ? `Reuse the reviewer App ${reusedReviewer} as "${session.inputs.reviewer}" (the repository is added to its installation)` : `Register the reviewer App "${session.inputs.reviewer}"`}, add its identity to GRAPHYARD_REVIEWER_APPS, and set it as the main guard's revert approver (GRAPHYARD_REVERT_APPROVER_*)`, human: 'One additional browser confirmation, because a reviewer is a separate GitHub identity with no control-plane authority.' });
 
   // A local Compose install serves loopback only, so GitHub can never deliver to it. Saying
   // so in the plan keeps an agent from chasing an unconfirmable step as if it were a failure.
@@ -854,7 +915,9 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     facts = await resolveApp(session, url, record);
     vault.add(facts.privateKey); vault.add(facts.webhookSecret);
     if (session.inputs.reviewer && !session.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer)) {
-      const reviewerFacts = await deps.githubApp!({ root: session.root, repository: session.inputs.repository, origin: url, file: appCredentialFile(session, session.inputs.reviewer), reviewer: session.inputs.reviewer });
+      const reusedReviewer = reusedFor(session, 'reviewer');
+      const reviewerFacts = reusedReviewer ? await adoptApp(session, reusedReviewer, 'reviewer', url)
+        : await deps.githubApp!({ root: session.root, repository: session.inputs.repository, origin: url, file: appCredentialFile(session, session.inputs.reviewer), reviewer: session.inputs.reviewer, reuse: pageReuse(session, 'reviewer', url) });
       if (!reviewerFacts.botUserId) throw new Error('GitHub did not return the reviewer bot identity; rerun the reviewer registration');
       if (reviewerFacts.appId === facts.appId) throw new Error('A reviewer App must be a different identity from the Graphyard control-plane App');
       session.reviewers = [...session.reviewers, { name: session.inputs.reviewer, appId: reviewerFacts.appId, botUserId: reviewerFacts.botUserId }];
@@ -1010,7 +1073,7 @@ export function resumeCommand(session: Pick<InstallSession, 'inputs'>) {
     createEnvironments: flag('create-environments', inputs.createEnvironments),
     herdr: inputs.herdr === 'rebind' ? ['--herdr-rebind'] : inputs.herdr === 'skip' ? ['--no-herdr'] : [],
   };
-  return ['graphyard', 'install', ...Object.values(flags).flat(), '--apply'].join(' ');
+  return ['graphyard', 'install', ...Object.values(flags).flat(), ...values('reuse-app', inputs.reuseApps), '--apply'].join(' ');
 }
 
 async function pausedSummary(session: InstallSession, plan: InstallPlan, url: string, health: boolean, profiles: ProfileRegistration | null, pending: AppStepPending): Promise<PausedInstall> {
@@ -1069,6 +1132,12 @@ async function authenticatedStatus(session: InstallSession, url: string) {
 
 async function resolveApp(session: InstallSession, url: string, record: InstallRecord): Promise<AppFacts & { slug: string; botUserId?: number; reused?: boolean }> {
   const { deps } = session;
+  const reused = reusedFor(session, 'control-plane');
+  if (reused) {
+    const facts = await adoptApp(session, reused, 'control-plane', url);
+    if (record.github && record.github.appId !== facts.appId) deps.log(`GitHub App changed from ${record.github.appId} to ${facts.appId}`);
+    return { ...facts, reused: true };
+  }
   const saved = session.savedApp.app;
   if (saved) {
     // A saved registration is used only once GitHub mints an installation token from it, so a
@@ -1086,9 +1155,21 @@ async function resolveApp(session: InstallSession, url: string, record: InstallR
     }
   }
   if (!deps.githubApp) throw new Error('No GitHub App flow is available in this environment');
-  const facts = await deps.githubApp({ root: session.root, repository: session.inputs.repository, origin: url, file: appCredentialFile(session) });
+  const facts = await deps.githubApp({ root: session.root, repository: session.inputs.repository, origin: url, file: appCredentialFile(session), reuse: pageReuse(session, 'control-plane', url) });
   if (record.github && record.github.appId !== facts.appId) session.deps.log(`GitHub App changed from ${record.github.appId} to ${facts.appId}`);
   return facts;
+}
+
+/**
+ * `--reuse-app` on apply (GY-1442): the repository is added to the App's installation, the App is
+ * shown to reach it, and its registration is saved as this install's own, so a rerun reuses it.
+ */
+async function adoptApp(session: InstallSession, slug: string, role: AppRole, url: string): Promise<AppFacts & { slug: string; botUserId?: number }> {
+  const reuse = await reuseApp(session, slug, role, role === 'control-plane' ? webhookUrlFor(url) : null, true);
+  const own = appCredentialFile(session, role === 'reviewer' ? session.inputs.reviewer : undefined);
+  await writeFile(own, JSON.stringify({ ...reuse.app, ...(role === 'reviewer' ? { reviewer: session.inputs.reviewer } : {}) }, null, 2), { mode: 0o600 }); await chmod(own, 0o600);
+  session.deps.log(`Reusing the ${role} App ${reuse.app.slug} (app ${reuse.app.appId}) from ${reuse.file}: ${reuse.added ? `added ${session.inputs.repository} to its installation ${reuse.app.installationId}` : `its installation ${reuse.app.installationId} covers every repository on ${reuse.account}`}; no browser step`);
+  return { appId: reuse.app.appId, slug: reuse.app.slug, installationId: reuse.app.installationId, privateKey: reuse.app.privateKey, webhookSecret: reuse.app.webhookSecret ?? '', ...(reuse.app.botUserId ? { botUserId: reuse.app.botUserId } : {}) };
 }
 
 async function registerProfiles(session: InstallSession, url: string, appPending = false): Promise<ProfileRegistration> {

@@ -60,6 +60,7 @@ export const installCommands = defineCommands([
       '  up --repo OWNER/NAME [--provider compose|railway|hetzner] [--reviewer NAME]',
       '     [--master claude|codex] [--agent] [--goal FILE] [--browser-profile PROFILE]',
       '     [--confirm-price X | --max-monthly N] [--ssh-key NAME] [--ssh-host HOST] [--ssh-user USER]',
+      '     [--reuse-app SLUG]... [--github-mobile]',
       '                                First-run setup in one command: preflight, control plane,',
       '                                host supervisor and Herdr, onboarding, agent accounts,',
       '                                harness and master loop, resumable (.graphyard/up.json).',
@@ -70,7 +71,10 @@ export const installCommands = defineCommands([
       '                                --agent runs every step non-interactively (JSON events on',
       '                                stderr), creating the Apps in the given or the master\'s recorded',
       '                                browser profile (none: exit 2), and hands off only device',
-      '                                approvals. Exit 0 green, 1 failed, 2 prerequisite, 3 still',
+      '                                approvals: a Confirm-access prompt is handed off as passkey or',
+      '                                password first (--github-mobile: GitHub Mobile first, with the',
+      '                                passkey or password link added after 60 s unapproved).',
+      '                                --reuse-app passes to install. Exit 0 green, 1 failed, 2 prerequisite, 3 still',
       '                                waiting (rerun resumes).',
     ],
     // `up` installs the control plane and records the connection; it never reads a stale one.
@@ -94,13 +98,18 @@ export const installCommands = defineCommands([
       '                                Install or reconcile a complete control plane.',
       '  install --target host|hetzner --repo OWNER/NAME [--plan|--apply]',
       '          [--ssh-host HOST | --local] [--migrate] [--max-monthly N | --confirm-price X]',
-      '          [--github-app FILE]',
+      '          [--github-app FILE] [--reuse-app SLUG]...',
       '                                Self-contained host: server, Postgres, loop, executors,',
       '                                Herdr and agent runtimes on one machine (hetzner creates it',
       '                                and needs its monthly price confirmed). --migrate moves an',
       '                                installation there from GRAPHYARD_MIGRATE_DATABASE_URL.',
       '                                An App already saved for the repository (--github-app,',
       '                                or .graphyard/github-app.json) is reused: no browser step.',
+      '                                --reuse-app SLUG reuses an App saved on this host and',
+      '                                installed on the account: the repository is added to its',
+      '                                installation with gh after its permissions are checked; a',
+      '                                control-plane App whose webhook serves another install is',
+      '                                refused. The App page offers the same reuse.',
       '                                --plan prints every action with secrets redacted and',
       '                                changes nothing; --apply executes the same plan. UAT and',
       '                                production resources that cost money are created only with',
@@ -116,7 +125,7 @@ export const installCommands = defineCommands([
       const { values, request: inputs } = installRequestFromArgs(context.rest);
       const session = await prepareInstall(process.cwd(), inputs, {
         cliPath: await context.activeCliPath(), hostId: context.individualHostId(), log: line => console.error(line),
-        githubApp: request => runManifestFlow(request.root, request.repository, request.origin, { reviewer: request.reviewer, announce: line => console.error(line), dependencies: { file: request.file } }),
+        githubApp: request => runManifestFlow(request.root, request.repository, request.origin, { reviewer: request.reviewer, announce: line => console.error(line), dependencies: { file: request.file, ...(request.reuse ? { reusable: request.reuse.slugs, reuse: request.reuse.adopt } : {}) } }),
       }, values.apply ? 'apply' : 'plan');
       if (values.logs) return console.log(await session.adapter.logs(session.context));
       const plan = await buildPlan(session);

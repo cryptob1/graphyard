@@ -334,8 +334,8 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
   assert.deepEqual(clicked, ['#register', '#create', '#install']);
   assert.ok(opened.includes('https://github.com/apps/graphyard-acme-shop/installations/new/permissions?suggested_target_id=11&repository_ids[]=22'), 'installs on the one repository');
 
-  // GitHub's passkey-first Confirm-access page shows no code until "Use GitHub Mobile" is activated;
-  // the drive activates it (as every master browser flow does) and hands off only the code it shows.
+  // GitHub's passkey-first Confirm-access page (GY-1442): the drive hands off the passkey or password
+  // confirmation at the page's link and waits for it, never triggering GitHub Mobile on its own.
   let mobile = false, approved = false, polls = 0;
   const passkey: BrowserPage = {
     ...page, url: () => approved ? 'https://github.com/settings/apps' : 'https://github.com/sessions/sudo',
@@ -343,11 +343,20 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
     locate: (kind, text) => kind === 'link' && text === 'Use GitHub Mobile' && !mobile ? { selector: '#mobile', tag: 'a', checked: null, value: null, text, href: 'https://github.com/sessions/sudo?mobile=1' } : controls[`${kind}:${text}`] ?? null,
     click: selector => { if (selector === '#mobile') mobile = true; },
   };
-  const passkeyHanded: { sentence: string; code: string | null }[] = [];
-  const passkeyDrive = browserAppDriver({ page: passkey, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: async () => { if (mobile && ++polls === 2) approved = true; } });
-  assert.deepEqual(await passkeyDrive('http://127.0.0.1:4311', (sentence, link) => { passkeyHanded.push({ sentence, code: link.code ?? null }); }), { state: 'done' });
+  const passkeyHanded: { sentence: string; url: string | null; code: string | null }[] = [];
+  const passkeyDrive = browserAppDriver({ page: passkey, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: async () => { if (++polls === 2) approved = true; } });
+  assert.deepEqual(await passkeyDrive('http://127.0.0.1:4311', (sentence, link) => { passkeyHanded.push({ sentence, url: link.url ?? null, code: link.code ?? null }); }), { state: 'done' });
+  assert.equal(mobile, false, 'GitHub Mobile is not triggered while the page offers a passkey');
+  assert.deepEqual(passkeyHanded, [{ sentence: 'Confirm access with your passkey or password at https://github.com/sessions/sudo', url: 'https://github.com/sessions/sudo', code: null }]);
+  // The operator chose GitHub Mobile (--github-mobile): the drive activates it and hands off only the code it shows.
+  approved = false; polls = 0;
+  const mobileHanded: { sentence: string; code: string | null }[] = [];
+  const mobileDrive = browserAppDriver({ page: passkey, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sudo: 'mobile', sleep: async () => { if (mobile && ++polls === 2) approved = true; } });
+  assert.deepEqual(await mobileDrive('http://127.0.0.1:4311', (sentence, link) => { mobileHanded.push({ sentence, code: link.code ?? null }); }), { state: 'done' });
   assert.ok(mobile, 'GitHub Mobile was triggered');
-  assert.deepEqual(passkeyHanded, [{ sentence: 'Approve the GitHub Mobile prompt on your phone and choose 37', code: '37' }]);
+  assert.deepEqual(mobileHanded, [{ sentence: 'Approve the GitHub Mobile prompt on your phone and choose 37', code: '37' }]);
+  assert.equal(upRequestFromArgs(['--repo', 'acme/shop', '--github-mobile', '--reuse-app', 'graphyard-acme-api']).sudo, 'mobile');
+  assert.deepEqual(upRequestFromArgs(['--repo', 'acme/shop', '--reuse-app', 'graphyard-acme-api']).reuseApps, ['graphyard-acme-api']);
 
   // The drive is a recorded master browser flow: each step and a record.json under .graphyard/master-actions.
   const recordRoot = await temporaryDirectory('graphyard-up-record');
