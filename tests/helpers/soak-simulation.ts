@@ -33,6 +33,8 @@ import { loopThroughputMeasurement, throughputClaim } from '../../src/throughput
 import { type RunOptions, type RunRecord, type RunResult, type Runner } from '../../src/runner/types.js';
 import { type DiagnosticianEffects } from '../../src/daemon/diagnosis.js';
 import { type AcceptanceEffects, clearDrafts, draftsSettled } from '../../src/daemon/acceptance.js';
+import { clearPlans, plansSettled } from '../../src/daemon/planner.js';
+import { plannerWorld } from './soak-planner.js';
 import type { Goal, Landing } from '../../src/model/goal.js';
 import { recordLanding } from '../../src/server/routes/goals.js';
 import { terminalDecisions } from '../../src/cli/decision-report.js';
@@ -150,7 +152,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   /** GY-1389: the review-round cap, the items whose change requests name a blocking finding past it, and those whose capped round the approver refuses. */
   reviewCap?: { cap: number; items: number[]; refused: number[] };
   /** GY-1417: record three goals and wire the acceptance role (acceptanceWorld below). */
-  acceptance?: boolean }) {
+  acceptance?: boolean;
+  /** GY-1418: with `acceptance`, also wire the planner role over the same goals (tests/helpers/soak-planner.ts). */
+  planner?: boolean }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -1164,8 +1168,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // operator-agent identity.
   const settings = diagnosticianSettings({ diagnostician: { invariantBoundMinutes: 30 } });
   const diagnosed: DiagnosisRun[] = [];
-  clearDrafts();
+  clearDrafts(); clearPlans();
   const acceptance = options.acceptance ? await acceptanceWorld(dayStart) : null;
+  const planner = acceptance && options.planner ? plannerWorld(dayStart, acceptance.day.goals) : null;
   // GY-1092: for `diagnosisLimit` the provider refuses every run for its spent quota, naming no reset.
   const limited = () => !!options.diagnosisLimit && clock.now() - dayStart >= options.diagnosisLimit.from && clock.now() - dayStart < options.diagnosisLimit.to;
   const diagnostician: DiagnosticianEffects = {
@@ -1313,6 +1318,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     },
     diagnostician,
     ...(acceptance ? { acceptance: acceptance.effects } : {}),
+    ...(planner ? { planner: planner.effects } : {}),
     baseSuccessions: async since => ({ tip: github.tip, successions: github.successions.filter(entry => github.commits.get(entry.commit)!.at >= Date.parse(since)), files: new Set(github.files) }),
     replan: (work, paths, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)),
     // The scope scenarios run the loop's own deciding and widening effects: the rule decides the
@@ -2193,6 +2199,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         const cycleStart = clock.now(); budgetDay.cycleSlow = 0;
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
         if (acceptance) await draftsSettled();
+        if (planner) await plansSettled();
         if (options.staleRelease) { staleReleaseDay.steps.push({ elapsed, ms: result.metrics.steps?.decisions?.ms ?? 0, backlogReads: staleReleaseDay.backlogReads }); staleReleaseDay.backlogReads = 0; }
         if (options.slowDecisions) budgetDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, slow: budgetDay.cycleSlow, deferred: [...state.decisionsDeferred] });
         if (options.slowDeployment) deploymentDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, cut: result.actions.some(action => action.kind === 'deployment' && /spent its \d+s budget/.test(action.detail)), pending: deploymentStep.deploymentReadsPending(state) });
@@ -2341,7 +2348,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, staleMerges, restartLog, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null };
+    wakes, staleMerges, restartLog, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null };
 }
 
 /**

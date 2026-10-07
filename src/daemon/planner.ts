@@ -267,7 +267,7 @@ export function plannerEffects(config: MasterConfig, root: string, calls: Calls)
     },
     plan: (goal, plan) => calls.asOperatorAgent('POST', `goals/${goal.key}/plan`, plan, `planner:${goal.id}:${goal.revision}`),
     judge: (goal, judgement) => asApprover(`goals/${goal.key}/plan-${judgement.verdict}`, { reason: judgement.reason }, `planner:${goal.id}:${goal.revision}:judged`),
-    release: goal => calls.asOperatorAgent('POST', `goals/${goal.key}/release`, {}, `planner:${goal.id}:${goal.revision}:release:${Date.now()}`),
+    release: goal => calls.asOperatorAgent('POST', `goals/${goal.key}/release`, {}, `planner:${goal.id}:${goal.revision}:release`),
     deliver: (goal, items, reason) => calls.asOperatorAgent('POST', `goals/${goal.key}/deliver`, { items, reason }, `planner:${goal.id}:${goal.revision}:deliver`),
   };
 }
