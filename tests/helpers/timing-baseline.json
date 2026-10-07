@@ -556,6 +556,7 @@
     "tests/scope-directory-collapse.test.ts": 3251,
     "tests/scope-request-flags.test.ts": 3225,
     "tests/scope-rule-implied.test.ts": 1044,
+    "tests/scope-widening-provenance.test.ts": 470,
     "tests/secrets-scan-scope.test.ts": 284,
     "tests/server-heap-bounded.test.ts": 15579,
     "tests/server-scale.test.ts": 10872,

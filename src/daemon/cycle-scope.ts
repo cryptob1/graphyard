@@ -3,6 +3,7 @@ import type { Work } from '../model.js';
 import { type ScopeRequestState, companionGround, decideScopeRequest, itemDocumentationPaths, pathScope, pathScopeContains, pinningTestGround, plannedFilesMax, redecidableScopeRefusal, routableScopeRequest, scopeDecisionBinding, testFile, unplannedPaths } from '../model/scope.js';
 import { importingTestGround, newProofTestGround, peerModuleGround } from '../model/scope-companions.js';
 import { widenedPlannedFiles } from '../model/scope-collapse.js';
+import { groundedWideningReason } from '../model/scope-provenance.js';
 import { barrelSuccessorGround, criterionSymbolGround, criterionSymbols, criterionTestGround, phraseCallees } from '../model/criterion-scope.js';
 import { type Successor, successorGround, successorsOf } from '../model/successors.js';
 import { findingScope, type ReviewFinding } from '../review-scope.js';
@@ -159,7 +160,7 @@ export async function scopeStep(cycle: Cycle) {
         return null;
       }
       const reason = guardBroadScope({ ...item, plannedFiles: [...new Set([...(item.plannedFiles ?? []), ...granted])] },
-        `Additive scope ${item.key}'s own change calls for — a review finding names it, it succeeds a planned file the base branch split, renamed or re-exports, a test pins text a planned file holds or a criterion changes, it defines or calls a symbol a criterion names, or it is a companion the change inevitably carries: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
+        `${groundedWideningReason(item.key)}a review finding names it, it succeeds a planned file the base branch split, renamed or re-exports, a test pins text a planned file holds or a criterion changes, it defines or calls a symbol a criterion names, or it is a companion the change inevitably carries: ${grounds}. ${request.requestedBy} asked because ${request.reason}`.slice(0, 1900), { allow: false, command: 'the loop', existing: item.plannedFiles });
       const widened = await effects.widenScope(item, request, granted, reason) as Work | undefined;
       // Every later step of this cycle reads the widened item, never the snapshot this widening
       // outdated: a successor re-plan posted from that snapshot is refused (GY-1235, GY-1293).
