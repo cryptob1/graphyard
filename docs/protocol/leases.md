@@ -16,7 +16,7 @@ Workers never use host `gh` logins; launchers mint into `worker-sessions/GY-N-EP
 - `submit` (CLI `complete`); later heartbeats get `Implementation lease for epoch N ended when GY-N was submitted; stop heartbeating after complete`.
 - `park` (human-only request naming every human step; file widenings (409) or deferred steps refused: `scope-request`) or `blocked` releases.
 - Coordinator `capacity` (`event: "exhausted"`): freed for another account; like every attempt end, closes its scope request, lifting that refusal blocker.
-- Expiry, classed by epoch's ledger: unwithdrawn pre-release `blocked` report → `lease.expired` cause `blocked-awaiting-operator`; admin `--previous-worker-stopped` → `stopped-by-attestation`; `capacity.exhausted` → `exhausted-capacity`; none → `lease-loss` escalation, auto-settled once a record explains it, a newer attempt supersedes it, or 5 min after raising once every attempt ended without lease or fence ([settling](../delegation.md#who-may-settle-what)).
+- Expiry, classed by epoch's ledger: unwithdrawn pre-release `blocked` report → `lease.expired` cause `blocked-awaiting-operator`; admin `--previous-worker-stopped` → `stopped-by-attestation`; `capacity.exhausted` → `exhausted-capacity`; renewed to the 130-min no-submission refusal unsubmitted → `no-submission-bound`; none → `lease-loss` escalation, auto-settled once a record explains it, a newer attempt supersedes it, or 5 min after raising once every attempt ended without lease or fence ([settling](../delegation.md#who-may-settle-what)).
 
 ## Blocked work unblocks itself
 
