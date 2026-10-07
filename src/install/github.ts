@@ -52,6 +52,18 @@ export async function installationToken(facts: Pick<AppFacts, 'appId' | 'private
   return { token: String(result.token), expires: Date.parse(result.expires_at) };
 }
 
+/**
+ * The App's installation on REPOSITORY, read as the App itself (GET /repos/OWNER/NAME/installation),
+ * or null when it has none: an App installed outside the setup page is found here (GY-1476).
+ */
+export async function repositoryInstallation(facts: Pick<AppFacts, 'appId' | 'privateKey'>, repository: string, fetcher: typeof fetch = fetch): Promise<number | null> {
+  const response = await fetcher(`https://api.github.com/repos/${repository}/installation`, { headers: { Authorization: `Bearer ${appJwt(facts.appId, facts.privateKey)}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }, signal: AbortSignal.timeout(20_000) });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`GitHub GET /repos/${repository}/installation failed (${response.status})`);
+  const id = ((await response.json()) as any)?.id;
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
 export function installationClient(facts: AppFacts, fetcher: typeof fetch = fetch): AppClient {
   let token = ''; let expires = 0;
   return {
