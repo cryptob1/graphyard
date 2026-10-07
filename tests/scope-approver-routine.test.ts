@@ -340,7 +340,12 @@ test('unit:scope-outcome-delivered — the worker reads the outcome in its sessi
   // While the approver judges it, status names no `master scope` for it; without the routing it would.
   const snapshot = await ok(token(coordinator), 'GET', 'work-snapshot') as { work: Work[]; now: string };
   const mine = { work: snapshot.work.filter(item => item.id === work.id), now: snapshot.now };
-  assert.match(scopeRequestAttention(mine).map(item => item.next).join('\n'), new RegExp(`graphyard master scope ${work.key}`), 'an unrouted refusal still names master scope');
+  // Before the loop routes it, the engine refuses `master scope` within the bound since the rule's
+  // refusal (GY-1388), so status names none; past that bound with no routed decision it does.
+  assert.deepEqual(scopeRequestAttention(mine), [], 'a refusal inside the bound names no master scope');
+  const aged = (iso: string | undefined) => iso && new Date(Date.parse(iso) - 16 * 60_000).toISOString();
+  const request = mine.work[0].scopeRequest!, unrouted = { ...mine, work: [{ ...mine.work[0], scopeRequest: { ...request, at: aged(request.at)!, decision: { ...request.decision!, at: aged(request.decision!.at)! } } }] };
+  assert.match(scopeRequestAttention(unrouted).map(item => item.next).join('\n'), new RegExp(`graphyard master scope ${work.key}`), 'an unrouted refusal past the bound still names master scope');
   const approvals = daemonSummary(approvedState, Date.now(), 30_000).approvals;
   assert.ok(routedScopeRequests(approvals)(mine.work[0]), 'the loop has routed this request');
   assert.deepEqual(scopeRequestAttention(mine, approvals).filter(item => /master scope/.test(`${item.next} ${item.text}`)), [], 'a routed request names no master scope');
