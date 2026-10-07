@@ -3,7 +3,7 @@
 
 ## Items, scope and human waits
 
-Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (flags before `--` refused); auto-granted if grounded: docs; files criteria, follow-ups or findings name; `web/`/`browser-tests/` for `docs/` planners; tests pinning planned text; symbol definitions; successors; companions (docs-budget gate, timing baseline, importing tests, planned modules' imports/importers). Else an `approve-scope` executor or loop replays standing decisions or asks an approver (a partial grant's rest same cycle); `master scope GY-N [--allow-broad-scope] REASON` applies refused requests save the approver's (routed, or refused <15 min ago: `master decisions`). Leases stay (`--wait` reads outcome). Ending attempts (submit, release, lapse, rework, requirements) close requests `attempt ended`; `master unblock GY-N` closes stale ones. Human decisions: `park GY-N EPOCH KIND NEEDED --ask ASK [--step STEP]… --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you)); `graphyard answer GY-N …`.
+Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (flags before `--` refused); auto-granted if grounded: docs; files criteria, follow-ups or findings name; `web/`/`browser-tests/` for `docs/` planners; tests pinning planned text; symbol definitions; successors; companions (docs-budget gate, timing baseline, importing tests, planned modules' imports/importers). Else an `approve-scope` executor or loop replays standing decisions or asks an approver (partial grant's rest same cycle); `master scope GY-N [--allow-broad-scope] REASON` applies refused requests save approver's (routed, or refused <15 min ago: `master decisions`). Leases stay (`--wait` reads outcome). Ending attempts (submit, release, lapse, rework, requirements) close requests `attempt ended`; `master unblock GY-N` closes stale ones. Human decisions: `park GY-N EPOCH KIND NEEDED --ask ASK [--step STEP]… --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you)); `graphyard answer GY-N …`.
 
 ## Conflict avoidance
 
@@ -19,7 +19,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 | `installation-accept` | Accept pending requests
 | `protection` | Reconcile branch protection
 
-Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` `record.json`, `ledger.json`. Approving a *Confirm access* GitHub Mobile code is human-only; the master never stores the profile's cookies, uses merge bypass, pushes code or reads worker credentials. On classifier refusals `master harness claude --apply` (or `master harness codex`) writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`; `gh api` `pulls/N/merge`, `repos/R/merges`, `merge-upstream`, `pulls/N/reviews`, `access_tokens`, `PUT`/`POST`/`DELETE`; `gh api graphql` with `mutation` or `=@`/`--input`. Missing/retired rules (`gh api *merge*`, `gh api graphql*`): `harness` drift, repaired by `master status`.
+Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` `record.json`, `ledger.json`. Approving *Confirm access* GitHub Mobile code on device is human-only; the master never stores profile's cookies, uses merge bypass, pushes code or reads a worker credential. On classifier refusals `master harness claude --apply` (or `master harness codex`) writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`; `gh api` `pulls/N/merge`, `repos/R/merges`, `merge-upstream`, `pulls/N/reviews`, `access_tokens`, `PUT`/`POST`/`DELETE`; `gh api graphql` with `mutation` or `=@`/`--input`. Missing/retired rules (`gh api *merge*`, `gh api graphql*`): `harness` drift, repaired by `master status`.
 
 ## Typed actions and executors
 
@@ -27,11 +27,11 @@ Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/
 
 ## Recovery
 
-A dead supervisor fences its item; `containment` lists survivors' pid, cmdline and cwd: with `settleable: true` run `master settle-containment GY-N REASON`, else stop the recorded scope unit (`containment.scope`) and request `rework`. Unexplained lapses raise `lease-loss` (`blocked-awaiting-operator`, `stopped-by-attestation` lapses are history); any admin settles explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns a handler answering `master decide GY-N resolve … --context FINGERPRINT REASON`.
+A dead supervisor fences its item; `containment` lists survivors' pid, cmdline and cwd: with `settleable: true` run `master settle-containment GY-N REASON`, else stop the recorded scope unit (`containment.scope`) and request `rework`. Unexplained lapses raise `lease-loss` (`blocked-awaiting-operator`, `stopped-by-attestation` lapses are history); any admin settles explained one with `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns handler answering `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
 ### Producer-runtime faults
 
-An unacted producer request (never started, launch refused, exited at launch) requests no rework, relaunching on an untried profile.
+An unacted producer request (never started, launch refused, exited at launch) relaunches on untried profile, requesting no rework.
 
 ## Fault classes
 
@@ -41,4 +41,4 @@ An unacted producer request (never started, launch refused, exited at launch) re
 
 Target (ten-plus deliveries): submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
 
-The loop's decisions step stays within 10 s a cycle at ~90 open items: one `decision.*` ledger read names moved items, rereading only those; unmoved histories are kept, not read. Widenings refused by 5xx or stale revision, and decisions or withdrawals whose history read times out, retry next cycle (two running: fault); moot ones (delivered, request answered, lease ended, head moved) count none.
+The loop's decisions step stays within 10 s a cycle at ~90 open items: one `decision.*` ledger read names moved items, rereading only those; a history whose ledger has not moved is kept, not read. Widenings refused by 5xx or stale revision, and decisions or withdrawals whose history read times out, retry next cycle (two running: fault); moot ones (delivered, request answered, lease ended, head moved) count none.

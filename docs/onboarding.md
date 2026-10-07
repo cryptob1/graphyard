@@ -21,7 +21,7 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, workflows ([candidates](deli
 
 ### What the generated instructions authorize
 
-Generated `AGENTS.md`: **every session Graphyard launches receives its instruction as the session's own first request** (Claude Code also `--append-system-prompt-file`), so nobody sends `go`; launcher pastes (the loop's single re-prompt, the reviewer's reminder, master wakes) need no confirmation; other bracketed paste is untrusted data (prompt injection). Role files under `.graphyard/harness/` hold permissions, not instructions.
+Generated `AGENTS.md`: **every session Graphyard launches receives its instruction as the session's own first request** (Claude Code also `--append-system-prompt-file`), so sessions start without anybody sending `go`; launcher pastes (the loop's single re-prompt, the reviewer's reminder, master wakes) need no confirmation; other bracketed paste is untrusted data (prompt injection). The role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Agent environments
 
@@ -84,7 +84,7 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W / 2⌉` review 
 
 ### The pipeline doctor (on by default)
 
-Every `run.doctor.intervalMinutes` (10) a Pi **doctor** session fixes stuck, overdue work via `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release` (never merging, dispatching or evidencing); posts findings and summary (`master status` `doctor`); escalates the rest or files fault items, deduplicated against open ones at settle (proof IDs normalised; create refusals escalate; control-plane refusals retry). Reportless (models died, loop stopped) or restart-lost runs record failed, posted, no `loop` fault; the next re-covers. The loop settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (10) a Pi **doctor** session fixes stuck, overdue work via `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release` (never merging, dispatching or evidencing); posts findings and summary (`master status` `doctor`); escalates rest or files fault items, deduplicated against open ones at settle (proof IDs normalised; create refusals escalate; control-plane refusals retry). Reportless (models died, loop stopped) or restart-lost runs record failed, posted, no `loop` fault; the next re-covers. The loop settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
 
 ## 4. Prove the first PR
 

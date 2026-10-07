@@ -11,7 +11,7 @@
 
 ## Lost worker before submission
 
-Leases expire 120s after last heartbeat (one more lease period after a recorded renewal fault); the next, higher-epoch claim keeps the worktree. Unexplained lapses raise [`lease-loss`](protocol/leases.md#how-a-lease-ends), blocking merge until [settled](delegation.md#who-may-settle-what).
+Leases expire 120s after last heartbeat (one more lease period after recorded renewal fault); next, higher-epoch claim keeps the worktree. Unexplained lapses raise [`lease-loss`](protocol/leases.md#how-a-lease-ends), blocking merge until [settled](delegation.md#who-may-settle-what).
 
 ## Supervisor died leaving a containment quarantine
 
@@ -23,7 +23,7 @@ Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next wo
 
 ## Retro synthesis
 
-Each minute scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables, and `master status` then flags crossed patterns as configuration faults) files item per crossed pattern and drafts `retro.drafted` changes (wording, check, producer method, fault-catalogue entry) per recurring refusal or rework cause; a non-drafting operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses each. Approved: [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete`.
+Each minute scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables, and `master status` then flags crossed patterns as configuration faults) files item per crossed pattern and drafts `retro.drafted` changes (wording, check, producer method, fault-catalogue entry) per recurring refusal or rework cause; non-drafting operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses each. Approved: [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete`.
 
 ## Flaky CI check
 
@@ -31,7 +31,7 @@ A failing check [reruns](github.md#failed-checks) once (`mergeQueue.rerunFailedC
 
 ## Accepted evidence turns out to be wrong
 
-`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes the gate; that head's required checks fail.
+`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes gate; that head's required checks fail.
 
 ## GitHub request budget
 
@@ -78,7 +78,7 @@ Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` take one o
 
 ## Storage retention
 
-Receipts answer retries a day; compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (14, min 1), appending `ledger.compacted`.
+Receipts answer retries day; compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (14, min 1), appending `ledger.compacted`.
 
 ## Bootstrap mode for a self-proving change
 
@@ -90,7 +90,7 @@ Stays Done, **delivered with failure**; revert via new item, never backfill.
 
 ## Merge bypass
 
-Ungated merges are permanent violations: repair access, file a follow-up, never backfill. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
+Ungated merges are permanent violations: repair access, file follow-up, never backfill. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Credentials
 
@@ -115,4 +115,4 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ### Concurrent reconciliation
 
-A 2s tick over 5s logs `reconciliation tick took N ms` (writes, longest lock wait). It opens briefly under the coordination lock (row versions, direct-merge sweep); batches evaluate ≤250ms lock-free, planning ≤8 writes, each one transaction: coordination lock (≤500ms wait, no row held), item row (`FOR NO KEY UPDATE`), commit; moved read re-evaluates first; job wakes follow in work-id order. Three expired lock waits defer unwritten items a tick. Writes read whole only their item, overlaps, dependencies (<500ms at 1,000 items); heartbeats lock only their item. Reconciliation yields to pending requests before each evaluation and write: a renewal waits ≤1 evaluation (≤1s). Stale observation snapshots retry after 2s.
+A 2s tick over 5s logs `reconciliation tick took N ms` (writes, longest lock wait). It opens briefly under the coordination lock (row versions, direct-merge sweep); batches evaluate ≤250ms lock-free, planning ≤8 writes, each one transaction: coordination lock (≤500ms wait, no row held), item row (`FOR NO KEY UPDATE`), commit; moved read re-evaluates first; job wakes follow in work-id order. Three expired lock waits defer unwritten items tick. Writes read whole only their item, overlaps, dependencies (<500ms at 1,000 items); heartbeats lock only their item. Reconciliation yields to pending requests before each evaluation and write: renewal waits ≤1 evaluation (≤1s). Stale observation snapshots retry after 2s.

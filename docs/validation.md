@@ -16,7 +16,7 @@ Values: `{{token}}`, `{{run}}`, `{{case}}`, saved ones. `graphyard e2e list` ref
 
 ## Release verdicts
 
-One retry: **passed**; **failed** (both); **flaky** (retry passed at the same served SHA; `RUN:attempt-1`, `RUN:attempt-2` recorded); **unrun** (stopped by a failed required case, which the report names; listed apart, never counted). Only required failed or unaccepted flaky cases block; optional ones are marked on **Tests**. At an unreported commit, pass-after-failure is failed.
+One retry: **passed**; **failed** (both); **flaky** (retry passed at the same served SHA; `RUN:attempt-1`, `RUN:attempt-2` recorded); **unrun** (stopped by a failed required case, which report names; listed apart, never counted). Only required failed or unaccepted flaky cases block; optional ones are marked on **Tests**. At an unreported commit, pass-after-failure is failed.
 
 Flaky required cases block promotion until an `evidence` decision (`{"case": ID, "runId": RUN, "sha": FULL_SHA}` on the hold item; approved by another agent) accepts; refused unless both attempts are recorded at that SHA. `release promote` reads only that run's and SHA's applied decisions. The workflow's `release promote ID` (`GRAPHYARD_URL`, `GRAPHYARD_TOKEN`) promotes only passing UATs.
 

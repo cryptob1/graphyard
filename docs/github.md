@@ -36,11 +36,11 @@ Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md
 
 ## Failed checks
 
-No merge queue (`master tip-cleanup --apply` deletes leftover `refs/graphyard/queue/*`). A failed required check reruns once on the unchanged head after its run completes (owed meanwhile); second fails the test gate. A 403 quotes GitHub (or, no permission missing, the preflight's reading). Tests (`graphyard-failed-tests:`) old base broke, fixed on tip, refresh (`baseBreak`), not rework.
+No merge queue (`master tip-cleanup --apply` deletes leftover `refs/graphyard/queue/*`). A failed required check reruns once on the unchanged head after its run completes (owed meanwhile); second fails test gate. A 403 quotes GitHub (or, no permission missing, preflight's reading). Tests (`graphyard-failed-tests:`) old base broke, fixed on tip, refresh (`baseBreak`), not rework.
 
 ### Bindings and carry
 
-Reviews and proofs bind head, base, policy revision; a moved base carries all if merge kept patch-id, else the approval if no reviewed file changed, disjoint-`scopeFiles` proofs. Carried approvals aren't re-posted; no merge requested.
+Reviews and proofs bind head, base, policy revision; a moved base carries all if merge kept patch-id, else approval if no reviewed file changed, disjoint-`scopeFiles` proofs. Carried approvals aren't re-posted or merge-requested.
 
 ### Proofs in CI
 
