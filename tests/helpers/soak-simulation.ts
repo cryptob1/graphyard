@@ -71,7 +71,7 @@ import { type MechanicalFixRequest, appliedMechanicalRework, freshReadFor, mecha
 import { mechanicalHoldPattern } from '../../src/model/refusal-catalogue.js';
 import { type InterventionRecordInput } from '../../src/model/interventions.js';
 import { RefusedResponse } from '../../src/model/refusal.js';
-import { type DiagnosisRun, type Failover, MANUAL, type MainGuardDay, PROOF, api, basePlan, blockerPlan, bulk18, coordinatorRoot, diagnosisRunner, engine, everyone, extraFile, extraWorkers, file, files, fixture, id, padded, principals, remedyItem, repository, reviewerApps, scopePlan, sideDayLeftovers, soakConfig, soakSessionDirectory, soakWorktreeRoot, store, token, url, workers } from './soak-plane.js';
+import { type DiagnosisRun, type Failover, MANUAL, type MainGuardDay, PROOF, api, basePlan, blockerPlan, bulk18, coordinatorRoot, diagnosisRunner, engine, everyone, extraFile, extraWorkers, file, files, fixture, id, loopAgent, padded, principals, remedyItem, repository, reviewerApps, scopePlan, sideDayLeftovers, soakConfig, soakSessionDirectory, soakWorktreeRoot, store, token, url, workers } from './soak-plane.js';
 
 /**
  * GY-404: per-item gates cannot catch faults that emerge from interaction over time, so this runs
@@ -1362,7 +1362,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     ...(acceptance ? { acceptance: acceptance.effects } : {}),
     ...(planner ? { planner: planner.effects } : {}),
     baseSuccessions: async since => ({ tip: github.tip, successions: github.successions.filter(entry => github.commits.get(entry.commit)!.at >= Date.parse(since)), files: new Set(github.files) }),
-    replan: (work, paths, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)),
+    replan: (work, paths, reason) => api(loopAgent, 'POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)),
     // The scope scenarios run the loop's own deciding and widening effects: the rule decides the
     // open requests, and the loop widens on the findings it reads, posting the folded revision.
     ...(options.scope ? {
