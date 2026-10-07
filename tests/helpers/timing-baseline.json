@@ -406,6 +406,7 @@
     "tests/intervention-exemptions.test.ts": 600,
     "tests/intervention-feedback.test.ts": 5125,
     "tests/intervention-pattern-human-only-decision-build.test.ts": 3200,
+    "tests/interventions-hotspot-split.test.ts": 600,
     "tests/interventions-scale.test.ts": 41000,
     "tests/item-page-structure.test.ts": 801,
     "tests/item-split.test.ts": 3534,
