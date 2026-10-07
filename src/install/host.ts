@@ -11,7 +11,7 @@ import { proposedConcurrency, proposedRuntimes } from '../model/registry-proposa
 import type { AgentRegistry, FleetAccountInput, FleetModel, FleetRole, FleetRoleName, FleetRuntime } from '../model/registry.js';
 import type { ProfileRegistration } from './index.js';
 import { suffixedSessionName } from '../session-name.js';
-import { executorGlob, executorInstance, perInstallUnits, readInstallUnits } from './units.js';
+import { executorGlob, executorInstance, installUnitsFile, type InstallUnits, parseInstallUnits, perInstallUnits, readInstallUnits } from './units.js';
 import { dirname } from 'node:path';
 
 /**
@@ -210,8 +210,7 @@ export function hostUnitFiles(installId: string, layout: HostLayout, owner: stri
  * the host, from the same templates as a workstation (GY-114, GY-105), and named for the install's
  * repository (GY-1441) so a second install on the same host never shares them.
  */
-export function supervisedUnits(layout: HostLayout, executors: number, repository: string): HostUnit[] {
-  const units = perInstallUnits(repository);
+export function supervisedUnits(layout: HostLayout, executors: number, units: InstallUnits): HostUnit[] {
   return [
     { name: units.master, scope: 'user', path: `${layout.userUnitDirectory}/${units.master}`, role: 'master loop' },
     ...Array.from({ length: executors }, (_, index) => ({ name: executorInstance(units, index + 1), scope: 'user' as const, path: `${layout.userUnitDirectory}/${units.executorTemplate}`, role: `executor slot ${index + 1}` })),
@@ -578,7 +577,7 @@ export function hostPlan(ctx: AdapterContext): HostPlan {
   const accounts = hostAccounts(layout, null);
   return {
     user: layout.user, configDirectory: layout.configDirectory, checkout: layout.checkout,
-    units: [...hostUnitFiles(ctx.installId, layout, `${HOST_USER}:${HOST_USER}`).map(({ name, scope, path, role }) => ({ name, scope, path, role })), ...supervisedUnits(layout, host.executors, ctx.repository)],
+    units: [...hostUnitFiles(ctx.installId, layout, `${HOST_USER}:${HOST_USER}`).map(({ name, scope, path, role }) => ({ name, scope, path, role })), ...supervisedUnits(layout, host.executors, perInstallUnits(ctx.repository))],
     runtimes: hostRuntimes.map(runtime => ({ kind: runtime.kind, program: runtime.program, package: runtime.package })),
     credentials: [
       ...host.principals.map(principal => ({ path: hostTokenFile(layout, principal.id), mode: '0600' as const, holds: `${principal.role} credential of ${principal.id}` })),
@@ -740,7 +739,10 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
   // that cannot be set up fails the install rather than reporting success.
   const masterInit = await asUser(remote, layout.checkout, 'env', [...environment, 'node', layout.cli, 'master', 'init', '--url', request.url, '--token-stdin', '--host-id', hostName, '--cli-path', layout.cli, ...(herdrWorkspace ? ['--herdr-workspace', herdrWorkspace] : [])], { input: request.coordinatorToken, allowFailure: true });
   if (masterInit.code !== 0) throw new Error(`master init did not complete on ${hostName}: ${failure(ctx, masterInit)}`);
-  await asUser(remote, layout.checkout, 'systemctl', ['--user', 'enable', '--now', perInstallUnits(ctx.repository).master]);
+  // The names master init recorded (GY-1441): a host installed before them keeps the legacy loop
+  // unit as its alias, so the unit to enable and report is read back, never recomputed.
+  const installUnits = parseInstallUnits(await readRemote(remote, `${layout.checkout}/${installUnitsFile}`), `${layout.checkout}/${installUnitsFile} on ${hostName}`);
+  await asUser(remote, layout.checkout, 'systemctl', ['--user', 'enable', '--now', installUnits.master]);
   const executors = await asUser(remote, layout.checkout, 'env', [...environment, 'node', `${layout.graphyard}/scripts/graphyard-executor.mjs`, '--install', '--count', String(host.executors)], { allowFailure: true });
   if (executors.code !== 0) throw new Error(`Installing ${host.executors} executor unit(s) on ${hostName} failed: ${failure(ctx, executors)}`);
 
@@ -758,7 +760,7 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
 
   const system = hostUnitFiles(ctx.installId, layout, owner).filter(unit => unit.scope === 'system');
   const systemStates = await unitStates(remote, system.map(unit => unit.name));
-  const userUnits = [{ name: 'graphyard-herdr.service', scope: 'user' as const, path: `${layout.userUnitDirectory}/graphyard-herdr.service`, role: 'herdr' }, ...supervisedUnits(layout, host.executors, ctx.repository)];
+  const userUnits = [{ name: 'graphyard-herdr.service', scope: 'user' as const, path: `${layout.userUnitDirectory}/graphyard-herdr.service`, role: 'herdr' }, ...supervisedUnits(layout, host.executors, installUnits)];
   const userState = await asUser(remote, HOST_HOME, 'systemctl', ['--user', 'is-active', ...userUnits.map(unit => unit.name)], { allowFailure: true });
   const userLines = userState.stdout.split('\n');
   const units = [
@@ -769,7 +771,7 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
     host: hostName, units, runtimes, accounts, herdrWorkspace, sessionViewer: 'local',
     profiles: {
       repository: { connected: true, herdr: !!herdrWorkspace, detail: herdrWorkspace ? `Herdr workspace ${herdrWorkspace} on ${hostName}` : 'Herdr is installed but no workspace could be created' },
-      master: { configured: true, kind: null, detail: `the loop runs as ${perInstallUnits(ctx.repository).master} on ${hostName}` },
+      master: { configured: true, kind: null, detail: `the loop runs as ${installUnits.master} on ${hostName}` },
       workers, reviewers: [],
     },
   };

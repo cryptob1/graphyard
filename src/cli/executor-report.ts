@@ -6,6 +6,7 @@ import { executorSupervisionStatus, executorUnit, type SystemctlRunner } from '.
 import { detectLoopMerger } from '../executor.js';
 import { executorRestartTimeoutMs } from '../executor-fleet.js';
 import { execFileSync } from 'node:child_process';
+import { type InstallUnits, legacyInstallUnits, readInstallUnits } from '../install/units.js';
 
 /**
  * The executor fleet as `master status` reports it (GY-105): who is alive to claim, judged by the
@@ -81,13 +82,14 @@ export const slotPaged = (entry: SlotObservation) => !(entry.seenBy === 'systemd
 const defaultSystemctl: SystemctlRunner = args => execFileSync('systemctl', ['--user', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 }).trim();
 const duration = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)}h${Math.floor(ms % 3_600_000 / 60_000)}m` : ms >= 60_000 ? `${Math.floor(ms / 60_000)}m` : `${Math.floor(ms / 1000)}s`;
 const downFor = (entry: SlotObservation) => typeof entry.downMs === 'number' ? ` for ${duration(entry.downMs)}, past the ${duration(slotUpgradeBoundMs)} upgrade bound` : '';
-export function executorSlots(supervision: ExecutorFleet['supervision'], presence: ExecutorFleet['presence'], hostId: string | null): SlotObservation[] {
+export function executorSlots(supervision: ExecutorFleet['supervision'], presence: ExecutorFleet['presence'], hostId: string | null, units: Pick<InstallUnits, 'executorTemplate'> | null = legacyInstallUnits): SlotObservation[] {
   if (supervision.units.length) return supervision.units.map(unit => ({ ...unit, seenBy: 'systemd' as const }));
-  if (!supervision.declaration || supervision.supervised || !presence.available || (presence as ExecutorReport).listening || !hostId) return [];
+  // A slot is named by the install's own template (GY-1441); an unreadable record names none.
+  if (!units || !supervision.declaration || supervision.supervised || !presence.available || (presence as ExecutorReport).listening || !hostId) return [];
   return Array.from({ length: supervision.declaration.count }, (_, index) => {
     const slot = index + 1;
     const live = presence.live.some(entry => entry.host === hostId && entry.executor.endsWith(`@${hostId}/${slot}`));
-    return { slot, unit: executorUnit(slot), active: live ? 'active' : 'inactive', seenBy: 'presence' as const };
+    return { slot, unit: executorUnit(slot, units), active: live ? 'active' : 'inactive', seenBy: 'presence' as const };
   });
 }
 
@@ -118,7 +120,9 @@ export async function executorFleet(root: string, masterApi: (path: string) => P
     presence = answer ? { ...withLoopMerger(answer, loop), available: true } : { available: false, reason: 'the deployed server reports no executor presence; deploy main so GET /api/actions carries executors', live: [], served: [], unserved: [], liveMs: executorLiveMs };
   } catch (error) { presence = { available: false, reason: `GET /api/actions failed: ${error instanceof Error ? error.message : String(error)}`, live: [], served: [], unserved: [], liveMs: executorLiveMs }; }
   const unserved = describeUnserved(presence);
-  const slots = executorSlots(supervision, presence, hostId !== undefined ? hostId : await loadMasterConfig(root).then(config => config.hostId ?? null, () => null));
+  let owned: InstallUnits | null = null;
+  try { owned = readInstallUnits(root); } catch { /* executorSupervisionStatus reports the unreadable record */ }
+  const slots = executorSlots(supervision, presence, hostId !== undefined ? hostId : await loadMasterConfig(root).then(config => config.hostId ?? null, () => null), owned);
   // systemd dates the stop by this host's clock, so its age is read against the same clock, never
   // the control plane's `snapshot.now`: a skew between the two would page mid-upgrade or hide a slot down.
   const hostNow = Date.now();

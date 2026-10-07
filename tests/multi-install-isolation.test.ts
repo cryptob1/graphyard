@@ -266,3 +266,50 @@ test('unit:harness-own-units-only — the generated master harness allows restar
   assert.equal(decide(thirdPlan, 'systemctl --user restart graphyard-master-cryptob1-graphyard-game-pilot.service'), 'deny');
   assert.equal(decide(pilotPlan, 'systemctl --user restart graphyard-master-cryptob1-graphyard-game-pilot.service'), 'allow');
 });
+
+test('unit:per-install-units — re-applying the self-contained host installer to a host installed before per-install names enables and reports the legacy unit master init recorded, never a per-install unit that was not written', async () => {
+  const { applyInstall, buildPlan, prepareInstall } = await import('../src/install/index.js');
+  const { harness } = await import('./install-harness.js');
+  const { legacyInstallUnits } = await units();
+  const inputs = { repository: 'owner/project', provider: 'host' as const, selfContained: true, sshHost: '203.0.113.20', sshUser: 'root', domain: 'graphyard.example.test' };
+  const legacyHost = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test' });
+  try {
+    // The host's loop already runs as the legacy unit for this checkout (an install from before GY-1441).
+    legacyHost.hostFiles.set(`/home/graphyard/.config/systemd/user/${legacyLoopUnit}`, { content: 'WorkingDirectory=/home/graphyard/code/owner-project\n', mode: 0o644 });
+    const session = await prepareInstall(legacyHost.root, inputs, legacyHost.deps);
+    const summary = await applyInstall(session, await buildPlan(session));
+    const lines = [...legacyHost.remotes.values()][0].commands.map(command => [command.program, ...command.args].join(' '));
+    assert.ok(lines.some(line => line.includes(`systemctl --user enable --now ${legacyLoopUnit}`)), 'the recorded alias is the unit enabled');
+    assert.ok(!lines.some(line => line.includes('graphyard-master-owner-project.service')), 'a per-install unit that was never written is never named');
+    const reported = summary.host!.units.map(unit => unit.name);
+    assert.ok(reported.includes(legacyLoopUnit) && reported.includes('graphyard-executor@1.service'), reported.join(', '));
+    assert.match(summary.profiles!.master.detail, new RegExp(`runs as ${legacyLoopUnit.replace('.', '\\.')}`));
+    assert.deepEqual(JSON.parse(legacyHost.hostFiles.get(`/home/graphyard/code/owner-project/.graphyard/units.json`)!.content), legacyInstallUnits);
+  } finally { await legacyHost.cleanup(); }
+
+  const freshHost = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test' });
+  try {
+    const session = await prepareInstall(freshHost.root, inputs, freshHost.deps);
+    const summary = await applyInstall(session, await buildPlan(session));
+    assert.ok(summary.host!.units.some(unit => unit.name === 'graphyard-master-owner-project.service'), 'a fresh host runs its per-install loop unit');
+    assert.ok(!summary.host!.units.some(unit => unit.name === legacyLoopUnit));
+  } finally { await freshHost.cleanup(); }
+});
+
+test('unit:per-install-units — repositories whose names differ only in punctuation get distinct units, and a record that exists but cannot be read fails closed instead of claiming the legacy units', async () => {
+  const { installSlug, perInstallUnits, readInstallUnits, resolveInstallUnits, installUnitsFile } = await units();
+  assert.equal(installSlug('cryptob1/graphyard'), 'cryptob1-graphyard', 'a plain OWNER/NAME keeps its readable slug');
+  const masters = ['owner/foo.bar', 'owner/foo_bar', 'owner/foo-bar', 'owner/Foo..bar'].map(repository => perInstallUnits(repository).master);
+  assert.equal(new Set(masters).size, masters.length, masters.join(', '));
+  const long = perInstallUnits(`owner/${'x'.repeat(120)}`).master, longer = perInstallUnits(`owner/${'x'.repeat(121)}`).master;
+  assert.notEqual(long, longer, 'truncation never merges two repositories');
+  assert.ok(long.length < 120);
+
+  const root = await checkout('corrupt-record', 'owner/project');
+  const unitDirectory = await temporaryDirectory('corrupt-units');
+  await writeFile(join(root, installUnitsFile), '{"version":2}');
+  assert.throws(() => readInstallUnits(root), /does not record this install's units/);
+  assert.throws(() => loopUnitOf(root), /does not record this install's units/);
+  await assert.rejects(resolveInstallUnits(root, 'owner/project', unitDirectory), /does not record this install's units/);
+  assert.equal(await readFile(join(root, installUnitsFile), 'utf8'), '{"version":2}', 'the unreadable record is left for the operator, not overwritten');
+});

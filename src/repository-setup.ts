@@ -769,9 +769,11 @@ export async function executorSupervisionStatus(root: string, run: SystemctlRunn
   let declaration: ExecutorDeclaration | null = null, error: string | null = null;
   try { declaration = await readExecutorDeclaration(root); } catch (failure) { error = failure instanceof Error ? failure.message : String(failure); }
   let manager = systemdUserManager(run);
-  let owned: InstallUnits;
-  try { owned = readInstallUnits(connectionRoots(root)[0]); } catch { owned = readInstallUnits(root); }
-  let units = declaration && manager.available ? Array.from({ length: declaration.count }, (_, index) => ({ slot: index + 1, unit: executorUnit(index + 1, owned), active: activeState(run, executorUnit(index + 1, owned)) })) : [];
+  let unitsRoot = root, owned: InstallUnits | null = null;
+  try { unitsRoot = connectionRoots(root)[0]; } catch { /* a checkout with no connection reads its own record */ }
+  // An unreadable record names no slot rather than guessing another install's units (GY-1441).
+  try { owned = readInstallUnits(unitsRoot); } catch (failure) { error ??= failure instanceof Error ? failure.message : String(failure); }
+  let units = declaration && manager.available && owned ? Array.from({ length: declaration.count }, (_, index) => ({ slot: index + 1, unit: executorUnit(index + 1, owned!), active: activeState(run, executorUnit(index + 1, owned!)) })) : [];
   // A manager that stopped answering between the two reads is no manager: its slots are unknown, not down (GY-1428).
   const lost = units.find(entry => entry.active === 'unreachable');
   if (lost) { manager = { available: false, reason: `no systemd user manager answers on this host (systemctl --user is-active ${lost.unit} could not reach it)` }; units = []; }

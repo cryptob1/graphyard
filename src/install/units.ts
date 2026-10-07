@@ -12,7 +12,7 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
 export const legacyLoopUnit = 'graphyard-master.service';
@@ -31,11 +31,19 @@ const recordSchema = z.object({
 }).strict();
 export type InstallUnits = z.infer<typeof recordSchema>;
 
-/** `OWNER/NAME` as a unit-name fragment: lower case, every other character a single dash. */
+/**
+ * `OWNER/NAME` as a unit-name fragment: lower case, every other character a single dash. When that
+ * loses information — a `.` or `_` in the name, a run of separators, or truncation — a short hash of
+ * the repository is appended, so `owner/foo.bar` and `owner/foo-bar` never share units.
+ */
 export function installSlug(repository: string) {
-  const slug = repository.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80).replace(/-+$/, '');
-  if (!slug) throw new Error(`The repository ${JSON.stringify(repository)} gives no unit-name slug`);
-  return slug;
+  const plain = repository.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  if (!plain) throw new Error(`The repository ${JSON.stringify(repository)} gives no unit-name slug`);
+  const [owner, name, ...rest] = repository.toLowerCase().split('/');
+  const lossless = !rest.length && name !== undefined && plain.length <= 80 && `${owner}-${name}` === plain && /^[a-z0-9-]+$/.test(`${owner}${name}`) && !/--/.test(plain);
+  if (lossless) return plain;
+  const hash = createHash('sha256').update(repository.toLowerCase()).digest('hex').slice(0, 8);
+  return `${plain.slice(0, 71).replace(/-+$/, '')}-${hash}`;
 }
 /** The names a new install of REPOSITORY writes: `graphyard-master-OWNER-NAME.service` and its executor template. */
 export function perInstallUnits(repository: string): InstallUnits {
@@ -55,13 +63,22 @@ export const executorInstancePattern = (units: Pick<InstallUnits, 'executorTempl
 export const ownedUnits = (units: InstallUnits) => [units.master, units.executorTemplate];
 
 /**
- * The units an install recorded, read synchronously by every reader. No record means an install
- * written before GY-1441, which by construction used the legacy names: those are its alias.
+ * The units a record names. No record (null) means an install written before GY-1441, which by
+ * construction used the legacy names: those are its alias. A record that exists but cannot be read
+ * fails closed: guessing the legacy names could act on another install's loop and executors.
  */
+export function parseInstallUnits(text: string | null, where = installUnitsFile): InstallUnits {
+  if (text === null) return legacyInstallUnits;
+  try { return recordSchema.parse(JSON.parse(text)); }
+  catch (error) { throw new Error(`${where} does not record this install's units (${error instanceof Error ? error.message.split('\n')[0] : String(error)}); fix or remove it and rerun master init, rather than guess which units are this install's`); }
+}
+const absent = (error: unknown) => (error as NodeJS.ErrnoException)?.code === 'ENOENT';
+/** The units an install recorded, read synchronously by every reader. */
 export function readInstallUnits(root: string): InstallUnits {
-  let text: string;
-  try { text = readFileSync(resolve(root, installUnitsFile), 'utf8'); } catch { return legacyInstallUnits; }
-  try { return recordSchema.parse(JSON.parse(text)); } catch { return legacyInstallUnits; }
+  const file = resolve(root, installUnitsFile);
+  let text: string | null;
+  try { text = readFileSync(file, 'utf8'); } catch (error) { if (!absent(error)) throw error; text = null; }
+  return parseInstallUnits(text, file);
 }
 
 const canonical = (path: string) => { const absolute = resolve(path); try { return realpathSync(absolute); } catch { return absolute; } };
@@ -112,8 +129,9 @@ export function assertUnitOwned(path: string, root: string, home = homedir()) {
  */
 export async function resolveInstallUnits(root: string, repository: string, unitDirectory: string, home = homedir()): Promise<InstallUnits> {
   const file = resolve(root, installUnitsFile);
-  try { return recordSchema.parse(JSON.parse(await readFile(file, 'utf8'))); }
-  catch { /* absent, or unreadable: decided afresh below */ }
+  let text: string | null;
+  try { text = await readFile(file, 'utf8'); } catch (error) { if (!absent(error)) throw error; text = null; }
+  if (text !== null) return parseInstallUnits(text, file);
   const legacy = [legacyLoopUnit, legacyExecutorTemplate].map(name => join(unitDirectory, name)).filter(path => existsSync(path));
   const units = legacy.length && legacy.every(path => foreignUnitCheckout(path, root, home) === null) ? legacyInstallUnits : perInstallUnits(repository);
   await mkdir(dirname(file), { recursive: true });
