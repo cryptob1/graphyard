@@ -127,6 +127,24 @@ export async function updateAppPermissions(root: string, options: { reviewer?: s
     await wait(options.pollMs ?? 5_000);
   }
 }
+/**
+ * Another App setup page already listens on the port: a `graphyard install --apply` waiting at its
+ * App step, or a `github-setup` or `init` left open (GY-1413). Named instead of a raw EADDRINUSE,
+ * with the page that is already serving, so the human finishes that one rather than a second.
+ */
+export function appPageBusy(port: number) {
+  return Object.assign(new Error(`Port ${port} already serves a GitHub App setup page, most likely a graphyard install --apply waiting at its App step (docs/setup-from-zero.md step 4). Finish the App on http://127.0.0.1:${port} or stop that process, then rerun; no second App page was opened.`), { code: 'GRAPHYARD_APP_PAGE_BUSY' });
+}
+
+/** Whether a local App setup page could be served on the port now; checked before any write that would precede one. */
+export async function appPagePortFree(port = 4311) {
+  const probe = createServer();
+  return new Promise<boolean>(accept => {
+    probe.once('error', () => accept(false));
+    probe.listen(port, '127.0.0.1', () => probe.close(() => accept(true)));
+  });
+}
+
 export async function startGithubSetup(root: string, repository: string, deployment: string, port = 4311, dependencies: {
   convert?: (code: string) => Promise<any>;
   verify?: (app: AppCredentials, installationId: number) => Promise<void>;
@@ -224,6 +242,7 @@ export async function startGithubSetup(root: string, repository: string, deploym
   });
   // Validate before binding; port 0 is useful for isolated tests.
   if (reviewer) reviewerAppManifest(reviewer, repository, deployment, 'http://127.0.0.1'); else appManifest(repository, deployment, 'http://127.0.0.1');
-  await new Promise<void>((accept, reject) => { http.once('error', reject); http.listen(port, '127.0.0.1', accept); });
+  await new Promise<void>((accept, reject) => { http.once('error', reject); http.listen(port, '127.0.0.1', accept); })
+    .catch((error: any) => { throw error?.code === 'EADDRINUSE' ? appPageBusy(port) : error; });
   return { http, url: `http://127.0.0.1:${(http.address() as any).port}`, file };
 }

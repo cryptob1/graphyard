@@ -9,7 +9,7 @@ Open items by group (tiles count, filter): **Needs you** (yours alone), **Blocke
 
 ## Needs you
 
-Cards show ask, its **Recommended** choice (or safest way) with one-line why, numbered steps, then choices, the recommended one first and preselected; agent detail folds under **Details for agents** (older requests: their need's first sentence). `graphyard login`: single-use sign-in link; **Provide now** seals credentials for `unseal GY-N`; operator approvals offer **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`), answered only from human admin sessions.
+Cards show ask, its **Recommended** choice (or safest way) with one-line why, numbered steps, choices (recommended first, preselected); agent detail folds under **Details for agents** (older requests: their need's first sentence). `graphyard login`: single-use sign-in link; **Provide now** seals credentials for `unseal GY-N`; operator approvals offer **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`), answered only from human admin sessions.
 
 ## Workers
 
@@ -25,4 +25,4 @@ Settings › **Agents**: **Can launch now?** role chips (titles name next accoun
 
 ## Insights
 
-**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats filed `bug` unless `GRAPHYARD_INTERVENTION_PATTERNS=0`), **Validation**, **Releases**. Reworks on loop-handled ground (base conflict, failed required check, change request, merge refusal, failed proof) aren't interventions, whoever asked, until an approver declines one. Nor are rounds the loop's operator-agent identity requested on recorded grounds (capped change requests put to its approver included) and the risk lane or an operator agent applied; hand-approved or hand-applied ones count; a pre-window decision counts only for an in-window outcome naming it.
+**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats filed `bug` unless `GRAPHYARD_INTERVENTION_PATTERNS=0`), **Validation**, **Releases**. Reworks on loop-handled ground (base conflict, failed required check, change request, merge refusal, failed proof) aren't interventions, whoever asked, until an approver declines one. Nor are rounds the loop's operator-agent identity requested on recorded grounds (capped change requests put to its approver included) applied by risk lane or operator agent; hand-approved or hand-applied ones count; a pre-window decision counts only for an in-window outcome naming it.

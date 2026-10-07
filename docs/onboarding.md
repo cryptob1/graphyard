@@ -7,7 +7,7 @@
 
 ## 2. Add machines
 
-Per concurrent session: worker identity, host ID (`install --workers`), or:
+Per concurrent session: worker identity, host ID (`install --workers`) or:
 
 ```sh
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
@@ -76,7 +76,7 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W / 2⌉` review 
 
 ## 3. Start the master
 
-`master init`, executor `init`, `master start` ([setup](setup-from-zero.md#10-start-the-master)), as an OS user whose GitHub credentials workers cannot read; `--browser-profile`: Chrome as GitHub admin (`master browser`); App confirmation and GitHub Mobile *Confirm access* stay human-only. Reviewer: `master reviewer setup` or `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); `master review GY-N` relaunches one.
+`master init`, executor `init`, `master start` ([setup](setup-from-zero.md#10-start-the-master)) as an OS user whose GitHub credentials workers can't read; `--browser-profile`: Chrome as GitHub admin (`master browser`); App confirmation and GitHub Mobile *Confirm access* stay human-only. Reviewer: `master reviewer setup` or `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); `master review GY-N` relaunches one.
 
 ### The loop must be supervised
 
@@ -84,7 +84,7 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W / 2⌉` review 
 
 ### The pipeline doctor (on by default)
 
-Every `run.doctor.intervalMinutes` (10) a Pi **doctor** session fixes stuck, overdue work via `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release` (never merging, dispatching or evidencing); posts findings and summary (`master status` `doctor`); escalates rest or files fault items, deduplicated against open ones at settle (proof IDs normalised; create refusals escalate; control-plane refusals retry). Reportless (models died, loop stopped) or restart-lost runs record failed, posted, no `loop` fault; the next re-covers. The loop settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck, overdue work via `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release` (never merging, dispatching or evidencing); posts findings, summary (`master status` `doctor`); escalates the rest or files fault items, deduplicated against open ones at settle (proof IDs normalised; create refusals escalate; control-plane ones retry). Reportless (models died, loop stopped) or restart-lost runs record failed, posted, no `loop` fault; the next re-covers. The loop itself settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
 
 ## 4. Prove the first PR
 

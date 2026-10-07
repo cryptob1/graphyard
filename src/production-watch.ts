@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Store } from './store.js';
 import type { Work } from './model.js';
 import type { BuildIdentity } from './protocol-version.js';
+import { productionEnvironmentEvent, productionEnvironmentName } from './flow-analytics.js';
 
 /**
  * Production deployment observation for the managed base branch.
@@ -123,8 +124,24 @@ export function githubDeploymentsProvider(github: { request(path: string): Promi
  * The deployment list the watch reads: Railway's API when a Railway token is configured, else the
  * GitHub deployments Railway reports for the managed repository, read with the App credential.
  */
-export function productionProvider(env: Record<string, string | undefined> = process.env, github: Parameters<typeof githubDeploymentsProvider>[0] | null = null, fetcher: typeof fetch = fetch): DeploymentProvider | null {
-  return railwayProvider(env, fetcher) ?? (github ? githubDeploymentsProvider(github, env.GRAPHYARD_PRODUCTION_ENVIRONMENT?.trim() || 'production') : null);
+export function productionProvider(env: Record<string, string | undefined> = process.env, github: Parameters<typeof githubDeploymentsProvider>[0] | null = null, fetcher: typeof fetch = fetch, environment = productionWatchEnvironment(null, env)): DeploymentProvider | null {
+  return railwayProvider(env, fetcher) ?? (github ? githubDeploymentsProvider(github, environment) : null);
+}
+
+/**
+ * The deployment environment the watch reads GitHub deployments under (GY-1426): the name the master
+ * publishes to the ledger (`production.environment`, from `run.productionEnvironment`), else
+ * GRAPHYARD_PRODUCTION_ENVIRONMENT, else `production`. Railway reports deployments under
+ * `<project> / production`, so an install that sets the name only in the master's configuration
+ * is still observed under it. Never throws: an unusable value falls through to the next source.
+ */
+export function productionWatchEnvironment(published: unknown, env: Record<string, string | undefined> = process.env) {
+  return productionEnvironmentName(published) ?? productionEnvironmentName(env.GRAPHYARD_PRODUCTION_ENVIRONMENT) ?? 'production';
+}
+/** The watch's environment as the ledger and this process's settings name it now, read once at server startup. */
+export async function resolvedWatchEnvironment(pool: { query(sql: string, params?: any[]): Promise<{ rows: any[] }> }, env: Record<string, string | undefined> = process.env) {
+  const row = (await pool.query('SELECT payload->>\'environment\' AS environment FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [productionEnvironmentEvent])).rows[0];
+  return productionWatchEnvironment(row?.environment, env);
 }
 
 /** The startup log's account of where production observation comes from. */
@@ -228,7 +245,7 @@ export class ProductionWatch {
   private releaseSeen: { tip: string; at: number } | null = null;
   /** Commit counts between two exact SHAs, which never change: each pair is asked of GitHub once (GY-1256). */
   private aheadMemo = new Map<string, number>();
-  /** Whether a serving commit holds the release tip, per `tip:serving` pair asked: a decided answer never changes for that pair. */
+  /** Whether a serving commit holds a commit (the release tip or a provider record's), per `tip:serving` pair asked: a decided answer never changes for that pair. */
   private servedMemo = new Map<string, boolean>();
   private report: ProductionReport;
   constructor(private store: Store, private options: ProductionWatchOptions) {
@@ -296,7 +313,7 @@ export class ProductionWatch {
     if (typeof comparison?.ahead_by !== 'number') throw new Error('GitHub did not report ahead_by');
     return comparison.ahead_by;
   }
-  /** Whether `serving` holds the release `tip`, memoized per decided pair so an unmoved pair costs no compare. */
+  /** Whether `serving` holds `tip` (the release tip, or a provider record's commit), memoized per decided pair so an unmoved pair costs no compare. */
   private async holdsRelease(tip: string, serving: string): Promise<boolean | null> {
     const key = `${tip}:${serving}`;
     if (this.servedMemo.has(key)) return this.servedMemo.get(key)!;
@@ -385,7 +402,11 @@ export class ProductionWatch {
     // release that is already live, and a provider list only explains why a deploy failed or is in
     // flight; it never overrides a served commit that already matches.
     const built = this.options.build.commit?.toLowerCase() ?? null;
-    const identity = !live && !!tip && !!built && newestSuccess?.commit?.toLowerCase() !== built && await this.holdsRelease(tip, built) === true;
+    // The running build also outranks a provider record it contains (GY-1424): a lagging or
+    // mis-attributed deployment record older than the build never reads as production serving it.
+    const recorded = newestSuccess?.commit?.toLowerCase() ?? null;
+    const identity = !live && !!built && recorded !== built
+      && ((!!tip && await this.holdsRelease(tip, built) === true) || (!!recorded && await this.holdsRelease(recorded, built) === true));
     report.serving = live ?? (identity ? built : newestSuccess?.commit ?? this.options.build.commit);
     report.servingSource = live ? 'endpoint' : identity ? 'build' : newestSuccess?.commit ? 'provider' : this.options.build.commit ? 'build' : null;
     if (tip) {

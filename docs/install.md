@@ -30,7 +30,7 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 ```
 
-`--workers N`, `--producer-proof NAME`, `--required-check NAME` ([`init --scan`](operations-reference.md#setup-proposals-and-drift)); `delivery`, `release.*` plan [candidates](delivery.md#managed-repositories). **Verify** `secretsRedacted`, `preflight[].ok` (else `fix`); human approves plan, `drift`.
+`--workers N`, `--producer-proof NAME`, `--required-check NAME` ([`init --scan`](operations-reference.md#setup-proposals-and-drift)); `delivery`, `release.*` plan [candidates](delivery.md#managed-repositories). **Verify** `secretsRedacted`, `preflight[].ok` (else `fix`; a `fix` starting `HUMAN:` is the human's); human approves plan, `drift`. `Branch protection` fails on GitHub's 403 *Upgrade to GitHub Pro* (free-plan private repositories cannot require `Graphyard / merge`: go public or upgrade); other failed protection reads (SSO, admin, 5xx) fail with GitHub's answer, never "not protected yet". `local.herdr` shows Herdr's `graphyard` plugin's fate; one bound elsewhere or with unreadable `config.json` fails `Herdr plugin` until `--herdr-rebind` (repoint) or `--no-herdr` (leave).
 
 ## Step 2: apply
 
@@ -42,7 +42,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; [protects](gi
 
 ## Step 3: App confirmation
 
-`--apply` serves and prints `http://127.0.0.1:4311` (no browser opened); the human installs the App there; **Verify** *App registered and installation verified*.
+`--apply` serves and prints `http://127.0.0.1:4311` (no browser) for 900 s; the human installs the App; **Verify** *App registered and installation verified*. Master configuration, profiles come first (`master environments`, `master harness` work). Unconfirmed: exit 1, JSON summary `completed`, `github.app` `pending` (credentials saved only if GitHub returned them), `credentials.principals` (self-contained: host token directory), `stack.stop`, `resume` (exact rerun, every flag, keeping pre-App steps).
 
 ## Step 4: summary
 
@@ -54,9 +54,9 @@ Dispatch a [small item](onboarding.md#4-prove-the-first-pr); once `Graphyard / m
 
 ## Self-contained host
 
-`--target host --ssh-host HOST` (or `--target hetzner`): server, Postgres, loop, executors, Herdr, runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4 serves `<ip>.sslip.io`; private/`--local` needs `--domain`. Bootstrap installs gh, bubblewrap, checks namespaces as `graphyard`; unpullable image builds from the host checkout at the installer's commit. Workers push and open PRs as the App: git's credential helper and `gh` wrapper mint one-hour repository tokens from `<install>/github/`. Re-apply refuses, never rotates, unreadable host credentials.
+`--target host --ssh-host HOST` (or `--target hetzner`): server, Postgres, loop, executors, Herdr, runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4 serves `<ip>.sslip.io`; private/`--local` needs `--domain`. Bootstrap installs gh, bubblewrap, checks namespaces as `graphyard`; an unpullable image builds from the host checkout at installer's commit. Workers push and open PRs as the App: git's credential helper and `gh` wrapper mint one-hour repository tokens from `<install>/github/`. Re-apply refuses, never rotates, unreadable host credentials.
 
-Sizing: 3 GB per agent, 2 GB per verification slot, 2 GB base, max(10%, 4 GB) spare (`--confirm-price`, `--max-monthly`). A saved App (`--github-app FILE`, this install's, `.graphyard/github-app.json`) is reused once it mints token; another live installation's webhook stays until `--migrate`: stops old loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`, released on pre-cutover failure), restores; local logins move.
+Sizing: 3 GB/agent, 2 GB/verification slot, 2 GB base, max(10%, 4 GB) spare (`--confirm-price`, `--max-monthly`). A saved App (`--github-app FILE`, this install's, `.graphyard/github-app.json`) is reused once it mints token; another live installation's webhook stays until `--migrate`: stops old loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`, released on pre-cutover failure), restores; local logins move.
 
 ## Upgrading an existing installation
 
@@ -70,7 +70,8 @@ Sizing: 3 GB per agent, 2 GB per verification slot, 2 GB base, max(10%, 4 GB) sp
 | `Railway workspace` `false` | a listed `--workspace`
 | `... must be able to read ...github-private-key.pem` | connect as `root` or `chown 1000:1000`
 | `did not become healthy` | `install --provider PROVIDER --repo OWNER/REPO --logs`
-| `The GitHub App confirmation did not complete in time` | rerun `--apply` (resumes)
+| `was not confirmed within 900 s` | the summary's `resume` once confirmed
+| `already serves a GitHub App setup page` | finish the App there, or stop its process
 | `webhook.delivered` `false`, 401 | rerun (rewrites secrets)
 | `Branch protection could not be applied` | admin `gh auth login`
 | worktree dependencies `failed` | [bubblewrap](#preconditions)
@@ -78,7 +79,7 @@ Sizing: 3 GB per agent, 2 GB per verification slot, 2 GB base, max(10%, 4 GB) sp
 
 ## Agent execution contract
 
-Run steps 1–5, report verifications, never weaken gates.
+Run steps 1–5, report verifications; never weaken gates.
 
 ## Manual fallback (unsupported platforms)
 

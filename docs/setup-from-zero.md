@@ -17,7 +17,7 @@ herdr --version
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true
 ```
 
-**Verify:** `gh repo view OWNER/REPO --json viewerPermission -q .viewerPermission` prints `ADMIN`; `install --plan` checks scopes. **HUMAN:** `gh auth login` as admin; failing `bwrap` needs user namespaces allowed.
+**Verify:** `gh repo view OWNER/REPO --json viewerPermission -q .viewerPermission` prints `ADMIN`; `install --plan` checks scopes. **HUMAN:** `gh auth login` as admin; failing `bwrap` needs user namespaces allowed; free-plan private repositories go public or upgrade (preflight `Branch protection`).
 
 ## 2. Graphyard and the repository
 
@@ -28,7 +28,7 @@ gy() { node "$GRAPHYARD_CLI" "$@"; }
 cd /path/to/REPO && gy init --scan
 ```
 
-A repository (even fresh from `git init`) needs a GitHub `origin` with default branch, tests and a `pull_request` workflow (its job: the required check); `node:test` reads as `junit-xml-v1` (`--test-reporter=junit`). **Verify:** readiness `repository`, `required-checks`, `test-formats` are `ready` (`recovery` names fixes). npm 11's esbuild install-script warning is harmless (no `npm install-scripts approve esbuild` needed). No deploy target: the scan proposes `--delivery per-pr`, ending at merged.
+A repository (even fresh from `git init`) needs a GitHub `origin` with default branch, tests, a `pull_request` workflow (its job: the required check); `node:test` reads as `junit-xml-v1` (`--test-reporter=junit`). **Verify:** readiness `repository`, `required-checks`, `test-formats` are `ready` (`recovery` names fixes). npm 11's esbuild install-script warning is harmless (skip `npm install-scripts approve esbuild`). No deploy target: the scan proposes `--delivery per-pr`, ending at merged.
 
 ## 3. Install the control plane
 
@@ -37,11 +37,11 @@ gy install --provider compose --repo OWNER/REPO --reviewer claude --plan
 gy install --provider compose --repo OWNER/REPO --reviewer claude --apply
 ```
 
-Providers differ only in `--provider` ([install](install.md)). **HUMAN:** approve the plan. **Verify:** `preflight[].ok`, `secretsRedacted` `true`; `curl -s http://127.0.0.1:4310/healthz` is `{"ok":true,…}`. Once the App exists (step 4), `--apply` records the master connection `.graphyard/master.json`, its `0600` credential under the plan's `installDirectory`; with no `GRAPHYARD_TOKEN`, `gy doctor` reads as it. **Verify:** `control-plane`, `credentials-file` (`reachable, credential missing`: step 4 unfinished).
+Providers differ only in `--provider` ([install](install.md); Herdr: `--herdr-rebind`). **HUMAN:** approve the plan. **Verify:** `preflight[].ok`, `secretsRedacted` `true`; `curl -s http://127.0.0.1:4310/healthz` is `{"ok":true,…}`. Before the App step, `--apply` records the master connection `.graphyard/master.json`, its `0600` credential under the plan's `installDirectory`; with no `GRAPHYARD_TOKEN`, `gy doctor` reads as it. **Verify:** `control-plane`, `credentials-file` (`reachable, credential missing`: rerun `--apply`).
 
 ## 4. Register the GitHub App
 
-`--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser (loopback `http://` accepted, webhook off: compose polls). **HUMAN:** open it, **Create GitHub App**, install on OWNER/REPO only, approve any *Confirm access* (sudo) Mobile code. **Verify:** `github-app`; listed `missing permissions` (e.g. `deployments: read`) → `gy github-setup --update-permissions --wait 600`, accept on the installation page ([permissions](github.md#app-permissions)).
+`--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser (loopback `http://` accepted, webhook off: compose polls; [900 s, then `resume`](install.md#step-3-app-confirmation)); steps 8-9 run meanwhile. **HUMAN:** open it, **Create GitHub App**, install on OWNER/REPO only, approve any *Confirm access* (sudo) Mobile code. **Verify:** `github-app`; listed `missing permissions` (e.g. `deployments: read`) → `gy github-setup --update-permissions --wait 600`, accept on the installation page ([permissions](github.md#app-permissions)).
 
 ## 5. Reviewer and revert-approver Apps
 
@@ -54,11 +54,11 @@ gy init --scan --apply --url http://127.0.0.1:4310
 git add AGENTS.md .gitignore graphyard.json .github/workflows && git commit -m "Adopt Graphyard" && git push
 ```
 
-PR if `main` is protected; never commit `.graphyard/`. **Verify:** readiness `setup-proposal` ([documentation policy](onboarding.md#documentation-policy), [generated instructions](onboarding.md#what-the-generated-instructions-authorize)).
+Reuses `install`'s identities, App (no principals file); refuses while step 4 waits or another `--url`. PR if `main` is protected; never commit `.graphyard/`. **Verify:** readiness `setup-proposal` ([documentation policy](onboarding.md#documentation-policy), [generated instructions](onboarding.md#what-the-generated-instructions-authorize)).
 
 ## 7. Branch protection
 
-After the first pull request shows `Graphyard / merge`, step 3's `--apply` requires it; `gy master protection --apply` reconciles review policies. **Verify:** `branch-protection` (via admin `gh`): both App checks required, admin enforcement on, "up to date" off (candidates merge on build base).
+Once the first pull request shows `Graphyard / merge`, step 3's `--apply` requires it; `gy master protection --apply` reconciles review policies. **Verify:** `branch-protection` (via admin `gh`): both App checks required, admin enforcement on, "up to date" off (candidates merge on build base).
 
 ## 8. Agent environments
 
@@ -77,7 +77,7 @@ Second `--apply` records `skipDangerousModePermissionPrompt`; launches write fol
 
 ## 10. Start the master
 
-[Start the master](onboarding.md#3-start-the-master) with the master credential step 3 recorded:
+[Start the master](onboarding.md#3-start-the-master) with step 3's master credential:
 
 ```sh
 gy master init --herdr-workspace HERDR_WORKSPACE_ID --browser-profile Default \

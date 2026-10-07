@@ -23,7 +23,7 @@ Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/
 
 ## Typed actions and executors
 
-`nextAction` (one per item): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`; judgements (`escalate`, `request-rework`): `actions.needsHuman`. `graphyard init` starts `graphyard-executor@N` user units (own credentials), moved to a release by `master executors restart` or a verified deployment (clean checkouts to base tip, then loop; dirty: `upgrade` attention). Fenced (`POST /api/actions/presence`) or claim-renewing executors live (never `Nothing can run KIND`); polls and renewals upsert `executor_presence` (no event; read at once after restarts); an empty fleet needs evidence (a poll; rows, or an empty table recording since its first read's marker, older than 120s), not process age. `resync` (`POST /api/work/:id/resync` `{ since }`) completes only on an observation newer than its claim. `dispatch`/`request-review` complete on a session already answering the head; standing verdicts block second reviewers until dismissed; busy/reserved profiles stall after 30 minutes. Three failures with an unchanged reason mark a row stalled instead of retrying (an idle-looking fleet): uncounted and unlisted except in `actions.stalled` and on its card; backoff never outlives it; eight escalate. Ticks requeue ownerless items (`liveness.violations`).
+`nextAction` (one per item): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`; judgements (`escalate`, `request-rework`): `actions.needsHuman`. `graphyard init` starts `graphyard-executor@N` user units (own credentials), moved to a release by `master executors restart` or a verified deployment (clean checkouts to base tip, then loop; dirty: `upgrade` attention). Fenced (`POST /api/actions/presence`) or claim-renewing executors live (never `Nothing can run KIND`); polls, renewals upsert `executor_presence` (no event; read at once after restarts); an empty fleet needs evidence (a poll; rows, or an empty table recording since its first read's marker, older than 120s), not process age. `resync` (`POST /api/work/:id/resync` `{ since }`) completes only on an observation newer than its claim. `dispatch`/`request-review` complete on a session already answering the head; standing verdicts block second reviewers until dismissed; busy/reserved profiles stall after 30 minutes. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): in no count and no list, but in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate. Ticks requeue ownerless items (`liveness.violations`).
 
 ## Recovery
 
@@ -31,7 +31,7 @@ A dead supervisor fences its item; `containment` lists survivors' pid, cmdline a
 
 ### Producer-runtime faults
 
-An unacted producer request (never started, launch refused, exited at launch) relaunches on untried profile, requesting no rework.
+Unacted producer requests (never started, launch refused, exited at launch) relaunch on an untried profile, requesting no rework.
 
 ## Fault classes
 
