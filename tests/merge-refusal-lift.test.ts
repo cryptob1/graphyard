@@ -7,7 +7,6 @@ import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { save, Store } from '../src/store.js';
 import { refusedReworkLiftsMergeRefusal } from '../src/server/decision-refusal.js';
-import { repeatedMergeRefusal } from '../src/daemon/decisions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // 2026-10-01: after the guarded merge refused a candidate (a `rework` merge refusal, GY-831), the
@@ -20,6 +19,12 @@ const item = (refusal: Partial<NonNullable<Work['mergeRefusal']>> | null) => ({
   key: 'GY-9', policyRevision: 3, candidate: { sha: head, baseSha: base },
   mergeRefusal: refusal && { sha: head, baseSha: base, policyRevision: 3, reason: 'awaits authorization', since: '2026-10-01T07:32:36Z', at: '2026-10-01T07:32:36Z', by: 'graphyard', action: 'rework', ...refusal },
 }) as unknown as Work;
+// The rework refusal recorded for exactly the current candidate (GY-831). No decision is asked for it
+// any more (GY-1391), but a refused rework requested before then still lifts it from the document.
+const repeatedMergeRefusal = (work: Work) => {
+  const refusal = work.mergeRefusal, candidate = work.candidate;
+  return refusal && refusal.action === 'rework' && candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha && refusal.policyRevision === work.policyRevision ? refusal : null;
+};
 
 test('unit:refused-rework-lifts-merge-refusal — a refused rework decision lifts the rework merge refusal of exactly that candidate, so its merge may proceed', () => {
   const stuck = item({});
