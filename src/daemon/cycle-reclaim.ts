@@ -14,9 +14,10 @@ import { containmentQuarantines } from '../master.js';
 import { type ContainmentObservation, containmentClock, unmeasured } from '../master/containment.js';
 import { closablePane, endedScopeStates, leaseLapsedEnding, loopEndedAttempt } from '../quarantine.js';
 import { paneAlreadyGone } from '../request-settlement.js';
+import { unsubmittedAttempt, unsubmittedAttemptText, workerReclaimBoundMs } from '../model/attempt-bound.js';
+import { checkPaneStillBelongs, endWorkerAttempt } from './cycle-resume.js';
 import type { DaemonAction, DaemonState } from './state.js';
 import type { DaemonEffects } from './effects.js';
-import { unsubmittedAttempt, unsubmittedAttemptText, workerReclaimBoundMs } from '../model/attempt-bound.js';
 
 /**
  * Session cleanup for a worker whose supervisor scope has ended (GY-189). `watch` exiting leaves
@@ -450,15 +451,16 @@ export const unboundedAttemptKey = (item: Pick<Work, 'id'>, epoch: number) => `u
  * 3a'. An attempt holding its lease past the reclaim bound (`workerReclaimBoundMs`: one further
  * worker bound after the stalled-gate fault) with still no submission and no submission progress
  * inside the cadence stops being renewed (GY-1460). Its renewals come from the attempt's watch
- * supervisor, which a live session keeps alive for ever; so the loop stops that supervisor through
- * the containment scope it recorded on this host — the same stop `endWorkerAttempt` uses — and does
- * nothing else. The lease then lapses, the supervisor's own shutdown or the settle step lowers the
- * fence, and the reconciliation's reclaim returns the item to the queue with its worktree kept. A
- * stop that cannot be made (no scope recorded, no way to signal it) is recorded failed and retried
- * on the action backoff; the fault keeps standing meanwhile.
+ * supervisor, which a live session keeps alive for ever, so the loop ends the attempt through the
+ * reclaim path a stalled attempt takes (`endWorkerAttempt`, as the idle bound does): what it left
+ * is kept on its branch, the attempt ends on the record, its supervisor is stopped through the
+ * scope it recorded (or stops on the ended lease) and its fence settles, so the item returns to the
+ * queue with its worktree kept. A lease merely left to lapse would read as an unexplained lease loss
+ * and wait on an operator. An end that cannot be made is recorded failed and retried on the action
+ * backoff; the fault keeps standing meanwhile.
  */
 export async function stopUnboundedAttempts(cycle: Cycle) {
-  const { config, state, effects, now, clock, performed, isolate, open } = cycle;
+  const { config, state, effects, now, clock, agents, performed, isolate, open } = cycle;
   const local = new Set(containmentQuarantines(open, config.hostId).map(item => item.id));
   for (const item of open) {
     const attempt = unsubmittedAttempt(item, clock);
@@ -469,19 +471,17 @@ export async function stopUnboundedAttempts(cycle: Cycle) {
     await isolate('session', item, item.key, async () => {
       const key = unboundedAttemptKey(item, attempt.epoch), previous = state.actions[key];
       if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;
-      const attempts = (previous?.attempts ?? 0) + 1, at = new Date(now()).toISOString();
+      const attempts = (previous?.attempts ?? 0) + 1;
       const entry = (outcome: DaemonAction['state'], detail: string) => record(state, key, { kind: 'session', work: item.key, principal: attempt.owner, epoch: attempt.epoch, state: outcome, detail: detail.slice(0, actionDetailMax), attempts, cycle: state.cycle }, now(), effects.persist);
-      const fenced = item.containmentQuarantine;
-      const scope = fenced && fenced.epoch === attempt.epoch && fenced.owner === attempt.owner ? fenced.scope : undefined;
-      if (!scope || !effects.stopSupervisor) {
-        performed.push(await entry('failed', `${unsubmittedAttemptText(attempt)}; but its renewal cannot be stopped from this loop: ${scope ? 'this loop cannot signal a supervisor' : `no supervisor scope is recorded for epoch ${attempt.epoch}`}`));
-        return;
-      }
+      // The pane this attempt's own handle records, and only while that pane is still its session (GY-852).
+      const handleId = `${attempt.owner}:${attempt.epoch}`, recorded = item.sessions?.find(handle => handle.kind === 'implementation' && handle.id === handleId)?.pane ?? undefined;
+      const pane = recorded && agents.some(agent => agent.pane_id === recorded) && !checkPaneStillBelongs(item, handleId, recorded) ? recorded : null;
+      const held = `held its lease past the ${workerReclaimBoundMs / 60_000}-minute reclaim bound without a submission (claimed at ${attempt.claimedAt})`;
       try {
-        await effects.stopSupervisor({ id: item.id, key: item.key, epoch: attempt.epoch, owner: attempt.owner, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: attempt.leaseExpiresAt }, 'SIGTERM');
-        performed.push(await entry('done', `${item.key} epoch ${attempt.epoch} (${attempt.owner}) held its lease past the ${workerReclaimBoundMs / 60_000}-minute reclaim bound without a submission (claimed at ${attempt.claimedAt}); at ${at} the loop stopped renewing it by stopping its supervisor (pid ${scope.pid}) through ${scope.unit}, so the lease lapses by ${attempt.leaseExpiresAt} and the reclaim and containment settlement return ${item.key} to the queue with its worktree kept`));
+        const next = await endWorkerAttempt(cycle, item, profile, attempt.epoch, pane, held, `ended without submitting: it ${held}`);
+        performed.push(await entry('done', `${item.key} epoch ${attempt.epoch} (${attempt.owner}) ${held}; the loop stopped renewing it: ${next}, with its worktree kept`));
       } catch (error) {
-        performed.push(await entry('failed', `${unsubmittedAttemptText(attempt)}; but stopping its supervisor (pid ${scope.pid}) through ${scope.unit} failed: ${message(error)}`));
+        performed.push(await entry('failed', `${unsubmittedAttemptText(attempt)}; but the loop could not end the attempt: ${message(error)}`));
       }
     });
   }

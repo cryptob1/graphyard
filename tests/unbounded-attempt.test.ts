@@ -103,6 +103,7 @@ test('unit:inside-bound-no-fault — no fault and no lease stop inside the bound
   assert.match(unsubmittedFaults(observed(iso(-20 * minute, now)), now)[0].text, /last submission progress at /);
   const working = unsubmittedAttempt(attempt(150, {}, now), now);
   assert.ok(working && working.live && working.reclaim, 'a working session with a renewed lease is still past the bound');
+  assert.ok(unsubmittedFaults(attempt(150, {}, now), now)[0].text.length <= 500, 'the reclaim line fits the fault record');
   // Another branch's pull request is not this attempt's progress.
   const other = attempt(150, { observation: { at: iso(-1 * minute, now), candidate: { sha: 'b'.repeat(40), baseSha: 'c'.repeat(40), pr: 70, branch: 'graphyard/gy-1457-0', author: 'worker-z' } } as Work['observation'] }, now);
   assert.ok(unsubmittedAttempt(other, now)?.reclaim);
@@ -126,39 +127,56 @@ async function configured() {
   return { config, cleanup: () => rm(directory, { recursive: true, force: true }) };
 }
 
-test('unit:lease-stop-renewal — past the reclaim bound the loop stops the attempt\'s supervisor once, and nothing else; inside it, or with progress, it stops nothing', async () => {
+test('unit:lease-stop-renewal — past the reclaim bound the loop ends the attempt once, keeping its work and stopping its supervisor; inside it, or with progress, it stops nothing', async () => {
   const { stopUnboundedAttempts, unboundedAttemptKey } = await reclaim();
   const { config, cleanup } = await configured();
   try {
-    const stops: { key: string; epoch: number; unit: string; signal: string }[] = [];
-    const effects: Partial<DaemonEffects> = { stopSupervisor: (orphan, signal) => { stops.push({ key: orphan.key, epoch: orphan.epoch, unit: orphan.scope.unit, signal }); }, persist: async () => {} };
+    const stops: { key: string; epoch: number; unit: string; signal: string }[] = [], ended: { key: string; epoch: number; cause: unknown; partialWork: unknown }[] = [], closed: string[] = [];
+    const effects: Partial<DaemonEffects> = {
+      stopSupervisor: (orphan: { key: string; epoch: number; scope: { unit: string } }, signal: string) => { stops.push({ key: orphan.key, epoch: orphan.epoch, unit: orphan.scope.unit, signal }); },
+      preserveWork: async (work: Work) => ({ state: 'committed', commit: 'e'.repeat(40), branch: work.workspaces[0].branch, path }),
+      reportCapacity: async (work: Work, event: { epoch: number; cause?: string; partialWork?: unknown }) => { ended.push({ key: work.key, epoch: event.epoch, cause: event.cause, partialWork: event.partialWork }); return work; },
+      closeSession: async (pane: string) => { closed.push(pane); }, recordSession: async () => {}, persist: async () => {},
+    } as unknown as Partial<DaemonEffects>;
+    const live = [{ name: 'graphyard-claude-1', pane_id: 'w1:p4', agent: 'claude', agent_status: 'working' }];
+    const cycle = (item: Work) => ({ ...cycleFor(state, config, effects, item), agents: live }) as Cycle;
     const state = emptyDaemonState(config);
     for (const quiet of [attempt(119), attempt(150, { submission: { epoch: 1, pr: 77 } }), attempt(150, { sessions: [handle({ head: 'd'.repeat(40), updatedAt: iso(-2 * minute) })] })])
-      await stopUnboundedAttempts(cycleFor(state, config, effects, quiet));
-    assert.deepEqual(stops, [], 'inside the bound, submitted, or progressing: the lease keeps renewing');
+      await stopUnboundedAttempts(cycle(quiet));
+    assert.deepEqual([stops, ended, closed], [[], [], []], 'inside the bound, submitted, or progressing: the lease keeps renewing');
     const item = attempt(121);
-    await stopUnboundedAttempts(cycleFor(state, config, effects, item));
+    await stopUnboundedAttempts(cycle(item));
     assert.deepEqual(stops, [{ key: 'GY-1457', epoch: 1, unit: scope.unit, signal: 'SIGTERM' }], 'its supervisor — what renews the lease — is stopped through its recorded scope');
+    assert.deepEqual(ended.map(entry => [entry.key, entry.epoch, entry.cause]), [['GY-1457', 1, 'interrupted']], 'the attempt is ended on the record, so the lapse is explained and no lease-loss escalation waits on an operator');
+    assert.equal((ended[0].partialWork as { state: string }).state, 'committed', 'what it left is kept on its branch');
+    assert.deepEqual(closed, ['w1:p4'], 'its own pane is closed');
     const action = state.actions[unboundedAttemptKey(item, 1)];
     assert.equal(action?.state, 'done');
-    assert.match(action!.detail, /the loop stopped renewing it by stopping its supervisor \(pid 4242\)/);
-    assert.match(action!.detail, /return GY-1457 to the queue with its worktree kept/);
-    await stopUnboundedAttempts(cycleFor(state, config, effects, item));
+    assert.match(action!.detail, /held its lease past the 120-minute reclaim bound without a submission .*; the loop stopped renewing it: the attempt ended on the record, its supervisor \(pid 4242\) was stopped through /);
+    assert.match(action!.detail, /GY-1457 is dispatched again, with its worktree kept$/);
+    await stopUnboundedAttempts(cycle(item));
     assert.equal(stops.length, 1, 'once per attempt');
-    // No recorded scope: the stop is recorded failed with why, and retried on the backoff.
+    assert.equal(ended.length, 1);
+    // No recorded scope: the attempt still ends on the record, and its supervisor stops on the ended lease.
     const unscoped = attempt(121, { id: 'work-1458', key: 'GY-1458', containmentQuarantine: null });
-    await stopUnboundedAttempts(cycleFor(state, config, effects, unscoped));
-    assert.equal(state.actions[unboundedAttemptKey(unscoped, 1)]?.state, 'failed');
-    assert.match(state.actions[unboundedAttemptKey(unscoped, 1)]!.detail, /no supervisor scope is recorded for epoch 1/);
+    await stopUnboundedAttempts(cycle(unscoped));
+    assert.equal(state.actions[unboundedAttemptKey(unscoped, 1)]?.state, 'done');
+    assert.match(state.actions[unboundedAttemptKey(unscoped, 1)]!.detail, /its supervisor stops on the ended lease/);
+    // An end the plane refuses is recorded failed with why, and retried on the backoff.
+    const refused = attempt(121, { id: 'work-1460', key: 'GY-1460' });
+    const refusing = { ...effects, preserveWork: async () => { throw new Error('the control plane answered 502'); } } as Partial<DaemonEffects>;
+    await stopUnboundedAttempts({ ...cycleFor(state, config, refusing, refused), agents: live } as Cycle);
+    assert.equal(state.actions[unboundedAttemptKey(refused, 1)]?.state, 'failed');
+    assert.match(state.actions[unboundedAttemptKey(refused, 1)]!.detail, /but the loop could not end the attempt: /);
     // Another host's attempt is left to that host's loop.
     const elsewhere = attempt(121, { id: 'work-1459', key: 'GY-1459', workspaces: [{ host: 'other-host', path, epoch: 1, owner: 'worker-a', branch: 'graphyard/gy-1459-1' }] });
-    await stopUnboundedAttempts(cycleFor(state, config, effects, elsewhere));
+    await stopUnboundedAttempts(cycle(elsewhere));
     assert.equal(state.actions[unboundedAttemptKey(elsewhere, 1)], undefined);
     assert.equal(stops.length, 1);
   } finally { await cleanup(); }
 });
 
-test('integration:unbounded-attempt-reclaimed — a live, renewing attempt past both bounds is faulted, then its renewal stops, its lease lapses, its fence settles and the item returns to the queue with its worktree kept', async () => {
+test('integration:unbounded-attempt-reclaimed — a live, renewing attempt past both bounds is faulted, then its renewal stops: the attempt ends on the record, its supervisor stops, its fence settles and the item returns to the queue with its worktree kept', async () => {
   const { unboundedAttemptKey } = await reclaim();
   const { config, cleanup } = await configured();
   // The plane's record, renewed by the supervisor on every read while it runs, as `graphyard watch` does.
@@ -209,27 +227,22 @@ test('integration:unbounded-attempt-reclaimed — a live, renewing attempt past 
     assert.equal(standing()[0].faultClass, 'stalled-gate');
     assert.match(standing()[0].text, /GY-1457 epoch 1 \(worker-a\) has held its lease 1 minutes past the 60-minute worker bound without a submission \(claimed at .+, lease renewed to /);
     assert.equal(supervisor.running, true, 'the first bound stops nothing');
-    // One further bound, still no submission and no progress: the loop stops renewing.
+    // One further bound, still no submission and no progress: the loop stops renewing — it ends the
+    // attempt through the reclaim path, keeping its work, stopping its supervisor and settling its fence.
     plane.item = attempt(121);
     await cycle();
     assert.equal(supervisor.running, false, 'the supervisor renewing the lease was stopped');
     assert.equal(state.actions[unboundedAttemptKey(plane.item, 1)]?.state, 'done');
-    assert.equal(standing().length, 1, 'still the same fault instance');
-    assert.match(standing()[0].text, /the loop stops renewing the lease \(it stops the attempt's supervisor\)/, 'the fault records the reclaim');
-    assert.ok(plane.item.lease, 'nothing ended the attempt on the record: the lease is left to lapse');
-    // The lease, no longer renewed, lapses; past the containment grace the normal settle path reclaims the item.
-    const lapsed = iso(-3 * minute);
-    plane.item.lease = { ...plane.item.lease!, expiresAt: lapsed };
-    plane.item.containmentQuarantine = { ...plane.item.containmentQuarantine!, leaseExpiresAt: lapsed };
-    await cycle();
+    assert.match(state.actions[unboundedAttemptKey(plane.item, 1)]!.detail, /the loop stopped renewing it: the attempt ended on the record, its supervisor \(pid 4242\) was stopped through .+, its containment fence was settled, and GY-1457 is dispatched again, with its worktree kept$/);
+    assert.equal(plane.preserved.length, 1, 'its partial work was kept on its branch as the attempt ended');
+    assert.equal(plane.item.lease, null, 'the attempt ended on the record, so the item is claimable again and no lease lapses unexplained');
     assert.equal(plane.item.containmentQuarantine, null, 'the fence was settled once the host verified the supervisor gone');
-    assert.equal(plane.item.lease, null, 'the lapsed attempt was reclaimed, so the item is claimable again');
-    assert.equal(plane.preserved.length, 1, 'its partial work was kept on its branch before the fence was lowered');
     assert.deepEqual(plane.item.workspaces.map(workspace => workspace.path), [path], 'its worktree is kept on the record');
+    assert.equal(standing().length, 1, 'still the same fault instance');
+    assert.match(standing()[0].text, /past the 120-minute bound the loop ends the attempt and stops its supervisor, returning GY-1457 to the queue with its worktree kept$/, 'the fault records the reclaim');
+    await cycle();
     assert.equal(supervisor.running, false);
     assert.equal(standing().length, 1, 'one fault instance across the whole episode');
-    assert.match(standing()[0].text, /lease lapsed at .+; past the 120-minute reclaim bound the lease was not renewed and lapsed, and the reclaim and containment settlement return GY-1457 to the queue with its worktree kept$/, 'the fault records the reclaim');
-    await cycle();
     assert.equal(state.faults.open[Object.keys(state.faults.open).find(key => key.startsWith('unsubmitted-attempt|GY-1457')) ?? ''], undefined, 'and ends once the item is back in the queue');
   } finally { await cleanup(); }
 });

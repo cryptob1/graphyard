@@ -133,7 +133,7 @@ import { type DiagnosisRun, type Failover, MANUAL, type MainGuardDay, PROOF, api
  * approver refuses the capped rework request of each of `refused` (GY-1389).
  */
 export let days = 0;
-export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; unbounded?: { stuck: number; progressing: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
   staleDiagnosis?: boolean;
@@ -523,7 +523,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
 
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; exitsAt: number | null; dispatchAt: number; state: 'working' | 'submitted' | 'dead' | 'exited' | 'idling' | 'reclaimed' | 'credential-blocked' | 'blocked' | 'failed-over'; syncs: number; syncedFor?: string; refusedSince?: number;
-    scopeAt: number | null; misreadAt: number | null; misread: boolean; credentialAt: number | null; blockAt: number | null; retryingAt: number | null; settlementToken?: string; files?: string[]; bot?: MechanicalFixRequest }
+    scopeAt: number | null; misreadAt: number | null; misread: boolean; credentialAt: number | null; blockAt: number | null; retryingAt: number | null; settlementToken?: string; files?: string[]; bot?: MechanicalFixRequest;
+    /** GY-1460: the unbounded day's attempt that renews without submitting, or the long one that pushes as it goes, and when it last pushed. */
+    unbounded?: 'stuck' | 'progressing'; pushedAt?: number }
   const sessions: Session[] = [], lost: string[] = [], launches: number[] = [];
   // GY-973: what each pane's screen tail shows, where it is not a session at work, and the
   // accounts the loop held. OpenCode 1.18 on a spent account prints its limit banner with a retry
@@ -556,6 +558,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     return done;
   };
   const attempts = new Map<string, number>();
+  // GY-1460: the unbounded day. The stuck attempt stays `working` and renewing for ever without a
+  // submission; the progressing one runs well past both bounds but pushes as it goes, then submits.
+  const unboundedPlan = { progressingMs: 150 * minute, pushEveryMs: 10 * minute };
+  const unboundedDay = { stops: [] as { key: string; epoch: number; elapsed: number; unit: string }[], pushes: [] as { key: string; epoch: number; elapsed: number }[] };
   // GY-1322: the finished sessions dispatches closed to launch over, the most live panes any one
   // profile name had at once, the dispatch blocks the loop asked for, and the seeded blocker's life.
   const drain = { reclaimed: [] as { key: string; profile: string; pane: string; status: string; at: number }[], peakPerName: 0, blocks: [] as string[],
@@ -657,10 +663,13 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // GY-811: the containment day's supervisor fences its session as `watch` does — a quarantine
     // whose settlement token only it holds, acknowledged by the launch — and lowers the fence
     // itself when the session ends on its own; a session that dies leaves it for the loop.
-    const settlementToken = options.containment ? createHash('sha256').update(`settle\0${key}\0${epoch}`).digest('hex') : undefined;
+    // GY-1460: the unbounded day's two first attempts run fenced under a supervisor scope the loop
+    // can stop, as a supervised launch records it.
+    const unbounded = options.unbounded && !attempts.has(key) ? (n === options.unbounded.stuck ? 'stuck' as const : n === options.unbounded.progressing ? 'progressing' as const : undefined) : undefined;
+    const settlementToken = options.containment || unbounded ? createHash('sha256').update(`settle\0${key}\0${epoch}`).digest('hex') : undefined;
     if (settlementToken) {
       const settlementHash = createHash('sha256').update(settlementToken).digest('hex');
-      await engine.execute(principal, 'quarantine', work.id, { epoch, settlementHash }, id());
+      await engine.execute(principal, 'quarantine', work.id, { epoch, settlementHash, ...(unbounded ? { scope: { unit: `graphyard-watch-${key.toLowerCase()}-${epoch}.scope`, pid: 7000 + n } } : {}) }, id());
       await engine.execute(principal, 'launch', work.id, { epoch, settlementHash }, id());
     }
     const attempt = (attempts.get(key) ?? 0) + 1; attempts.set(key, attempt);
@@ -702,7 +711,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     const fastPush = baseBreakDay && plan.baseBreak.item === n && baseBreakFrom === null && !(options.remedies && n === remedyItem && attempt === 1);
     if (fastPush) baseBreakFrom = clock.now();
     const pushAfterMs = fastPush ? plan.baseBreak.pushAfterMs : plan.workMs;
-    sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, pushAt: idling ? Number.MAX_SAFE_INTEGER : clock.now() + pushAfterMs,
+    sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, unbounded, pushedAt: undefined,
+      pushAt: idling || unbounded === 'stuck' ? Number.MAX_SAFE_INTEGER : unbounded === 'progressing' ? clock.now() + unboundedPlan.progressingMs : clock.now() + pushAfterMs,
       diesAt: !options.capacityWait && !idling && plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null,
       exitsAt: !idling && plan.exits.has(n) && attempt === 1 ? clock.now() + plan.exitAfterMs : null, dispatchAt: clock.now(), state: idling ? 'idling' : 'working', syncs: 0,
       scopeAt: !idling && plan.scoped.has(n) && attempt === 1 ? clock.now() + plan.scopeAfterMs : null, misreadAt: !idling && plan.misread.has(n) && attempt === 1 ? clock.now() + plan.misreadAfterMs : null, misread: false,
@@ -806,6 +816,14 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       }
       // The unrepresentable item's worker stays live on its refused ask: the item is blocked on
       // scope, so it neither pushes nor submits.
+      // GY-1460: the long attempt pushes a commit every few minutes and binds its session to it,
+      // the submission progress that keeps the loop from stopping it however long it runs.
+      if (session.unbounded === 'progressing' && now < session.pushAt && now - (session.pushedAt ?? session.dispatchAt) >= unboundedPlan.pushEveryMs) {
+        session.pushedAt = now;
+        const head = sha('progress', session.key, session.epoch, now);
+        await engine.execute(principal, 'session', session.work, { id: `${principal.id}:${session.epoch}`, kind: 'implementation', epoch: session.epoch, runtime: 'claude', host: config.hostId, subject: `${session.key}: long work`, head }, id());
+        unboundedDay.pushes.push({ key: session.key, epoch: session.epoch, elapsed: now - dayStart });
+      }
       if (now < session.pushAt || hold.has(session.key)) {
         // A renewal refused is lease loss: the supervisor stops the session, as `watch` does. An
         // idling session whose lease the loop itself ended is not lost — it was reclaimed (GY-852).
@@ -1156,7 +1174,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // containment day (GY-811) runs last and reads only its own items too, so its cycles do not pay
   // for every earlier day's delivered work; the failover day (GY-417) reads only its own as well. The mechanical day (GY-971) starts a plane of its own
   // and keeps the filter so it does not depend on where it falls in the file.
-  const ownItems = options.reassigned || options.headless || options.blockers || options.credentialBlocked || options.dispatchFailing || options.drained || options.containment || options.mechanical || failover ? new Set(items.map(item => item.id)) : null;
+  const ownItems = options.reassigned || options.headless || options.blockers || options.credentialBlocked || options.dispatchFailing || options.drained || options.containment || options.mechanical || options.unbounded || failover ? new Set(items.map(item => item.id)) : null;
   const snapshot = async () => { const read = await store.coordinationSnapshot(); return { work: ownItems ? read.work.filter(item => ownItems.has(item.id)) : read.work, now: read.now, jobs: read.jobs }; };
   // ---- Host memory (GY-612): below its floor the loop launches nothing, recording the crossing once each way. ----
   const dip = plan.memoryDip;
@@ -1220,7 +1238,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     return Object.fromEntries(work.filter(item => item.containmentQuarantine && containmentPhase(item, now)?.state !== 'live').map(item => {
       const fence = item.containmentQuarantine!, workspace = item.workspaces.find(entry => entry.epoch === fence.epoch)!;
       const verification = containmentVerificationSchema.parse({ method: 'linux-proc-systemd', host: workspace.host, uid: 1000, platform: 'linux', workspacePath: workspace.path,
-        observedAt: observed.now, clockOffset: { min: 0, max: 0 }, processes: [], scopes: [], inaccessible: 0, unverifiable: [] });
+        observedAt: observed.now, clockOffset: { min: 0, max: 0 }, processes: [], scopes: [], inaccessible: 0, unverifiable: [],
+        // A supervisor scope the launch recorded (GY-1460's day) is inspected and found stopped.
+        ...(fence.scope ? { recordedScope: { ...fence.scope, activeState: 'inactive' } } : {}) });
       const refusals = containmentSettlementRefusals(item, verification, { now });
       return [item.id, { key: item.key, id: item.id, epoch: fence.epoch, owner: fence.owner, at: fence.at, host: workspace.host, workspacePath: workspace.path, scope: fence.scope ?? null,
         settleable: !refusals.length, refusals, attestation: 'soak', verification }];
@@ -1422,7 +1442,15 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       selectedAccount: async (role: string, profile: string) => role === 'worker' ? { environment: `account-${profile}`, kind: null } : null,
       holdAccount: async (account: string, observed: { resetsAt: string | null }) => { heldAccounts.set(account, { resetsAt: observed.resetsAt }); },
     } : {}),
-    ...(options.reassigned || options.credentialBlocked || options.retrying ? {
+    // GY-1460: stopping a supervisor stops its session, so the lease it renewed lapses.
+    ...(options.unbounded ? {
+      stopSupervisor: async (orphan: { key: string; epoch: number; scope?: { unit: string } | null }) => {
+        const session = sessions.find(entry => entry.key === orphan.key && entry.epoch === orphan.epoch);
+        unboundedDay.stops.push({ key: orphan.key, epoch: orphan.epoch, elapsed: clock.now() - dayStart, unit: orphan.scope?.unit ?? '' });
+        if (session && (session.state === 'working' || session.state === 'idling')) { herdr.kill(session.pane); session.state = 'reclaimed'; }
+      },
+    } : {}),
+    ...(options.reassigned || options.credentialBlocked || options.retrying || options.unbounded ? {
       reportCapacity: async (work: Work, event: Record<string, unknown>) => api(principals.coordinator, 'POST', `work/${work.id}/capacity`, event),
       preserveWork: async (work: Work, epoch: number) => {
         const current = (await store.list()).find(item => item.id === work.id)!;
@@ -2428,7 +2456,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },

@@ -1,6 +1,7 @@
 // Concern: the worker bound (GY-1460) — an attempt holding its lease past the no-submission bound, read from the item's own record.
 import { isClosed } from './closure.js';
 import type { Work } from './work.js';
+import type { PipelineTimeline } from '../pipeline-speed.js';
 
 /**
  * GY-1460: the worker bound. An attempt holding its lease this long without a submission is a
@@ -9,7 +10,7 @@ import type { Work } from './work.js';
  * renewed lease alone must never extend the bound silently.
  */
 export const workerSubmissionBoundMs = 60 * 60_000;
-/** One further bound with still no submission and no progress: the loop stops renewing the lease, so the normal lapse, containment and reclaim path returns the item. */
+/** One further bound with still no submission and no progress: the loop stops renewing the lease, ending the attempt through the reclaim path, which returns the item. */
 export const workerReclaimBoundMs = 2 * workerSubmissionBoundMs;
 /** Submission progress counts while it is no older than the session's reporting cadence (sessionObservationFreshMs). */
 export const submissionProgressCadenceMs = 15 * 60_000;
@@ -30,7 +31,7 @@ export interface UnsubmittedAttempt {
 const minutes = (ms: number) => Math.floor(ms / 60_000);
 /** When the attempt holding `epoch` was claimed, from the assignment or the pipeline timeline. */
 function attemptClaimedAt(work: Work, epoch: number): string | null {
-  const attempts = (work as Work & { pipeline?: { attempts?: { epoch: number; claimedAt?: string | null }[] } }).pipeline?.attempts ?? [];
+  const attempts = (work as Work & { pipeline?: PipelineTimeline }).pipeline?.attempts ?? [];
   const claimed = (work.lastAssignment?.epoch === epoch ? work.lastAssignment.claimedAt : null) ?? attempts.find(attempt => attempt.epoch === epoch)?.claimedAt ?? null;
   return claimed && Number.isFinite(Date.parse(claimed)) ? claimed : null;
 }
@@ -59,6 +60,8 @@ export function unsubmittedAttempt(work: Work, now: number): UnsubmittedAttempt 
   if (!claimedAt) return null;
   const pastBoundMs = now - Date.parse(claimedAt) - workerSubmissionBoundMs;
   if (pastBoundMs <= 0) return null;
+  // A lease that lapsed inside the bound was never held past it: the lapse and containment path owns that attempt.
+  if (Date.parse(lease.expiresAt) - Date.parse(claimedAt) <= workerSubmissionBoundMs) return null;
   const progressAt = submissionProgressAt(work, lease.epoch, lease.owner);
   if (progressAt && now - Date.parse(progressAt) <= submissionProgressCadenceMs) return null;
   const handle = (work.sessions ?? []).find(entry => entry.kind === 'implementation' && entry.id === `${lease.owner}:${lease.epoch}`);
@@ -71,7 +74,7 @@ export function unsubmittedAttemptText(attempt: UnsubmittedAttempt): string {
   const held = `${attempt.key} epoch ${attempt.epoch} (${attempt.owner}) has held its lease ${minutes(attempt.pastBoundMs)} minutes past the ${minutes(workerSubmissionBoundMs)}-minute worker bound without a submission`;
   const renewal = `claimed at ${attempt.claimedAt}, lease ${attempt.live ? 'renewed to' : 'lapsed at'} ${attempt.leaseExpiresAt}${attempt.session ? `, session last observed ${attempt.session.state} at ${attempt.session.at}` : ''}${attempt.progressAt ? `, last submission progress at ${attempt.progressAt}` : ', no submission progress observed'}`;
   const reclaim = !attempt.reclaim ? `; past ${minutes(workerReclaimBoundMs)} minutes with no submission the loop stops renewing the lease`
-    : attempt.live ? `; past the ${minutes(workerReclaimBoundMs)}-minute reclaim bound, the loop stops renewing the lease (it stops the attempt's supervisor) so the lapse, containment and reclaim path returns ${attempt.key} to the queue with its worktree kept`
-      : `; past the ${minutes(workerReclaimBoundMs)}-minute reclaim bound the lease was not renewed and lapsed, and the reclaim and containment settlement return ${attempt.key} to the queue with its worktree kept`;
+    : attempt.live ? `; past the ${minutes(workerReclaimBoundMs)}-minute bound the loop ends the attempt and stops its supervisor, returning ${attempt.key} to the queue with its worktree kept`
+      : `; past the ${minutes(workerReclaimBoundMs)}-minute bound the lease lapsed unrenewed, and the reclaim returns ${attempt.key} to the queue with its worktree kept`;
   return `${held} (${renewal})${reclaim}`;
 }
