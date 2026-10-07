@@ -9,7 +9,7 @@ Own deployment: main → candidate → uat → production; `.railway/railway.ts`
 
 - `release cut [--trigger schedule|manual]` tags main's tip `rc/ID` with items; merges never pause. `.github/workflows/release-candidate.yml` cuts on loop dispatch or best-effort two-hourly cron, running [long suites](#pre-merge-gate-and-release-candidate-validation).
 - `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials), refused while UAT serves unjudged candidate <4 h old; push leased on observed tip.
-- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits UAT's `/healthz` `commit`; runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser` (sign-in, Work view), suites (container, chart gate; soak, timing advisory; `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`.
+- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits UAT's `/healthz` `commit`; runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser` (sign-in, Work view), suites (container, chart, `zero-touch` gate; soak, timing advisory; `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`.
 - `release promote ID` needs that (or [accepted flaky cases](validation.md#release-verdicts)), deploys production leased on last promoted SHA, records `rc-production/ID`; `release verify --url URL` confirms.
 - Failed candidates file [hold](validation.md#release-holds) per failed outcome, else one follow-up (`release follow-up ID` retries); fix forward.
 
@@ -17,7 +17,7 @@ Own deployment: main → candidate → uat → production; `.railway/railway.ts`
 
 ### Pre-merge gate and release-candidate validation
 
-Required: `typecheck`, `test` (`.github/workflows/ci.yml`), under ten minutes; soak/timing files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container and Helm checks run per candidate: timing budgets serially before soak, so no budget measures another suite's load.
+Required: `typecheck`, `test` (`.github/workflows/ci.yml`), under ten minutes; soak/timing files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container and Helm checks run per candidate: timing budgets serially before soak, so no budget measures another suite's load. UAT's `zero-touch` suite runs `tests/zero-touch-onboarding.test.ts`: `up --agent --goal` against a fake GitHub must reach a merged first item; any human step but the App approval fails it and blocks promotion.
 
 ### One delivery path
 

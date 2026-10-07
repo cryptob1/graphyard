@@ -526,7 +526,7 @@
     "tests/registry-drives-launch.test.ts": 1901,
     "tests/registry-slot-followups.test.ts": 1167,
     "tests/regression-guard.test.ts": 391,
-    "tests/release-candidate.test.ts": 4549,
+    "tests/release-candidate.test.ts": 4900,
     "tests/repair-lane.test.ts": 446,
     "tests/report-adapters.test.ts": 740,
     "tests/reporter.test.ts": 216,
@@ -652,6 +652,7 @@
     "tests/worktree-branch-lock.test.ts": 3289,
     "tests/worktree-hold-followups.test.ts": 1952,
     "tests/worktree-preserved-aside.test.ts": 1442,
-    "tests/worktree-reclaim.test.ts": 3054
+    "tests/worktree-reclaim.test.ts": 3054,
+    "tests/zero-touch-onboarding.test.ts": 5900
   }
 }
