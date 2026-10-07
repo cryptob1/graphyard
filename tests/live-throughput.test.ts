@@ -856,7 +856,7 @@ test('integration:throughput-attention-retires — once a recorded measurement o
     assert.equal(short.report!.population.admitted, 9);
     const unowned = await throughputStatus(root, serving, items);
     assert.equal(unowned.owner.item, null);
-    assert.match(unowned.attention!.text, /No open item owns the verification yet \(the loop files one after its next unverified measurement\): 9 admitted of 10/);
+    assert.match(unowned.attention!.text, /No open item owns the verification yet \(the loop files one on its next unverified measurement of a release whose owner has not closed on an answered needs-decision\): 9 admitted of 10/);
     const standing = await throughputStatus(root, serving, withOwner());
     assert.equal(standing.verdict, 'unverified'); assert.ok(standing.attention);
     assert.deepEqual(standing.owner, { item: throughputOwner, admitted: 9, needed: throughputClaim.minimumDeliveries, measuredAt: short.report!.measuredAt });
@@ -967,7 +967,7 @@ test('integration:throughput-stall-escalates — when every delivery in a window
       assert.equal(owners.filed.length, 1, 'one owner filed for the unverified release');
       const owner = items.at(-1)!;
       assert.equal(owner.stage, 'backlog'); assert.equal(owner.ready, false, 'filed in the backlog, never released to a worker');
-      const escalationKey = `escalation:throughput:${owner.key}`, escalation = state.actions[escalationKey];
+      const escalationKey = `escalation:throughput:${owner.key}:${owner.policyRevision}`, escalation = state.actions[escalationKey];
       assert.equal(escalation.kind, 'escalation'); assert.equal(escalation.work, owner.key);
       assert.match(escalation.detail, new RegExp(`^needs decision on ${owner.key}: ${stall.finding.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
       assert.ok(first.actions.some(action => action.kind === 'escalation'));
@@ -996,7 +996,7 @@ test('integration:throughput-stall-escalates — when every delivery in a window
       owner.policyRevision = 2;
       await runCycle(master, state, effects, () => Date.now());
       assert.deepEqual(owners.closed.map(entry => entry.key), [owner.key]);
-      assert.match(owners.closed[0].reason, new RegExp(`${owner.key}'s needs-decision was answered by its requirements revision 2`));
+      assert.match(owners.closed[0].reason, new RegExp(`${owner.key}'s needs-decision \\(raised at its requirements revision 1\\) was answered by its requirements revision 2`));
       await runCycle(master, state, effects, () => Date.now());
       assert.equal(owners.filed.length, 1, 'a release whose owner closed on an answered decision is not given a second');
     } finally { await rm(directory, { recursive: true, force: true }); }
@@ -1011,9 +1011,14 @@ test('integration:throughput-owner-item — the loop files one open owner item f
   assert.match(filedInput.description, /3 of the 10 session-free deliveries/);
   // The pure rule: open while unverified and unanswered, whatever the answer's state; closed on either condition.
   const owner = { key: 'GY-7200', policyRevision: 1 };
-  for (const verdict of ['unverified', null] as const) assert.equal(throughputOwnerClosure(owner, { revision: deployedRevision, verdict }), null, `${verdict}: stays open`);
-  assert.match(throughputOwnerClosure(owner, { revision: deployedRevision, verdict: 'verified' })!, new RegExp(`verified on the serving release ${deployedRevision}`));
-  assert.match(throughputOwnerClosure({ ...owner, policyRevision: 2 }, { revision: deployedRevision, verdict: 'unverified' })!, /needs-decision was answered/);
+  for (const verdict of ['unverified', null] as const) assert.equal(throughputOwnerClosure(owner, { revision: deployedRevision, verdict }, null), null, `${verdict}: stays open`);
+  assert.match(throughputOwnerClosure(owner, { revision: deployedRevision, verdict: 'verified' }, null)!, new RegExp(`verified on the serving release ${deployedRevision}`));
+  // Only a requirements revision applied after the loop raised its needs-decision answers it: an
+  // unrelated revision (a scope or criteria edit) with no needs-decision raised, or one the decision
+  // was raised at, closes nothing while the claim is unverified.
+  assert.equal(throughputOwnerClosure({ ...owner, policyRevision: 2 }, { revision: deployedRevision, verdict: 'unverified' }, null), null, 'a revision without a raised needs-decision answers nothing');
+  assert.equal(throughputOwnerClosure({ ...owner, policyRevision: 2 }, { revision: deployedRevision, verdict: 'unverified' }, 2), null, 'a needs-decision raised at the current revision is unanswered');
+  assert.match(throughputOwnerClosure({ ...owner, policyRevision: 3 }, { revision: deployedRevision, verdict: 'unverified' }, 2)!, /needs-decision \(raised at its requirements revision 2\) was answered by its requirements revision 3; .* files no second owner/);
   // A closed or delivered owner owns nothing.
   const template = (await store.list()).find(item => item.stage === 'done')!;
   const open = { ...template, key: 'GY-7201', title: `${throughputOwnerTitle}: x`, stage: 'backlog' as const };
@@ -1048,6 +1053,12 @@ test('integration:throughput-owner-item — the loop files one open owner item f
     for (let cycle = 0; cycle < 3; cycle++) await runCycle(master, state, effects, () => Date.now());
     assert.equal(owners.filed.length, 1, 'never filed again while it is open');
     assert.equal(owners.closed.length, 0, 'open while the claim is unverified');
+    // An unrelated requirements revision (the master scopes or edits the owner) with no needs-decision
+    // raised answers nothing: the owner stays open and owns the still-unverified claim (review B1).
+    owner.policyRevision = 2;
+    for (let cycle = 0; cycle < 3; cycle++) await runCycle(master, state, effects, () => Date.now());
+    assert.equal(owners.closed.length, 0, 'a revision without a raised needs-decision never closes the owner');
+    assert.equal(openThroughputOwner(work)?.key, owner.key);
     // master status names it with its progress.
     const visible = throughputClaimVisibility(null, { revision: sha, version: '0.9.1' }, 3, null, owner);
     assert.equal(visible.owner.item, owner.key);

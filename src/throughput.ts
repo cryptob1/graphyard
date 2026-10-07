@@ -460,11 +460,13 @@ export const openThroughputOwner = <W extends Pick<Work, 'title' | 'stage'> & { 
   work.find(item => item.title.startsWith(throughputOwnerTitle) && item.stage !== 'done' && !item.closure) ?? null;
 
 /**
- * Whether the owner's needs-decision was answered: an approved requirements revision applied to it
- * (`master decide GY-N requirements`, then its approver) advances its policy revision past the one
- * it was filed at, and nothing else the loop or a worker does to a backlog item moves it.
+ * Whether the owner's needs-decision was answered: the loop raised it (`raisedAt`, the owner's
+ * requirements revision when the loop recorded `escalation:throughput:GY-N:REVISION`) and a
+ * requirements revision was applied to the owner after that (`master decide GY-N requirements`,
+ * then its approver). A revision with no needs-decision raised, or one applied before it, answers
+ * nothing: a scope or criteria edit alone never closes the owner.
  */
-export const throughputOwnerAnswered = (owner: Pick<Work, 'policyRevision'>) => owner.policyRevision > 1;
+export const throughputOwnerAnswered = (owner: Pick<Work, 'policyRevision'>, raisedAt: number | null) => raisedAt !== null && owner.policyRevision > raisedAt;
 
 /** The item the loop files to own the verification, naming the release it found unverified and its progress. */
 export function throughputOwnerItem(revision: string, admitted: number | null) {
@@ -472,7 +474,7 @@ export function throughputOwnerItem(revision: string, admitted: number | null) {
     title: `${throughputOwnerTitle}: ${revision.slice(0, 12)}`.slice(0, 200), type: 'bug' as const, priority: 1,
     description: [
       `The master loop filed this item itself (GY-1438): ${throughputClaim.item}'s throughput claim (${throughputClaim.statement}) is unverified on the release the control plane serves, ${revision}${admitted === null ? '' : `, with ${admitted} of the ${throughputClaim.minimumDeliveries} session-free deliveries it is judged over admitted`}. It owns that verification so it can only end, never age.`,
-      `There is nothing to build here, so it stays in the backlog and is never released to a worker. The loop re-measures the serving release while its newest measurement is unverified and deliveries merge (at most every ${Math.round(throughputRemeasureMs / 60_000)} min; the budgets are never relaxed) and closes this item itself once a recorded measurement of the serving release verifies the claim. When session-free deliveries cannot accumulate it raises a needs-decision on this item instead; an approved requirements revision of this item answers it, and the loop closes the item then too.`,
+      `There is nothing to build here, so it stays in the backlog and is never released to a worker. The loop re-measures the serving release while its newest measurement is unverified (at most every ${Math.round(throughputRemeasureMs / 60_000)} min; the budgets are never relaxed) and closes this item itself once a recorded measurement of the serving release verifies the claim. When session-free deliveries cannot accumulate it raises a needs-decision on this item instead; an approved requirements revision of this item applied after that answers it, and the loop closes the item then too.`,
     ].join('\n\n'),
     criteria: [{ id: 'AC-1', text: `A recorded measurement of the release the control plane serves verifies ${throughputClaim.item}'s claim (at least ${throughputClaim.minimumDeliveries} admitted deliveries within its submit-to-merge p50 and idle-but-actionable budgets), or the needs-decision the loop raised on this item is answered`, proofs: ['manual:throughput-claim-verified'] }],
     reason: `${throughputClaim.item}'s throughput claim is unverified on the serving release ${revision.slice(0, 12)} and no open item owns its verification`,
@@ -484,9 +486,9 @@ export function throughputOwnerItem(revision: string, admitted: number | null) {
  * serving release verified the claim, or its needs-decision was answered. Nothing else closes it,
  * so a release that is still unverified always has an open owner.
  */
-export function throughputOwnerClosure(owner: Pick<Work, 'key' | 'policyRevision'>, serving: { revision: string; verdict: ThroughputReport['verdict'] | null }): string | null {
+export function throughputOwnerClosure(owner: Pick<Work, 'key' | 'policyRevision'>, serving: { revision: string; verdict: ThroughputReport['verdict'] | null }, raisedAt: number | null): string | null {
   if (serving.verdict === 'verified') return `${throughputClaim.item}'s throughput claim verified on the serving release ${serving.revision}; the loop closes ${owner.key}, which owned that verification`;
-  if (throughputOwnerAnswered(owner)) return `${owner.key}'s needs-decision was answered by its requirements revision ${owner.policyRevision}; the loop closes it, and an unverified release files a new owner`;
+  if (throughputOwnerAnswered(owner, raisedAt)) return `${owner.key}'s needs-decision (raised at its requirements revision ${raisedAt}) was answered by its requirements revision ${owner.policyRevision}; the loop closes it, and files no second owner for ${serving.revision.slice(0, 12)}: the next release it measures unverified files a new one`;
   return null;
 }
 
@@ -770,7 +772,7 @@ export function throughputClaimVisibility(measurement: { report: ThroughputRepor
   const command = throughputMeasurementCommand;
   const admitted = measurement?.report.population?.admitted ?? 0, ownerKey = ownerItem?.key ?? null;
   const owner = { item: ownerKey, admitted, needed: throughputClaim.minimumDeliveries, measuredAt: measurement?.report.measuredAt ?? null };
-  const progress = `${ownerKey ? `${ownerKey} owns the verification` : 'No open item owns the verification yet (the loop files one after its next unverified measurement)'}: ${admitted} admitted of ${throughputClaim.minimumDeliveries}${measurement ? ` in the newest recorded measurement (${measurement.report.measuredAt}, of ${measurement.report.deployed?.revision?.slice(0, 12) ?? 'an unnamed release'})` : ', nothing measured yet'}`;
+  const progress = `${ownerKey ? `${ownerKey} owns the verification` : 'No open item owns the verification yet (the loop files one on its next unverified measurement of a release whose owner has not closed on an answered needs-decision)'}: ${admitted} admitted of ${throughputClaim.minimumDeliveries}${measurement ? ` in the newest recorded measurement (${measurement.report.measuredAt}, of ${measurement.report.deployed?.revision?.slice(0, 12) ?? 'an unnamed release'})` : ', nothing measured yet'}`;
   const serving = Boolean(measurement && deployed.revision && deployed.revision !== 'unknown' && measurement.report.deployed?.revision === deployed.revision);
   const stall = serving ? throughputStall(measurement!.report, ownerKey) : null, decideOn = ownerKey ?? 'GY-N';
   // The ledger's pursuit (GY-1437): inside its bound the loop carries the claim, so the line is in
@@ -780,7 +782,7 @@ export function throughputClaimVisibility(measurement: { report: ThroughputRepor
     if (stall) return { subject: 'throughput', kind: 'throughput', text: `${throughputClaim.item}'s throughput claim is unverified against the deployed release and ${stall.text}`,
       ...agentOwner('master', `graphyard master decide ${decideOn} requirements @revision.json "REASON" with a revision that settles the population rule ${throughputClaim.item}'s claim is judged over or the coordination that leaves these fingerprints, then graphyard master approver ${decideOn} DECISION; the loop closes ${decideOn} once it is applied`, 'approver') };
     const text = `${throughputClaim.item}'s throughput claim is unverified against the deployed release: ${reason}. ${progress}`;
-    if (!pursuit) return { subject: 'throughput', kind: 'throughput', text: `${text}; the loop re-measures the serving release as deliveries merge`, ...agentOwner('master', command) };
+    if (!pursuit) return { subject: 'throughput', kind: 'throughput', text: `${text}; the loop re-measures the serving release at most every ${Math.round(throughputRemeasureMs / 60_000)} min while it stays unverified`, ...agentOwner('master', command) };
     if (!pursuit.escalated) return { subject: 'throughput', kind: 'throughput', text: `${text}; ${pursuit.text}`, inMotionUntil: pursuit.dueAt, ...agentOwner('master', command) };
     // Past the bound the line names the blocker. Only two blockers are a human's to remove (AGENTS.md):
     // a credential for the measurement, or whether deliveries may run with no master session at all.

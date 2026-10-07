@@ -174,7 +174,7 @@ export async function deploymentStep(cycle: Cycle) {
   const verified = observed !== stillVerifying && observed.ok ? state.deployment : null, measure = effects.measureThroughput;
   if (measure && verified && verified.source !== 'unavailable' && verified.sha) {
     const key = `throughput:${verified.sha}`, previous = state.actions[key], owner = openThroughputOwner(snapshot.work);
-    const standing = owner && throughputOwnerStanding(state.actions[throughputEscalationKey(owner.key)], owner);
+    const standing = owner && throughputOwnerStanding(state.actions, owner);
     let stall: ThroughputStall | null = null;
     if (throughputAskDue(previous, state.cycle) && !(standing && answeredVerdict(previous) === 'unverified')) {
       const measured = await withinDeploymentBudget(state, 'throughput', () => measure(snapshot.work, verified.sha!), deadline, now);
@@ -268,12 +268,25 @@ export function answeredVerdict(answer: DaemonAction | undefined): 'verified' | 
   return named ? named[1] as 'verified' | 'unverified' : null;
 }
 
-/** The loop's action keys for the owner item of a release (filed once per release) and for the needs-decision asked on an owner. */
+/**
+ * The loop's action keys for the owner item of a release (filed once per release) and for the
+ * needs-decision asked on an owner, keyed by the owner's requirements revision when it was raised,
+ * so only a revision applied after it answers it (`throughputOwnerAnswered`).
+ */
 export const throughputOwnerKey = (revision: string) => `throughput:owner:${revision}`;
-export const throughputEscalationKey = (owner: string) => `escalation:throughput:${owner}`;
+export const throughputEscalationKey = (owner: string, policyRevision: number) => `escalation:throughput:${owner}:${policyRevision}`;
+/** The owner's requirements revision at which the loop raised its needs-decision (the earliest, should a key repeat), or null when it raised none. */
+export function throughputEscalatedAt(actions: Record<string, DaemonAction>, owner: Pick<Work, 'key'>): number | null {
+  const prefix = `escalation:throughput:${owner.key}:`;
+  const raised = Object.entries(actions).filter(([key, action]) => key.startsWith(prefix) && action.state === 'done' && action.work === owner.key)
+    .map(([key]) => Number(key.slice(prefix.length))).filter(Number.isInteger);
+  return raised.length ? Math.min(...raised) : null;
+}
 /** The owner's needs-decision was raised and is not answered yet: no further escalation, and no re-measure, until it is. */
-export const throughputOwnerStanding = (escalation: DaemonAction | undefined, owner: Pick<Work, 'key' | 'policyRevision'>) =>
-  escalation?.state === 'done' && escalation.work === owner.key && !throughputOwnerAnswered(owner);
+export function throughputOwnerStanding(actions: Record<string, DaemonAction>, owner: Pick<Work, 'key' | 'policyRevision'>) {
+  const raisedAt = throughputEscalatedAt(actions, owner);
+  return raisedAt !== null && !throughputOwnerAnswered(owner, raisedAt);
+}
 
 /**
  * GY-1438: the item that owns GY-87's verification on the serving release, every cycle the
@@ -293,7 +306,7 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
   let owner = open;
   if (owner) {
     // Without a reason it stays open: the claim is not verified and its needs-decision is not answered.
-    const reason = throughputOwnerClosure(owner, { revision, verdict });
+    const reason = throughputOwnerClosure(owner, { revision, verdict }, throughputEscalatedAt(state.actions, owner));
     if (reason) {
       if (effects.closeThroughputOwner && (ownerAction?.state !== 'failed' || readyToRetry(ownerAction, state.cycle))) try {
         if (await effects.closeThroughputOwner(owner, reason, `throughput-owner:close:${owner.id}:${owner.revision}`)) performed.push(await note(owner.key, 'done', `Closed ${owner.key}: ${reason}`));
@@ -306,8 +319,8 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
       if (filed) { owner = filed; performed.push(await note(filed.key, 'done', `Filed ${filed.key} to own GY-87's throughput verification on ${revision.slice(0, 12)}; it closes once the claim verifies or its needs-decision is answered`)); }
     } catch (error) { performed.push(await note(null, 'failed', `Could not file the item that owns GY-87's throughput verification on ${revision.slice(0, 12)}: ${message(error)}`)); }
   }
-  if (!stall || !owner || state.actions[throughputEscalationKey(owner.key)]?.state === 'done') return;
-  performed.push(await record(state, throughputEscalationKey(owner.key), { kind: 'escalation', work: owner.key, principal: null, state: 'done', detail: throughputStallText({ ...stall, owner: owner.key }), attempts: 1, cycle: state.cycle }, now(), effects.persist));
+  if (!stall || !owner || throughputEscalatedAt(state.actions, owner) !== null) return;
+  performed.push(await record(state, throughputEscalationKey(owner.key, owner.policyRevision), { kind: 'escalation', work: owner.key, principal: null, state: 'done', detail: throughputStallText({ ...stall, owner: owner.key }), attempts: 1, cycle: state.cycle }, now(), effects.persist));
 }
 
 /** Record a budget-cut step, so the journal and `master status` say verification is in flight rather than blind; a full step supersedes the last cut once. */

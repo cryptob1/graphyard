@@ -10,7 +10,7 @@ export interface ThroughputEffects {
    * After a verified deployment of `observedSha`, records GY-87's throughput measurement for the
    * release the control plane serves, with the loop's own coordinator credential; reads only the
    * window's deliveries whole. A release is measured again only while its newest measurement is
-   * unverified and deliveries merged since (GY-1438). Absent, nothing is measured.
+   * unverified, at most once per `throughputRemeasureMs` (GY-1438). Absent, nothing is measured.
    */
   measureThroughput?: (work: Work[], observedSha: string) => Promise<LoopThroughputOutcome>;
   /**
