@@ -181,6 +181,8 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
 interface Ask { seq: number; at: string; stage: Stage | null; kind: 'scope-request' | 'blocked-report'; blocked: string; paths: string[]; trigger?: string; sources: { seq: number; kind: string }[] }
 interface WorkState {
   key: string | null; title: string | null; stage: Stage | null; plannedFiles: string[] | null;
+  /** The blocker as the previous row left it; undefined until a row with a document is seen. */
+  blocker?: string | null;
   asks: Ask[];
   reworkDecision: { seq: number; at: string; id: string; stage: Stage | null; binding: string | null } | null;
   bypass: { seq: number; at: string; mergeSha: string; blocked: string; stage: Stage | null } | null;
@@ -203,6 +205,24 @@ const failedCheckRound = (binding: string | null, candidate: { sha: string } | n
   const match = binding ? /^([a-f0-9]{40}):ci:.+$/.exec(binding) : null;
   return !!match && match[1] === candidate?.sha;
 };
+
+/**
+ * Whether a requirements revision re-plans work no attempt has started (GY-1396), judged from the
+ * item as the revision found it. An operator agent's row records that whole document as `before`:
+ * the item is unstarted when it was never claimed, or when every attempt lapsed leaving nothing on
+ * the record (no submission, candidate, scope ask or decision, human request, kept commit). Any
+ * other row records only the planned files, so only an item never claimed (epoch 0) is unstarted.
+ * A blocker standing before the revision is always something the revision answers.
+ */
+function unstarted(before: unknown, epochAfter: number | null | undefined, blockerBefore: string | null | undefined): boolean {
+  if (!isObject(before) || !('epoch' in before)) return epochAfter === 0 && !blockerBefore;
+  if (before.blocker) return false;
+  if (!before.epoch) return true;
+  const attempts = before.pipeline?.attempts, exhaustions = before.capacity?.exhaustions;
+  return !before.submission && !before.candidate && !before.scopeRequest && !before.scopeDecision && !before.humanRequest
+    && Array.isArray(attempts) && attempts.every((attempt: { end?: unknown }) => attempt?.end === 'expired')
+    && !(Array.isArray(exhaustions) && exhaustions.some((entry: { role?: unknown; partialWork?: { commit?: unknown } }) => entry?.role === 'worker' && entry.partialWork?.commit));
+}
 
 /**
  * Fold the ledger rows into interventions and judgements. `work` is the current snapshot: it
@@ -251,6 +271,8 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
     // The planned scope as the previous row left it, so a revision is judged against what it changed.
     const plannedBefore = entry.plannedFiles;
     if (Array.isArray(row.work?.plannedFiles)) entry.plannedFiles = row.work!.plannedFiles!;
+    const blockerBefore = entry.blocker;
+    if (row.work) entry.blocker = row.work.blocker ?? null;
     const source = { seq: row.seq, kind: row.kind };
     // Standing escalations, as every embedded document shows them: a trigger not seen before was
     // raised since the last row; one that vanished without a resolution row was auto-settled.
@@ -301,13 +323,21 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
           break;
         }
         const cleared = row.work ? !row.work.blocker : true;
+        // An item at backlog or ready that no attempt has worked on, that nobody asked about and that
+        // nothing blocked is being planned, not rescued: its coordinator revising the scope of work no
+        // worker has started waited on no one, so it is no intervention (GY-1396). A blocker it
+        // answers, or an item an attempt holds, released, submitted or was reworked from, still is.
+        // `liveScopeWidening` says only that the revision is additive, not that a lease was live,
+        // so the item as the revision found it decides.
+        const replanned = (stage === 'backlog' || stage === 'ready') && !!row.work
+          && unstarted(details.before, row.work.epoch, blockerBefore === undefined ? row.work.blocker : blockerBefore);
         if (entry.asks.length && (widened || cleared)) {
           // A widening answers the scope request; a blocker it clears beside one was an escalation of its own.
           const scopeAsked = entry.asks.some(ask => ask.kind === 'scope-request');
           const widens = (ask: Ask) => widened && (ask.kind === 'scope-request' || !scopeAsked);
           for (const ask of entry.asks) if (widens(ask) || cleared) emit(row, widens(ask) ? 'scope-widening' : 'escalation', { requestedAt: ask.at, blocked: ask.blocked, stage: ask.stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: reason, trigger: widens(ask) ? ask.trigger ?? ask.kind : ask.kind, sources: [...ask.sources, source] });
           entry.asks = entry.asks.filter(ask => !widens(ask) && !cleared);
-        } else if (widened) emit(row, 'scope-widening', { requestedAt: row.at, blocked: `files outside plannedFiles: ${(after ?? []).filter((path: string) => !(before ?? []).includes(path)).join(', ')}`, stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: reason, trigger: 'operator-widening', sources: [source] });
+        } else if (widened && !replanned) emit(row, 'scope-widening', { requestedAt: row.at, blocked: `files outside plannedFiles: ${(after ?? []).filter((path: string) => !(before ?? []).includes(path)).join(', ')}`, stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: reason, trigger: 'operator-widening', sources: [source] });
         break;
       }
       case 'unblock': {
