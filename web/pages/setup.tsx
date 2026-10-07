@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { checklistGreen, goalLimits, goalSubmission, requestedView, setupChecklist, type SetupItem } from '../../src/model/setup-checklist';
+import { findOnboardingWork, onboardingWait, type OnboardingWait } from '../../src/model/onboarding-work';
 import { PageHeader, PageSection } from '../components/page-layout';
 import type { Dashboard } from './dashboard';
 
@@ -32,13 +33,27 @@ function ItemAction({ item, onConnect }: { item: SetupItem; onConnect: () => voi
   return <span className="muted" data-setup-action={item.id}>{action.label}</span>;
 }
 
-export function SetupChecklist({ items, onConnect }: { items: SetupItem[]; onConnect: () => void }) {
+/**
+ * The onboarding change as the current setup step (GY-1478): the pull request that adds Graphyard's
+ * delivery workflows, filed as a work item the coordinator reviews and merges by itself. It shows
+ * what it waits for and how long, with its link, until it merges.
+ */
+function OnboardingStep({ wait }: { wait: OnboardingWait }) {
+  return <li data-setup-item="onboarding" data-done={wait.merged ? 'yes' : 'no'} data-waiting-for={wait.waitingFor.join(' ')} aria-current={wait.merged ? undefined : 'step'}>
+    <strong>{wait.merged ? '✓ ' : '○ '}Onboarding change</strong> <span className={wait.merged ? 'green' : 'amber'}>{wait.merged ? 'Done' : wait.closed ? 'Needs you' : 'In progress'}</span>
+    <p>{wait.line}</p>
+    {wait.url && <a className="connect-button" data-setup-action="onboarding" href={wait.url} target="_blank" rel="noreferrer">Open the change</a>}
+  </li>;
+}
+
+export function SetupChecklist({ items, onConnect, onboarding }: { items: SetupItem[]; onConnect: () => void; onboarding?: OnboardingWait | null }) {
   return <ol className="setup-checklist" aria-label="First-run checklist">
     {items.map(item => <li key={item.id} data-setup-item={item.id} data-done={item.done ? 'yes' : 'no'}>
       <strong>{item.done ? '✓ ' : '○ '}{item.title}</strong> <span className={item.done ? 'green' : 'amber'}>{item.done ? 'Done' : item.human ? 'Needs you' : 'In progress'}</span>
       <p>{item.line}</p>
       <ItemAction item={item} onConnect={onConnect}/>
     </li>)}
+    {onboarding && <OnboardingStep wait={onboarding}/>}
   </ol>;
 }
 
@@ -52,14 +67,22 @@ export function GoalForm({ onSubmit, busy, error, submitted }: { onSubmit: (text
   </form>;
 }
 
-/** The page body for a status answer, without the dashboard's state: what the tests render. */
-export function SetupView({ status, onConnect, onSubmitGoal, busy, error, submitted }: { status: any; onConnect: () => void; onSubmitGoal: (text: string) => void; busy?: boolean; error?: string; submitted?: string | null }) {
+/**
+ * The page body for a status answer and the work items (WORK, read at NOW), without the dashboard's
+ * state: what the tests render. The onboarding change is a step of its own while it is open, so the
+ * goal box waits for it as `graphyard up` does. WORKUNREAD: the work items are not read yet (or the
+ * read failed), so whether the change merged is unknown and the goal box stays closed.
+ */
+export function SetupView({ status, work, workUnread, now, onConnect, onSubmitGoal, busy, error, submitted }: { status: any; work?: readonly any[] | null; workUnread?: boolean; now?: number; onConnect: () => void; onSubmitGoal: (text: string) => void; busy?: boolean; error?: string; submitted?: string | null }) {
   const items = setupChecklist(status);
-  const green = checklistGreen(items);
-  const left = items.filter(item => !item.done).length;
+  const item = findOnboardingWork(work);
+  const onboarding = item ? onboardingWait(item, now ?? Date.now(), status?.githubRepository?.fullName ?? status?.githubRepository ?? null) : null;
+  const open = onboarding && !onboarding.merged ? 1 : 0;
+  const green = checklistGreen(items) && !open && !workUnread;
+  const total = items.length + (onboarding ? 1 : 0), left = items.filter(entry => !entry.done).length + open;
   return <>
-    <PageHeader title="Set up Graphyard">{green ? 'Everything is ready.' : `${left} of ${items.length} steps left. This page updates by itself as each one finishes.`}</PageHeader>
-    <PageSection title="Checklist" label="Setup checklist"><SetupChecklist items={items} onConnect={onConnect}/></PageSection>
+    <PageHeader title="Set up Graphyard">{green ? 'Everything is ready.' : !left ? 'Checking whether the onboarding change has merged. This page updates by itself.' : `${left} of ${total} steps left. This page updates by itself as each one finishes.`}</PageHeader>
+    <PageSection title="Checklist" label="Setup checklist"><SetupChecklist items={items} onConnect={onConnect} onboarding={onboarding}/></PageSection>
     {green && <PageSection title="Your first goal" label="First goal"><GoalForm onSubmit={onSubmitGoal} busy={busy} error={error} submitted={submitted}/></PageSection>}
   </>;
 }
@@ -74,11 +97,21 @@ export default function SetupPage({ status, api, setView }: Pick<Dashboard, 'sta
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [submitted, setSubmitted] = useState<string | null>(null);
+  // The work items, read while this page is open, so the onboarding change shows as the current step (GY-1478).
+  // Until a read answers, whether the change merged is unknown, so the goal box stays closed.
+  const [work, setWork] = useState<any[] | null>(null);
+  useEffect(() => {
+    let live = true;
+    const read = () => api('work-snapshot').then(snapshot => { if (live) setWork(Array.isArray(snapshot?.work) ? snapshot.work : null); }, () => { if (live) setWork(null); });
+    void read();
+    const timer = setInterval(read, 15_000);
+    return () => { live = false; clearInterval(timer); };
+  }, [api]);
   const submit = async (text: string) => {
     setBusy(true); setError('');
     try { setSubmitted(await submitGoal(api, text)); }
     catch (failure) { setError((failure as Error).message); }
     finally { setBusy(false); }
   };
-  return <SetupView status={status} onConnect={() => { location.hash = 'connect'; setView('agents'); }} onSubmitGoal={text => void submit(text)} busy={busy} error={error} submitted={submitted}/>;
+  return <SetupView status={status} work={work} workUnread={work === null} onConnect={() => { location.hash = 'connect'; setView('agents'); }} onSubmitGoal={text => void submit(text)} busy={busy} error={error} submitted={submitted}/>;
 }

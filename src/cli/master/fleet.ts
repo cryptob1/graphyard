@@ -7,7 +7,7 @@ import { readDispatchCursor } from '../../auto-dispatch.js';
 import { applyProtection, protectionPlan, readProtection, readWorkflows } from '../../protection.js';
 import { cleanupTipRefs } from '../../tip-cleanup.js';
 import { harnessDrift, writeHarnessPermissions } from '../../harness.js';
-import { browserFlows, runBrowserFlow, type BrowserFlow } from '../../master-browser.js';
+import { browserFlows, listConfirmAccessFixtures, runBrowserFlow, type BrowserFlow } from '../../master-browser.js';
 import { reviewerCommand } from '../master-reviewer.js';
 import { registryCommand } from '../master-registry.js';
 import { executorsCommand } from '../master-executors.js';
@@ -86,8 +86,10 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
   }
   if (id === 'browser') {
     const { values, positionals } = parseArgs({ args, options: { 'dry-run': { type: 'boolean' } }, allowPositionals: true });
+    // The Confirm-access captures earlier flows recorded, for fixtures (GY-1482); nothing is opened.
+    if (positionals[0] === 'fixtures' && positionals.length === 1 && !values['dry-run']) return print(await listConfirmAccessFixtures(root));
     const flow = positionals[0] as BrowserFlow | undefined;
-    if (!flow || !browserFlows.includes(flow)) throw new Error(`Use master browser ${browserFlows.join('|')} [--dry-run]`);
+    if (!flow || !browserFlows.includes(flow)) throw new Error(`Use master browser ${browserFlows.join('|')} [--dry-run], or master browser fixtures`);
     const snapshot = await masterApi('work-snapshot');
     // Installation state comes from the control plane's App credential, not the operator's gh token (GY-964).
     const result = await runBrowserFlow(root, master, flow, { work: snapshot.work, coordinator: coordinator.actor.id, dryRun: !!values['dry-run'], installation: () => masterApi('github/installation') });
