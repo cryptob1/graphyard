@@ -14,15 +14,36 @@ export async function runManifestFlow(root: string, repository: string, origin: 
   const wait = options.wait ?? ((ms: number) => new Promise(accept => setTimeout(accept, ms)));
   const setup = await startGithubSetup(root, repository, origin, options.port ?? 4311, options.dependencies ?? {}, options.reviewer);
   announce(`Open ${setup.url} in a browser on this machine and confirm the ${options.reviewer ? `reviewer App "${options.reviewer}"` : 'Graphyard App'}, then install it on ${repository}. Over SSH, forward port ${options.port ?? 4311} first. Credentials return to ${setup.file}; they are never printed.`);
-  const deadline = Date.now() + (options.timeoutMs ?? 900_000);
+  const timeoutMs = options.timeoutMs ?? APP_STEP_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
   try {
     for (;;) {
       const facts = await readAppFile(setup.file);
       if (facts) return facts;
-      if (Date.now() >= deadline) throw new Error('The GitHub App confirmation did not complete in time; rerun --apply to resume from the saved credentials');
+      if (Date.now() >= deadline) throw new AppStepPending(setup.file, await savedRegistration(setup.file), timeoutMs, options.reviewer);
       await wait(options.poll ?? 2_000);
     }
   } finally { await new Promise<void>(accept => setup.http.close(() => accept())); }
+}
+
+/** How long `install --apply` serves the App page before it stops and prints what it completed. */
+export const APP_STEP_TIMEOUT_MS = 900_000;
+
+/** Whether GitHub returned a registration to the file (created, not yet installed): only then is anything saved to resume from. */
+async function savedRegistration(file: string) {
+  try { return Number.isSafeInteger(JSON.parse(await readFile(file, 'utf8'))?.appId); } catch { return false; }
+}
+
+/**
+ * The App step timed out with nobody confirming it (GY-1413). Everything the install did before it
+ * is kept, so this is a pause, not a failure: the installer reports what it completed and how to
+ * resume. `saved` is true only when GitHub actually returned a registration to `file` — the message
+ * never claims credentials that were never written.
+ */
+export class AppStepPending extends Error {
+  constructor(readonly file: string, readonly saved: boolean, readonly timeoutMs: number, readonly reviewer?: string) {
+    super(`The ${reviewer ? `reviewer App "${reviewer}"` : 'GitHub App'} was not confirmed within ${Math.round(timeoutMs / 1000)} s. Rerun graphyard install --apply once the human confirms it; everything before the App step is kept.${saved ? ` GitHub returned the App registration to ${file}; the rerun resumes from it and only the installation on the repository remains.` : ' Nothing was confirmed, so no App credentials were saved.'}`);
+  }
 }
 
 export async function readAppFile(file: string): Promise<(AppFacts & { slug: string; botUserId?: number }) | null> {
