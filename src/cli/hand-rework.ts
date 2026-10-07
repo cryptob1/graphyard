@@ -1,5 +1,5 @@
 import type { Work } from '../model/work.js';
-import { cappedReview, neededDecision, withheldDecision, type ExhaustedProof, type ReviewCapConfig } from '../daemon/decisions.js';
+import { cappedReview, neededDecision, workerStopped, type ExhaustedProof, type ReviewCapConfig } from '../daemon/decisions.js';
 import type { MechanicalFixRequest } from '../mechanical-findings.js';
 import { unactedProducerAttempts } from '../auto-dispatch.js';
 import { mechanicalHoldPattern } from '../model/refusal-catalogue.js';
@@ -59,8 +59,10 @@ export function loopRework(work: Work, action: string, input: unknown, config: R
   if (!systemDriven(work) || !loop.requestsDecisions) return null;
   const needed = neededDecision(work, config, loop.baseFailed ?? undefined, loop.exhausted ?? [], loop.mechanical ?? []);
   if (needed?.action === 'rework') {
-    // Without the loop's base-failure judgement a failed check is not known to be the worker's.
-    if (loop.precedent || (loop.baseFailed == null && needed.binding.includes(':ci:')) || withheldDecision(work, config, loop.now)) return null;
+    // Without the loop's base-failure judgement a failed check is not known to be the worker's. The
+    // loop withholds any rework it needs — on whatever context grounds it — while the stopped worker
+    // is unverified, so that is judged on the round already found, never re-derived without it.
+    if (loop.precedent || (loop.baseFailed == null && needed.binding.includes(':ci:')) || workerStopped(work, loop.now).unverified) return null;
     return refused(work, `the loop's decisions step requests this rework itself on its recorded grounds (${needed.binding}): ${needed.reason.slice(0, 600)} `
       + 'Its risk lane or the approver it launches applies the round, so a hand rework of it is refused. A hand rework stays open to answer a refusal (--precedent ID).');
   }

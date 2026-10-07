@@ -185,6 +185,28 @@ test('unit:hand-rework-loop-context — the guard judges a hand rework on the lo
   assert.equal(handRework(capped, { capEscalated: null }), null);
 });
 
+test('unit:hand-rework-withheld-on-context-grounds — a rework the loop needs only on its own context (a spent producer request whose session acted, a planned mechanical round) is withheld by the loop while the stopped worker is unverified, so the hand rework stays the master\'s then; with no fence standing it is refused as the loop\'s round', async () => {
+  const { instances } = await handFixture();
+  const base = instances.find(instance => instance.work === 'GY-501')!.document;
+  const head = base.candidate!.sha, now = Date.parse('2026-10-02T06:00:00Z');
+  const work: Work = { ...base, lease: null, reworkRequested: false, containmentQuarantine: null };
+  // A lapsed fence this loop never verified: the worker is not known to be stopped.
+  const fenced: Work = { ...work, containmentQuarantine: { owner: 'graphyard-codex-1', epoch: base.epoch, at: '2026-10-01T00:00:00Z', settlementHash: 'h', leaseExpiresAt: '2026-10-01T01:00:00Z' } };
+  const exhausted: ExhaustedProof[] = [{ requestId: 'spent-acted', work: base.key, sha: head, group: 'unit', proofs: [], reason: 'the loop stopped attempting the request',
+    attempts: ['attempt 1 on claude-producer: failed — the session exited without recording evidence'] }];
+  const loop = (overrides: Partial<HandReworkLoop>): HandReworkLoop => ({ now, requestsDecisions: true, precedent: null, baseFailed: new Set(), exhausted: [], mechanical: [], capEscalated: false, ...overrides });
+  const refusal = loopRework(work, 'rework', { previousWorkerStopped: true }, loopConfig, loop({ exhausted }));
+  assert.match(refusal ?? '', /proof-exhausted/, 'with no fence the loop requests the spent-producer round itself');
+  assert.equal(loopRework(fenced, 'rework', { previousWorkerStopped: true }, loopConfig, loop({ exhausted })), null, 'the loop withholds it on an unverified worker, so the master may request it');
+
+  const reviewId = 4242;
+  const approved: Work = { ...work, observation: { ...base.observation!, merged: false, candidate: { ...base.observation!.candidate, sha: head }, reviews: [{ ...(base.observation!.reviews[0] ?? {}), id: reviewId, sha: head, state: 'APPROVED' } as Observation['reviews'][number]] } };
+  const mechanical = [{ key: base.key, pr: base.candidate!.pr, head, reviewId, epoch: base.epoch, at: '2026-10-02T05:00:00Z', mechanical: [{ path: 'src/a.ts', line: 1, category: 'typo' }], substantive: [], paths: ['src/a.ts'] }] as unknown as HandReworkLoop['mechanical'];
+  const mechanicalRefusal = loopRework(approved, 'rework', { previousWorkerStopped: true }, loopConfig, loop({ mechanical }));
+  assert.match(mechanicalRefusal ?? '', /:mechanical:4242/, 'with no fence the loop requests the mechanical round itself');
+  assert.equal(loopRework({ ...approved, containmentQuarantine: fenced.containmentQuarantine }, 'rework', { previousWorkerStopped: true }, loopConfig, loop({ mechanical })), null, 'withheld on an unverified worker, so open by hand');
+});
+
 // Driven through the real decide route on a disposable Postgres: the risk lane applies the loop's
 // grounded request, and a request recorded before the report's window opened is still read.
 const repository = 'owner/rework-rounds';
