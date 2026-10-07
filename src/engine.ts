@@ -2589,8 +2589,10 @@ export class Engine {
       if (recorded && recorded.files === null && work.submission?.pr === recorded.pr && observation.candidate.pr === recorded.pr && Array.isArray(observation.files))
         work.documentation = { ...work.documentation!, submission: recordDocumentationSubmission(work.documentation!, recorded, observation.files, recorded.statement, new Date(recorded.at)) };
       // Snapshot all provider review identities after the revision. Approvals in this
-      // first observation never count, regardless of clock skew or future reevaluation.
-      if (work.formalReviewResetRequired && reviewProviderOf(work.policy) === 'github' && !work.formalReviewBaseline && observation.reviewIds
+      // first observation never count, regardless of clock skew or future reevaluation. A baseline
+      // names one pull request: when the candidate moves to another (a reland after a revert), the
+      // first observation of the new one is captured again, or no approval there could count (GY-1425).
+      if (work.formalReviewResetRequired && reviewProviderOf(work.policy) === 'github' && work.formalReviewBaseline?.pr !== observation.candidate.pr && observation.reviewIds
         && observation.reviewIds.every(id => Number.isSafeInteger(id) && id > 0)
         && observation.reviews.every(r => Number.isSafeInteger(r.id) && observation.reviewIds!.includes(r.id!))) {
         work.formalReviewBaseline = { pr: observation.candidate.pr, policyRevision: work.policyRevision, reviewIds: [...observation.reviewIds] };
