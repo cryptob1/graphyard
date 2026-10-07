@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 import { collectScanInput, detectDeploy, detectStack, discover, proposeDelivery } from '../onboarding.js';
 import { parseRepositoryConfig, repositoryConfigFile } from '../model/documentation.js';
 import { requiredPullRequestChecks, type DeliveryPolicy } from '../model/delivery-policy.js';
@@ -16,9 +17,9 @@ import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesA
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
 import { assertOutsideRepository, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord } from './secrets.js';
 import { AppStepPending, readAppFile, readSavedApp, type SavedApp } from './manifest.js';
-import { herdrPluginBinding, herdrRebindRefusal } from '../repository-setup.js';
+import { herdrBoundElsewhere, herdrPluginBinding, herdrRebindRefusal } from '../repository-setup.js';
 import { localTransport, sshTransport, type Transport } from './transport.js';
-import { installIdFor, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PlannedPrincipal, type PreflightItem, type Provider } from './types.js';
+import { installIdFor, providers, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PlannedPrincipal, type PreflightItem, type Provider } from './types.js';
 
 export * from './types.js';
 export { adapterFor, type ProviderAdapter } from './adapters.js';
@@ -72,6 +73,59 @@ export interface ProfileRequest {
  */
 export interface HerdrChoice { herdr?: 'rebind' | 'skip' }
 export type InstallRequest = InstallInputs & HerdrChoice;
+
+/**
+ * The install request the `install` command's flags describe. It lives beside `resumeCommand`,
+ * which must print flags that parse back to the same request (GY-1413).
+ */
+export function installRequestFromArgs(args: string[]) {
+  const { values } = parseArgs({ args, options: {
+    provider: { type: 'string' }, repo: { type: 'string' }, plan: { type: 'boolean' }, apply: { type: 'boolean' },
+    domain: { type: 'string' }, workers: { type: 'string' }, reviewer: { type: 'string' }, image: { type: 'string' },
+    'producer-proof': { type: 'string', multiple: true }, 'base-branch': { type: 'string' }, 'review-policy': { type: 'string' },
+    'required-check': { type: 'string', multiple: true }, 'review-count': { type: 'string' },
+    'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' }, 'ssh-key': { type: 'string' }, 'server-name': { type: 'string' }, workspace: { type: 'string' },
+    'server-type': { type: 'string' }, location: { type: 'string' }, port: { type: 'string' }, logs: { type: 'boolean' },
+    target: { type: 'string' }, local: { type: 'boolean' }, migrate: { type: 'boolean' }, 'max-monthly': { type: 'string' }, 'confirm-price': { type: 'string' },
+    'github-app': { type: 'string' },
+    'create-environments': { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' },
+  }, allowPositionals: false });
+  if (values['herdr-rebind'] && values['no-herdr']) throw new Error('Choose either --herdr-rebind or --no-herdr');
+  if (!values.repo) throw new Error('Use --repo OWNER/NAME');
+  // --target names a self-contained install (GY-717): an existing machine, or a Hetzner server it creates.
+  if (values.target && values.provider) throw new Error('Use either --target host|hetzner (a self-contained host) or --provider (a server-only install)');
+  if (values.target && !['host', 'hetzner'].includes(values.target)) throw new Error('Use --target host (an existing Linux machine) or --target hetzner (a server the installer creates)');
+  const provider = values.target ?? values.provider;
+  if (!provider || !providers.includes(provider as any)) throw new Error(`Use --provider ${providers.join('|')}, or --target host|hetzner`);
+  const money = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`--${flag} takes an amount such as 19.52`); return parsed; };
+  if (values.plan && values.apply) throw new Error('Choose either --plan or --apply');
+  const reviewPolicy = values['review-policy'];
+  if (reviewPolicy && !['github', 'agent'].includes(reviewPolicy)) throw new Error('Use --review-policy github or agent');
+  // A count that silently became NaN would install a control plane with no worker principal
+  // or an unusable port, so a non-numeric value stops the command instead.
+  const count = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`--${flag} takes a whole number`); return parsed; };
+  const request: InstallRequest = { repository: values.repo,
+    ...(values['herdr-rebind'] ? { herdr: 'rebind' as const } : values['no-herdr'] ? { herdr: 'skip' as const } : {}), provider: provider as InstallRequest['provider'],
+    ...(values.target || provider === 'host' ? { selfContained: true } : {}),
+    ...(values.local ? { local: true } : {}), ...(values.migrate ? { migrate: true } : {}),
+    ...(values['max-monthly'] ? { maxMonthly: money('max-monthly', values['max-monthly']) } : {}),
+    ...(values['confirm-price'] ? { confirmPrice: money('confirm-price', values['confirm-price']) } : {}),
+    ...(values['github-app'] ? { githubAppFile: values['github-app'] } : {}),
+    ...(values['base-branch'] ? { baseBranch: values['base-branch'] } : {}),
+    ...(values.domain ? { domain: values.domain } : {}), ...(values.workers ? { workers: count('workers', values.workers) } : {}),
+    ...(values.port ? { port: count('port', values.port) } : {}),
+    ...(values.reviewer ? { reviewer: values.reviewer } : {}), ...(values.image ? { image: values.image } : {}),
+    ...(values['producer-proof']?.length ? { producerProofs: values['producer-proof'] } : {}),
+    ...(reviewPolicy ? { reviewPolicy: reviewPolicy as 'github' | 'agent' } : {}),
+    ...(values['required-check']?.length ? { requiredChecks: values['required-check'] } : {}),
+    ...(values['review-count'] ? { reviewCount: count('review-count', values['review-count']) } : {}),
+    ...(values['ssh-host'] ? { sshHost: values['ssh-host'] } : {}), ...(values['ssh-user'] ? { sshUser: values['ssh-user'] } : {}),
+    ...(values['ssh-key'] ? { sshKey: values['ssh-key'] } : {}),
+    ...(values['server-name'] ? { serverName: values['server-name'] } : {}), ...(values.workspace ? { workspace: values.workspace } : {}),
+    ...(values['server-type'] ? { serverType: values['server-type'] } : {}), ...(values.location ? { location: values.location } : {}),
+    ...(values['create-environments'] ? { createEnvironments: true } : {}) };
+  return { values, request };
+}
 
 export interface InstallSession {
   root: string; inputs: Required<Pick<InstallInputs, 'repository' | 'provider' | 'baseBranch'>> & InstallRequest;
@@ -416,7 +470,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   // another server is repointed only with --herdr-rebind (GY-1413).
   const herdr = context.host ? null : await observeHerdr(session);
   const herdrTarget = record?.url ?? null;
-  const herdrRelink = herdr?.binding && session.inputs.herdr !== 'skip' && origin(herdr.binding.url) !== (herdrTarget && origin(herdrTarget)) ? herdr.binding.url : null;
+  const herdrRelink = session.inputs.herdr !== 'skip' && herdrBoundElsewhere(herdr?.binding ?? null, herdrTarget) ? herdr!.binding!.bound : null;
   if (herdrRelink && session.inputs.herdr !== 'rebind') preflight.push({ name: 'Herdr plugin', ok: false, detail: herdrRebindRefusal(herdrRelink, herdrTarget ?? 'this installation'), fix: 'Rerun with --herdr-rebind to repoint the plugin at this installation, or --no-herdr to leave Herdr untouched' });
   const observation = preflight.every(item => item.ok) ? await adapter.observe(context) : { installed: false, compute: false, database: false, app: false, url: null, variables: {}, detail: ['provider preflight is incomplete; the installation was not inspected'] } as AdapterObservation;
 
@@ -535,7 +589,6 @@ function deliverySummary(session: InstallSession): InstallPlan['delivery'] {
     perCandidate: policy.mode === 'per-pr' ? [] : policy.mergeGate.perCandidate.map(entry => entry.check), adapter: policy.deploy.adapter };
 }
 
-const origin = (value: string) => { try { return new URL(value).origin; } catch { return value; } };
 
 /**
  * GitHub's answer for the base branch's protection, read before anything is created (GY-1413).
@@ -568,7 +621,7 @@ function herdrAction(session: InstallSession, herdr: Awaited<ReturnType<typeof o
   if (session.inputs.herdr === 'skip') return { id: 'local.herdr', target: 'local', state: 'satisfied', title: 'Leave Herdr untouched (--no-herdr): the graphyard plugin is neither linked nor reconfigured' };
   if (!herdr?.state.available) return { id: 'local.herdr', target: 'local', state: 'satisfied', title: 'Herdr is not installed on this machine; nothing to link, and workers start from the CLI' };
   if (relink) return { id: 'local.herdr', target: 'local', state: 'update', title: `Relink Herdr's graphyard plugin, now bound to ${relink}, to ${target ?? 'this installation'} (${steps})${session.inputs.herdr === 'rebind' ? '; --herdr-rebind allows it' : '; refused without --herdr-rebind'}` };
-  if (herdr.binding) return { id: 'local.herdr', target: 'local', state: 'satisfied', title: `Herdr's graphyard plugin is already bound to ${herdr.binding.url}; it keeps that server` };
+  if (herdr.binding) return { id: 'local.herdr', target: 'local', state: 'satisfied', title: `Herdr's graphyard plugin is already bound to ${herdr.binding.bound}; it keeps that server` };
   return { id: 'local.herdr', target: 'local', state: 'create', title: `Link and enable Herdr's graphyard plugin for this repository (${steps})` };
 }
 
@@ -785,23 +838,39 @@ export class InstallPaused extends Error {
   constructor(message: string, readonly summary: PausedInstall) { super(message); }
 }
 
-/** The exact command that resumes this install: the same inputs, rerun with --apply. */
-export function resumeCommand(session: Pick<InstallSession, 'inputs' | 'context'>) {
+/** A shell word: plain when it needs no quoting, otherwise single-quoted. */
+const shellWord = (value: string) => /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * The exact command that resumes this install: every input it was given, rerun with --apply, so the
+ * rerun targets the same server, SSH identity and spend consent (GY-1413). `installRequestFromArgs`
+ * parses it back to the same request; the record below makes a new input a compile error until it is
+ * serialized here.
+ */
+export function resumeCommand(session: Pick<InstallSession, 'inputs'>) {
   const { inputs } = session;
-  const flag = (name: string, value: string | number | undefined | null) => value === undefined || value === null || value === '' ? [] : [`--${name}`, String(value)];
-  return ['graphyard', 'install',
-    ...(session.context.host ? ['--target', inputs.provider] : ['--provider', inputs.provider]),
-    '--repo', inputs.repository,
-    ...(inputs.baseBranch !== 'main' ? flag('base-branch', inputs.baseBranch) : []),
-    ...flag('domain', inputs.domain), ...flag('workers', inputs.workers), ...flag('port', inputs.port), ...flag('reviewer', inputs.reviewer),
-    ...(inputs.producerProofs ?? []).flatMap(proof => flag('producer-proof', proof)),
-    ...flag('review-policy', inputs.reviewPolicy), ...flag('review-count', inputs.reviewCount),
-    ...(inputs.requiredChecks ?? []).flatMap(check => flag('required-check', check)),
-    ...flag('ssh-host', inputs.sshHost), ...flag('workspace', inputs.workspace), ...flag('image', inputs.image),
-    ...flag('github-app', inputs.githubAppFile),
-    ...(inputs.local ? ['--local'] : []),
-    ...(inputs.herdr === 'rebind' ? ['--herdr-rebind'] : inputs.herdr === 'skip' ? ['--no-herdr'] : []),
-    '--apply'].join(' ');
+  const value = (name: string, given: string | number | undefined | null) => given === undefined || given === null || given === '' ? [] : [`--${name}`, shellWord(String(given))];
+  const values = (name: string, given: string[] | undefined) => (given ?? []).flatMap(item => value(name, item));
+  const flag = (name: string, given: boolean | undefined) => given ? [`--${name}`] : [];
+  const flags: Record<keyof InstallRequest, string[]> = {
+    provider: inputs.selfContained || inputs.provider === 'host' ? ['--target', inputs.provider] : ['--provider', inputs.provider],
+    selfContained: [],
+    repository: value('repo', inputs.repository),
+    baseBranch: inputs.baseBranch !== 'main' ? value('base-branch', inputs.baseBranch) : [],
+    domain: value('domain', inputs.domain), workers: value('workers', inputs.workers), port: value('port', inputs.port), reviewer: value('reviewer', inputs.reviewer),
+    producerProofs: values('producer-proof', inputs.producerProofs),
+    reviewPolicy: value('review-policy', inputs.reviewPolicy), reviewCount: value('review-count', inputs.reviewCount),
+    requiredChecks: values('required-check', inputs.requiredChecks),
+    sshHost: value('ssh-host', inputs.sshHost), sshUser: value('ssh-user', inputs.sshUser), sshKey: value('ssh-key', inputs.sshKey),
+    workspace: value('workspace', inputs.workspace), image: value('image', inputs.image),
+    serverName: value('server-name', inputs.serverName), serverType: value('server-type', inputs.serverType), location: value('location', inputs.location),
+    local: flag('local', inputs.local), migrate: flag('migrate', inputs.migrate),
+    maxMonthly: value('max-monthly', inputs.maxMonthly), confirmPrice: value('confirm-price', inputs.confirmPrice),
+    githubAppFile: value('github-app', inputs.githubAppFile),
+    createEnvironments: flag('create-environments', inputs.createEnvironments),
+    herdr: inputs.herdr === 'rebind' ? ['--herdr-rebind'] : inputs.herdr === 'skip' ? ['--no-herdr'] : [],
+  };
+  return ['graphyard', 'install', ...Object.values(flags).flat(), '--apply'].join(' ');
 }
 
 async function pausedSummary(session: InstallSession, plan: InstallPlan, url: string, health: boolean, profiles: ProfileRegistration | null, pending: AppStepPending): Promise<PausedInstall> {
@@ -814,7 +883,7 @@ async function pausedSummary(session: InstallSession, plan: InstallPlan, url: st
   return {
     complete: false, repository: session.inputs.repository, provider: context.provider, installId: session.installId, installDirectory: session.directory,
     url, health,
-    completed: [...before, ...(profiles ? ['local.profiles', 'local.herdr'] : []), ...(controlPlaneApp ? [] : ['github.app'])],
+    completed: [...before, ...(profiles?.master.configured ? ['local.profiles'] : []), ...(profiles?.repository.connected ? ['local.herdr'] : []), ...(controlPlaneApp ? [] : ['github.app'])],
     github: { app: 'pending', step: controlPlaneApp ? 'github.app' : 'github.reviewer', credentials: pending.saved ? `GitHub returned the ${controlPlaneApp ? 'App' : `reviewer App "${pending.reviewer}"`} registration to ${pending.file}; it is not installed on ${session.inputs.repository} yet` : `none saved: nobody confirmed the ${controlPlaneApp ? 'App' : `reviewer App "${pending.reviewer}"`}, so ${pending.file} was never written` },
     credentials: { principals: `saved under ${session.directory} (mode 0600)`, githubApp: controlPlaneApp ? (pending.saved ? `registration saved in ${savedFile}, installation pending` : 'not saved') : `saved in ${savedFile}` },
     stack: { running: true, detail: `the control plane keeps running at ${url}${stop ? ` (Compose project ${context.workdir})` : ''}`, stop },

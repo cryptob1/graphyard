@@ -30,7 +30,7 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 ```
 
-Options: `--workers N`, `--producer-proof NAME`, `--required-check NAME` ([`init --scan`](operations-reference.md#setup-proposals-and-drift)); `delivery`, `release.*` plan the [candidate pipeline](delivery.md#managed-repositories). **Verify** `secretsRedacted` and every `preflight[].ok` are `true` (else run its `fix`; a `fix` starting `HUMAN:` is the human's); human approves plan and `drift`. `Branch protection` fails on GitHub's 403 *Upgrade to GitHub Pro*: a private repository on a free plan can never require `Graphyard / merge`, so the human makes it public or upgrades. `local.herdr` shows what happens to Herdr's `graphyard` plugin; one bound to another server fails `Herdr plugin` until `--herdr-rebind` (repoint it) or `--no-herdr` (leave it).
+Options: `--workers N`, `--producer-proof NAME`, `--required-check NAME` ([`init --scan`](operations-reference.md#setup-proposals-and-drift)); `delivery`, `release.*` plan the [candidate pipeline](delivery.md#managed-repositories). **Verify** `secretsRedacted` and every `preflight[].ok` are `true` (else run its `fix`; a `fix` starting `HUMAN:` is the human's); human approves plan and `drift`. `Branch protection` fails on GitHub's 403 *Upgrade to GitHub Pro*: a private repository on a free plan can never require `Graphyard / merge`, so the human makes it public or upgrades. `local.herdr` shows what happens to Herdr's `graphyard` plugin; one bound to another server, or with an unreadable `config.json`, fails `Herdr plugin` until `--herdr-rebind` (repoint it) or `--no-herdr` (leave it).
 
 ## Step 2: apply
 
@@ -42,7 +42,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; [protects](gi
 
 ## Step 3: App confirmation
 
-`--apply` serves and prints `http://127.0.0.1:4311`, opening no browser; the human installs the App there; **Verify** *App registered and installation verified*. The page is served for 900 s. The master configuration and profiles are written before it, so `master environments` and `master harness` already work. Unconfirmed, it exits 1 and prints a JSON summary: `completed`, `github.app` `pending` (credentials saved only when GitHub returned them), `stack.stop` and `resume`, the exact rerun that keeps everything before the App step.
+`--apply` serves and prints `http://127.0.0.1:4311`, opening no browser; the human installs the App there; **Verify** *App registered and installation verified*. The page is served for 900 s. The master configuration and profiles are written before it, so `master environments` and `master harness` already work. Unconfirmed, it exits 1 and prints a JSON summary: `completed`, `github.app` `pending` (credentials saved only when GitHub returned them), `stack.stop` and `resume`, the exact rerun with every flag given, which keeps everything before the App step.
 
 ## Step 4: summary
 

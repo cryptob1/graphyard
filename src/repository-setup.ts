@@ -144,22 +144,34 @@ async function atomicWrite(file: string, content: string, mode: number) {
   const temporary = `${file}.${randomUUID()}.tmp`;
   await writeFile(temporary, content, { mode, flag: 'wx' }); await rename(temporary, file); await chmod(file, mode);
 }
+const urlOrigin = (value: string) => { try { return new URL(value).origin; } catch { return value; } };
+
 /**
  * The server Herdr's `graphyard` plugin is bound to on this machine, read from the config.json its
  * config directory holds; null when the plugin has no configuration (never linked) or Herdr cannot
  * say where it keeps one. A host already running a Graphyard install has one, and linking the
- * plugin for another server would silently repoint it (GY-1413).
+ * plugin for another server would silently repoint it (GY-1413). A config.json that exists but
+ * cannot be read, is not JSON or names no server is a binding nobody can inspect: `url` is null
+ * and `bound` says why, so callers refuse to overwrite it without --herdr-rebind rather than
+ * mistaking it for no binding at all.
  */
-export async function herdrPluginBinding(runHerdr: (args: string[]) => string | Promise<string>): Promise<{ configDirectory: string; url: string } | null> {
+export async function herdrPluginBinding(runHerdr: (args: string[]) => string | Promise<string>): Promise<{ configDirectory: string; url: string | null; bound: string } | null> {
   let configDirectory: string;
   try { configDirectory = String(await runHerdr(['plugin', 'config-dir', 'graphyard'])).trim(); } catch { return null; }
   if (!configDirectory || !isAbsolute(configDirectory) || /[\r\n\0]/.test(configDirectory)) return null;
+  const file = resolve(configDirectory, 'config.json');
+  const uninspectable = (reason: string) => ({ configDirectory, url: null, bound: `a configuration that cannot be inspected (${file}: ${reason})` });
+  let text: string;
+  try { text = await readFile(file, 'utf8'); } catch (error: any) { if (error.code === 'ENOENT') return null; return uninspectable(error.code ?? error.message); }
   let config: any;
-  try { config = JSON.parse(await readFile(resolve(configDirectory, 'config.json'), 'utf8')); } catch { return null; }
-  return typeof config?.url === 'string' && config.url ? { configDirectory, url: config.url } : null;
+  try { config = JSON.parse(text); } catch { return uninspectable('not valid JSON'); }
+  return typeof config?.url === 'string' && config.url ? { configDirectory, url: config.url, bound: config.url } : uninspectable('it names no server url');
 }
 
-const urlOrigin = (value: string) => { try { return new URL(value).origin; } catch { return value; } };
+/** True when a plugin binding points anywhere but `target`, an uninspectable one included. */
+export function herdrBoundElsewhere(binding: { url: string | null } | null, target: string | null) {
+  return !!binding && (binding.url === null || target === null || urlOrigin(binding.url) !== urlOrigin(target));
+}
 
 /** The refusal for a plugin bound to another server, shared by `init --herdr` and `install --apply`. */
 export function herdrRebindRefusal(bound: string, target: string, flag = '--herdr-rebind') {
@@ -190,7 +202,7 @@ export async function setupRepository(root: string, input: Connection, options: 
   if (options.herdr) runHerdr(['plugin', '--help']);
   // Refused before any write: a plugin another server owns is repointed only on purpose.
   const herdrBound = options.herdr ? await herdrPluginBinding(runHerdr) : null;
-  const herdrRelink = herdrBound && urlOrigin(herdrBound.url) !== connection.url ? herdrBound.url : null;
+  const herdrRelink = herdrBoundElsewhere(herdrBound, connection.url) ? herdrBound!.bound : null;
   if (herdrRelink && !options.herdrRebind) throw new Error(herdrRebindRefusal(herdrRelink, connection.url));
   const directory = await localDirectory(connectionRoots(root)[0]);
   await atomicWrite(resolve(directory, 'connection.json'), JSON.stringify(connection, null, 2), 0o600);
@@ -217,7 +229,7 @@ export async function setupRepository(root: string, input: Connection, options: 
   }
   return { discovery, server: connection.url, cliPath: connection.cliPath, principal: connection.principal ?? null, connected: !!connection.principal,
     instructions: 'AGENTS.md', pluginConfigured,
-    herdr: options.herdr ? { previous: herdrBound?.url ?? null, bound: pluginConfigured ? connection.url : null, relinked: !!herdrRelink && pluginConfigured } : null,
+    herdr: options.herdr ? { previous: herdrBound?.bound ?? null, bound: pluginConfigured ? connection.url : null, relinked: !!herdrRelink && pluginConfigured } : null,
     executors, next: connection.principal ? 'Use Herdr or the CLI to claim work, then handoff GY-N for the assigned workspace and supervisor command' : 'Supply an individual worker credential and rerun init to verify the connection' };
 }
 /** Whether `master init` configured this checkout: the coordinator credential an executor needs lives there. */

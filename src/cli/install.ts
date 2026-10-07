@@ -6,7 +6,7 @@ import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
 import { appPageBusy, appPagePortFree, startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, readDocumentationConfig, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { protectionRun } from '../protection.js';
-import { applyInstall, buildPlan, InstallPaused, prepareInstall, providers, type InstallRequest } from '../install/index.js';
+import { applyInstall, buildPlan, InstallPaused, installRequestFromArgs, prepareInstall } from '../install/index.js';
 import { runManifestFlow } from '../install/manifest.js';
 import { delegationLimitAssignments } from '../install/limits.js';
 import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../install/ci-proofs.js';
@@ -83,51 +83,7 @@ export const installCommands = defineCommands([
     // The installer creates the connection file; it must never read a stale one.
     readsConnection: () => false,
     async run(context) {
-      const { values } = parseArgs({ args: context.rest, options: {
-        provider: { type: 'string' }, repo: { type: 'string' }, plan: { type: 'boolean' }, apply: { type: 'boolean' },
-        domain: { type: 'string' }, workers: { type: 'string' }, reviewer: { type: 'string' }, image: { type: 'string' },
-        'producer-proof': { type: 'string', multiple: true }, 'base-branch': { type: 'string' }, 'review-policy': { type: 'string' },
-        'required-check': { type: 'string', multiple: true }, 'review-count': { type: 'string' },
-        'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' }, 'ssh-key': { type: 'string' }, 'server-name': { type: 'string' }, workspace: { type: 'string' },
-        'server-type': { type: 'string' }, location: { type: 'string' }, port: { type: 'string' }, logs: { type: 'boolean' },
-        target: { type: 'string' }, local: { type: 'boolean' }, migrate: { type: 'boolean' }, 'max-monthly': { type: 'string' }, 'confirm-price': { type: 'string' },
-        'github-app': { type: 'string' },
-        'create-environments': { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' },
-      }, allowPositionals: false });
-      if (values['herdr-rebind'] && values['no-herdr']) throw new Error('Choose either --herdr-rebind or --no-herdr');
-      if (!values.repo) throw new Error('Use --repo OWNER/NAME');
-      // --target names a self-contained install (GY-717): an existing machine, or a Hetzner server it creates.
-      if (values.target && values.provider) throw new Error('Use either --target host|hetzner (a self-contained host) or --provider (a server-only install)');
-      if (values.target && !['host', 'hetzner'].includes(values.target)) throw new Error('Use --target host (an existing Linux machine) or --target hetzner (a server the installer creates)');
-      const provider = values.target ?? values.provider;
-      if (!provider || !providers.includes(provider as any)) throw new Error(`Use --provider ${providers.join('|')}, or --target host|hetzner`);
-      const money = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`--${flag} takes an amount such as 19.52`); return parsed; };
-      if (values.plan && values.apply) throw new Error('Choose either --plan or --apply');
-      const reviewPolicy = values['review-policy'];
-      if (reviewPolicy && !['github', 'agent'].includes(reviewPolicy)) throw new Error('Use --review-policy github or agent');
-      // A count that silently became NaN would install a control plane with no worker principal
-      // or an unusable port, so a non-numeric value stops the command instead.
-      const count = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`--${flag} takes a whole number`); return parsed; };
-      const inputs: InstallRequest = { repository: values.repo,
-        ...(values['herdr-rebind'] ? { herdr: 'rebind' as const } : values['no-herdr'] ? { herdr: 'skip' as const } : {}), provider: provider as InstallRequest['provider'],
-        ...(values.target || provider === 'host' ? { selfContained: true } : {}),
-        ...(values.local ? { local: true } : {}), ...(values.migrate ? { migrate: true } : {}),
-        ...(values['max-monthly'] ? { maxMonthly: money('max-monthly', values['max-monthly']) } : {}),
-        ...(values['confirm-price'] ? { confirmPrice: money('confirm-price', values['confirm-price']) } : {}),
-        ...(values['github-app'] ? { githubAppFile: values['github-app'] } : {}),
-        ...(values['base-branch'] ? { baseBranch: values['base-branch'] } : {}),
-        ...(values.domain ? { domain: values.domain } : {}), ...(values.workers ? { workers: count('workers', values.workers) } : {}),
-        ...(values.port ? { port: count('port', values.port) } : {}),
-        ...(values.reviewer ? { reviewer: values.reviewer } : {}), ...(values.image ? { image: values.image } : {}),
-        ...(values['producer-proof']?.length ? { producerProofs: values['producer-proof'] } : {}),
-        ...(reviewPolicy ? { reviewPolicy: reviewPolicy as 'github' | 'agent' } : {}),
-        ...(values['required-check']?.length ? { requiredChecks: values['required-check'] } : {}),
-        ...(values['review-count'] ? { reviewCount: count('review-count', values['review-count']) } : {}),
-        ...(values['ssh-host'] ? { sshHost: values['ssh-host'] } : {}), ...(values['ssh-user'] ? { sshUser: values['ssh-user'] } : {}),
-        ...(values['ssh-key'] ? { sshKey: values['ssh-key'] } : {}),
-        ...(values['server-name'] ? { serverName: values['server-name'] } : {}), ...(values.workspace ? { workspace: values.workspace } : {}),
-        ...(values['server-type'] ? { serverType: values['server-type'] } : {}), ...(values.location ? { location: values.location } : {}),
-        ...(values['create-environments'] ? { createEnvironments: true } : {}) };
+      const { values, request: inputs } = installRequestFromArgs(context.rest);
       const session = await prepareInstall(process.cwd(), inputs, {
         cliPath: await context.activeCliPath(), hostId: context.individualHostId(), log: line => console.error(line),
         githubApp: request => runManifestFlow(request.root, request.repository, request.origin, { reviewer: request.reviewer, announce: line => console.error(line), dependencies: { file: request.file } }),
@@ -174,10 +130,12 @@ export const installCommands = defineCommands([
           if (!stored) throw new Error('No stored setup proposal to apply. Run init --scan, review .graphyard/setup-proposal.json, then rerun with --apply');
           // An install that owns this repository supplies the identities and the App (GY-1413);
           // when it cannot yet — its App step is still waiting — this refuses before anything else.
-          const installed = await installedOnboarding(root, stored.proposal.repository);
+          // It owns them only for the server it installed, so the selected server must be that one.
+          const selected = values.url ?? stored.proposal.server ?? null;
+          const installed = await installedOnboarding(root, stored.proposal.repository, selected);
           const differences = repositoryScanDifference(fresh, stored.proposal);
           if (differences.length) throw new Error(`${differences.join('; ')}. Rerun init --scan, review the refreshed proposal, then apply it again. The stored proposal was left unchanged.`);
-          const url = values.url ?? stored.proposal.server;
+          const url = selected ?? installed?.url;
           if (!url) throw new Error('Applying requires the Graphyard server URL; pass --url');
           if (installed) {
             const result = await applyProposal(root, stored.proposal, { url, installed, github: protectionRun });

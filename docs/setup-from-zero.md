@@ -54,7 +54,7 @@ gy init --scan --apply --url http://127.0.0.1:4310
 git add AGENTS.md .gitignore graphyard.json .github/workflows && git commit -m "Adopt Graphyard" && git push
 ```
 
-It reuses `install`'s identities and App (no principals file), refusing while step 4 waits. Commit through a pull request if `main` is protected; never commit `.graphyard/`. **Verify:** readiness `setup-proposal` is `ready`. [Documentation policy](onboarding.md#documentation-policy) and [generated instructions](onboarding.md#what-the-generated-instructions-authorize) explain the files.
+It reuses `install`'s identities and App (no principals file), refusing while step 4 waits or for another `--url`. Commit through a pull request if `main` is protected; never commit `.graphyard/`. **Verify:** readiness `setup-proposal` is `ready`. [Documentation policy](onboarding.md#documentation-policy) and [generated instructions](onboarding.md#what-the-generated-instructions-authorize) explain the files.
 
 ## 7. Branch protection
 

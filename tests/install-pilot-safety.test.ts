@@ -6,7 +6,7 @@ import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { applyInstall, buildPlan, InstallPaused, prepareInstall, type ProfileRequest } from '../src/install/index.js';
+import { applyInstall, buildPlan, InstallPaused, installRequestFromArgs, prepareInstall, resumeCommand, type InstallRequest, type ProfileRequest } from '../src/install/index.js';
 import { AppStepPending, runManifestFlow } from '../src/install/manifest.js';
 import { readInstallRecord } from '../src/install/secrets.js';
 import { appPageBusy, startGithubSetup } from '../src/github-setup.js';
@@ -69,7 +69,7 @@ test('unit:init-reuses-install-identities — init --scan --apply never mints a 
     let refusal = null as Error | null;
     const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, { ...fixture.deps,
       githubApp: async request => {
-        refusal = await installedOnboarding(fixture.root, REPOSITORY, fixture.configHome).then(() => null, error => error);
+        refusal = await installedOnboarding(fixture.root, REPOSITORY, 'https://graphyard.example', fixture.configHome).then(() => null, error => error);
         throw new AppStepPending(request.file, false, 900_000);
       } }, 'apply');
     await assert.rejects(applyInstall(session, await buildPlan(session)), InstallPaused);
@@ -96,10 +96,22 @@ test('unit:init-reuses-install-identities — init --scan --apply never mints a 
     // Order 2: the install finished (its App confirmed). init reuses its App and writes no principals.
     const finished = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, fixture.deps, 'apply');
     await applyInstall(finished, await buildPlan(finished));
-    const installed = await installedOnboarding(fixture.root, REPOSITORY, fixture.configHome);
-    assert.deepEqual(installed, { directory: finished.directory, githubApp: { appId: GRAPHYARD_APP_ID, slug: 'graphyard-owner-project' } });
+    const installUrl = (await readInstallRecord(finished.directory))!.url!;
+    const installed = await installedOnboarding(fixture.root, REPOSITORY, installUrl, fixture.configHome);
+    assert.deepEqual(installed, { directory: finished.directory, url: installUrl, githubApp: { appId: GRAPHYARD_APP_ID, slug: 'graphyard-owner-project' } });
+    assert.deepEqual(await installedOnboarding(fixture.root, REPOSITORY, null, fixture.configHome), installed, "no selected server means the install's own");
+    // Another server is not the install's: its identities and App are not reused for it, and nothing is minted either.
+    await assert.rejects(installedOnboarding(fixture.root, REPOSITORY, 'https://other.example', fixture.configHome), (error: Error) => {
+      assert.ok(error.message.startsWith(`graphyard install --apply owns owner/project's identities and App for ${installUrl} (`), error.message); assert.match(error.message, /install\.json\), not https:\/\/other\.example\./);
+      assert.match(error.message, /init mints no principals for another server beside the install's\. Nothing was written/);
+      return true;
+    });
+    const otherServer = await execFile(process.execPath, [launcher, 'init', '--scan', '--apply', '--url', 'https://other.example'], { cwd: fixture.root, env }).then(() => null, error => error);
+    assert.ok(otherServer, 'init --scan --apply against another server exits non-zero');
+    assert.match(String(otherServer.stderr), /not https:\/\/other\.example/);
+    for (const file of ['principals.json', 'repository-setup.json', 'profiles']) assert.equal(await exists(join(fixture.root, '.graphyard', file)), false, `${file} was not written for another server`);
     let appPageOpened = false;
-    const result = await applyProposal(fixture.root, proposal, { url: 'https://graphyard.example', installed: installed!, githubSetup: async () => { appPageOpened = true; return { appId: 1, slug: 'second' }; } });
+    const result = await applyProposal(fixture.root, proposal, { url: installUrl, installed: installed!, githubSetup: async () => { appPageOpened = true; return { appId: 1, slug: 'second' }; } });
     assert.equal(appPageOpened, false, 'init opened no App page of its own');
     assert.deepEqual(result.githubApp, { appId: GRAPHYARD_APP_ID, slug: 'graphyard-owner-project' }, "the install's App is reused");
     assert.equal(result.principalsFile, null);
@@ -140,7 +152,7 @@ test('unit:install-herdr-plugin-guard — the plan shows a Herdr relink and a pl
     // A host already running a Graphyard install: its plugin is bound to the production server.
     await mkdir(pluginDirectory, { recursive: true });
     await writeFile(join(pluginDirectory, 'config.json'), JSON.stringify({ url: 'https://production.example', token: 'production-worker-token-0123456789abcdef' }), { mode: 0o600 });
-    assert.deepEqual(await herdrPluginBinding(runHerdr), { configDirectory: pluginDirectory, url: 'https://production.example' });
+    assert.deepEqual(await herdrPluginBinding(runHerdr), { configDirectory: pluginDirectory, url: 'https://production.example', bound: 'https://production.example' });
     const plan = await buildPlan(await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, { ...fixture.deps, runHerdr }, 'plan'));
     const relink = plan.actions.find(action => action.id === 'local.herdr')!;
     assert.equal(relink.state, 'update');
@@ -151,6 +163,21 @@ test('unit:install-herdr-plugin-guard — the plan shows a Herdr relink and a pl
     const refused = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, { ...fixture.deps, runHerdr }, 'apply');
     await assert.rejects(applyInstall(refused, await buildPlan(refused)), /Preflight is incomplete; the installer changed nothing[\s\S]*Herdr plugin/);
     assert.equal(JSON.parse(await readFile(join(pluginDirectory, 'config.json'), 'utf8')).url, 'https://production.example', 'the production binding is untouched');
+
+    // A binding nobody can inspect (config.json unreadable as JSON, or naming no server) fails closed:
+    // it is shown as a relink and refused without --herdr-rebind, never mistaken for no binding.
+    const productionConfig = await readFile(join(pluginDirectory, 'config.json'), 'utf8');
+    for (const [content, reason] of [['{not json', /not valid JSON/], [JSON.stringify({ token: 'x' }), /names no server url/]] as const) {
+      await writeFile(join(pluginDirectory, 'config.json'), content, { mode: 0o600 });
+      const binding = (await herdrPluginBinding(runHerdr))!;
+      assert.equal(binding.url, null); assert.match(binding.bound, reason);
+      const opaque = await buildPlan(await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, { ...fixture.deps, runHerdr }, 'plan'));
+      assert.equal(opaque.actions.find(action => action.id === 'local.herdr')!.state, 'update');
+      assert.match(opaque.actions.find(action => action.id === 'local.herdr')!.title, /now bound to a configuration that cannot be inspected .*refused without --herdr-rebind$/);
+      assert.equal(opaque.preflight.find(item => item.name === 'Herdr plugin')!.ok, false);
+      assert.equal(await readFile(join(pluginDirectory, 'config.json'), 'utf8'), content, 'the uninspectable binding is untouched');
+    }
+    await writeFile(join(pluginDirectory, 'config.json'), productionConfig, { mode: 0o600 });
 
     // --no-herdr leaves it alone; --herdr-rebind names the relink and allows it.
     const skipped = await buildPlan(await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose', herdr: 'skip' }, { ...fixture.deps, runHerdr }, 'plan'));
@@ -183,6 +210,13 @@ test('unit:install-herdr-plugin-guard — the plan shows a Herdr relink and a pl
     const result = await setupRepository(root, connection, { herdr: true, herdrRebind: true, fetcher, runHerdr: run, executors: false });
     assert.deepEqual(result.herdr, { previous: 'https://production.example', bound: 'https://new.example', relinked: true });
     assert.equal(JSON.parse(await readFile(join(config, 'config.json'), 'utf8')).url, 'https://new.example');
+    // An uninspectable config.json is refused the same way, before any write.
+    await writeFile(join(config, 'config.json'), '{not json', { mode: 0o600 });
+    calls.length = 0;
+    await assert.rejects(setupRepository(root, { ...connection, url: 'https://third.example' }, { herdr: true, fetcher, runHerdr: run, executors: false }), /bound to a configuration that cannot be inspected \(.*config\.json: not valid JSON\); linking it for https:\/\/third\.example would repoint/);
+    assert.ok(!calls.some(args => args[1] === 'link' || args[1] === 'enable'), 'nothing was linked or enabled over an uninspectable binding');
+    assert.equal(await readFile(join(config, 'config.json'), 'utf8'), '{not json');
+    await writeFile(join(config, 'config.json'), JSON.stringify({ url: 'https://new.example', token: 'x' }), { mode: 0o600 });
     // Rebinding the same server again is no relink.
     assert.deepEqual((await setupRepository(root, connection, { herdr: true, fetcher, runHerdr: run, executors: false })).herdr, { previous: 'https://new.example', bound: 'https://new.example', relinked: false });
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -222,6 +256,7 @@ test('unit:install-app-timeout-resume — an App step nobody confirms prints wha
     assert.equal(summary.stack.stop, `docker compose --project-directory ${session.context.workdir} down`);
     assert.match(summary.stack.detail, /keeps running at http/);
     assert.equal(summary.resume, `graphyard install --provider compose --repo ${REPOSITORY} --reviewer claude-reviewer --apply`);
+    assert.deepEqual(installRequestFromArgs(summary.resume.split(' ').slice(2)).request, { repository: REPOSITORY, provider: 'compose', reviewer: 'claude-reviewer' });
     assert.match(summary.nextSteps.join('\n'), /master environments and graphyard master harness already work/);
     assert.match(paused.message, /Nothing was confirmed, so no App credentials were saved/);
     assert.equal((await readInstallRecord(session.directory))!.github, null, 'the record shows the App step pending');
@@ -279,4 +314,31 @@ test('unit:install-app-timeout-resume — an App step nobody confirms prints wha
     await new Promise<void>(accept => server.close(() => accept()));
     for (const directory of [root, credentials, environments]) await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('unit:install-app-timeout-resume — the resume command carries every install input, so the rerun targets the same server, identity and spend consent', async () => {
+  // Every flag install accepts, with values a shell must quote; the printed command parses back to the same request.
+  const everything: Required<Omit<InstallRequest, 'selfContained' | 'local' | 'migrate'>> = {
+    repository: REPOSITORY, provider: 'hetzner', baseBranch: 'release', domain: 'graphyard.example.com', workers: 3, producerProofs: ['unit', 'browser'],
+    reviewer: 'claude-reviewer', reviewPolicy: 'agent', requiredChecks: ['ci / test', "lint's check"], reviewCount: 2,
+    sshHost: '203.0.113.7', sshUser: 'deploy', sshKey: 'operator key', workspace: 'My Team', image: 'ghcr.io/example/graphyard:1.2',
+    port: 4320, serverName: 'foo', serverType: 'cx32', location: 'fsn1', maxMonthly: 19.52, confirmPrice: 7.05,
+    githubAppFile: '/home/operator/app files/github-app.json', createEnvironments: true, herdr: 'rebind',
+  };
+  const roundTrip = async (request: InstallRequest) => {
+    const command = resumeCommand({ inputs: { baseBranch: 'main', ...request } as any });
+    const { stdout } = await execFile('sh', ['-c', `printf '%s\\0' ${command}`]);
+    const words = stdout.split('\0').slice(0, -1);
+    assert.deepEqual(words.slice(0, 2), ['graphyard', 'install']); assert.equal(words.at(-1), '--apply');
+    return { command, parsed: installRequestFromArgs(words.slice(2)).request };
+  };
+  const server = await roundTrip(everything);
+  assert.deepEqual(server.parsed, everything);
+  for (const flag of ['--ssh-user deploy', "--ssh-key 'operator key'", '--server-name foo', '--server-type cx32', '--location fsn1', '--create-environments', '--max-monthly 19.52', '--confirm-price 7.05', "--workspace 'My Team'", '--herdr-rebind']) assert.ok(server.command.includes(flag), `${flag} in ${server.command}`);
+  // A self-contained host keeps --target, --local and --migrate; --no-herdr survives too.
+  const host: InstallRequest = { repository: REPOSITORY, provider: 'host', selfContained: true, local: true, migrate: true, herdr: 'skip' };
+  const resumedHost = await roundTrip(host);
+  assert.deepEqual(resumedHost.parsed, host); assert.match(resumedHost.command, /--target host .*--local --migrate .*--no-herdr --apply$/);
+  const createdHost: InstallRequest = { repository: REPOSITORY, provider: 'hetzner', selfContained: true, sshKey: 'k', maxMonthly: 0 };
+  assert.deepEqual((await roundTrip(createdHost)).parsed, createdHost);
 });
