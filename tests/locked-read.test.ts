@@ -106,7 +106,7 @@ test('unit:locked-transactions-read-bounded — no transaction client reads ever
   assert.deepEqual([focus.key, dependency.key, overlapping.key, sharing.key].map(standIn), [false, false, false, false], 'the item, its overlaps and its dependency are documents');
   for (const item of unrelated) {
     const projection = board.find(entry => entry.key === item.key)!;
-    assert.ok(standIn(item.key) && !projection.pipeline && projection.plannedFiles.length && projection.stage === item.stage, `${item.key} is read as its compact projection`);
+    assert.ok(standIn(item.key) && (!projection.pipeline || Object.keys(projection.pipeline).join() === 'reworkRounds') && projection.plannedFiles.length && projection.stage === item.stage, `${item.key} is read as its compact projection`);
   }
   await assert.rejects(store.transaction(async (db, now) => save(db, board.find(entry => entry.key === unrelated[0].key)!, 'test', 'test', now)), /compact projection/);
 });

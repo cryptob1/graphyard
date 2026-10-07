@@ -69,7 +69,8 @@ const relevantEvidence = `((entry->>'sha' = r.head AND entry->>'baseSha' IS NOT 
     OR entry->>'id' = ANY(r.carried) OR entry->>'sha' = ANY(r.requested))`;
 
 /**
- * One document as the coordination view reads it: the pipeline timeline dropped, the observation
+ * One document as the coordination view reads it: the pipeline timeline cut to its rework-round
+ * count (the review-round cap reads it, GY-1389; a settled delivery keeps none), the observation
  * without its per-file scope comparison, only the evidence records a coordinator decision can
  * still consult (read with `coordinationRelevance(keep)` joined as `r`), each without its
  * artifacts, scope digests and provenance, and the resolved dispatch requests, queue history and
@@ -83,6 +84,7 @@ const relevantEvidence = `((entry->>'sha' = r.head AND entry->>'baseSha' IS NOT 
  * reader of finished sessions belongs on the full snapshot, or must unsettle what it reads.
  */
 export const coordinationDocument = ({ keep, settled }: { keep: number; settled: boolean }) => `d.document - 'pipeline' - 'evidence' - 'observation' - 'queueHistory' - 'actionQueue' - 'autoDispatch' - 'sessions'
+  ${settled ? '' : `|| CASE WHEN ${object("d.document->'pipeline'")} AND d.document->'pipeline' ? 'reworkRounds' THEN jsonb_build_object('pipeline', jsonb_build_object('reworkRounds', d.document->'pipeline'->'reworkRounds')) ELSE '{}'::jsonb END`}
   || jsonb_build_object('evidence', (SELECT COALESCE(jsonb_agg(entry - 'artifacts' - 'scopeFiles' - 'provenance' ORDER BY position), '[]'::jsonb) FROM jsonb_array_elements(${array("d.document->'evidence'")}) WITH ORDINALITY AS e(entry, position) WHERE ${relevantEvidence}))
   || CASE WHEN d.document ? 'observation' THEN jsonb_build_object('observation', CASE WHEN ${object("d.document->'observation'")} THEN (d.document->'observation') - 'scopeFiles' ELSE d.document->'observation' END) ELSE '{}'::jsonb END
   || CASE WHEN jsonb_typeof(d.document->'queueHistory') = 'array' THEN jsonb_build_object('queueHistory', ${tail("d.document->'queueHistory'", keep)}) ELSE '{}'::jsonb END

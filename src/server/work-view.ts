@@ -15,11 +15,13 @@ import { evidenceBindsCandidate, type Work } from '../model.js';
  *   and evidence reuse read (the touched-path list stays, the overlap scheduler needs it);
  * - resolved dispatch requests, resolved action rows and queue history: the most recent entries
  *   only (the open action rows are what the executors claim from and pass through whole);
- * - the pipeline timeline: dropped whole, like the observation's scope comparison and without a
- *   tally, because the omission is structural rather than a count of entries. It is a report of
- *   what already happened — one entry per attempt, growing for the life of the item — and every
- *   reader of it (master status, the speed summary) derives that report from the full documents.
- *   No gate, dispatch or action decision consults it, so the loop's own poll need not carry it;
+ * - the pipeline timeline: reduced to its rework-round count, without a tally, because the
+ *   omission is structural rather than a count of entries. The rest is a report of what already
+ *   happened — one entry per attempt, growing for the life of the item — and every reader of it
+ *   (master status, the speed summary) derives that report from the full documents. The count is
+ *   the one decision input in it: the review-round cap (GY-1118) and the bot-thread rule read it,
+ *   and a view without it showed the loop every head in its first round (GY-1389); a settled
+ *   delivery, which no cap judges, keeps none;
  *
  * - sessions: the running ones and the last few finished; each kept resolved action row, its last
  *   few attempt records;
@@ -86,9 +88,10 @@ export function coordinationWork(work: Work, omitted: CoordinationOmissions): Wo
   const sessionsKept = settled ? 0 : coordinationSessionLimit;
   const sessions = Array.isArray(work.sessions) ? work.sessions.filter((handle, index, all) => handle?.state === 'running' || index >= all.length - sessionsKept) : undefined;
   if (sessions) omitted.sessions += work.sessions!.length - sessions.length;
-  const { pipeline: _pipeline, ...decisions } = work;
+  const { pipeline, ...decisions } = work;
   return {
     ...decisions, evidence, observation,
+    ...(!settled && pipeline && typeof pipeline === 'object' && 'reworkRounds' in pipeline ? { pipeline: { reworkRounds: pipeline.reworkRounds } as Work['pipeline'] } : {}),
     ...(dispatch ? { autoDispatch: { ...dispatch, history: recentHistory } } : {}),
     ...(queueHistory ? { queueHistory } : {}),
     ...(actions ? { actionQueue: { ...actions, history: actionHistory! } } : {}),

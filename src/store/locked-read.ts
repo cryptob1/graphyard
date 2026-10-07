@@ -267,8 +267,10 @@ export function coordinationProjection(document: Work): Work {
     const sha = text(entry?.sha);
     return (sha !== null && head !== null && sha === head && text(entry?.baseSha) === base) || carried.has(text(entry?.id)!) || (sha !== null && requested.has(sha));
   };
-  const { pipeline: _pipeline, evidence, observation, queueHistory, actionQueue, autoDispatch, sessions, ...rest } = doc;
+  const { pipeline, evidence, observation, queueHistory, actionQueue, autoDispatch, sessions, ...rest } = doc;
   const out: Record<string, any> = { ...rest };
+  // Of the timeline only the rework-round count, which the review-round cap reads (GY-1389).
+  if (isObject(pipeline) && 'reworkRounds' in pipeline) out.pipeline = { reworkRounds: pipeline.reworkRounds };
   out.evidence = arrayOf(evidence).filter(relevant).map(entry => { if (!isObject(entry)) return entry; const { artifacts: _a, scopeFiles: _s, provenance: _p, ...kept } = entry; return kept; });
   if ('observation' in doc) out.observation = isObject(observation) ? (({ scopeFiles: _s, ...kept }) => kept)(observation) : observation;
   if (Array.isArray(queueHistory)) out.queueHistory = lastOf(queueHistory, keep);
