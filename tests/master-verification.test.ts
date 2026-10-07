@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
-import { readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -115,12 +115,13 @@ test('integration:master-loop-deployment-verification — verification is record
     assert.deepEqual(dirty.checks, { guide: 'unobserved', init: 'unobserved' }, 'a refused preflight never emits instructions from the wrong checkout');
     execFileSync('git', ['-C', release.checkout, 'checkout', '-q', '--', 'docs/master-agent.md']);
 
-    // Local-only: the deployed release moved on; this checkout is no longer what serves.
+    // The deployed release moved on to a commit this checkout cannot place after the merge: it is
+    // refused as not serving it, before any isolated checkout is spent.
     const rolledForward = 'f'.repeat(40); state.sha = rolledForward;
     const compare = (_command: string, args: string[]) => { if (args[0] === 'api' && args[1].includes(`compare/${release.sha}...${rolledForward}`)) return JSON.stringify({ status: 'ahead' }); throw new Error(`unexpected ${args.join(' ')}`); };
     const moved = await verifyDeployment(state.work[0], verificationEffects(master, { root: release.checkout, snapshot: effects.snapshot, mutate: async () => assert.fail('nothing is recorded from a checkout that is not the deployed release'), run: (command, args, options) => command === 'gh' ? compare(command, args) : execFileSync(command, args, { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) }));
     assert.equal(moved.result, 'refused'); assert.equal(moved.release.sha, rolledForward); assert.equal(moved.release.covers, null);
-    assert.match(moved.refusals.join('\n'), new RegExp(`emitted by a local checkout at ${release.sha}, not by the deployed release ${rolledForward}`));
+    assert.deepEqual(moved.refusals, [`Deployed release ${rolledForward} does not serve GY-42 merge commit ${release.sha} yet`]);
     assert.equal(mutations.length, 1);
     state.sha = release.sha;
 
@@ -275,4 +276,70 @@ test('integration:master-loop-deployment-verification — master verify-deployme
     assert.equal(state.records.length, 1);
     await assert.rejects(promisify(execFile)(process.execPath, [launcher, 'master', 'verify-deployment'], { cwd: repository, env }), /Use master verify-deployment GY-N/);
   } finally { await close(server); await rm(release.directory, { recursive: true, force: true }); await rm(repository, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
+});
+
+test('unit:deployment-verification-exact-release — a coordinator checkout ahead of production verifies from an isolated clean checkout of exactly the served release', async () => {
+  const release = await releaseCheckout();
+  const served = release.sha;
+  const state = { sha: served, work: [] as Work[], records: [] as any[] };
+  const { server, url } = await stubServer(state);
+  const clock = Date.now();
+  state.work = [delivered(served, iso(clock, -hour))];
+  const git = (...args: string[]) => execFileSync('git', ['-C', release.checkout, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  // The supervised master upgraded past production: a newer commit whose guide lacks the loop,
+  // plus local dirt. Neither may emit or decide anything about the served release.
+  await writeFile(join(release.checkout, 'docs/master-agent.md'), '# Newer guide without the loop\n');
+  git('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '-am', 'newer than production');
+  const ahead = git('rev-parse', 'HEAD');
+  await writeFile(join(release.checkout, 'src/master.ts'), '// local edit\n', { flag: 'a' });
+  const scratches: string[] = [];
+  const run = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv }) => {
+    if (command === 'git' && args[0] === 'clone') scratches.push(args.at(-1)!);
+    return execFileSync(command, args, { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  };
+  try {
+    const master = config(release.cliPath, url);
+    const records: unknown[] = [];
+    const effects = verificationEffects(master, { root: release.checkout, snapshot: async () => ({ work: state.work, now: iso(clock) }), mutate: async (_path, data) => { records.push(data); return data; }, run });
+    const verified = await verifyDeployment(state.work[0], effects);
+    assert.equal(verified.result, 'verified', verified.refusals.join('; '));
+    assert.deepEqual(verified.checkout, { sha: ahead, clean: false });
+    assert.deepEqual(verified.emittedFrom, { sha: served, clean: true, isolated: true });
+    assert.deepEqual(verified.checks, { guide: 'pass', init: 'pass' }, 'the served release\'s own guide was read, not the newer one');
+    assert.deepEqual(records, [{ sha: served, mergeSha: served, source: 'endpoint', observedAt: verified.release.observedAt }]);
+    assert.equal(scratches.length, 1);
+    await assert.rejects(access(scratches[0]), 'the isolated checkout is removed after emitting');
+    assert.equal(git('rev-parse', 'HEAD'), ahead, 'the coordinator checkout is untouched');
+    assert.match(git('status', '--porcelain', '--untracked-files=no'), /src\/master\.ts/);
+
+    // Missing: production serves a commit the coordinator's store lacks.
+    const missing = await effects.isolate!('e'.repeat(40));
+    assert.deepEqual(missing, { reason: `Deployed release ${'e'.repeat(40)} is missing from the coordinator checkout; fetch it and verify again` });
+  } finally { await close(server); await rm(release.directory, { recursive: true, force: true }); }
+
+  // Dirty, stale and unserved releases are refused, and nothing is recorded.
+  const sha = 'c'.repeat(40), newer = 'd'.repeat(40);
+  const item = delivered(sha, iso(clock, -hour));
+  const observation = { source: 'endpoint' as const, sha, at: iso(clock), reason: null, deployed: ['GY-42'], pending: [] };
+  const coordinator = { sha: newer, clean: true, repository: 'owner/project', reason: null };
+  const emitted: EmittedInstructions = { guide: await readFile(join(root, 'docs/master-agent.md'), 'utf8'), init: managedInstructions('# Rules\n', 'https://graphyard.example') };
+  const base = { snapshot: async () => ({ work: [item], now: iso(clock) }), release: () => coordinator, emit: async () => assert.fail('the newer coordinator checkout never emits'), record: async () => assert.fail('nothing is recorded'), repository: 'owner/project', now: () => clock };
+  let disposed = 0;
+  const isolatedAt = (clean: boolean) => async (requested: string) => ({ release: { sha: requested, clean, repository: 'owner/project', reason: null }, emit: async () => emitted, dispose: async () => { disposed++; } });
+  const dirty = await verifyDeployment(item, { ...base, observe: async () => observation, isolate: isolatedAt(false) });
+  assert.equal(dirty.result, 'refused'); assert.equal(dirty.recorded, null); assert.equal(disposed, 1);
+  assert.match(dirty.refusals.join('\n'), /emitted by a local checkout at c{40} with uncommitted changes, not by the deployed release c{40}/);
+  const wrongCommit = await verifyDeployment(item, { ...base, observe: async () => observation, isolate: async () => ({ ...(await isolatedAt(true)(sha)), release: { sha: newer, clean: true, repository: 'owner/project', reason: null } }) });
+  assert.equal(wrongCommit.result, 'refused'); assert.match(wrongCommit.refusals.join('\n'), /local checkout at d{40}, not by the deployed release c{40}/);
+  const neverIsolated = async () => assert.fail('a refused preflight never spends an isolated checkout');
+  const stale = await verifyDeployment(item, { ...base, observe: async () => ({ ...observation, at: iso(clock, -deploymentFreshnessMs - 1000) }), isolate: neverIsolated });
+  assert.equal(stale.result, 'refused'); assert.match(stale.refusals[0], /stale/);
+  const unserved = await verifyDeployment(delivered('a'.repeat(40), iso(clock, -hour)), { ...base, snapshot: async () => ({ work: [delivered('a'.repeat(40), iso(clock, -hour))], now: iso(clock) }), observe: async () => ({ ...observation, deployed: [], pending: ['GY-42'] }), isolate: neverIsolated });
+  assert.equal(unserved.result, 'refused'); assert.match(unserved.refusals[0], /does not serve GY-42 merge commit a{40} yet/);
+  const absent = await verifyDeployment(item, { ...base, observe: async () => observation, isolate: async requested => ({ reason: `Deployed release ${requested} is missing from the coordinator checkout; fetch it and verify again` }) });
+  assert.equal(absent.result, 'refused'); assert.deepEqual(absent.refusals, [`Deployed release ${sha} is missing from the coordinator checkout; fetch it and verify again`]);
+  // Served, clean and exact: verified from the isolated release with the coordinator ahead.
+  const recorded: unknown[] = [];
+  const exact = await verifyDeployment(item, { ...base, observe: async () => observation, isolate: isolatedAt(true), record: async (_work, data) => { recorded.push(data); } });
+  assert.equal(exact.result, 'verified'); assert.deepEqual(exact.emittedFrom, { sha, clean: true, isolated: true }); assert.deepEqual(recorded, [{ sha, mergeSha: sha, source: 'endpoint', observedAt: observation.at }]);
 });
