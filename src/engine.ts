@@ -2433,9 +2433,9 @@ export class Engine {
     if (closedScope) ledger.push({ kind: 'scope.closed', details: closedScope });
     // A standing lease-loss for an epoch whose candidate was already bound predates that
     // rule, and one the control plane raised for an epoch whose blocked report or stopped-worker
-    // attestation is in the ledger never needed a human either. Settle both here, on deploy and
-    // on every later tick, with the note that says why and the attestation it rests on, so the
-    // backlog does not wait on one click per item.
+    // attestation is in the ledger never needed a human either, nor one a newer attempt has
+    // superseded (GY-1390). Settle them here, on deploy and on every later tick, with the note that
+    // says why and the attestation it rests on, so the backlog does not wait on one click per item.
     for (const settled of settleableLeaseLoss(work, attestations)) {
       resolveEscalation(work, settled.escalation.trigger);
       ledger.push({ kind: 'escalation.auto-settled', details: { trigger: settled.escalation.trigger, epoch: settled.epoch, escalation: settled.escalation, note: settled.note, cause: settled.cause, attestation: settled.attestation, submission: work.submission } });
