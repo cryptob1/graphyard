@@ -4,6 +4,8 @@ import type { MechanicalFixRequest } from '../mechanical-findings.js';
 import { unactedProducerAttempts } from '../auto-dispatch.js';
 import { mechanicalHoldPattern } from '../model/refusal-catalogue.js';
 import { systemDriven } from './hand-actions.js';
+import { conflictReworkBoundMs, conflictReworkDue } from '../model/approval.js';
+import { decisionKey } from '../daemon/reconcile.js';
 
 /**
  * GY-1389. A hand `master decide GY-N rework` that restates the loop's own round. The loop's
@@ -48,6 +50,19 @@ export function loopBaseFailed(work: Pick<Work, 'id' | 'candidate' | 'baseRefres
   return new Set(Object.values(state.baseFailures).filter(failure => failure.blocks.some(block => block.id === work.id && block.sha === sha)).map(failure => failure.check));
 }
 
+/**
+ * GY-1434. The loop round a recorded base conflict owes, named exactly — the action key the loop's
+ * decisions step records it under — with the bound it falls due by, and, past it, how overdue it is:
+ * a refused hand rework then says that the step is stalled rather than leaving the stall silent.
+ */
+function conflictRound(work: Work, needed: { action: string; binding: string }, now: number): string {
+  const due = needed.binding.endsWith(':conflict') ? conflictReworkDue(work, now) : null;
+  if (!due || due.binding !== needed.binding) return '';
+  const round = `The round is ${decisionKey(work, needed as Parameters<typeof decisionKey>[1])}, owed within ${conflictReworkBoundMs / 60_000} minutes of the conflict first recorded on this head at ${due.since} (due at ${due.dueAt}). `;
+  return due.overdueMs > 0 ? `${round}It is ${Math.ceil(due.overdueMs / 60_000)} minute(s) overdue against that bound, so the loop's decisions step is stalled on it: master status names it as a stalled-step attention. `
+    : round;
+}
+
 const refused = (work: Work, why: string) => `${work.key} is system-driven: ${why} `
   + 'Watch it with master status; a loop that is not running is restarted, never stood in for by hand.';
 
@@ -64,7 +79,7 @@ export function loopRework(work: Work, action: string, input: unknown, config: R
     // is unverified, so that is judged on the round already found, never re-derived without it.
     if (loop.precedent || (loop.baseFailed == null && needed.binding.includes(':ci:')) || workerStopped(work, loop.now).unverified) return null;
     return refused(work, `the loop's decisions step requests this rework itself on its recorded grounds (${needed.binding}): ${needed.reason.slice(0, 600)} `
-      + 'Its risk lane or the approver it launches applies the round, so a hand rework of it is refused. A hand rework stays open to answer a refusal (--precedent ID).');
+      + `${conflictRound(work, needed, loop.now)}Its risk lane or the approver it launches applies the round, so a hand rework of it is refused. A hand rework stays open to answer a refusal (--precedent ID).`);
   }
   // The review gate holds an approval with mechanical nits for the worker bot's own round (GY-971).
   const hold = (work.gates ?? []).find(gate => gate.name === 'review')?.reasons.find(reason => mechanicalHoldPattern.test(reason));
