@@ -3,6 +3,7 @@ import { demand, operatorCapability, type Principal, type Work } from '../model.
 import { closeRefusal, closeSchema, closureRefRefusal, commitRef, itemRef, type Closure } from '../model/closure.js';
 import { dispatchHistoryLimit, type DispatchRequest } from '../model/dispatch.js';
 import { humanRequestBlocker, retainedHumanRequests, type HumanRequest } from '../model/human-request.js';
+import { decisionGroundsMovedSince } from '../engine.js';
 import { endAttempt } from '../pipeline-speed.js';
 import { save } from '../store.js';
 import { authenticated, digest, receipt, record } from './decisions.js';
@@ -17,10 +18,13 @@ type Db = pg.PoolClient;
  * coordination lock moves the item to the terminal stage with a `closure` record, cancels every
  * open review and producer request, withdraws an open human-only request so the Needs-you page
  * stops listing it, retires the item's action rows through the ordinary evaluation, and appends
- * `work.closed` with the actor and the reason. A live worker lease or an in-flight merge execution
- * refuses it. Commit ancestry is read from GitHub before the transaction, never inside it.
+ * `work.closed` with the actor and the reason. A live worker lease refuses it, unless an approved
+ * two-party close decision applies it (`decided`, GY-1463) at the revision its approval judged, or
+ * one past it that moved nothing its grounds rest on: then the closure ends that lease, as a
+ * release. A lease epoch change or any other grounds change since refuses it, named. Commit
+ * ancestry is read from GitHub before the transaction, never inside it.
  */
-export async function closeWork(services: Services, caller: Principal, id: string, body: unknown, key: string) {
+export async function closeWork(services: Services, caller: Principal, id: string, body: unknown, key: string, options: { decided?: { expectedRevision?: number } } = {}) {
   const data = closeSchema.parse(body);
   const ref = data.ref ?? null;
   const fingerprint = digest({ id, close: data });
@@ -38,12 +42,16 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     if (actor.role === 'operator-agent') operatorCapability(actor, 'intent:create', work!, services.repository);
-    const refused = closeRefusal(work!, now.getTime()); demand(!refused, refused!, 409);
+    // The approval judged the item at its revision; a replacement claim since, or any other grounds change, was never judged.
+    const judged = options.decided?.expectedRevision;
+    const moved = judged === undefined ? null : await decisionGroundsMovedSince(db, work!, judged);
+    if (moved) demand(false, `${moved[0].toUpperCase()}${moved.slice(1)} since approved revision ${judged} moved the decision's grounds; the close was not applied`, 409);
+    const refused = closeRefusal(judged !== undefined && work!.lease ? { ...work!, lease: null } : work!, now.getTime()); demand(!refused, refused!, 409);
     const badRef = closureRefRefusal(work!, all, data.kind, ref); demand(!badRef, badRef!, 422);
     if (ancestry) demand(ancestry.contained, `Commit ${ref} is not an ancestor of the base branch (${ancestry.base.slice(0, 12)}); an item is superseded only by work that landed`, 422);
     const closure: Closure = { kind: data.kind, reason: data.reason, ref, by: actor.id, at: now.toISOString(), from: work!.stage };
     const settled = settleOpenRequests(work!, closure, now);
-    // A lapsed lease reconciliation never reached ends here, as released.
+    // A lapsed lease reconciliation never reached ends here, as released; so does a live one an approved close decision ends.
     if (work!.lease) { endAttempt(work!, work!.lease.epoch, 'released', now); work!.lease = null; }
     Object.assign(work!, { closure, stage: 'done', stageEnteredAt: now.toISOString(), reviewRequest: null, scopeRequest: null, blocker: null });
     services.engine.evaluate(work!, all, now);

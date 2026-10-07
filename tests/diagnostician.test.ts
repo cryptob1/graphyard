@@ -593,11 +593,15 @@ test('unit:diagnosis-release-stale-recurrence-reproduced — the loop moves the 
   assert.equal(entry.state, 'releasing', entry.detail);
   const fixKey = entry.fix!, first = entry.decision!.id;
   const fixOf = async () => (await store.list()).find(work => work.key === fixKey)!;
-  // While the approver judges, the loop reports its session on the fix item again and again — past
-  // what the server can trace back to the revision the release is pinned to.
+  // While the approver judges, the loop reports its session on the fix item again and again, which never
+  // stales the release (GY-1463), and the fix's requirements are revised, which does.
   for (let report = 1; report <= 21; report++) await observe(await fixOf(), first, clock + report * 1000);
+  const revised = await fixOf();
+  await engine.execute(operator, 'requirements', revised.id, { expectedPolicyRevision: revised.policyRevision, reason: 'A criterion is added',
+    criteria: [...revised.criteria.map(({ id, text, proofs }) => ({ id, text, proofs })), { id: 'AC-2', text: 'The refresh is logged', proofs: ['unit:refresh-logged'] }],
+    dependencies: [], plannedFiles: revised.plannedFiles, exclusiveResources: [], producerProofs: [] }, randomUUID());
   const [pinned] = (await ok(master.token, `work/${(await fixOf()).id}/decisions`)).decisions;
-  assert.equal((await fixOf()).revision - pinned.input.expectedRevision, 22, 'the loop\'s own writes moved the item past the revision the release is pinned to');
+  assert.equal((await fixOf()).revision - pinned.input.expectedRevision, 23, 'the loop\'s own writes and a requirements revision moved the item past the revision the release is pinned to');
 
   // The approver approves: the server settles the decision stale and applies nothing.
   const refused = await call(approver.token, `work/${fixKey}/approve`, { decision: first, reason: 'The diagnosis is sound' });
