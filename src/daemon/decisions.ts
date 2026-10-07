@@ -1,5 +1,5 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
-import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, supersedingAttempt, RefusedResponse } from '../model.js';
+import { type Work, type AgentReview, reviewProviderOf, RefusedResponse } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker } from '../model/scope.js';
 import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
@@ -314,16 +314,14 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   const threads = !capped && !work.reworkRequested && work.candidate && !threadsAwaitReview(work, Date.parse(work.observation?.at ?? '')) ? reworkThreads(work) : [];
   if (threads.length) return { action: 'rework', reason: `${work.key}: ${threadReworkSummary(work.candidate!.sha, threads)}. The findings stand against the current head, so the item returns to a worker to address them; the next review names the threads it verified fixed and the loop resolves them.`,
     binding: `${work.candidate!.sha}:threads:${threads.map(thread => thread.id ?? `${thread.path}:${thread.line}`).sort().join(',')}` };
-  // A lease-loss the control plane raised is operational: once the lost attempt can no longer act,
-  // settling it is a routine two-party decision, not a wait on a human master session (GY-161,
-  // 2026-09-24: its first worker exited five minutes in, a new attempt took the item, and the
-  // standing escalation would have refused the merge until somebody asked for the resolution).
   // An otherwise-approved head whose approval raised findings classified mechanical (GY-971) returns
   // to a worker-class bot round for one commit that fixes exactly those, before the fresh read.
   const fix = mechanicalRework(work, mechanical);
   if (fix) return { action: 'rework', ...fix };
-  const lost = leaseLossDecision(work);
-  if (lost) return lost;
+  // A lease-loss the control plane raised is not the loop's to ask about: once the lost attempt can
+  // no longer act, reconciliation settles it on the record (GY-1393, `endedLeaseLoss`). It had been
+  // a routine two-party resolve (GY-161), and 28 approver rounds in 7 days confirmed only what the
+  // control plane already held.
   return null;
 }
 /**
@@ -502,37 +500,6 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
   // to docs pages (GY-566), and a clean one costs no round at all.
   if (observation.conflicting && !pendingBaseRefresh(work))
     return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
-  return null;
-}
-/** The resolve decision a standing control-plane lease-loss calls for (see `idleLeaseLoss`), or null. */
-function leaseLossDecision(work: Work): RoutineDecision | null {
-  const lost = idleLeaseLoss(work);
-  return lost ? { action: 'resolve', input: { trigger: 'lease-loss' }, escalation: { trigger: 'lease-loss', at: lost.escalation.at }, binding: `lease-loss:${lost.epoch}:${lost.escalation.at}`,
-    reason: `${work.key}: the control plane raised a lease-loss for epoch ${lost.epoch} at ${lost.escalation.at} (${lost.escalation.reason}). No newer attempt holds the item and none is due: ${lost.idle}. Nothing from the lost attempt can act or merge. Resolving clears only this concern: it decides no gate and ships nothing.` } : null;
-}
-/**
- * The standing control-plane lease-loss the loop asks to settle, or null. A lease-loss a newer
- * attempt superseded (`supersedingAttempt`) is never asked: reconciliation settles it on the
- * control plane's next tick (GY-1390; the loop's two-party decision for it was 227 of 298 build-stage
- * escalation interventions in the week to 7 October 2026). Nor is one whose next action is the
- * implementation dispatch that will supersede it: the claim does what the decision would. What
- * remains is a lost epoch between attempts with nothing due to take the item — held, blocked, or not
- * ready — and the request then rests on this host verifying the worker stopped (`workerStopped`,
- * applied in `routineDecision`). A lead-raised concern, another trigger, or a lost epoch whose fence
- * still stands is never asked.
- */
-export function idleLeaseLoss(work: Work): { escalation: ReturnType<typeof standingEscalations>[number]; epoch: number; idle: string } | null {
-  if (work.stage === 'done') return null;
-  for (const escalation of standingEscalations(work)) {
-    const epoch = leaseLossEpoch(escalation);
-    if (escalation.trigger !== 'lease-loss' || escalation.actor !== 'graphyard' || epoch === null) continue;
-    if (work.containmentQuarantine && work.containmentQuarantine.epoch <= epoch) continue;
-    if (supersedingAttempt(work, epoch)) continue;
-    if (work.epoch !== epoch || work.lease?.epoch === epoch) continue;
-    const next = work.nextAction;
-    if (next?.kind === 'dispatch' && next.inputs.kind === 'dispatch' && next.inputs.target === 'implementation') continue;
-    return { escalation, epoch, idle: next ? `its next action is ${next.kind}${next.reason ? ` (${next.reason.slice(0, 200)})` : ''}` : 'it has no next action' };
-  }
   return null;
 }
 /**
