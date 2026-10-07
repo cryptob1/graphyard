@@ -10,7 +10,7 @@ import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
 import { mainGuardAttention } from '../main-guard.js';
-import { openThroughputOwner, throughputOwnerClosure, throughputOwnerIdempotency, throughputOwnerItem, throughputOwnerPredecessor, throughputRemeasureAt, throughputStallText, type ThroughputOwnerPredecessor, type ThroughputStall } from '../throughput.js';
+import { openThroughputOwner, throughputOwnerAsPredecessor, throughputOwnerClosure, throughputOwnerIdempotency, throughputOwnerItem, throughputOwnerPredecessor, throughputRemeasureAt, throughputStallText, type ThroughputOwnerPredecessor, type ThroughputStall } from '../throughput.js';
 
 /**
  * GY-710. Wake the item's observation job for a step refused on a stale observation — a rework —
@@ -296,13 +296,14 @@ export function throughputEscalatedAt(actions: Record<string, DaemonAction>, own
  * unverified answer files one, once per release. GY-1467: a release whose owner was closed on an
  * answered decision while its newest measurement still shows the stall — the answered rule is not
  * yet served where the measurement runs — gets one successor per (release, answered revision),
- * carrying the settled rule under a key of its own, retried on the backoff until filed; without the
- * stall it gets none, and the next release files afresh. Every body is a pure function of its
- * idempotency key, so a retry after a refusal or a lost reply is answered from the stored receipt.
- * A measurement showing the
- * population cannot accumulate raises the typed needs-decision on the owner once per owner: it
- * stands until answered, so a re-measure that finds the same — or more of the same — never raises
- * it again. Filing and closing go through the operator-agent; a failure backs off on the action.
+ * carrying the settled rule under a key of its own: filed in the cycle that closes its predecessor,
+ * or in any later cycle on the newest recorded measurement, and retried on the backoff until filed;
+ * without the stall it gets none, and the next release files afresh. Every body is a pure function
+ * of its idempotency key, so a retry after a refusal or a lost reply is answered from the stored
+ * receipt. A measurement showing the population cannot accumulate raises the typed needs-decision
+ * on the owner once per owner: it stands until answered, so a re-measure that finds the same — or
+ * more of the same — never raises it again. Filing and closing go through the operator-agent; a
+ * failure backs off on the action.
  */
 async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'performed'>, revision: string, work: Work[], stall: ThroughputStall | null) {
   const { state, effects, now, performed } = cycle, answer = state.actions[`throughput:${revision}`];
@@ -320,21 +321,28 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
       return null;
     }
   };
-  let owner = openThroughputOwner(work);
+  let owner = openThroughputOwner(work), closed: ThroughputOwnerPredecessor | null = null;
   if (owner) {
     // Without a reason it stays open: the claim is not verified and its needs-decision is not answered.
     const ownerKey = throughputOwnerKey(revision), ownerAction = state.actions[ownerKey];
     const reason = throughputOwnerClosure(owner, { revision, verdict }, throughputEscalatedAt(state.actions, owner));
     if (reason) {
       if (effects.closeThroughputOwner && (ownerAction?.state !== 'failed' || readyToRetry(ownerAction, state.cycle))) try {
-        if (await effects.closeThroughputOwner(owner, reason, `throughput-owner:close:${owner.id}:${owner.revision}`)) performed.push(await note(ownerKey, owner.key, 'done', `Closed ${owner.key}: ${reason}`));
+        if (await effects.closeThroughputOwner(owner, reason, `throughput-owner:close:${owner.id}:${owner.revision}`)) {
+          performed.push(await note(ownerKey, owner.key, 'done', `Closed ${owner.key}: ${reason}`));
+          // Closed on its answer, not a verified claim: its successor is judged in this same cycle.
+          if (verdict !== 'verified') closed = throughputOwnerAsPredecessor(owner);
+        }
       } catch (error) { performed.push(await note(ownerKey, owner.key, 'failed', `Could not close ${owner.key}: ${message(error)}`)); }
-      return;
+      if (!closed) return;
+      owner = null;
     }
-  } else if (effects.fileThroughputOwner) {
-    const predecessor = throughputOwnerPredecessor(work, revision), action = state.actions[throughputOwnerKey(revision, predecessor)];
-    // A successor is filed in the cycle whose measurement shows the stall, and its failed filing retried after.
+  }
+  if (!owner && effects.fileThroughputOwner) {
+    const predecessor = closed ?? throughputOwnerPredecessor(work, revision), action = state.actions[throughputOwnerKey(revision, predecessor)];
     const due = action?.state !== 'done' && readyToRetry(action, state.cycle);
+    // A successor is judged on the newest recorded measurement whenever this cycle took none, and its failed filing is retried after.
+    if (due && predecessor) stall ??= await effects.newestThroughputStall?.(revision).catch(() => null) ?? null;
     if (due && (predecessor ? stall !== null || action?.state === 'failed' : verdict === 'unverified')) owner = await file(predecessor);
   }
   if (!stall || !owner || throughputEscalatedAt(state.actions, owner) !== null) return;

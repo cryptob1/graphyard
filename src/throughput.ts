@@ -486,7 +486,25 @@ export function throughputOwnerPredecessor(work: readonly Pick<Work, 'key' | 'ti
     return match ? [{ item, at: item.closure!.at, policyRevision: Number(match[1]) }] : [];
   }).sort((a, b) => b.at.localeCompare(a.at));
   const newest = answered[0];
-  return newest ? { key: newest.item.key, policyRevision: newest.policyRevision, criteria: (newest.item.criteria ?? []).map(criterion => criterion.text) } : null;
+  return newest ? throughputOwnerAsPredecessor({ ...newest.item, policyRevision: newest.policyRevision }) : null;
+}
+
+/** An owner the loop has just closed on its answered needs-decision, as the predecessor its successor follows: the same one `throughputOwnerPredecessor` reads back from its closure. */
+export const throughputOwnerAsPredecessor = (owner: Pick<Work, 'key' | 'policyRevision' | 'criteria'>): ThroughputOwnerPredecessor =>
+  ({ key: owner.key, policyRevision: owner.policyRevision, criteria: (owner.criteria ?? []).map(criterion => criterion.text) });
+
+/**
+ * How many characters of the predecessor's answered criteria a successor's description carries, so
+ * the filing stays within the description limit however long the answered revision is (GY-1467):
+ * the rest is cut at a fixed point, deterministically, so the body stays a function of its key.
+ */
+export const throughputSuccessorRuleBudget = 8000;
+
+/** The settled admission rule as a successor carries it: the predecessor's criteria, cut to `throughputSuccessorRuleBudget` with a pointer to the revision that holds them whole. */
+export function throughputSuccessorRule(predecessor: ThroughputOwnerPredecessor) {
+  const rule = predecessor.criteria.join(' ') || 'its requirements revision names none';
+  if (rule.length <= throughputSuccessorRuleBudget) return rule;
+  return `${rule.slice(0, throughputSuccessorRuleBudget)}… (cut here; ${predecessor.key}'s requirements revision ${predecessor.policyRevision} holds it whole)`;
 }
 
 /**
@@ -502,7 +520,7 @@ export function throughputOwnerItem(revision: string, predecessor: ThroughputOwn
     title: `${throughputOwnerTitle}: ${revision.slice(0, 12)}${predecessor ? ` (succeeds ${predecessor.key})` : ''}`.slice(0, 200), type: 'bug' as const, priority: 1,
     description: [
       `The master loop filed this item itself (GY-1438): ${throughputClaim.item}'s throughput claim (${throughputClaim.statement}) is unverified on the release the control plane serves, ${revision}. It owns that verification so it can only end, never age.`,
-      ...(predecessor ? [`It succeeds ${predecessor.key}, closed when its needs-decision was answered by its requirements revision ${predecessor.policyRevision}, because the newest measurement of ${revision.slice(0, 12)} still shows the stall: the measurement applies the settled admission rule only once the release it runs carries it (GY-1467). The settled admission rule, as ${predecessor.key} was answered: ${predecessor.criteria.join(' ') || 'its requirements revision names none'}`] : []),
+      ...(predecessor ? [`It succeeds ${predecessor.key}, closed when its needs-decision was answered by its requirements revision ${predecessor.policyRevision}, because the newest measurement of ${revision.slice(0, 12)} still shows the stall: the measurement applies the settled admission rule only once the release it runs carries it (GY-1467). The settled admission rule, as ${predecessor.key} was answered: ${throughputSuccessorRule(predecessor)}`] : []),
       `There is nothing to build here, so it stays in the backlog and is never released to a worker. The loop re-measures the serving release while its newest measurement is unverified (at most every ${Math.round(throughputRemeasureMs / 60_000)} min; the budgets are never relaxed) and closes this item itself once a recorded measurement of the serving release verifies the claim. When session-free deliveries cannot accumulate it raises a needs-decision on this item instead; an approved requirements revision of this item applied after that answers it, and the loop closes the item then too.`,
     ].join('\n\n'),
     criteria: [{ id: 'AC-1', text: `A recorded measurement of the release the control plane serves verifies ${throughputClaim.item}'s claim (at least ${throughputClaim.minimumDeliveries} admitted deliveries within its submit-to-merge p50 and idle-but-actionable budgets), or the needs-decision the loop raised on this item is answered`, proofs: ['manual:throughput-claim-verified'] }],
@@ -783,6 +801,16 @@ export async function loopThroughputMeasurement(root: string, input: {
   await appendThroughputLedger(ledger, recordedEntry(report, { source: 'loop', file, output: renderThroughput(report) }));
   return { outcome: 'recorded', settled: report.verdict === 'verified', revision: revision!, file, report, read, verdict: report.verdict, stall: throughputStall(report),
     detail: `${remeasure ? 'Re-measured' : 'Recorded'} ${claimKey}'s throughput measurement for ${revision!.slice(0, 12)} in ${file}, reading ${read.length} deliveries whole: ${report.verdict}: ${report.reason}${report.verdict === 'verified' ? '' : `; measured again from ${throughputRemeasureFrom(report.measuredAt)} as deliveries accumulate`}` };
+}
+
+/**
+ * The stall the newest recorded measurement shows for `revision`, or null when it shows none or
+ * measured another release (GY-1467): a successor owner is judged on it, not only on a measurement
+ * taken in the filing cycle, so no cycle between re-measures leaves a standing stall unowned.
+ */
+export async function newestThroughputStall(root: string, revision: string): Promise<ThroughputStall | null> {
+  const newest = await readThroughputMeasurement(root).catch(() => null);
+  return newest && newest.report.deployed?.revision?.toLowerCase() === revision.toLowerCase() ? throughputStall(newest.report) : null;
 }
 
 /** The newest recorded measurement, with the file it came from; null when none was ever taken. */

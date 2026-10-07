@@ -3,7 +3,7 @@ import type { ChildRun } from '../child-runner.js';
 import type { ControlPlaneStatus, MasterConfig } from '../master.js';
 import type { Work } from '../model.js';
 import { localAncestry } from './deployment.js';
-import { loopThroughputMeasurement, type LoopThroughputOutcome, type throughputOwnerItem } from '../throughput.js';
+import { loopThroughputMeasurement, newestThroughputStall, type LoopThroughputOutcome, type ThroughputStall, type throughputOwnerItem } from '../throughput.js';
 
 export interface ThroughputEffects {
   /**
@@ -19,6 +19,12 @@ export interface ThroughputEffects {
    * operator-agent identity is not provisioned: nothing is filed, and the attention says no item owns it.
    */
   fileThroughputOwner?: (input: ReturnType<typeof throughputOwnerItem>, key: string) => Promise<Work | null>;
+  /**
+   * The stall the newest recorded measurement of `revision` shows, or null (GY-1467): a successor
+   * owner is filed on it in any cycle, not only one that measured. Absent, only an in-cycle
+   * measurement's stall files a successor.
+   */
+  newestThroughputStall?: (revision: string) => Promise<ThroughputStall | null>;
   /** Closes the owner item as the operator-agent once the claim verifies or its needs-decision is answered; null, closing nothing, without that identity. */
   closeThroughputOwner?: (owner: Work, reason: string, key: string) => Promise<Work | null>;
 }
@@ -34,6 +40,7 @@ export function throughputEffects(root: string, current: () => MasterConfig, run
     // The identity is read on each call, as a configuration reload may provision it after the loop starts.
     fileThroughputOwner: async (input, key) => current().operatorAgent ? asOperatorAgent('POST', 'work', input, key) as Promise<Work> : null,
     closeThroughputOwner: async (owner, reason, key) => current().operatorAgent ? asOperatorAgent('POST', `work/${owner.id}/close`, { kind: 'obsolete', reason }, key) as Promise<Work> : null,
+    newestThroughputStall: revision => newestThroughputStall(root, revision),
     measureThroughput: (work, observedSha) => loopThroughputMeasurement(root, { work, observedSha, now: () => Date.now(), origin: new URL(current().url).origin,
       status: () => asCoordinator('status') as Promise<ControlPlaneStatus & Record<string, unknown>>,
       readItem: id => asCoordinator(`work/${encodeURIComponent(id)}`) as Promise<Work>,
