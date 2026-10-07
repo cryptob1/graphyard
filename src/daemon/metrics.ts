@@ -7,6 +7,7 @@ import { stalledItems } from '../model/action-account.js';
 import { type MasterConfig, type ContainmentAssessment, assertDispatchable, containmentPhase } from '../master.js';
 import { type ApprovalWatch, type DaemonAction, type DaemonActionKind, type DaemonState, type CycleMetrics, type ItemClock, itemClockSchema, type LatencySample, latencySampleSchema, type ScopeMeasurement } from './state.js';
 import { decisionKey } from './reconcile.js';
+import { docsSyncHolding } from '../model/docs-sync.js';
 import { approvedUnapplied, boundDetail, mergeableCandidate, namePaths, routineDecision, withheldDecision } from './decisions.js';
 
 export function percentiles(values: number[]) {
@@ -122,7 +123,7 @@ export function approvedUnappliedSince(watch: Pick<ApprovalWatch, 'decision' | '
 }
 export interface ActionableSubject { key: string; kind: DaemonActionKind; work: string | null; detail: string }
 export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run'>, work: Work[], now: number,
-  context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals']; baseFailed?: Map<string, Set<string>> } = {}): ActionableSubject[] {
+  context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals']; baseFailed?: Map<string, Set<string>>; docsSyncs?: DaemonState['docsSyncs'] } = {}): ActionableSubject[] {
   const subjects: ActionableSubject[] = [];
   // The silence record keeps each detail to 500 characters; a refusal or proof list quoted here is cut to fit.
   const add = (kind: DaemonActionKind, item: Work | null, detail: string) => subjects.push({ key: `${kind}:${item?.key ?? 'pipeline'}`, kind, work: item?.key ?? null, detail: boundDetail(detail, 500) });
@@ -141,7 +142,9 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     // A decision waiting for an approver account to reset is the one capacity line, not a stall per item (GY-182).
     // An approved decision whose application was lost is named for what it is (GY-1300), never as waiting for its approver.
     const unapplied = watch ? approvedUnappliedSince(watch) : null;
-    if (decision && !watch?.settledAt && !(watch && standingCapacity(item, 'approver').length)) add('decision', item, !watch ? `${item.key} needs a ${decision.action} decision requested and approved`
+    // A conflict rework a docs-sync session holds inside its bound is the step's recorded wait, not its silence (GY-1436).
+    const docsHeld = decision?.action === 'rework' && !watch && decision.binding === `${item.candidate?.sha}:conflict` && !!context.docsSyncs && !!docsSyncHolding(context.docsSyncs, item, now);
+    if (decision && !docsHeld && !watch?.settledAt && !(watch && standingCapacity(item, 'approver').length)) add('decision', item, !watch ? `${item.key} needs a ${decision.action} decision requested and approved`
       : unapplied ? `${item.key}'s ${decision.action} decision ${watch.decision} is ${approvedUnapplied} ${unapplied}; the loop asks the control plane to apply it`
       : watch.approvedAt ? `${item.key}'s ${decision.action} decision ${watch.decision} ${approvedUnappliedWording} ${watch.approvedAt}${watch.approvedBy ? ` by ${watch.approvedBy}` : ''}; the loop applies it (graphyard master decisions ${item.key})`
       : watch.exhaustedAt ? `${item.key}'s ${decision.action} decision ${watch.decision} ${approverWaitWording.unjudged} ${watch.launches} approver session(s)`
