@@ -10,10 +10,10 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
-import { actionExecution, actionIdleSpans, claimWindow, coordinatorFingerprints, deliveryActions, deployedRevision as revisionOf, populationRule, readThroughputMeasurement, renderThroughput, throughputClaim, throughputClaimVisibility, throughputMeasurementCommand, throughputMeasurementDirectory, unrealReasons, verifyThroughput, type DeployedRelease, type ThroughputReport } from '../src/throughput.js';
+import { actionExecution, actionIdleSpans, claimWindow, coordinatorFingerprints, deliveryActions, deployedRevision as revisionOf, loopThroughputMeasurement, measureThroughput, populationRule, throughputStatus, type LoopThroughputOutcome, readThroughputMeasurement, renderThroughput, throughputClaim, throughputClaimVisibility, throughputMeasurementCommand, throughputMeasurementDirectory, unrealReasons, verifyThroughput, type DeployedRelease, type ThroughputReport } from '../src/throughput.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { actionRetryDelay } from '../src/model/actions.js';
-import { emptyDaemonState, writeDaemonState } from '../src/master-daemon.js';
+import { emptyDaemonState, runCycle, writeDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free measurement script.
@@ -109,6 +109,9 @@ async function executorDelivery(title: string, submitToMergeMs: number, options:
   await runQueue(item, executorB, 'host-2');
   return deliver(item, submitToMergeMs);
 }
+
+/** A settled delivery as the default snapshot and the coordination view carry it: no histories, no sessions, no timeline. */
+const summary = (item: Work) => item.stage === 'done' ? { id: item.id, key: item.key, title: item.title, stage: item.stage, delivery: item.delivery, updatedAt: item.updatedAt, summary: true } as unknown as Work : item;
 
 const release = (overrides: Partial<DeployedRelease> = {}): DeployedRelease =>
   ({ revision: deployedRevision, version: '0.9.1', origin: 'https://graphyard.example', observedAt: new Date().toISOString(), containsClaim: true, reason: null, ...overrides });
@@ -313,11 +316,17 @@ test('integration:live-throughput-population — the population rule reads the r
   // The ledger the script reads, with and without the delivery that idled past the bound.
   let ledger = snapshot.filter(item => item.id !== idled.id);
   let statusRelease: object = { release: { version: '0.9.1', revision: deployedRevision } };
+  // The default snapshot serves settled deliveries as summaries (GY-422); `GET /api/work/:id` the whole document.
+  const asked: string[] = [];
   const served = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json');
     if (request.headers.authorization !== 'Bearer reader-token') { response.statusCode = 401; return response.end('{}'); }
+    asked.push(request.url!);
     if (request.url === '/api/status') return response.end(JSON.stringify({ actor: { id: 'reader' }, now: new Date(now).toISOString(), ...statusRelease }));
-    if (request.url === '/api/work-snapshot?view=full') return response.end(JSON.stringify({ now: new Date(now).toISOString(), work: ledger }));
+    if (request.url === '/api/work-snapshot') return response.end(JSON.stringify({ now: new Date(now).toISOString(), work: ledger.map(summary), view: 'bounded' }));
+    const whole = /^\/api\/work\/([^/]+)$/.exec(request.url!);
+    const item = whole && ledger.find(entry => entry.id === decodeURIComponent(whole[1]));
+    if (item) return response.end(JSON.stringify(item));
     response.statusCode = 404; response.end('{}');
   });
   await new Promise<void>(resolve => served.listen(0, '127.0.0.1', resolve));
@@ -336,6 +345,8 @@ test('integration:live-throughput-population — the population rule reads the r
     assert.deepEqual((JSON.parse(await readFile(join(directory, files[0]), 'utf8')) as ThroughputReport).population, recorded.population);
     assert.match(logged.join('\n'), /throughput claim: VERIFIED/);
     assert.match(logged.join('\n'), /Excluded:/);
+    assert.ok(!asked.some(url => url.includes('view=full')), 'the script never asks for the full work snapshot');
+    assert.equal(asked.filter(url => url.startsWith('/api/work/')).length, recorded.population.delivered, 'only the window\'s deliveries are read whole');
     ledger = snapshot.filter(item => item.id !== idled.id); logged.length = 0; process.exitCode = undefined;
     const uncheckedRelease = await measureMain(['--claim', claimKey], environment, { run: () => ({ status: 128, stderr: 'bad object' }) }) as ThroughputReport;
     assert.equal(uncheckedRelease.verdict, 'unverified'); assert.equal(uncheckedRelease.met, null); assert.equal(process.exitCode, 2);
@@ -461,4 +472,153 @@ test('unit:throughput-claim-visible — master status carries GY-87\'s throughpu
     assert.equal(unstamped.throughput.deployed.revision, deployedRevision);
     assert.equal(unstamped.throughput.verdict, 'verified');
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('unit:throughput-bounded-read — the measurement chooses its window from settled-delivery summaries and reads whole only the deliveries in it, never the full work snapshot of every item', async () => {
+  // A claim observed serving in a window of its own, so the deliveries other tests made fall outside it.
+  const windowStart = '2099-01-01T00:00:00.000Z', at = (minutes: number) => new Date(Date.parse(windowStart) + minutes * minute).toISOString();
+  let claimItem = await executorDelivery('The bounded claim', 5 * minute);
+  await patch(claimItem, { delivery: { ...(await reload(claimItem)).delivery, mergedAt: at(-120), mergedAtRepository: at(-120),
+    deployment: { sha: deployedRevision, mergeSha: commit(claimItem.key), source: 'endpoint', observedAt: windowStart, covers: 'exact', at: windowStart, observer: 'coordinator-1' } } });
+  claimItem = await reload(claimItem);
+  const inside: Work[] = [];
+  for (let index = 0; index < 3; index++) {
+    const item = await executorDelivery(`Bounded delivery ${index}`, 10 * minute);
+    await patch(item, { delivery: { ...item.delivery, mergedAt: at(10 + index), mergedAtRepository: at(10 + index) } });
+    inside.push(await reload(item));
+  }
+  const before = await executorDelivery('Merged before the window', 10 * minute);
+  await patch(before, { delivery: { ...before.delivery, mergedAt: at(-30), mergedAtRepository: at(-30) } });
+  await ready('Still open');
+
+  const whole = await store.list();
+  const summaries = whole.map(summary);
+  const read: string[] = [];
+  const readItem = async (id: string) => { read.push(id); return whole.find(item => item.id === id)!; };
+  const now = Date.parse(at(60));
+  const { report, read: named } = await measureThroughput(summaries, readItem, now, { deployed: release(), claimKey: claimItem.key });
+  assert.deepEqual(new Set(read), new Set(inside.map(item => item.id)), 'exactly the window\'s deliveries are read whole');
+  assert.deepEqual(new Set(named), new Set(read));
+  assert.equal(read.length, inside.length, 'each is read once');
+  assert.ok(read.length < whole.length, 'the read is the window, not the ledger');
+  // The bounded read judges exactly what a read of every whole document judges.
+  const full = verifyThroughput(whole, now, { deployed: release(), claimKey: claimItem.key });
+  assert.deepEqual(report.population, full.population);
+  assert.deepEqual(report.submitToMerge, full.submitToMerge);
+  assert.deepEqual(report.deliveries.map(record => record.key), full.deliveries.map(record => record.key));
+  assert.equal(report.window.basis, 'deployment-observation');
+  // An undelivered claim establishes no window, and nothing is read for it.
+  read.length = 0;
+  const open = await measureThroughput(summaries.filter(item => item.id !== claimItem.id), readItem, now, { deployed: release(), claimKey: claimItem.key });
+  assert.deepEqual(read, []); assert.equal(open.report.verdict, 'unverified');
+});
+
+test('unit:throughput-recorded-by-loop — after a verified deployment the loop records one throughput measurement for the release now serving, at most once per release, with its coordinator credential, and master status reads it back', async () => {
+  const root = await temporaryDirectory('throughput-loop');
+  try {
+    // GY-87 itself, delivered and observed serving, and the deliveries made since.
+    const windowStart = '2100-01-01T00:00:00.000Z', at = (minutes: number) => new Date(Date.parse(windowStart) + minutes * minute).toISOString();
+    const claimed = await executorDelivery('The loop-measured claim', 5 * minute);
+    await patch(claimed, { delivery: { ...claimed.delivery, mergedAt: at(-60), mergedAtRepository: at(-60),
+      deployment: { sha: deployedRevision, mergeSha: commit(claimed.key), source: 'endpoint', observedAt: windowStart, covers: 'exact', at: windowStart, observer: 'coordinator-1' } } });
+    for (let index = 0; index < 2; index++) {
+      const item = await executorDelivery(`Loop-measured delivery ${index}`, 10 * minute);
+      await patch(item, { delivery: { ...item.delivery, mergedAt: at(5 + index), mergedAtRepository: at(5 + index) } });
+    }
+    // The claim answers to GY-87's key, as it does in this repository's own ledger.
+    const work = (await store.list()).map(item => item.id === claimed.id ? { ...item, key: throughputClaim.item } : item);
+    const summaries = work.map(summary);
+    const byId = new Map(work.map(item => [item.id, item]));
+    let revision = deployedRevision, statusReads = 0;
+    const read: string[] = [];
+    const input = (observedSha: string) => ({ work: summaries, observedSha, now: () => Date.now(), origin: 'https://graphyard.example',
+      status: async () => { statusReads++; return { now: new Date().toISOString(), release: { version: '0.9.1', revision } }; },
+      readItem: async (id: string) => { read.push(id); return byId.get(id)!; },
+      contains: async () => true as boolean | null });
+
+    const first = await loopThroughputMeasurement(root, input(deployedRevision));
+    assert.equal(first.outcome, 'recorded');
+    assert.equal(first.report!.deployed.revision, deployedRevision);
+    assert.equal(first.report!.deployed.containsClaim, true);
+    assert.ok(first.file!.startsWith(throughputMeasurementDirectory));
+    assert.deepEqual(new Set(read), new Set(first.read), 'only the window\'s deliveries were read whole');
+    assert.equal(read.length, 2);
+    assert.match(first.detail, new RegExp(`Recorded GY-87's throughput measurement for ${deployedRevision.slice(0, 12)}`));
+    // master status now reports the claim against the release serving: verified, or the shortfall named.
+    const visible = await throughputStatus(root, { release: { version: '0.9.1', revision } }, work);
+    assert.equal(visible.measurement!.deployedRevision, deployedRevision);
+    assert.equal(visible.verdict, first.report!.verdict);
+    if (visible.verdict === 'unverified') assert.ok(visible.shortfall, 'an unverified measurement names its shortfall');
+    assert.doesNotMatch(visible.reason, /no post-deploy measurement has ever been recorded/);
+
+    // The same release is never measured twice.
+    read.length = 0;
+    const again = await loopThroughputMeasurement(root, input(deployedRevision));
+    assert.equal(again.outcome, 'current'); assert.deepEqual(read, []);
+    assert.equal((await readdir(join(root, throughputMeasurementDirectory))).length, 1);
+    // A deployment the plane does not serve yet is waited for, not measured as the old release.
+    const next = commit('next-release');
+    assert.equal((await loopThroughputMeasurement(root, input(next))).outcome, 'waiting');
+    assert.deepEqual(read, []);
+    // Once it serves, it is measured, once.
+    revision = next;
+    const moved = await loopThroughputMeasurement(root, input(next));
+    assert.equal(moved.outcome, 'recorded'); assert.equal(moved.report!.deployed.revision, next);
+    assert.equal((await readdir(join(root, throughputMeasurementDirectory))).length, 2);
+    // Ancestry git cannot answer stays unknown and keeps the claim unverified.
+    revision = commit('third-release');
+    const unknown = await loopThroughputMeasurement(root, { ...input(revision), contains: async () => null });
+    assert.equal(unknown.report!.deployed.containsClaim, null); assert.equal(unknown.report!.verdict, 'unverified');
+    // Without GY-87 delivered there is nothing to measure, and the plane is not asked.
+    const reads = statusReads;
+    assert.equal((await loopThroughputMeasurement(root, { ...input(revision), work: summaries.filter(item => item.key !== throughputClaim.item) })).outcome, 'skipped');
+    assert.equal(statusReads, reads);
+  } finally { await rm(root, { recursive: true, force: true }); }
+
+  // The loop's deployment step asks for it after each verified deployment, once per release.
+  const directory = await temporaryDirectory('throughput-cycle');
+  try {
+    const token = join(directory, 'coordinator.token');
+    await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: token, cliPath: launcher, repository: 'owner/project', baseBranch: 'main',
+      githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
+    const state = emptyDaemonState(master);
+    state.lock = { id: 'lock', pid: process.pid, host: master.hostId, startedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString() };
+    const delivered = (await store.list()).find(item => item.stage === 'done')!;
+    let observed: { source: 'endpoint' | 'unavailable'; sha: string | null } = { source: 'unavailable', sha: null };
+    const asked: string[] = [];
+    let answer: () => Promise<LoopThroughputOutcome> = async () => ({ outcome: 'recorded', revision: observed.sha, detail: `Recorded for ${observed.sha}` });
+    const effects: DaemonEffects = {
+      agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
+      snapshot: async () => ({ work: [delivered], now: new Date().toISOString() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+      observeDeployment: async () => ({ ...observed, at: new Date().toISOString(), reason: observed.sha ? null : 'not configured', deployed: observed.sha ? [delivered.key] : [], pending: observed.sha ? [] : [delivered.key], requests: 0 }) as any,
+      recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+      measureThroughput: async (_work, sha) => { asked.push(sha); return answer(); },
+    };
+    await runCycle(master, state, effects, () => Date.now());
+    assert.deepEqual(asked, [], 'no verified deployment, no measurement');
+    observed = { source: 'endpoint', sha: commit('served-1') };
+    await runCycle(master, state, effects, () => Date.now());
+    assert.deepEqual(asked, [commit('served-1')], 'a verified deployment asks for the measurement');
+    assert.equal(state.actions[`throughput:${commit('served-1')}`].state, 'done');
+    await runCycle(master, state, effects, () => Date.now());
+    assert.deepEqual(asked, [commit('served-1')], 'at most once per release');
+    // A release the plane does not serve yet is asked again until it does; a failure backs off and is retried.
+    observed = { source: 'endpoint', sha: commit('served-2') };
+    answer = async () => ({ outcome: 'waiting', revision: commit('served-1'), detail: 'still serving served-1' });
+    await runCycle(master, state, effects, () => Date.now());
+    await runCycle(master, state, effects, () => Date.now());
+    assert.equal(asked.filter(sha => sha === commit('served-2')).length, 2);
+    assert.equal(state.actions[`throughput:${commit('served-2')}`].state, 'waiting');
+    answer = async () => { throw new Error('plane refused work/x (502)'); };
+    await runCycle(master, state, effects, () => Date.now());
+    assert.equal(state.actions[`throughput:${commit('served-2')}`].state, 'failed');
+    assert.match(state.actions[`throughput:${commit('served-2')}`].detail, /could not be recorded .*502/);
+    answer = async () => ({ outcome: 'recorded', revision: commit('served-2'), detail: 'Recorded for served-2' });
+    for (let cycles = 0; cycles < 4 && state.actions[`throughput:${commit('served-2')}`].state !== 'done'; cycles++) await runCycle(master, state, effects, () => Date.now());
+    assert.equal(state.actions[`throughput:${commit('served-2')}`].state, 'done');
+    const count = asked.length;
+    await runCycle(master, state, effects, () => Date.now());
+    assert.equal(asked.length, count);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

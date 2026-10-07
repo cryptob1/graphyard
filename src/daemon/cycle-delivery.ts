@@ -153,6 +153,27 @@ export async function deploymentStep(cycle: Cycle) {
     }
   }
 
+  // 7a'''. GY-1385: GY-87's throughput claim is measured, not asserted. After a verified deployment
+  //        the loop records one measurement for the release the control plane serves, at most once
+  //        per release, with its own coordinator credential, reading only the window's deliveries
+  //        whole; master status reads it back as verified or with its shortfall. One per observed
+  //        release: `waiting` is asked again each cycle until the plane serves it, a failure backs off.
+  const verified = state.deployment, measure = effects.measureThroughput;
+  if (measure && verified && verified.source !== 'unavailable' && verified.sha) {
+    const key = `throughput:${verified.sha}`, previous = state.actions[key];
+    if (readyToRetry(previous, state.cycle)) {
+      const measured = await withinDeploymentBudget(state, 'throughput', () => measure(snapshot.work, verified.sha!), deadline, now);
+      if (measured === stillVerifying) deferred.push('the throughput measurement');
+      else {
+        const outcome = measured.ok ? measured.value : null;
+        const detail = outcome ? outcome.detail : `GY-87's throughput measurement could not be recorded for ${verified.sha.slice(0, 12)}: ${message((measured as { error: unknown }).error)}`;
+        const entryState = !outcome ? 'failed' : outcome.outcome === 'waiting' ? 'waiting' : 'done';
+        if (entryState !== 'waiting' || detailChanged(previous, detail)) performed.push(await record(state, key, { kind: 'deployment', work: null, principal: null, state: entryState, detail,
+          attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+      }
+    }
+  }
+
   // 7b. The second confidence layer. For each delivery whose policy asks for a smoke proof: record
   //     the observation on Graphyard once the release serves its merge, ask the provider to run the
   //     trusted smoke workflow against exactly that commit, and escalate a failed verdict with

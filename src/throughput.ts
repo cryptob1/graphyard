@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { agentOwner, type AttentionItem } from './master.js';
 import { actionIdleMs, actionRetryDelay, type ActionRecord, type ActionRow } from './model/actions.js';
@@ -297,6 +297,15 @@ export function deliveryRecord(work: Work, now: number): DeliveryRecord {
   };
 }
 
+/** The delivered items whose accepted merge falls in `[since, until)`: everything a window holds, and nothing else. */
+export function windowDeliveries(work: Work[], since: string | null, until?: string | null): Work[] {
+  const from = time(since), to = time(until ?? null);
+  return work.filter(item => {
+    const mergedAt = time(acceptedMergeAt(item));
+    return mergedAt !== null && (from === null || mergedAt >= from) && (to === null || mergedAt < to);
+  });
+}
+
 /** The population rule in one sentence, carried in every report so the reader judges the rule, not the number. */
 export const populationRule = 'A delivery is counted when it is a merged pull request of this repository with a recorded submission, at most one rework round, at least one action an executor claimed and completed, and no trace of a coordinator on it: no action superseded before an executor ran it, no coordination session recorded, no blocked report and no requirements revision while it was under way. Every delivery the window holds is listed either way, with its own figures and, when it is excluded, the reason.';
 
@@ -308,12 +317,7 @@ export const populationRule = 'A delivery is counted when it is a merged pull re
 export function verifyThroughput(work: Work[], now: number, options: { deployed: DeployedRelease; since?: string | null; until?: string | null; claimKey?: string }): ThroughputReport {
   const claimKey = options.claimKey ?? throughputClaim.item;
   const window = claimWindow(work.find(item => item.key === claimKey), options.since);
-  const since = time(window.since), until = time(options.until ?? null);
-  const delivered = work.filter(item => item.stage === 'done' && item.delivery);
-  const inWindow = delivered.filter(item => {
-    const mergedAt = time(acceptedMergeAt(item));
-    return mergedAt !== null && (since === null || mergedAt >= since) && (until === null || mergedAt < until);
-  });
+  const inWindow = windowDeliveries(work, window.since, options.until);
   const records = inWindow.map(item => deliveryRecord(item, now)).sort((a, b) => Date.parse(a.mergedAt) - Date.parse(b.mergedAt));
   // "Real" is judged before the coordinator rule, so the population line separates a fixture from
   // a delivery a master drove; both are excluded, and they are not the same fact.
@@ -419,12 +423,97 @@ export function renderThroughput(report: ThroughputReport): string {
 
 /**
  * Where the post-deploy throughput measurement records what it measured, and the command that
- * takes it. The measurement is a separate run — it reads the deployed release's own identity and
- * its whole ledger — so `master status` reports the last recorded one rather than re-measuring on
- * every status read.
+ * takes it by hand. The loop takes it itself once per release after it verifies a deployment
+ * (`loopThroughputMeasurement`), so `master status` reports the last recorded one rather than
+ * re-measuring on every status read.
  */
 export const throughputMeasurementDirectory = '.graphyard/measurements/throughput';
 export const throughputMeasurementCommand = `GRAPHYARD_URL=… GRAPHYARD_TOKEN_FILE=… node scripts/measure-throughput.mjs --record ${throughputMeasurementDirectory}`;
+
+/** How many whole delivery documents the bounded measurement reads at once. */
+export const throughputReadConcurrency = 4;
+
+/**
+ * The bounded measurement (GY-1385). The window is chosen from documents the reader already holds —
+ * the loop's coordination snapshot, or the default snapshot, both of which carry each settled
+ * delivery's summary (key, stage, delivery) — and only the deliveries inside it are then read
+ * whole, one `GET /api/work/:id` each, for the action rows and sessions the population rule judges.
+ * Nothing reads the full work snapshot of every item: the cost grows with the window, not the ledger.
+ * `read` names every item read whole, so a caller can see exactly what was asked.
+ */
+export async function measureThroughput(summaries: Work[], readItem: (id: string) => Promise<Work>, now: number,
+  options: { deployed: DeployedRelease; since?: string | null; until?: string | null; claimKey?: string }): Promise<{ report: ThroughputReport; read: string[] }> {
+  const claimKey = options.claimKey ?? throughputClaim.item;
+  const claim = summaries.find(item => item.key === claimKey);
+  const window = claimWindow(claim, options.since);
+  // No established window means no release of the claim to measure: nothing is read.
+  const wanted = window.since === null && window.basis === 'unknown' ? [] : windowDeliveries(summaries, window.since, options.until);
+  const whole = new Map<string, Work>(), queue = [...wanted];
+  await Promise.all(Array.from({ length: Math.min(throughputReadConcurrency, queue.length) }, async () => {
+    for (let next = queue.shift(); next; next = queue.shift()) whole.set(next.id, await readItem(next.id));
+  }));
+  const work = [...(claim && !whole.has(claim.id) ? [claim] : []), ...wanted.map(item => whole.get(item.id)!)];
+  return { report: verifyThroughput(work, now, { ...options, claimKey }), read: wanted.map(item => item.id) };
+}
+
+/** Writes one report as a timestamped JSON file under `directory`, returning the path relative to `root`. */
+export async function recordThroughputMeasurement(root: string, report: ThroughputReport, directory = throughputMeasurementDirectory): Promise<string> {
+  await mkdir(join(root, directory), { recursive: true });
+  const file = join(directory, `${report.measuredAt.replace(/[:.]/g, '-')}.json`);
+  await writeFile(join(root, file), JSON.stringify(report, null, 2) + '\n');
+  return file;
+}
+
+export interface LoopThroughputOutcome {
+  /** `recorded`: measured now; `current`: the serving release is already measured; `waiting`: the plane does not serve the observed release yet; `skipped`: nothing to measure. */
+  outcome: 'recorded' | 'current' | 'waiting' | 'skipped';
+  revision: string | null;
+  detail: string;
+  file?: string;
+  report?: ThroughputReport;
+  /** The ids read whole for the measurement. */
+  read?: string[];
+}
+
+/**
+ * The loop's own post-deploy measurement (GY-1385), taken after it verifies a deployment of
+ * `observedSha`: at most one per release the control plane reports serving, read with the loop's
+ * coordinator credential. The release identity comes from the plane's own status, never from this
+ * checkout; whether it contains the claim's merge is asked of git (`contains`). A release already
+ * measured is not measured again; one the plane does not serve yet is waited for, so the
+ * measurement is of the release the deployment verified.
+ */
+export async function loopThroughputMeasurement(root: string, input: {
+  work: Work[]; observedSha: string; now: () => number; origin: string;
+  status: () => Promise<Parameters<typeof deployedRevision>[0] & { now?: string; release?: { version?: string | null } | null }>;
+  readItem: (id: string) => Promise<Work>;
+  contains: (ancestor: string, descendant: string) => Promise<boolean | null>;
+}): Promise<LoopThroughputOutcome> {
+  const claim = input.work.find(item => item.key === throughputClaim.item);
+  if (!claim || claim.stage !== 'done' || !claim.delivery) return { outcome: 'skipped', revision: null, detail: `${throughputClaim.item} is not delivered here, so there is no throughput claim to measure` };
+  const status = await input.status();
+  const { revision, source } = deployedRevision(status);
+  if (!revision || revision === 'unknown') return { outcome: 'skipped', revision: null, detail: `The control plane reports no build revision, so ${throughputClaim.item}'s throughput cannot be measured against the release serving` };
+  const previous = await readThroughputMeasurement(root).catch(() => null);
+  if (previous?.report.deployed?.revision === revision) return revision === input.observedSha
+    ? { outcome: 'current', revision, detail: `${throughputClaim.item}'s throughput is already measured for ${revision.slice(0, 12)} (${previous.report.verdict}, ${previous.file})`, file: previous.file }
+    : { outcome: 'waiting', revision, detail: `The control plane still serves ${revision.slice(0, 12)}, already measured; ${input.observedSha.slice(0, 12)} is measured once it serves` };
+  const mergeSha = claim.delivery.mergeSha;
+  let containsClaim: boolean | null = null, reason: string | null = null;
+  if (!mergeSha) reason = `${throughputClaim.item} records no merge commit to compare the deployed revision against`;
+  else {
+    containsClaim = mergeSha.toLowerCase() === revision.toLowerCase() ? true : await input.contains(mergeSha, revision);
+    if (containsClaim === false) reason = `${mergeSha.slice(0, 12)} is not an ancestor of the deployed ${revision.slice(0, 12)}`;
+    else if (containsClaim === null) reason = `git could not compare ${mergeSha.slice(0, 12)} with the deployed ${revision.slice(0, 12)} from the loop's checkout`;
+  }
+  const now = input.now();
+  const deployed: DeployedRelease = { revision, revisionSource: source, version: status?.release?.version ?? null, origin: input.origin,
+    observedAt: status?.now ?? new Date(now).toISOString(), containsClaim, reason };
+  const { report, read } = await measureThroughput(input.work, input.readItem, now, { deployed });
+  const file = await recordThroughputMeasurement(root, report);
+  return { outcome: 'recorded', revision, file, report, read,
+    detail: `Recorded ${throughputClaim.item}'s throughput measurement for ${revision.slice(0, 12)} in ${file}, reading ${read.length} deliveries whole: ${report.verdict}: ${report.reason}` };
+}
 
 /** The newest recorded measurement, with the file it came from; null when none was ever taken. */
 export async function readThroughputMeasurement(root: string, directory = throughputMeasurementDirectory): Promise<{ report: ThroughputReport; file: string } | null> {
@@ -469,7 +558,7 @@ export function throughputClaimVisibility(measurement: { report: ThroughputRepor
       idleMaxMs: measurement.report.idle?.maxMs ?? null, file: measurement.file } : null };
   const unverified = (reason: string, shortfall: ThroughputReport['shortfall'] = null): ThroughputVisibility => ({ ...base, verdict: 'unverified', reason, shortfall,
     attention: deliveries ? { subject: 'throughput', text: `${throughputClaim.item}'s throughput claim is unverified against the deployed release: ${reason}`, ...agentOwner('master', command) } : null });
-  if (!measurement) return unverified(`no post-deploy measurement has ever been recorded under ${throughputMeasurementDirectory}, so the claim (${throughputClaim.statement}) is delivered but unproven`);
+  if (!measurement) return unverified(`no post-deploy measurement has ever been recorded under ${throughputMeasurementDirectory}, so the claim (${throughputClaim.statement}) is delivered but unproven; the loop records one after it next verifies a deployment`);
   const measured = measurement.report.deployed?.revision ?? null;
   if (!deployed.revision || deployed.revision === 'unknown') return unverified(`the control plane reports no build revision, so the last measurement (of ${measured ?? 'an unnamed release'} at ${measurement.report.measuredAt}) cannot be matched to what is serving`, measurement.report.shortfall ?? null);
   if (measured !== deployed.revision) return unverified(`the last measurement was taken against ${measured ?? 'an unnamed release'} at ${measurement.report.measuredAt}; the release now serving is ${deployed.revision.slice(0, 12)}`, measurement.report.shortfall ?? null);
