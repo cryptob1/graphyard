@@ -54,7 +54,9 @@ test('App manifest refuses unsafe deployment URLs and requests the declared cont
 test('reviewer App manifest registers an independent identity without control-plane authority', async () => {
   for (const url of ['http://example.com', 'https://user:password@example.com', 'https://example.com/private']) assert.throws(() => reviewerAppManifest('claude', 'owner/repo', url, 'http://127.0.0.1:4311'));
   assert.throws(() => reviewerAppManifest('Claude Reviewer', 'owner/repo', 'https://example.com', 'http://127.0.0.1:4311'), /lowercase identifier/);
-  assert.throws(() => reviewerAppManifest('claude-cloud-reviewer', 'owner/long-repository-name', 'https://example.com', 'http://127.0.0.1:4311'), /34 characters/);
+  // A long OWNER/REPO falls back to a shorter name; only a reviewer no fallback fits is refused (GY-1476).
+  assert.equal(reviewerAppManifest('claude-cloud-reviewer', 'owner/long-repository-name', 'https://example.com', 'http://127.0.0.1:4311').name, 'long review claude-cloud-reviewer');
+  assert.throws(() => reviewerAppManifest('a-reviewer-name-of-thirty-chars', 'owner/repo', 'https://example.com', 'http://127.0.0.1:4311'), /34 characters/);
   const manifest = reviewerAppManifest('claude', 'owner/repo', 'https://example.com', 'http://127.0.0.1:4311');
   assert.equal(manifest.name, 'owner-repo review claude'); assert.equal(manifest.public, false);
   assert.equal(manifest.default_permissions.contents, 'read'); assert.equal(manifest.default_permissions.pull_requests, 'write');

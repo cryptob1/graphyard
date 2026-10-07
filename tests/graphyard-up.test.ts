@@ -291,14 +291,15 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
   assert.equal(deviceResult.handoffs.length, 1, 'exactly one handed-off step');
   assert.deepEqual(deviceResult.handoffs[0], { step: 'control-plane', sentence: 'Approve the GitHub Mobile prompt on your phone and choose 42', url: 'https://github.com/sessions/sudo', code: '42' });
 
-  // No browser profile: agent mode stops before anything runs rather than hand App creation to a person.
+  // No browser profile: agent mode stops before anything but the read-only plan runs rather than hand
+  // App creation to a person; the plan says whether an App saved on this machine covers it (GY-1476).
   const bareRoot = await temporaryDirectory('graphyard-up-agent-bare');
   const bare = world();
   const refusedAgent = await runUp(request({ agent: true }), dependencies(bare, bareRoot, []));
   assert.equal(refusedAgent.exitCode, 2);
   assert.match(refusedAgent.next, /--browser-profile PROFILE/);
   assert.deepEqual(refusedAgent.handoffs, [], 'App creation is never handed to a person');
-  assert.deepEqual(bare.calls, [], 'nothing ran');
+  assert.deepEqual(bare.calls.map(args => args.slice(0, 1).concat(args.filter(arg => arg === '--plan' || arg === '--apply'))), [['install', '--plan']], 'only the read-only plan ran');
   // --reuse-app lifts that stop only when the reused Apps cover every App the install would create in a
   // browser: up always registers a reviewer, so reusing the control-plane App alone still stops (GY-1442).
   const partial = world({ browserApps: ['reviewer'] });
