@@ -306,7 +306,13 @@ test('integration:auto-rebase-conflict-guard — a conflicting base returns the 
   const status = buildMasterStatus(await store.workSnapshot(), [], []);
   const row = status.work.find(entry => entry.key === conflicting.key)!;
   assert.equal(row.attention, conflict);
-  assert.match(row.attentionOwner!.next, new RegExp(`graphyard master decide ${conflicting.key} rework`));
+  // A system-driven item's conflict rework is the loop's own round, which refuses a hand request (GY-1434):
+  // the owner names that step, never a master decide the CLI would refuse; a hand-driven item's is the master's.
+  assert.equal(conflicting.systemDriven, true);
+  assert.match(row.attentionOwner!.next, new RegExp(`the loop's decisions step requests ${conflicting.key}'s rework itself`));
+  assert.equal(row.attentionOwner!.approvedBy, null);
+  const handRow = buildMasterStatus({ ...(await store.workSnapshot()), work: [{ ...conflicting, systemDriven: false }] }, [], []).work[0];
+  assert.match(handRow.attentionOwner!.next, new RegExp(`graphyard master decide ${conflicting.key} rework`));
 
   // A clean merge whose base touched a reviewed file or a declared proof scope carries only what
   // it may: the rest is required afresh with the reason, exactly as a carry across a base refresh decides it.

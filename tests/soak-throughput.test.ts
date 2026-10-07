@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { loopThroughputMeasurement, openThroughputOwner, throughputMeasurementDirectory, throughputMeasurementRetention, throughputRemeasureMs, throughputStallBound } from '../src/throughput.js';
+import { throughputLedgerFile } from '../src/throughput-ledger.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -18,8 +19,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  *
  * - one whose deliveries are excluded for reasons no coordinator left (no submission is recorded),
  *   so the population may yet accumulate and nothing escalates: every re-measure is at least
- *   `throughputRemeasureMs` after the one before, there is at most one ask per cycle and one status
- *   read per ask, and the measurement directory, the loop's actions and the owner items stay
+ *   `throughputRemeasureMs` after the one before, the asks between them follow the failure backoff,
+ *   never one per cycle, with one status read per ask, and the measurement directory, the loop's actions and the owner items stay
  *   bounded however long the release serves;
  * - one whose every delivery carries a coordinator fingerprint (a blocked report), so past the bound
  *   the population cannot accumulate: the needs-decision is raised once on the one owner, and while
@@ -100,9 +101,11 @@ test('unit:soak-throughput-remeasure — over a simulated day of one unverified 
     for (let index = 1; index < recorded.length; index++) assert.ok(recorded[index].at - recorded[index - 1].at >= throughputRemeasureMs,
       `re-measures at least ${throughputRemeasureMs / minute} min apart: ${(recorded[index].at - recorded[index - 1].at) / minute} min before measurement ${index + 1}`);
     assert.ok(recorded.length <= day / throughputRemeasureMs + 1, `no more than one measurement per spacing: ${recorded.length}`);
-    assert.ok(asks.length <= 2 * recorded.length + 1, `asks are re-measures, never per cycle: ${asks.length} asks for ${recorded.length} measurements over ${state.cycle} cycles`);
+    // An unverified answer is asked again on the failure backoff, which doubles from one cycle to its 30-cycle cap.
+    for (let index = 2; index < asks.length; index++) assert.ok(asks[index].cycle - asks[index - 1].cycle >= 2, `asked on the backoff, never once per cycle: cycles ${asks[index - 1].cycle} and ${asks[index].cycle}`);
+    assert.ok(asks.length <= Math.ceil(state.cycle / 30) + 8, `at most one ask per backoff cap once it saturates: ${asks.length} asks for ${recorded.length} measurements over ${state.cycle} cycles`);
     assert.equal(counts.statusReads, asks.length, 'one status read per ask');
-    assert.ok((await readdir(join(root, throughputMeasurementDirectory))).length <= throughputMeasurementRetention, 'the measurement directory stays within its retention');
+    assert.ok((await readdir(join(root, throughputMeasurementDirectory))).filter(name => name !== throughputLedgerFile).length <= throughputMeasurementRetention, 'the measurement directory stays within its retention');
     assert.deepEqual(filed, ['GY-2'], 'one owner item for the unverified release, filed once');
     assert.deepEqual(closed, [], 'the owner stays open while the claim is unverified and no decision is asked of it');
     assert.deepEqual(day1.escalations(), [], 'a population that may yet accumulate is never escalated');
@@ -136,6 +139,6 @@ test('unit:soak-throughput-stall — over a simulated day whose every delivery c
     assert.equal(stalled.escalations().length, 1, 'escalations stay bounded: one per owner');
     assert.ok(stalled.throughputActions().length <= 3, `the loop's throughput records stay bounded: ${stalled.throughputActions().join(', ')}`);
     assert.equal(counts.statusReads, asks.length, 'one status read per ask');
-    assert.ok((await readdir(join(root, throughputMeasurementDirectory))).length <= throughputMeasurementRetention, 'the measurement directory stays within its retention');
+    assert.ok((await readdir(join(root, throughputMeasurementDirectory))).filter(name => name !== throughputLedgerFile).length <= throughputMeasurementRetention, 'the measurement directory stays within its retention');
   } finally { await rm(root, { recursive: true, force: true }); }
 });

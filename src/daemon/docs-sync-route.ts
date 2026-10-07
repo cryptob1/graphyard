@@ -8,6 +8,7 @@ import type { FaultKind } from '../model/fault-classes.js';
 import type { DaemonEffects } from './effects.js';
 import { conflictRoute, docsSyncWatchFor, docsSyncWatchKey, docsSyncWatchSchema, routedConflictRetention, routedConflictSchema, routedConflictWindowMs, type DocsSyncWatch } from '../model/docs-sync.js';
 import { docsSyncMaxMs, docsSyncSessionName, docsSyncStoppedMs, type DocsSyncPlan } from '../docs-sync.js';
+import { conflictReworkBoundMs, conflictReworkDue } from '../model/approval.js';
 
 /**
  * The decision step's docs-sync route. A confirmed conflict of the current head is classified once
@@ -23,7 +24,17 @@ import { docsSyncMaxMs, docsSyncSessionName, docsSyncStoppedMs, type DocsSyncPla
  * rework decision follows as before, as it does for every conflict that touches anything else. One
  * that stopped of its own accord took the route its instruction names, so it is no decision fault;
  * one that vanished or ran past its bound still is.
+ *
+ * On a system-driven item the rework is the loop's own round, due within conflictReworkBoundMs of
+ * the conflict first being recorded on the head (GY-1434). A docs-sync is launched only before its
+ * cutoff, docsSyncCutoffLeadMs ahead of that bound; one still running at the cutoff is stopped then,
+ * so nothing it does lands later, and gives the conflict up once an observation taken since — the
+ * step wakes one at once — shows the head unmoved. A push that landed before the cutoff is observed
+ * and adopted, never reworked, and the rework is requested inside the bound rather than after
+ * docsSyncMaxMs.
  */
+/** GY-1434: how far ahead of the loop-owned rework's bound a docs-sync is stopped, so the observation its give-up waits for lands inside the bound. */
+export const docsSyncCutoffLeadMs = 2 * 60_000;
 export function docsSyncRoute({ config, state, effects, snapshot, sessions, note, inventorySpent, stamp, clock }: {
   config: { baseBranch: string };
   state: DaemonState;
@@ -39,10 +50,14 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
   const markRework = (work: string, head: string, base: string) => {
     state.conflicts = state.conflicts.map(entry => entry.work === work && entry.head === head && entry.base === base ? { ...entry, route: 'rework' } : entry);
   };
-  /** Close a docs-sync session's tab, if Herdr still lists it, give its registry session back, and remove its role file (GY-1433). */
-  const settle = async (item: Work | undefined, watch: DocsSyncWatch, why: string) => {
+  /** Close a docs-sync session's tab, if Herdr still lists it. */
+  const stop = async (watch: DocsSyncWatch) => {
     const listed = watch.agentName ? (await sessions()).agents.find(agent => agent.name === watch.agentName) : undefined;
     if (listed?.pane_id) { try { await effects.closeSession(listed.pane_id); } catch { /* the session report closes it once the pane is gone */ } inventorySpent(); }
+  };
+  /** Close a docs-sync session's tab, if Herdr still lists it, give its registry session back, and remove its role file (GY-1433). */
+  const settle = async (item: Work | undefined, watch: DocsSyncWatch, why: string) => {
+    await stop(watch);
     if (watch.session && effects.endRegistrySession) { await effects.endRegistrySession(watch.session, why.slice(0, 500)).catch(() => undefined); watch.session = null; }
     await effects.docsSyncSettled?.({ key: watch.work, head: watch.head }).catch(() => undefined);
     await effects.persist(state);
@@ -56,14 +71,24 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
       if (watch.settledAt && clock - Date.parse(watch.settledAt) > routedConflictWindowMs) delete state.docsSyncs[key];
     }
   };
-  const holds = async (item: Work): Promise<boolean> => {
+  /**
+   * Whether a docs-sync holds the item's conflict. `observe` wakes the item's observation and returns
+   * the fresh reading, or null when none landed this cycle (the step then wakes the job for the next).
+   */
+  const holds = async (item: Work, observe?: (item: Work) => Promise<Work | null>): Promise<boolean> => {
     const refresh = item.baseRefresh!, head = refresh.from.sha, base = refresh.base;
     const found = docsSyncWatchFor(state.docsSyncs, item, head), key = found?.key ?? docsSyncWatchKey(item, head), watch = found?.watch;
+    // GY-1434: the loop-owned rework's bound, which no docs-sync may outlast; it is stopped a lead ahead of it.
+    const due = conflictReworkDue(item, clock), bounded = !!due && clock >= Date.parse(due.dueAt) - docsSyncCutoffLeadMs;
+    const boundReason = due ? `the conflict was first recorded on ${head.slice(0, 12)} at ${due.since}, and the loop requests its rework within ${conflictReworkBoundMs / 60_000} minutes of that (due at ${due.dueAt}), stopping a docs-sync ${docsSyncCutoffLeadMs / 60_000} minutes before` : '';
+    const observedSince = (work: Work, at: string) => !!work.observation && Date.parse(work.observation.at) > Date.parse(at);
     if (!watch) {
       if (state.conflicts.some(entry => entry.work === item.key && entry.head === head && entry.base === base)) return false;
       const local = await effects.conflictPaths?.(item, head, base).catch(() => null) ?? null;
       const paths = local?.length ? local : refresh.conflictPaths ?? null;
-      const routed = effects.docsSync ? conflictRoute(paths) : { route: 'rework' as const, reason: 'this loop has no docs-sync launcher' };
+      const routed = !effects.docsSync ? { route: 'rework' as const, reason: 'this loop has no docs-sync launcher' }
+        : bounded ? { route: 'rework' as const, reason: `${boundReason}, so no docs-sync session is launched this late` }
+        : conflictRoute(paths);
       state.conflicts = [...state.conflicts, routedConflictSchema.parse({ work: item.key, head, base, at: stamp, paths: (paths ?? []).slice(0, 200).map(path => path.slice(0, 500)), route: routed.route })].slice(-routedConflictRetention);
       await effects.persist(state);
       if (routed.route === 'rework') return false;
@@ -89,6 +114,22 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
       }
     }
     if (watch.failed) return false;
+    // At the cutoff the docs-sync is stopped first, so nothing it does lands after goneAt; only an
+    // observation taken since, still on the reviewed head, shows it gave the conflict up. One that
+    // pushed before the cutoff moved the head: its head is adopted and the sweep settles it.
+    if (bounded) {
+      if (!watch.goneAt) { watch.goneAt = stamp; await stop(watch); await effects.persist(state); }
+      let seen = item;
+      if (!observedSince(seen, watch.goneAt) && observe) seen = await observe(item) ?? item;
+      if (seen.candidate?.sha !== head || (seen.observation && seen.observation.candidate.sha !== head)) return true;
+      if (!observedSince(seen, watch.goneAt)) return true;
+      watch.failed = `docs-sync session ${watch.agentName ?? 'for it'} was stopped at ${watch.goneAt} without having moved ${head.slice(0, 12)}, as an observation at ${seen.observation!.at} shows: ${boundReason}`.slice(0, 1000);
+      watch.settledAt = stamp;
+      await settle(item, watch, watch.failed);
+      markRework(item.key, head, watch.base);
+      await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the conflict returns to a worker`);
+      return false;
+    }
     const seen = await sessions(), listed = watch.agentName ? seen.agents.find(agent => agent.name === watch.agentName) : undefined;
     const overdue = clock - Date.parse(watch.launchedAt) >= docsSyncMaxMs;
     // A runtime that stopped (idle or done) ended its turn: the session pushed, or aborted and stopped.

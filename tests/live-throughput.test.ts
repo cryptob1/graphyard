@@ -15,6 +15,7 @@ import { masterStatusReport } from '../src/cli/master-status.js';
 import { actionRetryDelay } from '../src/model/actions.js';
 import { emptyDaemonState, runCycle, writeDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { readThroughputLedger, throughputLedgerFile } from '../src/throughput-ledger.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error Dependency-free measurement script.
 import { claimContainment, main as measureMain, parseArguments } from '../scripts/measure-throughput.mjs';
@@ -340,8 +341,12 @@ test('integration:live-throughput-population — the population rule reads the r
     assert.equal(recorded.deployed.revision, deployedRevision, 'the measurement names the deployed commit it observed');
     assert.equal(recorded.deployed.origin, environment.GRAPHYARD_URL);
     assert.equal(recorded.population.admitted, 10, 'the live read counts every executor-driven delivery in the window');
-    const files = await readdir(directory);
+    const files = (await readdir(directory)).filter(name => name !== throughputLedgerFile);
     assert.equal(files.length, 1);
+    // The run is also in the ledger (GY-1437): its per-delivery list and the output it printed.
+    const [entry] = (await readThroughputLedger(directory)).entries;
+    assert.equal(entry.verdict, 'verified'); assert.equal(entry.deliveries.filter(delivery => delivery.admitted).length, 10);
+    assert.equal(entry.output, logged.join('\n'));
     assert.deepEqual((JSON.parse(await readFile(join(directory, files[0]), 'utf8')) as ThroughputReport).population, recorded.population);
     assert.match(logged.join('\n'), /throughput claim: VERIFIED/);
     assert.match(logged.join('\n'), /Excluded:/);
@@ -515,6 +520,8 @@ test('unit:throughput-bounded-read — the measurement chooses its window from s
 
 test('unit:throughput-recorded-by-loop — after a verified deployment the loop records one throughput measurement for the release now serving, at most once per release, with its coordinator credential, and master status reads it back', async () => {
   const root = await temporaryDirectory('throughput-loop');
+  // The measurement records, without the ledger beside them (GY-1437).
+  const records = async () => (await readdir(join(root, throughputMeasurementDirectory))).filter(name => name !== throughputLedgerFile);
   try {
     // GY-87 itself, delivered and observed serving, and the deliveries made since.
     const windowStart = '2100-01-01T00:00:00.000Z', at = (minutes: number) => new Date(Date.parse(windowStart) + minutes * minute).toISOString();
@@ -559,11 +566,11 @@ test('unit:throughput-recorded-by-loop — after a verified deployment the loop 
     if (visible.verdict === 'unverified') assert.ok(visible.shortfall, 'an unverified measurement names its shortfall');
     assert.doesNotMatch(visible.reason, /no post-deploy measurement has ever been recorded/);
 
-    // The same release is never measured twice.
+    // The same release is not measured again while its record is fresh (an unverified one is re-read hourly, GY-1437).
     read.length = 0;
     const again = await loopThroughputMeasurement(root, input(deployedRevision));
     assert.equal(again.outcome, 'current'); assert.deepEqual(read, []);
-    assert.equal((await readdir(join(root, throughputMeasurementDirectory))).length, 1);
+    assert.equal((await records()).length, 1);
     // A deployment the plane does not serve yet is waited for, not measured as the old release.
     const next = commit('next-release');
     assert.equal((await loopThroughputMeasurement(root, input(next))).outcome, 'waiting');
@@ -572,7 +579,7 @@ test('unit:throughput-recorded-by-loop — after a verified deployment the loop 
     revision = next;
     const moved = await loopThroughputMeasurement(root, input(next));
     assert.equal(moved.outcome, 'recorded'); assert.equal(moved.report!.deployed.revision, next);
-    assert.equal((await readdir(join(root, throughputMeasurementDirectory))).length, 2);
+    assert.equal((await records()).length, 2);
     // Ancestry git cannot answer stays unknown and keeps the claim unverified.
     revision = commit('third-release');
     const unknown = await loopThroughputMeasurement(root, { ...input(revision), contains: async () => null });
@@ -586,11 +593,11 @@ test('unit:throughput-recorded-by-loop — after a verified deployment the loop 
     const named = await loopThroughputMeasurement(root, { ...input(revision), work: (await store.list()).map(summary), claimKey: claimed.key });
     assert.equal(named.outcome, 'recorded'); assert.equal(named.report!.window.basis, 'deployment-observation');
     // The record stays bounded: past the retention the oldest files are retired and the newest still reads back.
-    const before = (await readdir(join(root, throughputMeasurementDirectory))).sort();
+    const before = (await records()).sort();
     assert.equal(before.length, 4);
     const newest = { ...named.report!, measuredAt: new Date(Date.now() + 60_000).toISOString() };
     const kept = await recordThroughputMeasurement(root, newest, undefined, 2);
-    const after = (await readdir(join(root, throughputMeasurementDirectory))).sort();
+    const after = (await records()).sort();
     assert.deepEqual(after, [before[3], kept.split('/').pop()], 'the two newest files remain');
     assert.equal((await readThroughputMeasurement(root))!.report.measuredAt, newest.measuredAt);
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -708,7 +715,7 @@ test('unit:throughput-same-millisecond-records — measurements recorded in the 
     const foreign = ['delivery-causes.json', 'pipeline-speed.json', '0000-report.json', '9999-12-31T23-59-59-999Z.backup.json'];
     for (const name of foreign) await writeFile(join(directory, name), JSON.stringify({ reason: `foreign ${name}` }));
     await recordThroughputMeasurement(root, report('2026-10-07T04:40:49.000Z', 200), undefined, 1);
-    assert.deepEqual((await readdir(directory)).sort(), [...foreign, '2026-10-07T04-40-49-000Z.json'].sort(), 'only the recorder\'s own files are retired');
+    assert.deepEqual((await readdir(directory)).sort(), [...foreign, throughputLedgerFile, '2026-10-07T04-40-49-000Z.json'].sort(), 'only the recorder\'s own files are retired, and the by-hand runs\' ledger stays');
     assert.equal((await readThroughputMeasurement(root))!.report.reason, 'record 200');
     // Past retention in one millisecond, a later record still takes a suffix above every one recorded,
     // so it orders newest and survives instead of reusing the retired unsuffixed name.
@@ -776,11 +783,11 @@ test('integration:throughput-remeasure-unverified — while the serving release\
     const first = await loopThroughputMeasurement(root, input());
     assert.equal(first.outcome, 'recorded'); assert.equal(first.verdict, 'unverified');
     assert.equal(first.report!.population.admitted, 2);
-    // Nothing merged since: the record stands.
+    // Inside the spacing the record stands.
     clock += 45 * minute;
     const unchanged = await loopThroughputMeasurement(root, input());
     assert.equal(unchanged.outcome, 'current'); assert.equal(unchanged.verdict, 'unverified');
-    assert.match(unchanged.detail, /measured again once a delivery merges after it/);
+    assert.match(unchanged.detail, /measured again from .* as deliveries accumulate/);
     // A delivery merges after the measurement: within the spacing it waits, past it the same revision is measured again.
     items.push(await mergedAt(await executorDelivery('Merged after the measurement', 10 * minute), at(70)));
     clock = Date.parse(at(60)) + throughputRemeasureMs - minute;
@@ -791,58 +798,42 @@ test('integration:throughput-remeasure-unverified — while the serving release\
     assert.equal(again.report!.deployed.revision, deployedRevision, 'the same revision, measured again');
     assert.equal(again.report!.population.admitted, 3, 'the delivery that merged since is counted');
     assert.match(again.detail, new RegExp(`^Re-measured ${claimItem.key}'s throughput measurement for ${deployedRevision.slice(0, 12)}`));
-    assert.equal((await readdir(join(root, throughputMeasurementDirectory))).length, 2);
+    assert.equal((await readdir(join(root, throughputMeasurementDirectory))).filter(name => name !== throughputLedgerFile).length, 2);
     assert.equal((await throughputStatus(root, { release: { version: '0.9.1', revision: deployedRevision } }, items)).measurement!.admitted, 3, 'master status reads the newer measurement');
     // A verified measurement is final for its release, whatever merges after it.
-    assert.equal(throughputRemeasureDue({ verdict: 'verified', measuredAt: at(60) }, items, clock), false);
+    assert.equal(throughputRemeasureDue({ verdict: 'verified', measuredAt: at(60) }, clock), false);
   } finally { await rm(root, { recursive: true, force: true }); }
 
-  // The loop's step re-asks an unverified answer once a delivery merged after it and the spacing passed — never every cycle.
+  // The loop's step keeps an unverified answer unsettled: it is asked again on the failure backoff —
+  // one ask per backoff step, never once per cycle — and a verified answer is final.
   const directory = await temporaryDirectory('throughput-remeasure-cycle');
   try {
     const { master, state } = await throughputCycle(directory);
     const sha = commit('remeasure-served'), key = `throughput:${sha}`;
-    let delivered = [(await store.list()).find(item => item.stage === 'done')!];
+    const delivered = [(await store.list()).find(item => item.stage === 'done')!];
     const asked: number[] = [];
     let verdict: 'verified' | 'unverified' = 'unverified';
     const effects = cycleEffects(() => delivered, sha, async () => { asked.push(state.cycle); return { outcome: 'recorded', revision: sha, verdict, detail: `Recorded for ${sha.slice(0, 12)}: ${verdict}: the claim` }; });
-    await runCycle(master, state, effects, () => Date.now());
-    assert.equal(asked.length, 1); assert.equal(state.actions[key].state, 'done');
-    await runCycle(master, state, effects, () => Date.now());
-    assert.equal(asked.length, 1, 'no delivery merged since: not asked again');
-    // The answer is older than the spacing, but nothing merged after it: still not asked.
-    const answered = new Date(Date.now() - throughputRemeasureMs - minute).toISOString();
-    state.actions[key].at = answered;
-    await runCycle(master, state, effects, () => Date.now());
-    assert.equal(asked.length, 1);
-    // A delivery merged after the answer: asked once, and the fresh answer restarts the spacing.
-    state.actions[key].at = answered;
-    const since = new Date(Date.now() - minute).toISOString();
-    delivered = [...delivered, { ...delivered[0], id: 'merged-since', key: 'GY-9999', delivery: { ...delivered[0].delivery!, mergedAt: since, mergedAtRepository: since } }];
-    await runCycle(master, state, effects, () => Date.now());
-    await runCycle(master, state, effects, () => Date.now());
-    assert.equal(asked.length, 2, 'asked once for the deliveries merged since, not on every cycle');
-    // Once verified, the release is never asked again.
+    for (let cycle = 0; cycle < 8; cycle++) await runCycle(master, state, effects, () => Date.now());
+    assert.equal(state.actions[key].state, 'waiting', 'an unverified answer is not settled');
+    assert.ok(asked.length >= 3 && asked.length <= 5, `eight cycles cost ${asked.length} asks on the backoff`);
+    for (let index = 2; index < asked.length; index++) assert.ok(asked[index] - asked[index - 1] >= 2, `never once per cycle: ${asked.join(', ')}`);
     verdict = 'verified';
-    state.actions[key].at = answered;
-    await runCycle(master, state, effects, () => Date.now());
-    assert.equal(asked.length, 3); assert.match(state.actions[key].detail, /: verified:/);
-    state.actions[key].at = answered;
-    await runCycle(master, state, effects, () => Date.now());
-    assert.equal(asked.length, 3, 'a verified answer is final');
+    for (let cycle = 0; cycle < 40 && String(state.actions[key].state) !== 'done'; cycle++) await runCycle(master, state, effects, () => Date.now());
+    assert.equal(state.actions[key].state, 'done'); assert.match(state.actions[key].detail, /: verified:/);
+    const count = asked.length;
+    for (let cycle = 0; cycle < 3; cycle++) await runCycle(master, state, effects, () => Date.now());
+    assert.equal(asked.length, count, 'a verified answer is final');
   } finally { await rm(directory, { recursive: true, force: true }); }
 
-  // The answer is written when the step ends, after the measurement read its window: a delivery that
-  // merged inside that slack (the step's budget) is compared too, so it is never missed; one merged
-  // before the slack is not new. Merges are read at the repository's merge instant.
-  const { throughputRemeasureAsk } = await import('../src/daemon/cycle-delivery.js');
-  const template = (await store.list()).find(item => item.stage === 'done')!, slack = 60_000, answeredAt = Date.now() - throughputRemeasureMs - minute;
-  const answer = { kind: 'deployment' as const, work: null, principal: null, state: 'done' as const, detail: 'Recorded: unverified: short', attempts: 1, epoch: null, cycle: 1, at: new Date(answeredAt).toISOString() };
-  const mergedAtRepository = (offset: number) => [{ ...template, delivery: { ...template.delivery!, mergedAt: new Date(answeredAt + 10 * minute).toISOString(), mergedAtRepository: new Date(answeredAt + offset).toISOString() } }];
-  assert.equal(throughputRemeasureAsk(answer, mergedAtRepository(-slack / 2), Date.now(), slack), true, 'merged inside the slack: asked');
-  assert.equal(throughputRemeasureAsk(answer, mergedAtRepository(-2 * slack), Date.now(), slack), false, 'merged before the slack, whatever the mirrored mergedAt says: not new');
-  assert.equal(throughputRemeasureAsk({ ...answer, detail: 'Recorded: verified: holds' }, mergedAtRepository(minute), Date.now(), slack), false, 'a verified answer is final');
-  assert.equal(throughputRemeasureAsk({ ...answer, detail: 'GY-87 is not delivered here, so there is no throughput claim to measure' }, mergedAtRepository(minute), Date.now(), slack), false, 'an answer naming no verdict is not re-asked');
+  // The owner step reads the verdict an answer names, and nothing from a wait on the plane.
+  const { answeredVerdict } = await import('../src/daemon/cycle-delivery.js');
+  const answer = (state: 'done' | 'waiting' | 'failed', detail: string) => ({ kind: 'deployment' as const, work: null, principal: null, state, detail, attempts: 1, epoch: null, cycle: 1, at: new Date().toISOString() });
+  assert.equal(answeredVerdict(answer('waiting', 'Recorded GY-87\'s throughput measurement for abc in f.json, reading 3 deliveries whole: unverified: short')), 'unverified');
+  assert.equal(answeredVerdict(answer('waiting', 'GY-87\'s throughput is already measured for abc (unverified, f.json); measured again from x as deliveries accumulate')), 'unverified');
+  assert.equal(answeredVerdict(answer('done', 'Re-measured GY-87\'s throughput measurement for abc in f.json, reading 3 deliveries whole: verified: holds')), 'verified');
+  assert.equal(answeredVerdict(answer('waiting', 'The control plane serves abc, not yet measured while the verified deployment is def; def is measured once it serves')), null, 'a wait on the plane names no verdict');
+  assert.equal(answeredVerdict(answer('failed', 'could not be recorded: unverified: x')), null);
 });
 
 test('integration:throughput-attention-retires — once a recorded measurement of the serving release verifies the claim, the throughput attention retires and master status reports the claim verified against that revision', async () => {
@@ -1058,14 +1049,12 @@ test('integration:throughput-owner-item — the loop files one open owner item f
     assert.equal(owners.filed.length, 1, 'never filed again while it is open');
     assert.equal(owners.closed.length, 0, 'open while the claim is unverified');
     // master status names it with its progress.
-    const visible = throughputClaimVisibility(null, { revision: sha, version: '0.9.1' }, 3, owner);
+    const visible = throughputClaimVisibility(null, { revision: sha, version: '0.9.1' }, 3, null, owner);
     assert.equal(visible.owner.item, owner.key);
     assert.match(visible.attention!.text, new RegExp(`${owner.key} owns the verification: 0 admitted of 10, nothing measured yet`));
     // A re-measure verifies the claim: the loop closes the owner.
     verdict = 'verified';
-    state.actions[key].at = new Date(Date.now() - 31 * minute).toISOString();
-    work.push({ ...template, id: randomUUID(), key: 'GY-7299', delivery: { ...template.delivery!, mergedAt: new Date(Date.now() - minute).toISOString(), mergedAtRepository: new Date(Date.now() - minute).toISOString() } });
-    await runCycle(master, state, effects, () => Date.now());
+    for (let cycle = 0; cycle < 40 && state.actions[key].state !== 'done'; cycle++) await runCycle(master, state, effects, () => Date.now());
     assert.match(state.actions[key].detail, /: verified:/);
     assert.deepEqual(owners.closed.map(entry => entry.key), [owner.key]);
     assert.match(owners.closed[0].reason, new RegExp(`verified on the serving release ${sha}`));

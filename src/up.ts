@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { goalWorkItem, setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
+import { goalSubmission, setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
 import { actionsDirectory, agentBrowserPage, passSudo, recordingPage, type BrowserPage, type RecordedStep } from './master-browser.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
 
@@ -342,13 +342,14 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     }
     if (request.goalFile) {
       await step('goal', async () => {
-        const item = goalWorkItem(await readFile(resolve(deps.root, request.goalFile!), 'utf8'));
+        // A goal record, as `graphyard goal FILE` submits it, so the acceptance and planner roles run (GY-1443).
+        const goal = goalSubmission(await readFile(resolve(deps.root, request.goalFile!), 'utf8'));
         const file = resolve(deps.root, '.graphyard/up-goal.json');
-        await writeFile(file, `${JSON.stringify(item, null, 2)}\n`, { mode: 0o600 });
+        await writeFile(file, `${JSON.stringify(goal, null, 2)}\n`, { mode: 0o600 });
         // The request id is saved before the first try: a rerun replays the same create, which the control plane answers once.
         if (!state.goalRequest) { state.goalRequest = randomUUID(); await writeState(deps.root, state); }
-        const created = parseJson(await run('goal', ['master', 'create', file, 'Goal submitted by graphyard up'], { env: { GRAPHYARD_REQUEST_ID: state.goalRequest } }));
-        state.goal = created?.key ?? created?.id ?? 'created';
+        const created = parseJson(await run('goal', ['goal', file], { env: { GRAPHYARD_REQUEST_ID: state.goalRequest } }));
+        state.goal = created?.key ?? 'created';
         return `submitted as ${state.goal}`;
       });
     }

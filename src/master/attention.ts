@@ -11,6 +11,7 @@ import type { FleetView } from '../model/registry.js';
 import { roleAtCapacity } from '../fleet.js';
 import { classified, type FaultClass, type FaultKind } from '../model/fault-classes.js';
 import { humanOnlyDecisions } from './harness.js';
+import { conflictReworkBoundMs, conflictReworkDue } from '../model/approval.js';
 
 /** The control-plane facts `GET /api/status` reports that are not about any one work item. */
 export interface ControlPlaneStatus {
@@ -60,14 +61,14 @@ export function installationOwner(source: typeof installationSources[number], te
 }
 /** Why a work item raises attention; each cause is also its fault kind. */
 export const workAttentionCauses = ['human-request', 'containment-settleable', 'containment-grace', 'containment', 'session', 'proof-gap', 'reviewer-exhausted', 'launch-review', 'launch-producer',
-  'base-conflict', 'merged-unauthorized', 'merged-reverted', 'hold-overdue', 'merge-base-dismissed', 'merge-refused', 'gate'] as const satisfies readonly FaultKind[];
+  'stalled-step', 'base-conflict', 'merged-unauthorized', 'merged-reverted', 'hold-overdue', 'merge-base-dismissed', 'merge-refused', 'gate'] as const satisfies readonly FaultKind[];
 export type WorkAttentionCause = typeof workAttentionCauses[number];
 /**
  * The owner of a work item's attention, from the same facts that raised it. Everything an agent
  * identity may run is routed to an agent: decisions a human used to make go to the master and
  * its independent approver through graphyard master decide.
  */
-export function workAttentionOwner(work: Work, cause: WorkAttentionCause): AttentionOwner {
+export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = Date.now()): AttentionOwner {
   const key = work.key;
   if (cause === 'merge-refused') return agentOwner('master', `Nothing to run by hand: the integration job asks GitHub again on every observation of ${key}; fix what GitHub names (branch protection, the App's pull request permission, a moved head) and the next observation clears it`);
   if (cause === 'merge-base-dismissed') return agentOwner('master', missingBaseAncestry(work)
@@ -96,6 +97,15 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause): Atten
   }
   // Graphyard absorbs a moved base itself; a conflict is the one case it cannot, so the candidate
   // goes back to a worker for a fresh attempt rather than waiting for a refresh that cannot land.
+  // On a system-driven item that rework is the loop's own round (GY-1389), which refuses a hand request:
+  // the owner names the loop's step and the bound it is due by, never a command the CLI refuses (GY-1434).
+  if (cause === 'stalled-step' || (cause === 'base-conflict' && work.systemDriven === true)) {
+    const due = conflictReworkDue(work, now);
+    const bound = due ? ` (due at ${due.dueAt}, ${conflictReworkBoundMs / 60_000} minutes after the conflict was first recorded at ${due.since})` : '';
+    return cause === 'stalled-step'
+      ? agentOwner('master', `Nothing to run by hand: a hand rework of ${key} is refused. Check the loop is cycling (master status names its liveness; systemctl --user restart graphyard-master.service restarts a stopped loop), and file the decisions-step defect that left its conflict rework unrequested${bound}`)
+      : agentOwner('control plane', `Nothing to run by hand: the loop's decisions step requests ${key}'s rework itself${bound}; past that bound master status names the step as stalled`);
+  }
   if (cause === 'base-conflict') return agentOwner('master', `graphyard master decide ${key} rework REASON, then graphyard master approver ${key} DECISION`, 'approver');
   if (cause === 'containment-settleable') return agentOwner('master', `graphyard master settle-containment ${key} REASON`);
   if (cause === 'containment-grace') return agentOwner('master', `Wait out the grace window, then graphyard master status verifies the host and graphyard master settle-containment ${key} REASON once settleable`);
