@@ -350,10 +350,7 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   doctor?: DoctorEffects;
   /** Clears an item's blocker as the operator-agent identity, bound to the revision the loop read (GY-711 remedy 2): only for a scope refusal plannedFiles already covers. */
   unblock?: (work: Work, reason: string) => Promise<Work>;
-  /**
-   * The diagnostician (GY-439) and the acceptance role (GY-1417): settings, primary and fallback runners, the excerpts read, and calls as
-   * the master's identities. Each is absent while `run.diagnostician.enabled` is false or the operator-agent or approver identity is missing.
-   */
+  /** The diagnostician (GY-439) and the acceptance role (GY-1417); each absent while `run.diagnostician.enabled` is false or either master identity is missing. */
   diagnostician?: DiagnosticianEffects;
   acceptance?: AcceptanceEffects;
   /** The recurrence rule; the environment's (GRAPHYARD_FAULT_CLASS_*) or the shipped default when absent. */
