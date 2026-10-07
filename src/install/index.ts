@@ -17,7 +17,7 @@ import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesA
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
 import { assertOutsideRepository, configHome, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord } from './secrets.js';
 import { AppStepPending, readAppFile, readSavedApp, type SavedApp } from './manifest.js';
-import { reuseExistingApp, savedRegistrations, type AppCredentials, type AppRole, type SavedRegistration } from '../github-setup.js';
+import { appRoles, importApp, listApps, reuseExistingApp, savedRegistrations, type AppCredentials, type AppRole, type SavedRegistration } from '../github-setup.js';
 import { herdrBoundElsewhere, herdrPluginBinding, herdrRebindRefusal } from '../repository-setup.js';
 import { localTransport, sshTransport, type Transport } from './transport.js';
 import { installIdFor, providers, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PlannedPrincipal, type PreflightItem, type Provider } from './types.js';
@@ -217,11 +217,47 @@ async function findSavedApp(root: string, directory: string, inputs: InstallInpu
   return { app: null, error: null };
 }
 
-/** The App registrations saved on this host: every install directory under the config home, then the checkout's. */
-async function hostRegistrations(root: string, override?: string) {
+/** The App registrations saved on this host: every install directory under the config home (`app import`'s too), then the checkout's. */
+export async function hostRegistrations(root: string, override?: string) {
   const home = configHome(override);
   const installs = await readdir(home, { withFileTypes: true }).then(entries => entries.filter(entry => entry.isDirectory()).map(entry => resolve(home, entry.name)).sort(), () => [] as string[]);
   return savedRegistrations([...installs, resolve(root, '.graphyard'), resolve(mainCheckout(root), '.graphyard')]);
+}
+export interface AppCommandDependencies {
+  root: string; configHome?: string; fetcher?: typeof fetch;
+  /** `gh` with the host's login: resolves stdout, rejects on a non-zero exit. */
+  gh?: (args: string[]) => Promise<string>;
+}
+/**
+ * `app import` and `app list` (GY-1451): reuse an App created elsewhere without GitHub sudo. The
+ * install the App joins is the repository's (`--repo`, else the checkout's origin); its own
+ * webhook, once installed, is the one a control-plane App may keep.
+ */
+export async function appCommand(args: string[], dependencies: AppCommandDependencies) {
+  const [action, ...rest] = args;
+  const { values } = parseArgs({ args: rest, options: { repo: { type: 'string' }, 'app-id': { type: 'string' }, 'key-file': { type: 'string' }, role: { type: 'string' } }, allowPositionals: false });
+  const repository = values.repo ?? (await discover(dependencies.root)).repository;
+  if (!repository) throw new Error('Use --repo OWNER/NAME, or run from a checkout whose origin is the managed repository');
+  const directory = installDirectory(installIdFor(repository), dependencies.configHome);
+  const record = await readInstallRecord(directory).catch(() => null);
+  const webhookUrl = record?.url ? webhookUrlFor(record.url) : null;
+  const fetcher = dependencies.fetcher ? { fetcher: dependencies.fetcher } : {};
+  if (action === 'import') {
+    if (!values['app-id'] || !values['key-file']) throw new Error('Use app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver]');
+    const role = (values.role ?? 'control-plane') as AppRole;
+    if (!appRoles.includes(role)) throw new Error(`--role takes ${appRoles.join(', ')}`);
+    return importApp({ appId: Number(values['app-id']), keyFile: values['key-file'], role, repository, directory, webhookUrl, ...fetcher });
+  }
+  if (action === 'list') {
+    if (values['app-id'] || values['key-file'] || values.role) throw new Error('app list takes only --repo');
+    const gh = dependencies.gh ?? (async (args: string[]) => {
+      const result = await githubCli(localTransport())(args, { allowFailure: true });
+      if (result.code !== 0) throw new Error(`gh ${args.slice(0, 3).join(' ')} failed: ${(result.stderr || result.stdout).trim().split('\n')[0] || `exit ${result.code}`}`);
+      return result.stdout;
+    });
+    return listApps({ repository, registrations: await hostRegistrations(dependencies.root, dependencies.configHome), webhookUrl, gh, ...fetcher });
+  }
+  throw new Error('Use app import --app-id ID --key-file PEM [--role ROLE], or app list');
 }
 /** The App --reuse-app names for ROLE, judged by the role its saved registration has. */
 const reusedFor = (session: Pick<InstallSession, 'inputs' | 'registrations'>, role: AppRole) =>
@@ -446,8 +482,14 @@ export function githubEnv(facts: AppFacts, ciAppIds: number[]): EnvValue[] {
  * registration. Without one the guard cannot revert unaided, and readiness says so.
  */
 export async function revertApproverEnv(session: Pick<InstallSession, 'reviewers' | 'directory'>): Promise<EnvValue[]> {
-  const reviewer = session.reviewers[0];
-  return reviewer ? revertApproverFromFile(appCredentialFile(session, reviewer.name)) : [];
+  const source = await revertApproverSource(session);
+  return source ? revertApproverFromFile(source) : [];
+}
+/** The registration the revert approver signs with: an App reused as the revert approver (GY-1451), else the first reviewer App. */
+async function revertApproverSource(session: Pick<InstallSession, 'reviewers' | 'directory'>) {
+  const reused = resolve(session.directory, REVERT_APPROVER_FILE);
+  if ((await readAppFile(reused))?.privateKey) return reused;
+  return session.reviewers[0] ? appCredentialFile(session, session.reviewers[0].name) : null;
 }
 
 /**
@@ -509,7 +551,7 @@ export async function derivedVariables(session: InstallSession): Promise<Derived
   return [
     ...(session.materialized ? derivedFrom(coreEnv(session), `the install plan's credentials under ${session.directory}`) : []),
     ...(saved ? derivedFrom(githubEnv(saved.facts, session.record?.github?.ciAppIds ?? []), `the control-plane App registration ${saved.file}`) : []),
-    ...derivedFrom(await revertApproverEnv(session), session.reviewers[0] ? `the reviewer App registration ${appCredentialFile(session, session.reviewers[0].name)}` : ''),
+    ...derivedFrom(await revertApproverEnv(session), `the revert approver App registration ${await revertApproverSource(session) ?? ''}`),
   ];
 }
 
@@ -762,7 +804,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   }
 
   const reviewerBound = !!record?.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer);
-  const browserApps: AppRole[] = [...(appConfigured || saved || reusedApp ? [] : ['control-plane' as const]), ...(session.inputs.reviewer && !reviewerBound && !reusedReviewer ? ['reviewer' as const] : [])];
+  const browserApps: Exclude<AppRole, 'revert-approver'>[] = [...(appConfigured || saved || reusedApp ? [] : ['control-plane' as const]), ...(session.inputs.reviewer && !reviewerBound && !reusedReviewer ? ['reviewer' as const] : [])];
   const plan: InstallPlan = {
     version: 1, repository: session.inputs.repository, provider: context.provider, installId: session.installId,
     installDirectory: session.directory, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy,
@@ -878,6 +920,8 @@ export async function applyInstall(session: InstallSession, plan: InstallPlan): 
  */
 const appCredentialFile = (session: Pick<InstallSession, 'directory'>, reviewer?: string) =>
   resolve(session.directory, reviewer ? `github-reviewer-${reviewer}.json` : 'github-app.json');
+/** Where an App reused as the revert approver (`--reuse-app` of a revert-approver registration) is saved as this install's own. */
+const REVERT_APPROVER_FILE = 'github-revert-approver.json';
 
 async function performInstall(session: InstallSession, plan: InstallPlan): Promise<InstallSummary> {
   const { adapter, context, deps, vault } = session;
@@ -930,6 +974,9 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
       session.reviewers = [...session.reviewers, { name: session.inputs.reviewer, appId: reviewerFacts.appId, botUserId: reviewerFacts.botUserId }];
       log(`Registered reviewer App ${session.inputs.reviewer} (app ${reviewerFacts.appId})`);
     }
+    // A revert approver reused by --reuse-app (GY-1451) replaces the reviewer App in that seat; it is never the control plane's.
+    const reusedApprover = reusedFor(session, 'revert-approver');
+    if (reusedApprover && (await adoptApp(session, reusedApprover, 'revert-approver', url)).appId === facts.appId) throw new Error('The revert approver App must be a different identity from the Graphyard control-plane App');
   } catch (error) {
     if (!(error instanceof AppStepPending)) throw error;
     const pending = await pausedSummary(session, plan, url, health, early, error);
@@ -1173,7 +1220,7 @@ async function resolveApp(session: InstallSession, url: string, record: InstallR
  */
 async function adoptApp(session: InstallSession, slug: string, role: AppRole, url: string): Promise<AppFacts & { slug: string; botUserId?: number }> {
   const reuse = await reuseApp(session, slug, role, role === 'control-plane' ? webhookUrlFor(url) : null, true);
-  const own = appCredentialFile(session, role === 'reviewer' ? session.inputs.reviewer : undefined);
+  const own = role === 'revert-approver' ? resolve(session.directory, REVERT_APPROVER_FILE) : appCredentialFile(session, role === 'reviewer' ? session.inputs.reviewer : undefined);
   await writeFile(own, JSON.stringify({ ...reuse.app, ...(role === 'reviewer' ? { reviewer: session.inputs.reviewer } : {}) }, null, 2), { mode: 0o600 }); await chmod(own, 0o600);
   session.deps.log(`Reusing the ${role} App ${reuse.app.slug} (app ${reuse.app.appId}) from ${reuse.file}: ${reuse.added ? `added ${session.inputs.repository} to its installation ${reuse.app.installationId}` : `its installation ${reuse.app.installationId} covers every repository on ${reuse.account}`}; no browser step`);
   return { appId: reuse.app.appId, slug: reuse.app.slug, installationId: reuse.app.installationId, privateKey: reuse.app.privateKey, webhookSecret: reuse.app.webhookSecret ?? '', ...(reuse.app.botUserId ? { botUserId: reuse.app.botUserId } : {}) };

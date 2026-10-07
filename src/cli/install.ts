@@ -6,7 +6,7 @@ import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
 import { appPageBusy, appPagePortFree, startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, readDocumentationConfig, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { protectionRun } from '../protection.js';
-import { applyInstall, buildPlan, InstallPaused, installRequestFromArgs, prepareInstall } from '../install/index.js';
+import { appCommand, applyInstall, buildPlan, InstallPaused, installRequestFromArgs, prepareInstall } from '../install/index.js';
 import { runManifestFlow } from '../install/manifest.js';
 import { delegationLimitAssignments } from '../install/limits.js';
 import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../install/ci-proofs.js';
@@ -280,6 +280,9 @@ export const installCommands = defineCommands([
         limits: ['CI discovery is a proposal, not executed-test inventory', 'Herdr two-host recovery and GitHub refusal-to-acceptance must be demonstrated', 'A ready checklist is configuration, never evidence: the first real PR must visibly pass every gate'] });
     },
   },
+  { name: 'app', help: ['  app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo R]', '  app list [--repo OWNER/NAME]  Import an App made elsewhere (key proven by an App JWT, saved 0600,',
+    '                                never printed) for --reuse-app without sudo; list reusable Apps per role'], readsConnection: () => false,
+    async run(context) { context.print(await appCommand([context.id, ...context.args].filter((value): value is string => value !== undefined), { root: context.repositoryRoot() })); } },
   {
     name: 'github-setup',
     help: [

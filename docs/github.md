@@ -28,6 +28,10 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 `master reviewer setup` creates it (Pull requests write; tokens last one hour); `SLUG[bot]` head approval satisfies both. Shortfalls (`appPermissions`; `github-setup --update-permissions` lists `Actions: write (failed CI reruns)`) hold jobs, **not retried** (`integration-held`), until `master browser app-permissions` or `master browser installation-accept`.
 
+## Reusing an App without sudo
+
+GitHub returns an App's private key once, so `--reuse-app SLUG` needs a key saved on this host. For an App created elsewhere, generate a key on its settings page, then `graphyard app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo OWNER/NAME]`: an App JWT proves the key; the App is saved `0600` as `imported-app-SLUG.json` in the install directory; the key is never printed. Refused: a control-plane App whose webhook serves another install. A reused `revert-approver` replaces the reviewer as revert approver. `graphyard app list` reads saved Apps by their own JWTs, plus organization installations via `gh` (never `/user/installations`), naming each App's reusable roles or why not.
+
 Refused workflow syncs: `sync GY-N --push-via-control-plane COMMIT` (`POST /api/work/:id/sync-push`) pushes COMMIT, fast-forwarding and merging `origin/BASE` (`sync.workflow-push`).
 
 ## Require the check

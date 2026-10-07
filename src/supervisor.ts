@@ -7,7 +7,7 @@ import { isAbsolute, join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { clearConsentHold, consentHoldSuffix, consentHoldVerdict, detectConsentPrompt, readConsentHolds, reclassifyConsentHold, writeConsentHold, type ConsentAnswer } from './consent-prompt.js';
 import { unknownWorkCode } from './model/refusal.js';
-import { legacyLoopUnit, readInstallUnits, resolveInstallUnits } from './install/units.js';
+import { installUnitsFile, legacyLoopUnit, proposedInstallUnits, readInstallUnits, resolveInstallUnits } from './install/units.js';
 
 interface Renewal { lease: { epoch: number; expiresAt: string } | null; updatedAt: string }
 
@@ -713,7 +713,7 @@ export function probeSupervisorAbsence(target: SupervisorProbeTarget, deps: Supe
  */
 export const loopUnitName = legacyLoopUnit;
 /** The loop unit the install at ROOT owns: its recorded name, or the legacy alias. */
-export const loopUnitOf = (root: string) => readInstallUnits(root).master;
+export const loopUnitOf = (root: string, unitDirectory?: string, home?: string) => readInstallUnits(root, unitDirectory, home).master;
 /** Long enough for the cycle's own bounded external calls to return before SIGKILL. */
 export const loopStopTimeoutSeconds = 120;
 export const loopRestartSeconds = 10;
@@ -994,7 +994,10 @@ function observeUnit(run: (command: string, args: string[]) => string, unit: str
 export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupervisorHost = {}, options: LoopSupervisorInstallOptions = {}): Promise<LoopSupervisorInstallation> {
   const support = supervisorSupport(host);
   const unitDirectory = loopUnitDirectory(host);
-  let loopUnit = input.unit ?? loopUnitOf(input.root);
+  const home = host.home ?? ((host.env ?? process.env).HOME?.trim() || homedir());
+  // Before the record is written, an unrecorded install beside another checkout's legacy unit names
+  // the units it is about to record, never that install's (GY-1452).
+  let loopUnit = input.unit ?? (existsSync(resolve(input.root, installUnitsFile)) ? loopUnitOf(input.root, unitDirectory, home) : proposedInstallUnits(input.root, input.repository, unitDirectory, home).master);
   let unitPath = join(unitDirectory, loopUnit);
   if (!support.supported) return { supported: false, unit: loopUnit, unitPath: null, installed: false, enabled: null, active: null, linger: null,
     wrote: 'none', refused: null, performed: [], reason: support.reason, instruction: unsupervisedInstruction(input) };
@@ -1016,7 +1019,6 @@ export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupe
   } catch (error) { if (error instanceof LoopSupervisorRefusal) return refused(error); throw error; }
   // The install's own name, decided once and recorded beside its configuration (GY-1441): a second
   // install on this host writes its own unit and never this one's.
-  const home = host.home ?? ((host.env ?? process.env).HOME?.trim() || homedir());
   if (!input.unit) { loopUnit = (await resolveInstallUnits(input.root, input.repository, unitDirectory, home)).master; unitPath = join(unitDirectory, loopUnit); }
   try { existing = await readFile(unitPath, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   // A unit that runs another loop — a different checkout or launcher — is somebody's installation,
@@ -1070,7 +1072,7 @@ export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupe
  * that is not installed is left to `master init`; one that already matches is not touched.
  */
 export async function alignLoopUnit(input: LoopUnitInput, host: LoopSupervisorHost = {}): Promise<{ wrote: LoopSupervisorInstallation['wrote']; reason: string | null; unitPath: string }> {
-  const unitPath = join(loopUnitDirectory(host), input.unit ?? loopUnitOf(input.root));
+  const unitPath = join(loopUnitDirectory(host), input.unit ?? loopUnitOf(input.root, loopUnitDirectory(host), host.home));
   let existing: string | null = null;
   try { existing = await readFile(unitPath, 'utf8'); } catch { existing = null; }
   if (existing === null) return { wrote: 'none', reason: `${unitPath} is not installed; graphyard master init installs it`, unitPath };
@@ -1082,7 +1084,7 @@ export async function alignLoopUnit(input: LoopUnitInput, host: LoopSupervisorHo
 /** The same facts, observed rather than installed: what `master status` reports about supervision. */
 export async function loopSupervision(input: Pick<LoopUnitInput, 'root' | 'cliPath'>, host: LoopSupervisorHost = {}): Promise<LoopSupervision> {
   const support = supervisorSupport(host);
-  const loopUnit = loopUnitOf(input.root);
+  const loopUnit = loopUnitOf(input.root, loopUnitDirectory(host), host.home);
   const unitPath = join(loopUnitDirectory(host), loopUnit);
   if (!support.supported) return { supported: false, unit: loopUnit, unitPath: null, installed: false, enabled: null, active: null, linger: null,
     reason: support.reason, instruction: unsupervisedInstruction(input), ...(support.unreachable ? { unreachable: true } : {}) };

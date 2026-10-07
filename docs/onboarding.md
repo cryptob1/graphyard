@@ -82,7 +82,7 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W/2⌉` review an
 
 `master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master-OWNER-NAME.service`, runs `systemctl --user enable --now`, `loginctl enable-linger` (restart on crash, reboot, hang); never a side effect (worker checkouts, temp directories refused). Move: `master init --token-stdin --replace-supervisor` from new checkout. `master status`: `setup.supervisor`.
 
-Installs share hosts: units named per repository (`graphyard-executor-OWNER-NAME@N.service` too, plus a short hash where names collide) in `.graphyard/units.json` (fails closed unreadable); a host whose `graphyard-master.service` runs this checkout keeps legacy names as recorded alias. Setup refuses, naming the checkout, to overwrite or restart another checkout's unit; the master harness restarts only its loop unit. Each install needs its own `--herdr-workspace`: sweeps (idle-pane close, reclaim, liveness, tab cleanup) act only on its panes.
+Installs share hosts: units named per repository (`graphyard-executor-OWNER-NAME@N.service` too, plus a short hash where names collide) in `.graphyard/units.json` (fails closed unreadable); a host whose `graphyard-master.service` runs this checkout keeps legacy names as recorded alias. With no record, a legacy unit running another checkout makes every unit-name read refuse, naming unit and checkout, until `master init` records this install's own. Setup refuses, naming the checkout, to overwrite or restart another checkout's unit; the master harness restarts only its loop unit. Each install needs its own `--herdr-workspace`: sweeps (idle-pane close, reclaim, liveness, tab cleanup) act only on its panes.
 
 ### The pipeline doctor (on by default)
 
