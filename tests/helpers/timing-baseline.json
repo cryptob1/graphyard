@@ -571,7 +571,6 @@
     "tests/session-reconcile.test.ts": 1396,
     "tests/setup-checks-consistent.test.ts": 1400,
     "tests/setup-guide-no-operator-token.test.ts": 300,
-    "tests/setup-self-provision.test.ts": 1100,
     "tests/shipping-pulse-coverage.test.ts": 2732,
     "tests/shipping-pulse.test.ts": 2390,
     "tests/snapshot-bounded-reads.test.ts": 5143,
