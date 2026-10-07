@@ -267,12 +267,18 @@ test('unit:sudo-code-entry — no screenshot is recorded while the code field ho
  * confirmation without a new handoff.
  *
  * unit:sudo-handoff-profile-mode — the handoff says whether the drive shares the live Chrome
- * session; the own-Chrome route only when it does, the code methods otherwise.
+ * session; the own-Chrome route only when it does, otherwise the code methods the page offers, or,
+ * when it offers none, what does reach a copy.
  *
  * unit:sudo-offers-import-route — the handoff and the local App setup page offer the App-import
- * route, and `up --no-wait` exits with it instead of waiting.
+ * route for both Apps as runnable commands, and `up --no-wait` exits with it instead of waiting.
  */
-const IMPORT_ROUTE = /create the App at github\.com\/settings\/apps\/new whenever convenient, then run `graphyard app import --app-id ID --key-file PEM` and `graphyard up --reuse-app SLUG`/;
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+const IMPORT_ROUTE = (up: string) => new RegExp(escapeRegExp('create the App at github.com/settings/apps/new whenever convenient, once for the control plane and once for the reviewer; '
+  + 'import each with `graphyard app import --app-id ID --key-file PEM --role control-plane --repo acme/shop` and `graphyard app import --app-id ID --key-file PEM --role reviewer --repo acme/shop`, '
+  + `then run \`graphyard up --reuse-app SLUG --reuse-app REVIEWER_SLUG --repo acme/shop${up}\``));
+/** The up command a route names, as up parses it: it must run as written, reusing both Apps. */
+const routeUp = (text: string) => text.match(/`graphyard up ([^`]+)`/)![1].split(' ');
 /** The local App page, then GitHub's Confirm access until the clock reaches GRANTAT, then the new-App form; no install link, so no repository ids are read. */
 function appDrivePage(clock: { t: number }, grantAt: number) {
   let view: 'local' | 'sudo' | 'form' | 'manifest' | 'done' = 'local';
@@ -332,7 +338,7 @@ test('unit:sudo-handoff-profile-mode — the handoff says whether the drive shar
   const { browserProfileMode, sudoInstruction } = await browser();
   assert.equal(browserProfileMode('Default'), 'copy', 'a profile named by its name is opened as a copy');
   assert.equal(browserProfileMode('/home/operator/.config/google-chrome'), 'shared', 'a profile directory named by its path is opened as itself');
-  const state = { code: null, method: 'passkey' as const, url: 'https://github.com/sessions/sudo', offered: ['passkey'] as SudoMethod[] };
+  const state = { code: null, method: 'passkey' as const, url: 'https://github.com/sessions/sudo', offered: ['passkey', 'authenticator', 'email'] as SudoMethod[] };
   const route = { page: LOCAL, command: 'graphyard up --sudo-code' };
   const shared = sudoInstruction(state, 'your phone', { ...route, profile: { mode: 'shared', name: '/home/operator/chrome' } }).split('\n');
   assert.equal(shared[0], 'The drive uses your live Chrome session (profile /home/operator/chrome), so a confirmation in your own Chrome reaches it');
@@ -342,6 +348,18 @@ test('unit:sudo-handoff-profile-mode — the handoff says whether the drive shar
   assert.ok(!copy.some(line => /in your own Chrome at/.test(line)), 'copy: confirming in your own Chrome is not offered');
   assert.ok(copy.includes(`For your authenticator app, enter its 6-digit code at ${LOCAL} or with graphyard up --sudo-code CODE`), 'copy: the authenticator code is offered');
   assert.ok(copy.some(line => line.startsWith('For an email code, ask for it')), 'copy: the email code is offered');
+
+  // Only the code methods the page offers are listed: passSudo can type nothing else.
+  const authenticatorOnly = sudoInstruction({ ...state, offered: ['passkey', 'authenticator'] }, 'your phone', { ...route, profile: { mode: 'copy', name: 'Default' } }).split('\n');
+  assert.ok(authenticatorOnly.some(line => line.startsWith('For your authenticator app')));
+  assert.ok(!authenticatorOnly.some(line => /email code, ask for it/.test(line)), 'an email code the page does not offer is not');
+  // A passkey-only page on a copy: no code reaches the drive, and the handoff says so and names what does.
+  const passkeyOnly = sudoInstruction({ ...state, offered: ['passkey'] }, 'your phone', { ...route, profile: { mode: 'copy', name: 'Default' } }).split('\n');
+  assert.equal(passkeyOnly[0], "The drive runs on a copy of your Chrome profile Default, not your live session, so a confirmation in your own Chrome does not reach it: none of the page's methods reaches the drive: pass --browser-profile a Chrome profile directory path to share your live session, or take the App-import route");
+  assert.ok(!passkeyOnly.some(line => /^For (your authenticator|an email code)/.test(line)), 'no code method is invented');
+  assert.ok(!passkeyOnly.some(line => /in your own Chrome at/.test(line)));
+  const withMobile = sudoInstruction({ ...state, offered: ['passkey', 'mobile'] }, 'your phone', { ...route, profile: { mode: 'copy', name: 'Default' } }).split('\n');
+  assert.match(withMobile[0], /none of the page's methods reaches the drive: rerun with --github-mobile to approve a GitHub Mobile prompt, /, 'Mobile is named when the page offers it');
 
   // The drive names its own profile's mode.
   const { recordedAppDriver } = await import('../src/up.js');
@@ -360,13 +378,21 @@ test('unit:sudo-offers-import-route — the handoff and the local setup page off
   const handed: string[] = [];
   const { drive } = recordedAppDriver(await temporaryDirectory('sudo-import-route'), await upRequest(), { profile: 'Default' }, () => appDrivePage(clock, 30_000), timing);
   assert.deepEqual(await drive(LOCAL, sentence => { handed.push(sentence); }), { state: 'done' });
-  assert.match(handed[0].split('\n').at(-1)!, IMPORT_ROUTE, 'the handoff ends with the route that needs no live moment');
+  const handedRoute = handed[0].split('\n').at(-1)!;
+  assert.match(handedRoute, IMPORT_ROUTE(' --provider compose --agent'), 'the handoff ends with the route that needs no live moment');
+  const routed = upRequestFromArgs(routeUp(handedRoute));
+  assert.deepEqual({ repository: routed.repository, provider: routed.provider, agent: routed.agent, reuseApps: routed.reuseApps }, { repository: 'acme/shop', provider: 'compose', agent: true, reuseApps: ['SLUG', 'REVIEWER_SLUG'] }, 'the route runs as written, reusing both Apps');
 
   const { startGithubSetup } = await import('../src/github-setup.js');
   const pageRoot = await temporaryDirectory('sudo-import-page');
   execFileSync('git', ['init', '-q'], { cwd: pageRoot });
   const setup = await startGithubSetup(pageRoot, 'acme/shop', 'http://127.0.0.1:4320', 0);
-  try { assert.match((await (await fetch(setup.url)).text()).replace(/<\/?code>/g, '`'), IMPORT_ROUTE, 'the local setup page offers it'); }
+  try {
+    const shown = (await (await fetch(setup.url)).text()).replace(/<\/?code>/g, '`').replace(/&#39;/g, "'");
+    assert.match(shown, IMPORT_ROUTE(''), 'the local setup page offers it');
+    assert.match(shown, /REVIEWER_SLUG --repo acme\/shop` with the --provider and --agent you ran up with/);
+    assert.equal(upRequestFromArgs(routeUp(shown)).repository, 'acme/shop', 'its up command parses');
+  }
   finally { await new Promise<void>(accept => setup.http.close(() => accept())); }
 
   // --no-wait: the drive meets Confirm access, up ends the install it drives and exits 3 with the route.
@@ -392,9 +418,9 @@ test('unit:sudo-offers-import-route — the handoff and the local setup page off
   });
   assert.equal(result.exitCode, 3, 'waiting on a person, resumable');
   assert.match(result.next, /--no-wait does not wait for it/);
-  assert.match(result.next, IMPORT_ROUTE, 'the next step is the App-import route');
+  assert.match(result.next, IMPORT_ROUTE(' --provider compose --agent'), 'the next step is the App-import route');
   assert.ok(aborted, 'the install serving the App page was ended');
-  assert.equal(installEnv?.GRAPHYARD_APP_WAIT_MS, '1200000', "the App page is served as long as up's wait");
+  assert.equal(installEnv?.GRAPHYARD_APP_WAIT_MS, '1260000', "the App page is served up's wait plus a minute, outliving the drive");
   assert.equal(result.handoffs.length, 1);
 });
 

@@ -289,9 +289,10 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
 
     await step('control-plane', async () => {
       // The install waits on the App pages itself, as long as this run waits on a person (900 s
-      // without a bound); it then pauses (exit 1) and a rerun resumes it.
+      // without a bound); it then pauses (exit 1) and a rerun resumes it. The page's clock starts
+      // before the drive reaches Confirm access, so it gets a minute more than the drive waits.
       const deadline = deps.now() + humanWaitMs;
-      const appWait = Number.isFinite(humanWaitMs) ? { GRAPHYARD_APP_WAIT_MS: String(humanWaitMs) } : null;
+      const appWait = Number.isFinite(humanWaitMs) ? { GRAPHYARD_APP_WAIT_MS: String(humanWaitMs + 60_000) } : null;
       for (;;) {
         // A drive that stops at Confirm access under --no-wait ends the install it drives too.
         const stopped = new AbortController();
@@ -446,11 +447,13 @@ export function upRequestFromArgs(args: string[]): UpRequest {
  * off again; NOWAIT ends the drive at the handoff with that route as the next step.
  */
 export function browserAppDriver(options: { page: BrowserPage; repository: string; ids: () => { owner: number; repository: number }; sleep: (ms: number) => Promise<void>; now?: () => Date; timeoutMs?: number; record?: string; sudo?: SudoOptions['prefer']; readCode?: SudoOptions['readCode']; onClose?: (outcome: DriveOutcome) => Promise<void> | void;
-  profile?: { mode: BrowserProfileMode; name: string } | null; noWait?: boolean; rerun?: string;
+  profile?: { mode: BrowserProfileMode; name: string } | null; noWait?: boolean; upFlags?: string;
   pending?: () => Promise<SudoState | null> | SudoState | null; remember?: (state: SudoState | null) => Promise<void> | void; onResume?: (state: SudoState) => void }) {
   const { page } = options;
   const owner = options.repository.split('/')[0];
-  const rerun = options.rerun ?? 'graphyard up --agent';
+  // The operator's up command past its repository (provider and mode), for the rerun and the App-import route.
+  const upFlags = options.upFlags ?? ' --agent';
+  const rerun = `graphyard up --repo ${options.repository}${upFlags}`, importRoute = appImportRoute(options.repository, upFlags);
   let setupPage: string | null = null, resumeChecked = false;
   const awaitSudo = async (handoff: Handoff) => {
     const onCode = async (state: SudoState) => {
@@ -461,9 +464,9 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
       const resumed = before && before.method && before.method !== 'mobile' && before.method === state.method && now - Date.parse(before.issuedAt) < 86_400_000 ? before : null;
       await options.remember?.(resumed ? { ...state, issuedAt: resumed.issuedAt } : state);
       if (resumed) options.onResume?.(resumed);
-      else handoff([sudoInstruction(state, 'your phone', { ...(options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), profile: options.profile ?? null }), appImportRoute].join('\n'),
+      else handoff([sudoInstruction(state, 'your phone', { ...(options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), profile: options.profile ?? null }), importRoute].join('\n'),
         { url: state.fallback?.url ?? state.url ?? page.url(), code: state.code });
-      if (options.noWait) throw new SudoNoWait(`GitHub asks to confirm access before it creates the App, and --no-wait does not wait for it. ${appImportRoute}; or rerun ${rerun} without --no-wait to wait for the confirmation.`);
+      if (options.noWait) throw new SudoNoWait(`GitHub asks to confirm access before it creates the App, and --no-wait does not wait for it. ${importRoute}; or rerun ${rerun} without --no-wait to wait for the confirmation.`);
     };
     // passSudo's flow names the closest master browser flow; its rerun advice is this command's.
     try {
@@ -542,7 +545,7 @@ export function recordedAppDriver(root: string, request: UpRequest, browser: { p
     // GY-1457: up's own wait, the profile's sharing said in the handoff, and the pending confirmation kept for a rerun.
     timeoutMs: Number.isFinite(upWaitMs(request)) ? upWaitMs(request) : upAgentWaitMs, noWait: request.noWait,
     profile: { mode: browserProfileMode(browser.profile), name: browser.profile },
-    rerun: `graphyard up --repo ${request.repository} --provider ${request.provider} --agent`,
+    upFlags: ` --provider ${request.provider} --agent`,
     pending: () => readPendingSudo(root), remember: state => rememberPendingSudo(root, state),
     onResume: state => clock.emit?.({ kind: 'note', text: `Resuming the Confirm access handed off at ${state.issuedAt}; no new handoff: confirm it as asked then, or pass a code with graphyard up --sudo-code` }),
     ids: () => {

@@ -6,7 +6,7 @@ import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
 import { appPageBusy, appPagePortFree, startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, readDocumentationConfig, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { protectionRun } from '../protection.js';
-import { appCommand, applyInstall, buildPlan, InstallPaused, installRequestFromArgs, prepareInstall } from '../install/index.js';
+import { appCommand, applyInstall, appStepWait, buildPlan, InstallPaused, installRequestFromArgs, prepareInstall } from '../install/index.js';
 import { runManifestFlow } from '../install/manifest.js';
 import { delegationLimitAssignments } from '../install/limits.js';
 import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../install/ci-proofs.js';
@@ -17,15 +17,6 @@ import { documentationDrift } from '../model/documentation.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
 import { describeUpEvent, runUp, upDependencies, upRequestFromArgs, upSudoCode } from '../up.js';
-
-/**
- * How long the App page is served (GY-1457): `graphyard up` sets GRAPHYARD_APP_WAIT_MS to its own
- * wait, so the page outlives the browser drive's Confirm-access wait; otherwise the 900 s default.
- */
-export function appStepWait(env: NodeJS.ProcessEnv) {
-  const ms = Number(env.GRAPHYARD_APP_WAIT_MS);
-  return Number.isSafeInteger(ms) && ms > 0 ? { timeoutMs: ms } : {};
-}
 
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
   const setup = await startGithubSetup(root, repository, deployment);
@@ -71,23 +62,19 @@ export const installCommands = defineCommands([
       '     [--confirm-price X | --max-monthly N] [--ssh-key NAME] [--ssh-host HOST] [--ssh-user USER]',
       '     [--reuse-app SLUG]... [--github-mobile] [--wait MINUTES] [--no-wait]',
       '  up --sudo-code CODE|email',
-      '                                First-run setup in one command: preflight, control plane,',
-      '                                host supervisor and Herdr, onboarding, agent accounts,',
-      '                                harness and master loop, resumable (.graphyard/up.json).',
-      '                                Onboarding files are published as a pull request; the goal',
-      '                                waits for it to merge. Price and SSH flags pass to install.',
-      '                                A step that needs a person prints one one-time link that signs',
-      '                                in to the dashboard Setup page, and waits for it to turn green.',
+      '                                First-run setup in one command: preflight, control plane, host supervisor and',
+      '                                Herdr, onboarding, agent accounts, harness and master loop, resumable (.graphyard/up.json).',
+      '                                Onboarding files are published as a pull request; the goal waits for it to merge.',
+      '                                Price and SSH flags pass to install. A step that needs a person prints one one-time',
+      '                                link that signs in to the dashboard Setup page, and waits for it to turn green.',
       '                                --agent runs every step non-interactively (JSON events on stderr), Apps in',
       '                                the given or master\'s browser profile (none: exit 2), handing off only device',
-      '                                approvals: Confirm access lists the page\'s methods, re-checked every 10 s',
-      '                                (confirm in your Chrome, or --sudo-code a 6-digit authenticator/email code;',
-      '                                email: GitHub sends one); --github-mobile: Mobile first, password link after',
-      '                                60 s. --reuse-app passes to install. Exit 0 green, 1 failed, 2 prereq, 3 waiting.',
-      '                                --wait MINUTES bounds each wait on a person (agent default 20), the browser\'s',
-      '                                Confirm access and the App page included; a rerun resumes a pending Confirm',
-      '                                access without a new handoff. The handoff says whether the profile is a copy',
-      '                                and offers app import + --reuse-app; --no-wait exits 3 with that instead.',
+      '                                approvals. Confirm access lists the page\'s methods, re-checked every 10 s: confirm in',
+      '                                your Chrome (shared profile only), or --sudo-code a 6-digit authenticator/email code',
+      '                                (email: GitHub sends one); --github-mobile: Mobile first, password link after 60 s;',
+      '                                or app import both Apps and --reuse-app each (--no-wait exits 3 saying so). --wait',
+      '                                MINUTES bounds each wait on a person (agent: 20), App page and Confirm access too; a',
+      '                                rerun resumes a pending Confirm access. Exit 0 green, 1 failed, 2 prereq, 3 waiting.',
     ],
     // `up` installs the control plane and records the connection; it never reads a stale one.
     readsConnection: () => false,
@@ -130,9 +117,8 @@ export const installCommands = defineCommands([
       '                                production resources that cost money are created only with',
       '                                --create-environments. A Herdr graphyard plugin bound to',
       '                                another server is repointed only with --herdr-rebind.',
-      '                                An App step nobody confirms within 900 s (under graphyard',
-      '                                up: up\'s --wait) exits 1 with a JSON summary and the exact',
-      '                                resume command.',
+      '                                An App step nobody confirms within 900 s (under up: its --wait,',
+      '                                plus a minute) exits 1 with a JSON summary and the exact resume command.',
       '                                See docs/install.md for the agent-executable runbook.',
     ],
     // The installer creates the connection file; it must never read a stale one.

@@ -12,29 +12,29 @@ git clone https://github.com/cryptob1/graphyard.git ~/graphyard && (cd ~/graphya
 cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --repo OWNER/REPO   # --provider compose (default), railway or hetzner
 ```
 
-A new Hetzner server waits (exit 3) for operator price approval: rerun with `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`, passed to `install`.
+A new Hetzner server waits (exit 3) for the operator's price approval: rerun with `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`.
 
-`up` runs every machine step in order: preflight, control plane, host supervisor and Herdr, onboarding, accounts, harness, master loop. Onboarding opens a `graphyard/onboarding` pull request with its files; goals wait for its merge. `.graphyard/up.json` records finished steps; a rerun skips them. A Herdr plugin bound to another server is never repointed (`--no-herdr`). A preflight failure (exit 2) names the [prerequisite](#1-machine-prerequisites) to fix.
+`up` runs, in order: preflight, control plane, host supervisor and Herdr, onboarding (a `graphyard/onboarding` pull request goals wait on), accounts, harness, master loop. `.graphyard/up.json` records finished steps; a rerun skips them. A preflight failure (exit 2) names the [prerequisite](#1-machine-prerequisites) to fix.
 
 ## The Setup page
 
-When a step needs a person, `up` prints one link and waits until green. The link (`SERVER/#sign-in=CODE&setup` from the operator credential, or a host install's `#claim=CODE&setup`) signs you in once, within 10 minutes, and opens the Setup page (also linked from Settings → Agents). Each live item has one sentence and one button:
+When a step needs a person, `up` prints one link (`SERVER/#sign-in=CODE&setup` from the operator credential, or a host install's `#claim=CODE&setup`) and waits until green; it signs you in once, within 10 minutes, and opens the Setup page (also linked from Settings → Agents). Each live item has one sentence and one button:
 
 | Item | Button
 | --- | ---
 | GitHub App, reviewer App | **Create the GitHub App** opens `up`'s App page
-| An account that writes code, one that reviews | **Connect an account** (an API key, or a subscription sign-in)
+| An account that writes code, one that reviews | **Connect an account** (API key or subscription sign-in)
 | Branch protection, coordinator running | none: Graphyard does these
 
-When all are green, **Describe what you want built** records a goal, like `graphyard goal`. Once the first pull request reports `Graphyard / merge`, rerun `up` to require it.
+When all are green, **Describe what you want built** records a goal, like `graphyard goal`.
 
 ## Agent setup: graphyard up --agent
 
-Agents run `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary on stdout, exit `0` green, `1` failed, `2` prerequisite, `3` waiting. It creates the Apps in a Chrome profile signed in to GitHub (passed, else the master's; with neither, and no `--reuse-app` for both Apps, it exits `2`), recorded under `.graphyard/master-actions/`; connects host accounts; sets deployment variables from saved credentials; records FILE as a goal once. Only a device step becomes a `handoff` event: a subscription login's approval, or *Confirm access*, listing the page's methods: confirm once in your Chrome on the named sudo-protected page (re-checked every 10 s), or pass an authenticator or email code via the App page or `up --sudo-code CODE` (`email`: GitHub sends one; never recorded); GitHub Mobile only with `--github-mobile` (60 s unapproved adds the password link). Each wait on a person lasts `--wait MINUTES` (default 20), *Confirm access* and the App page included; a rerun resumes a pending *Confirm access* without a new handoff. The handoff says whether the drive shares your live Chrome session (profile given as a path) or runs on a copy (a profile name): confirming in your own Chrome is offered only when shared, the codes otherwise. To skip the live moment: create the App at github.com/settings/apps/new whenever convenient, `graphyard app import --app-id ID --key-file PEM`, then `up --reuse-app SLUG`; `--no-wait` exits `3` with this at *Confirm access*. Preflight fails a checkout under `/tmp` or `/var/tmp`, which the loop unit refuses, naming a durable path.
+Agents run `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary on stdout; exit `0` green, `1` failed, `2` prerequisite, `3` waiting. It creates the Apps in a Chrome profile signed in to GitHub (passed, else the master's; with neither, and no `--reuse-app` for both Apps, exit `2`), recorded under `.graphyard/master-actions/`; connects host accounts, sets deployment variables from saved credentials, records FILE as a goal once. Only a device step becomes a `handoff`: a subscription login's approval, or *Confirm access*, saying whether the drive shares your live Chrome (profile path) or a copy (profile name), and offering what reaches it: confirming in your Chrome on the named page (shared only; re-checked every 10 s); a code the page offers via the App page or `up --sudo-code CODE|email` (never recorded); `--github-mobile` (password link after 60 s); or no live moment: create both Apps at github.com/settings/apps/new, `graphyard app import --app-id ID --key-file PEM --role control-plane|reviewer --repo OWNER/REPO` each, then rerun `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` exits `3` with this). Each wait on a person lasts `--wait MINUTES` (default 20); a rerun resumes a pending *Confirm access*. Preflight fails a checkout under `/tmp` or `/var/tmp`, naming a durable path.
 
 ## Troubleshooting: the manual steps
 
-What `up` runs, if a step fails; **HUMAN** marks what agents cannot do. `graphyard doctor` prints `setupFromZero.lines`: one `PASS`/`FAIL` line per prerequisite, each failure naming its step below; `next` names the first gap.
+What `up` runs; **HUMAN** marks what agents cannot. `graphyard doctor` prints `setupFromZero.lines`, a `PASS`/`FAIL` line per prerequisite, each failure naming its step; `next` names the first gap.
 
 ## 1. Machine prerequisites
 
@@ -70,7 +70,7 @@ The repository needs `origin` on GitHub and a GitHub Actions workflow testing on
 
 ## 7. Branch protection
 
-`--apply` protects the base branch; once the first pull request shows `Graphyard / merge`, rerun it to require that check. **Verify:** `branch-protection` passes.
+`--apply` protects the base branch; once the first pull request shows `Graphyard / merge`, rerun it (or `up`) to require that check. **Verify:** `branch-protection` passes.
 
 ## 8. Agent environments
 
