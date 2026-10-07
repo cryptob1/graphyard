@@ -83,18 +83,37 @@ jobs:
       # rather than start one unconfined. Ubuntu 24.04 confines unprivileged user namespaces to
       # profiled binaries, so the runner lifts that restriction for the suite.
       # A stalled apt mirror once held two shards in this step until the job timeout cancelled them
-      # (GY-1468): each apt call is bounded and retried, and the step fails in three minutes at most.
+      # (GY-1468), and three 50-second attempts outran this step's own three-minute bound twice on
+      # 2026-10-07, failing main (GY-1483). Each apt call is bounded at 25 seconds, the second and
+      # third attempts switch to another Ubuntu mirror, and the attempts fit well within the job's
+      # bound. The step has no timeout of its own: a step timeout fails the job, which the main guard
+      # judges a failing test. When every attempt fails, the step waits for the job's own timeout,
+      # so the shard concludes timed out, which the guard treats like a cancelled run: it reruns it
+      # and never reverts the merge over it.
       - name: Install bubblewrap (the confinement suite runs real namespaces)
-        timeout-minutes: 3
         shell: bash
         run: |
-          set -euo pipefail
-          apt=(-q -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+          set -uo pipefail
+          apt=(-q -o Acquire::Retries=1 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10)
+          mirrors=('' http://archive.ubuntu.com/ubuntu/ http://mirrors.edge.kernel.org/ubuntu/)
+          installed=false
+          command -v bwrap >/dev/null && installed=true
           for attempt in 1 2 3; do
-            if sudo timeout 50 apt-get update "${apt[@]}" && sudo timeout 50 apt-get install -y "${apt[@]}" bubblewrap; then break; fi
-            if (( attempt == 3 )); then echo "::error::bubblewrap could not be installed after 3 bounded attempts"; exit 1; fi
-            sleep 5
+            [[ $installed == true ]] && break
+            mirror=${mirrors[attempt - 1]}
+            if [[ -n $mirror ]]; then
+              echo "::warning::bubblewrap install attempt $attempt uses the fallback mirror $mirror"
+              sudo sed -i -E "s#^URIs: .*#URIs: $mirror#" /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null
+              sudo sed -i -E "s#^(deb(-src)? (\[[^]]*\] )?)[^ ]+#\1$mirror#" /etc/apt/sources.list 2>/dev/null
+            fi
+            if sudo timeout 25 apt-get update "${apt[@]}" && sudo timeout 25 apt-get install -y "${apt[@]}" bubblewrap; then installed=true; break; fi
+            sleep 3
           done
+          if [[ $installed != true ]]; then
+            echo "::error title=Infrastructure failure, not a test failure::bubblewrap could not be installed from any mirror after 3 bounded attempts; this shard waits for the job timeout so the run concludes timed out (cancelled), which the main guard reruns and never reverts"
+            sleep 600
+            exit 1
+          fi
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
       - name: Select the test files this run executes
         run: node scripts/ci-tests.mjs select --out "$RUNNER_TEMP/selected-tests.txt"

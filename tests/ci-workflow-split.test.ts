@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isReleaseCandidateTest, listTestFiles, preMergeTestFiles, readDurations, releaseCandidateTests, repositoryRoot, shardFiles } from '../scripts/ci-tests.mjs';
+import { commitVerdict } from '../src/main-guard.js';
 import { policySchema } from '../src/model/policy.js';
 import { readWorkflow } from '../src/protection.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -12,7 +13,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // queue tip ran four shards including a twenty-to-thirty-minute soak, container acceptance and
 // recovery, and the chart, so runner queues grew and a soak flake that main also showed stranded
 // candidates. Those long suites now run only against a pinned release-candidate SHA, in their own
-// workflow. One case per proof: unit:fast-gate-required-set, unit:long-suites-on-candidate.
+// workflow. One case per proof: unit:fast-gate-required-set, unit:long-suites-on-candidate,
+// unit:ci-bubblewrap-install-resilient.
 
 const read = (path: string) => readFileSync(join(repositoryRoot, path), 'utf8');
 const ciPath = '.github/workflows/ci.yml', candidatePath = '.github/workflows/release-candidate.yml';
@@ -170,4 +172,42 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
   // No job here shares a name with a required check, so none can ever be required of a pull request.
   const required = policySchema.parse({}).checks;
   for (const id of jobs.keys()) assert.ok(!required.includes(id), `${id} is not a required check`);
+});
+
+test('unit:ci-bubblewrap-install-resilient — the shards install bubblewrap with bounded, retried apt calls that fall back to other mirrors, and an install that fails every attempt concludes the shard timed out, which the main guard reruns and never reverts', () => {
+  const shard = jobsOf(read(ciPath)).get('test-shard')!;
+  const start = shard.text.indexOf('      - name: Install bubblewrap'), end = shard.text.indexOf('\n      - ', start + 1);
+  assert.ok(start >= 0 && end > start, 'test-shard installs bubblewrap');
+  const step = shard.text.slice(start, end);
+  // Retried, each attempt bounded, the later ones on a fallback mirror.
+  assert.match(step, /for attempt in 1 2 3; do/, 'three attempts');
+  const bounds = [...step.matchAll(/sudo timeout (\d+) apt-get (update|install)/g)];
+  assert.deepEqual(bounds.map(match => match[2]), ['update', 'install'], 'both apt calls of an attempt are bounded');
+  const attempt = bounds.reduce((sum, match) => sum + Number(match[1]), 0) + Number(step.match(/^ +sleep (\d+)$/m)?.[1] ?? NaN);
+  assert.ok(3 * attempt < 3 * 60, `three attempts take at most ${3 * attempt}s, well within the job's ${shard.timeout}-minute bound`);
+  const mirrors = step.match(/mirrors=\(''((?: https?:\/\/\S+)+)\)/)?.[1].trim().split(' ') ?? [];
+  assert.equal(mirrors.length, 2, 'attempts 2 and 3 each switch to a fallback mirror');
+  assert.match(step, /sed -i -E "s#\^URIs: \.\*#URIs: \$mirror#" \/etc\/apt\/sources\.list\.d\/ubuntu\.sources/, 'the fallback rewrites only Ubuntu\'s own sources');
+  assert.match(step, /command -v bwrap >\/dev\/null && installed=true/, 'a preinstalled bubblewrap skips apt');
+  // No step timeout: a step timing out fails the job, which the guard judges a failing test. After
+  // the last attempt the step outwaits the job's own timeout instead.
+  assert.doesNotMatch(step, /timeout-minutes/, 'the step has no timeout of its own');
+  assert.ok(shard.timeout && shard.timeout <= 6, 'the job bounds it');
+  const exhausted = step.slice(step.indexOf("if [[ $installed != true ]]; then"));
+  assert.match(exhausted, /::error title=Infrastructure failure, not a test failure::/);
+  assert.ok(Number(exhausted.match(/^ +sleep (\d+)$/m)?.[1]) > shard.timeout * 60, 'it waits past the job timeout');
+
+  // The guard's classification of such a run: the shard timed out, the aggregate test check failed
+  // because of it, so main is a cancelled run to rerun, not a culprit to revert.
+  const ci = [15368], required = ['test', 'typecheck'];
+  const checks = [
+    { name: 'typecheck', result: 'success', appId: 15368, id: 1 },
+    { name: 'test shard 1', result: 'success', appId: 15368, id: 2 },
+    { name: 'test shard 2', result: 'timed_out', appId: 15368, id: 3 },
+    { name: 'test-browser', result: 'success', appId: 15368, id: 4 },
+    { name: 'test', result: 'failure', appId: 15368, id: 5 },
+  ];
+  assert.deepEqual(commitVerdict(checks, required, ci), { verdict: 'cancelled', failing: ['test'], checkRun: 3 });
+  // A step that failed the shard outright is a failing test, which is why the step never fails on its own.
+  assert.deepEqual(commitVerdict(checks.map(check => check.id === 3 ? { ...check, result: 'failure' } : check), required, ci), { verdict: 'fail', failing: ['test'] });
 });
