@@ -561,20 +561,19 @@ test('manual:session-liveness-docs-review — docs/master-agent.md states that t
   // Every closure the sweep makes, named with the reason it records.
   for (const cause of ['Vanished', 'Ended', 'Superseded', 'Duplicate']) assert.match(section, new RegExp(`\\*\\*${cause}\\*\\*`), `${cause} is documented`);
   assert.match(section, /`idle`, `done` and\s+`blocked` are deliberately not terminal/);
-  assert.match(section, /a delivered item is closed the same\s+way as any other/i);
-  assert.match(section, /decides no gate, ends no lease, and stops no process/);
+  assert.match(section, /moved past, delivered items too/);
+  assert.match(section, /decides no gate, ends no lease, stops no process/);
 
   // That the slot follows the reconciled record, which is the thing a reader would otherwise
   // work around by closing a handle by hand.
-  assert.match(section, /counted against live\s+sessions only/);
-  assert.match(section, /busy only while a live session has it/);
+  assert.match(section, /concurrency and busy names count live\s+sessions only/);
 
   // What to do instead of closing sessions by hand — for a dead session, and for a live one that
   // is making no progress.
-  assert.match(section, /what an operator or a master does instead of closing sessions by hand/);
-  assert.match(section, /nothing, for a session\s+that finished or died/);
+  assert.match(section, /Instead of closing sessions by hand/);
+  assert.match(section, /do nothing for a finished or dead session/);
   assert.match(section, /graphyard master run --once/);
-  assert.match(section, /attach to it with the command on the handle/);
+  assert.match(section, /attach to an overlong one with its handle's command/);
   assert.match(section, /Never mark\s+another session's handle finished to free a slot/);
 
   // The maximum each role is judged against, so the attention item's numbers are documented too.
