@@ -141,7 +141,7 @@ test('unit:inside-bound-no-fault — no fault and no lease stop inside the bound
   assert.match(unsubmittedFaults(attempt(90, {}, now), now)[0].text, /past 120 minutes with no submission the loop stops renewing the lease$/);
 });
 
-test('unit:scope-wait-not-unbounded — an attempt waiting on its own scope request, undecided or refused by the widening rule, is not past the bound; once its request is answered, a refusal by the independent approver included, the bound runs from the answer (GY-1472)', async () => {
+test('unit:scope-wait-not-unbounded — an attempt waiting on its own scope request, undecided or refused by the widening rule, is not past the bound; once its request is answered, a refusal by the independent approver included, or withdrawn, the bound runs from the answer or the withdrawal (GY-1472)', async () => {
   const { noSubmissionRenewalRefused, unsubmittedAttempt } = await bound();
   const now = Date.now();
   const claimed = iso(-150 * minute, now), asked = iso(-149 * minute, now);
@@ -169,6 +169,16 @@ test('unit:scope-wait-not-unbounded — an attempt waiting on its own scope requ
   assert.ok(past?.reclaim && past.boundFrom === iso(-130 * minute, now) && past.claimedAt === claimed, 'past both bounds from the answer');
   // A decision on a request asked before this attempt's claim moves nothing.
   assert.equal(unsubmittedAttempt(attempt(150, { scopeDecision: { ...refusal, state: 'approved', requestedAt: iso(-200 * minute, now), at: iso(-10 * minute, now) } }, now), now)?.boundFrom, claimed);
+  // Withdrawn after more than the reclaim bound of waiting, undecided or refused by the widening rule: the bound runs from the withdrawal, never again over the exempted wait.
+  const withdrawn = (minutesAgo: number, fields: Partial<Work> = {}) => attempt(150, { scopeWithdrawn: { epoch: 1, at: iso(-minutesAgo * minute, now) }, ...fields }, now);
+  for (const fields of [{}, { scopeDecision: refusal }]) {
+    assert.equal(unsubmittedAttempt(withdrawn(5, fields), now), null, 'five minutes since the withdrawal is inside the bound');
+    assert.equal(noSubmissionRenewalRefused(withdrawn(5, fields), now), false, 'and the server keeps renewing it');
+    const late = unsubmittedAttempt(withdrawn(125, fields), now);
+    assert.ok(late?.reclaim && late.boundFrom === iso(-125 * minute, now), 'a worker idle past both bounds from its withdrawal is still reclaimed');
+  }
+  // An earlier attempt's withdrawal does not cover this one.
+  assert.equal(unsubmittedAttempt(attempt(150, { scopeWithdrawn: { epoch: 0, at: iso(-5 * minute, now) } }, now), now)?.boundFrom, claimed);
 });
 
 function cycleFor(state: DaemonState, config: MasterConfig, effects: Partial<DaemonEffects>, item: Work, now = Date.now()): Cycle {

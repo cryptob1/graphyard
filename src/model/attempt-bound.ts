@@ -17,7 +17,7 @@ export const submissionProgressCadenceMs = 15 * 60_000;
 
 export interface UnsubmittedAttempt {
   key: string; epoch: number; owner: string; claimedAt: string;
-  /** Where the bound runs from: the claim, or the answer to the attempt's own scope request when that came later (GY-1472). */
+  /** Where the bound runs from: the claim, or the answer to or withdrawal of the attempt's own scope request when that came later (GY-1472). */
   boundFrom: string;
   /** How far past the worker bound the attempt is. */
   pastBoundMs: number;
@@ -43,14 +43,23 @@ function attemptClaimedAt(work: Work, epoch: number): string | null {
  * escalation standing — is waiting on that decision, not stalled, so the bound does not run (null).
  * Ending it would only launch an attempt that asks the same paths again, deciding the one request
  * twice. An independent approver's refusal is the final answer the worker acts on, though it stays
- * on the request: like any answer, the bound runs from it. Otherwise from the claim.
+ * on the request: like any answer, the bound runs from it. A withdrawal ends the wait too, so the
+ * bound runs from it rather than counting the exempted wait again. The bound runs from the latest
+ * of the claim, the answer and the withdrawal.
  */
 function boundStartedAt(work: Work, epoch: number, claimedAt: string): string | null {
   const own = work.scopeRequest?.epoch === epoch ? work.scopeRequest : null;
   if (own && (!own.decision || own.decision.decidedBy === 'graphyard')) return null;
+  const claimed = Date.parse(claimedAt);
   const answered = own?.decision ?? work.scopeDecision;
-  return answered && Date.parse(answered.requestedAt) >= Date.parse(claimedAt) && Date.parse(answered.at) > Date.parse(claimedAt) ? answered.at : claimedAt;
+  const withdrawn = work.scopeWithdrawn?.epoch === epoch ? work.scopeWithdrawn.at : null;
+  const starts = [answered && Date.parse(answered.requestedAt) >= claimed ? answered.at : null, withdrawn]
+    .filter((at): at is string => !!at && Date.parse(at) > claimed);
+  return starts.sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? claimedAt;
 }
+/** When the attempt holding `epoch` withdrew its scope request (GY-1472): set by the `scope` command's withdrawal, where the worker bound restarts. */
+export interface ScopeWithdrawn { epoch: number; at: string }
+declare module './work.js' { interface Work { scopeWithdrawn?: ScopeWithdrawn } }
 /**
  * When the loop first observed the candidate's current head (GY-1460): set by the observation
  * write only when the pull request or its head differs from the one recorded, so a routine poll of

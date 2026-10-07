@@ -1392,6 +1392,8 @@ export class Engine {
         const asks = data.paths.length || data.remove?.length || data.criteria?.length;
         if (!asks) {
           demand(work.scopeRequest, 'No scope request is open for this attempt');
+          // GY-1472: the withdrawal ends the attempt's wait on its request, so the worker bound runs from it.
+          work.scopeWithdrawn = { epoch: work.scopeRequest.epoch, at: now.toISOString() };
           work.scopeRequest = null;
           // Withdrawing the ask withdraws the refusal it earned; the item is no longer blocked on scope.
           if (work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
