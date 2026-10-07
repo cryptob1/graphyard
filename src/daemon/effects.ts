@@ -44,6 +44,7 @@ import { observeDeployment, promotionReads, promotionWorkflow, type PromotionRea
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
+import { reexecuteUnsupervised } from './reexec.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import { loopRunAdoption, type AdoptedRun } from './run-adoption.js';
@@ -563,10 +564,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   const upgradeDeps = (keepAlive?: () => Promise<void>): SelfUpgradeDeps => ({ root, run, // shared with the moved-HEAD recovery (GY-1356)
     restartExecutors: to => restartExecutors(current(), { actions: () => asCoordinator('actions'), coordinatorCommit: to, onWait: keepAlive }),
     restartSelf: async () => {
+      // A unit's --no-block restart is ended by systemd's stop (upgrade.ts restartEndedBySupervisorStop); a loop no unit runs starts its own successor (GY-1399).
       const unit = detectLoopSupervisorUnit();
-      if (!unit) throw new Error('this loop runs under no graphyard-master supervisor unit, so it cannot re-execute itself; run it under the packaged unit (examples/master/graphyard-master.service), or restart it by hand with systemctl --user restart graphyard-master');
-      // --no-block queues the restart; systemd's stop then ends this wait, and reaches this process too (upgrade.ts restartEndedBySupervisorStop).
-      await awaitSupervisorRestart(() => run('systemctl', ['--user', '--no-block', 'restart', unit]));
+      await (unit ? awaitSupervisorRestart(() => run('systemctl', ['--user', '--no-block', 'restart', unit])) : reexecuteUnsupervised({ root, cliPath: current().cliPath, logDirectory: join(root, '.graphyard') }));
     },
     alignUnit: () => alignRunningLoopUnit(root, current()),
     persist: persistLoop,

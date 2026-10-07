@@ -232,8 +232,8 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       if (restartEndedBySupervisorStop(error)) return { outcome: 'upgraded', from: pending.from, to: pending.to, code: true, executors, self: true };
       state.upgrade.last = { ...state.upgrade.last!, self: false };
       await persist();
-      const reason = `the loop could not re-execute itself through its supervisor: ${message(error)}`;
-      await note(`${reason}; it keeps running ${shortCommit(state.release?.commit ?? null)} until its supervisor restarts it`, true);
+      const reason = `the loop could not re-execute itself: ${message(error)}`;
+      await note(`${reason}; it keeps running ${shortCommit(state.release?.commit ?? null)} until it is restarted`, true);
       return { outcome: 'failed', reason };
     }
     // The supervisor has queued the restart; its stop signal ends this process during the wait.
@@ -360,8 +360,8 @@ export async function recoverMovedHead(config: MasterConfig, state: DaemonState,
   catch (error) {
     if (restartEndedBySupervisorStop(error)) return { outcome: 'upgraded', from, to, code: true, executors, self: true };
     state.upgrade.last = { ...state.upgrade.last, self: false };
-    const reason = `the loop could not re-execute itself through its supervisor: ${message(error)}`;
-    await note(`${moved}, but ${reason}; it keeps running ${shortCommit(from)} until its supervisor restarts it`, true);
+    const reason = `the loop could not re-execute itself: ${message(error)}`;
+    await note(`${moved}, but ${reason}; it keeps running ${shortCommit(from)} until it is restarted`, true);
     return { outcome: 'failed', reason, forward: true };
   }
   return { outcome: 'upgraded', from, to, code: true, executors, self: true };
