@@ -4,7 +4,7 @@ import { elapsed } from '../model/sessions.js';
 import { mapBounded, readConcurrency } from '../master/timings.js';
 import { staleReleaseAttention } from './owed-report.js';
 import { approverJudgeBoundMs, masterTurnWaitBoundMs, maxApproverLaunches } from '../daemon/decisions.js';
-import { closeGrounds, revisionRace, staleAttentionAttempts, staleRun } from '../model/stale-close.js';
+import { convergibleClose, staleAttentionAttempts, staleRun } from '../model/stale-close.js';
 import type { Closure } from '../model/closure.js';
 
 type DecisionRow = { id: string; action: string; state: string; input?: any; requestedAt: string; staleAt?: string; requestedBy?: string; outcome?: string | null; race?: unknown; refusal?: { approver: string; reason: string; at: string } | null };
@@ -130,7 +130,7 @@ export async function terminalDecisions(masterApi: (path: string) => Promise<any
       // grounds still hold is the loop's to request again (staleCloseStep), named by its wait, until the series reaches
       // staleAttentionAttempts; from there one line stands for the series, its wording free of the attempt's id and count.
       const run = staleRun(decisions, decision.action);
-      if (decision.action === 'close' && decision.input?.triageAt === undefined && revisionRace(decision) && run.length < staleAttentionAttempts && !closeGrounds(item, decision.input, work)) continue;
+      if (decision.action === 'close') { const converge = convergibleClose(item, decisions, work); if (converge && 'input' in converge) continue; }
       if (run.length >= staleAttentionAttempts) attentionItems.push({ subject: item.key, text: `Decision ${item.key}/${decision.action} (${decision.action}) is stale on ${staleAttentionAttempts} or more requests in a row: the item moved between each request and its approval, so the loop no longer requests it again`,
           ...agentOwner('master', `The latest is ${decision.id} (${decision.outcome ?? 'the item moved past it'}); graphyard master decide ${item.key} ${decision.action} [JSON|@FILE] REASON, then graphyard master approver ${item.key} DECISION — or act on the item yourself`, 'approver') });
       else attentionItems.push({ ...staleInMotion(decision), subject: item.key, text: `Decision ${decision.id} (${decision.action}) is stale: ${decision.outcome ?? 'the item moved past it'}; request it again, the stale decision no longer blocks`,

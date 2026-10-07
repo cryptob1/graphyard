@@ -24,7 +24,7 @@ import { decompositionHold, decompositionSettings } from '../decomposition.js';
 import { decompositionStep } from '../decomposition-step.js';
 import { judgeHostMemory } from '../master-resources.js';
 import { dispatchBlockRetryMs, dispatchFailureBlockAfter, dispatchFailureBlocker, noteDispatchFailure, planeWideFailure } from './dispatch-failures.js';
-import { closingItems } from './stale-closes.js';
+import { closeStanding, closingItems } from './stale-closes.js';
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
 export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) {
@@ -247,6 +247,15 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
         if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       }
       return 'stop';
+    }
+    // GY-1439: a close requested by hand since the last cycle is in no kept history or watch until the
+    // decisions step (4c) reads it, after this step; the item's own history, read afresh only for an
+    // item a profile is about to take, holds it here, so its claim does not move the revision under the close.
+    const close = await closeStanding(effects, item, snapshot.work, closing);
+    if (close) {
+      const waitKey = `wait:closing:${item.id}`, detail = `${item.key}: close decision ${close} stands unapplied, so the loop takes no dispatch decision on it while it is being closed`;
+      if (detailChanged(state.actions[waitKey], detail)) performed.push(await record(state, waitKey, { kind: 'decision', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[waitKey]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+      return;
     }
     taken.add(choice.profile.name);
     const holds = [choice.profile.name];

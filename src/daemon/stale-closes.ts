@@ -1,6 +1,6 @@
 // Concern: cycle step 4c — a close that went stale on a revision race is requested again, and the item it closes holds still meanwhile (GY-1439).
 import type { Work } from '../model.js';
-import { convergibleClose, pendingClose, revisionRace, staleAttentionAttempts, staleWaitKey } from '../model/stale-close.js';
+import { closeGrounds, convergibleClose, pendingClose, revisionRace, staleAttentionAttempts, staleWaitKey } from '../model/stale-close.js';
 import { diagnosisSettled } from '../runner/payloads.js';
 import { mapBounded } from '../master/timings.js';
 import { detailChanged } from './decisions.js';
@@ -150,8 +150,16 @@ export async function staleCloseStep(cycle: Cycle, effects: DaemonEffects, writt
       try { requested = await ask(item); }
       catch (error) {
         // The request names the snapshot's revision, and a write since moved it: read the item once more and ask against that.
-        const fresh = /Task revision changed/.test(message(error)) && effects.snapshot ? (await effects.snapshot().catch(() => null))?.work.find(entry => entry.id === item.id) : undefined;
-        const again = fresh && fresh.stage !== 'done' ? await ask(fresh).then(made => ({ made }), (retry: unknown) => ({ error: retry })) : { error };
+        // Its grounds are judged once more on that read (`closeGrounds`): the item it names may have closed or left the graph since.
+        const reread = /Task revision changed/.test(message(error)) && effects.snapshot ? await effects.snapshot().catch(() => null) : null;
+        const fresh = reread?.work.find(entry => entry.id === item.id);
+        const grounds = fresh ? closeGrounds(fresh, converge.input, reread!.work) : null;
+        if (grounds) {
+          const detail = `${series}; the loop does not request it again: its grounds no longer hold: ${grounds}`;
+          if (detailChanged(wait, detail)) await note(waitKey, item, 'done', detail);
+          return;
+        }
+        const again = fresh ? await ask(fresh).then(made => ({ made }), (retry: unknown) => ({ error: retry })) : { error };
         if (!('made' in again)) { await note(key, item, 'failed', `Could not request again the close of ${item.key} after ${why}: ${message(again.error)}`); return; }
         requested = again.made; target = fresh!;
       }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { classifyAttention } from '../src/model/fault-classes.js';
-import { masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type * as StaleClose from '../src/model/stale-close.js';
 import { terminalDecisions } from '../src/cli/decision-report.js';
@@ -24,11 +24,13 @@ const iso = (at: number) => new Date(at).toISOString();
 const head = 'c4609c37'.padEnd(40, '0'), base = 'b'.repeat(40), reviewId = 5440070483;
 const staleOutcome = (now: number) => `Task revision changed (now ${now}); reload and request again; the decision was not applied`;
 
-function config(): MasterConfig {
+function config(workers: WorkerProfile[] = []): MasterConfig {
   return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher,
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project',
-    autoMerge: true, mergeMethod: 'merge', workers: [] });
+    autoMerge: true, mergeMethod: 'merge', workers });
 }
+/** One launch profile, for the cases that dispatch. */
+const worker = { name: 'worker-1', principal: 'principal-1', agentName: 'graphyard-worker-1', mode: 'launch', kind: 'claude', credentialFile: '/outside/worker-1.token', agentArgs: [], approvals: 'auto', environment: {} } as unknown as WorkerProfile;
 function item(key: string, overrides: Partial<Work> = {}): Work {
   return {
     id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [],
@@ -56,8 +58,9 @@ type Row = { id: string; work: string; action: string; state: string; input: Rec
  * server/decisions.ts does — the close binds the item revision it was requested against
  * (decisionInput), and an approval against a moved revision settles it stale.
  */
-function world(work: Work[], mechanical: MechanicalFixRequest[] = []) {
-  const state = emptyDaemonState(config());
+function world(work: Work[], mechanical: MechanicalFixRequest[] = [], options: { workers?: WorkerProfile[]; effects?: Partial<DaemonEffects> } = {}) {
+  const workers = options.workers ?? [], state = emptyDaemonState(config(workers));
+  const dispatched: string[] = [];
   const ledger: Row[] = [], approvers: { work: string; decision: string }[] = [], wakes: string[] = [];
   const launches: { agentName: string; account: null; runtime: null; session: null; launchedAt: string; work: string; decision: string }[] = [];
   let now = clock, sequence = 0;
@@ -77,11 +80,17 @@ function world(work: Work[], mechanical: MechanicalFixRequest[] = []) {
     mechanicalFixes: async () => ({ requests: mechanical }),
     approverLaunches: async () => launches,
     observe: async (target: Work) => { wakes.push(target.key); find(target.key).revision += 1; return structuredClone(find(target.key)); },
+    // The claim moves the item: a lease taken, its revision bumped.
+    ...workers.length ? {
+      herdr: () => ({ agents: [], available: true }), credentials: async (configured: WorkerProfile[]) => Object.fromEntries(configured.map(entry => [entry.name, { available: true, reason: null }])),
+      dispatch: async (target: Work) => { dispatched.push(target.key); find(target.key).revision += 1; return {}; },
+    } : {},
+    ...options.effects,
   } as unknown as DaemonEffects;
   return {
-    state, work, ledger, approvers, wakes, find,
+    state, work, ledger, approvers, wakes, dispatched, find,
     at: (offset: number) => { now = clock + offset; },
-    cycle: () => runCycle(config(), state, effects, () => now),
+    cycle: () => runCycle(config(workers), state, effects, () => now),
     /** The master's own request, by hand, as `graphyard master decide` makes it, put to an approver with `graphyard master approver`. */
     requestByHand: (key: string, action: string, reason: string, input: Record<string, unknown>) => {
       const made = record(find(key), action, reason, input, 'graphyard-master-agent:hand');
@@ -238,4 +247,54 @@ test('unit:decision-stale-named-wait-single-attention — repeated stale settles
   const last = w.requestByHand('GY-1437', 'close', reason, duplicate); w.approve(last.id);
   w.at(10 * minute); await w.cycle();
   assert.equal(w.state.actions[key], undefined);
+});
+
+test('integration:advancing-steps-defer-to-pending-close — dispatch: a claimable item a close was requested on by hand between two cycles gets no worker', async () => {
+  // The usual target of a duplicate close: a ready item no one holds.
+  const claimable = () => item('GY-1437', { stage: 'ready', ready: false, plannedFiles: [] });
+  // Without a close, the item is dispatched once it is claimable.
+  const control = world([claimable(), item('GY-1438', { ready: false })], [], { workers: [worker] });
+  await control.cycle();
+  control.find('GY-1437').ready = true;
+  control.at(minute); await control.cycle();
+  assert.deepEqual(control.dispatched, ['GY-1437'], 'the control: the claimable item is dispatched');
+
+  const w = world([claimable(), item('GY-1438', { ready: false })], [], { workers: [worker] });
+  await w.cycle();
+  // Between the cycles the master closes it as a duplicate, by hand: no kept history or watch knows it yet.
+  const close = w.requestByHand('GY-1437', 'close', reason, duplicate);
+  w.find('GY-1437').ready = true;
+  const before = w.find('GY-1437').revision;
+  w.at(minute); await w.cycle();
+  assert.deepEqual(w.dispatched, [], 'no worker is dispatched on an item being closed');
+  assert.equal(w.find('GY-1437').revision, before, 'no claim moves the revision under the close');
+  assert.match(w.state.actions['wait:closing:work-GY-1437']?.detail ?? '', new RegExp(`close decision ${close.id} stands unapplied`));
+  // So the close applies as it was asked.
+  w.approve(close.id);
+  assert.equal(close.id, closes(w)[0]!.id); assert.equal(closes(w)[0]!.state, 'applied');
+});
+
+test('integration:close-applied-despite-two-revision-bumps — the retry after a request-time revision race re-validates the grounds on the fresh read', async () => {
+  // The re-request races once more: the item moved between the loop's snapshot and its request, and by then GY-1438 was itself closed.
+  let raced = false;
+  const w = world([reviewed(114), item('GY-1438')], [], { effects: {
+    decide: async (target: Work, action: string, why: string, input: Record<string, unknown> = {}) => {
+      if (action === 'close' && !raced) {
+        raced = true;
+        Object.assign(w.find('GY-1438'), { stage: 'done', closure: { kind: 'obsolete', ref: null, reason: 'gone', by: 'x', at: iso(clock), from: 'build' } });
+        w.bump('GY-1437', 1);
+        throw new Error(`Task revision changed (now ${w.find('GY-1437').revision})`);
+      }
+      w.ledger.push({ id: `loop-${w.ledger.length + 1}`, work: target.key, action, state: 'requested', input: { expectedRevision: target.revision, ...input }, reason: why, requestedBy: 'graphyard-master-agent', requestedAt: iso(clock), outcome: null, approvedBy: null });
+      return { id: `loop-${w.ledger.length}` };
+    },
+  } });
+  const first = w.requestByHand('GY-1437', 'close', reason, duplicate);
+  await w.cycle();
+  w.bump('GY-1437', 26); w.approve(first.id);
+  w.at(minute); await w.cycle();
+  assert.ok(raced, 'the loop asked again and raced');
+  assert.equal(closes(w).length, 1, `no close is requested on grounds that no longer hold: ${JSON.stringify(w.ledger)}`);
+  const { staleWaitKey } = await staleClose();
+  assert.match(w.state.actions[staleWaitKey(w.find('GY-1437'), 'close')]?.detail ?? '', /the loop does not request it again: its grounds no longer hold: GY-1438, which the closure names, was itself closed/);
 });
