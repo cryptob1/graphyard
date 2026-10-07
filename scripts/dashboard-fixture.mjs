@@ -43,7 +43,8 @@ function item(n, title, fields) {
   };
 }
 const passedEvidence = (proof, headSha, when) => ({ id: `evidence-${proof}`, proof, sha: headSha, baseSha: base, policyRevision: 1, producer: 'ci', trusted: true, result: 'pass', executed: 8, skipped: 0, at: at(when) });
-const assigned = (owner, displayName, epoch, expires) => ({ lease: { owner, epoch, expiresAt: at(expires) }, lastAssignment: { owner, epoch, displayName, runtime: 'Claude', claimedAt: at(expires - 3 * hour) }, epoch });
+// A live attempt was claimed inside the worker no-submission bound (GY-1462): one held past it is a stalled-gate fault the loop ends.
+const assigned = (owner, displayName, epoch, expires) => ({ lease: { owner, epoch, expiresAt: at(expires) }, lastAssignment: { owner, epoch, displayName, runtime: 'Claude', claimedAt: at(expires > 0 ? -50 * minute : expires - 3 * hour) }, epoch });
 const workspace = (owner, epoch, n) => [{ host: 'build-1', path: `/work/gy-${n}-${epoch}`, branch: `graphyard/gy-${n}-${epoch}`, epoch, owner }];
 
 function shipped(n, title, pr, when) {

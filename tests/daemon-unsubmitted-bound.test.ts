@@ -11,6 +11,7 @@ import type { Principal, Work } from '../src/model.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
 import { faultClassOf, workFaults } from '../src/model/fault-classes.js';
+import { leaseLapseCause } from '../src/model/escalation.js';
 import { doctorBounds, doctorPrompt } from '../src/daemon/doctor.js';
 import { preserveInterruptedAttempt } from '../src/daemon/effects.js';
 import { preservePartialWork } from '../src/master/launch.js';
@@ -98,21 +99,28 @@ test('integration:cycle-faults-unsubmitted-attempt — the loop\'s faults step r
   assert.deepEqual(unsubmittedFaults(cycleFaults(emptyDaemonState(config()), [held(59 * minute, { sessions: [session] } as Partial<Work>)], clock, { config: config() })), []);
 });
 
-test('unit:renew-lease-nosubmission-refusal — renewal is refused from two no-submission bounds unsubmitted, and not before', async () => {
-  const { workerNoSubmissionRenewalBounds, unsubmittedPastBound } = await bound();
-  assert.equal(workerNoSubmissionRenewalBounds, 2);
-  assert.equal(unsubmittedPastBound(held(61 * minute), clock, workerNoSubmissionRenewalBounds), false, 'one bound past: fault, still renewed');
-  assert.equal(unsubmittedPastBound(held(119 * minute), clock, workerNoSubmissionRenewalBounds), false);
-  assert.equal(unsubmittedPastBound(held(120 * minute), clock, workerNoSubmissionRenewalBounds), true, 'two bounds: refused');
+test('unit:renew-lease-nosubmission-refusal — the loop ends an attempt at two no-submission bounds unsubmitted, the server refuses its renewal ten minutes later as the backstop, and not before', async () => {
+  const { workerNoSubmissionRenewalBounds, workerNoSubmissionRefusalMs, unsubmittedPastBound } = await bound();
+  assert.equal(workerNoSubmissionRenewalBounds, 2, 'the loop ends the attempt at two bounds');
+  assert.equal(workerNoSubmissionRefusalMs, 130 * minute, 'the server refuses its renewals ten minutes later');
+  assert.equal(unsubmittedPastBound(held(61 * minute), clock, workerNoSubmissionRefusalMs), false, 'one bound past: fault, still renewed');
+  assert.equal(unsubmittedPastBound(held(129 * minute), clock, workerNoSubmissionRefusalMs), false);
+  assert.equal(unsubmittedPastBound(held(130 * minute), clock, workerNoSubmissionRefusalMs), true, 'past the backstop: refused');
+  // The lapse that refusal causes is explained by it; a worker that vanished inside the bound is still a lease-loss.
+  const bounded = held(131 * minute), lapsedAt = (offset: number) => ({ epoch: 1, expiresAt: iso(offset) });
+  assert.equal(leaseLapseCause(bounded, lapsedAt(0))?.cause, 'no-submission-bound');
+  assert.equal(leaseLapseCause(bounded, lapsedAt(-2 * minute)), null, 'a lease that ran out before the bound was not refused by it');
+  assert.equal(leaseLapseCause(bounded, { epoch: 1 }), null, 'an undated lapse is not judged by the bound');
 });
 
 test('unit:nosubmission-bound-moot-after-submit — an epoch with a submission is never bounded', async () => {
-  const { workerNoSubmissionRenewalBounds, unsubmittedAttempt, unsubmittedPastBound } = await bound();
+  const { workerNoSubmissionRefusalMs, unsubmittedAttempt, unsubmittedPastBound } = await bound();
   const submitted = held(5 * 60 * minute, { submission: { epoch: 1, pr: 41 } as Work['submission'] });
   assert.equal(unsubmittedAttempt(submitted, clock), null);
   assert.equal(unsubmittedPastBound(submitted, clock, 1), false);
-  assert.equal(unsubmittedPastBound(submitted, clock, workerNoSubmissionRenewalBounds), false);
+  assert.equal(unsubmittedPastBound(submitted, clock, workerNoSubmissionRefusalMs), false);
   assert.deepEqual(unsubmittedFaults(workFaults(submitted, clock)), []);
+  assert.equal(leaseLapseCause(submitted, { epoch: 1, expiresAt: iso(0) })?.cause, 'submitted', 'its lapse is the submission\'s, never the bound\'s');
 });
 
 test('unit:doctor-worker-bound-matches-product — the doctor\'s worker bound is the product bound, and its prompt names it', async () => {
@@ -163,15 +171,19 @@ test('integration:unsubmitted-attempt-reclaimed — past two bounds unsubmitted 
   work = await heartbeat(work);
   assert.equal(work.lease?.epoch, epoch, 'renewed inside the second bound');
   assert.equal(unsubmittedFaults(workFaults(work, Date.now())).length, 1);
-  // Two bounds past: refused, as a renewal after submission is (a 409 the supervisor reads as definite).
-  await age(work, 2 * 60 * minute + minute);
+  // Past the backstop: refused, as a renewal after submission is (a 409 the supervisor reads as definite).
+  await age(work, 130 * minute + minute);
   await assert.rejects(heartbeat(work), (error: Error & { status?: number }) =>
-    /is not renewed: no submission in 120 minutes, past the worker no-submission bound/.test(error.message) && (error.status ?? 409) === 409);
+    /is not renewed: no submission in 130 minutes, past the worker no-submission bound/.test(error.message) && error.status === 409);
   // The supervisor stops; the lease runs out. Reconcile ends the attempt on the record.
   await overwrite(work, document => { document.lease = { ...document.lease!, expiresAt: new Date(Date.now() - 1_000).toISOString() }; });
   await engine.reconcile();
   work = await reload(work);
   assert.equal(work.lease, null, 'the lapsed lease is gone');
+  // The control plane's own refusal explains the lapse: recorded with its cause, never a lease-loss incident.
+  assert.deepEqual(work.escalations?.filter(entry => entry.trigger === 'lease-loss') ?? [], [], 'no lease-loss escalation for a lapse the bound caused');
+  const expired = (await store.pool.query(`SELECT payload FROM events WHERE work_id=$1 AND kind='lease.expired'`, [work.id])).rows.map(row => row.payload.details);
+  assert.deepEqual(expired.map(details => [details.epoch, details.cause]), [[epoch, 'no-submission-bound']], 'the lapse is history with the bound as its cause');
   // The item is back in the queue: another worker claims a fresh epoch.
   work = await engine.execute(replacement, 'claim', work.id, {}, id());
   assert.equal(work.epoch, epoch + 1);
@@ -183,7 +195,7 @@ test('integration:unsubmitted-end-keeps-branch — the ended attempt\'s work is 
   await bound();
   let work = await claimed('unsubmitted-keeps-branch');
   const epoch = work.epoch, branch = work.workspaces.find(entry => entry.epoch === epoch)!.branch;
-  await age(work, 2 * 60 * minute + minute);
+  await age(work, 130 * minute + minute);
   await assert.rejects(heartbeat(work), /past the worker no-submission bound/);
   await overwrite(work, document => { document.lease = { ...document.lease!, expiresAt: new Date(Date.now() - 1_000).toISOString() }; });
   await engine.reconcile();

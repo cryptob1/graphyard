@@ -191,7 +191,9 @@ test('unit:soak-invariants-hold — after a restart the first request for a refu
 });
 
 test('unit:soak-invariants-hold — direct wide scope requests: a rule-approved ask folds and answers once, a finding-grounded ask widens once, an unrepresentable ask is refused with nothing retrying it, and a partly grounded ask reaches its approver through transient refusals and a late history read with no scope fault', { timeout: 600_000 }, async () => {
-  const day = await simulateDay({ hours: 4, scope: true });
+  // Three hours: the unrepresentable ask's worker releases with the refusal standing before the
+  // worker no-submission bound would end its attempt (GY-1462), so no later attempt asks it again.
+  const day = await simulateDay({ hours: 3, scope: true });
   assertLaunchesConfined(day, coordinatorRoot!);
   const { items, final, violations, failures, state, escalations, transientRefused, lateReads, decideCalls } = day;
   assert.deepEqual(violations, [], 'every system invariant holds with the scope scenarios in the day');

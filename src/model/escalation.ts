@@ -30,9 +30,47 @@ export function lapsedBeforeStart(work: Pick<Work, 'sessions'>, escalation: Esca
 // recorded that the attempt's provider account ran out of quota mid-session. Only an epoch
 // with no bound submission, no carried blocked report, no attestation and no exhaustion record
 // was lost while its work was unfinished — a worker that silently vanished — and only that
-// raises the concern.
+// raises the concern. An epoch whose lease ran past the worker no-submission renewal bound unsubmitted
+// was ended by the control plane's own refusal to renew it (GY-1462), which explains it too.
 export type LeaseLapse = 'expired' | 'lost';
-export type LeaseLapseCause = 'submitted' | 'blocked-awaiting-operator' | 'stopped-by-attestation' | 'exhausted-capacity';
+export type LeaseLapseCause = 'submitted' | 'blocked-awaiting-operator' | 'stopped-by-attestation' | 'exhausted-capacity' | 'no-submission-bound';
+/**
+ * The worker no-submission bound (GY-1462): how long an attempt may hold its lease with no
+ * submission for its epoch. It is declared here once; the doctor's checklist (doctorBounds), the
+ * loop's `unsubmitted-attempt` fault, the server's renewal refusal and the lapse it causes all read
+ * it. Renewal and session activity are no motion against it: at one bound the attempt is a
+ * stalled-gate fault, at two the loop ends it through its reclaim path (its work kept on its
+ * branch, the item dispatched again), and a little past that the server refuses its renewals, so
+ * with no loop to end it the lease lapses into containment and reclaim.
+ */
+export const workerNoSubmissionBoundMs = 60 * 60_000;
+/** After this many bounds unsubmitted, the loop ends the attempt. */
+export const workerNoSubmissionRenewalBounds = 2;
+/**
+ * How long an attempt may hold its lease unsubmitted before the server refuses its renewals: the
+ * loop's end plus ten minutes, so the loop has its cycles to end the attempt with its work kept
+ * before the backstop lets the lease lapse.
+ */
+export const workerNoSubmissionRefusalMs = workerNoSubmissionRenewalBounds * workerNoSubmissionBoundMs + 10 * 60_000;
+/**
+ * When `epoch`'s attempt was claimed, or null when the record cannot date it: the epoch's
+ * assignment (`lastAssignment`), else the pipeline timeline's attempt for that epoch.
+ */
+export function attemptClaimedAt(work: Partial<Pick<Work, 'lastAssignment'>> & { pipeline?: { attempts?: { epoch: number; claimedAt: string }[] } }, epoch: number): string | null {
+  const claimedAt = work.lastAssignment?.epoch === epoch && work.lastAssignment.claimedAt
+    ? work.lastAssignment.claimedAt : work.pipeline?.attempts?.find(attempt => attempt.epoch === epoch)?.claimedAt;
+  return claimedAt && Number.isFinite(Date.parse(claimedAt)) ? claimedAt : null;
+}
+/**
+ * Whether a lapsed `lease` ran to the no-submission refusal unsubmitted: its last renewal kept it
+ * past the point from which the server refuses renewals (workerNoSubmissionRefusalMs), so it lapsed on that refusal
+ * (renewals come well inside the lease, so a lease expiring past the bound was renewed up to it).
+ */
+export function lapsedAtNoSubmissionBound(work: Pick<Work, 'submission'> & Parameters<typeof attemptClaimedAt>[0], lease: Pick<Lease, 'epoch'> & Partial<Pick<Lease, 'expiresAt'>>): boolean {
+  const claimedAt = attemptClaimedAt(work, lease.epoch);
+  return !submittedEpoch(work, lease.epoch) && !!claimedAt && !!lease.expiresAt
+    && Date.parse(lease.expiresAt) - Date.parse(claimedAt) >= workerNoSubmissionRefusalMs;
+}
 export const attestationKinds = ['blocked', 'stopped-worker'] as const;
 export type AttestationKind = typeof attestationKinds[number];
 /**
@@ -78,7 +116,7 @@ export function workerExhaustion(work: Pick<Work, 'capacity'>, epoch: number): E
   return (work.capacity?.exhaustions ?? []).find(entry => entry.role === 'worker' && entry.epoch === epoch) ?? null;
 }
 /** Why a lapse of `lease` is expected lifecycle, or null when the worker silently vanished. */
-export function leaseLapseCause(work: Pick<Work, 'submission' | 'capacity'>, lease: Pick<Lease, 'epoch'>, attestations: Attestation[] = []): { cause: LeaseLapseCause; attestation: Attestation | null; exhaustion?: ExhaustionRecord } | null {
+export function leaseLapseCause(work: Pick<Work, 'submission' | 'capacity'> & Parameters<typeof attemptClaimedAt>[0], lease: Pick<Lease, 'epoch'> & Partial<Pick<Lease, 'expiresAt'>>, attestations: Attestation[] = []): { cause: LeaseLapseCause; attestation: Attestation | null; exhaustion?: ExhaustionRecord } | null {
   if (submittedEpoch(work, lease.epoch)) return { cause: 'submitted', attestation: null };
   const blocked = attestationFor(attestations, lease.epoch, 'blocked');
   if (blocked) return { cause: 'blocked-awaiting-operator', attestation: blocked };
@@ -86,9 +124,10 @@ export function leaseLapseCause(work: Pick<Work, 'submission' | 'capacity'>, lea
   if (stopped) return { cause: 'stopped-by-attestation', attestation: stopped };
   const exhausted = workerExhaustion(work, lease.epoch);
   if (exhausted) return { cause: 'exhausted-capacity', attestation: null, exhaustion: exhausted };
+  if (lapsedAtNoSubmissionBound(work, lease)) return { cause: 'no-submission-bound', attestation: null };
   return null;
 }
-export function classifyLeaseLapse(work: Pick<Work, 'submission' | 'capacity'>, lease: Pick<Lease, 'epoch'>, attestations: Attestation[] = []): LeaseLapse { return leaseLapseCause(work, lease, attestations) ? 'expired' : 'lost'; }
+export function classifyLeaseLapse(work: Parameters<typeof leaseLapseCause>[0], lease: Parameters<typeof leaseLapseCause>[1], attestations: Attestation[] = []): LeaseLapse { return leaseLapseCause(work, lease, attestations) ? 'expired' : 'lost'; }
 // A standing lease-loss raised for an epoch that already had its candidate bound was
 // recorded before post-submission expiry stopped being treated as an incident, and one
 // raised by the control plane (actor `graphyard`) for an epoch whose lapse a blocked report, a
@@ -99,6 +138,7 @@ export function classifyLeaseLapse(work: Pick<Work, 'submission' | 'capacity'>, 
 export const leaseLossAutoSettlement = 'auto-settled: submitted before expiry';
 export function leaseLossSettlementNote(cause: LeaseLapseCause, attestation: Attestation | null, exhaustion: ExhaustionRecord | null = null) {
   if (cause === 'submitted') return leaseLossAutoSettlement;
+  if (cause === 'no-submission-bound') return `auto-settled: the server refused renewal ${workerNoSubmissionRefusalMs / 60_000} minutes unsubmitted, past the worker no-submission bound, which is why the attempt ended`;
   if (cause === 'exhausted-capacity') return `auto-settled: the ${exhaustion?.profile ?? 'worker'} account ${exhaustion?.account ?? 'it ran on'} reported no quota left for epoch ${exhaustion?.epoch} (recorded by ${exhaustion?.recordedBy ?? 'the loop'} at ${exhaustion?.at}; ${exhaustion?.resetsAt ? `resets ${exhaustion.resetsAt}` : 'no reset time given'}), which is why the attempt ended`;
   const source = attestation ? ` (${attestation.source} by ${attestation.actor} at ${attestation.at})` : '';
   return cause === 'blocked-awaiting-operator' ? `auto-settled: blocked report for epoch ${attestation?.epoch} explains the lapse${source}`

@@ -7,6 +7,7 @@ import { readyToRetry } from './sessions.js';
 import { clearedBefore, clearedBlockerKey, failedAttemptCount, overlongKey, overlongReason, reblockedKey, reblockedMarker, reblockedReason } from './reblocked-attempts.js';
 import { launchAppearanceMs, preserveInterruptedAttempt, record } from './effects.js';
 import { roleSessionMaximumMs } from '../model/sessions.js';
+import { unsubmittedAttempt, workerNoSubmissionBoundMs, workerNoSubmissionRenewalBounds } from '../model/fault-classes.js';
 import { credentialBlockedKey, credentialBlockedReason, credentialFailure } from '../worker-credential.js';
 import type { Cycle } from './cycle.js';
 import { settleEndedAttemptFence } from './cycle-reclaim.js';
@@ -62,6 +63,8 @@ const idleRemainingMinutes = (now: number, idleAt: string) => Math.max(idleRepro
 /** What a live attempt waits on — its blocker, its scope request — and when its session was last seen active; each a `waiting` action the loop keeps while it stands. */
 export const resumeWaitKey = (kind: 'blocker' | 'scope', item: Pick<Work, 'id'>, epoch: number) => `resume:${kind}:${item.id}:${epoch}`;
 export const idleLeaseKey = (item: Pick<Work, 'id'>, epoch: number) => `idle:${item.id}:${epoch}`;
+/** The action that ends an attempt past the worker no-submission renewal bound (GY-1462). */
+export const noSubmissionKey = (item: Pick<Work, 'id'>, epoch: number) => `resume:nosubmission:${item.id}:${epoch}`;
 const waitPrefixes = ['resume:blocker:', 'resume:scope:', 'idle:'];
 const blockerMarker = 'is re-prompted once it is cleared: ';
 
@@ -208,6 +211,26 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
         await drop(keys.blocker, keys.idle);
       } catch (error) {
         performed.push(await entry(key, 'failed', `${profile.agentName} on ${item.key} ${reason}, but its attempt could not be ended: ${message(error)}`, attempts));
+      }
+      return;
+    }
+
+    // GY-1462: an attempt held two no-submission bounds unsubmitted is ended through the reclaim path
+    // in the cycle that sees it, so its work is kept on its branch once and the item is dispatched
+    // again; the server's refusal of its renewals ten minutes later is only the backstop.
+    const unsubmitted = unsubmittedAttempt(item, clock);
+    if (unsubmitted && unsubmitted.epoch === epoch && unsubmitted.heldMs >= workerNoSubmissionRenewalBounds * workerNoSubmissionBoundMs) {
+      const key = noSubmissionKey(item, epoch), previous = state.actions[key];
+      if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;
+      const reason = `held its lease ${Math.floor(unsubmitted.heldMs / 60_000)} min since ${unsubmitted.claimedAt} with no submission, past ${workerNoSubmissionRenewalBounds} worker no-submission bounds of ${workerNoSubmissionBoundMs / 60_000} min`;
+      const attempts = (previous?.attempts ?? 0) + 1;
+      await entry(key, 'started', `${profile.agentName} on ${item.key} epoch ${epoch} ${reason}; ending the attempt`, attempts);
+      try {
+        const next = await endWorkerAttempt(cycle, item, profile, epoch, pane, reason, `ended without submitting: it ${reason}`);
+        performed.push(await entry(key, 'done', `${profile.agentName} on ${item.key} epoch ${epoch} ${reason}; ${next}, keeping the attempt's branch`, attempts));
+        await drop(keys.blocker, keys.scope, keys.idle);
+      } catch (error) {
+        performed.push(await entry(key, 'failed', `${profile.agentName} on ${item.key} epoch ${epoch} ${reason}, but its attempt could not be ended: ${message(error)}`, attempts));
       }
       return;
     }
