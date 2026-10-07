@@ -5,7 +5,7 @@ import type { Work } from '../src/model.js';
 import { emptyDaemonState, type DaemonState } from '../src/master-daemon.js';
 import { performSelfUpgrade, upgradeTouchesCode, type SelfUpgradeDeps } from '../src/daemon/upgrade.js';
 import { coordinatorCheckoutGuard } from '../src/daemon/run.js';
-import { owedUpgrade, readResources, resourceAttention, type ResourceInputs } from '../src/master-resources.js';
+import { loadedRevision as revisionOf, owedUpgrade, readResources, resourceAttention, type ResourceInputs } from '../src/master-resources.js';
 import type { ExecutorRestartResult } from '../src/executor-fleet.js';
 
 /**
@@ -15,6 +15,11 @@ import type { ExecutorRestartResult } from '../src/executor-fleet.js';
  * 2cca02cd2424, checkout 02ba2078f1ce, 81 commits behind). Fake git and a fake supervisor here; each
  * test is named for the proof it produces: integration:self-upgrade-fires-without-verified-deployment,
  * unit:loaded-revision-names-last-restart-attempt and unit:loaded-revision-exception-rules.
+ *
+ * GY-1473: the GY-1469 instances (loaded 6d7d82f95808, checkout b59c79735ee2, 45 commits behind,
+ * refiring from 16:18 to 19:06Z on 2026-10-07): the restart onto the checkout must not wait on the
+ * fleet. integration:self-upgrade-restarts-without-claim, integration:self-upgrade-with-claim-loads
+ * and unit:loaded-revision-fault-clears.
  */
 
 const full = (prefix: string) => prefix.padEnd(40, '0');
@@ -67,11 +72,12 @@ function faultState(options: { owed?: boolean } = {}): DaemonState {
 const loadedRevision = (state: DaemonState, revision: NonNullable<ResourceInputs['revision']>, now: number) => readResources({ now, reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, disk: null,
   profiles: { workers: [], reviewers: [], producers: [] }, revision, upgrade: owedUpgrade(state) }).find(reading => reading.id === 'loaded-revision')!;
 
-function deps(fake: FakeGit, clock: { now: number }, fleet: { held: boolean; self: number; executors: string[]; selfFails?: string | null }): SelfUpgradeDeps {
+/** `reload`: the cursor the process the supervisor starts records its load on, the checkout's HEAD; omitted, the re-execution loads nothing. */
+function deps(fake: FakeGit, clock: { now: number }, fleet: { held: boolean; self: number; executors: string[]; selfFails?: string | null }, reload?: DaemonState): SelfUpgradeDeps {
   return {
     root: '/coordinator', run: fake.run, now: () => clock.now,
     restartExecutors: async to => { fleet.executors.push(to); return fleet.held ? refusedExecutors(to) : restartedExecutors(to); },
-    restartSelf: async () => { if (fleet.selfFails) throw new Error(fleet.selfFails); fleet.self += 1; },
+    restartSelf: async () => { if (fleet.selfFails) throw new Error(fleet.selfFails); fleet.self += 1; if (reload) reload.release = { commit: fake.head, dirty: false }; },
   };
 }
 
@@ -92,7 +98,7 @@ test('integration:self-upgrade-fires-without-verified-deployment — with produc
 
   // Cycle 1: no verified deployment, yet the pass runs: the checkout moves to the base tip and the
   // owed restart is attempted, refused on the held claims, and recorded.
-  const upgrade = (current: DaemonState) => performSelfUpgrade(master, current, deps(fake, clock, fleet));
+  const upgrade = (current: DaemonState) => performSelfUpgrade(master, current, deps(fake, clock, fleet, current));
   const first = await guard.betweenCycles(upgrade);
   assert.equal(first.refusal, null);
   assert.equal(first.upgraded?.outcome, 'pending', 'the owed restart waits on the claims, it is not skipped');
@@ -107,24 +113,33 @@ test('integration:self-upgrade-fires-without-verified-deployment — with produc
   assert.match(reading.detail!, /owed restart onto it is under way, last attempted 2026-10-07T09:28:59\.761Z/);
   assert.deepEqual(resourceAttention([reading]), []);
 
-  // Cycles 2 and 3, ten minutes apart: the claims still hold, every pass retries and records it.
-  for (const step of [1, 2]) {
-    clock.now = faultAt + step * 10 * minute;
-    assert.equal((await guard.betweenCycles(upgrade)).upgraded?.outcome, 'pending');
-    assert.equal(state.actions['upgrade:none']?.at, iso(clock.now));
-    reading = loadedRevision(state, { behind: 85, loaded, checkout: tip, movedAt: moved }, clock.now);
-    assert.equal(reading.used, 0, `cycle ${step + 1} stays within headroom`);
-  }
-  assert.equal(fleet.self, 0, 'the loop re-executes last, once the fleet is restarted');
+  // Cycle 2, ten minutes in: the claims still hold, the pass retries and records it, and the loop
+  // still waits on the fleet (GY-1473: for fifteen minutes of refusal at most).
+  clock.now = faultAt + 10 * minute;
+  assert.equal((await guard.betweenCycles(upgrade)).upgraded?.outcome, 'pending');
+  assert.equal(state.actions['upgrade:none']?.at, iso(clock.now));
+  reading = loadedRevision(state, { behind: 85, loaded, checkout: tip, movedAt: moved }, clock.now);
+  assert.equal(reading.used, 0, 'cycle 2 stays within headroom');
+  assert.equal(fleet.self, 0, 'the loop waits on the fleet first');
 
-  // The claims settle 25 minutes in, inside the 30-minute bound: the fleet restarts and the loop re-executes.
+  // Cycle 3, twenty minutes in: the claims still hold, so the loop re-executes onto the tip by itself;
+  // the executor restart stays owed on the cursor.
+  clock.now = faultAt + 20 * minute;
+  const alone = (await guard.betweenCycles(upgrade)).upgraded;
+  assert.deepEqual({ outcome: alone?.outcome, self: alone?.outcome === 'pending' && alone.self }, { outcome: 'pending', self: true });
+  assert.equal(fleet.self, 1, 'the loop restart completed within the bound with the claims still held');
+  assert.equal(state.release?.commit, tip, 'the process the supervisor starts loads the tip');
+  assert.deepEqual(state.upgrade.pending, { from: checkout, to: tip, code: true }, 'the executor restart stays owed');
+  assert.equal(loadedRevision(state, { behind: 0, loaded: tip, checkout: tip }, clock.now).used, 0);
+
+  // The claims settle 25 minutes in: the fleet restarts, and the loop, already on the tip, does not re-execute again.
   fleet.held = false;
   clock.now = faultAt + 25 * minute;
   const done = await guard.betweenCycles(upgrade);
   assert.equal(done.upgraded?.outcome, 'upgraded');
-  assert.equal(fleet.self, 1, 'the loop restart was attempted within the bound');
+  assert.equal(fleet.self, 1, 'one loop restart in all');
   assert.equal(state.upgrade.pending, null);
-  assert.deepEqual({ to: state.upgrade.last?.to, self: state.upgrade.last?.self }, { to: tip, self: true });
+  assert.deepEqual({ to: state.upgrade.last?.to, self: state.upgrade.last?.self }, { to: tip, self: false });
   assert.equal(state.upgrade.alignedRelease, null, 'no verified release was aligned: none was observed');
   assert.equal(state.upgrade.stalled, undefined);
   // The process the supervisor starts loads the tip: nothing is behind.
@@ -277,7 +292,7 @@ test('unit:loaded-revision-fetch-failure-is-no-restart-attempt — an origin out
   fake.fetchFails = 'fatal: unable to access \'https://github.com/owner/project/\': Could not resolve host: github.com';
   for (let step = 0; step < 4; step++) {
     clock.now = faultAt + step * 10 * minute;
-    assert.equal((await performSelfUpgrade(master, state, deps(fake, clock, fleet))).outcome, 'pending', `cycle ${step + 1} attempts the restart`);
+    assert.equal((await performSelfUpgrade(master, state, deps(fake, clock, fleet, state))).outcome, 'pending', `cycle ${step + 1} attempts the restart`);
     assert.equal(state.actions['upgrade:none']?.at, iso(clock.now), 'the attempt is the restart\'s');
     assert.equal(loadedRevision(state, revision, clock.now).used, 0);
   }
@@ -434,8 +449,10 @@ test('unit:soak-self-upgrade-unverified-production — a day of between-cycles p
     assert.equal(reading.used, 0, `+${elapsed / minute} min: loaded-revision pinned: ${reading.detail}`);
   }
 
-  // Each code move restarted onto once, within the bound of the checkout's move; the docs-only move restarted nothing.
-  assert.deepEqual(restarts.map(restart => ({ at: restart.at / minute, onto: restart.onto })), [{ at: 60, onto: c1.sha }, { at: 320, onto: c4.sha }]);
+  // Each code move restarted onto once, within the bound of the checkout's move; the docs-only move
+  // restarted nothing. The second stretch of held claims outlasts the fleet wait (GY-1473), so the
+  // loop re-executes onto c4 by itself at +316 min, and the fleet restart at +320 does not repeat it.
+  assert.deepEqual(restarts.map(restart => ({ at: restart.at / minute, onto: restart.onto })), [{ at: 60, onto: c1.sha }, { at: 316, onto: c4.sha }]);
   for (const restart of restarts) assert.ok(restart.at - restart.movedAt < 30 * minute, `the restart onto ${restart.onto.slice(0, 12)} came ${(restart.at - restart.movedAt) / minute} min after the move`);
   assert.deepEqual(moves.map(move => ({ at: move.at / minute, to: move.to })), [{ at: 50, to: c1.sha }, { at: 180, to: c3.sha }, { at: 300, to: c4.sha }]);
   assert.equal(state.release?.commit, c4.sha);
@@ -451,4 +468,182 @@ test('unit:soak-self-upgrade-unverified-production — a day of between-cycles p
   assert.equal(state.actions[alignKey], undefined, 'no failure before a restart was ever recorded: the outage only met owed restarts');
   const keys = Object.keys(state.actions).filter(key => key.startsWith('upgrade:'));
   assert.ok(keys.length <= deploys.length + 1, `the cursor holds one upgrade action per release and one unverified: ${keys.join(', ')}`);
+});
+
+/** GY-1473's instance: the loop on 6d7d82f95808 while the checkout holds b59c79735ee2, 45 commits behind. */
+const stale = full('6d7d82f95808'), current = full('b59c79735ee2'), next = full('63530ca74a00');
+const staleAt = Date.parse('2026-10-07T16:18:10.000Z');
+
+/** A fleet with no executor claim at all: every restart it is asked for restarts, with nothing held. */
+function claimFree(fake: FakeGit, clock: { now: number }, reload: DaemonState) {
+  const fleet = { claims: [] as string[], executors: [] as string[], self: [] as number[] };
+  const upgradeDeps: SelfUpgradeDeps = {
+    root: '/coordinator', run: fake.run, now: () => clock.now,
+    restartExecutors: async to => { fleet.executors.push(to); return fleet.claims.length ? refusedExecutors(to) : restartedExecutors(to); },
+    restartSelf: async () => { fleet.self.push(clock.now); reload.release = { commit: fake.head, dirty: false }; },
+  };
+  return { fleet, upgradeDeps };
+}
+
+test('integration:self-upgrade-restarts-without-claim — with no executor holding a claim, the between-cycles self-upgrade restarts the loop onto the checkout\'s revision on the first pass after the checkout advances, observed production or not, so the move is loaded well within 30 minutes', async () => {
+  for (const shape of ['unobserved', 'observed-aligned'] as const) {
+    const state = emptyDaemonState(master), clock = { now: staleAt };
+    state.release = { commit: stale, dirty: false };
+    // The checkout advanced to `current` under the running loop, which has not loaded it.
+    const fake = new FakeGit(current, current);
+    if (shape === 'observed-aligned') {
+      // Production observed, its release already aligned: the GY-1469 shape, no restart on the cursor.
+      state.deployment = { source: 'endpoint', sha: current, at: iso(clock.now), reason: null, deployed: ['GY-1445'], pending: [] };
+      state.upgrade.alignedRelease = current;
+    }
+    const { fleet, upgradeDeps } = claimFree(fake, clock, state);
+    const guard = coordinatorCheckoutGuard({
+      state: () => state, read: async () => ({ root: '/coordinator', commit: fake.head, modified: [], untracked: [] }),
+      agents: async () => [], snapshot: async () => ({ work: [] as Work[], now: iso(clock.now) }), persist: async () => {}, now: () => clock.now, log: () => {}, applies: () => true,
+    });
+    assert.equal(await guard.start(stale), null);
+    const movedAt = clock.now;
+    clock.now = movedAt + 5 * minute;
+    const { refusal, upgraded } = await guard.betweenCycles(current => performSelfUpgrade(master, current, upgradeDeps));
+    assert.equal(refusal, null);
+    assert.equal(upgraded?.outcome, 'upgraded', `${shape}: the pass restarts, it does not wait for a claim`);
+    assert.deepEqual(fleet.executors, [current], `${shape}: the fleet restart targets the checkout`);
+    assert.deepEqual(fleet.self, [clock.now], `${shape}: the loop re-executed once, on this pass`);
+    assert.ok(fleet.self[0] - movedAt < 30 * minute, `${shape}: within the bound of the move`);
+    assert.equal(state.release?.commit, current, `${shape}: the move is loaded`);
+    assert.equal(state.upgrade.pending, null);
+    assert.equal(state.upgrade.stalled, undefined);
+    assert.equal(loadedRevision(state, { behind: 0, loaded: current, checkout: current }, clock.now).used, 0);
+
+    // A newly verified release then advances the checkout, still with no claim: the next pass moves
+    // it and restarts onto it. (Unobserved, an idle checkout is never fetched (GY-1445): only the
+    // checkout's own HEAD is the move there.)
+    if (shape === 'unobserved') continue;
+    fake.originTip = next;
+    clock.now += 5 * minute;
+    state.deployment = { ...state.deployment!, sha: next, at: iso(clock.now) };
+    const again = await guard.betweenCycles(current => performSelfUpgrade(master, current, upgradeDeps));
+    assert.equal(again.upgraded?.outcome, 'upgraded', `${shape}: the advance is restarted onto`);
+    assert.deepEqual(fake.checkouts, [next]);
+    assert.equal(state.release?.commit, next);
+    assert.equal(fleet.self.length, 2);
+  }
+});
+
+test('integration:self-upgrade-with-claim-loads — with an executor claim held on every cycle, the each-cycle retry re-executes the loop onto the checkout within the bound, so the loaded revision reaches the checkout HEAD; the executor restart stays owed and completes once the claim settles, without a second loop restart', async () => {
+  const state = emptyDaemonState(master), clock = { now: staleAt };
+  state.release = { commit: stale, dirty: false };
+  const fake = new FakeGit(current, current);
+  const { fleet, upgradeDeps } = claimFree(fake, clock, state);
+  fleet.claims.push('graphyard-master@host-a/3 holds dispatch for GY-1439');
+  const guard = coordinatorCheckoutGuard({
+    state: () => state, read: async () => ({ root: '/coordinator', commit: fake.head, modified: [], untracked: [] }),
+    agents: async () => [], snapshot: async () => ({ work: [] as Work[], now: iso(clock.now) }), persist: async () => {}, now: () => clock.now, log: () => {}, applies: () => true,
+  });
+  assert.equal(await guard.start(stale), null);
+  const movedAt = clock.now, cycleMs = 5 * minute;
+  const outcomes: string[] = [];
+  // Every cycle for an hour, the claim held throughout.
+  for (let elapsed = cycleMs; elapsed <= hour; elapsed += cycleMs) {
+    clock.now = movedAt + elapsed;
+    const { upgraded } = await guard.betweenCycles(current => performSelfUpgrade(master, current, upgradeDeps));
+    outcomes.push(`${elapsed / minute}:${upgraded?.outcome}${upgraded?.outcome === 'pending' && upgraded.self ? '+self' : ''}`);
+    const loadedNow = state.release!.commit!;
+    const reading = loadedRevision(state, { behind: loadedNow === current ? 0 : 45, loaded: loadedNow, checkout: current, movedAt }, clock.now);
+    assert.equal(reading.used, 0, `+${elapsed / minute} min: ${reading.detail}`);
+  }
+  assert.equal(fleet.executors.length, 12, 'the executor restart was retried every cycle');
+  assert.equal(fleet.self.length, 1, 'the loop re-executed once, not every cycle');
+  assert.ok(fleet.self[0] - movedAt < 30 * minute, `the loop loaded the checkout ${(fleet.self[0] - movedAt) / minute} min after the move`);
+  assert.equal(state.release?.commit, current, 'the loaded revision reached the checkout HEAD while the claim was held');
+  assert.deepEqual(outcomes.slice(0, 4), ['5:pending', '10:pending', '15:pending', '20:pending+self']);
+  assert.ok(outcomes.slice(4).every(outcome => outcome.endsWith(':pending')), outcomes.join(', '));
+  assert.deepEqual(state.upgrade.pending, { from: stale, to: current, code: true }, 'the executor restart stays owed');
+  assert.equal(state.upgrade.stalled?.cause, 'executors-refused');
+
+  // The claim settles: the fleet restarts onto the checkout and the loop, already on it, is not restarted again.
+  fleet.claims.length = 0;
+  clock.now += cycleMs;
+  const done = await guard.betweenCycles(current => performSelfUpgrade(master, current, upgradeDeps));
+  assert.deepEqual(done.upgraded?.outcome === 'upgraded' && { self: done.upgraded.self, to: done.upgraded.to }, { self: false, to: current });
+  assert.equal(fleet.self.length, 1);
+  assert.equal(state.upgrade.pending, null);
+  assert.equal(state.upgrade.stalled, undefined);
+
+  // A loop that cannot reach its supervisor keeps the failure named; the next pass retries.
+  const broken = emptyDaemonState(master);
+  broken.release = { commit: stale, dirty: false };
+  broken.upgrade.pending = { from: stale, to: current, code: true };
+  broken.upgrade.stalled = { cause: 'executors-refused', reason: 'held', since: iso(staleAt - 20 * minute), at: iso(staleAt - 5 * minute) };
+  const failing = await performSelfUpgrade(master, broken, { ...upgradeDeps, restartExecutors: async to => refusedExecutors(to), restartSelf: async () => { throw new Error('Failed to connect to bus'); } });
+  assert.equal(failing.outcome, 'failed');
+  assert.equal(broken.upgrade.stalled?.cause, 'supervisor-unreachable');
+  assert.deepEqual(broken.upgrade.pending, { from: stale, to: current, code: true }, 'still owed for the next pass');
+});
+
+test('unit:loaded-revision-fault-clears — once the self-upgrade\'s restart lands (a claim held throughout), the loaded-revision reading, read from the real reflog and process start, raises no resource-bound attention on any later cycle, and it fires again only when a new unloaded move ages past the 30-minute bound with no restart attempted', async () => {
+  const sec = (at: number) => Math.floor(at / 1000);
+  const loop = { start: staleAt - 6 * hour };
+  /** The checkout's HEAD reflog, newest first: each move and when it happened. */
+  const reflog: { sha: string; at: number }[] = [{ sha: current, at: staleAt - 2 * hour }, { sha: stale, at: staleAt - 8 * hour }];
+  const run = (command: string, args: string[]): string => {
+    if (command === 'ps') return `${sec(clock.now) - sec(loop.start)}\n`;
+    const [op, ...operands] = args.slice(2);
+    if (op === 'rev-parse') return `${reflog[0].sha}\n`;
+    if (op === 'reflog') return reflog.map(move => `${move.sha} HEAD@{${sec(move.at)}}`).join('\n');
+    if (op === 'diff') return 'src/daemon/run.ts\n';
+    if (op === 'rev-list') return operands.at(-1)!.startsWith(stale) ? '45\n' : '3\n';
+    throw new Error(`fake cannot answer: ${command} ${args.join(' ')}`);
+  };
+  const clock = { now: staleAt };
+  const state = emptyDaemonState(master);
+  state.release = { commit: stale, dirty: false };
+  const attention = () => {
+    const revision = revisionOf('/coordinator', 4242, run, clock.now);
+    assert.ok(revision, 'the reading resolves');
+    const reading = loadedRevision(state, revision, clock.now);
+    return { reading, attention: resourceAttention([reading]) };
+  };
+
+  // The fault as it stood: 45 commits behind, the move two hours old, no restart attempted.
+  let read = attention();
+  assert.equal(read.reading.used, 45);
+  assert.deepEqual(read.attention.map(item => item.subject), ['resource:loaded-revision']);
+
+  // The self-upgrade's passes, a claim held on every one: the restart it completes starts a new
+  // process after the move, which loads the checkout HEAD.
+  const fake = new FakeGit(current, current);
+  const upgradeDeps: SelfUpgradeDeps = {
+    root: '/coordinator', run: fake.run, now: () => clock.now,
+    restartExecutors: async to => refusedExecutors(to),
+    restartSelf: async () => { loop.start = clock.now + 20_000; state.release = { commit: fake.head, dirty: false }; },
+  };
+  let landed: number | null = null;
+  for (let cycle = 0; cycle < 24; cycle++) {
+    clock.now = staleAt + minute + cycle * 5 * minute;
+    await performSelfUpgrade(master, state, upgradeDeps);
+    if (landed === null && state.release?.commit === current) landed = clock.now;
+    clock.now += 30_000;
+    if (landed === null) continue;
+    const revision = revisionOf('/coordinator', 4242, run, clock.now);
+    assert.deepEqual({ loaded: revision?.loaded, behind: revision?.behind }, { loaded: current, behind: 0 }, `cycle ${cycle}: the loop runs the checkout HEAD`);
+    read = attention();
+    assert.equal(read.reading.used, 0, `cycle ${cycle}: ${read.reading.detail}`);
+    assert.deepEqual(read.attention, [], `cycle ${cycle}: the fault stays clear`);
+  }
+  assert.ok(landed !== null && landed - staleAt <= 30 * minute, 'the restart landed within the bound with the claim held');
+
+  // A new move onto unloaded code: within the bound it is the self-upgrade's to make, and nothing fires.
+  const movedAt = clock.now + minute;
+  reflog.unshift({ sha: next, at: movedAt });
+  clock.now = movedAt + 29 * minute;
+  read = attention();
+  assert.equal(read.reading.used, 0, read.reading.detail!);
+  assert.deepEqual(read.attention, []);
+  // Past the bound with no restart attempted, it fires again, naming the new move.
+  clock.now = movedAt + 31 * minute;
+  read = attention();
+  assert.equal(read.reading.used, 3);
+  assert.deepEqual(read.attention.map(item => item.subject), ['resource:loaded-revision']);
+  assert.match(read.reading.detail!, /the checkout is at 63530ca74a00/);
 });

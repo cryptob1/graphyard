@@ -27,6 +27,13 @@ import { detailChanged } from './decisions.js';
 const loadedPrefixes = ['src/', 'scripts/', 'bin/'], loadedFiles = ['package.json'];
 /** The action a failure before any restart attempt is recorded on (GY-1445): never one of the release's attempts. */
 export const alignKey = 'upgrade:align';
+/**
+ * How long the loop waits on executors whose held claims refuse the fleet restart before it
+ * re-executes onto the checkout by itself (GY-1473): half the loaded-revision resource's 30-minute
+ * bound, so the loop loads the move within the bound even while a claim is held every cycle.
+ */
+export const fleetWaitMs = 15 * 60_000;
+const sameCommit = (a: string | null | undefined, b: string | null | undefined) => !!a && !!b && (a.startsWith(b) || b.startsWith(a));
 export function upgradeTouchesCode(paths: readonly string[]): boolean {
   return paths.some(path => loadedFiles.includes(path) || loadedPrefixes.some(prefix => path.startsWith(prefix)));
 }
@@ -61,8 +68,12 @@ export type SelfUpgradeOutcome =
   /** `forward`: a moved HEAD the recovery found to be merged code descending from the loaded commit, which it could not adopt by itself (GY-1359). */
   | { outcome: 'refused'; reason: string; commit: string | null; forward?: boolean }
   | { outcome: 'failed'; reason: string; forward?: boolean }
-  /** The checkout moved and the restarts it owes wait on the cursor: the executor restart was refused (a claim still held), which the next cycle retries. */
-  | { outcome: 'pending'; reason: string; to: string }
+  /**
+   * The checkout moved and the executor restart it owes waits on the cursor: refused (a claim still
+   * held), which the next cycle retries. `self`: the loop still re-executed itself onto the checkout
+   * (GY-1473), so what it runs never waits on the fleet's claims.
+   */
+  | { outcome: 'pending'; reason: string; to: string; self?: boolean }
   | { outcome: 'upgraded'; from: string | null; to: string; code: boolean; executors: ExecutorRestartResult | null; self: boolean };
 
 /** The one line about an outcome, for the loop's log. */
@@ -71,7 +82,7 @@ export function describeSelfUpgrade(upgraded: SelfUpgradeOutcome): string {
   if (upgraded.outcome === 'up-to-date') return `the checkout is current at ${shortCommit(upgraded.commit)}`;
   if (upgraded.outcome === 'refused') return `refused: ${upgraded.reason}`;
   if (upgraded.outcome === 'failed') return `failed: ${upgraded.reason}`;
-  if (upgraded.outcome === 'pending') return `pending at ${shortCommit(upgraded.to)}: ${upgraded.reason}`;
+  if (upgraded.outcome === 'pending') return `pending at ${shortCommit(upgraded.to)}: ${upgraded.reason}${upgraded.self ? '; the loop re-executes itself onto it meanwhile' : ''}`;
   return `checked out ${shortCommit(upgraded.to)}${upgraded.code ? '; loaded code moved' : '; no loaded code moved'}`
     + `${upgraded.executors ? `; executors ${upgraded.executors.result}${upgraded.executors.reason ? ` (${upgraded.executors.reason})` : ''}` : ''}`
     + `${upgraded.self ? '; the loop re-executes itself' : ''}`;
@@ -163,8 +174,9 @@ export interface SelfUpgradeDeps {
  * anything touches it. The executors are restarted first, through the shipped command whose
  * refusals (a claim in flight, another restart's fence) leave the owed restarts on the cursor for
  * the next cycle to finish; the loop's own re-execution is last, and everything the next process
- * needs to know is on the cursor before it goes. Nothing here throws: every failure is a recorded
- * action.
+ * needs to know is on the cursor before it goes. A refusal that has stood `fleetWaitMs` no longer
+ * holds the loop (GY-1473): it re-executes onto the checkout alone, and the executor restart stays
+ * owed for the process that starts. Nothing here throws: every failure is a recorded action.
  */
 export async function performSelfUpgrade(config: MasterConfig, state: DaemonState, deps: SelfUpgradeDeps): Promise<SelfUpgradeOutcome> {
   const now = deps.now ?? Date.now, at = () => new Date(now()).toISOString();
@@ -235,19 +247,38 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     const executors = await deps.restartExecutors(pending.to).catch(error => ({ result: 'refused' as const, reason: message(error), coordinator: { commit: pending.to }, held: [], restarted: [], unsupervised: [], forgotten: [] }));
     if (executors.result === 'refused') {
       // The designed safety, not a fault (GY-916): a claim still held after the bounded wait. The
-      // owed restarts stay on the cursor as pending, the action is recorded waiting, and the next
-      // cycle's pass finds the checkout at the tip and completes them.
+      // owed executor restart stays on the cursor as pending, the action is recorded waiting, and
+      // the next cycle's pass finds the checkout at the tip and completes it.
       const reason = `the executors were not restarted: ${executors.reason ?? 'the restart was refused'}; the fleet stands down on the moved checkout on its own and the restart is retried next cycle`;
       state.upgrade.pending = { from: pending.from, to: pending.to, code: true };
       stall('executors-refused', reason);
       storeAction(state, key, { kind: 'config', work: null, principal: null, state: 'waiting', detail: reason, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
       await persist();
-      return { outcome: 'pending', reason, to: pending.to };
+      // The loop waits on the fleet's claims only so long (GY-1473): a busy fleet can hold one across
+      // every cycle for hours, so once the refusal has stood `fleetWaitMs` the loop re-executes onto
+      // the checkout by itself, the executor restart still owed on the cursor for the process that
+      // starts. A loop already running the checkout's revision has nothing to re-execute.
+      const waited = now() - Date.parse(state.upgrade.stalled?.since ?? at());
+      if (!deps.restartSelf || sameCommit(state.release?.commit, pending.to) || !(waited >= fleetWaitMs)) return { outcome: 'pending', reason, to: pending.to };
+      await alignUnit();
+      try { await deps.restartSelf(); }
+      catch (error) {
+        if (restartEndedBySupervisorStop(error)) return { outcome: 'pending', reason, to: pending.to, self: true };
+        const failure = `${reason}; the loop could not re-execute itself through its supervisor: ${message(error)}`;
+        stall('supervisor-unreachable', failure);
+        await persist();
+        await note(`${failure}; it keeps running ${shortCommit(state.release?.commit ?? null)} until its supervisor restarts it`, true);
+        return { outcome: 'failed', reason: failure };
+      }
+      return { outcome: 'pending', reason, to: pending.to, self: true };
     }
+    // A loop that already re-executed onto this revision while the fleet held its claims runs it:
+    // only the executors were owed, so it is not restarted again.
+    const running = sameCommit(state.release?.commit, pending.to);
     // The cursor is written before the loop re-executes itself: the next process must find the
     // alignment complete, never repeat it. `self` is written true before the call, because the
     // process may not survive it; a failed re-execution writes it back to false.
-    state.upgrade.last = { at: at(), from: pending.from, to: pending.to, code: true, executors: `${executors.result}${executors.reason ? `: ${executors.reason}` : ''}`, self: !!deps.restartSelf };
+    state.upgrade.last = { at: at(), from: pending.from, to: pending.to, code: true, executors: `${executors.result}${executors.reason ? `: ${executors.reason}` : ''}`, self: !running && !!deps.restartSelf };
     // The stall is retired before the loop re-executes, as the next process may never see it again;
     // a re-execution that fails restores it with its first attempt kept.
     const prior = state.upgrade.stalled;
@@ -257,6 +288,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     unstall();
     await persist();
     await note(`Checked out base tip ${shortCommit(pending.to)}${pending.from ? ` from ${shortCommit(pending.from)}` : ''}; loaded code moved, the executors were restarted (${executors.result})${executors.reason ? `: ${executors.reason}` : ''}`, false);
+    if (running) return { outcome: 'upgraded', from: pending.from, to: pending.to, code: true, executors, self: false };
     if (!deps.restartSelf) return failed('loaded code moved and the executors were restarted, but this loop cannot re-execute itself', 'supervisor-unreachable');
     await alignUnit();
     try { await deps.restartSelf(); }
