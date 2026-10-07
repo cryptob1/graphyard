@@ -67,7 +67,7 @@ export const faultCatalogue = {
   'proof': ['proof-gap', 'timing-failure', 'nonexercising-proof', 'fix-item', 'escalation:evidence-policy-conflict', 'action:proof'],
   'capacity': ['reviewer-exhausted', 'role-capacity', 'concurrency-starved', 'fleet-capacity', 'action:failover', 'action:capacity'],
   'resources': ['disk-pressure', 'memory-pressure', 'resource-bound', 'ledger-refusal', 'action:reclaim'],
-  'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'retry-stopped'],
+  'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'retry-stopped', 'stalled-step'],
   'human-decision': ['human-request', 'sudo', 'action:human'],
   'stalled-gate': ['gate', 'blocker', 'stalled-item', 'stalled-action', 'actorless', 'action:blocker'],
   'unclassified': ['unclassified', 'action:fault', 'action:diagnosis'], // GY-1338: these name a step, not a cause

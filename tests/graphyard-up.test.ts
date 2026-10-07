@@ -41,12 +41,14 @@ interface World {
   ticks: number;
   /** The credential files the run minted a sign-in link from. */
   signIns: (string | null)[];
-  /** The request id of each goal create. */
+  /** The request id of each goal record (`graphyard goal FILE`). */
   creates: (string | null)[];
   /** The onboarding pull request once published, and whether it has merged. */
   onboardingPullRequest: string | null; onboardingMerged: boolean;
   /** The Hetzner server's monthly price is shown but not yet confirmed. */
   priceUnconfirmed: boolean;
+  /** The plan's Apps still to create in a browser (GY-1442); absent from the plan when undefined. */
+  browserApps?: string[];
 }
 
 function world(overrides: Partial<World> = {}): World {
@@ -76,10 +78,10 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
     async cli(args, options = {}) {
       w.calls.push(args);
       const joined = args.join(' ');
-      if (args[0] === 'master' && args[1] === 'create') w.creates.push(options.env?.GRAPHYARD_REQUEST_ID ?? null);
+      if (args[0] === 'goal') w.creates.push(options.env?.GRAPHYARD_REQUEST_ID ?? null);
       for (const prefix of w.failOnce) if (joined.startsWith(prefix)) { w.failOnce.delete(prefix); return { code: 1, stdout: '{"error":"interrupted"}' }; }
       if (args[0] === 'install' && args.includes('--plan')) {
-        return { code: 0, stdout: JSON.stringify({ installId: 'acme-shop', installDirectory: '/install/acme-shop', ...(w.host ? { host: { units: [] } } : {}), principals: [{ id: 'acme-shop-operator', role: 'admin', sessionKind: 'human' }, { id: 'acme-shop-master', role: 'coordinator', sessionKind: 'ai' }],
+        return { code: 0, stdout: JSON.stringify({ installId: 'acme-shop', installDirectory: '/install/acme-shop', ...(w.browserApps ? { browserApps: w.browserApps } : {}), ...(w.host ? { host: { units: [] } } : {}), principals: [{ id: 'acme-shop-operator', role: 'admin', sessionKind: 'human' }, { id: 'acme-shop-master', role: 'coordinator', sessionKind: 'ai' }],
           preflight: [{ name: 'GitHub CLI', ok: true }, ...(w.priceUnconfirmed && !args.includes('--confirm-price') ? [{ name: 'Monthly price', ok: false, detail: 'cx33 (8 GB) at fsn1: 6.49 EUR/month; not confirmed, so nothing will be created' }] : []), ...(w.herdrElsewhere && !args.includes('--no-herdr') ? [{ name: 'Herdr plugin', ok: false, detail: 'bound to https://other.example' }] : [])] }) };
       }
       if (args[0] === 'install' && args.includes('--apply')) {
@@ -90,7 +92,7 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
       }
       if (joined === 'master registry propose --apply') { w.accounts = true; return { code: 0, stdout: '{}' }; }
       if (joined === 'master restart') { w.loop = true; return { code: 0, stdout: '{}' }; }
-      if (args[0] === 'master' && args[1] === 'create') return { code: 0, stdout: JSON.stringify({ key: 'GY-1', title: 'goal' }) };
+      if (args[0] === 'goal') return { code: 0, stdout: JSON.stringify({ key: 'GOAL-1', stage: 'acceptance-drafting' }) };
       return { code: 0, stdout: '{}' };
     },
     ...extra,
@@ -258,10 +260,10 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
   assert.equal(result.prompts, 0, 'agent mode never prints the Setup address and waits');
   assert.deepEqual(result.handoffs, [], 'nothing is handed to a person');
   assert.ok(quiet.calls.some(args => args.join(' ') === 'master registry propose --apply'), 'accounts come from login homes on the host');
-  const create = quiet.calls.find(args => args[0] === 'master' && args[1] === 'create')!;
+  const create = quiet.calls.find(args => args[0] === 'goal')!;
   assert.ok(create, 'the goal is submitted');
-  assert.equal(result.goal, 'GY-1');
-  assert.ok(quiet.calls.findIndex(args => args[0] === 'master' && args[1] === 'create') > quiet.calls.findLastIndex(args => args[0] === 'onboarding-merged?'), 'the goal is submitted only once the onboarding pull request has merged');
+  assert.equal(result.goal, 'GOAL-1');
+  assert.ok(quiet.calls.findIndex(args => args[0] === 'goal') > quiet.calls.findLastIndex(args => args[0] === 'onboarding-merged?'), 'the goal is submitted only once the onboarding pull request has merged');
   assert.ok(result.completed.includes('goal'));
   assert.ok(events.every(event => JSON.parse(JSON.stringify(event)).kind), 'every event is JSON');
 
@@ -286,6 +288,18 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
   assert.match(refusedAgent.next, /--browser-profile PROFILE/);
   assert.deepEqual(refusedAgent.handoffs, [], 'App creation is never handed to a person');
   assert.deepEqual(bare.calls, [], 'nothing ran');
+  // --reuse-app lifts that stop only when the reused Apps cover every App the install would create in a
+  // browser: up always registers a reviewer, so reusing the control-plane App alone still stops (GY-1442).
+  const partial = world({ browserApps: ['reviewer'] });
+  const partlyReused = await runUp(request({ agent: true, reuseApps: ['graphyard-acme-shop'] }), dependencies(partial, await temporaryDirectory('graphyard-up-agent-partial'), []));
+  assert.equal(partlyReused.exitCode, 2);
+  assert.match(partlyReused.next, /--reuse-app covers no reviewer App "claude"/);
+  assert.deepEqual(partial.calls.map(args => args.slice(0, 1).concat(args.filter(arg => arg === '--plan' || arg === '--apply'))), [['install', '--plan']], 'only the read-only plan ran');
+  assert.deepEqual(partlyReused.handoffs, []);
+  const covered = world({ app: true, reviewer: true, accounts: true, browserApps: [] });
+  const fullyReused = await runUp(request({ agent: true, reuseApps: ['graphyard-acme-shop', 'acme-shop-review-claude'] }), dependencies(covered, await temporaryDirectory('graphyard-up-agent-covered'), []));
+  assert.equal(fullyReused.exitCode, 0, fullyReused.next);
+  assert.ok(covered.calls.some(args => args[0] === 'install' && args.includes('--apply') && args.includes('acme-shop-review-claude')), 'both reused Apps reach install');
   // The profile is the one passed, else the one the master recorded.
   assert.equal(upBrowserProfile(bareRoot, request({ agent: true })), null);
   await mkdir(join(bareRoot, '.graphyard'), { recursive: true });
@@ -296,7 +310,7 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
   // An interrupted goal submission replays the same request id, so the control plane creates the goal once.
   const goalRoot = await temporaryDirectory('graphyard-up-goal');
   await writeFile(join(goalRoot, 'goal.txt'), 'A sign-up page that sends a welcome email');
-  const goalWorld = world({ app: true, reviewer: true, accounts: true, failOnce: new Set(['master create']) });
+  const goalWorld = world({ app: true, reviewer: true, accounts: true, failOnce: new Set(['goal']) });
   const goalDeps = () => dependencies(goalWorld, goalRoot, [], { driveApp: async () => ({ state: 'done' }) });
   assert.equal((await runUp(request({ agent: true, goalFile: 'goal.txt' }), goalDeps())).exitCode, 1);
   assert.equal((await runUp(request({ agent: true, goalFile: 'goal.txt' }), goalDeps())).exitCode, 0);
@@ -334,8 +348,8 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
   assert.deepEqual(clicked, ['#register', '#create', '#install']);
   assert.ok(opened.includes('https://github.com/apps/graphyard-acme-shop/installations/new/permissions?suggested_target_id=11&repository_ids[]=22'), 'installs on the one repository');
 
-  // GitHub's passkey-first Confirm-access page shows no code until "Use GitHub Mobile" is activated;
-  // the drive activates it (as every master browser flow does) and hands off only the code it shows.
+  // GitHub's passkey-first Confirm-access page (GY-1442): the drive hands off the passkey or password
+  // confirmation at the page's link and waits for it, never triggering GitHub Mobile on its own.
   let mobile = false, approved = false, polls = 0;
   const passkey: BrowserPage = {
     ...page, url: () => approved ? 'https://github.com/settings/apps' : 'https://github.com/sessions/sudo',
@@ -343,11 +357,20 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
     locate: (kind, text) => kind === 'link' && text === 'Use GitHub Mobile' && !mobile ? { selector: '#mobile', tag: 'a', checked: null, value: null, text, href: 'https://github.com/sessions/sudo?mobile=1' } : controls[`${kind}:${text}`] ?? null,
     click: selector => { if (selector === '#mobile') mobile = true; },
   };
-  const passkeyHanded: { sentence: string; code: string | null }[] = [];
-  const passkeyDrive = browserAppDriver({ page: passkey, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: async () => { if (mobile && ++polls === 2) approved = true; } });
-  assert.deepEqual(await passkeyDrive('http://127.0.0.1:4311', (sentence, link) => { passkeyHanded.push({ sentence, code: link.code ?? null }); }), { state: 'done' });
+  const passkeyHanded: { sentence: string; url: string | null; code: string | null }[] = [];
+  const passkeyDrive = browserAppDriver({ page: passkey, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: async () => { if (++polls === 2) approved = true; } });
+  assert.deepEqual(await passkeyDrive('http://127.0.0.1:4311', (sentence, link) => { passkeyHanded.push({ sentence, url: link.url ?? null, code: link.code ?? null }); }), { state: 'done' });
+  assert.equal(mobile, false, 'GitHub Mobile is not triggered while the page offers a passkey');
+  assert.deepEqual(passkeyHanded, [{ sentence: "Confirm access with your passkey or password at https://github.com/sessions/sudo in the Chrome profile the agent drives (GitHub ties the confirmation to that browser's session)", url: 'https://github.com/sessions/sudo', code: null }]);
+  // The operator chose GitHub Mobile (--github-mobile): the drive activates it and hands off only the code it shows.
+  approved = false; polls = 0;
+  const mobileHanded: { sentence: string; code: string | null }[] = [];
+  const mobileDrive = browserAppDriver({ page: passkey, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sudo: 'mobile', sleep: async () => { if (mobile && ++polls === 2) approved = true; } });
+  assert.deepEqual(await mobileDrive('http://127.0.0.1:4311', (sentence, link) => { mobileHanded.push({ sentence, code: link.code ?? null }); }), { state: 'done' });
   assert.ok(mobile, 'GitHub Mobile was triggered');
-  assert.deepEqual(passkeyHanded, [{ sentence: 'Approve the GitHub Mobile prompt on your phone and choose 37', code: '37' }]);
+  assert.deepEqual(mobileHanded, [{ sentence: 'Approve the GitHub Mobile prompt on your phone and choose 37', code: '37' }]);
+  assert.equal(upRequestFromArgs(['--repo', 'acme/shop', '--github-mobile', '--reuse-app', 'graphyard-acme-api']).sudo, 'mobile');
+  assert.deepEqual(upRequestFromArgs(['--repo', 'acme/shop', '--reuse-app', 'graphyard-acme-api']).reuseApps, ['graphyard-acme-api']);
 
   // The drive is a recorded master browser flow: each step and a record.json under .graphyard/master-actions.
   const recordRoot = await temporaryDirectory('graphyard-up-record');
@@ -376,7 +399,7 @@ const JARGON: [string, RegExp][] = [
 ];
 
 test('unit:setup-wizard-states — the Setup page shows each checklist state with its one action, offers the goal box only when every item is green, and shows no command, sha or file path', async () => {
-  const { goalWorkItem, setupChecklist } = await checklistModule();
+  const { setupChecklist } = await checklistModule();
   const green = { github: true, githubRepository: 'acme/shop', appPermissions: { missing: [] }, reviewerApps: [{ id: 'claude', appId: 9 }],
     fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] },
     setup: { protection: 'complete', loop: true } };
@@ -416,10 +439,41 @@ test('unit:setup-wizard-states — the Setup page shows each checklist state wit
   assert.doesNotMatch(fleetPage(), /data-open-setup/, 'only for the admin');
   // Partially protected (the repository's checks only) is enough to start; the line says what follows.
   assert.equal(setupChecklist({ ...green, setup: { protection: 'checks', loop: true } }).find(item => item.id === 'branch-protection')!.done, true);
-  // The goal becomes a first work item the master refines.
-  const goal = goalWorkItem('  A sign-up page that sends a welcome email\nUse the existing mailer.  ');
-  assert.equal(goal.title, 'A sign-up page that sends a welcome email');
-  assert.match(goal.description, /Use the existing mailer\.$/);
-  assert.deepEqual(goal.criteria.map(criterion => criterion.proofs), [['manual:goal-delivered']]);
-  assert.throws(() => goalWorkItem('short'), /at least 10 characters/);
+});
+
+test('unit:up-goal-uses-pipeline — `up --goal FILE` and the Setup page submit a goal record through the goals API, as `graphyard goal` does, and create no plain work item', async () => {
+  const { runUp } = await up();
+  const { goalSubmission } = await checklistModule();
+  const { goalInputSchema, recordGoal } = await import('../src/model/goal.js');
+  const { submitGoal } = await import('../web/pages/setup.js');
+  const text = '  A sign-up page that sends a welcome email\r\nUse the existing mailer.  ';
+
+  // The goal box's text becomes a goal input the goals API accepts: the acceptance role drafts it.
+  const input = goalSubmission(text);
+  assert.equal(input.statement, 'A sign-up page that sends a welcome email\nUse the existing mailer.');
+  const recorded = recordGoal(goalInputSchema.parse(input), 'GOAL-1', { actor: { id: 'acme-shop-operator', role: 'admin' } as any, at: new Date(0).toISOString() });
+  assert.equal(recorded.key, 'GOAL-1');
+  assert.equal(recorded.stage, 'acceptance-drafting', 'a recorded goal waits on the acceptance role');
+  assert.throws(() => goalSubmission('short'), /at least 10 characters/);
+  assert.throws(() => goalSubmission('x'.repeat(2001)), /under 2000 characters/);
+  assert.doesNotThrow(() => goalInputSchema.parse(goalSubmission('x'.repeat(2000))), 'the box\'s limit fits a goal statement');
+
+  // `up --goal FILE` runs `graphyard goal FILE` with that input, never a work item create.
+  const root = await temporaryDirectory('graphyard-up-goal-pipeline');
+  await writeFile(join(root, 'goal.txt'), text);
+  const w = world({ app: true, reviewer: true, accounts: true });
+  const result = await runUp(request({ agent: true, goalFile: 'goal.txt' }), dependencies(w, root, [], { driveApp: async () => ({ state: 'done' }) }));
+  assert.equal(result.exitCode, 0, result.next);
+  assert.equal(result.goal, 'GOAL-1');
+  const goals = w.calls.filter(args => args[0] === 'goal');
+  assert.equal(goals.length, 1, 'one goal record');
+  assert.deepEqual(goalInputSchema.parse(JSON.parse(await readFile(goals[0][1], 'utf8'))), input, 'the file holds the goal input `graphyard goal` reads');
+  assert.equal(w.calls.filter(args => args.includes('create') || args[0] === 'work').length, 0, 'no plain work item');
+
+  // The Setup page's 'Describe what you want built' posts to the goals API, never to work.
+  const posts: { path: string; body: unknown }[] = [];
+  const key = await submitGoal(async (path: string, body?: unknown) => { posts.push({ path, body }); return { key: 'GOAL-2', stage: 'acceptance-drafting' }; }, text);
+  assert.equal(key, 'GOAL-2');
+  assert.deepEqual(posts, [{ path: 'goals', body: input }]);
+  assert.doesNotThrow(() => goalInputSchema.parse(posts[0].body));
 });

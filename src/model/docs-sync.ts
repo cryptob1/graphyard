@@ -131,6 +131,18 @@ export type RoutedConflict = z.infer<typeof routedConflictSchema>;
 export const routedConflictRetention = 500;
 /** The window the hotspot report counts over, and how long a settled docs-sync record is kept. */
 export const routedConflictWindowMs = 24 * 3_600_000;
+/**
+ * The blocked bound: the longest one of the loop's own holds may keep an item from the decision it
+ * owes (GY-1436). A docs-sync hold used to last the session's 30-minute run limit, past this bound
+ * and past the 20-minute silence budget, with the step's owed rework recorded nowhere.
+ */
+export const blockedBoundMs = 10 * 60_000;
+/** How long a docs-sync session holds its item from the rework decision: never past the blocked bound. */
+export const docsSyncHoldMs = blockedBoundMs;
+/** When a watch's hold ends: its launch plus the hold bound. */
+export const docsSyncHoldDeadline = (watch: Pick<DocsSyncWatch, 'launchedAt'>) => Date.parse(watch.launchedAt) + docsSyncHoldMs;
+/** Past this share of its bound a hold that has not moved the head is raised as attention naming its session (GY-1436). */
+export const docsSyncStallMs = docsSyncHoldMs / 2;
 /** The watch key: item and head only, the identity the session is named from (GY-1423). */
 export const docsSyncWatchKey = (item: Pick<Work, 'id'>, head: string) => `${item.id}:${head}`;
 /**
@@ -143,4 +155,17 @@ export function docsSyncWatchFor(watches: Record<string, DocsSyncWatch>, item: P
   const held = Object.entries(watches).filter(([, watch]) => watch.work === item.key && watch.head === head);
   const found = held.find(([, watch]) => !watch.settledAt) ?? held.at(-1);
   return found ? { key: found[0], watch: found[1] } : null;
+}
+
+/**
+ * The docs-sync hold standing on this item's confirmed conflict, or null (GY-1436): a watch of its
+ * reviewed head, still running, classified against the base tip the refresh confirmed, and inside
+ * its bound. While it stands the decisions step records it as a wait, and the rework decision it
+ * holds back is no silence subject: the step is not failing to act, the hold forbids the act.
+ */
+export function docsSyncHolding(watches: Record<string, DocsSyncWatch>, item: Pick<Work, 'id' | 'key' | 'candidate' | 'baseRefresh'>, now: number): DocsSyncWatch | null {
+  const refresh = item.baseRefresh, head = refresh?.from.sha;
+  if (!refresh?.conflict || !head || item.candidate?.sha !== head) return null;
+  const watch = docsSyncWatchFor(watches, item, head)?.watch;
+  return watch && !watch.failed && !watch.settledAt && !watch.goneAt && watch.base === refresh.base && now < docsSyncHoldDeadline(watch) ? watch : null;
 }

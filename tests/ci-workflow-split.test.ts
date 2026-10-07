@@ -131,8 +131,16 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
 
   // Every suite the pre-merge gate excludes runs here.
   assert.deepEqual([...jobs.keys()].sort(), ['candidate', 'chart', 'container-acceptance', 'container-recovery', 'long-suites', 'promote', 'uat']);
-  assert.match(jobs.get('long-suites')!.text, /node scripts\/ci-tests\.mjs release-candidate --out "\$RUNNER_TEMP\/release-candidate-tests\.txt"/);
-  assert.match(jobs.get('long-suites')!.text, /npm test -- --files-from "\$RUNNER_TEMP\/release-candidate-tests\.txt"/);
+  // The timing budgets run first, one file at a time, and the soak after them (GY-1440): a budget
+  // measured beside another suite's load measures that load. Both run whatever the other's verdict.
+  const suitesStep = jobs.get('long-suites')!.text;
+  assert.match(suitesStep, /node scripts\/ci-tests\.mjs release-candidate --suite timing-budget --out "\$RUNNER_TEMP\/timing-budget-tests\.txt"/);
+  assert.match(suitesStep, /node scripts\/ci-tests\.mjs release-candidate --suite soak --out "\$RUNNER_TEMP\/soak-tests\.txt"/);
+  const timingRun = suitesStep.indexOf('npm test -- --files-from "$RUNNER_TEMP/timing-budget-tests.txt" --test-concurrency=1 '), soakRun = suitesStep.indexOf('npm test -- --files-from "$RUNNER_TEMP/soak-tests.txt" ');
+  assert.ok(timingRun >= 0 && soakRun > timingRun, 'the timing budgets run one file at a time, before the soak');
+  assert.equal([...suitesStep.matchAll(/npm test -- /g)].length, 2, 'no other run shares the runner with them');
+  assert.equal([...suitesStep.matchAll(/ \|\| status=1$/gm)].length, 2, 'the soak runs whatever the timing budgets\' verdict, and the step fails on either');
+  assert.match(suitesStep, /timing-report\.ts "\$RUNNER_TEMP\/timing\/release-candidate\.jsonl" "\$RUNNER_TEMP\/timing\/test-timing-budget\.log" "\$RUNNER_TEMP\/timing\/test-soak\.log"/, 'the report counts both runs\' failures');
   assert.match(jobs.get('long-suites')!.text, /apt-get install -y -q bubblewrap/, 'the soak confines its launches in real namespaces');
   assert.match(jobs.get('container-acceptance')!.text, /scripts\/run-acceptance\.mjs "\$RUNNER_TEMP\/candidate\.json" graphyard-ci "\$RUNNER_TEMP\/acceptance\.json"/);
   // GitHub merges under branch protection (GY-1235): Graphyard has no merge authorization left to exercise.
@@ -146,6 +154,10 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
   const listed = execFileSync(process.execPath, ['scripts/ci-tests.mjs', 'release-candidate'], { cwd: repositoryRoot, encoding: 'utf8' }).split('\n').filter(Boolean);
   assert.deepEqual(listed, listTestFiles().filter(isReleaseCandidateTest));
   assert.deepEqual([...listed].sort(), Object.keys(releaseCandidateTests).sort());
+  const suite = (name: string) => execFileSync(process.execPath, ['scripts/ci-tests.mjs', 'release-candidate', '--suite', name], { cwd: repositoryRoot, encoding: 'utf8' }).split('\n').filter(Boolean);
+  const [timingBudget, soak] = [suite('timing-budget'), suite('soak')];
+  assert.deepEqual([...timingBudget, ...soak].sort(), [...listed].sort(), 'the two suites together are exactly the release-candidate list');
+  assert.ok(timingBudget.length > 0 && timingBudget.every(file => releaseCandidateTests[file] === 'timing-budget') && soak.every(file => releaseCandidateTests[file] === 'soak'), 'each suite lists its own files');
   // The soak runs as one suite per concern (GY-1363), each file of it here and none over 1,500 lines.
   const soaks = listTestFiles().filter(file => /^tests\/soak/.test(file));
   assert.ok(soaks.length >= 4, `the soak is split per concern: ${soaks.join(', ')}`);

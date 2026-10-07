@@ -602,6 +602,7 @@
     "tests/store-init.test.ts": 11890,
     "tests/store-locks.test.ts": 55907,
     "tests/successor-scope.test.ts": 1901,
+    "tests/sudo-fallback.test.ts": 1500,
     "tests/supervisor-renewal.test.ts": 80263,
     "tests/sync-no-tags.test.ts": 700,
     "tests/sync-restore.test.ts": 2355,

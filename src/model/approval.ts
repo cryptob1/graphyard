@@ -6,6 +6,7 @@ import { implementerIdentities, proofExerciseSchema } from './evidence.js';
 import { standingEscalations } from './escalation.js';
 import { closureKinds } from './closure.js';
 import { createSchema, escalationTriggers, operatorCapability, type OperatorCapability, type Principal, type Work } from './work.js';
+import { baseRefreshConflict } from '../merge-queue.js';
 
 /**
  * Two-party decisions: the calls the guides used to reserve for a human operator. An agent
@@ -288,6 +289,23 @@ export function decisionPrecondition(action: DecisionAction, input: any, work: W
   if (bound && work.candidate?.sha !== bound) return `The rework is bound to ${bound.slice(0, 12)} but the current candidate is ${work.candidate?.sha.slice(0, 12) ?? 'none'}; its grounds no longer describe the item`;
   if (action === 'close' && input.triageAt !== undefined && (work.triage?.state !== 'proposed' || work.triage.at !== input.triageAt)) return `${work.key} has no proposed triage closure from ${input.triageAt}; its triage is ${work.triage ? `${work.triage.state} from ${work.triage.at}` : 'not recorded'}`;
   return null;
+}
+
+/**
+ * GY-1434. The loop's decisions step requests a system-driven item's base-conflict rework within one
+ * decision cycle of the grounds, at most ten minutes; a hand rework of it is refused, so a docs-sync
+ * gives the conflict up before then and past it `master status` names the step as stalled.
+ */
+export const conflictReworkBoundMs = 10 * 60_000;
+/** The round's grounds binding (`${sha}:conflict`), the conflict's first recording on this head, its due time and how far past it the round is. */
+export interface ConflictReworkDue { binding: string; since: string; dueAt: string; overdueMs: number }
+/** The loop-owned conflict rework a system-driven item is owed and when it falls due, or null when none is owed. */
+export function conflictReworkDue(work: Pick<Work, 'stage' | 'systemDriven' | 'reworkRequested' | 'candidate' | 'observation' | 'baseRefresh' | 'policyRevision'>, now: number): ConflictReworkDue | null {
+  if (work.stage === 'done' || work.systemDriven !== true || work.reworkRequested || !baseRefreshConflict(work)) return null;
+  const since = work.baseRefresh!.conflictSince ?? work.baseRefresh!.at, at = Date.parse(since);
+  if (!Number.isFinite(at)) return null;
+  const due = at + conflictReworkBoundMs;
+  return { binding: `${work.candidate!.sha}:conflict`, since, dueAt: new Date(due).toISOString(), overdueMs: Math.max(0, now - due) };
 }
 
 // Decisions no pair of agent identities can complete (GY-102) live in operator-decision.ts.
