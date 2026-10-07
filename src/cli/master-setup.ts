@@ -4,11 +4,11 @@ import { loopSupervision, loopSupervisionAttention, type LoopSupervisorEvidence,
 import { readDaemonState } from '../master-daemon.js';
 import { detectLoopSupervisorUnit } from '../daemon/upgrade.js';
 import type { MainGuardReadiness } from '../main-guard.js';
-import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import type { CliContext } from './context.js';
-import { deploymentTarget, derivedFrom, derivedVariables, installIdFor, prepareInstall, providers, revertApproverFromFile, selfProvision, type DerivedVariable, type PendingRedeploy, type Provider, type SelfProvisionAudit } from '../install/index.js';
+import { deploymentTarget, derivedFrom, derivedVariables, installIdFor, prepareInstall, providers, revertApproverFromFile, selfProvision, type DerivedVariable, type PendingRedeploy, type PendingSetup, type Provider, type SelfProvisionAudit } from '../install/index.js';
 import type { AdapterContext, ProviderAdapter } from '../install/adapters.js';
 import { installDirectory, readInstallRecord } from '../install/secrets.js';
 
@@ -66,13 +66,16 @@ export async function setupHealth(root: string, master: MasterConfig, supervisor
 
 /** The loop's latest own run of `master setup --apply`: when it started and what it did (`running` until it settles). */
 export interface LoopSelfProvision { at: string; outcome: string; failed: boolean }
-const loopProvisionIntervalMs = 3_600_000, loopProvisionRetryMs = 600_000;
-const loopProvisionRuns = new Map<string, { at: number; running: boolean; outcome: string; failed: boolean; reported: boolean }>();
+const loopProvisionIntervalMs = 3_600_000, loopProvisionRetryMs = 600_000, loopProvisionRetryCapMs = 86_400_000;
+/** The wait before the next run: an hour after a success; after the Nth failure in a row 10 min × 2^(N-1), at most a day, so a setup or redeploy that keeps failing is retried a bounded number of times a day. */
+export const loopProvisionDelay = (failures: number) => failures ? Math.min(loopProvisionRetryMs * 2 ** (failures - 1), loopProvisionRetryCapMs) : loopProvisionIntervalMs;
+const loopProvisionRuns = new Map<string, { at: number; running: boolean; outcome: string; failed: boolean; failures: number; reported: boolean }>();
 /** Where the loop's latest run is kept, so `master status` in another process reads its outcome. */
 export const loopProvisionFile = (root: string) => resolve(root, '.graphyard', 'setup-self-provision.json');
 /**
  * The loop's setup step (GY-1416 AC-2, src/daemon/cycle.ts): `master setup --apply` runs beside
- * the cycle (a redeploy outlasts a cycle) at most once an hour, ten minutes after a failure. It sets
+ * the cycle (a redeploy outlasts a cycle) at most once an hour; after failures in a row it backs off
+ * from ten minutes, doubling to at most a day (`loopProvisionDelay`). It sets
  * variables only where the provider adapter applies them in place; elsewhere it plans, and the setup
  * attention keeps naming the command. A failed run is thrown on the next step, so the cycle records
  * the failed config action, and its outcome is kept for `master status`, which never runs it.
@@ -80,15 +83,15 @@ export const loopProvisionFile = (root: string) => resolve(root, '.graphyard', '
 export async function loopSelfProvision(root: string, master: Pick<MasterConfig, 'repository' | 'reviewer'>, options: { now?: number; setup?: typeof masterSetup } = {}): Promise<LoopSelfProvision> {
   const now = options.now ?? Date.now(), last = loopProvisionRuns.get(root);
   if (last && !last.running && last.failed && !last.reported) { last.reported = true; throw new Error(`setup self-provision ${last.outcome}`); }
-  if (!last || (!last.running && now - last.at >= (last.failed ? loopProvisionRetryMs : loopProvisionIntervalMs))) {
-    const entry = { at: now, running: true, outcome: 'running', failed: false, reported: false };
+  if (!last || (!last.running && now - last.at >= loopProvisionDelay(last.failures))) {
+    const entry = { at: now, running: true, outcome: 'running', failed: false, failures: last?.failures ?? 0, reported: false };
     loopProvisionRuns.set(root, entry);
     void (options.setup ?? masterSetup)(root, master, { apply: true })
-      .then(report => { entry.outcome = report.set.length ? `set ${report.set.join(', ')}` : report.redeployed.length ? `redeployed ${report.redeployed.join(', ')}` : report.next ?? 'every derived variable is present'; },
-        error => { entry.outcome = `failed: ${error instanceof Error ? error.message : String(error)}`; entry.failed = true; })
+      .then(report => { entry.failures = 0; entry.outcome = report.set.length ? `set ${report.set.join(', ')}` : report.redeployed.length ? `redeployed ${report.redeployed.join(', ')}` : report.next ?? 'every derived variable is present'; },
+        error => { entry.outcome = `failed: ${error instanceof Error ? error.message : String(error)}`; entry.failed = true; entry.failures++; })
       .finally(async () => {
         entry.running = false;
-        await mkdir(resolve(root, '.graphyard'), { recursive: true }).then(() => writeFile(loopProvisionFile(root), `${JSON.stringify({ at: new Date(entry.at).toISOString(), outcome: entry.outcome, failed: entry.failed })}\n`)).catch(() => undefined);
+        await writeAtomically(loopProvisionFile(root), { at: new Date(entry.at).toISOString(), outcome: entry.outcome, failed: entry.failed }).catch(() => undefined);
       });
   }
   return (await lastLoopSelfProvision(root))!;
@@ -96,7 +99,15 @@ export async function loopSelfProvision(root: string, master: Pick<MasterConfig,
 export async function lastLoopSelfProvision(root: string): Promise<LoopSelfProvision | null> {
   const current = loopProvisionRuns.get(root);
   if (current) return { at: new Date(current.at).toISOString(), outcome: current.outcome, failed: current.failed };
-  return readFile(loopProvisionFile(root), 'utf8').then(text => JSON.parse(text) as LoopSelfProvision, () => null);
+  // A missing or unreadable file is no report: it is a diagnostic, and `master status` never fails on it.
+  return readFile(loopProvisionFile(root), 'utf8').then(text => JSON.parse(text) as LoopSelfProvision).catch(() => null);
+}
+/** Replaces a small state file whole, so a process killed mid-write leaves the old file or the new one, never a partial one. */
+async function writeAtomically(file: string, value: unknown) {
+  await mkdir(resolve(file, '..'), { recursive: true });
+  const staged = `${file}.${process.pid}.tmp`;
+  await writeFile(staged, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  await rename(staged, file);
 }
 
 /** Where `master setup --apply` appends one audit line per variable it set: name, source and fingerprint, never a value. */
@@ -137,8 +148,8 @@ export async function masterSetup(root: string, master: Pick<MasterConfig, 'repo
   const audit = async (entry: SelfProvisionAudit) => { await mkdir(resolve(root, '.graphyard'), { recursive: true }); await appendFile(setupAuditFile(root), `${JSON.stringify(entry)}\n`, { mode: 0o600 }); };
   const pendingFile = resolve(root, '.graphyard', `setup-redeploy-${located.context.provider}-${located.context.service}.json`);
   const pending: PendingRedeploy = {
-    read: () => readFile(pendingFile, 'utf8').then(text => JSON.parse(text) as string[], () => []),
-    write: async names => { await mkdir(resolve(root, '.graphyard'), { recursive: true }); await (names.length ? writeFile(pendingFile, `${JSON.stringify(names)}\n`) : rm(pendingFile, { force: true })); },
+    read: () => readFile(pendingFile, 'utf8').then(text => JSON.parse(text) as PendingSetup, () => ({ redeploy: [], audit: [] })),
+    write: async staged => { await (staged.redeploy.length || staged.audit.length ? writeAtomically(pendingFile, staged) : rm(pendingFile, { force: true })); },
   };
   // The reviewer bound now comes first: the first occurrence of a name wins, and the install record's reviewer may since have been replaced.
   return { target: { provider: located.context.provider, service: located.context.service }, ...await selfProvision(located, [...reviewer, ...located.derived], { apply: options.apply, audit, now: deps.now, pending }) };

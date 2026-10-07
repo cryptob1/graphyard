@@ -118,8 +118,8 @@ const hostDoable: (HostDoableAsk & { test: RegExp })[] = [
 const personRecipient = /\b(?:teammate|contractor|colleague|employee|engineer|person|people|developer|new hire)s?\b/i;
 /** A credential asked under `credentials-for-people` is the host's only when an agent's work is its stated purpose. */
 const agentPurpose = /\b(?:pilot|worker|agent|master|loop|host|install(?:er|ation)?|deployment|control plane|CI|webhooks?)\b/i;
-/** A step only the human takes, which a host-doable step beside it never hides: money, a paid account, a goal. */
-const humanStep = /\b(?:paid|pay|purchase|buy|billing|subscription|budget|spend|invoice|goals?|priorit(?:y|ies|ize))\b|[€$]\s?\d|\b\d+(?:\.\d+)?\s?(?:EUR|USD)\b|\/month\b|\ba month\b/i;
+/** A step only the human takes, which a host-doable step beside it never hides: money, opening any third-party account (free or paid), a goal. */
+const humanStep = /\b(?:paid|pay|purchase|buy|billing|subscription|budget|spend|invoice|goals?|priorit(?:y|ies|ize))\b|\b(?:open|create|register|sign(?:ing)? up for)\b[^.;]{0,40}\baccounts?\b|\bsign(?:ing)?[- ]?up\b|[€$]\s?\d|\b\d+(?:\.\d+)?\s?(?:EUR|USD)\b|\/month\b|\ba month\b/i;
 export function hostDoableAsk(needed: string, kind?: string): HostDoableAsk | null {
   if (humanStep.test(needed)) return null;
   const found = hostDoable.find(entry => entry.test.test(needed) && !(entry.class === 'host-credential' && (personRecipient.test(needed) || (kind === 'credentials-for-people' && !agentPurpose.test(needed)))));

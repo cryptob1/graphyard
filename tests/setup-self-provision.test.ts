@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { deploymentTarget, REDACTED } from '../src/install/index.js';
 import { fingerprint } from '../src/install/secrets.js';
 import type { Transport } from '../src/install/transport.js';
-import { loopSelfProvision, masterSetup, setupApplyNext, setupAuditFile, setupHealth } from '../src/cli/master-setup.js';
+import { loopProvisionDelay, loopSelfProvision, masterSetup, setupApplyNext, setupAuditFile, setupHealth } from '../src/cli/master-setup.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { mainGuardReadiness } from '../src/main-guard.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
@@ -161,6 +161,46 @@ test('unit:setup-self-provision — the reviewer bound now wins over the install
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('unit:setup-self-provision — an audit entry that failed to append after the variables were set is written by the next run, once each', async () => {
+  const { root, master } = await fixture();
+  try {
+    const deployed: Record<string, string> = {};
+    const bundle = railway(deployed);
+    const target = deploymentTarget({ provider: 'railway', repository: 'owner/project', service: 'graphyard', linkDirectory: root, transport: bundle.transport });
+    const locate = async () => ({ ...target, derived: [] });
+    // The audit log is a directory for the first run, so every append fails after the variables are set and redeployed.
+    await rm(setupAuditFile(root), { force: true });
+    await mkdir(setupAuditFile(root), { recursive: true });
+    await assert.rejects(masterSetup(root, master, { apply: true }, { locate }));
+    assert.deepEqual(Object.keys(deployed), revertNames, 'set and redeployed');
+    await rm(setupAuditFile(root), { recursive: true, force: true });
+    bundle.calls.length = 0;
+    const owed = await masterSetup(root, master, { apply: false }, { locate });
+    assert.equal(owed.next, 'graphyard master setup --apply', 'the unwritten audit is still owed');
+    const retried = await masterSetup(root, master, { apply: true }, { locate });
+    assert.deepEqual([retried.set, retried.redeployed, retried.audit.map(entry => entry.variable)], [[], [], revertNames]);
+    assert.equal(bundle.calls.some(call => call.args[0] === 'variable' || call.args[0] === 'redeploy'), false, 'nothing set or redeployed again');
+    const lines = (await readFile(setupAuditFile(root), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(lines.map(line => line.variable), revertNames, 'one entry per variable');
+    const settled = await masterSetup(root, master, { apply: true }, { locate });
+    assert.deepEqual([settled.audit, settled.next], [[], null]);
+    assert.equal((await readFile(setupAuditFile(root), 'utf8')).trim().split('\n').length, 3, 'never repeated');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('unit:setup-attention-owner — a corrupt self-provision status file reads as no report and never fails master status', async () => {
+  const root = await temporaryDirectory('setup-attention-corrupt');
+  try {
+    const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(root, 'coordinator.token'), cliPath: '/opt/graphyard/bin/graphyard.mjs',
+      repository: 'owner/corrupt', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-corrupt', autoMerge: true, mergeMethod: 'merge', workers: [],
+      browser: { profile: 'Default' } }) as MasterConfig;
+    await mkdir(join(root, '.graphyard'), { recursive: true });
+    await writeFile(join(root, '.graphyard', 'setup-self-provision.json'), '{"at":"2026-10-07T0');
+    const host = { platform: 'linux' as NodeJS.Platform, temporaryDirectories: [] as string[], home: root, run: () => '' };
+    assert.equal((await setupHealth(root, master, host, null, async () => null)).setup.selfProvision, null);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('unit:setup-attention-owner — a missing derivable deployment variable is the master\'s attention, naming master setup --apply, never the human; the loop\'s setup step runs it itself and a status read never does', async () => {
   const root = await temporaryDirectory('setup-attention-owner');
   try {
@@ -205,6 +245,8 @@ test('unit:setup-attention-owner — a missing derivable deployment variable is 
     assert.equal(runs.length, 3);
     await loopSelfProvision(root, master, { now: now + 7_800_000, setup: setupStub });
     assert.equal(runs.length, 4, 'retried ten minutes after the failure');
+    // Failures in a row back off, doubling from ten minutes to at most a day: a setup that keeps failing is retried a bounded number of times a day.
+    assert.deepEqual([0, 1, 2, 3, 8, 9, 20].map(loopProvisionDelay), [3_600_000, 600_000, 1_200_000, 2_400_000, 76_800_000, 86_400_000, 86_400_000]);
 
     // The step is the cycle's own: every cycle offers it, isolated, and a throw fails only that step.
     let offered = 0;

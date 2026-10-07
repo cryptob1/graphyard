@@ -363,8 +363,13 @@ export interface SelfProvisionReport {
   redeployed: string[]; pendingRedeploy: string[];
   audit: SelfProvisionAudit[]; next: string | null;
 }
-/** Variables set on the deployment whose redeploy has not yet succeeded; kept between runs so a failed redeploy is retried. */
-export interface PendingRedeploy { read(): Promise<string[]>; write(names: string[]): Promise<void> }
+/**
+ * What an applying run staged and has not yet finished, kept between runs: variables set on the
+ * deployment whose redeploy has not succeeded, and audit entries for variables set but not yet
+ * written to the audit log. The next run redeploys the one and writes the other.
+ */
+export interface PendingSetup { redeploy: string[]; audit: SelfProvisionAudit[] }
+export interface PendingRedeploy { read(): Promise<PendingSetup>; write(staged: PendingSetup): Promise<void> }
 export const derivedFrom = (values: EnvValue[], source: string): DerivedVariable[] => values.map(value => ({ ...value, source }));
 
 /**
@@ -397,32 +402,40 @@ export async function selfProvision(target: { adapter: ProviderAdapter; context:
   // A listing that failed reads as no variables: applying from it would overwrite every live value.
   const observed = observation.app && observation.variablesObserved === true;
   const canApply = typeof adapter.applyVariables === 'function';
-  const names = new Set<string>();
-  const missing = !observed ? [] : derived.filter(value => value.value !== '' && !names.has(value.name) && !!names.add(value.name) && !presentOn(observation.variables, value.name));
-  const pending = canApply && observed ? await options.pending?.read() ?? [] : [];
+  // The first occurrence of a name wins.
+  const first = derived.filter((value, index) => derived.findIndex(other => other.name === value.name) === index);
+  const missing = !observed ? [] : first.filter(value => value.value !== '' && !presentOn(observation.variables, value.name));
+  const staged = canApply && observed ? await options.pending?.read() ?? { redeploy: [], audit: [] } : { redeploy: [], audit: [] };
+  const pending = staged.redeploy;
   const report: SelfProvisionReport = {
     provider: context.provider, service: context.service, mode: options.apply ? 'apply' : 'plan', observed, canApply,
     missing: missing.map(value => ({ ...planValue(value, true), source: value.source })), set: [], redeployed: [], pendingRedeploy: pending, audit: [],
     next: !observation.app ? `The ${context.service} service was not observed on ${context.provider}; check the provider CLI's login and link (${context.railwayDir}), or name the service with --service NAME, then rerun`
       : !observed ? `The ${context.service} service's variables could not be read on ${context.provider}; nothing is applied from an unread listing. Rerun once the provider CLI lists them`
-      : !missing.length && !pending.length ? null
+      : !missing.length && !pending.length && !staged.audit.length ? null
       : !canApply ? `The ${context.provider} adapter rewrites the whole environment: graphyard install --provider ${context.provider} --repo ${context.repository} --apply sets these with the rest`
       : options.apply ? null : 'graphyard master setup --apply',
   };
-  if (options.apply && canApply && (missing.length || pending.length)) {
-    // Recorded before the writes: variables set but never redeployed read as present on the next run, which then redeploys them.
-    const staged = [...new Set([...pending, ...missing.map(value => value.name)])];
-    await options.pending?.write(staged);
-    // With no values, applyVariables only redeploys.
-    await adapter.applyVariables!(context, missing.map(({ name, value, secret }) => ({ name, value, secret })));
-    await options.pending?.write([]);
-    report.redeployed = pending; report.pendingRedeploy = [];
+  if (options.apply && canApply && (missing.length || pending.length || staged.audit.length)) {
     const at = new Date((options.now ?? Date.now)()).toISOString();
-    for (const value of missing) {
-      const entry: SelfProvisionAudit = { at, variable: value.name, secret: value.secret, fingerprint: fingerprint(value.value), source: value.source, provider: context.provider, service: context.service };
-      await options.audit?.(entry);
-      report.audit.push(entry); report.set.push(value.name);
+    const entries = missing.map((value): SelfProvisionAudit => ({ at, variable: value.name, secret: value.secret, fingerprint: fingerprint(value.value), source: value.source, provider: context.provider, service: context.service }));
+    // Staged before the writes: variables set but never redeployed read as present on the next run,
+    // which then redeploys them, and an audit entry not yet written is written by the next run.
+    const audits = [...staged.audit, ...entries], redeploy = [...new Set([...pending, ...missing.map(value => value.name)])];
+    if (redeploy.length) {
+      await options.pending?.write({ redeploy, audit: audits });
+      // With no values, applyVariables only redeploys.
+      await adapter.applyVariables!(context, missing.map(({ name, value, secret }) => ({ name, value, secret })));
+      await options.pending?.write({ redeploy: [], audit: audits });
     }
+    report.redeployed = pending; report.pendingRedeploy = [];
+    // Each entry leaves the staged set once written, so a failed append neither loses nor repeats one.
+    for (const [index, entry] of audits.entries()) {
+      await options.audit?.(entry);
+      await options.pending?.write({ redeploy: [], audit: audits.slice(index + 1) });
+      report.audit.push(entry);
+    }
+    report.set = missing.map(value => value.name);
   }
   vault.assertClean(JSON.stringify(report), 'the setup report');
   return vault.scrub(report);

@@ -430,6 +430,9 @@ test('unit:park-refuses-host-doable — park refuses a NEEDED an agent identity 
     ['credentials-for-people', 'Provide Alice a GitHub token'],
     // A human-only step beside a host-doable one keeps the whole request the human's.
     ['money-or-accounts', 'Open a paid Railway account, then set the deployment variables'],
+    // Opening any third-party account is the human's, free or trial as much as paid.
+    ['money-or-accounts', 'Open a Railway account, then set the deployment variables'],
+    ['money-or-accounts', 'Sign up for a free Fly.io trial and set the control-plane variables there'],
   ] as const;
   for (const [kind, needed] of accepted) {
     assert.equal(parkRefusal({ needed, kind }), null, needed);
