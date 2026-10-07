@@ -26,7 +26,7 @@ All lanes require `e2e:` proofs; low/medium reworks need no approver (approved b
 
 ![Bootstrap: one supervised worker; normal operation: a fleet.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: in bootstrap the human operator supervises one worker; later the master dispatches many, each credentialed.
+Text equivalent: bootstrap, the operator supervises one worker; later the master dispatches many credentialed ones.
 
 ![Authority of operator, Graphyard, Herdr sessions, reviewer, producer.](diagrams/roles-and-authority.svg)
 
@@ -36,6 +36,6 @@ Text equivalent: operator makes human-only decisions; Herdr hosts master (`coord
 
 ![Control plane: callers, engine, Postgres, reconciliation worker, GitHub.](diagrams/control-plane-components.svg)
 
-Text equivalent: API callers' mutations apply with events in locked Postgres transactions; reconciliation syncs GitHub, which merges passing heads; webhooks wake jobs.
+Text equivalent: mutations apply with events in locked Postgres transactions; reconciliation syncs GitHub, which merges passing heads; webhooks wake jobs.
 
 Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`; claims bump epoch; latest trusted proof wins; merge is not [delivery](delivery.md).

@@ -40,7 +40,7 @@ No merge queue (`master tip-cleanup --apply` deletes leftover `refs/graphyard/qu
 
 ### Bindings and carry
 
-Reviews and proofs bind head, base, policy revision; a moved base carries all if merge kept patch-id, else the approval if no reviewed file changed, and disjoint-`scopeFiles` proofs. Carried approvals aren't re-posted; no merge requested.
+Reviews and proofs bind head, base, policy revision; a moved base carries all if merge kept patch-id, else the approval if no reviewed file changed, disjoint-`scopeFiles` proofs. Carried approvals aren't re-posted; no merge requested.
 
 ### Proofs in CI
 

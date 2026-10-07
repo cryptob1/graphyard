@@ -1,4 +1,4 @@
-<!-- page: Agent protocol | 6 | the `pipeline` field. -->
+<!-- page: Agent protocol | 6 | `pipeline` field. -->
 # Pipeline timeline
 
 Lifecycle commands append to each item's `pipeline`; it never moves a gate.

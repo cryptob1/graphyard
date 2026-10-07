@@ -76,7 +76,7 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W / 2⌉` review 
 
 ## 3. Start the master
 
-`master init`, executor `init`, `master start` ([setup](setup-from-zero.md#10-start-the-master)), as an OS user whose GitHub credentials workers cannot read; `--browser-profile`: Chrome as GitHub admin (`master browser`); GitHub Mobile *Confirm access* stays human-only. Reviewer: `master reviewer setup` or `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); `master review GY-N` relaunches one.
+`master init`, executor `init`, `master start` ([setup](setup-from-zero.md#10-start-the-master)), as an OS user whose GitHub credentials workers cannot read; `--browser-profile`: Chrome as GitHub admin (`master browser`); App confirmation and GitHub Mobile *Confirm access* stay human-only. Reviewer: `master reviewer setup` or `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); `master review GY-N` relaunches one.
 
 ### The loop must be supervised
 
@@ -84,12 +84,10 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W / 2⌉` review 
 
 ### The pipeline doctor (on by default)
 
-Every `run.doctor.intervalMinutes` (10) a Pi **doctor** session fixes stuck, overdue work via `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release` (never merging, dispatching or evidencing); posts per-item findings and summary (`master status` `doctor`); escalates the rest or files fault items, deduplicated against open items at settle (proof IDs normalised; create-refused filings escalate; control-plane refusals retry). Reportless (models died, loop stopped) or restart-lost runs are recorded failed, posted, no `loop` fault; next run re-covers. The loop itself settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (10) a Pi **doctor** session fixes stuck, overdue work via `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release` (never merging, dispatching or evidencing); posts findings and summary (`master status` `doctor`); escalates the rest or files fault items, deduplicated against open ones at settle (proof IDs normalised; create refusals escalate; control-plane refusals retry). Reportless (models died, loop stopped) or restart-lost runs record failed, posted, no `loop` fault; the next run re-covers. The loop itself settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
 
 ## 4. Prove the first PR
 
 `graphyard doctor --profile through-merge` names gaps; `master run` dispatches small item, merged once protection requires `Graphyard / merge`; `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
 CI workflows should cancel superseded pull-request runs: group `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}`, `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled; `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
-
-Humans only: logins, App confirmation, plan approval, producer grants, [human-only decisions](glossary.md#who-decides).

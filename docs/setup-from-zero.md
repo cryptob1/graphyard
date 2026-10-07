@@ -28,7 +28,7 @@ gy() { node "$GRAPHYARD_CLI" "$@"; }
 cd /path/to/REPO && gy init --scan
 ```
 
-A repository (even fresh from `git init`) needs `origin` on GitHub with its default branch, tests, and `pull_request` workflow whose job is the required check; `node:test` is detected as `junit-xml-v1` (`--test-reporter=junit`). **Verify:** readiness `repository`, `required-checks`, `test-formats` are `ready`.
+A repository (even fresh from `git init`) needs a GitHub `origin` with default branch, tests and a `pull_request` workflow whose job is the required check; `node:test` is detected as `junit-xml-v1` (`--test-reporter=junit`). **Verify:** readiness `repository`, `required-checks`, `test-formats` are `ready`.
 
 ## 3. Install the control plane
 

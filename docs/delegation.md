@@ -21,6 +21,6 @@ Unresolved triggers refuse the merge gate; a replacement may claim, delivery wai
 `escalation.resolved` records each:
 
 - Explained `lease-loss`: reconciliation, or `admin` `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`.
-- Superseded-epoch `lease-loss` (latest attempt leased or submitted, no lost-epoch fence): reconciliation. Stopped epoch between attempts: none while implementation dispatch is next (claim supersedes); else the loop's two-party decision.
+- Superseded-epoch `lease-loss` (latest attempt leased or submitted, no lost-epoch fence): reconciliation. Stopped epoch between attempts: none while implementation dispatch is next (claim supersedes); else loop two-party decision.
 - `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, lead-raised `lease-loss`: master-requested two-party decision or declared human session (`admin`, `sessionKind: "human"`; settles any).
 - `requirement-weakening` from approved `requirements` decision: records id, settled by that approval (citing approver); no `scope` fault.

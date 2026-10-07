@@ -14,7 +14,7 @@ Workers never use host `gh` logins: launchers mint into `worker-sessions/GY-N-EP
 ## How a lease ends
 
 - `submit` (CLI `complete`); later heartbeats get `Implementation lease for epoch N ended when GY-N was submitted; stop heartbeating after complete`.
-- `park` (a human-only request naming every human step; file widenings (409) or deferred steps refused: `scope-request`) or `blocked` (records the blocker, keeps partial work) releases.
+- `park` (a human-only request naming every human step; file widenings (409) or deferred steps refused: `scope-request`) or `blocked` releases.
 - Coordinator `capacity` (`event: "exhausted"`): freed for another account; like every attempt end, closes the attempt's scope request, lifting its refusal blocker.
 - Expiry, classed by the epoch's ledger: unwithdrawn pre-release `blocked` report → `lease.expired` cause `blocked-awaiting-operator`; admin `--previous-worker-stopped` → `stopped-by-attestation`; `capacity.exhausted` → `exhausted-capacity`; none → `lease-loss` escalation, auto-settled once a record explains it or a newer attempt supersedes it ([settling](../delegation.md#who-may-settle-what)).
 
