@@ -133,16 +133,9 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * when the repository has no such workflow, absent on a loop wired without it.
    */
   promotion?: PromotionReads | null;
-  /**
-   * Publishes `mergeQueue.rerunFailedChecks` to the control plane, which reruns a failed required
-   * check by it (GY-516); sent only on a change, and read at the start of every cycle so a
-   * reconfiguration applies before the next observation.
-   */
+  /** Publishes `mergeQueue.rerunFailedChecks` to the control plane, which reruns a failed required check by it (GY-516); sent only on a change, and read at the start of every cycle so a reconfiguration applies before the next observation. */
   publishMergeSettings?: () => Promise<unknown>;
-  /**
-   * GY-1416: the loop's setup step, `master setup --apply` beside the cycle at most hourly; it sets
-   * derived deployment variables only where the provider adapter applies them in place.
-   */
+  /** GY-1416: the loop's setup step, `master setup --apply` beside the cycle at most hourly; it sets derived deployment variables only where the provider adapter applies them in place. */
   selfProvision?: () => Promise<unknown>;
   /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
   requestSmoke: (work: Work) => void | Promise<void>;
@@ -712,8 +705,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('production-environment', { environment });
       publishedEnvironment = environment;
     },
-    // Imported when first run: master-setup reads the install modules, which the loop needs only here.
-    selfProvision: async () => (await import('../cli/master-setup.js')).loopSelfProvision(root, current()),
+    selfProvision: async () => (await import('../cli/master-setup.js')).loopSelfProvision(root, current()), // imported when first run: only this step reads the install modules
     publishMergeSettings: async () => {
       const config = { rerunFailedChecks: rerunFailedChecks(current()) };
       const published = JSON.stringify(config);
