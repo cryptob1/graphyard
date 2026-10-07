@@ -5,7 +5,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { buildMasterStatus, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Observation, Work } from '../src/model.js';
 import type { BaseRefresh } from '../src/merge-queue.js';
-import { docsSyncRoute, docsSyncCutoffLeadMs } from '../src/daemon/docs-sync-route.js';
+import { docsSyncRoute } from '../src/daemon/docs-sync-route.js';
 import { routineDecision } from '../src/daemon/decisions.js';
 import { docsSyncSessionName, type DocsSyncPlan } from '../src/docs-sync.js';
 import { loopRework } from '../src/cli/hand-rework.js';
@@ -74,6 +74,7 @@ function launch(record: { synced: DocsSyncPlan[]; agents: string[] }) {
 
 test('unit:system-driven-conflict-rework-requested — a docs-sync holds a system-driven conflict only until a cutoff ahead of the rework\'s 10-minute bound, is stopped there, and gives the conflict up on a reading taken since, never over a push it missed', async () => {
   const { conflictReworkBoundMs, conflictReworkDue } = await bound10();
+  const { docsSyncCutoffLeadMs } = await import('../src/daemon/docs-sync-route.js') as any;
   // The bound: one decision cycle after the grounds, at most ten minutes from the conflict first recorded on the head.
   assert.equal(conflictReworkBoundMs, 10 * minute);
   const due = conflictReworkDue(gy1419(tips.second, at('07:48:00')), at('07:48:00'))!;
