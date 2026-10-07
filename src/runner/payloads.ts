@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { faultClasses } from '../model/fault-classes.js';
-import { proofSchema } from '../model/proof.js';
 
 /**
  * What the Graphyard Pi tools submit, as Graphyard re-validates it (GY-169). The extension under
@@ -58,7 +57,7 @@ export const diagnosisPayloadSchema = z.object({
     title: line(200), description: line(20000),
     type: z.enum(['feature', 'bug', 'chore']).default('bug'),
     priority: z.number().int().min(0).max(4),
-    criteria: z.array(z.object({ id: z.string().trim().regex(/^[A-Z]+-\d+$/), text: line(4000), proofs: z.array(proofSchema).min(1).max(10) }).strict()).min(1).max(20),
+    criteria: z.array(z.object({ id: z.string().trim().regex(/^[A-Z]+-\d+$/), text: line(4000), proofs: z.array(line(200)).min(1).max(10) }).strict()).min(1).max(20),
     plannedFiles: z.array(line(500)).min(1).max(100),
   }).strict().nullable().default(null),
 }).strict().refine(payload => !!payload.covering !== !!payload.fix, 'A diagnosis names exactly one answer: the covering item, or the fix item to file');

@@ -7,6 +7,8 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine, readAttestations } from '../src/engine.js';
 import { attestationFor, attestationsFromLedger, classifyLeaseLapse, leaseLapseCause, leaseLossAutoSettlement, leaseLossReason, leaseLossSettlementNote, settleableLeaseLoss, standingEscalations, type Attestation, type Escalation, type Principal, type Work } from '../src/model.js';
+import { readInterventionReport } from '../src/interventions.js';
+import { interventionPolicyFromEnv } from '../src/model/interventions.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -351,6 +353,50 @@ test('integration:lease-loss-backlog-attested: standing reconcile-raised lease-l
   await engine.reconcile();
   assert.deepEqual(standingEscalations(await reload(otherEpoch)).map(entry => entry.trigger), ['lease-loss']);
   assert.equal((await events(otherEpoch, 'escalation.auto-settled')).length, 0);
+});
+
+test('integration:lease-loss-superseded-settled: reconciliation settles a control-plane lease-loss once a newer attempt holds the item, with no decision and no intervention', async () => {
+  // GY-1390: from 30 September to 7 October 2026 the loop asked an approver to settle 227 lease-losses
+  // a newer attempt had already superseded, each one an escalation intervention at the build stage.
+  let work = await claimed('superseded-loss', expiring);
+  const lostEpoch = work.epoch;
+  await engine.reconcile();
+  work = await reload(work);
+  assert.deepEqual(standingEscalations(work).map(entry => entry.reason), [`Worker ${worker.id} lost lease epoch ${lostEpoch}`], 'a silent lapse still raises the concern');
+  await engine.reconcile();
+  assert.deepEqual(standingEscalations(await reload(work)).map(entry => entry.trigger), ['lease-loss'], 'between attempts nothing supersedes it yet');
+
+  // The next attempt claims: the lost epoch's lease has ended and nothing from it can act.
+  work = await engine.execute(replacement, 'claim', work.id, {}, id());
+  assert.equal(work.epoch, lostEpoch + 1);
+  await engine.reconcile();
+  work = await reload(work);
+  assert.deepEqual(standingEscalations(work), [], 'settled by the control plane, without a resolve decision');
+  assert.equal(merge(work).reasons.some(reason => /lease-loss/.test(reason)), false, 'the merge gate no longer refuses on it');
+  const settled = await events(work, 'escalation.auto-settled');
+  assert.equal(settled.length, 1);
+  assert.equal(settled[0].actor, 'graphyard');
+  assert.deepEqual({ epoch: settled[0].payload.details.epoch, cause: settled[0].payload.details.cause, note: settled[0].payload.details.note },
+    { epoch: lostEpoch, cause: 'superseded', note: `auto-settled: superseded — epoch ${lostEpoch + 1} is held by ${replacement.id}, so nothing from epoch ${lostEpoch} can act or merge` });
+  assert.equal((await events(work, 'escalation.resolved')).length, 0);
+  assert.equal((await events(work, 'decision.requested')).length, 0);
+  const report = await readInterventionReport(store, interventionPolicyFromEnv({}), { days: 7, work: work.id });
+  assert.deepEqual(report.interventions.filter(entry => entry.kind === 'escalation'), [], 'an auto-settled lease-loss is no intervention');
+
+  // The superseding attempt lapsing silently in turn raises its own concern; it is not hidden behind the first.
+  work = await overwrite(work, document => { document.lease = { ...document.lease!, expiresAt: '2000-01-01T00:00:00Z' }; });
+  await engine.reconcile();
+  assert.deepEqual(standingEscalations(await reload(work)).map(entry => entry.reason), [`Worker ${replacement.id} lost lease epoch ${lostEpoch + 1}`]);
+
+  // A lost epoch whose own containment fence still stands is not superseded, whoever holds the lease.
+  let fenced = await claimed('superseded-fenced', expiring);
+  const fencedEpoch = fenced.epoch;
+  await engine.reconcile();
+  fenced = await engine.execute(replacement, 'claim', fenced.id, {}, id());
+  fenced = await overwrite(fenced, document => { document.containmentQuarantine = { owner: worker.id, epoch: fencedEpoch, at: '2026-09-19T05:20:00.000Z', settlementHash: 'a'.repeat(64) }; });
+  await engine.reconcile();
+  assert.deepEqual(standingEscalations(await reload(fenced)).map(entry => entry.trigger), ['lease-loss']);
+  assert.equal((await events(fenced, 'escalation.auto-settled')).length, 0);
 });
 
 test('manual:escalation-docs: the delegation, master-agent and lease docs describe the lapse classification and who may settle what', async () => {

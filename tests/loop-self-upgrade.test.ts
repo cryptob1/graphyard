@@ -9,7 +9,8 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { daemonSummary, deploymentObservationSchema, emptyDaemonState, readDaemonState, runDaemon, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { describeSelfUpgrade, performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
-import { releaseLag, readBaseTip, releaseLagGraceMs, upgradeRefusalAttention } from '../src/master/release-lag.js';
+import { releaseLag, readBaseTip, releaseLagGraceMs, upgradeRefusalAttention, type PromotionWait } from '../src/master/release-lag.js';
+import { owedUpgrade, readResources, resourceAttention } from '../src/master-resources.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { executorRegistrar, readExecutorRegistration, readExecutorRegistrations, readRelease, readRestartFence, restartExecutors, writeExecutorRegistration, type ExecutorRegistration } from '../src/executor-fleet.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -627,4 +628,81 @@ test('unit:self-upgrade-under-load — with executors holding claimed actions at
     for (const { dispose } of fixtures) await dispose();
     await rm(checkout, { recursive: true, force: true });
   }
+});
+
+/**
+ * GY-1400: the loop loads a base tip only once a verified production release serves it, and its
+ * promotion drive dispatches at most every 120 minutes, so two or three merges inside one window
+ * leave it more than one delivery behind for up to two hours by design. Fake git: a commit
+ * contains a delivery only when it is that delivery's merge or a later one in `order`.
+ */
+const order = [hex('a'), hex('b'), hex('c'), hex('d')];
+const ancestry = async (_command: string, args: string[]) => {
+  const [mergeSha, commit] = args.slice(-2);
+  if (order.indexOf(mergeSha) <= order.indexOf(commit)) return '';
+  throw Object.assign(new Error('not an ancestor'), { status: 1 });
+};
+const windowNow = Date.parse('2026-10-07T03:10:36.678Z');
+const windowDeliveries = [
+  { key: 'GY-1365', mergeSha: hex('b'), mergedAt: '2026-10-07T02:01:46.000Z' },
+  { key: 'GY-1385', mergeSha: hex('c'), mergedAt: '2026-10-07T02:01:46.000Z' },
+  { key: 'GY-1398', mergeSha: hex('d'), mergedAt: '2026-10-07T02:40:00.000Z' },
+];
+const windowComponents = [
+  { name: 'loop', label: 'The master loop', release: { commit: hex('a'), dirty: false }, startedAt: '2026-10-07T01:53:05.000Z', restart: 'systemctl --user restart graphyard-master (the loop also upgrades itself between cycles once a delivery is verified deployed)' },
+  { name: 'graphyard-master@vishrog/1', label: 'Executor graphyard-master@vishrog/1', release: { commit: hex('a'), dirty: false }, startedAt: '2026-10-07T01:53:10.000Z', restart: 'systemctl --user restart graphyard-executor@1.service' },
+];
+const wait = (overrides: Partial<PromotionWait> = {}): PromotionWait => ({ deployedSha: hex('a'), alignedRelease: hex('a'), pending: ['GY-1365', 'GY-1385', 'GY-1398'], nextDueAt: '2026-10-07T03:41:53.113Z', inFlight: false, ...overrides });
+const lagOf = (promotion: PromotionWait | null, now = windowNow) => releaseLag(hex('d'), windowDeliveries, windowComponents, { root: '/nonexistent', run: ancestry, now, promotion });
+
+test('unit:release-lag-promotion-grace — deliveries inside one promotion window whose promotion is not yet due leave the loop and the executors not late, and the report names nextDueAt', async () => {
+  for (const promotion of [wait(), wait({ nextDueAt: '2026-10-07T02:00:00.000Z', inFlight: true })]) {
+    const report = await lagOf(promotion);
+    for (const row of report.components) {
+      assert.deepEqual(row.behind.map(entry => entry.key), ['GY-1365', 'GY-1385', 'GY-1398'], `${row.component} still reports what it has not loaded`);
+      assert.deepEqual(row.awaitingPromotion, ['GY-1365', 'GY-1385', 'GY-1398']);
+      assert.equal(row.late, false, `${row.component} waits on the promotion, on schedule`);
+    }
+    assert.deepEqual(report.attention, [], 'no loop-liveness attention is raised');
+    assert.equal(report.promotion?.nextDueAt, promotion.nextDueAt, 'the report names the promotion\'s nextDueAt');
+    assert.equal(report.promotion?.onSchedule, true);
+  }
+
+  // The ordinary grace stands for what a verified release already serves: two served deliveries
+  // the loop has not loaded past ten minutes are named, whatever else waits on the promotion.
+  const partly = await lagOf(wait({ pending: ['GY-1398'] }));
+  assert.equal(partly.components[0].late, true);
+  assert.deepEqual(partly.components[0].awaitingPromotion, ['GY-1398']);
+  // An overdue promotion with no candidate in validation is no longer the window.
+  assert.equal((await lagOf(wait({ nextDueAt: '2026-10-07T03:00:00.000Z' }))).components[0].late, true);
+  // No promotion wait on the cursor: the lag is named exactly as before.
+  const unread = await lagOf(null);
+  assert.ok(unread.components.every(row => row.late));
+  assert.equal(unread.promotion, null);
+});
+
+test('unit:loop-lag-remedy-names-promotion — a loop aligned with the verified deployment is never told to restart: the lag text and the loaded-revision detail name the promotion and its due time', async () => {
+  // On schedule: nothing is raised at all, so nothing prescribes a restart.
+  assert.deepEqual((await lagOf(wait())).attention, []);
+  // Overdue: still named, but the remedy is the promotion, never a host restart onto the same release.
+  const overdue = wait({ nextDueAt: '2026-10-07T03:00:00.000Z' });
+  const late = await lagOf(overdue);
+  assert.equal(late.attention.length, 2);
+  for (const item of late.attention) {
+    assert.match(item.text, /runs the verified release production serves, and GY-1365, GY-1385, GY-1398 wait on the promotion due 2026-10-07T03:00:00.000Z/);
+    assert.doesNotMatch(item.next!, /systemctl --user restart/);
+    assert.match(item.next!, /Nothing to restart: .* already runs a{12}, the release production serves/);
+    assert.match(item.next!, /the promotion due 2026-10-07T03:00:00.000Z has passed with no candidate in validation/);
+  }
+  // Not aligned with the deployment: the loop has a release to load, and the restart stays its remedy.
+  const unaligned = await lagOf(wait({ nextDueAt: '2026-10-07T03:00:00.000Z', deployedSha: hex('d'), pending: [] }));
+  assert.match(unaligned.attention.find(item => item.subject === 'loop')!.next!, /systemctl --user restart graphyard-master/);
+
+  // The loaded-revision detail, from the same cursor, names the promotion and its due time.
+  const cursor = { upgrade: { alignedRelease: hex('a'), pending: null }, deployment: { sha: hex('a'), pending: wait().pending }, promotion: { nextDueAt: wait().nextDueAt, inFlight: false }, actions: {} };
+  const reading = readResources({ now: windowNow, reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, disk: null, profiles: { workers: [], reviewers: [], producers: [] },
+    revision: { behind: 3, loaded: hex('a'), checkout: hex('d'), movedAt: windowNow - hour }, upgrade: owedUpgrade(cursor) }).find(entry => entry.id === 'loaded-revision')!;
+  assert.match(reading.detail!, /wait on the promotion due 2026-10-07T03:41:53\.113Z: no restart is owed/);
+  assert.doesNotMatch(reading.detail!, /systemctl --user restart/);
+  assert.deepEqual(resourceAttention([reading]), []);
 });

@@ -2,17 +2,20 @@ import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { retryStopAttention } from '../src/retry-stop.js';
 import { unansweredRequestAttention } from '../src/cli/unanswered-requests.js';
-import { classifyAttention, faultClassItem, trackFaults, type FaultInstance, type FaultRecord } from '../src/model/fault-classes.js';
+import { classifyAttention, trackFaults, type FaultRecord } from '../src/model/fault-classes.js';
 import { launchWaitAttention, type LaunchWait } from '../src/auto-dispatch.js';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
 import type { Work } from '../src/model.js';
-import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
-import { clearDiagnoses, diagnosesSettled, diagnosisStep, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
+import { faultClassItem, recurringClasses, type FaultInstance } from '../src/model/fault-classes.js';
+import { planeWideRefusal } from '../src/model/blocker-class.js';
+import { masterConfigSchema } from '../src/master.js';
+import { emptyDaemonState, runCycle, storeAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { postRun } from '../src/daemon/doctor.js';
+import { clearDiagnoses, diagnosesSettled, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
+import { maxDecisionRequests } from '../src/daemon/decisions.js';
 import type { Cycle } from '../src/daemon/cycle.js';
-import { diagnosisPayloadSchema, diagnosticianSettings } from '../src/runner/payloads.js';
+import type { DoctorRunRecord } from '../src/daemon/state.js';
+import { diagnosticianSettings } from '../src/runner/payloads.js';
 import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import { graphyardTools as piTools } from '../integrations/pi/index.js';
 
@@ -105,90 +108,9 @@ test('manual:fault-class-unclassified — GY-1141, GY-1039, GY-1158, GY-1167: a 
   assert.deepEqual(opened.map(entry => [entry.subject, entry.kind, entry.faultClass]), launchWaitInstances.map(wait => [wait.work, ...wait.expected]));
 });
 
-// GY-1402 names this file for its proof: manual:fault-class-unclassified. The master loop filed 3
-// unclassified faults in 24 hours; each is replayed below from its recorded instance. Against the
-// base each test fails where it asserts the instance is not recorded again (or, for the stale
-// stand-down, is recorded under the class that names it); against the candidate it passes.
-
-const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-const clock = Date.parse('2026-10-07T03:38:00Z');
-const minute = 60_000, hour = 3_600_000;
-const iso = (offset: number) => new Date(clock + offset).toISOString();
-const policy = { threshold: 3, windowHours: 24 };
-const settings = diagnosticianSettings({ diagnostician: { invariantBoundMinutes: 30 } });
-const config = (): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher,
-  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
-const item = (key: string, overrides: Partial<Work> = {}): Work => ({
-  id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [],
-  policy: { checks: ['test'], review: true }, plannedFiles: ['src/x.ts'], stage: 'backlog', revision: 1, policyRevision: 1,
-  createdAt: iso(-hour), updatedAt: iso(0), stageEnteredAt: iso(-hour), ready: false, epoch: 0, lease: null, workspaces: [],
-  candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
-  gates: [], violations: [], ...overrides,
-}) as unknown as Work;
-const unclassified = (state: ReturnType<typeof emptyDaemonState>) => state.faults.instances.filter(entry => entry.faultClass === 'unclassified');
-afterEach(() => clearDiagnoses());
-
-// ---- Instance 1: action:fault on doctor:post:2026-10-06T14:08:45.963Z --------------------------
-
-test('manual:fault-class-unclassified — action:fault|doctor:post:2026-10-06T14:08:45.963Z: a doctor post that times out on the plane is retried with no fault instance', async () => {
-  const state = emptyDaemonState(config());
-  const run = { at: '2026-10-06T14:08:45.963Z' } as Parameters<typeof postRun>[2];
-  state.doctor.runs.push(run);
-  const timeout = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
-  await postRun({ state, effects: { persist: async () => {} } as unknown as Cycle['effects'] }, { recordRun: async () => { throw timeout; } }, run, () => Date.parse('2026-10-06T14:40:53.123Z'));
-  const action = state.actions[`doctor:post:${run.at}`];
-  assert.equal(action.state, 'failed', 'the post is still recorded as not accepted');
-  assert.match(action.detail, /it is posted again next cycle: The operation was aborted due to timeout/);
-  assert.deepEqual(state.doctor.unposted, [run.at], 'and it stays queued for the next cycle');
-  assert.equal(action.faultClass, undefined);
-  assert.deepEqual(unclassified(state), [], 'the plane\'s window opens no unclassified fault');
-  // A refusal of the run itself is still the doctor's fault, under its step's kind.
-  await postRun({ state, effects: { persist: async () => {} } as unknown as Cycle['effects'] }, { recordRun: async () => { throw new Error('Graphyard refused doctor/runs (400): invalid run'); } }, run, () => Date.parse('2026-10-06T14:42:00Z'));
-  assert.equal(unclassified(state).length, 1);
-  assert.equal(unclassified(state)[0].kind, 'action:fault');
-});
-
-// ---- Diagnosis harness (as tests/diagnostician.test.ts drives the step) ---------------------------
-
-function fakeRunner(name: string, respond: () => unknown): Runner {
-  return { name, start<T>(_prompt: string, options: RunOptions<T>) {
-    let result: RunResult<T>;
-    try { const parsed = options.validate(respond()); result = { ok: true, tool: options.tool, payload: parsed, payloads: [parsed] }; }
-    catch (error) { result = { ok: false, failure: { reason: 'invalid-payload', detail: String(error) }, payloads: [] }; }
-    return { id: randomUUID(), events: [], onEvent: () => () => {}, cancel() {}, result: async () => result };
-  } };
-}
-interface Harness { diagnostician: DiagnosticianEffects; filed: any[]; requested: { work: string; action: string; id: string }[]; outcomes: Map<string, { state: string; outcome?: string }> }
-function harness(primary: () => unknown, fallback = primary): Harness {
-  const h: Harness = { filed: [], requested: [], outcomes: new Map(), diagnostician: undefined as unknown as DiagnosticianEffects };
-  h.diagnostician = { settings, cwd: '/checkout/project',
-    runner: async attempt => ({ runner: fakeRunner(attempt, attempt === 'primary' ? primary : fallback), runtime: 'pi', model: attempt === 'primary' ? settings.model : settings.fallbackModel }),
-    context: async () => ({ journal: ['2026-10-07T03:30:00Z reclaim: ENOTEMPTY'], serverLog: [], pullRequests: [] }),
-    file: async input => { h.filed.push(input); return item(`GY-${1400 + h.filed.length}`, { title: input.title, priority: input.priority } as Partial<Work>); },
-    decide: async (work, action) => { const id = randomUUID(); h.requested.push({ work: work.key, action, id }); h.outcomes.set(id, { state: 'requested' }); return { id }; },
-  } as DiagnosticianEffects;
-  return h;
-}
-const effects = (h: Harness): DaemonEffects => ({
-  persist: async () => {}, snapshot: async () => ({ work: [], now: iso(0) }), faultClassPolicy: policy, diagnostician: h.diagnostician,
-  approver: async (_target: Work, decision: string) => ({ agentName: `approver-${decision.slice(0, 8)}`, pane: null }),
-  decisions: async (target: Work) => ({ decisions: h.requested.filter(entry => entry.work === target.key).map(entry => ({ id: entry.id, action: entry.action, ...h.outcomes.get(entry.id)!, input: {}, approvedBy: null, refusal: null })) }),
-}) as unknown as DaemonEffects;
-async function step(state: ReturnType<typeof emptyDaemonState>, fx: DaemonEffects, work: Work[], at: number) {
-  const cycle = { config: config(), state, effects: fx, now: () => at, snapshot: { work, now: new Date(at).toISOString() }, clock: at, performed: [], isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as unknown as Cycle;
-  await diagnosisStep(cycle); await diagnosesSettled();
-}
-/** A recurring-fault item as the loop files it (GY-1401 was the resources class). */
-function recurring(state: ReturnType<typeof emptyDaemonState>, key: string) {
-  const instances: FaultInstance[] = ['a', 'b', 'c'].map((name, index) => ({ id: `reclaim|${name}|${iso(-index * minute)}`, kind: 'action:reclaim', faultClass: 'resources',
-    subject: `/tmp/${name}`, text: `ENOTEMPTY removing /tmp/${name}`, at: iso(-index * minute), lastSeenAt: iso(0), linkedTo: key }));
-  state.faults.instances.push(...instances);
-  const input = faultClassItem({ faultClass: 'resources', recent: instances }, policy, clock);
-  return item(key, { title: input.title, description: input.description, origin: input.origin, type: 'bug', priority: 1 } as Partial<Work>);
-}
-
-// ---- Instance 2: action:diagnosis on GY-1401 -------------------------------------------------------
-
+// GY-1402: GY-1404 classifies the failed filing of a malformed fix (fix-item); the diagnose and doctor
+// tools also refuse a proof master create would refuse at the call, so the agent corrects it in its run
+// and the GY-1401 instance is not reached at all.
 // The diagnostician's fix item for GY-1401, as the loop's cursor recorded it: each proof an id followed by prose.
 const gy1401Criteria = [
   { id: 'AC-1', text: 'The pass removes a candidate with bounded retries.', proofs: ['unit:tmp-reclaim: a tree that gains files while the pass removes it is retried and removed rather than failed ENOTEMPTY'] },
@@ -205,45 +127,128 @@ test('manual:fault-class-unclassified — action:diagnosis|GY-1401: the diagnose
   await assert.rejects(diagnose.execute('call-1', gy1401(gy1401Criteria)), /graphyard_diagnose was not recorded: input\.fix\.criteria\[0\]\.proofs\[0\] must match .*Correct the call and make it again/);
   const accepted = await diagnose.execute('call-2', gy1401(wellFormed));
   assert.match(accepted.content[0].text, /recorded diagnosis GY-1401/);
-  assert.equal(diagnosisPayloadSchema.safeParse(gy1401(gy1401Criteria)).success, false, 'the loop\'s own check of the payload refuses it too');
-  assert.equal(diagnosisPayloadSchema.safeParse(gy1401(wellFormed)).success, true);
 });
 
-test('manual:fault-class-unclassified — action:diagnosis|GY-1401: a malformed fix from one model is no diagnosis, the fallback\'s is filed, and no unclassified fault opens', async () => {
-  const state = emptyDaemonState(config());
-  const subject = recurring(state, 'GY-1401');
-  const h = harness(() => gy1401(gy1401Criteria), () => gy1401(wellFormed));
-  const fx = effects(h);
-  await step(state, fx, [subject], clock);
-  await step(state, fx, [subject], clock + minute);
-  assert.equal(h.filed.length, 1, JSON.stringify(state.diagnoses['GY-1401']));
-  assert.deepEqual(h.filed[0].criteria.map((criterion: { proofs: string[] }) => criterion.proofs[0]), ['unit:tmp-reclaim-retry', 'unit:tmp-reclaim-isolation', 'unit:tmp-reclaim-visible']);
-  assert.equal(state.diagnoses['GY-1401'].state, 'releasing');
-  assert.deepEqual(unclassified(state), []);
+// GY-1402, 2026-10-06: three unclassified faults in 24 hours, each a failed maintenance action the loop
+// classified only by its step (action:fault, action:diagnosis), though its wording named the cause:
+// - doctor:post:2026-10-06T14:08:45.963Z — the control plane timed out the doctor-run post (plane-unavailable);
+// - GY-1401 — the diagnostician's fix item failed master create's proof-ID pattern (fix-item);
+// - GY-1399 — a close decision settled stale past the re-request bound (decision-stale).
+// GY-1404 has the failing sites pass the cause their branch knows; the step kind stays the fallback.
+afterEach(() => clearDiagnoses());
+const day = 24 * 60 * 60_000;
+const gy1402Clock = Date.parse('2026-10-06T14:10:00.000Z');
+const gy1402Config = () => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)),
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
+const doctorRun = (at: string): DoctorRunRecord => ({ at, state: 'reported', runs: [], findings: [], actions: [], filed: [], detail: '' });
+const kinds = (state: DaemonState) => state.faults.instances.map(entry => [entry.kind, entry.faultClass]);
+
+function backlog(key: string, overrides: Partial<Work> = {}): Work {
+  return { id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: ['src/x.ts'],
+    stage: 'backlog', revision: 1, policyRevision: 1, createdAt: iso(-60 * 60_000), updatedAt: iso(0), stageEnteredAt: iso(-60 * 60_000), ready: false, epoch: 0, lease: null, workspaces: [],
+    candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], ...overrides } as unknown as Work;
+}
+function iso(offset: number) { return new Date(gy1402Clock + offset).toISOString(); }
+/** A loop with one recurring-fault item to diagnose, a diagnostician answering with `proof`, and a decision ledger that settles every approval stale. */
+function diagnosisWorld(proof: string) {
+  const settings = diagnosticianSettings({}), policy = { threshold: 3, windowHours: 24 };
+  const state = emptyDaemonState(gy1402Config());
+  const instances: FaultInstance[] = ['GY-1', 'GY-2', 'GY-3'].map((subject, index) => ({ id: `blocker|${subject}|${iso(-index * 60_000)}`, kind: 'blocker', faultClass: 'stalled-gate',
+    subject, text: `${subject} waits on the merge of PR #77`, at: iso(-index * 60_000), lastSeenAt: iso(0), linkedTo: 'GY-101' }));
+  state.faults.instances.push(...instances);
+  const recurring = faultClassItem({ faultClass: 'stalled-gate', recent: instances }, policy, gy1402Clock);
+  const work = [backlog('GY-101', { title: recurring.title, description: recurring.description, origin: recurring.origin } as Partial<Work>)];
+  const ledger: { id: string; work: string; action: string; state: string; input: Record<string, unknown>; requestedAt: string; outcome: string | null; approvedBy: string | null }[] = [];
+  let now = gy1402Clock;
+  const fix = { title: 'Stop the observation race', description: 'The gate waits on an observation nobody refreshes.', type: 'bug' as const, priority: 1,
+    criteria: [{ id: 'AC-1', text: 'The observation is refreshed within a cycle, by a test', proofs: [proof] }], plannedFiles: ['src/merge-queue.ts', 'tests/refresh.test.ts'] };
+  const payload = { subject: 'GY-101', cause: 'The merge queue never re-reads a CLEAN pull request after its base moves', evidence: { logLines: ['merge GY-1 waiting'], commands: ['gh pr view 77'] }, faultClass: 'stalled-gate', fix };
+  const runner: Runner = { name: 'pi', start<T>(_prompt: string, options: RunOptions<T>) {
+    const parsed = options.validate(payload);
+    const result: RunResult<T> = { ok: true, tool: options.tool, payload: parsed, payloads: [parsed] };
+    return { id: 'run', events: [], onEvent: () => () => {}, cancel() {}, result: async () => result };
+  } };
+  const diagnostician: DiagnosticianEffects = { settings, cwd: '/checkout/project', runner: async () => ({ runner, runtime: 'pi', model: settings.model }),
+    context: async () => ({ journal: [], serverLog: [], pullRequests: [] }),
+    file: async input => { const filed = backlog('GY-201', { title: input.title, criteria: input.criteria, plannedFiles: input.plannedFiles } as Partial<Work>); work.push(filed); return filed; },
+    decide: async (target, action) => { const id = `decision-${ledger.length + 1}`; ledger.push({ id, work: target.key, action, state: 'requested', input: { expectedRevision: target.revision }, requestedAt: iso(now - gy1402Clock), outcome: null, approvedBy: null }); return { id }; } };
+  const effects = { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: work.map(entry => ({ ...entry })), now: new Date(now).toISOString() }),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+    faultClassPolicy: policy, persist: async () => {}, fileFaultClass: async () => work[0], diagnostician,
+    approver: async (_target: Work, decision: string) => ({ agentName: `approver-${decision}`, pane: null }),
+    decisions: async (target: Work) => ({ decisions: ledger.filter(entry => entry.work === target.key).map(entry => ({ ...entry })) }) } as unknown as DaemonEffects;
+  return { state, ledger,
+    async cycle(offset: number) { now = gy1402Clock + offset; await runCycle(gy1402Config(), state, effects, () => now); await diagnosesSettled(); },
+    /** The approver approves; the item's revision has moved, so the server settles it stale. */
+    settleStale() { for (const entry of ledger.filter(row => row.state === 'requested')) Object.assign(entry, { state: 'stale', outcome: 'Task revision changed (now 394); reload and request again; the decision was not applied' }); } };
+}
+/** The instances the diagnosis action opened: its failing run's, wherever the item it named. */
+const diagnosisFaults = (state: DaemonState) => state.faults.instances.filter(entry => /diagnos/i.test(entry.text)).map(entry => [entry.kind, entry.faultClass, entry.text]);
+
+test('unit:fault-class-action-wording — a doctor-run post the control plane timed out is plane-unavailable (deployment), and the accepted post ends it', async () => {
+  const state = emptyDaemonState(gy1402Config());
+  const run = doctorRun('2026-10-06T14:08:45.963Z');
+  state.doctor.runs.push(run);
+  let refuse: Error | null = new Error('The operation was aborted due to timeout');
+  const effects = { recordRun: async () => { if (refuse) throw refuse; } };
+  const cycle = { state, effects: { persist: async () => {} } } as unknown as Cycle;
+  await postRun(cycle, effects, run, () => gy1402Clock);
+  assert.deepEqual(kinds(state), [['plane-unavailable', 'deployment']]);
+  assert.match(state.faults.instances[0].text, /^The control plane did not accept the doctor run of 2026-10-06T14:08:45\.963Z; it is posted again next cycle: The operation was aborted due to timeout$/);
+  assert.equal(state.faults.failing[`doctor:post:${run.at}`], state.faults.instances[0].id, 'the refusal stands as a failing run');
+  // Refused again: still the one instance.
+  await postRun(cycle, effects, run, () => gy1402Clock + 60_000);
+  assert.equal(state.faults.instances.length, 1);
+  // The control plane takes it: the run ends, and a later refusal is a new instance.
+  refuse = null;
+  await postRun(cycle, effects, run, () => gy1402Clock + 120_000);
+  assert.deepEqual(state.doctor.unposted, []);
+  assert.equal(state.faults.failing[`doctor:post:${run.at}`], undefined, 'the accepted post ends the instance');
+  assert.equal(state.actions[`doctor:post:${run.at}`].state, 'done');
+  refuse = new Error('The operation was aborted due to timeout');
+  await postRun(cycle, effects, run, () => gy1402Clock + 180_000);
+  assert.deepEqual(kinds(state), [['plane-unavailable', 'deployment'], ['plane-unavailable', 'deployment']]);
 });
 
-// ---- Instance 3: action:diagnosis on GY-1399 -------------------------------------------------------
+test('unit:fault-class-action-wording — a fix item that fails master create\'s checks is fix-item (proof)', async () => {
+  const w = diagnosisWorld('unit:observation refreshed within a cycle');
+  await w.cycle(0);
+  await w.cycle(60_000);
+  assert.equal(w.state.diagnoses['GY-101'].state, 'failed');
+  const faults = diagnosisFaults(w.state);
+  assert.equal(faults.length, 1, JSON.stringify(faults));
+  assert.deepEqual(faults[0].slice(0, 2), ['fix-item', 'proof']);
+  assert.match(String(faults[0][2]), /^The diagnostician's fix item for GY-101 fails the checks master create applies: /);
+});
 
-test('manual:fault-class-unclassified — action:diagnosis|GY-1399: three close requests settled stale stand down as a decision-stale fault, not an unclassified one', async () => {
-  const state = emptyDaemonState(config());
-  const subject = recurring(state, 'GY-1399');
-  const covering = item('GY-1390', { stage: 'build' } as Partial<Work>);
-  const h = harness(() => ({ ...gy1401(wellFormed), subject: 'GY-1399', fix: null, covering: 'GY-1390' }));
-  const fx = effects(h);
-  const at = (revision: number) => [{ ...subject, revision }, covering];
-  await step(state, fx, at(390), clock);
-  await step(state, fx, at(391), clock + minute);
-  assert.equal(state.diagnoses['GY-1399'].state, 'closing');
-  for (let round = 0; round < 3; round++) {
-    h.outcomes.set(h.requested.at(-1)!.id, { state: 'stale', outcome: `Task revision changed (now ${392 + round}); reload and request again; the decision was not applied` });
-    await step(state, fx, at(392 + round), clock + (2 + round) * minute);
-  }
-  assert.equal(h.requested.length, 3);
-  assert.equal(state.diagnoses['GY-1399'].state, 'failed');
-  assert.match(state.diagnoses['GY-1399'].detail, /3 close request\(s\) for the diagnosis of GY-1399 settled without applying, so it is not requested again/);
-  assert.deepEqual(unclassified(state), [], 'the stand-down opens no unclassified fault');
-  const stale = state.faults.instances.filter(entry => entry.kind === 'decision-stale');
-  assert.equal(stale.length, 1);
-  assert.equal(stale[0].faultClass, 'decision');
-  assert.ok(Object.keys(state.actions).some(key => key.startsWith('escalation:diagnosis-stale:')), 'the manual route is still escalated');
+test('unit:fault-class-action-wording — a diagnosis decision settled stale past the re-request bound is decision-stale (decision)', async () => {
+  const w = diagnosisWorld('unit:observation-refreshed');
+  await w.cycle(0);
+  await w.cycle(60_000);
+  assert.equal(w.ledger.length, 1, 'the release of the filed fix is requested');
+  for (let round = 0; round < maxDecisionRequests; round += 1) { w.settleStale(); await w.cycle((2 + round) * 60_000); }
+  assert.equal(w.state.diagnoses['GY-101'].state, 'failed');
+  const faults = diagnosisFaults(w.state);
+  assert.equal(faults.length, 1, JSON.stringify(faults));
+  assert.deepEqual(faults[0].slice(0, 2), ['decision-stale', 'decision']);
+  assert.match(String(faults[0][2]), /was settled stale: Task revision changed .+ settled without applying, so it is not requested again$/);
+});
+
+// The three GY-1402 instance lines, as the loop recorded them, with the kinds their sites now pass.
+const gy1402 = [
+  { key: 'doctor:post:2026-10-06T14:08:45.963Z', kind: 'fault', site: 'plane-unavailable', expected: 'deployment',
+    detail: 'The control plane did not accept the doctor run of 2026-10-06T14:08:45.963Z; it is posted again next cycle: The operation was aborted due to timeout' },
+  { key: 'diagnosis:GY-1401', kind: 'diagnosis', site: 'fix-item', expected: 'proof',
+    detail: 'The diagnostician\'s fix item for GY-1401 fails the checks master create applies: [ { "message": "Invalid string: must match pattern /^(unit|integration|e2e|manual):[a-zA-Z0-9._/-]+$/" } ]' },
+  { key: 'diagnosis:GY-1399', kind: 'diagnosis', site: 'decision-stale', expected: 'decision',
+    detail: 'The close decision da6e7b2f-c678-44d1-9107-ee22d99d3c7f on GY-1399 was settled stale: Task revision changed (now 394); reload and request again; the decision was not applied; 3 close request(s) for the diagnosis of GY-1399 settled without applying, so it is not requested again' },
+] as const;
+
+test('manual:fault-class-unclassified — GY-1402: the doctor-run timeout, the GY-1401 fix item and the GY-1399 stale close open deployment, proof and decision instances, none unclassified', () => {
+  const state = emptyDaemonState(gy1402Config());
+  // The site that raised each line names its cause: a plane-wide refusal, and the two diagnosis branches.
+  assert.ok(planeWideRefusal(new Error('The operation was aborted due to timeout')));
+  for (const [index, line] of gy1402.entries()) storeAction(state, line.key, { kind: line.kind, work: null, principal: null, state: 'failed', detail: line.detail, attempts: 1, epoch: null, cycle: index, at: iso(index * 60_000) }, line.site);
+  assert.deepEqual(state.faults.instances.map(entry => [entry.subject, entry.faultClass]), gy1402.map(line => [line.key, line.expected]));
+  assert.deepEqual(recurringClasses(state.faults.instances, [], { threshold: 3, windowHours: 24 }, gy1402Clock + day / 2).filter(entry => entry.faultClass === 'unclassified'), [], 'no unclassified recurrence is filed');
 });
