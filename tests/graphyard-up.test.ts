@@ -47,6 +47,8 @@ interface World {
   onboardingPullRequest: string | null; onboardingMerged: boolean;
   /** The Hetzner server's monthly price is shown but not yet confirmed. */
   priceUnconfirmed: boolean;
+  /** The plan's Apps still to create in a browser (GY-1442); absent from the plan when undefined. */
+  browserApps?: string[];
 }
 
 function world(overrides: Partial<World> = {}): World {
@@ -79,7 +81,7 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
       if (args[0] === 'goal') w.creates.push(options.env?.GRAPHYARD_REQUEST_ID ?? null);
       for (const prefix of w.failOnce) if (joined.startsWith(prefix)) { w.failOnce.delete(prefix); return { code: 1, stdout: '{"error":"interrupted"}' }; }
       if (args[0] === 'install' && args.includes('--plan')) {
-        return { code: 0, stdout: JSON.stringify({ installId: 'acme-shop', installDirectory: '/install/acme-shop', ...(w.host ? { host: { units: [] } } : {}), principals: [{ id: 'acme-shop-operator', role: 'admin', sessionKind: 'human' }, { id: 'acme-shop-master', role: 'coordinator', sessionKind: 'ai' }],
+        return { code: 0, stdout: JSON.stringify({ installId: 'acme-shop', installDirectory: '/install/acme-shop', ...(w.browserApps ? { browserApps: w.browserApps } : {}), ...(w.host ? { host: { units: [] } } : {}), principals: [{ id: 'acme-shop-operator', role: 'admin', sessionKind: 'human' }, { id: 'acme-shop-master', role: 'coordinator', sessionKind: 'ai' }],
           preflight: [{ name: 'GitHub CLI', ok: true }, ...(w.priceUnconfirmed && !args.includes('--confirm-price') ? [{ name: 'Monthly price', ok: false, detail: 'cx33 (8 GB) at fsn1: 6.49 EUR/month; not confirmed, so nothing will be created' }] : []), ...(w.herdrElsewhere && !args.includes('--no-herdr') ? [{ name: 'Herdr plugin', ok: false, detail: 'bound to https://other.example' }] : [])] }) };
       }
       if (args[0] === 'install' && args.includes('--apply')) {
@@ -286,6 +288,18 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
   assert.match(refusedAgent.next, /--browser-profile PROFILE/);
   assert.deepEqual(refusedAgent.handoffs, [], 'App creation is never handed to a person');
   assert.deepEqual(bare.calls, [], 'nothing ran');
+  // --reuse-app lifts that stop only when the reused Apps cover every App the install would create in a
+  // browser: up always registers a reviewer, so reusing the control-plane App alone still stops (GY-1442).
+  const partial = world({ browserApps: ['reviewer'] });
+  const partlyReused = await runUp(request({ agent: true, reuseApps: ['graphyard-acme-shop'] }), dependencies(partial, await temporaryDirectory('graphyard-up-agent-partial'), []));
+  assert.equal(partlyReused.exitCode, 2);
+  assert.match(partlyReused.next, /--reuse-app covers no reviewer App "claude"/);
+  assert.deepEqual(partial.calls.map(args => args.slice(0, 1).concat(args.filter(arg => arg === '--plan' || arg === '--apply'))), [['install', '--plan']], 'only the read-only plan ran');
+  assert.deepEqual(partlyReused.handoffs, []);
+  const covered = world({ app: true, reviewer: true, accounts: true, browserApps: [] });
+  const fullyReused = await runUp(request({ agent: true, reuseApps: ['graphyard-acme-shop', 'acme-shop-review-claude'] }), dependencies(covered, await temporaryDirectory('graphyard-up-agent-covered'), []));
+  assert.equal(fullyReused.exitCode, 0, fullyReused.next);
+  assert.ok(covered.calls.some(args => args[0] === 'install' && args.includes('--apply') && args.includes('acme-shop-review-claude')), 'both reused Apps reach install');
   // The profile is the one passed, else the one the master recorded.
   assert.equal(upBrowserProfile(bareRoot, request({ agent: true })), null);
   await mkdir(join(bareRoot, '.graphyard'), { recursive: true });
@@ -334,8 +348,8 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
   assert.deepEqual(clicked, ['#register', '#create', '#install']);
   assert.ok(opened.includes('https://github.com/apps/graphyard-acme-shop/installations/new/permissions?suggested_target_id=11&repository_ids[]=22'), 'installs on the one repository');
 
-  // GitHub's passkey-first Confirm-access page shows no code until "Use GitHub Mobile" is activated;
-  // the drive activates it (as every master browser flow does) and hands off only the code it shows.
+  // GitHub's passkey-first Confirm-access page (GY-1442): the drive hands off the passkey or password
+  // confirmation at the page's link and waits for it, never triggering GitHub Mobile on its own.
   let mobile = false, approved = false, polls = 0;
   const passkey: BrowserPage = {
     ...page, url: () => approved ? 'https://github.com/settings/apps' : 'https://github.com/sessions/sudo',
@@ -343,11 +357,20 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
     locate: (kind, text) => kind === 'link' && text === 'Use GitHub Mobile' && !mobile ? { selector: '#mobile', tag: 'a', checked: null, value: null, text, href: 'https://github.com/sessions/sudo?mobile=1' } : controls[`${kind}:${text}`] ?? null,
     click: selector => { if (selector === '#mobile') mobile = true; },
   };
-  const passkeyHanded: { sentence: string; code: string | null }[] = [];
-  const passkeyDrive = browserAppDriver({ page: passkey, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: async () => { if (mobile && ++polls === 2) approved = true; } });
-  assert.deepEqual(await passkeyDrive('http://127.0.0.1:4311', (sentence, link) => { passkeyHanded.push({ sentence, code: link.code ?? null }); }), { state: 'done' });
+  const passkeyHanded: { sentence: string; url: string | null; code: string | null }[] = [];
+  const passkeyDrive = browserAppDriver({ page: passkey, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: async () => { if (++polls === 2) approved = true; } });
+  assert.deepEqual(await passkeyDrive('http://127.0.0.1:4311', (sentence, link) => { passkeyHanded.push({ sentence, url: link.url ?? null, code: link.code ?? null }); }), { state: 'done' });
+  assert.equal(mobile, false, 'GitHub Mobile is not triggered while the page offers a passkey');
+  assert.deepEqual(passkeyHanded, [{ sentence: "Confirm access with your passkey or password at https://github.com/sessions/sudo in the Chrome profile the agent drives (GitHub ties the confirmation to that browser's session)", url: 'https://github.com/sessions/sudo', code: null }]);
+  // The operator chose GitHub Mobile (--github-mobile): the drive activates it and hands off only the code it shows.
+  approved = false; polls = 0;
+  const mobileHanded: { sentence: string; code: string | null }[] = [];
+  const mobileDrive = browserAppDriver({ page: passkey, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sudo: 'mobile', sleep: async () => { if (mobile && ++polls === 2) approved = true; } });
+  assert.deepEqual(await mobileDrive('http://127.0.0.1:4311', (sentence, link) => { mobileHanded.push({ sentence, code: link.code ?? null }); }), { state: 'done' });
   assert.ok(mobile, 'GitHub Mobile was triggered');
-  assert.deepEqual(passkeyHanded, [{ sentence: 'Approve the GitHub Mobile prompt on your phone and choose 37', code: '37' }]);
+  assert.deepEqual(mobileHanded, [{ sentence: 'Approve the GitHub Mobile prompt on your phone and choose 37', code: '37' }]);
+  assert.equal(upRequestFromArgs(['--repo', 'acme/shop', '--github-mobile', '--reuse-app', 'graphyard-acme-api']).sudo, 'mobile');
+  assert.deepEqual(upRequestFromArgs(['--repo', 'acme/shop', '--reuse-app', 'graphyard-acme-api']).reuseApps, ['graphyard-acme-api']);
 
   // The drive is a recorded master browser flow: each step and a record.json under .graphyard/master-actions.
   const recordRoot = await temporaryDirectory('graphyard-up-record');
