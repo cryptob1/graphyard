@@ -16,7 +16,7 @@ Producers ever assigned the item or in its slice: `evidence.producer.refused`. L
 | `security-concern` | A lead's `escalate` ruling |
 | `requirement-weakening` | A revision retires a criterion or narrows proofs |
 
-Unresolved triggers refuse the merge gate. A `requirement-weakening` raised by applying an approved two-party decision records that decision's id, is resolved by that same approval and is no `scope` fault: the approver already judged the weakening. Explained lapses are `lease.expired` with a [cause](protocol/leases.md#how-a-lease-ends) (`submitted`, `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`); later-explained `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`), and so does one a newer attempt superseded (`auto-settled: superseded — epoch M is held by OWNER, so nothing from epoch N can act or merge`). Meanwhile a replacement may claim; delivery waits.
+Unresolved triggers refuse the merge gate. A `requirement-weakening` raised by applying an approved two-party decision records that decision's id, is resolved by that same approval and is no `scope` fault: the approver already judged the weakening. Explained lapses are `lease.expired` with a [cause](protocol/leases.md#how-a-lease-ends) (`submitted`, `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`); later-explained `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`), and so does one a newer attempt superseded (`auto-settled: superseded — epoch M is held by OWNER, so nothing from epoch N can act or merge`) or, after 5 min, one whose attempts have all ended. Meanwhile a replacement may claim; delivery waits.
 
 ### Who may settle what
 
@@ -24,6 +24,6 @@ Resolutions record `escalation.resolved`.
 
 - Explained `lease-loss`: reconciliation, or `admin` `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`.
 - `lease-loss` of a superseded epoch (the latest attempt holds its lease or submitted, no fence of the lost epoch stands): reconciliation, no decision.
-- `lease-loss` of a stopped epoch between attempts: none while an implementation dispatch is the item's next action (its claim supersedes it); otherwise the loop's two-party decision.
+- Control-plane `lease-loss` whose attempts have all ended (no lease, no containment fence): reconciliation after 5 min standing (`auto-settled: ended — …`), no decision.
 - `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, or a lead-raised `lease-loss`: master-requested two-party decision, or a declared human session (`admin`, `sessionKind: "human"`; settles any).
 - `requirement-weakening` raised by applying an approved `requirements` decision: that approval, citing the decision and approver.

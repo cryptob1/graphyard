@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import type { Engine } from './engine.js';
-import { demand, pathScopeContains, standingEscalations, type Principal, type Stage, type Work } from './model.js';
+import { demand, endedLeaseLoss, leaseLossSettleMs, pathScopeContains, standingEscalations, type Principal, type Stage, type Work } from './model.js';
 import { interventionKindLabel, interventionKinds, interventionWindows, judgementVerdictLabel, type Intervention, type InterventionKind, type InterventionPattern, type InterventionPolicy, type InterventionReport, type InterventionRecordInput, type InterventionWindow, type Judgement, type JudgementInput } from './model/interventions.js';
 import type { Store } from './store.js';
 import { boundedSnapshot } from './store/bounded-snapshot.js';
@@ -453,6 +453,8 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
     if (entry.bypass) open('bypass', { requestedAt: entry.bypass.at, blocked: entry.bypass.blocked, stage: entry.bypass.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'refused-reconciliation', sources: [{ seq: entry.bypass.seq, kind: 'merge.reconciliation.refused' }] });
     if (entry.quarantine?.concernAt && item.containmentQuarantine) open('containment-settlement', { requestedAt: entry.quarantine.concernAt, blocked: `containment fence of epoch ${entry.quarantine.epoch}`, stage: entry.quarantine.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'unsettled', sources: [{ seq: entry.quarantine.seq, kind: 'quarantine' }] });
     for (const escalation of standingEscalations(item)) {
+      // A lease-loss reconciliation will settle on the record once its bound passes waits on nobody (GY-1393).
+      if (endedLeaseLoss(item, escalation) && Date.parse(now) - Date.parse(escalation.at) < leaseLossSettleMs) continue;
       const known = entry.escalations.get(`${escalation.trigger}@${escalation.at}`);
       open('escalation', { id: `escalation:${id}:${escalation.trigger}@${escalation.at}`, requestedAt: escalation.at, blocked: escalation.reason, stage: known?.stage ?? entry.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: escalation.trigger, sources: known ? [{ seq: known.seq, kind: 'raised' }] : [] });
     }
