@@ -40,7 +40,7 @@ type View = 'landing' | 'passkey' | 'authenticator' | 'email' | 'mobile' | 'upda
 const form = (inner: string) => `<form action="/sessions/sudo" method="post"><input type="hidden" name="authenticity_token" value="${TOKEN}" />` +
   `<input type="hidden" name="timestamp_secret" value="${SECRET}" />${inner}</form>`;
 const MARKUP: Record<Exclude<View, 'update'>, string> = {
-  landing: form('<label for="sudo_password">Password</label><input type="password" name="sudo_password" id="sudo_password" value="' + PREFILLED + '"><button type="submit">Confirm</button>'),
+  landing: form('<label for="sudo_password">Password</label><input type="password" name="sudo_password" id="sudo_password" value="' + PREFILLED + '"><input type="submit" name="commit" value="Confirm">'),
   passkey: form(`<webauthn-get data-json='{"challenge":"${CHALLENGE}"}'><button type="submit">Use passkey</button></webauthn-get>`),
   authenticator: form(`<label for="app_totp">Authentication code</label><input type="text" name="app_otp" id="app_totp" autocomplete="one-time-code" value="${TOTP}"><button type="submit">Verify</button>`),
   email: form(`<label for="email_otp">Email code</label><input type="text" name="email_otp" id="email_otp" autocomplete="one-time-code" value="${PREFILLED}"><button type="submit">Verify</button>`),
@@ -140,6 +140,8 @@ test('unit:confirm-access-capture — each Confirm-access view the flow meets is
       for (const [, value] of html.matchAll(/\bvalue="([^"]*)"/g)) assert.equal(value, sudoFormRedaction, `${file} keeps no value attribute contents`);
       assert.ok(html.includes(`<input type="hidden" name="authenticity_token" value="${sudoFormRedaction}" />`), `${file} keeps the token input, redacted`);
     }
+    const landing = await readFile(join(captures, 'confirm-access-landing.html'), 'utf8');
+    assert.ok(landing.includes(`<input type="submit" name="commit" value="${sudoFormRedaction}">`), 'a structural input keeps its type and name but not its value');
     const totp = await readFile(join(captures, 'confirm-access-authenticator.html'), 'utf8');
     assert.ok(totp.includes(`<input type="text" name="app_otp" id="app_totp" autocomplete="one-time-code" value="${sudoFormRedaction}">`), 'the code field keeps its name, id and autocomplete');
     const mobile = await readFile(join(captures, 'confirm-access-mobile.html'), 'utf8');

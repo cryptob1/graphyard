@@ -321,8 +321,10 @@ const escapeAttribute = (value: string) => value.replace(/&/g, '&amp;').replace(
  * password input is replaced by sudoFormRedaction. Names, ids, labels and autocomplete stay. A
  * one-time code shown as text — a GitHub Mobile pairing code, or any element whose whole text is a
  * short run of digits — and every CODES value in text or in any attribute are redacted too (GY-1482).
+ * With EVERYVALUE, a structural input's value (a submit button's label, a checkbox's value) goes too:
+ * a Confirm-access capture keeps no value attribute contents at all.
  */
-export function redactSudoForm(html: string, codes: readonly string[] = []) {
+export function redactSudoForm(html: string, codes: readonly string[] = [], everyValue = false) {
   const known = codes.filter(code => /^\w+$/.test(code)).map(code => new RegExp(`\\b${code}\\b`, 'g'));
   const holdsCode = (value: string) => known.some(pattern => { pattern.lastIndex = 0; return pattern.test(value); });
   const tags = html.replace(/<([a-zA-Z][\w:-]*)((?:\s+[^\s"'>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*(\/?)>/g, (_tag, name: string, body: string, close: string) => {
@@ -332,7 +334,7 @@ export function redactSudoForm(html: string, codes: readonly string[] = []) {
     const type = (attributes.find(attribute => attribute.key.toLowerCase() === 'type')?.value ?? 'text').toLowerCase();
     const rewritten = attributes.map(({ key, value }) => {
       if (value === null) return key;
-      const secret = secretAttribute.test(key) || input && key.toLowerCase() === 'value' && !structuralInputs.has(type) || holdsCode(unescapeAttribute(value));
+      const secret = secretAttribute.test(key) || input && key.toLowerCase() === 'value' && (everyValue || !structuralInputs.has(type)) || holdsCode(unescapeAttribute(value));
       return `${key}="${secret ? sudoFormRedaction : escapeAttribute(unescapeAttribute(value))}"`;
     });
     return `<${name}${rewritten.map(attribute => ` ${attribute}`).join('')}${close ? ' /' : ''}>`;
@@ -359,7 +361,7 @@ export interface ConfirmAccessCapture { view: ConfirmAccessView; file: string; u
 async function saveConfirmAccess(page: BrowserPage, directory: string, view: ConfirmAccessView, html: string, codes: readonly string[], now: () => Date): Promise<ConfirmAccessCapture> {
   const file = confirmAccessFile(view);
   await mkdir(resolve(directory, confirmAccessDirectory), { recursive: true, mode: 0o700 });
-  await writeFile(resolve(directory, file), `${redactSudoForm(html, codes)}\n`, { mode: 0o600 });
+  await writeFile(resolve(directory, file), `${redactSudoForm(html, codes, true)}\n`, { mode: 0o600 });
   page.note?.('confirm-access-capture', [view, file]);
   return { view, file, url: page.url(), at: now().toISOString() };
 }
