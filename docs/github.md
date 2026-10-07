@@ -28,6 +28,10 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 `graphyard master reviewer setup` creates it (Pull requests write, reads otherwise); review tokens last one hour; `SLUG[bot]` approving the head satisfies both. Shortfalls (`appPermissions`) hold jobs, **not retried** (`integration-held`), until `master browser app-permissions` or `master browser installation-accept`, which the loop runs itself on a stalled row ([bound remedies](coordination.md#ship-in-under-thirty-minutes)). Without Actions: write, `graphyard github-setup --update-permissions` lists `Actions: write (failed CI reruns)`; accept it on the installation page, rerun it to verify.
 
+## Reusing an App without sudo
+
+GitHub returns an App's private key only once, so `--reuse-app SLUG` needs a key saved on this host. For an App created elsewhere, generate a key on its settings page, then `graphyard app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo OWNER/NAME]`: an App JWT proves the key, the App is saved `0600` as `imported-app-SLUG.json` in the install directory, and the key is never printed. A control-plane App whose webhook serves another install is refused. A reused `revert-approver` replaces the reviewer as the revert approver. `graphyard app list` reads saved Apps by their own JWTs, plus an organization's installations via `gh`; never `/user/installations`. It names each App's reusable roles, or why not.
+
 ## Workflow base syncs
 
 Worker tokens carry `contents`, `pull_requests` and `workflows` write ([push credential](protocol/leases.md#push-credential)). If GitHub refuses a base sync, `sync GY-N --push-via-control-plane COMMIT` has the control plane push (`POST /api/work/:id/sync-push`) a COMMIT that fast-forwards the branch and merges `origin/BASE` (`sync.workflow-push`).
