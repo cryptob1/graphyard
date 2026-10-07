@@ -88,10 +88,6 @@ A `policy:bootstrap` holder adds `"bootstrap":{"reason":"…","contractPaths":["
 
 Stays Done, **delivered with failure**; revert via a new item, never backfill.
 
-## Merged but not deployed
-
-An unserved merge is a [`delivery.deployment-incident`](deployment.md#production-deployment-observation) until served.
-
 ## Merge bypass
 
 An ungated merge is a permanent violation: repair access, file a follow-up, never backfill. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.

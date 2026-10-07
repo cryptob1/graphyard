@@ -1,7 +1,7 @@
 <!-- page: Build integrations | 2 | cases, runners. -->
 # E2E validation
 
-An `e2e:` proof passes from a pinned candidate, bundle and separate [collector](runner-setup.md). `graphyard validation define|build|candidate|request|dispatch|ack|heartbeat|result FILE.json` wraps `POST /api/validation/ACTION`: `admin` defines; runners (`worker`) poll, ack, heartbeat; builders and collectors (`producer`) attest, publish, never both per build. `admin` defines test cases (**Settings → Test cases**, `graphyard scenario scenario.json`); `e2e:ID` pins the latest immutable revision; only trusted attempts append **Tests** runs.
+An `e2e:` proof passes from a pinned candidate, bundle and separate [collector](runner-setup.md). `graphyard validation define|build|candidate|request|dispatch|ack|heartbeat|result FILE.json` wraps `POST /api/validation/ACTION`: `admin` defines test cases (**Settings → Test cases**, `graphyard scenario scenario.json`); runners (`worker`) poll, ack, heartbeat; builders and collectors (`producer`) attest, publish, never both per build; `e2e:ID` pins the latest immutable revision; only trusted attempts append **Tests** runs.
 
 ## E2E case repository
 
@@ -16,9 +16,9 @@ Values: `{{token}}`, `{{run}}`, `{{case}}`, saved ones. `graphyard e2e list` val
 
 ## Release verdicts
 
-One retry: **passed**; **failed** (both); **flaky** (retry passed at the same served SHA; `RUN:attempt-1`, `RUN:attempt-2` recorded); **unrun** (stopped by a failed required case, which the report names; listed apart, never counted). Only required failed or unaccepted flaky cases block; optional ones show marked on **Tests**. At an unreported commit, pass-after-failure is failed.
+One retry: **passed**; **failed** (both); **flaky** (retry passed at the same served SHA; `RUN:attempt-1`, `RUN:attempt-2` recorded); **unrun** (stopped by a failed required case, which the report names; listed apart, never counted). Only required failed or unaccepted flaky cases block; optional ones are marked on **Tests**. At an unreported commit, pass-after-failure is failed.
 
-Flaky required cases block promotion until an `evidence` decision (`{"case": ID, "runId": RUN, "sha": FULL_SHA}` on the hold item; another agent approves, never self) accepts; refused unless both attempts are recorded at that SHA. `release promote` reads only that run's and SHA's applied decisions. The workflow promotes only passing UATs: run `release promote ID` with `GRAPHYARD_URL`, `GRAPHYARD_TOKEN`.
+Flaky required cases block promotion until an `evidence` decision (`{"case": ID, "runId": RUN, "sha": FULL_SHA}` on the hold item; approved by another agent) accepts; refused unless both attempts are recorded at that SHA. `release promote` reads only that run's and SHA's applied decisions. The workflow's `release promote ID` (`GRAPHYARD_URL`, `GRAPHYARD_TOKEN`) promotes only passing UATs.
 
 `e2e/contract.json` lists required customer outcomes: `id`, `title`, optional `criteria`, proving `cases` (several outcomes allowed). The workflow's pre-cut `graphyard release contract` refuses `release cut`, naming outcome and case, when a bound case is missing, invalid, not `uat`-targeted or optional, or a required case proves nothing.
 

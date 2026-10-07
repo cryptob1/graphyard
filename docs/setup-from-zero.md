@@ -5,7 +5,7 @@
 
 Run each step, then its **Verify**; ask a human only for **HUMAN** steps. [Hard rules](install.md#hard-rules) apply.
 
-`graphyard doctor` prints `setupFromZero.lines`: `PASS`/`FAIL` per prerequisite (`control-plane`, `credentials-file`, `github-app`, `reviewer-app`, `branch-protection`, `agent-environment:NAME`, `worker-sandbox`), each `FAIL` naming its step; `next` names the first gap (readiness `recovery`, then `FAIL`). Generated `AGENTS.md` links here. `GRAPHYARD_CONFIG_HOME` and `GRAPHYARD_AGENT_ENVIRONMENTS` (default `~/.coding_agents`) relocate credentials, agent environments.
+`graphyard doctor` prints `setupFromZero.lines`: `PASS`/`FAIL` per prerequisite (`control-plane`, `credentials-file`, `github-app`, `reviewer-app`, `branch-protection`, `agent-environment:NAME`, `worker-sandbox`), each `FAIL` naming its step; `next` names the first gap (readiness `recovery`, then `FAIL`). Generated `AGENTS.md` links here. `GRAPHYARD_CONFIG_HOME` relocates credentials, `GRAPHYARD_AGENT_ENVIRONMENTS` (`~/.coding_agents`) agent environments.
 
 ## 1. Machine prerequisites
 
@@ -52,7 +52,7 @@ export GRAPHYARD_TOKEN_FILE=~/.config/graphyard/OWNER-REPO/tokens/OWNER-REPO-ope
 
 ## 5. Reviewer and revert-approver Apps
 
-`--reviewer NAME` registers the reviewer App every review needs (**HUMAN:** confirm) and makes it the main guard's revert approver (`GRAPHYARD_REVERT_APPROVER_*`; each `--apply` resets hand-set values); compose's `server.env` takes no multi-line PEM, so the key mounts as a file (`_PRIVATE_KEY_FILE`). **Verify:** `reviewer-app`; readiness `revert-approver` `ready`. Otherwise `gy master reviewer setup` (HTTPS or loopback origin, checked before the page opens) plus the [variables](deployment.md#variables).
+`--reviewer NAME` registers the reviewer App every review needs (**HUMAN:** confirm) and makes it the main guard's revert approver (`GRAPHYARD_REVERT_APPROVER_*`; each `--apply` resets hand-set values); on compose the key mounts as a file (`_PRIVATE_KEY_FILE`; `server.env` takes no multi-line PEM). **Verify:** `reviewer-app`; readiness `revert-approver` `ready`. Otherwise `gy master reviewer setup` (HTTPS or loopback origin, checked before the page opens) plus the [variables](deployment.md#variables).
 
 ## 6. Onboard the checkout
 
@@ -99,4 +99,4 @@ ID: `herdr workspace list`; **HUMAN:** `--browser-profile` is a Chrome profile s
 
 ## 12. First item end to end
 
-Write an item like [work.json](../examples/work.json) (`"policy":{"checks":["test"],"review":true}`), then `master create FILE`. Local producers prove `unit:*` on compose (CI cannot reach loopback); hosted installs use [CI proofs](github.md#proofs-in-ci). **Verify:** `gy status GY-1` reaches `done`; `gh pr view N --json state` prints `MERGED`; doctor shows `production.serving` at or past the merge, `production.aheadBy` `0`, `production.incidents` `[]` ([observation](deployment.md#production-deployment-observation)); without a deploy job `production.latest` is `null`.
+Write an item like [work.json](../examples/work.json) (`"policy":{"checks":["test"],"review":true}`), then `master create FILE`. Local producers prove `unit:*` on compose (CI cannot reach loopback); hosted installs use [CI proofs](github.md#proofs-in-ci). **Verify:** `gy status GY-1` is `done`; `gh pr view N --json state` is `MERGED`; doctor shows `production.serving` at or past the merge, `production.aheadBy` `0`, `production.incidents` `[]` ([observation](deployment.md#production-deployment-observation)); without a deploy job `production.latest` is `null`.
