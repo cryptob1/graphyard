@@ -412,6 +412,31 @@ export async function upSudoCode(root: string, args: string[]) {
   return { ok: true, handed: kind === 'email' ? 'a request for an emailed code' : 'a 6-digit code', next: 'The waiting graphyard up types it into GitHub\'s Confirm-access page within its next check.' };
 }
 
+/** A shell word: plain when it needs no quoting, otherwise single-quoted. */
+const shellWord = (value: string) => /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+/**
+ * The operator's up command past its repository (GY-1457): the provider and --agent, then every
+ * other option that shapes the setup (reviewer, master, goal, browser profile, install consent and
+ * SSH inputs, Mobile preference, wait), so a printed rerun or App-import route sets up the same thing.
+ * --reuse-app and --no-wait are left to the command that prints it.
+ */
+export function upCommandFlags(request: UpRequest) {
+  const flags: string[] = ['--provider', request.provider, ...(request.agent ? ['--agent'] : [])];
+  const option = (name: string, value: string | null | undefined) => { if (value) flags.push(name, value); };
+  if (request.reviewer !== 'claude') option('--reviewer', request.reviewer);
+  if (request.master !== 'claude') option('--master', request.master);
+  option('--goal', request.goalFile);
+  option('--browser-profile', request.browserProfile);
+  option('--confirm-price', request.install?.confirmPrice);
+  option('--max-monthly', request.install?.maxMonthly);
+  option('--ssh-key', request.install?.sshKey);
+  option('--ssh-host', request.install?.sshHost);
+  option('--ssh-user', request.install?.sshUser);
+  if (request.sudo === 'mobile') flags.push('--github-mobile');
+  if (request.waitMs) option('--wait', String(Math.round(request.waitMs / 60_000)));
+  return flags.map(shellWord).map(word => ` ${word}`).join('');
+}
+
 /** `graphyard up`'s flags. */
 export function upRequestFromArgs(args: string[]): UpRequest {
   const { values } = parseArgs({ args, options: { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, reviewer: { type: 'string' }, master: { type: 'string' }, goal: { type: 'string' }, 'browser-profile': { type: 'string' },
@@ -447,13 +472,13 @@ export function upRequestFromArgs(args: string[]): UpRequest {
  * off again; NOWAIT ends the drive at the handoff with that route as the next step.
  */
 export function browserAppDriver(options: { page: BrowserPage; repository: string; ids: () => { owner: number; repository: number }; sleep: (ms: number) => Promise<void>; now?: () => Date; timeoutMs?: number; record?: string; sudo?: SudoOptions['prefer']; readCode?: SudoOptions['readCode']; onClose?: (outcome: DriveOutcome) => Promise<void> | void;
-  profile?: { mode: BrowserProfileMode; name: string } | null; noWait?: boolean; upFlags?: string;
+  profile?: { mode: BrowserProfileMode; name: string } | null; noWait?: boolean; upFlags?: string; reuseFlags?: string;
   pending?: () => Promise<SudoState | null> | SudoState | null; remember?: (state: SudoState | null) => Promise<void> | void; onResume?: (state: SudoState) => void }) {
   const { page } = options;
   const owner = options.repository.split('/')[0];
-  // The operator's up command past its repository (provider and mode), for the rerun and the App-import route.
+  // The operator's up command past its repository (upCommandFlags), for the rerun and the App-import route; the rerun keeps its --reuse-app too.
   const upFlags = options.upFlags ?? ' --agent';
-  const rerun = `graphyard up --repo ${options.repository}${upFlags}`, importRoute = appImportRoute(options.repository, upFlags);
+  const rerun = `graphyard up --repo ${options.repository}${options.reuseFlags ?? ''}${upFlags}`, importRoute = appImportRoute(options.repository, upFlags);
   let setupPage: string | null = null, resumeChecked = false;
   const awaitSudo = async (handoff: Handoff) => {
     const onCode = async (state: SudoState) => {
@@ -535,6 +560,7 @@ export function recordedAppDriver(root: string, request: UpRequest, browser: { p
   const startedAt = new Date(), id = randomUUID();
   const directory = resolve(actionsDirectory(root), `${startedAt.toISOString().replace(/[:.]/g, '-')}-app-create-${id.slice(0, 8)}`);
   const steps: RecordedStep[] = [];
+  const scope = { repository: request.repository, provider: request.provider };
   const session = `graphyard-up-${request.repository.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase()}`;
   let created = false;
   const recorded = recordingPage(page(session), { directory, steps, now: () => new Date() });
@@ -545,8 +571,8 @@ export function recordedAppDriver(root: string, request: UpRequest, browser: { p
     // GY-1457: up's own wait, the profile's sharing said in the handoff, and the pending confirmation kept for a rerun.
     timeoutMs: Number.isFinite(upWaitMs(request)) ? upWaitMs(request) : upAgentWaitMs, noWait: request.noWait,
     profile: { mode: browserProfileMode(browser.profile), name: browser.profile },
-    upFlags: ` --provider ${request.provider} --agent`,
-    pending: () => readPendingSudo(root), remember: state => rememberPendingSudo(root, state),
+    upFlags: upCommandFlags(request), reuseFlags: (request.reuseApps ?? []).map(slug => ` --reuse-app ${shellWord(slug)}`).join(''),
+    pending: () => readPendingSudo(root, scope), remember: state => rememberPendingSudo(root, state, scope),
     onResume: state => clock.emit?.({ kind: 'note', text: `Resuming the Confirm access handed off at ${state.issuedAt}; no new handoff: confirm it as asked then, or pass a code with graphyard up --sudo-code` }),
     ids: () => {
       const repo = JSON.parse(execFileSync('gh', ['api', `repos/${request.repository}`], { encoding: 'utf8', timeout: 30_000 }));
@@ -560,16 +586,25 @@ export function recordedAppDriver(root: string, request: UpRequest, browser: { p
   return { directory, drive };
 }
 
-/** The Confirm access an App drive handed off and is waiting on (GY-1457), so a rerun resumes it. */
+/**
+ * The Confirm access an App drive handed off and is waiting on (GY-1457), so a rerun resumes it.
+ * It is kept with the repository and provider it was handed off for, as up.json is: a run for
+ * another one never resumes it, so its own handoff is issued.
+ */
 const pendingSudoFile = (root: string) => resolve(actionsDirectory(root), 'up-sudo.json');
-export async function readPendingSudo(root: string): Promise<SudoState | null> {
-  try { return sudoStateSchema.parse(JSON.parse(await readFile(pendingSudoFile(root), 'utf8'))); } catch { return null; }
+export interface PendingSudoScope { repository: string; provider: string }
+export async function readPendingSudo(root: string, scope?: PendingSudoScope): Promise<SudoState | null> {
+  try {
+    const { repository, provider, ...state } = JSON.parse(await readFile(pendingSudoFile(root), 'utf8'));
+    if (scope && (repository !== scope.repository || provider !== scope.provider)) return null;
+    return sudoStateSchema.parse(state);
+  } catch { return null; }
 }
-export async function rememberPendingSudo(root: string, state: SudoState | null) {
+export async function rememberPendingSudo(root: string, state: SudoState | null, scope?: PendingSudoScope) {
   const file = pendingSudoFile(root);
   if (!state) { await rm(file, { force: true }); return; }
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-  await writeFile(`${file}.${process.pid}.tmp`, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+  await writeFile(`${file}.${process.pid}.tmp`, `${JSON.stringify({ ...state, ...scope })}\n`, { mode: 0o600 });
   await rename(`${file}.${process.pid}.tmp`, file);
 }
 

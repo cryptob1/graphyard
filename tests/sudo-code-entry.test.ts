@@ -299,7 +299,7 @@ function appDrivePage(clock: { t: number }, grantAt: number) {
 const upRequest = async (...extra: string[]) => (await import('../src/up.js')).upRequestFromArgs(['--repo', 'acme/shop', '--agent', ...extra]);
 
 test('unit:sudo-wait-matches-up — the drive waits at Confirm access as long as up does, past 600 s, and a rerun resumes the pending confirmation without a new handoff', async () => {
-  const { recordedAppDriver, upWaitMs, upRequestFromArgs, readPendingSudo } = await import('../src/up.js');
+  const { recordedAppDriver, upWaitMs, upRequestFromArgs, readPendingSudo, rememberPendingSudo } = await import('../src/up.js');
   assert.equal(upWaitMs(await upRequest()), 1_200_000, "agent mode's wait on a person is 20 minutes");
   assert.equal(upWaitMs(await upRequest('--wait', '45')), 2_700_000, '--wait MINUTES sets it');
   assert.throws(() => upRequestFromArgs(['--repo', 'acme/shop', '--wait', '0']), /whole minutes/);
@@ -325,6 +325,17 @@ test('unit:sudo-wait-matches-up — the drive waits at Confirm access as long as
   assert.equal(first.length, 1);
   const pending = await readPendingSudo(rerunRoot);
   assert.equal(pending?.method, 'passkey', 'the handed-off confirmation is kept for the rerun');
+  // A later up from the same checkout for another repository never resumes it: it hands off its own confirmation.
+  assert.equal(await readPendingSudo(rerunRoot, { repository: 'acme/other', provider: 'compose' }), null);
+  assert.equal(await readPendingSudo(rerunRoot, { repository: 'acme/shop', provider: 'railway' }), null);
+  const other: string[] = [], otherNotes: string[] = [];
+  const otherRun = recordedAppDriver(rerunRoot, upRequestFromArgs(['--repo', 'acme/other', '--agent', '--wait', '1']), { profile: 'Default' }, () => appDrivePage(clock, Infinity), { ...timing, emit: event => { if (event.kind === 'note') otherNotes.push(event.text); } });
+  assert.equal((await otherRun.drive(LOCAL, sentence => { other.push(sentence); })).state, 'failed');
+  assert.equal(other.length, 1, "another repository's run issues its own handoff");
+  assert.match(other[0], /--repo acme\/other/, 'naming its own repository');
+  assert.deepEqual(otherNotes, [], 'and resumes nothing');
+  // Restore this repository's pending confirmation for the resume below.
+  await rememberPendingSudo(rerunRoot, pending, { repository: 'acme/shop', provider: 'compose' });
   const second: string[] = [], notes: string[] = [];
   const resumeAt = clock.t + 300_000;
   const rerun = recordedAppDriver(rerunRoot, await upRequest(), { profile: 'Default' }, () => appDrivePage(clock, resumeAt), { ...timing, emit: event => { if (event.kind === 'note') notes.push(event.text); } });
@@ -382,6 +393,17 @@ test('unit:sudo-offers-import-route — the handoff and the local setup page off
   assert.match(handedRoute, IMPORT_ROUTE(' --provider compose --agent'), 'the handoff ends with the route that needs no live moment');
   const routed = upRequestFromArgs(routeUp(handedRoute));
   assert.deepEqual({ repository: routed.repository, provider: routed.provider, agent: routed.agent, reuseApps: routed.reuseApps }, { repository: 'acme/shop', provider: 'compose', agent: true, reuseApps: ['SLUG', 'REVIEWER_SLUG'] }, 'the route runs as written, reusing both Apps');
+  // The route and the rerun carry every option the operator set up with, not only the provider and --agent.
+  const custom: string[] = [];
+  const options = ['--provider', 'hetzner', '--reviewer', 'codex', '--master', 'codex', '--goal', 'goals/first game.md', '--ssh-host', 'build.example.com', '--ssh-user', 'ops', '--confirm-price', '4.51', '--wait', '45', '--reuse-app', 'acme-graphyard'];
+  const customRequest = await upRequest(...options);
+  const customDrive = recordedAppDriver(await temporaryDirectory('sudo-import-options'), customRequest, { profile: 'Default' }, () => appDrivePage(clock, clock.t + 30_000), timing);
+  assert.deepEqual(await customDrive.drive(LOCAL, sentence => { custom.push(sentence); }), { state: 'done' });
+  const words = (command: string) => command.match(/'[^']*'|\S+/g)!.map(word => word.replace(/^'(.*)'$/, '$1'));
+  const carried = upRequestFromArgs(words(custom[0].split('\n').at(-1)!.match(/`graphyard up ([^`]+)`/)![1]));
+  const { reuseApps: _reuse, ...expected } = customRequest;
+  assert.deepEqual({ ...carried, reuseApps: undefined }, { ...expected, reuseApps: undefined }, 'a non-default --reviewer, --master, --goal, SSH, price and wait survive the route');
+  assert.deepEqual(carried.reuseApps, ['SLUG', 'REVIEWER_SLUG'], 'the route names its own --reuse-app per App');
 
   const { startGithubSetup } = await import('../src/github-setup.js');
   const pageRoot = await temporaryDirectory('sudo-import-page');
@@ -390,7 +412,7 @@ test('unit:sudo-offers-import-route — the handoff and the local setup page off
   try {
     const shown = (await (await fetch(setup.url)).text()).replace(/<\/?code>/g, '`').replace(/&#39;/g, "'");
     assert.match(shown, IMPORT_ROUTE(''), 'the local setup page offers it');
-    assert.match(shown, /REVIEWER_SLUG --repo acme\/shop` with the --provider and --agent you ran up with/);
+    assert.match(shown, /REVIEWER_SLUG --repo acme\/shop` with every other option you ran up with \(--provider, --agent, and any --reviewer, --master, --goal, /, 'the page names every option the operator must carry over');
     assert.equal(upRequestFromArgs(routeUp(shown)).repository, 'acme/shop', 'its up command parses');
   }
   finally { await new Promise<void>(accept => setup.http.close(() => accept())); }
@@ -418,7 +440,7 @@ test('unit:sudo-offers-import-route — the handoff and the local setup page off
   });
   assert.equal(result.exitCode, 3, 'waiting on a person, resumable');
   assert.match(result.next, /--no-wait does not wait for it/);
-  assert.match(result.next, IMPORT_ROUTE(' --provider compose --agent'), 'the next step is the App-import route');
+  assert.match(result.next, IMPORT_ROUTE(' --provider compose --agent --browser-profile Default'), 'the next step is the App-import route, with the options up was run with');
   assert.ok(aborted, 'the install serving the App page was ended');
   assert.equal(installEnv?.GRAPHYARD_APP_WAIT_MS, '1260000', "the App page is served up's wait plus a minute, outliving the drive");
   assert.equal(result.handoffs.length, 1);

@@ -1095,7 +1095,6 @@ export interface PausedInstall {
   resume: string; nextSteps: string[];
 }
 
-/** The App step paused the install; `summary` is what it completed, printed as JSON before the exit. */
 /**
  * How long the App page is served (GY-1457): `graphyard up` sets GRAPHYARD_APP_WAIT_MS to its own
  * wait plus a minute, so the page outlives the browser drive's Confirm-access wait; otherwise 900 s.
@@ -1105,6 +1104,7 @@ export function appStepWait(env: NodeJS.ProcessEnv) {
   return Number.isSafeInteger(ms) && ms > 0 ? { timeoutMs: ms } : {};
 }
 
+/** The App step paused the install; `summary` is what it completed, printed as JSON before the exit. */
 export class InstallPaused extends Error {
   constructor(message: string, readonly summary: PausedInstall) { super(message); }
 }
