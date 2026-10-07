@@ -3,7 +3,7 @@
 
 > set up Graphyard for OWNER/REPO following docs/setup-from-zero.md
 
-The setup agent acts as the **master** identity `install --apply` records; the operator credential stays with the human, never given to an agent. The [install hard rules](install.md#hard-rules) apply.
+The setup agent acts as the **master** identity `install --apply` records; the operator credential stays with the human. The [install hard rules](install.md#hard-rules) apply.
 
 ## One command: graphyard up
 
@@ -12,13 +12,13 @@ git clone https://github.com/cryptob1/graphyard.git ~/graphyard && (cd ~/graphya
 cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --repo OWNER/REPO   # --provider compose (default), railway or hetzner
 ```
 
-A new Hetzner server waits (exit 3) for the operator's price approval: rerun with `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`.
+A new Hetzner server waits (exit 3) for price approval: rerun with `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`.
 
-`up` runs every machine step in order: preflight, control plane, host supervisor and Herdr, onboarding, accounts, harness, master loop. Onboarding opens a `graphyard/onboarding` pull request with its files; goals wait for its merge. `.graphyard/up.json` records finished steps; a rerun skips them, reusing its `--repo`/`--provider` (conflicting ones are refused). Ctrl-C also stops the install child. A Herdr plugin bound to another server is never repointed (`--no-herdr`). A preflight failure (exit 2) names the [prerequisite](#1-machine-prerequisites) to fix.
+`up` runs, in order: preflight, control plane, host supervisor and Herdr, onboarding, accounts, harness, master loop. Onboarding opens a `graphyard/onboarding` pull request; goals wait for its merge. `.graphyard/up.json` records finished steps; a rerun skips them, reusing (never contradicting) its `--repo`/`--provider`. Ctrl-C also stops the install child. A Herdr plugin bound elsewhere is never repointed (`--no-herdr`). A preflight failure (exit 2) names the [prerequisite](#1-machine-prerequisites).
 
 ## The Setup page
 
-When a step needs a person, `up` prints one link (`SERVER/#sign-in=CODE&setup` from the operator credential, or a host install's `#claim=CODE&setup`) and waits until green; it signs you in once, within 10 minutes, and opens the Setup page (also linked from Settings → Agents). Each live item has one sentence and one button:
+A step needing a person prints one link (`SERVER/#sign-in=CODE&setup` from the operator credential, or a host install's `#claim=CODE&setup`) and waits until green; it signs you in once, within 10 minutes, opening the Setup page (also in Settings → Agents). Each live item has a sentence and a button:
 
 | Item | Button
 | --- | ---
@@ -26,11 +26,11 @@ When a step needs a person, `up` prints one link (`SERVER/#sign-in=CODE&setup` f
 | An account that writes code, one that reviews | **Connect an account** (API key or subscription sign-in)
 | Branch protection, coordinator running | none: Graphyard does these
 
-When all are green, **Describe what you want built** records a goal, like `graphyard goal`.
+Once green, **Describe what you want built** records a goal, like `graphyard goal`.
 
 ## Agent setup: graphyard up --agent
 
-Agents run `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary on stdout; exit `0` green, `1` failed, `2` prerequisite, `3` waiting. It creates the Apps in a Chrome profile signed in to GitHub (passed, else the master's; neither, without `--reuse-app` for both, exits `2`), recorded under `.graphyard/master-actions/`; connects host accounts, sets deployment variables from saved credentials, records FILE as a goal once. Only a device step becomes a `handoff`: a subscription login's approval, or *Confirm access*, saying if the drive shares your live Chrome (profile path) or copies it (profile name), offering what reaches it: confirming in your Chrome on the named page (shared only; re-checked every 10 s); a code the page offers via the App page or `up --sudo-code CODE|email` (never recorded); `--github-mobile` (password link after 60 s); or no live moment: create both Apps at github.com/settings/apps/new as it lists (permissions, events, no webhook URL, installed on the owner), `graphyard app import` each (printed), then `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` with your other options (`--no-wait`: exit `3`). A drive that gives up hands off the still-served App page. Waits on a person last `--wait MINUTES` (default 20); a rerun (same repository, provider, profile) resumes a pending *Confirm access*. Preflight fails a checkout under `/tmp` or `/var/tmp`, naming a durable path.
+Agents run `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary on stdout; exit `0` green, `1` failed, `2` prerequisite, `3` waiting. It creates the Apps in a GitHub-signed-in Chrome profile (passed, else the master's; neither, without `--reuse-app` for both, exits `2`), recorded under `.graphyard/master-actions/`; connects host accounts, sets deployment variables from saved credentials, records FILE as one goal. Only a device step becomes a `handoff`: a subscription login's approval, or *Confirm access*, saying if the drive shares your live Chrome (profile path) or a copy (profile name), offering: confirm in your Chrome on the named page (shared only; re-checked every 10 s); a code via the App page or `up --sudo-code CODE|email` (never recorded); `--github-mobile` (password link after 60 s); or, with no live moment, create both Apps at github.com/settings/apps/new as listed (no webhook URL), `graphyard app import` each, then `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` exits `3` here). A drive giving up hands off the still-served App page. Waits on a person last `--wait MINUTES` (default 20); a rerun (same repository, provider, profile) resumes a pending *Confirm access*. Preflight fails a checkout under `/tmp` or `/var/tmp`, naming a durable path.
 
 ## Troubleshooting: the manual steps
 
@@ -66,7 +66,7 @@ The repository needs `origin` on GitHub and a GitHub Actions workflow testing on
 
 ## 6. Onboard the checkout
 
-`gy init --scan` (detects `node --test` as `node:test`, reported via `--test-reporter=junit` as `junit-xml-v1`), then `gy init --scan --apply --url http://127.0.0.1:4310`; merge `AGENTS.md .gitignore graphyard.json .github/workflows` to the base (never `.graphyard/`). **Verify:** readiness `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
+`gy init --scan` (reads `node --test` as `node:test`, reporting `junit-xml-v1`), then `gy init --scan --apply --url http://127.0.0.1:4310`; merge `AGENTS.md .gitignore graphyard.json .github/workflows` to the base (never `.graphyard/`). **Verify:** readiness `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
 
 ## 7. Branch protection
 
