@@ -455,12 +455,12 @@ test('integration:human-decision-parking — a human-only decision is a typed re
   const independent = await released('independent of the wait');
 
   // The worker records the decision with the CLI its prompt names, under its own credential.
-  assert.match(workerPrompt(config, parked, config.workers[0], 1), new RegExp(`node \\S+ park ${parked.key} 1 KIND NEEDED -- REASON`));
-  const asked = cli(workerA, ['1', 'money-or-accounts', 'A', 'Hetzner', 'Cloud', 'project', 'with', 'an', 'API', 'token', 'for', 'the', 'live-install', 'proofs', '--ask', 'Approve a Hetzner Cloud project for the live-install proofs', '--', 'The', 'four', 'live-install', 'proofs', 'provision', 'real', 'servers;', 'opening', 'the', 'account', 'and', 'accepting', 'its', 'charges', 'is', 'the', "operator's"]);
+  assert.match(workerPrompt(config, parked, config.workers[0], 1), new RegExp(`node \\S+ park ${parked.key} 1 KIND NEEDED --ask ASK --recommend TEXT --why SENTENCE -- REASON`));
+  const asked = cli(workerA, ['1', 'money-or-accounts', 'A', 'Hetzner', 'Cloud', 'project', 'with', 'an', 'API', 'token', 'for', 'the', 'live-install', 'proofs', '--ask', 'Approve a Hetzner Cloud project for the live-install proofs', '--recommend', 'A project with a €20 monthly spending cap', '--why', 'The proofs need four small servers for under an hour.', '--', 'The', 'four', 'live-install', 'proofs', 'provision', 'real', 'servers;', 'opening', 'the', 'account', 'and', 'accepting', 'its', 'charges', 'is', 'the', "operator's"]);
   await parkCommand.run(asked.context, parked);
   let work = await reload(parked.id);
   const request = work.humanRequest!;
-  assert.deepEqual({ ...request, id: null, at: null }, { id: null, at: null, kind: 'money-or-accounts', ask: 'Approve a Hetzner Cloud project for the live-install proofs', needed: 'A Hetzner Cloud project with an API token for the live-install proofs',
+  assert.deepEqual({ ...request, id: null, at: null }, { id: null, at: null, kind: 'money-or-accounts', ask: 'Approve a Hetzner Cloud project for the live-install proofs', recommendation: 'A project with a €20 monthly spending cap', why: 'The proofs need four small servers for under an hour.', needed: 'A Hetzner Cloud project with an API token for the live-install proofs',
     reason: "The four live-install proofs provision real servers; opening the account and accepting its charges is the operator's", requestedBy: workerA.id, epoch: 1 });
   assert.equal(work.lease, null, 'recording the request ended the lease in the same transaction');
   assert.equal((work as any).pipeline.attempts[0].end, 'released');
@@ -530,7 +530,7 @@ test('integration:human-answer-resumes-item — answering from the CLI or the da
   let work = await released('resumes on the human answer');
   await cycle(state);
   assert.deepEqual(calls.dispatch.map(entry => entry.work), [work.key]);
-  await ok(workerA, 'POST', `work/${work.id}/park`, { epoch: 1, kind: 'credentials-for-people', needed: 'A deploy key for the staging host, issued to the on-call engineer', reason: 'Only the operator issues credentials to people' });
+  await ok(workerA, 'POST', `work/${work.id}/park`, { epoch: 1, kind: 'credentials-for-people', needed: 'A deploy key for the staging host, issued to the on-call engineer', reason: 'Only the operator issues credentials to people', recommendation: 'A deploy key for that one host, read-only, expiring in 7 days', why: 'It reaches nothing else and lapses on its own.' });
   herdr.agents = [];
   clock.skewMs += 20_000; await cycle(state);
   assert.equal(calls.dispatch.length, 1, 'a parked item is not dispatched');
@@ -570,7 +570,7 @@ test('integration:human-answer-resumes-item — answering from the CLI or the da
 
   // The dashboard answers through the same route (`action(id, 'answer', …)`); a declined answer keeps the item parked on the human's words.
   let declined = await launcherClaims(await released('declined by the human'), workerB);
-  declined = await ok(workerB, 'POST', `work/${declined.id}/park`, { epoch: 1, kind: 'goals-and-priorities', needed: 'Whether the legacy importer is still a goal', reason: 'The item removes it' });
+  declined = await ok(workerB, 'POST', `work/${declined.id}/park`, { epoch: 1, kind: 'goals-and-priorities', needed: 'Whether the legacy importer is still a goal', reason: 'The item removes it', recommendation: 'Go ahead as asked', why: 'Nothing uses the importer any more.' });
   assert.equal((await call(operator, 'POST', `work/${declined.id}/answer`, { request: randomUUID(), answer: 'stale' })).status, 409, 'an answer names the request it read');
   declined = await ok(operator, 'POST', `work/${declined.id}/answer`, { request: declined.humanRequest!.id, outcome: 'declined', answer: 'Keep the importer this quarter' });
   assert.equal(declined.humanRequest, null);

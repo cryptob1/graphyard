@@ -146,7 +146,7 @@ test('integration:intervention-signals-recorded — one intervention of each kin
 
   // human-only-decision: the worker parks the item on a decision only a human may make; the human answers.
   const parked = await claimed('human');
-  await ok(token(worker), 'POST', `work/${parked.key}/park`, { epoch: parked.epoch, kind: 'money-or-accounts', needed: 'a Railway account for the proof environment', reason: 'The proof runs against a deployed environment' });
+  await ok(token(worker), 'POST', `work/${parked.key}/park`, { recommendation: 'Approve', why: 'Nothing else unblocks the item.', epoch: parked.epoch, kind: 'money-or-accounts', needed: 'a Railway account for the proof environment', reason: 'The proof runs against a deployed environment' });
   await delay(30);
   const request = (await reload(parked.id)).humanRequest!;
   await ok(token(operator), 'POST', `work/${parked.key}/answer`, { request: request.id, outcome: 'provided', answer: 'Use the shared staging account' });
@@ -384,7 +384,7 @@ test('unit:intervention-fold-reads-only-typed-rows — the fold reads the ledger
   assert.deepEqual(both.map(entry => [entry.kind, entry.trigger, entry.resolvedAt]).sort(), [['escalation', 'blocked-report', at(3)], ['scope-widening', 'scope-request', at(3)]]);
   // An open signal: a parked item still waiting on its human.
   const waiting = await claimed('waiting');
-  await ok(token(worker), 'POST', `work/${waiting.key}/park`, { epoch: waiting.epoch, kind: 'credentials-for-people', needed: 'a GitHub seat for the reviewer', reason: 'The reviewer identity is a person' });
+  await ok(token(worker), 'POST', `work/${waiting.key}/park`, { recommendation: 'Approve', why: 'Nothing else unblocks the item.', epoch: waiting.epoch, kind: 'credentials-for-people', needed: 'a GitHub seat for the reviewer', reason: 'The reviewer identity is a person' });
   const open = ofKind((await report('window=7')).interventions, 'human-only-decision', waiting.key)[0];
   assert.deepEqual({ resolvedAt: open.resolvedAt, resolvedBy: open.resolvedBy, trigger: open.trigger }, { resolvedAt: null, resolvedBy: null, trigger: 'credentials-for-people' });
   assert.ok(open.waitedMs >= 0 && open.waitedMs < 60_000);

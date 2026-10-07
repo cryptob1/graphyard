@@ -276,13 +276,15 @@ test('unit:human-surface-derived-from-refusals — a human-only refusal added to
   }
 });
 
+/** The recommendation every park carries (GY-1410), for the parks whose advice a test does not read. */
+const advice = { recommendation: 'Approve', why: 'Nothing else unblocks the item.' };
 /** A worker's item, claimed at epoch 1 and parked with `body` through the real route. */
 async function parked(body: Record<string, unknown>) {
   const n = ++serial;
   let work = await engine.execute(operator, 'create', null, { title: `Short ask ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:behaves'] }] }, id());
   work = await engine.execute(operator, 'ready', work.id, {}, id());
   work = await engine.execute(worker, 'claim', work.id, {}, id());
-  await post(token(worker), `work/${work.id}/park`, { epoch: 1, kind: 'money-or-accounts', ...body });
+  await post(token(worker), `work/${work.id}/park`, { epoch: 1, kind: 'money-or-accounts', ...advice, ...body });
   return reload(work.id);
 }
 /**
@@ -297,7 +299,7 @@ const occurrences = (text: string, part: string) => text.split(part).length - 1;
 const agentNote = Array.from({ length: 15 }, (_, index) => `Resume graphyard/gy-1384-${index} at 5bc497ab7c62 then graphyard unseal GY-1384 under GH_CONFIG_DIR.`).join(' ');
 
 test('unit:human-request-short-ask — a park carries a short human ask apart from its agent detail: ASK, STEPS and WHY are bounded and refuse agent shorthand naming it, and a request without them leads with the first sentence of NEEDED', async () => {
-  const ok = { epoch: 1, kind: 'money-or-accounts', needed: 'A repository and an admin token', reason: 'The pilot needs both' };
+  const ok = { epoch: 1, kind: 'money-or-accounts', needed: 'A repository and an admin token', reason: 'The pilot needs both', ...advice };
   const refused = (extra: Record<string, unknown>) => { const parsed = humanRequestSchema.safeParse({ ...ok, ...extra }); assert.equal(parsed.success, false, JSON.stringify(extra)); return parsed.error!.issues.map(issue => issue.message).join(' | '); };
   // The limits: one sentence of at most 140 characters, at most 5 steps of at most 160, a why of at most 200.
   assert.match(refused({ ask: `Create ${'a'.repeat(140)}` }), /ASK is 147 characters; keep it to 140/);
@@ -356,7 +358,7 @@ test('unit:human-request-card-render — each human request renders once per sur
   const seen = visibleText(card);
   assert.ok(seen.split(' ').length < 80, `${seen.split(' ').length} visible words: ${seen}`);
   assert.equal(occurrences(seen, note.ask), 1, 'the ask once');
-  assert.match(card, new RegExp(`<h3>${note.ask}</h3><ol class="human-steps"><li>${note.steps[0]}</li><li>${note.steps[1]}</li></ol><p class="human-why">${note.why}</p>`), 'heading, numbered steps, then why');
+  assert.match(card, new RegExp(`<h3>${note.ask}</h3><p class="human-why human-recommendation"><strong>Recommended:</strong> ${advice.recommendation}<span class="muted"> ${note.why}</span></p><ol class="human-steps"><li>${note.steps[0]}</li><li>${note.steps[1]}</li></ol>`), 'heading, the recommendation with why (GY-1410), then numbered steps');
   assert.ok(card.indexOf(note.why) < card.indexOf(row.choices![0].label), 'the choices follow');
   assert.ok(!seen.includes('graphyard unseal') && !seen.includes('5bc497ab') && !seen.includes('Who acts next'), 'no agent detail and no restatement in view');
   assert.match(card, /<details class="agent-details"><summary class="muted">Details for agents<\/summary>/, 'the detail is collapsed, closed by default');
