@@ -156,8 +156,9 @@ export function settleableLeaseLoss(work: Pick<Work, 'submission' | 'capacity' |
       settlements.push({ escalation, epoch, ...explained, note: leaseLossSettlementNote(explained.cause, explained.attestation, explained.exhaustion ?? null) });
       continue;
     }
-    const ended = now !== undefined && work.epoch !== undefined && now - Date.parse(escalation.at) >= leaseLossSettleMs
-      ? endedLeaseLoss({ stage: work.stage ?? 'build', epoch: work.epoch, lease: work.lease ?? null, submission: work.submission, containmentQuarantine: work.containmentQuarantine ?? null }, escalation) : null;
+    // Only a caller that passes the item's stage and epoch is asked: none is assumed for it.
+    const ended = now !== undefined && work.stage !== undefined && work.epoch !== undefined && now - Date.parse(escalation.at) >= leaseLossSettleMs
+      ? endedLeaseLoss({ stage: work.stage, epoch: work.epoch, lease: work.lease ?? null, submission: work.submission, containmentQuarantine: work.containmentQuarantine ?? null }, escalation) : null;
     if (ended) settlements.push({ escalation, epoch, cause: ended.cause, attestation: null, note: `auto-settled: ${ended.evidence}; nothing from the lost attempt can act or merge` });
   }
   return settlements;
