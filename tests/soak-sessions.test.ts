@@ -125,10 +125,12 @@ test('unit:soak-invariants-hold — headless approver runs through loop restarts
   const { items, final, violations, failures, state, headless } = await simulateDay({ hours: 6, headless: true });
   const { pi, root, applied, submitted, runs, restarts, adoptedLive, adoptedEnded } = headless!;
   const keyOf = (n: number) => items[n - 1].key;
+  // The item whose approver is lost one time more than is given back, and the one whose approver is lost every time.
+  const [lostOnceMore, lostAlways] = [...basePlan.killedApprovers].sort(([, a], [, b]) => a - b).map(([n]) => n);
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle, across every restart');
   assert.deepEqual(failures, [], 'no cycle failed');
   // Every item is delivered but the one whose approver is killed every time: its decision is escalated.
-  assert.deepEqual(final.filter(item => item.stage !== 'done' || !item.delivery).map(item => item.key), [keyOf(9)]);
+  assert.deepEqual(final.filter(item => item.stage !== 'done' || !item.delivery).map(item => item.key), [keyOf(lostAlways)]);
   // The loop restarted with runs live, and adopted both runs still live and runs that ended while unwatched.
   assert.ok(restarts >= 3 && adoptedLive > 0 && adoptedEnded > 0, `restarts ${restarts}, adopted live ${adoptedLive}, adopted ended ${adoptedEnded}`);
   // Exactly once: every submitted verdict applied once, whether its run was watched or adopted, and each on disk as applied.
@@ -136,10 +138,10 @@ test('unit:soak-invariants-hold — headless approver runs through loop restarts
   assert.deepEqual([...applied].sort(), [...submitted].sort(), 'each submitted verdict applied exactly once');
   // Bounded per decision, lost runs included: at most maxApproverLaunches + maxLostApproverRuns runs.
   assert.ok([...runs.values()].every(count => count <= maxApproverLaunches + maxLostApproverRuns), `runs per decision: ${[...runs.values()].join(', ')}`);
-  const killed = Object.values(state.approvals).find(watch => watch.work === keyOf(9))!;
+  const killed = Object.values(state.approvals).find(watch => watch.work === keyOf(lostAlways))!;
   assert.equal(runs.get(killed.decision), maxApproverLaunches + maxLostApproverRuns, 'an approver killed every time is relaunched only within the bound');
   assert.deepEqual([killed.launches, killed.lostRuns, !!killed.exhaustedAt, killed.settledAt], [maxApproverLaunches, maxLostApproverRuns, true, null], 'then its decision is escalated as unjudged');
-  assert.equal(final.find(item => item.key === keyOf(5))!.stage, 'done', 'an approver lost one time more than is given back still judges its decision');
+  assert.equal(final.find(item => item.key === keyOf(lostOnceMore))!.stage, 'done', 'an approver lost one time more than is given back still judges its decision');
   // The registry is bounded: nothing left running or watched, one directory per run, each applied
   // run recorded, and every one of them removed once past its retention.
   assert.deepEqual([pi.live(), watchedRuns(), liveRuns().length], [0, 0, 0]);

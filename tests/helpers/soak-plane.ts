@@ -43,9 +43,16 @@ export const principals = {
 export const workers: WorkerProfile[] = ['one', 'two', 'three'].map(name => ({ name, principal: `worker-${name}`, agentName: `soak-worker-${name}`, mode: 'launch', kind: 'claude', credentialFile: `/outside/${name}.token`, agentArgs: [], approvals: 'auto', environment: {} }) as WorkerProfile);
 // The slow-server day's roster (GY-1286): worker capacity enough to staff every item at once.
 export const extraWorkers: WorkerProfile[] = ['four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve'].map(name => ({ name, principal: `worker-${name}`, agentName: `soak-worker-${name}`, mode: 'launch', kind: 'claude', credentialFile: `/outside/${name}.token`, agentArgs: [], approvals: 'auto', environment: {} }) as WorkerProfile);
+/**
+ * The loop's own operator-agent identity, provisioned on every control plane as onboarding does:
+ * the control plane accepts the loop's rule-grounded successor re-plan only from an operator agent
+ * (GY-1397), which `principals.operatorAgent`, an admin standing in for it elsewhere, is not.
+ */
+export const loopAgent: Principal = { id: 'graphyard-master-loop', role: 'operator-agent', sessionKind: 'ai' };
+const loopAgentToken = `${loopAgent.id}-token-${'x'.repeat(32)}`;
 export const everyone: Principal[] = [...Object.values(principals), ...[...workers, ...extraWorkers].map(profile => ({ id: profile.principal, role: 'worker' as const }))];
 export const credentials = everyone.map(principal => ({ ...principal, token: `${principal.id}-token-${'x'.repeat(32)}` }));
-export const token = (principal: Principal) => credentials.find(entry => entry.id === principal.id)!.token;
+export const token = (principal: Principal) => principal.id === loopAgent.id ? loopAgentToken : credentials.find(entry => entry.id === principal.id)!.token;
 export const reviewerApps = [{ id: 'claude-reviewer', runtime: 'claude', appId: 55_001, botUserId: 55_002 }, { id: 'cursor-reviewer', runtime: 'cursor', appId: 66_001, botUserId: 66_002 }];
 export const launcher = fileURLToPath(new URL('../../bin/graphyard.mjs', import.meta.url));
 export const soakConfig: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository, baseBranch: 'main', githubAppId: 1234,
@@ -134,9 +141,11 @@ export const basePlan = {
   // A runtime that exits and leaves its pane open on a bare shell. Item eight's first attempt is
   // free to exit, its second carrying the slow-recompute head.
   exits: new Set([8]), exitAfterMs: 12 * minute,
-  // GY-453, the headless day: approver runs killed from outside, by item — the first four of item 5's
-  // (one more than the loop gives back), and every one of item 9's.
-  killedApprovers: new Map([[5, 4], [9, Number.POSITIVE_INFINITY]]),
+  // GY-453, the headless day: approver runs killed from outside, by item — the first four of item 3's
+  // (one more than the loop gives back), and every one of item 7's. Both are review-rework items, whose
+  // decisions still go to an approver; a dead worker's lease loss no longer does, since the control
+  // plane settles it itself (GY-1393).
+  killedApprovers: new Map([[3, 4], [7, Number.POSITIVE_INFINITY]]),
   // GY-430: the item whose auto-merge GitHub keeps BLOCKED past master status's ten-minute bound
   // after Graphyard's gate passed; the main day sets it, so no other day waits on that merge.
   blockedMerge: 0,
@@ -414,6 +423,7 @@ export async function controlPlane(database: string) {
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
   stores.push(store); listeners.push(http);
+  await api(principals.operator, 'POST', 'operator-agents', { id: loopAgent.id, displayName: loopAgent.id, capabilities: ['policy:requirements'], scope: { repositories: [repository], workItems: ['*'] }, token: loopAgentToken, reason: 'Onboarding provisions the loop\'s operator agent' });
 }
 /**
  * The hooks every soak suite registers (GY-1363): its own Postgres server, the simulated clock and

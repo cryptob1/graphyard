@@ -6,7 +6,8 @@
 // pre-merge file. The release-candidate suites (`releaseCandidateTests`) never run here.
 //
 //   node scripts/ci-tests.mjs select --out FILE           the files this CI run executes, one per line
-//   node scripts/ci-tests.mjs release-candidate --out FILE  the long suites only release-candidate validation runs
+//   node scripts/ci-tests.mjs release-candidate [--suite soak|timing-budget] --out FILE
+//                                                         the long suites only release-candidate validation runs
 //   node scripts/ci-tests.mjs shards [N]                  the balanced shards of the full suite
 //   node scripts/ci-tests.mjs affected FILE...            the selection for changed FILEs
 //   node scripts/ci-tests.mjs durations RECORD.jsonl...   write measured per-file durations into the baseline
@@ -260,7 +261,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.error(summary);
     if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, summary, { flag: 'a' });
   } else if (command === 'release-candidate') {
-    const files = tests.filter(isReleaseCandidateTest), out = option('--out');
+    // `--suite` narrows the list to one suite: the timing budgets run one file at a time, apart from
+    // the soak, since a budget measured beside another suite's load measures that load (GY-1440).
+    const suite = option('--suite');
+    if (suite !== null && !['soak', 'timing-budget'].includes(suite)) throw new Error(`--suite takes soak or timing-budget: ${suite}`);
+    const files = tests.filter(file => suite === null ? isReleaseCandidateTest(file) : releaseCandidateKind(file) === suite), out = option('--out');
     if (out) writeFileSync(out, files.map(file => `${file}\n`).join('')); else console.log(files.join('\n'));
   } else if (command === 'shards') {
     const shards = shardFiles(preMergeTestFiles(), readDurations(), Number(args[0] ?? defaultShardCount));
@@ -276,6 +281,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     writeFileSync(file, `${JSON.stringify(merged, null, 2)}\n`);
     console.log(`Recorded durations for ${Object.keys(merged.files).length} of ${tests.length} test files in ${relative(process.cwd(), file)}`);
   } else {
-    throw new Error('Usage: ci-tests select [--out FILE] | release-candidate [--out FILE] | shards [N] | affected FILE... | durations RECORD.jsonl...');
+    throw new Error('Usage: ci-tests select [--out FILE] | release-candidate [--suite soak|timing-budget] [--out FILE] | shards [N] | affected FILE... | durations RECORD.jsonl...');
   }
 }
