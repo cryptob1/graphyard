@@ -17,7 +17,7 @@ import { delegationLimitAssignments, delegationLimitVariables } from './limits.j
 import { assertOutsideRepository, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord } from './secrets.js';
 import { readAppFile, readSavedApp, type SavedApp } from './manifest.js';
 import { localTransport, sshTransport, type Transport } from './transport.js';
-import { installIdFor, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PlannedPrincipal, type Provider } from './types.js';
+import { installIdFor, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PlannedPrincipal, type PreflightItem, type Provider } from './types.js';
 
 export * from './types.js';
 export { adapterFor, type ProviderAdapter } from './adapters.js';
@@ -99,7 +99,7 @@ export async function repositoryDelivery(root: string): Promise<{ policy: Delive
   return { policy: proposeDelivery(input, detectDeploy(input, stack), stack), committed: false };
 }
 
-const APP_HUMAN_STEP = 'Confirm the Graphyard GitHub App in the browser page the installer opens, and install it on the managed repository; when GitHub asks to Confirm access, approve the GitHub Mobile prompt.';
+const APP_HUMAN_STEP = 'Open the page the installer serves and prints (http://127.0.0.1:4311; it opens no browser), confirm the Graphyard GitHub App there, and install it on the managed repository; when GitHub asks to Confirm access, approve the GitHub Mobile prompt.';
 const CORE_HUMAN_STEPS = [
   'Authenticate the provider CLI and GitHub CLI once (the installer prints the exact command when either is missing).',
   'Approve the printed plan before rerunning with --apply.',
@@ -462,14 +462,31 @@ function variableDrift(session: InstallSession, action: string, values: EnvValue
 // Plan
 // ---------------------------------------------------------------------------
 
+/**
+ * The `gh` login a provider needs (GY-1412): `repo` for branch protection and CI discovery
+ * everywhere, plus `admin:repo_hook` for a hosted provider. Compose observes GitHub by polling,
+ * never through a webhook, so it needs no `admin:repo_hook`. A login whose scopes `gh` does not
+ * list (a fine-grained token) is not refused for scopes it may hold.
+ */
+export function githubCliScopes(provider: Provider) { return provider === 'compose' ? ['repo'] : ['repo', 'admin:repo_hook']; }
+export function githubCliPreflight(provider: Provider, status: { code: number; stdout: string; stderr?: string }, repository: string): PreflightItem {
+  const needed = githubCliScopes(provider);
+  const login = `gh auth login --scopes ${needed.join(',')}`;
+  const note = provider === 'compose' ? '; compose polls GitHub, so it needs no admin:repo_hook' : '';
+  if (status.code !== 0) return { name: 'GitHub CLI', ok: false, detail: 'gh is missing or not authenticated', fix: `Install GitHub CLI and run: ${login} (the account must administer ${repository})${note}` };
+  const listed = /Token scopes:\s*(.*)/.exec(`${status.stdout}\n${status.stderr ?? ''}`)?.[1];
+  const held = listed === undefined ? null : [...listed.matchAll(/[\w:-]+/g)].map(match => match[0]);
+  const lacking = held ? needed.filter(scope => !held.includes(scope)) : [];
+  if (lacking.length) return { name: 'GitHub CLI', ok: false, detail: `the gh login lacks scope ${lacking.join(', ')} (${provider} needs ${needed.join(', ')})${note}`, fix: `Run: gh auth refresh --scopes ${needed.join(',')}` };
+  return { name: 'GitHub CLI', ok: true, detail: `authenticated for branch protection and CI discovery with ${held ? `scopes ${needed.join(', ')}` : 'unlisted scopes'}${note}` };
+}
+
 export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   const { adapter, context, record } = session;
   const preflight = await adapter.preflight(context);
   const gh = githubCli(context.transport);
   const ghStatus = await gh(['auth', 'status'], { allowFailure: true });
-  preflight.push(ghStatus.code === 0
-    ? { name: 'GitHub CLI', ok: true, detail: 'authenticated for branch protection and CI discovery' }
-    : { name: 'GitHub CLI', ok: false, detail: 'gh is missing or not authenticated', fix: `Install GitHub CLI and run: gh auth login --scopes repo,admin:repo_hook (the account must administer ${session.inputs.repository})` });
+  preflight.push(githubCliPreflight(context.provider, ghStatus, session.inputs.repository));
   // A declared manifest the installer cannot read would deploy a server whose regression guard
   // exempts nothing, so it blocks --apply like any other preflight until the script is fixed.
   preflight.push(session.generatedFiles.error

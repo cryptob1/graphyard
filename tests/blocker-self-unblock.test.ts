@@ -127,6 +127,7 @@ const incidents: [string, BlockerClass][] = [
   [`${humanRequestBlocker} (spending money or opening third-party accounts): a Railway team seat`, 'human-only'],
   ['The two criteria contradict each other about the retry order', 'genuine'],
   ['Dispatch failed 3 consecutive times with the same cause since 2026-10-05T18:28:08.000Z, so the master loop stopped redispatching GY-1310: no worker profile can take GY-1310 [attempts 1, 2, 3 each ended without a submission]', 'dispatch-failure'],
+  ["Blocked command: systemctl --user show-environment -> 'Failed to connect to user scope bus via local transport: Connection refused'", 'host-supervisor'],
 ];
 
 test('unit:blocker-classified — the 2026-09-30 blocker texts fall into their named classes, unrecognised text is genuine, and only genuine and human-only need someone', () => {
@@ -155,7 +156,7 @@ test('unit:blocker-classified — the 2026-09-30 blocker texts fall into their n
   assert.equal(classifyBlocker('').class, 'genuine');
   assert.equal(classifyBlocker('Environment, not the item: the codex sandbox cannot write /srv/wt/.git/FETCH_HEAD, so required command \'sync GY-1\' failed: EROFS').path, '/srv/wt/.git/FETCH_HEAD');
   for (const name of blockerClasses) assert.equal(needsSomeone(name), name === 'genuine' || name === 'human-only', name);
-  assert.deepEqual([...environmentalBlockerClasses].sort(), ['control-plane-error', 'dispatch-failure', 'github-credential', 'outside-scope-test-failure', 'sandbox-path', 'worktree-mismatch']);
+  assert.deepEqual([...environmentalBlockerClasses].sort(), ['control-plane-error', 'dispatch-failure', 'github-credential', 'host-supervisor', 'outside-scope-test-failure', 'sandbox-path', 'worktree-mismatch']);
 });
 
 test('unit:blocked-attempt-frees-slot — recording a blocker ends the attempt in the same transaction, keeps its partial work and releases the lease, so the slot is free on the next dispatch', async () => {
@@ -411,7 +412,7 @@ test('unit:blocked-board-shows-class — the board and master status show each b
   const routine = await block(await claimed('Board: credential'), `${incidents[0][0]} (board)`);
   const genuine = await block(await claimed('Board: genuine'), `${incidents[8][0]} (board)`);
   const parked = await claimed('Board: human-only');
-  await ok(token(implementer), 'POST', `work/${parked.id}/park`, { epoch: parked.epoch, kind: 'money-or-accounts', needed: 'a Railway team seat', reason: 'The deploy needs a paid seat' });
+  await ok(token(implementer), 'POST', `work/${parked.id}/park`, { recommendation: 'Approve', why: 'Nothing else unblocks the item.', epoch: parked.epoch, kind: 'money-or-accounts', needed: 'a Railway team seat', reason: 'The deploy needs a paid seat' });
   await loop.cycle(state);
 
   const snapshot = await ok(token(coordinator), 'GET', 'work-snapshot');
