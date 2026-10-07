@@ -23,8 +23,8 @@ export const slotWindowMs = 60 * minute;
  * again only after `reviveBackoffMs`, so a manager that stays down costs no cycle the few seconds a
  * revival waits. Each slot the loop starts is a `host-supervision:UNIT` row: a slot down again
  * within `slotCooldownMs` waits, and a slot down a fourth time within the hour from its first
- * restart is reported failed and left down until it is seen running. A slot an operator disabled is never started. A host with
- * nothing to repair records nothing.
+ * restart is reported failed and left down until it is seen running. A slot an operator disabled
+ * is never started. A host with nothing to repair records nothing.
  */
 export async function hostSupervisionStep(cycle: Cycle) {
   const { effects, state, now, performed } = cycle;
