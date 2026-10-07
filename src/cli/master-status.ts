@@ -165,6 +165,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // Commits no reviewer session ever got a verdict on, with the dismissed review.
     unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
     ...sectionsReport,
+    // Open goals (GY-1417) with their stage and who acts next: acceptance drafting, awaiting approval, planned, delivering.
+    goals: await sections.optional('goals', 'GET /api/goals', async () => (await masterApi('goals?open=1&view=summary')).goals, () => null),
     // Doctor runs: accepted, else cursor's.
     doctor: coordinator?.doctor?.length ? coordinator.doctor : cycling?.doctor?.recent ?? null,
   };

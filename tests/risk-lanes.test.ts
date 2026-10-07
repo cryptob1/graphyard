@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { Store } from '../src/store.js';
+import { Store, save } from '../src/store.js';
 import { Refusal, type Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import assert from 'node:assert/strict';
@@ -277,6 +277,56 @@ test('unit:lane-sets-required-gates — a low- or medium-lane rework is applied 
   const pending = await call(master.token, `work/${high.key}/decide`, { action: 'rework', input: { previousWorkerStopped: true }, reason: 'The reviewer requested changes' });
   assert.equal(pending.state, 'requested', 'a high-lane rework waits for its independent approver');
   assert.equal((await store.list()).find(item => item.id === high.id)!.reworkRequested, false);
+});
+
+// GY-1394: a high-lane rework whose ground the record shows on the exact head — here the control
+// plane's own test merge of the candidate onto the moved base conflicted — is applied as it is
+// requested too. GitHub's conflict reading alone is no ground (GY-375): on a blocked or draft item,
+// or one whose base has not moved, no test merge ever checked it, so that rework waits for its approver.
+test('unit:rework-ground-recorded — a high-lane rework the record grounds is applied with no approver decision', { timeout: 120_000 }, async () => {
+  const { engine, store, master, call, submitted } = await lanes();
+  const tip = 'e'.repeat(40);
+  const reread = async (id: string) => (await store.list()).find(item => item.id === id)!;
+  const conflicting = async (title: string, paths: string[], extra: Partial<Observation> = {}) => {
+    const work = await submitted(title, paths);
+    assert.equal(work.lane, 'high');
+    return engine.observe(work.id, (await reread(work.id)).revision, { ...observed(paths), candidate: { ...work.candidate! }, conflicting: true, mergeable: false, prState: 'open' as const, baseTip: tip, baseTipContained: false, ...extra });
+  };
+  // Unchecked readings: a draft, and a base that has not moved.
+  for (const [title, extra] of [['unchecked-draft', { draft: true }], ['unchecked-unmoved', { baseTip: base, baseTipContained: true }]] as const) {
+    const work = await conflicting(title, [`src/server/routes/${title}.ts`], extra);
+    const pending = await call(master.token, `work/${work.key}/decide`, { action: 'rework', input: { previousWorkerStopped: true }, reason: 'GitHub reports a conflict with the base' });
+    assert.equal(pending.state, 'requested', `${title}: an unchecked GitHub reading waits for the independent approver`);
+    assert.equal((await reread(work.id)).reworkRequested, false);
+  }
+  // A blocked item's reading is unchecked too: the test merge does not run while it is blocked.
+  const blocked = await conflicting('unchecked-blocked', ['src/server/routes/unchecked-blocked.ts']);
+  await store.transaction(async db => {
+    const current: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [blocked.id])).rows[0].document;
+    current.blocker = 'waiting on a credential';
+    await save(db, current, 'lane-operator', 'test.blocked', new Date());
+  });
+  const held = await call(master.token, `work/${blocked.key}/decide`, { action: 'rework', input: { previousWorkerStopped: true }, reason: 'GitHub reports a conflict with the base' });
+  assert.equal(held.state, 'requested', 'a blocked item\u2019s unchecked reading waits for the independent approver');
+  // Confirmed: the control plane's test merge onto the moved tip conflicted for this head.
+  const work = await conflicting('grounded-rework', ['src/server/routes/grounded.ts']);
+  await store.transaction(async db => {
+    const current: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [work.id])).rows[0].document;
+    current.baseRefresh = { at: new Date().toISOString(), base: tip, from: { sha: head, baseSha: base }, head: null, carry: null, merge: null, trigger: 'conflict confirmed', policyRevision: current.policyRevision,
+      conflict: 'Merge of the base tip conflicts in src/server/routes/grounded.ts', conflictPaths: ['src/server/routes/grounded.ts'] } as unknown as Work['baseRefresh'];
+    await save(db, current, 'lane-operator', 'test.base-refresh', new Date());
+  });
+  const decision = await call(master.token, `work/${work.key}/decide`, { action: 'rework', input: { previousWorkerStopped: true }, reason: 'The base refresh conflicted' });
+  assert.equal(decision.state, 'applied', 'the record is the ground: no approver decision is needed');
+  assert.equal(decision.approvedBy, 'graphyard-risk-lane');
+  assert.match(decision.approvalReason, /candidate .* conflicts with base branch tip eeeeeeeeeeee in the control plane's own test merge, so the record is the rework's ground/);
+  assert.equal((await reread(work.id)).reworkRequested, true);
+  // The returned head keeps its submission, candidate and conflict until a new head is submitted,
+  // but its ground is spent: the retry cap's rework after attempts that never submitted (GY-885)
+  // judges those attempts, so it waits for the independent approver.
+  const capped = await call(master.token, `work/${work.key}/decide`, { action: 'rework', input: { previousWorkerStopped: true, binding: `overlong-cap:${work.id}:${new Date().toISOString()}` }, reason: 'held: 3 attempts in a row ended without submitting' });
+  assert.equal(capped.state, 'requested', 'a returned head\u2019s ground lets no later rework through');
+  assert.equal(capped.approvedBy ?? null, null);
 });
 
 // GY-1110 AC-1: a lane-approved rework whose application recorded no outcome is resumed by the

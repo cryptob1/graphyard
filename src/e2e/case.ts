@@ -51,7 +51,8 @@ const browserStep = z.object({
   for (const field of needs[step.action]) if (step[field] === undefined) context.addIssue({ code: 'custom', path: [field], message: `a browser ${step.action} step needs ${field}` });
 });
 const step = z.discriminatedUnion('kind', [httpStep, browserStep]);
-const caseId = z.string().regex(/^[a-z0-9][a-z0-9._-]*$/, 'an id is lower-case letters, digits, ., _ and -').max(100);
+/** A case or outcome id: also a file name and a ledger tag segment. */
+export const caseId = z.string().regex(/^[a-z0-9][a-z0-9._-]*$/, 'an id is lower-case letters, digits, ., _ and -').max(100);
 export const caseSchema = z.object({
   id: caseId,
   title: z.string().min(1).max(200),

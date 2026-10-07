@@ -245,7 +245,7 @@ export class ProductionWatch {
   private releaseSeen: { tip: string; at: number } | null = null;
   /** Commit counts between two exact SHAs, which never change: each pair is asked of GitHub once (GY-1256). */
   private aheadMemo = new Map<string, number>();
-  /** Whether a serving commit holds the release tip, per `tip:serving` pair asked: a decided answer never changes for that pair. */
+  /** Whether a serving commit holds a commit (the release tip or a provider record's), per `tip:serving` pair asked: a decided answer never changes for that pair. */
   private servedMemo = new Map<string, boolean>();
   private report: ProductionReport;
   constructor(private store: Store, private options: ProductionWatchOptions) {
@@ -313,7 +313,7 @@ export class ProductionWatch {
     if (typeof comparison?.ahead_by !== 'number') throw new Error('GitHub did not report ahead_by');
     return comparison.ahead_by;
   }
-  /** Whether `serving` holds the release `tip`, memoized per decided pair so an unmoved pair costs no compare. */
+  /** Whether `serving` holds `tip` (the release tip, or a provider record's commit), memoized per decided pair so an unmoved pair costs no compare. */
   private async holdsRelease(tip: string, serving: string): Promise<boolean | null> {
     const key = `${tip}:${serving}`;
     if (this.servedMemo.has(key)) return this.servedMemo.get(key)!;
@@ -402,7 +402,11 @@ export class ProductionWatch {
     // release that is already live, and a provider list only explains why a deploy failed or is in
     // flight; it never overrides a served commit that already matches.
     const built = this.options.build.commit?.toLowerCase() ?? null;
-    const identity = !live && !!tip && !!built && newestSuccess?.commit?.toLowerCase() !== built && await this.holdsRelease(tip, built) === true;
+    // The running build also outranks a provider record it contains (GY-1424): a lagging or
+    // mis-attributed deployment record older than the build never reads as production serving it.
+    const recorded = newestSuccess?.commit?.toLowerCase() ?? null;
+    const identity = !live && !!built && recorded !== built
+      && ((!!tip && await this.holdsRelease(tip, built) === true) || (!!recorded && await this.holdsRelease(recorded, built) === true));
     report.serving = live ?? (identity ? built : newestSuccess?.commit ?? this.options.build.commit);
     report.servingSource = live ? 'endpoint' : identity ? 'build' : newestSuccess?.commit ? 'provider' : this.options.build.commit ? 'build' : null;
     if (tip) {

@@ -21,6 +21,7 @@ import { conflictSince, requestedBaseRefresh, disprovedConflict, withDisprovedCo
 import { docsSyncCarry } from './model/docs-sync.js';
 import { githubFromEnv } from './github.js';
 import { regressionRefusals } from './regression-guard.js';
+import { protectedCasePrefix, protectedCaseRefusals, readProtectingGoals } from './model/goal.js';
 import { retroCheckRefusals } from './model/retro-synthesis.js';
 import { readAppliedRetroChecks } from './retro-synthesis.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
@@ -1480,6 +1481,9 @@ export class Engine {
           // Checks registered by approved retro artefacts (GY-970) run against the observed candidate.
           const retroChecks = retroCheckRefusals(work, observation, await readAppliedRetroChecks(db));
           demand(!retroChecks.length, `Submission refused for ${work.key}: ${retroChecks.join('; ')}`);
+          // The required cases and contract bindings a merged acceptance pull request protects (GY-1417).
+          const protectedCases = protectedCaseRefusals(work, observation, await readProtectingGoals(db));
+          demand(!protectedCases.length, `Submission refused for ${work.key}: ${protectedCases.join('; ')}`);
         }
         work.submission = { epoch: data.epoch, pr: data.pr };
         if (work.documentation) work.documentation = { ...work.documentation, submission: recordDocumentationSubmission(work.documentation, work.submission, observation?.files ?? null, data.documentation, now) };
@@ -2616,6 +2620,10 @@ export class Engine {
       if (reruns.transitions.length || work.checkReruns) work.checkReruns = reruns.reruns;
       for (const transition of reruns.transitions) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', transition.kind,
         JSON.stringify({ details: { ...transition.rerun, at: now.toISOString() } })]);
+      // Protected cases (GY-1417) are judged on every observed head, not only at complete: a head pushed
+      // since that changes one holds a violation, which no merge passes, until a later head or grant clears it.
+      const e2e = [...(Array.isArray(observation.files) ? observation.files : []), ...(observation.scopeFiles ?? []).map(file => file.previousPath ?? '')].some(path => path.startsWith('e2e/'));
+      if (!observation.merged) work.violations = [...work.violations.filter(entry => !entry.startsWith(protectedCasePrefix)), ...(e2e ? protectedCaseRefusals(work, observation, await readProtectingGoals(db)) : [])];
       this.evaluate(work, all, now);
       if (restoredApproval) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'review.restored',
         JSON.stringify({ details: { ...restoredApproval, baseSha: observation.candidate.baseSha, policyRevision: work.policyRevision } })]);
