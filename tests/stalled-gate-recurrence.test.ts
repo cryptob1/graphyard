@@ -8,6 +8,7 @@ import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
 import { actorlessSubmissions } from '../src/cli/actorless-submissions.js';
 import { syncConflict } from '../src/daemon/decisions.js';
 import { reviewNeed } from '../src/model/dispatch.js';
+import { coordinationSnapshot } from '../src/server/work-view.js';
 
 // GY-1403 names this file for its proof: manual:fault-class-stalled-gate. The master loop filed 3
 // stalled-gate faults in 24 hours on 6–7 October 2026: two `actorless` submissions (GY-1357,
@@ -26,7 +27,8 @@ import { reviewNeed } from '../src/model/dispatch.js';
 //
 // Each instance is replayed from the ledger (tests/fixtures/gy-1403-stalled-gate.json, read from
 // `graphyard events`) as the item stood when the loop recorded it, through the loop's own fault
-// step. Against the base each replay fails: the instance reproduces. Past the bound each is counted.
+// step, after the coordination view the loop reads (`X-Graphyard-View: coordination`), which drops the
+// pipeline timeline. Against the base each replay fails: the instance reproduces. Past the bound each is counted.
 
 interface Instance {
   id: string; kind: 'actorless' | 'blocker'; subject: string; at: string; epoch: number; movedAt: string; moved: string;
@@ -54,15 +56,25 @@ function submitted(instance: Instance): Work {
     autoDispatch: { review: null, producers: [], history: [] }, actionQueue: { actions: [], history: [] }, gates: [], violations: [], proofGaps: [], scopeRequest: null, containmentQuarantine: null } as unknown as Work;
 }
 
-/** The blocked item as the loop read it: the attempt that raised the blocker ended (released) at that instant, nothing else standing. */
+/**
+ * The blocked item as the record held it: the `blocked` report ended the attempt (released) at that
+ * instant and, in the same transaction, recorded the worker's interrupted exhaustion for the epoch
+ * (src/engine.ts), nothing else standing. The pipeline timeline is written too, though the loop's
+ * coordination view drops it.
+ */
 function blocked(instance: Instance, blockedAt = instance.blockedAt!): Work {
   return { id: `work-${instance.subject}`, key: instance.subject, title: instance.subject, stage: 'build', epoch: instance.epoch, blocker: instance.blocker,
-    escalations: [], violations: [], proofGaps: [], containmentQuarantine: null, humanRequest: null, scopeRequest: null, lease: null, submission: null, candidate: null,
+    escalations: [], violations: [], proofGaps: [], containmentQuarantine: null, humanRequest: null, scopeRequest: null, lease: null, submission: null, candidate: null, evidence: [], observation: null,
+    capacity: { escalations: [], exhaustions: [{ role: 'worker', cause: 'interrupted', epoch: instance.epoch, profile: 'graphyard-claude-1', account: null, runtime: 'claude',
+      reason: `blocked on epoch ${instance.epoch}: ${instance.blocker!.replace(/^blocked on epoch \d+: /, '')}`.slice(0, 500), resetsAt: null,
+      partialWork: { state: 'not-applicable', detail: 'none' }, at: blockedAt, owner: 'graphyard-claude-1', recordedBy: 'graphyard-claude-1' }] },
     pipeline: { attempts: [{ epoch: instance.epoch, owner: 'graphyard-claude-1', claimedAt: instance.claimedAt, endedAt: blockedAt, end: 'released' }] } } as unknown as Work;
 }
 
 /** The stalled-gate faults the loop's fault step records for the item at `at`, with the actorless lines master status reports. */
-function stalledGate(work: Work, at: string) {
+function stalledGate(stored: Work, at: string) {
+  const [work] = coordinationSnapshot({ work: [stored] }).work;
+  assert.equal((work as unknown as { pipeline?: unknown }).pipeline, undefined, 'the loop reads the item without its pipeline timeline');
   const reported = actorlessSubmissions([work], new Date(at));
   return { reported, faults: cycleFaults(emptyDaemonState(config()), [work], Date.parse(at), { config: config(), reported }).filter(fault => fault.faultClass === 'stalled-gate') };
 }
@@ -103,9 +115,13 @@ for (const instance of instances.filter(entry => entry.kind === 'blocker')) {
   test(`manual:fault-class-stalled-gate — ${instance.id}: a blocker standing past the master's turn, or one the record cannot date, still counts`, () => {
     const late = shift(instance.blockedAt!, masterTurnWaitBoundMs + 60_000);
     assert.deepEqual(stalledGate(blocked(instance), late).faults.map(fault => fault.kind), ['blocker']);
+    // Dated by nothing the loop reads: no blocked report of this epoch recorded, or one of an older epoch.
     const undated = blocked(instance);
-    (undated as unknown as { pipeline: unknown }).pipeline = undefined;
+    undated.capacity = null;
     assert.deepEqual(stalledGate(undated, instance.at).faults.map(fault => fault.kind), ['blocker']);
+    const otherCause = blocked(instance);
+    otherCause.capacity!.exhaustions[0] = { ...otherCause.capacity!.exhaustions[0], reason: 'session lost' };
+    assert.deepEqual(stalledGate(otherCause, instance.at).faults.map(fault => fault.kind), ['blocker']);
     // A blocker the item's current attempt did not raise is not dated by an older attempt's end.
     assert.deepEqual(stalledGate({ ...blocked(instance), epoch: instance.epoch + 1 } as Work, instance.at).faults.map(fault => fault.kind), ['blocker']);
   });

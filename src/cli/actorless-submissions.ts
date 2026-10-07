@@ -3,7 +3,6 @@ import { reviewNeed, type ReviewState } from '../model/dispatch.js';
 import { pendingBaseRefresh } from '../merge-queue.js';
 import { standingEscalations } from '../model/escalation.js';
 import type { Work } from '../model/work.js';
-import { baseConflictWaitBoundMs } from '../daemon/faults.js';
 
 /**
  * A submitted item nobody is acting for (GY-191).
@@ -25,6 +24,8 @@ import { baseConflictWaitBoundMs } from '../daemon/faults.js';
  * 2026) and GY-1292 (7 October) were each counted at 5 minutes and returned 25s and 21s later.
  */
 export const actorlessBoundMs = 5 * 60_000;
+/** How long a confirmed base conflict may stand on a head before it counts as a merge fault (GY-1129), and an `actorless` head behind the base before it counts (GY-1403). */
+export const baseConflictWaitBoundMs = 30 * 60_000;
 
 const missingActor: Record<ReviewState, { actor: string; next: (key: string) => string }> = {
   required: { actor: 'a reviewer: no review request is raised for its head', next: key => `graphyard master review ${key}` },

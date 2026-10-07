@@ -27,7 +27,8 @@ import { containmentGraceMs, containmentPhase, containmentSettleWaitBoundMs } fr
 import { openAction } from '../model/next-action.js';
 import { carriedDecision } from '../model/concerns.js';
 import { masterTurnWaitBoundMs } from './decisions.js';
-import type { PipelineTimeline } from '../pipeline-speed.js';
+import { blockedAttemptMarker } from '../model/capacity.js';
+import { credentialBlockedMarker } from '../worker-credential.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
 export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[];
@@ -126,18 +127,22 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
 }
 /**
  * GY-1403. Whether an item's blocker is still in motion: it was raised within `masterTurnWaitBoundMs`
- * of now, dated by the end of the attempt that recorded it (a blocked worker releases its lease). A
- * blocker is handed on at once — the loop's blocker step re-probes a routine class every cycle and
- * hands any other to the master, whose turn moves the remedy — so one that recent is the ordinary
- * pace of work, as an owed escalation is (owedEscalationInMotion). On 7 October 2026 GY-1292's
- * blocker counted 100s after it was raised; the master requested the requirements decision that
- * applied the operator's approved revision of its AC-1 within four minutes, and the item was
- * unblocked in thirty. A blocker the record cannot date counts at once, as before.
+ * of now. It is dated by the record the `blocked` report writes in the same transaction that ends
+ * the attempt — the worker's `interrupted` exhaustion for the item's current epoch, whose reason
+ * carries the blocked-attempt marker — because `capacity` is kept by the coordination view the loop
+ * reads, where the pipeline timeline is dropped. A blocker is handed on at once — the loop's blocker
+ * step re-probes a routine class every cycle and hands any other to the master, whose turn moves the
+ * remedy — so one that recent is the ordinary pace of work, as an owed escalation is
+ * (owedEscalationInMotion). On 7 October 2026 GY-1292's blocker counted 100s after it was raised;
+ * the master requested the requirements decision that applied the operator's approved revision of
+ * its AC-1 within four minutes, and the item was unblocked in thirty. A blocker the record cannot
+ * date (one no `blocked` report of this epoch raised) counts at once, as before.
  */
 export function blockerInMotion(work: Work | undefined, now: number): boolean {
   if (!work?.blocker) return false;
-  const attempt = ((work as Work & { pipeline?: PipelineTimeline }).pipeline?.attempts ?? []).filter(entry => entry.epoch === work.epoch).at(-1);
-  const since = attempt?.endedAt ? Date.parse(attempt.endedAt) : Number.NaN;
+  const raised = (work.capacity?.exhaustions ?? []).filter(record => record.role === 'worker' && record.cause === 'interrupted' && record.epoch === work.epoch
+    && (record.reason.startsWith(`${blockedAttemptMarker}${work.epoch}:`) || record.reason.startsWith(`${credentialBlockedMarker} on epoch ${work.epoch}:`))).at(-1);
+  const since = raised ? Date.parse(raised.at) : Number.NaN;
   return Number.isFinite(since) && now - since <= masterTurnWaitBoundMs;
 }
 /** Whether the loop recorded the settlement of the item's standing fence: its settle action for the fence's epoch is done. */
@@ -180,8 +185,8 @@ export function owedContainmentLine(work: Work | undefined, text: string): boole
 }
 /** Whether the item still holds a fence the loop is not settling: standing and past containmentInMotion's bound. */
 const standingFence = (work: Work | undefined, now: number) => !!work?.containmentQuarantine && !containmentInMotion(work, now);
-/** How long a confirmed base conflict may stand on a head before it counts as a merge fault (GY-1129). */
-export const baseConflictWaitBoundMs = 30 * 60_000;
+import { baseConflictWaitBoundMs } from '../cli/actorless-submissions.js';
+export { baseConflictWaitBoundMs };
 /**
  * GY-1269. Whether an owed line names the item's rework decision: its open action is `request-rework`
  * and the line carries that action's own owed decision (`needsHuman.decision`), the phrase
