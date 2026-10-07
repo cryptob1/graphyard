@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { readFile, writeFile, rename, link, unlink } from 'node:fs/promises';
+import { readdir, readFile, writeFile, rename, link, unlink } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { GitHub, appJwt, installationSettingsUrl } from './github.js';
 import { localDirectory } from './onboarding.js';
@@ -56,6 +56,9 @@ export interface AppPermissionInspection {
   settingsUrl: string; installationUrl: string; steps: string[]; verified: boolean;
 }
 const levelRank = (level: unknown) => ['read', 'write', 'admin'].indexOf(String(level));
+/** Permissions in LEVELS beyond the REQUIRED declaration; for a reviewer any is a boundary violation. */
+const excessPermissions = (levels: Record<string, string>, required: Record<string, PermissionLevel>) => Object.entries(levels).filter(([permission, level]) => levelRank(level) > levelRank(required[permission] ?? null))
+  .map(([permission, level]) => ({ permission, granted: level, declared: required[permission] ?? null })).sort((a, b) => a.permission < b.permission ? -1 : 1);
 /**
  * Compares a registered App with the declaration for its role. GitHub exposes no API for
  * changing a registered App's permissions, so the App-level change is a browser step and the
@@ -94,8 +97,7 @@ export async function inspectAppPermissions(root: string, options: { reviewer?: 
   }
   const appShortfalls = permissionShortfalls(registered, set);
   const installationShortfalls = installationId ? permissionShortfalls(granted, set) : [];
-  const excess = Object.entries(granted ?? registered).filter(([permission, level]) => levelRank(level) > levelRank(required[permission] ?? null))
-    .map(([permission, level]) => ({ permission, granted: level, declared: required[permission] ?? null })).sort((a, b) => a.permission < b.permission ? -1 : 1);
+  const excess = excessPermissions(granted ?? registered, required);
   const list = (shortfalls: PermissionShortfall[]) => shortfalls.map(shortfall => describePermission(shortfall.permission, shortfall.required)).join(', ');
   // The acceptance step names what each missing grant blocks, so an Actions: write gap reads as
   // the failed CI reruns it stops before a rerun is ever attempted (GY-1328).
@@ -127,6 +129,103 @@ export async function updateAppPermissions(root: string, options: { reviewer?: s
     await wait(options.pollMs ?? 5_000);
   }
 }
+// ---- Reusing an App already installed on the account (GY-1442) -------------------------------
+
+export type AppRole = 'control-plane' | 'reviewer';
+/** An App registration saved on this host, with the private key an earlier install or github-setup kept. */
+export interface SavedRegistration { file: string; role: AppRole; app: AppCredentials }
+const registrationName = /^(github-app|github-reviewer-[a-z0-9][a-z0-9._-]{0,63})\.json$/;
+/**
+ * Every App registration saved in DIRECTORIES (each install directory under the config home, and
+ * the checkout's .graphyard), first one per App. Only an App whose private key is saved on this host
+ * can be reused: GitHub never returns a key again, so a slug alone cannot sign as the App.
+ */
+export async function savedRegistrations(directories: readonly string[]): Promise<SavedRegistration[]> {
+  const found: SavedRegistration[] = [];
+  for (const directory of directories) {
+    let names: string[];
+    try { names = (await readdir(directory)).filter(name => registrationName.test(name)).sort(); } catch { continue; }
+    for (const name of names) {
+      const file = resolve(directory, name);
+      let app: AppCredentials;
+      try { app = JSON.parse(await readFile(file, 'utf8')); } catch { continue; }
+      if (!Number.isSafeInteger(app?.appId) || typeof app.slug !== 'string' || !app.slug || typeof app.privateKey !== 'string' || !app.privateKey) continue;
+      if (found.some(entry => entry.app.appId === app.appId)) continue;
+      found.push({ file, role: app.reviewer ? 'reviewer' : 'control-plane', app });
+    }
+  }
+  return found;
+}
+export interface AppReuseRequest {
+  slug: string; repository: string; role: AppRole; registrations: readonly SavedRegistration[];
+  /** This install's own webhook URL once known: an App whose webhook delivers anywhere else belongs to another control plane. */
+  webhookUrl?: string | null;
+  /** `gh` with the host's login: resolves stdout, rejects on a non-zero exit. */
+  gh: (args: string[]) => Promise<string>;
+  fetcher?: typeof fetch;
+  /** Without apply only reads; with it adds the repository to the App's installation and verifies the App reaches it. */
+  apply: boolean;
+}
+export interface AppReuse { file: string; app: AppCredentials & { installationId: number }; account: string; selection: 'all' | 'selected'; added: boolean }
+/**
+ * `--reuse-app SLUG` (and the App page's "Reuse an App"): skip App creation and use an App already
+ * installed on the repository's account. The App must request, and its installation grant, every
+ * permission the role's declaration needs; a control-plane App whose webhook delivers to another
+ * install's control plane is refused, naming it, since one App has one webhook. On apply the
+ * repository is added to that installation with the host's gh login (GitHub's
+ * `PUT /user/installations/{id}/repositories/{repository_id}`) and reached with the App's own token.
+ */
+export async function reuseExistingApp(request: AppReuseRequest): Promise<AppReuse> {
+  const { slug, role } = request;
+  const saved = request.registrations.find(entry => entry.app.slug.toLowerCase() === slug.toLowerCase());
+  if (!saved) throw new Error(`No registration for App ${slug} is saved on this host, so it cannot sign as that App (GitHub returns an App's private key only once, to the machine that created it). Reuse an App an earlier install or github-setup saved here${request.registrations.length ? ` (${request.registrations.map(entry => entry.app.slug).join(', ')})` : ''}, or omit --reuse-app to register a new one.`);
+  if (saved.role !== role) throw new Error(`App ${saved.app.slug} is registered as a ${saved.role} App and cannot serve as the ${role} App`);
+  const app = saved.app, fetcher = request.fetcher ?? fetch;
+  const call = async (path: string, init: { method?: string; token?: string } = {}) => {
+    const response = await fetcher(`https://api.github.com${path}`, { method: init.method ?? 'GET', headers: { Authorization: `Bearer ${init.token ?? appJwt(app.appId, app.privateKey)}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }, signal: AbortSignal.timeout(20_000) });
+    if (!response.ok) throw new Error(`GitHub ${init.method ?? 'GET'} ${path} failed for App ${app.slug} (${response.status})${response.status === 401 ? '; its saved private key was rejected' : ''}`);
+    return response.json() as Promise<any>;
+  };
+  const levels = (value: unknown) => value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).filter(([, level]) => typeof level === 'string')) as Record<string, string> : {};
+  const set = role === 'reviewer' ? reviewerPermissions : controlPlanePermissions;
+  const list = (shortfalls: PermissionShortfall[]) => shortfalls.map(shortfall => describePermission(shortfall.permission, shortfall.required)).join(', ');
+  const registration = await call('/app');
+  if (registration?.id !== app.appId) throw new Error(`GitHub returned a different App for the key saved in ${saved.file}`);
+  const requested = permissionShortfalls(levels(registration.permissions), set);
+  if (requested.length) throw new Error(`App ${app.slug} does not request ${list(requested)}, which the ${role} role needs; raise it at https://github.com/settings/apps/${encodeURIComponent(app.slug)}/permissions, or choose another App`);
+  // A reviewer never holds more than its declaration (never Contents: write or Checks), the same rule
+  // inspectAppPermissions applies: an App that does could write code or publish Graphyard's gate check.
+  const beyond = (levels: Record<string, string>, where: string) => {
+    const excess = role === 'reviewer' ? excessPermissions(levels, requiredPermissions(reviewerPermissions)) : [];
+    if (excess.length) throw new Error(`App ${app.slug}${where} holds ${excess.map(entry => describePermission(entry.permission, entry.granted as PermissionLevel)).join(', ')}, beyond the reviewer declaration; a reviewer App must never hold more than its declaration, so reduce it at https://github.com/settings/apps/${encodeURIComponent(app.slug)}/permissions, or choose another App`);
+  };
+  beyond(levels(registration.permissions), '');
+  if (role === 'control-plane') {
+    const hook = await call('/app/hook/config');
+    const bound = typeof hook?.url === 'string' ? hook.url.trim() : '';
+    if (bound && bound !== (request.webhookUrl ?? '')) throw new Error(`App ${app.slug} is bound to another install's control plane: its webhook delivers to ${bound}. One App has one webhook, so reusing it as this install's control-plane App would take that control plane's events; reuse another App, or omit --reuse-app to register a new one.`);
+  }
+  const repository = JSON.parse(await request.gh(['api', `repos/${request.repository}`]));
+  const account = String(repository?.owner?.login ?? ''), repositoryId = Number(repository?.id);
+  if (!account || !Number.isSafeInteger(repositoryId)) throw new Error(`gh could not read ${request.repository}`);
+  const installations: any[] = await call('/app/installations?per_page=100');
+  const installation = (Array.isArray(installations) ? installations : []).find(entry => String(entry?.account?.login ?? '').toLowerCase() === account.toLowerCase());
+  if (!installation || !Number.isSafeInteger(installation.id)) throw new Error(`App ${app.slug} is not installed on ${account}; install it there at https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new, or omit --reuse-app`);
+  if (installation.suspended_at) throw new Error(`App ${app.slug}'s installation on ${account} is suspended; restore it at ${installationSettingsUrl(installation.id)}`);
+  const granted = permissionShortfalls(levels(installation.permissions), set);
+  if (granted.length) throw new Error(`App ${app.slug}'s installation on ${account} does not grant ${list(granted)}; accept the pending permission request at ${installationSettingsUrl(installation.id)}, then rerun`);
+  beyond(levels(installation.permissions), `'s installation on ${account}`);
+  const selection = installation.repository_selection === 'all' ? 'all' : 'selected';
+  let added = false;
+  if (request.apply) {
+    if (selection === 'selected') { await request.gh(['api', '--method', 'PUT', `/user/installations/${installation.id}/repositories/${repositoryId}`]); added = true; }
+    const { token } = await call(`/app/installations/${installation.id}/access_tokens`, { method: 'POST' });
+    const reached = await call(`/repos/${request.repository}`, { token });
+    if (String(reached?.full_name ?? '').toLowerCase() !== request.repository.toLowerCase()) throw new Error(`App ${app.slug}'s installation cannot reach ${request.repository} after it was added`);
+  }
+  return { file: saved.file, app: { ...app, repository: request.repository, installationId: installation.id }, account, selection, added };
+}
+
 /**
  * Another App setup page already listens on the port: a `graphyard install --apply` waiting at its
  * App step, or a `github-setup` or `init` left open (GY-1413). Named instead of a raw EADDRINUSE,
@@ -153,6 +252,12 @@ export async function startGithubSetup(root: string, repository: string, deploym
   // path, and learns the verified installation through record rather than re-reading the file.
   file?: string;
   record?: (app: AppCredentials & { installationId: number }) => Promise<void>;
+  /**
+   * GY-1442: Apps saved on this host that the page offers to reuse instead of creating one, and the
+   * reuse itself (reuseExistingApp with apply): it adds the repository to that App's installation.
+   */
+  reusable?: string[];
+  reuse?: (slug: string) => Promise<AppCredentials & { installationId: number }>;
 } = {}, reviewer?: string) {
   if (reviewer !== undefined && !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(reviewer)) throw new Error('Reviewer name must be a lowercase identifier');
   // Refused before the page opens, not when the human first loads it.
@@ -192,7 +297,7 @@ export async function startGithubSetup(root: string, repository: string, deploym
   const http = createServer(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store'); res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'self'; form-action https://github.com; frame-ancestors 'none'; base-uri 'none'");
+    res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'self'; form-action 'self' https://github.com; frame-ancestors 'none'; base-uri 'none'");
     const html = (code: number, text: string) => { res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Graphyard setup</title><link rel="stylesheet" href="/style.css"></head><body><main><div class="brand">g / graphyard</div><small>REPOSITORY SETUP</small><h1>Connect your work<br>to its proof.</h1><h2>Connect Graphyard to GitHub</h2>${text}<footer>Graphyard coordinates the work. Your agents write the code.</footer></main></body></html>`); };
     try {
       const address = `127.0.0.1:${(http.address() as any).port}`;
@@ -208,9 +313,26 @@ export async function startGithubSetup(root: string, repository: string, deploym
           : '<p>App registered and installation verified. Credentials are saved locally with restricted file permissions. You may close setup and configure Railway.</p>');
         if (app) return html(200, `<p>App registered. Install it only on ${escape(repository)}.</p><a href="https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new">Install GitHub App</a>`);
         const manifest = reviewer ? reviewerAppManifest(reviewer, repository, deployment, `http://${address}`) : appManifest(repository, deployment, `http://${address}`);
-        return html(200, reviewer
+        const reusable = dependencies.reuse ? dependencies.reusable ?? [] : [];
+        const reuse = reusable.length ? `<h2>Or reuse an App you already have</h2><p>Skips creating an App: the repository is added to the chosen App's existing installation, after its permissions${reviewer ? '' : ' and webhook'} are checked.</p><form method="get" action="/reuse"><input type="hidden" name="state" value="${state}"><select name="slug" aria-label="App to reuse">${reusable.map(slug => `<option value="${escape(slug)}">${escape(slug)}</option>`).join('')}</select> <button>Reuse this App →</button></form>` : '';
+        return html(200, (reviewer
           ? `<p>Register a private reviewer App named <strong>${escape(reviewer)}</strong> for <strong>${escape(repository)}</strong>. Its runtime signs in as this App to post review verdicts.</p><p>The reviewer App reads code and writes pull request comments. It cannot publish Graphyard's gate check, change branch protection, or write source code. Use a GitHub account that is not the pull request author.</p><form method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register reviewer App →</button></form>`
-          : `<p>Register a private App for <strong>${escape(repository)}</strong>. GitHub will ask you to sign in, name the App, and choose the repository.</p><p>The App reads code and branch protection, publishes its gate check and the graphyard/landable status, writes PR review requests, and moves release and revert branches, which is why it holds Contents: read and write. It never writes an agent's code and never merges a pull request: GitHub merges it once branch protection's required checks pass. Credentials return directly to this machine; no key copying is needed.</p><form method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register Graphyard App →</button></form>`);
+          : `<p>Register a private App for <strong>${escape(repository)}</strong>. GitHub will ask you to sign in, name the App, and choose the repository.</p><p>The App reads code and branch protection, publishes its gate check and the graphyard/landable status, writes PR review requests, and moves release and revert branches, which is why it holds Contents: read and write. It never writes an agent's code and never merges a pull request: GitHub merges it once branch protection's required checks pass. Credentials return directly to this machine; no key copying is needed.</p><form method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register Graphyard App →</button></form>`) + reuse);
+      }
+      if (url.pathname === '/reuse') {
+        const received = Buffer.from(url.searchParams.get('state') ?? ''), expected = Buffer.from(state);
+        if (received.length !== expected.length || !timingSafeEqual(received, expected) || exchanging || app || !dependencies.reuse) return html(409, '<p>Invalid or already used setup session.</p>');
+        const slug = url.searchParams.get('slug') ?? '';
+        if (!(dependencies.reusable ?? []).includes(slug)) return html(400, '<p>Choose one of the Apps this page offers.</p>');
+        exchanging = true;
+        let reused: AppCredentials & { installationId: number };
+        // A refusal names the App and why (permissions, another control plane's webhook); it holds no secret.
+        try { reused = await dependencies.reuse(slug); }
+        catch (error) { exchanging = false; return html(409, `<p>${escape(error instanceof Error ? error.message : String(error))}</p><p><a href="/">Back</a></p>`); }
+        const next: AppCredentials = { ...reused, repository, ...(reviewer ? { reviewer } : {}) };
+        await persist(next, true); app = next;
+        if (dependencies.record) await dependencies.record(next as AppCredentials & { installationId: number });
+        res.writeHead(303, { Location: '/' }); return res.end();
       }
       if (url.pathname === '/created') {
         const received = Buffer.from(url.searchParams.get('state') ?? ''), expected = Buffer.from(state);

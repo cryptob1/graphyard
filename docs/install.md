@@ -56,7 +56,7 @@ Dispatch a [small item](onboarding.md#4-prove-the-first-pr); once `Graphyard / m
 
 `--target host --ssh-host HOST` (or `--target hetzner`): server, Postgres, loop, executors, Herdr, runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4 serves `<ip>.sslip.io`; private/`--local` needs `--domain`. Bootstrap installs gh, bubblewrap, checks namespaces as `graphyard`; an unpullable image builds from the host checkout at installer's commit. Workers push and open PRs as the App: git's credential helper and `gh` wrapper mint one-hour repository tokens from `<install>/github/`. Re-apply refuses, never rotates, unreadable host credentials.
 
-Sizing: 3 GB/agent, 2 GB/verification slot, 2 GB base, max(10%, 4 GB) spare (`--confirm-price`, `--max-monthly`). A saved App (`--github-app FILE`, this install's, `.graphyard/github-app.json`) is reused once it mints token; another live installation's webhook stays until `--migrate`: stops old loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`, released on pre-cutover failure), restores; local logins move.
+Sizing: 3 GB/agent, 2 GB/verification slot, 2 GB base, max(10%, 4 GB) spare (`--confirm-price`, `--max-monthly`). A saved App (`--github-app FILE`, this install's, `.graphyard/github-app.json`) is reused once it mints token; `--reuse-app SLUG` (or the App page) reuses a host-saved App installed on the account; `gh` adds the repository if permissions fit. Refused: a webhook serving another live install (until `--migrate`), a reviewer App beyond its declaration, two Apps per role. `--migrate` stops old loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`, released on pre-cutover failure), restores; local logins move.
 
 ## Upgrading an existing installation
 

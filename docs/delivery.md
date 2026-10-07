@@ -13,11 +13,11 @@ Own deployment: main → candidate → uat → production; `.railway/railway.ts`
 - `release promote ID` needs that (or [accepted flaky cases](validation.md#release-verdicts)), deploys production leased on the last promoted SHA, records `rc-production/ID`; `release verify --url URL` confirms.
 - Failed candidates file a [hold](validation.md#release-holds) per failed outcome, else one follow-up (`release follow-up ID` retries); fix forward.
 
-**The master loop drives promotion**: dispatching workflow (`promote=true`) when main differs from the last `rc-production/` SHA, no cut or scheduled run is queued or running, and `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 120, `0` off, empty resets) passed since the last dispatch (own, fired cron, or GitHub-listed). Fetches main, tags ≤ every max(5 min, 3 intervals); lists runs every max(1 min, interval). Failed `gh` attempts count (lacking `actions: write` retries next interval); failures raise `promotion:failed`, backing off. `master status` `promotion`: `lastPromotedSha`, `behind` (first-parent merges production lacks), `nextDueAt`. `release status` lists candidates; `release GY-N EPOCH` gives up a lease. Needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, `GRAPHYARD_UAT_TOKEN`, `GRAPHYARD_RELEASE_TOKEN`.
+**The master loop drives promotion**: dispatching workflow (`promote=true`) when main differs from the last `rc-production/` SHA, no cut or scheduled run is queued or running, and `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 120, `0` off, empty resets) passed since the last dispatch (own, fired cron, or GitHub-listed). Fetches main, tags ≤ every max(5 min, 3 intervals); lists runs every max(1 min, interval). Failed `gh` attempts count (no `actions: write`: retried next interval); failures raise `promotion:failed` with backoff. `master status` `promotion`: `lastPromotedSha`, `behind` (first-parent merges production lacks), `nextDueAt`. `release status` lists candidates; `release GY-N EPOCH` gives up a lease. Needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, `GRAPHYARD_UAT_TOKEN`, `GRAPHYARD_RELEASE_TOKEN`.
 
 ### Pre-merge gate and release-candidate validation
 
-Required: `typecheck`, `test` (`.github/workflows/ci.yml`), under ten minutes; soak/timing files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container and Helm checks run per candidate.
+Required: `typecheck`, `test` (`.github/workflows/ci.yml`), under ten minutes; soak/timing files (`releaseCandidateTests` in `scripts/ci-tests.mjs`), container and Helm checks run per candidate: timing budgets serially before the soak, so no budget measures another suite's load.
 
 ### One delivery path
 
