@@ -427,11 +427,11 @@ test('unit:park-refuses-host-doable — park refuses a NEEDED an agent identity 
   ] as const;
   for (const [kind, needed] of accepted) {
     assert.equal(parkRefusal({ needed }), null, needed);
-    const work = await parked({ kind, needed, reason: 'a decision only the operator makes' });
+    const work = await parked({ kind, needed, reason: 'a decision only the operator makes', ...(kind === 'goals-and-priorities' ? { recommendation: 'Go ahead as asked' } : {}) });
     assert.equal(work.humanRequest?.kind, kind, `${needed} parks`);
     // The CLI passes it straight to park.
     const posted: string[] = [];
-    await routedParkCommand.run({ args: ['1', kind, ...needed.split(' '), '--ask', 'Decide it', '--', 'why'], print: () => {}, api: async (path: string) => { posted.push(path); return {}; }, individualHostId: () => 'host' } as any, { id: 'w', key: 'GY-1', revision: 1 } as any);
+    await routedParkCommand.run({ args: ['1', kind, ...needed.split(' '), '--ask', 'Decide it', '--recommend', kind === 'goals-and-priorities' ? 'Go ahead as asked' : 'Approve', '--why', 'Only the operator decides it.', '--', 'why'], print: () => {}, api: async (path: string) => { posted.push(path); return {}; }, individualHostId: () => 'host' } as any, { id: 'w', key: 'GY-1', revision: 1 } as any);
     assert.deepEqual(posted, ['work/w/park'], needed);
   }
 });
