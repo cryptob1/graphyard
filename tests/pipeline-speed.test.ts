@@ -568,12 +568,20 @@ test('integration:speed-metrics — the periodic measurement summarizes submit�
 const hourMs = 3_600_000, stageNow = Date.parse('2026-10-06T12:00:00.000Z');
 const ago = (hours: number) => new Date(stageNow - hours * hourMs).toISOString();
 type StageFixture = { key: string; ready: number; claim: number; submit: number; merged: number; promoted: number | null; moves: [number, DeliveryStageMove['to']][] };
-/** One item's path as hours ago: ready, first claim, first submit, the step moves, the merge and the promotion. */
-function stageItem(fixture: StageFixture): Work {
-  return { id: `id-${fixture.key}`, key: fixture.key, stage: 'done', createdAt: ago(fixture.ready),
+/**
+ * One item's path as hours ago: ready, first claim, first submit, the step moves, the merge and the
+ * promotion. The claim and submit are the item's own timeline, as the settled summary carries it
+ * (a later attempt's claim stands beside the first, which is the one that counts); `timeline`
+ * overrides it for an item whose timeline is missing or reconstructed from a truncated ledger.
+ */
+function timelineItem(fixture: StageFixture, timeline?: Partial<NonNullable<Work['pipeline']>> | null): Work {
+  const pipeline = timeline === null ? {} : { pipeline: { attempts: [{ epoch: 1, owner: 'w1', claimedAt: ago(fixture.claim), endedAt: ago(fixture.submit), end: 'submitted' }, { epoch: 2, owner: 'w2', claimedAt: ago(fixture.submit - 0.5), endedAt: ago(fixture.merged), end: 'submitted' }],
+    submittedAt: ago(fixture.submit), resubmittedAt: ago(fixture.submit - 0.5), reworkRounds: 1, interventions: { blocked: 0, requirements: 0 }, ...timeline } };
+  return { id: `id-${fixture.key}`, key: fixture.key, stage: 'done', createdAt: ago(fixture.ready), ...pipeline,
     delivery: { mergedAt: ago(fixture.merged), mergeSha: sha40(fixture.key), authorizationRevision: 1 },
     releaseDeliveries: fixture.promoted === null ? [] : [{ environment: 'production', policyRevision: 1, releaseId: 'r', releaseRevision: 1, generation: 1, verifiedAt: ago(fixture.promoted), interval: { from: ago(fixture.merged), to: ago(fixture.promoted) } }] } as unknown as Work;
 }
+const stageItem = (fixture: StageFixture) => timelineItem(fixture);
 /** A slow review: submitted, CI, review with a rework round, proof, merge, and promotion. */
 const reviewHeld = (key: string, reviewHours: number, promoted: number | null = 0.5): StageFixture => {
   const submit = 12 + reviewHours;
@@ -581,15 +589,20 @@ const reviewHeld = (key: string, reviewHours: number, promoted: number | null = 
     [submit + 2, 'build'], [submit - 0.25, 'validate'], [submit - 0.5, 'review'], [submit - 0.5 - reviewHours / 2, 'build'], [submit - 1 - reviewHours / 2, 'validate'],
     [submit - 1.5 - reviewHours / 2, 'review'], [3, 'prove'], [2, 'merge'], [1, 'deploy']] };
 };
-/** The reads master status makes, served from fixtures: ready, claim and submit events, and the steps drill-down two items a page. */
+/**
+ * The reads master status makes, served from fixtures: ready events and the steps drill-down two
+ * items a page. A claim or submit events read is refused: the first claim and submit come from the
+ * snapshot's own timelines, so the breakdown walks no ledger for them (the rework-cause test counts
+ * every non-ready events read as the rework walk, and master status makes exactly one).
+ */
 function stageMaster(fixtures: StageFixture[], calls: string[] = []) {
   return async (path: string) => {
     calls.push(path);
     const params = new URLSearchParams(path.slice(path.indexOf('?') + 1));
     if (path.startsWith('events?')) {
-      const kinds = (params.get('kind') ?? '').split(',');
-      const events = fixtures.flatMap(f => [['ready', f.ready], ['claim', f.claim], ['submit', f.submit]].filter(([kind]) => kinds.includes(kind as string))
-        .map(([kind, hours]) => ({ work_id: `id-${f.key}`, kind, created_at: ago(hours as number) })));
+      const kind = params.get('kind');
+      assert.ok(kind === 'ready' || kind === 'rework', `events read of ${kind}: first claims and submits come from the timelines, never a ledger walk`);
+      const events = kind === 'ready' ? fixtures.map(f => ({ work_id: `id-${f.key}`, kind: 'ready', created_at: ago(f.ready) })) : [];
       return { events: events.sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at)), page: { hasMore: false, nextCursor: null } };
     }
     if (path.startsWith('analytics/flow/drilldown?')) {
@@ -628,7 +641,8 @@ test('unit:delivery-stage-breakdown — master status reports p50 and p90 per st
   const calls: string[] = [];
   const work = [...fixtures.map(stageItem), { ...stageItem({ ...reviewHeld('GY-905', 1), submit: 0 }), stage: 'build', delivery: undefined } as unknown as Work];
   const { report } = await flowAnalytics.speedSections({}, stageMaster(fixtures, calls), { work, now: new Date(stageNow).toISOString() }, { root: await temporaryDirectory('delivery-stages'), sections: noSections });
-  assert.ok(calls.some(path => path.startsWith('events?') && new URLSearchParams(path.slice(7)).get('kind') === 'claim,submit'), 'first claims and submits are read');
+  assert.deepEqual(calls.filter(path => path.startsWith('events?')).map(path => new URLSearchParams(path.slice(7)).get('kind')).sort(), ['ready', 'rework'],
+    'the events reads are the rework walk and the ready instants: first claims and submits come from the snapshot, never a ledger walk');
   assert.equal(calls.filter(path => path.startsWith('analytics/flow/drilldown?')).length, 2, 'the steps drill-down is paged to its end');
   const stages = report.stages!;
   assert.deepEqual(Object.keys(stages.windows), ['24h', '7d']);
@@ -648,11 +662,15 @@ test('unit:delivery-stage-breakdown — master status reports p50 and p90 per st
       promotedAt: Date.parse(ago(fixture.promoted!)), moves: fixture.moves.map(([hours, to]) => ({ at: Date.parse(ago(hours)), to })) });
     assert.equal(flowAnalytics.deliveryStages.reduce((sum, stage) => sum + own[stage]!, 0), (fixture.ready - fixture.promoted!) * hourMs, fixture.key);
   }
-  // An item whose first submit was never read is unmeasured and said so, never guessed.
-  const partial = flowAnalytics.deliveryStageBreakdown(fixtures.map(stageItem), { claimedAt: new Map(fixtures.map(f => [`id-${f.key}`, ago(f.claim)])), submittedAt: new Map([[`id-GY-901`, ago(fixtures[0].submit)]]),
-    moves: new Map(fixtures.map(f => [f.key, f.moves.map(([hours, to]) => ({ at: Date.parse(ago(hours)), to }))])), movesCoveredUntil: stageNow, movesFrom: 0 }, { now: stageNow });
+  // An item whose timeline records no first submit, has no timeline, or was reconstructed from a
+  // ledger that no longer holds its start is unmeasured and said so, never guessed from a later attempt.
+  const reads = { moves: new Map(fixtures.map(f => [f.key, f.moves.map(([hours, to]) => ({ at: Date.parse(ago(hours)), to }))])), movesCoveredUntil: stageNow, movesFrom: 0 };
+  const partial = flowAnalytics.deliveryStageBreakdown([timelineItem(fixtures[0]), timelineItem(fixtures[1], { submittedAt: null }), timelineItem(fixtures[2], null),
+    timelineItem(fixtures[3], { backfill: { at: ago(0), source: 'ledger', events: 3, fromEvent: '7', toEvent: '9', retained: false, truncated: false } })], reads, { now: stageNow });
   assert.deepEqual({ measured: partial.windows['7d'].measured, unmeasured: partial.windows['7d'].unmeasured }, { measured: 1, unmeasured: 3 });
   assert.match(partial.statements.join(' '), /3 items merged over 7 days have no stage breakdown/);
+  assert.equal(flowAnalytics.firstClaimAndSubmit(stageItem(fixtures[0]))!.claimedAt, Date.parse(ago(fixtures[0].claim)), 'the first attempt\'s claim counts, not the rework attempt\'s');
+  assert.equal(flowAnalytics.firstClaimAndSubmit(timelineItem(fixtures[0], { backfill: { at: ago(0), source: 'ledger', events: 3, fromEvent: '7', toEvent: '9', retained: true, truncated: true } })), null, 'an unfinished reconstruction measures nothing');
 });
 
 test('unit:delivery-dominant-stage — the delivery-speed attention names the stage holding the largest share of the p90 and the items most delayed in it, and its next step names that stage', async () => {
@@ -679,4 +697,17 @@ test('unit:delivery-dominant-stage — the delivery-speed attention names the st
   const plain = flowAnalytics.deliverySpeed(fixtures.map(stageItem), { now: stageNow });
   assert.equal(flowAnalytics.deliverySpeedBreaches(plain)[0].stage, null);
   assert.doesNotMatch(flowAnalytics.deliverySpeedBreaches(plain)[0].text, /largest share/);
+  // The slowest tenth is judged over every item the headline p90 counts: when the slowest item has
+  // no stage breakdown, no stage is named from the others (that would send the next step to a hold
+  // the unmeasured item may not have been in), the report says why, and the line stays the slowest items.
+  const gap = fixtures.map(fixture => timelineItem(fixture, fixture.key === 'GY-919' ? { submittedAt: null } : undefined));
+  const withheld = await flowAnalytics.speedSections({}, stageMaster(fixtures), { work: gap, now: new Date(stageNow).toISOString() }, { root: await temporaryDirectory('delivery-dominant'), sections: noSections });
+  assert.equal(withheld.report.stages!.dominant.readyToMerged, null);
+  assert.equal(withheld.report.stages!.windows['7d'].measured, 9);
+  assert.match(withheld.report.stages!.statements.join(' '), /No stage is named for ready→merged: 1 of the 1 item in its slowest tenth over 7 days has no stage breakdown/);
+  assert.ok(withheld.attention[0].text.startsWith('Ready→merged into main p90 is') && withheld.attention[0].text.includes('slowest: GY-919'));
+  assert.doesNotMatch(withheld.attention[0].text, /largest share/);
+  assert.match(withheld.attention[0].next, /^Find what held the slowest items/);
+  // Every item took 0.5h to promote, so merged→production's slowest tenth is all of them, the unmeasured one among them: withheld too.
+  assert.equal(withheld.report.stages!.dominant.mergedToProduction, null);
 });
