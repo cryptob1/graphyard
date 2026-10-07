@@ -52,7 +52,7 @@ test('unit:soak-invariants-hold — an item whose worktree the host cannot build
   assert.ok(!failedRecord || /workspace could not be prepared/.test(failedRecord[1].detail), 'a kept failure record names the workspace, not the profile');
 });
 
-test('unit:soak-invariants-hold — start failures on the real dispatch path fall forward across the day: three consecutive failures of one account across items raise one attention item, a later start on the account clears it, and every failed pane is closed at its bound', { timeout: 300_000 }, async () => {
+test('unit:soak-dispatch-start-failures — every invariant holds as start failures on the real dispatch path fall forward across the day, each item launched once per dispatch: three consecutive failures of one account across items raise one attention item, a later start on the account clears it, and every failed pane is closed at its bound', { timeout: 300_000 }, async () => {
   // GY-417: account failover and the failure ledger repeat per dispatch, so the real loop runs a
   // day whose every dispatch goes through `dispatchWork` on a master root whose OpenCode account's
   // runtime never comes up: each launch falls forward to the Claude account, is recorded, and is
