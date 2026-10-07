@@ -5,6 +5,7 @@ import { routableScopeRequest, scopeBlockedBudgetMs, scopeRefusalBlocker } from 
 import { containmentPhase } from './containment.js';
 import { lapsedBeforeStart } from './escalation.js';
 import { blockerKind } from './blocker-kind.js';
+import { unsubmittedAttempt, unsubmittedAttemptText } from './attempt-bound.js';
 export { blockerKind };
 // Types only from work.ts: work.ts reaches this module through the origin schema (interventions.ts),
 // so a value import back would read work.ts before it has evaluated.
@@ -69,7 +70,7 @@ export const faultCatalogue = {
   'resources': ['disk-pressure', 'memory-pressure', 'resource-bound', 'ledger-refusal', 'action:reclaim'],
   'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'retry-stopped', 'stalled-step'],
   'human-decision': ['human-request', 'sudo', 'action:human'],
-  'stalled-gate': ['gate', 'blocker', 'stalled-item', 'stalled-action', 'actorless', 'action:blocker'],
+  'stalled-gate': ['gate', 'blocker', 'stalled-item', 'stalled-action', 'actorless', 'unsubmitted-attempt', 'action:blocker'],
   'unclassified': ['unclassified', 'action:fault', 'action:diagnosis'], // GY-1338: these name a step, not a cause
 } as const satisfies Record<FaultClass, readonly string[]>;
 export type FaultKind = typeof faultCatalogue[FaultClass][number];
@@ -201,6 +202,8 @@ export function workFaults(work: Work, now: number, routes = true): FaultObserva
   if (work.violations.length) found.push(observe('scope-violation', work.key, work.violations[0]));
   const restated = /* a blocker restating a typed fault is that fault: a human-only park's wait, a refused scope request */ (work.humanRequest && !work.humanRequest.answer) || (work.scopeRequest && work.blocker?.startsWith(scopeRefusalBlocker));
   if (work.blocker && !restated) found.push(observe(blockerKind(work.blocker), work.key, work.blocker));
+  const unsubmitted = unsubmittedAttempt(work, now);
+  if (unsubmitted) found.push(observe('unsubmitted-attempt', work.key, unsubmittedAttemptText(unsubmitted)));
   return found;
 }
 

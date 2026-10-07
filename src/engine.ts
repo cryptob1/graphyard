@@ -43,6 +43,7 @@ import { claimAction, openActions, reconcileActions, renewClaim, settleAction, s
 import { livenessFallback, livenessOf, livenessRepairEntry } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema, sessionObservationFields } from './model/sessions.js';
+import { observeHead } from './model/attempt-bound.js';
 import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type ExhaustionRecord } from './model/capacity.js';
 import { credentialBlockedReason, credentialFailure } from './worker-credential.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
@@ -2577,6 +2578,8 @@ export class Engine {
       // GitHub's queue state is read after the observation, by the check publication; it is kept
       // across observations of the same pull request until that read replaces it.
       if (observation.githubQueue === undefined && previousObservation?.githubQueue && previousObservation.candidate?.pr === observation.candidate.pr) observation.githubQueue = previousObservation.githubQueue;
+      // When this pull request's head was first observed (GY-1460): the worker bound reads a push from it, never a poll.
+      observeHead(work, observation.candidate, observation.at);
       work.candidate = observation.candidate;
       // A conflict the control plane's own test merge of this head onto this tip found clean is
       // GitHub's stale reading (GY-375): it is stored disproved — the head merges cleanly, which is

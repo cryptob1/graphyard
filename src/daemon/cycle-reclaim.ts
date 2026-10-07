@@ -14,6 +14,8 @@ import { containmentQuarantines } from '../master.js';
 import { type ContainmentObservation, containmentClock, unmeasured } from '../master/containment.js';
 import { closablePane, endedScopeStates, leaseLapsedEnding, loopEndedAttempt } from '../quarantine.js';
 import { paneAlreadyGone } from '../request-settlement.js';
+import { unsubmittedAttempt, unsubmittedAttemptText, workerReclaimBoundMs } from '../model/attempt-bound.js';
+import { checkPaneStillBelongs, endWorkerAttempt } from './cycle-resume.js';
 import type { DaemonAction, DaemonState } from './state.js';
 import type { DaemonEffects } from './effects.js';
 
@@ -189,6 +191,36 @@ export async function settleEndedAttemptFence(cycle: Cycle, item: Work, ending: 
       return true;
     }
     if (!assessment || Date.now() + wait.pollMs > deadline) return false;
+    await new Promise(resolve => setTimeout(resolve, wait.pollMs));
+  }
+}
+
+/**
+ * Why the stopped supervisor of `item`'s fenced attempt is not verified gone on this host, or null
+ * once it is (GY-1460): its recorded scope ended and nothing left running in its worktree. Probed
+ * within the bound the cycle's endings share. An attempt with no recorded scope here, or a loop
+ * that cannot inspect the host, has nothing more to verify than the pane it closed.
+ */
+export async function supervisorStillRunning(cycle: Cycle, item: Work, ending: { epoch: number; owner: string }, wait: { boundMs: number; pollMs: number } = { boundMs: endedFenceWaitMs, pollMs: 500 }) {
+  const { effects, config, clockOffset, snapshot, now } = cycle;
+  const fence = item.containmentQuarantine;
+  if (fence?.epoch !== ending.epoch || fence.owner !== ending.owner || !fence.scope || !effects.containment || !containmentQuarantines([item], config.hostId).length) return null;
+  const ended = endedRecord(item, ending, new Date(now()).toISOString());
+  const measured = await containmentClock(clockOffset, effects.controlPlaneClock);
+  const observed: ContainmentObservation = { now: snapshot.now, clockOffset: measured.clockOffset, clockRoundTripMs: measured.roundTripMs, clockSource: measured.source };
+  const deadline = endedFenceDeadlines.get(cycle) ?? Date.now() + wait.boundMs;
+  endedFenceDeadlines.set(cycle, deadline);
+  for (;;) {
+    let running: string;
+    try {
+      const verification = (await effects.containment([ended], observed))[item.id]?.verification ?? null, recorded = verification?.recordedScope;
+      running = !verification ? 'the host reported no inspection of it'
+        : recorded?.unit !== fence.scope.unit || !endedScopeStates.includes(recorded.activeState) ? `scope ${fence.scope.unit} is ${recorded?.unit === fence.scope.unit ? recorded.activeState : 'unread'}`
+          : verification.processes.length || verification.scopes.some(scope => scope.processes.length) ? `${verification.processes.length + verification.scopes.reduce((sum, scope) => sum + scope.processes.length, 0)} processes still run in ${verification.workspacePath}`
+            : '';
+    } catch (error) { return `the host could not be inspected: ${message(error)}`; }
+    if (!running) return null;
+    if (Date.now() + wait.pollMs > deadline) return running;
     await new Promise(resolve => setTimeout(resolve, wait.pollMs));
   }
 }
@@ -388,6 +420,9 @@ export async function reclaimStep(cycle: Cycle) {
     }
   }
 
+  // 3a'. Stop renewing an attempt past its no-submission bound (GY-1460), before the fences are read.
+  await stopUnboundedAttempts(cycle);
+
   // 3b. Reclaim the items whose sessions died. A supervised launch fences its worker in a scope
   //     unit; when that session dies the fence outlives it and the item cannot be claimed again
   //     until somebody settles the quarantine. This host is the only one that can verify the
@@ -438,4 +473,46 @@ export async function reclaimStep(cycle: Cycle) {
     await settleQuarantine(cycle, item, assessment);
   });
   return assessments;
+}
+
+/** The loop's record that it stopped renewing an attempt's lease (GY-1460). */
+export const unboundedAttemptKey = (item: Pick<Work, 'id'>, epoch: number) => `unbounded:${item.id}:${epoch}`;
+/**
+ * 3a'. An attempt holding its lease past the reclaim bound (`workerReclaimBoundMs`: one further
+ * worker bound after the stalled-gate fault) with still no submission and no submission progress
+ * inside the cadence stops being renewed (GY-1460). Its renewals come from the attempt's watch
+ * supervisor, which a live session keeps alive for ever, so the loop ends the attempt through the
+ * reclaim path a stalled attempt takes (`endWorkerAttempt`, as the idle bound does): what it left
+ * is kept on its branch, the attempt ends on the record, its supervisor is stopped through the
+ * scope it recorded (or stops on the ended lease) and its fence settles, so the item returns to the
+ * queue with its worktree kept. A lease merely left to lapse would read as an unexplained lease loss
+ * and wait on an operator. An end that cannot be made is recorded failed and retried on the action
+ * backoff; the fault keeps standing meanwhile.
+ */
+export async function stopUnboundedAttempts(cycle: Cycle) {
+  const { config, state, effects, now, clock, agents, performed, isolate, open } = cycle;
+  const local = new Set(containmentQuarantines(open, config.hostId).map(item => item.id));
+  for (const item of open) {
+    const attempt = unsubmittedAttempt(item, clock);
+    if (!attempt?.reclaim || !attempt.live) continue;
+    const profile = config.workers.find(worker => worker.principal === attempt.owner);
+    // Another host's attempt is that host's loop to stop: only this one can reach its supervisor.
+    if (!profile || (item.containmentQuarantine && !local.has(item.id))) continue;
+    await isolate('session', item, item.key, async () => {
+      const key = unboundedAttemptKey(item, attempt.epoch), previous = state.actions[key];
+      if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;
+      const attempts = (previous?.attempts ?? 0) + 1;
+      const entry = (outcome: DaemonAction['state'], detail: string) => record(state, key, { kind: 'session', work: item.key, principal: attempt.owner, epoch: attempt.epoch, state: outcome, detail: detail.slice(0, actionDetailMax), attempts, cycle: state.cycle }, now(), effects.persist);
+      // The pane this attempt's own handle records, and only while that pane is still its session (GY-852).
+      const handleId = `${attempt.owner}:${attempt.epoch}`, recorded = item.sessions?.find(handle => handle.kind === 'implementation' && handle.id === handleId)?.pane ?? undefined;
+      const pane = recorded && agents.some(agent => agent.pane_id === recorded) && !checkPaneStillBelongs(item, handleId, recorded) ? recorded : null;
+      const held = `held its lease past the ${workerReclaimBoundMs / 60_000}-minute reclaim bound without a submission (claimed at ${attempt.claimedAt})`;
+      try {
+        const next = await endWorkerAttempt(cycle, item, profile, attempt.epoch, pane, held, `ended without submitting: it ${held}`, { stopFirst: true });
+        performed.push(await entry('done', `${item.key} epoch ${attempt.epoch} (${attempt.owner}) ${held}; the loop stopped renewing it: ${next}, with its worktree kept`));
+      } catch (error) {
+        performed.push(await entry('failed', `${unsubmittedAttemptText(attempt)}; but the loop could not end the attempt: ${message(error)}`));
+      }
+    });
+  }
 }
