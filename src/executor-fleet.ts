@@ -335,6 +335,12 @@ export interface RestartExecutorsDeps {
   claimWaitMs?: number;
   /** Called on every poll of the three waits: the loop feeds its supervisor's watchdog here, so a long wait is not a hang (GY-916). */
   onWait?: () => void | Promise<void>;
+  /**
+   * Leave a slot already on the coordinator's release alone (GY-1432): its running, live record
+   * names the coordinator's commit, so a restart would only stop it and start it again onto the
+   * code it runs — a second outage for a slot that just restarted itself onto the target.
+   */
+  skipCurrent?: boolean;
 }
 export interface RestartedExecutor { name: string; unit: string; pid: { before: number; after: number | null }; release: { before: ExecutorRelease; after: ExecutorRelease | null }; registered: boolean; waitedMs: number }
 export interface ExecutorRestartResult {
@@ -348,7 +354,12 @@ export interface ExecutorRestartResult {
   unsupervised: { name: string; pid: number; root: string; instruction: string }[];
   /** Records whose process is gone and which no supervisor brings back; removed. */
   forgotten: string[];
+  /** Slots left running because they already run the coordinator's release (`skipCurrent`). */
+  current?: { name: string; unit: string | null; commit: string }[];
 }
+/** A record whose live, running process already loaded the coordinator's commit: restarting it changes nothing it runs. */
+export const runsRelease = (registration: ExecutorRegistration, commit: string | null, alive: (pid: number) => boolean) =>
+  !!commit && registration.state === 'running' && registration.release.commit === commit && alive(registration.pid);
 export const executorRestartTimeoutMs = 120_000;
 export const executorClaimWaitMs = 30_000;
 
@@ -397,9 +408,14 @@ export async function restartExecutors(config: ExecutorFleetConfig, deps: Restar
   if ('standing' in raised) return empty('refused', `Restart refused: another restart on ${config.hostId} (pid ${raised.standing.pid}, since ${raised.standing.at}) holds the fence at ${restartFenceFile(config)}; wait for it to finish`);
   try {
     let local: ExecutorRegistration[];
+    // Slots already on the release are read once, before the waits: they are neither waited for
+    // nor restarted, and a claim one of them holds does not hold the others' restart.
+    const current = new Map<string, ExecutorRegistration>();
+    const unskipped = (registrations: ExecutorRegistration[]) => registrations.filter(registration => !current.has(registration.name));
+    if (deps.skipCurrent) for (const registration of (await readExecutorRegistrations(config)).filter(entry => entry.host === config.hostId && runsRelease(entry, coordinator.commit, alive))) current.set(registration.name, registration);
     const claimDeadline = now() + claimWaitMs;
     for (;;) {
-      local = (await readExecutorRegistrations(config)).filter(registration => registration.host === config.hostId);
+      local = unskipped((await readExecutorRegistrations(config)).filter(registration => registration.host === config.hostId));
       const claiming = local.filter(registration => registration.claiming && registration.state !== 'stopped' && alive(registration.pid));
       if (!claiming.length) break;
       if (now() >= claimDeadline) {
@@ -415,15 +431,16 @@ export async function restartExecutors(config: ExecutorFleetConfig, deps: Restar
     // claim still held at the deadline refuses it.
     const heldDeadline = now() + timeoutMs;
     for (;;) {
-      const held = await heldClaims(config, deps, local, alive);
+      const held = (await heldClaims(config, deps, local, alive)).filter(entry => !current.has(entry.name));
       if (!held.length) break;
       if (now() >= heldDeadline) {
         const named = held.map(entry => `${entry.name} holds ${entry.kind ?? 'an action'}${entry.key ? ` for ${entry.key}` : ''}${entry.since ? ` since ${entry.since}` : ''}`).join('; ');
         return { ...empty('refused', `Restart refused while an executor on ${config.hostId} holds a claimed action: ${named}. Wait for it to settle, then run ${executorRestartCommand} again`), held };
       }
       await sleep(deps.pollMs ?? 1000);
-      local = (await readExecutorRegistrations(config)).filter(registration => registration.host === config.hostId);
+      local = unskipped((await readExecutorRegistrations(config)).filter(registration => registration.host === config.hostId));
     }
+    const skipped = [...current.values()].map(registration => ({ name: registration.name, unit: registration.supervisor?.unit ?? null, commit: registration.release.commit! }));
 
     const restarted: RestartedExecutor[] = [], unsupervised: ExecutorRestartResult['unsupervised'] = [], forgotten: string[] = [];
     const restartAt = now();
@@ -437,7 +454,7 @@ export async function restartExecutors(config: ExecutorFleetConfig, deps: Restar
         instruction: `${registration.name} runs ${registration.supervisor ? `under ${registration.supervisor.unit}, which is not a ${executorUnitPrefix} service this command may restart,` : 'unsupervised'} as pid ${registration.pid}; stop it (kill -TERM ${registration.pid}; it finishes the action in flight and records itself stopped) and start it again from ${registration.root} with node scripts/graphyard-executor.mjs --name ${registration.name}, or run it under the packaged unit (examples/master/graphyard-executor@.service) so this command can restart it` });
       else { await removeExecutorRegistration(config, registration.name); forgotten.push(registration.name); }
     }
-    if (!units.size && !unsupervised.length) return { ...empty('restarted', `No executor is registered on ${config.hostId}`), forgotten };
+    if (!units.size && !unsupervised.length) return { ...empty('restarted', skipped.length ? `Every executor on ${config.hostId} already runs ${shortCommit(coordinator.commit)}: ${skipped.map(entry => entry.name).join(', ')}; none was restarted` : `No executor is registered on ${config.hostId}`), forgotten, ...(skipped.length ? { current: skipped } : {}) };
 
     for (const [unit] of units) run('systemctl', ['--user', 'restart', unit]);
 
@@ -469,6 +486,6 @@ export async function restartExecutors(config: ExecutorFleetConfig, deps: Restar
       missing.length ? `${missing.join(', ')} did not register again on ${shortCommit(coordinator.commit)} within ${Math.round(waitedMs / 1000)}s; read journalctl --user -u UNIT and the record under ${executorsDirectory(config)}` : null,
       unsupervised.length ? `${unsupervised.map(entry => entry.name).join(', ')} ${unsupervised.length === 1 ? 'has' : 'have'} no supervisor unit and ${unsupervised.length === 1 ? 'was' : 'were'} not restarted` : null,
     ].filter((reason): reason is string => !!reason);
-    return { result: reasons.length ? 'incomplete' : 'restarted', reason: reasons.join('; ') || null, coordinator, held: [], restarted, unsupervised, forgotten };
+    return { result: reasons.length ? 'incomplete' : 'restarted', reason: reasons.join('; ') || null, coordinator, held: [], restarted, unsupervised, forgotten, ...(skipped.length ? { current: skipped } : {}) };
   } finally { await lowerRestartFence(config, raised.fence); }
 }

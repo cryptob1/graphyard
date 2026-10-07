@@ -156,11 +156,18 @@ export function detachedLaunch(directory: string, id: string, command: string, a
   const confined = confinement.map(word => `${quoted(word)} `).join('');
   // A bound the run enforces on itself: a scratch run has no watcher once the process that
   // started it is gone, so nothing else would stop it. A watchdog beside Pi stops the run's whole
-  // group (the shell leads it) at the bound, as a watcher would, and is killed once Pi has exited.
-  // It ignores TERM so that its own stop does not end it before the KILL that follows.
-  const watchdog = boundSeconds ? `( trap '' TERM; sleep ${Math.ceil(boundSeconds)}; kill -TERM -$$; sleep 5; kill -KILL -$$ ) & watchdog=$!; ` : '';
+  // group (the shell leads it) at the bound, as a watcher would, and is stopped once Pi has exited.
+  // Nothing in it is immune to TERM (GY-1432): a scratch run lies in the launching unit's cgroup,
+  // and an ignored TERM is inherited across exec, so a `sleep` started under `trap '' TERM` outlived
+  // every stop of graphyard-master.service until TimeoutStopSec SIGKILLed it. The watchdog waits on
+  // its own sleep and, on TERM — the unit's stop, or the shell's once Pi has exited — ends that
+  // sleep and itself. It ignores TERM only for the instant it signals its own group, then gives
+  // the run five seconds, a second at a time, and stops as soon as the shell has gone: a TERM the
+  // shell sent inside that instant is lost, so the watchdog never relies on receiving it.
+  const watchdog = boundSeconds ? `( trap 'kill "$nap" 2>/dev/null; exit 0' TERM; sleep ${Math.ceil(boundSeconds)} & nap=$!; wait "$nap"; trap '' TERM; kill -TERM -$$; trap 'exit 0' TERM; `
+    + `for grace in 1 2 3 4 5; do kill -0 $$ 2>/dev/null || exit 0; sleep 1; done; kill -KILL -$$ ) & watchdog=$!; ` : '';
   const script = `trap : TERM INT HUP; ${watchdog}if command -v "$0" >/dev/null 2>&1; then ${confined}"$0" "$@" <${'/dev/null'} >${quoted(files.stdout)} 2>${quoted(files.stderr)}; code=$?; `
-    + `else printf '%s: command not found\\n' "$0" >${quoted(files.stderr)}; code=spawn; fi; ${watchdog ? 'kill -KILL "$watchdog" 2>/dev/null; ' : ''}printf '%s\\n' "$code" >${quoted(pending)} && mv -f ${quoted(pending)} ${quoted(files.exit)}`;
+    + `else printf '%s: command not found\\n' "$0" >${quoted(files.stderr)}; code=spawn; fi; ${watchdog ? 'kill -TERM "$watchdog" 2>/dev/null; ' : ''}printf '%s\\n' "$code" >${quoted(pending)} && mv -f ${quoted(pending)} ${quoted(files.exit)}`;
   const shell = ['/bin/sh', '-c', script, command, ...args];
   const unit = containment === 'systemd' ? `graphyard-run-${id}.scope` : null;
   return unit ? { file: 'systemd-run', args: ['--user', '--scope', '--quiet', '--collect', `--unit=${unit}`, '--', ...shell], unit } : { file: shell[0], args: shell.slice(1), unit };
