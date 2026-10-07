@@ -61,6 +61,37 @@ export async function closeStanding(effects: Pick<DaemonEffects, 'decisions'>, i
 }
 
 /**
+ * The history reads of a step that runs before the decisions step (the review cap): the history the
+ * loop keeps across cycles (GY-1142) when it holds one, else one read, kept for the decisions step
+ * and the cycles after. A kept history goes when the ledger names its item, so a close asked since
+ * is seen by the next cycle, and a step that looks every cycle reads nothing while nothing moves.
+ */
+export function heldReads(cycle: Pick<Cycle, 'effects' | 'heldDecisions'>): Pick<DaemonEffects, 'decisions'> {
+  const { effects, heldDecisions } = cycle, read = effects.decisions;
+  return { decisions: read && (async (item: Work) => {
+    const kept = heldDecisions.histories.get(item.id);
+    if (kept) return { decisions: structuredClone(kept) };
+    const fresh = await read(item);
+    heldDecisions.histories.set(item.id, structuredClone(fresh.decisions));
+    return fresh;
+  }) };
+}
+
+/**
+ * The decisions step's effects with every item they write — a request, a withdrawal, a resume —
+ * named in `written`. What the step wrote this cycle is no stale settle, and its history was just
+ * dropped from the kept ones, so the stale-close step leaves it to the next cycle's read rather
+ * than reading it a second time in the cycle that wrote it.
+ */
+export function recordingWrites(effects: DaemonEffects, written: Set<string>): DaemonEffects {
+  const wrap = (call: unknown) => typeof call === 'function' ? (item: Work, ...rest: unknown[]) => { written.add(item.id); return call(item, ...rest); } : call;
+  return new Proxy(effects, { get: (target, property, receiver) => {
+    const value = Reflect.get(target, property, receiver);
+    return property === 'decide' || property === 'withdraw' || property === 'resume' ? wrap(value) : value;
+  } });
+}
+
+/**
  * GY-1439. A close bound to the item revision the server settled `stale` — a review settled, a bot
  * round was authorized or an observation refreshed between the request and its approval — closes
  * nothing, and before this only the master asked again, on its next turn: GY-1437's close stood
@@ -75,7 +106,7 @@ export async function closeStanding(effects: Pick<DaemonEffects, 'decisions'>, i
  * close applies; after `staleAttentionAttempts` stale settles in a row it is asked no more, and
  * master status raises one attention line for the series (cli/decision-report.ts).
  */
-export async function staleCloseStep(cycle: Cycle, effects: DaemonEffects) {
+export async function staleCloseStep(cycle: Cycle, effects: DaemonEffects, written: ReadonlySet<string> = new Set()) {
   const { state, snapshot, now, performed, isolate, open } = cycle;
   const { decide, approver, decisions } = effects;
   if (!decide || !approver || !decisions) return;
@@ -85,7 +116,7 @@ export async function staleCloseStep(cycle: Cycle, effects: DaemonEffects) {
   const ids = new Set(open.map(item => item.id));
   for (const key of Object.keys(state.actions)) if (key.startsWith(staleWaitPrefix) && !ids.has(key.slice(staleWaitPrefix.length).split(':')[0]!)) delete state.actions[key];
   const diagnosed = diagnosedCloses(state), known = closingItems(cycle);
-  const candidates = open.filter(item => !diagnosed.has(item.key) && (known.has(item.key) || !!state.actions[staleWaitKey(item, 'close')]
+  const candidates = open.filter(item => !diagnosed.has(item.key) && !written.has(item.id) && (known.has(item.key) || !!state.actions[staleWaitKey(item, 'close')]
     || cycle.heldDecisions.histories.get(item.id)?.some(decision => decision.action === 'close')));
   // An unreadable history is unknown: nothing is asked on it, and the next cycle reads it again.
   const histories = await mapBounded(candidates, decisionReadConcurrency, item => decisions(item).then(result => result.decisions, () => null));

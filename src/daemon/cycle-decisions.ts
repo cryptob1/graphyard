@@ -20,14 +20,16 @@ import { wakeObservationJob } from './cycle-delivery.js';
 import { createApproverSupervisor } from './cycle-approvers.js';
 import { decisionBudget, deferredFirst, settleDeferred } from './decision-budget.js';
 import { staleReleaseStep } from './stale-releases.js';
-import { closeStanding, closingItems, staleCloseStep } from './stale-closes.js';
+import { closeStanding, closingItems, recordingWrites, staleCloseStep } from './stale-closes.js';
 
 /** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403). */
 export { handWatchPrefix };
 /** Step 4c: request and supervise the routine decisions. */
 export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, assessments: Record<string, ContainmentAssessment>, { capacities, approversSpent }: { capacities: RoleCapacity[]; approversSpent: boolean }) {
   const { config, state, now, snapshot, clock, performed, isolate, agents, open } = cycle;
-  const effects = await decisionReads(cycle.effects, cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock, cycle.effects.decisionReadDeadlineMs);
+  // The items this step writes, which the stale-close step leaves to the next cycle's read (GY-1439).
+  const written = new Set<string>();
+  const effects = recordingWrites(await decisionReads(cycle.effects, cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock, cycle.effects.decisionReadDeadlineMs), written);
   // 4c. The routine decisions. A standing verdict, a base the control plane could not merge in, and
   //     a delivered item still fenced by a dead supervisor each have one correct answer, and each
   //     used to wait for a master session to notice. The loop requests the decision with the
@@ -539,7 +541,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   await approvers.superviseHandApprovers();
   await approvers.reconcileRegistrySessions();
   // 4c++. A close that went stale on a revision race is requested again against the fresh revision, its grounds re-validated (GY-1439).
-  await staleCloseStep(cycle, effects);
+  await staleCloseStep(cycle, effects, written);
   // 4c+++. A stale release of a backlog item is asked again, whoever asked first (GY-1315): last, so its backlog reads hold nothing above.
   await staleReleaseStep(cycle, effects);
 }

@@ -2,7 +2,7 @@
 import { cappedReview, detailChanged, type CappedReview } from './decisions.js';
 import { record } from './effects.js';
 import { readyToRetry } from './sessions.js';
-import { closeStanding, closingItems } from './stale-closes.js';
+import { closeStanding, closingItems, heldReads } from './stale-closes.js';
 import type { Cycle } from './cycle.js';
 import type { Work } from '../model.js';
 
@@ -36,11 +36,12 @@ export function cappedEscalation(work: Pick<Work, 'key'>, capped: CappedReview, 
  */
 export async function reviewCapStep(cycle: Cycle) {
   const { config, state, effects, performed, isolate, now } = cycle;
-  // A withdrawal spends a fresh review on the head; an item a close stands on is not reviewed again (GY-1439).
-  const closing = closingItems(cycle);
+  // A withdrawal spends a fresh review on the head; an item a close stands on is not reviewed again (GY-1439),
+  // read from the kept histories only when a withdrawal is due, so a held item costs no read a cycle.
+  const closing = closingItems(cycle), reads = heldReads(cycle);
   for (const item of cycle.open) await isolate('review', item, item.key, async () => {
     const capped = cappedReview(item, config);
-    if (!capped || await closeStanding(effects, item, cycle.snapshot.work, closing)) return;
+    if (!capped) return;
     const escalate = async (why?: string) => {
       const key = cappedEscalationKey(item, capped.sha), detail = cappedEscalation(item, capped, why);
       if (detailChanged(state.actions[key], detail))
@@ -58,6 +59,7 @@ export async function reviewCapStep(cycle: Cycle) {
       return escalate(`${capped.reason}, and this loop runs without the reviewer App it needs to withdraw the request`);
     if (previous && previous.attempts >= maxCappedFilingAttempts) return escalate(`${capped.reason}; withdrawing it failed ${previous.attempts} times (${previous.detail.slice(0, 300)})`);
     if (!readyToRetry(previous, state.cycle)) return;
+    if (await closeStanding(reads, item, cycle.snapshot.work, closing)) return;
     const reason = `Review round ${capped.round} of ${item.key} is past its cap of ${capped.cap}: ${capped.reviewer}'s change request ${capped.reviewId} on ${capped.sha.slice(0, 12)} names no BLOCKING: finding, so its findings are nits, not filed, and the item proceeds toward merge without another rework`;
     try {
       await effects.withdrawReview(item, capped.reviewId!, `Graphyard withdrew this change request: review round ${capped.round} is past the cap of ${capped.cap}, and it names no BLOCKING: finding. Its findings are nits and are not filed; the head is reviewed again, and only a BLOCKING: finding holds it.`);
