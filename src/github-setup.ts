@@ -13,11 +13,31 @@ function manifestOrigin(repository: string, deployment: string) {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Expected owner/repository');
   const url = new URL(deployment);
   // A local Compose install serves plain HTTP on loopback (GY-1352): GitHub never reaches it, so its
-  // App is registered with the webhook off and the control plane polls instead.
+  // App is registered without a webhook and the control plane polls instead.
   if ((url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback(url))) || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error('Use the deployed HTTPS origin (or http:// on loopback for a local Compose install), without credentials or a path');
   return url.origin;
 }
-const loopback = (url: URL) => ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
+const loopback = (url: URL) => ['localhost', '[::1]'].includes(url.hostname) || /^127\.\d+\.\d+\.\d+$/.test(url.hostname);
+/**
+ * Whether GitHub could ever deliver to ORIGIN (GY-1474). Loopback (127.0.0.0/8, ::1, localhost),
+ * private, link-local and unspecified addresses are not; GitHub refuses a manifest whose hook URL
+ * names one, even with the hook inactive.
+ */
+export function publiclyReachable(origin: string) {
+  const host = new URL(origin).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.internal')) return false;
+  const v4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(host)?.slice(1).map(Number);
+  if (v4) {
+    const [a, b] = v4;
+    return !(a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168));
+  }
+  if (host.includes(':')) {
+    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(host)?.[1];
+    if (mapped) return publiclyReachable(`http://${mapped}`);
+    return !(host === '::' || host === '::1' || /^f[cd]/.test(host) || /^fe[89ab]/.test(host));
+  }
+  return true;
+}
 /**
  * A reviewer App is a separate identity with no control-plane authority: it reads code and
  * writes pull request comments, and never publishes Graphyard's own gate check.
@@ -37,8 +57,10 @@ export function reviewerAppManifest(reviewer: string, repository: string, deploy
 export function appManifest(repository: string, deployment: string, callback: string) {
   const origin = manifestOrigin(repository, deployment);
   const url = new URL(origin);
+  // GitHub validates a hook URL even when the hook is inactive, so an origin it cannot reach
+  // (a local Compose install, which polls instead) sends no hook_attributes at all (GY-1474).
   return { name: `Graphyard ${repository.replace('/', '-')}`, url: url.origin, public: false,
-    hook_attributes: { url: `${url.origin}/api/github/webhook`, active: !loopback(url) },
+    ...(publiclyReachable(url.origin) ? { hook_attributes: { url: `${url.origin}/api/github/webhook`, active: true } } : {}),
     redirect_url: `${callback}/created`, setup_url: `${callback}/installed`,
     // Exactly the declared control-plane set; the merge queue's Contents: write lives there.
     default_permissions: requiredPermissions(controlPlanePermissions),

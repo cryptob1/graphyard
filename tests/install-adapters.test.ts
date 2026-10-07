@@ -51,7 +51,9 @@ test('--apply provisions Postgres and the application, sets every variable, and 
       assert.equal(summary.status.repository, 'owner/project');
       assert.equal(summary.github?.appId, GRAPHYARD_APP_ID);
       assert.deepEqual(summary.github?.ciAppIds, [CI_APP_ID]);
-      assert.equal(summary.webhook.delivered, true, `${provider} webhook: ${summary.webhook.detail}`);
+      // A local Compose install registers no webhook and polls GitHub, so its delivery check is skipped (GY-1474).
+      if (provider === 'compose') assert.equal(summary.webhook.skipped, true, summary.webhook.detail);
+      else assert.equal(summary.webhook.delivered, true, `${provider} webhook: ${summary.webhook.detail}`);
 
       const lines = fixture.allCommandLines();
       if (provider === 'railway') {
