@@ -5,6 +5,7 @@ import type { Work } from '../model.js';
 import { createSchema } from '../model.js';
 import { isClosed } from '../model/closure.js';
 import { openFaultClassItem } from '../model/fault-classes.js';
+import { planeWideRefusal } from '../model/blocker-class.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
 import { containmentPhase, type MasterConfig } from '../master.js';
@@ -344,6 +345,10 @@ export async function applyDoctorRun(cycle: Cycle, effects: DoctorEffects, run: 
  * Post one settled run to the control plane. A refusal or an unreachable control plane is recorded
  * as a failed action and the run is posted again on later cycles, until it is accepted or it
  * leaves the retained runs: the dashboard and `master status` are never silently without it.
+ * GY-1402: a post that met the plane's own window (planeWideRefusal: a 502, a refused connection, a
+ * call that ran into its timeout) is that window, not the doctor failing, and the retry is the
+ * designed handling — still failed, but no fault kind, as GY-1345 did for the diagnosis. On
+ * 2026-10-06 one timed-out post opened an unclassified action:fault instance.
  */
 export async function postRun(cycle: Pick<Cycle, 'state' | 'effects'>, effects: Pick<DoctorEffects, 'recordRun'>, run: DoctorRunRecord, now: () => number) {
   const { state } = cycle;
@@ -354,7 +359,7 @@ export async function postRun(cycle: Pick<Cycle, 'state' | 'effects'>, effects: 
     pending.delete(run.at);
   } catch (error) {
     pending.add(run.at);
-    await record(state, `doctor:post:${run.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `The control plane did not accept the doctor run of ${run.at}; it is posted again next cycle: ${message(error)}`.slice(0, 2000), attempts: (state.actions[`doctor:post:${run.at}`]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), cycle.effects.persist);
+    await record(state, `doctor:post:${run.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `The control plane did not accept the doctor run of ${run.at}; it is posted again next cycle: ${message(error)}`.slice(0, 2000), attempts: (state.actions[`doctor:post:${run.at}`]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), cycle.effects.persist, planeWideRefusal(error) ? null : undefined);
   }
   state.doctor.unposted = [...pending].filter(at => state.doctor.runs.some(entry => entry.at === at)).slice(-40);
 }
