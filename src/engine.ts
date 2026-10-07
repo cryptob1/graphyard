@@ -2622,7 +2622,7 @@ export class Engine {
         JSON.stringify({ details: { ...transition.rerun, at: now.toISOString() } })]);
       // Protected cases (GY-1417) are judged on every observed head, not only at complete: a head pushed
       // since that changes one holds a violation, which no merge passes, until a later head or grant clears it.
-      const e2e = [...observation.files, ...(observation.scopeFiles ?? []).map(file => file.previousPath ?? '')].some(path => path.startsWith('e2e/'));
+      const e2e = [...(Array.isArray(observation.files) ? observation.files : []), ...(observation.scopeFiles ?? []).map(file => file.previousPath ?? '')].some(path => path.startsWith('e2e/'));
       if (!observation.merged) work.violations = [...work.violations.filter(entry => !entry.startsWith(protectedCasePrefix)), ...(e2e ? protectedCaseRefusals(work, observation, await readProtectingGoals(db)) : [])];
       this.evaluate(work, all, now);
       if (restoredApproval) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'review.restored',
