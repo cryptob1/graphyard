@@ -3,68 +3,63 @@
 
 ### 1. Human operator (human authority)
 
-`admin` with `sessionKind: "human"`; alone decides goals, spending, accounts, people's credentials.
-
-**Canonical usage:** *human operator*.
+`admin` with `sessionKind: "human"`; alone decides goals, priorities, spending, accounts, people's credentials. **Canonical usage:** *human operator*; bare *operator* = this person.
 
 ### 2. AI agent
 
-A model in a runtime with only its credential's authority.
-
-**Canonical usage:** name the role.
+A model in a runtime, holding only its credential's authority. **Canonical usage:** name the role.
 
 ### 3. Agent session (Herdr-managed session or runtime)
 
-One running agent instance.
-
-**Canonical usage:** *session*; its host: *runtime*.
+One running agent instance. **Canonical usage:** *session*; its host: *runtime*.
 
 ### 4. Principal, role, and credential
 
-*Principal*: authenticated identity; *role*: authority class; *credential*: its secret.
-
-**Canonical usage:** one principal per session.
+*Principal*: authenticated identity; *role*: authority class; *credential* (*token*): its secret. **Canonical usage:** one principal per concurrent session.
 
 ### 5. Worker lease and worktree
 
-*Lease*: a worker's timed hold on one item at one *epoch*; *assigned worktree*: its registered checkout.
-
-**Canonical usage:** *lease*, *epoch*, *assigned worktree*.
+*Lease*: a worker's timed hold on one item at one *epoch*; *assigned worktree*: registered `(host, path)` checkout, reserved branch. **Canonical usage:** *lease*, *epoch*, *assigned worktree*.
 
 ### 6. Independent reviewer and proof producer
 
-*Reviewer*: non-author GitHub identity approving the exact head; *proof producer*: `producer` granted named proofs.
-
-**Canonical usage:** *reviewer*, *proof producer*.
+*Reviewer*: non-author GitHub identity approving the exact head; *proof producer*: `producer` granted named proofs. Neither implements. **Canonical usage:** *reviewer*, *proof producer*.
 
 ### 7. Graphyard control plane
 
-Server, database, dashboard, CLI.
-
-**Canonical usage:** Graphyard *records*, *refuses*, *authorizes*; never *runs* sessions.
+Server, database, dashboard, CLI. **Canonical usage:** Graphyard *records*, *refuses*, *authorizes*, never *runs* sessions.
 
 ### 8. Herdr runtime
 
-Launches sessions, reports liveness.
-
-**Canonical usage:** *Herdr*; other runtimes by product name.
+Launches sessions, reports liveness. **Canonical usage:** *Herdr*; other runtimes by product name.
 
 ## The roles at a glance
 
-Role | Held by | May
----|---|---
-| `admin` | Human operator | Any decision; never shared with AI
-| `operator-agent` | Master, approver | Add intent; request or approve decisions, never its own
-| `coordinator` | Master loop | Dispatch, reconcile merges; never implement or prove
-| `slice-lead` | Slice lead | Rule on its slice, escalate
-| `worker` | Worker | Claim, heartbeat, register, submit
-| `producer` | CI, runner, observer | Report granted proofs, never on its own work
-| `reader` | Dashboards | Read
+Role | Held by | May | Never
+---|---|---|---
+| `admin` | Human operator | Any decision | Share with AI
+| `operator-agent` | Master, approver | Add intent; request, approve | Self-approve; merge
+| `coordinator` | Master loop | Dispatch, reconcile merges | Implement, prove
+| `slice-lead` | Slice lead | Rule, escalate | Implement, merge
+| `worker` | Worker | Claim, heartbeat, register, submit | Satisfy acceptance
+| `producer` | CI, runner, observer | Report granted proofs | Prove own work
+| `reader` | Dashboards | Read | Mutate
 
 ## Who decides
 
-The master applies non-weakening intent directly; two-party decisions (`graphyard master decide GY-N ACTION REASON`, applied by a separate approver's `graphyard master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants and triage closures; human-only decisions [park](master-agent-reference.md#items-scope-and-human-waits) items. `POST /api/work/:id/decide` resumes an approval left unapplied.
+Master applies non-weakening intent directly; two-party decisions (`graphyard master decide GY-N ACTION REASON`, approved by another's `graphyard master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, triage closures, merges with automatic merging off; gates decide the rest; human-only decisions [park](master-agent-reference.md#items-scope-and-human-waits) items.
+
+An approved-but-unapplied decision never blocks its action's next request: bound to a passed head and base, it settles `superseded` (naming both heads), the new request judged; else it resumes unjudged, settling applied, failed or `stale` (pinned revision moved). Any request resumes it after 60 s (risk-lane rework at once; a refusal within names the `resume`); after its approver session ends (even hand-put), the next loop cycle sends `POST /api/work/:id/decide` `{ "action": "resume", "decision": ID }`. Meanwhile `master status` shows `approved but unapplied since <approvedAt>`, a `loop-silence` fault.
 
 ## Diagram legend
 
-Amber human operator, green agent session, blue control plane, violet Herdr, grey GitHub; dashed chip credential, epoch or worktree; solid arrow command, dashed arrow observation.
+Shape and colour | Term
+---|---
+Amber rounded box | Human operator
+Green rounded box | Agent session
+Blue square box | Control plane
+Violet box | Herdr runtime
+Grey square box | GitHub
+Dashed chip | Credential, epoch or worktree
+Solid arrow | Command
+Dashed arrow | Observation

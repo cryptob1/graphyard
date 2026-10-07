@@ -26,26 +26,26 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
-`graphyard master reviewer setup` creates it (Pull requests write, reads otherwise); review tokens last one hour. Shortfalls (`appPermissions`) hold jobs until `master browser app-permissions` or `master browser installation-accept`, which the loop runs on a stalled row ([remedies](coordination.md#ship-in-under-thirty-minutes)); `graphyard github-setup --update-permissions` lists what is missing.
+`master reviewer setup` creates it (Pull requests write; tokens last one hour); its `SLUG[bot]` head approval satisfies both. Shortfalls (`appPermissions`; `github-setup --update-permissions` lists `Actions: write (failed CI reruns)`) hold jobs, **not retried** (`integration-held`), until `master browser app-permissions` or `master browser installation-accept`.
 
-Worker tokens carry `contents`, `pull_requests` and `workflows` write ([push credential](protocol/leases.md#push-credential)); if GitHub refuses a base sync, `sync GY-N --push-via-control-plane COMMIT` has the control plane push it (`POST /api/work/:id/sync-push`).
+Refused workflow syncs: `sync GY-N --push-via-control-plane COMMIT` (`POST /api/work/:id/sync-push`) pushes COMMIT, fast-forwarding and merging `origin/BASE` (`sync.workflow-push`).
 
 ## Require the check
 
-Require `Graphyard / merge` and `graphyard/landable` ([landability](coordination.md)) from the control-plane App on base: `strict` **off**, admin-enforced, no force push or deletion (`master protection --apply`, `master browser protection` reconcile). GitHub merges a head with green `GITHUB_CI_APP_IDS` checks and a current-head approval ([one delivery path](delivery.md#one-delivery-path)).
+Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md)) from the control-plane App: `strict` **off**, admin-enforced, no force push/deletion (`master protection --apply`, `master browser protection`). GitHub merges only mergeable non-draft PRs with an approved head green on `GITHUB_CI_APP_IDS` and required checks ([one delivery path](delivery.md#one-delivery-path)); restrict other merge identities (lease-less workers still push).
 
 ## Failed checks
 
-There is no merge queue (`master tip-cleanup --apply` deletes leftover `refs/graphyard/queue/*` tips). A failed required check is rerun once on the unchanged head (`mergeQueue.rerunFailedChecks`, 0 disables); a second failure returns the item for rework, and a check failing only tests the base tip fixed refreshes onto the tip.
+No merge queue (`master tip-cleanup --apply` deletes leftover `refs/graphyard/queue/*`). A failed required check reruns once on the unchanged head after its run completes (owed meanwhile); a second fails the test gate. A 403 quotes GitHub (or, no permission missing, the preflight's reading). Tests (`graphyard-failed-tests:`) the old base broke, fixed on the tip, refresh (`baseBreak`), not rework.
 
 ### Bindings and carry
 
-Reviews and proofs bind head, base and policy revision; on a moved base all carry if the clean merge kept the patch-id, else the approval carries if no reviewed file changed and disjoint-`scopeFiles` proofs carry. Branch protection alone judges the head's approvals.
+Reviews and proofs bind head, base, policy revision; a moved base carries all if the merge kept the patch-id, else the approval if no reviewed file changed, and disjoint-`scopeFiles` proofs. Carried approvals aren't re-posted; no merge requested.
 
 ### Proofs in CI
 
-Protected `pull_request_target` workflow per `graphyard/*` push: **plan** finds the item's `unit:*`/`integration:*` proofs; **exercise** runs one secret-free job on the base-merged candidate; **publish** reports via the `ciRun`-bound [CI producer](deployment.md#ci-producer). Dependencies, the database image and candidate layers are cached. Manual proofs stay producer sessions. `"deploySmoke": true` runs the smoke install once the release serves the merge, else [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
+Protected `pull_request_target` workflow per `graphyard/*` push: **plan** finds `unit:*`/`integration:*` proofs; **exercise** runs one secret-free job on the base-merged candidate; **publish** via `ciRun`-bound [CI producer](deployment.md#ci-producer). Dependencies, database image, candidate layers cached. Manual proofs stay producer sessions. `"deploySmoke": true` smoke-installs once the release serves the merge; failure: [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
 
 ## Identity-bound agent review
 
-`reviewProvider: "codex"` accepts Codex's clean result on the exact head; `agent` needs a non-author reviewer App (`github-setup URL --reviewer claude`; `GRAPHYARD_REVIEWER_APPS`) adopted by `graphyard reviewpolicy GY-N agent REVISION "reason" --profiles` [FILE](../examples/reviewer-profiles.json).
+`reviewProvider`: `codex` takes Codex's clean head result; `agent` a non-author reviewer App (`github-setup URL --reviewer claude`; `GRAPHYARD_REVIEWER_APPS`; `graphyard reviewpolicy GY-N agent REVISION "reason" --profiles` [FILE](../examples/reviewer-profiles.json)) approving via head-naming `graphyard-verdict` comments.
