@@ -320,141 +320,13 @@ export function githubEnv(facts: AppFacts, ciAppIds: number[]): EnvValue[] {
  */
 export async function revertApproverEnv(session: Pick<InstallSession, 'reviewers' | 'directory'>): Promise<EnvValue[]> {
   const reviewer = session.reviewers[0];
-  return reviewer ? revertApproverFromFile(appCredentialFile(session, reviewer.name)) : [];
-}
-
-/**
- * The revert approver variables from one saved App registration (the JSON the manifest flow or
- * `master reviewer bind` writes: appId, installationId, privateKey), or none when it holds no key.
- */
-export async function revertApproverFromFile(file: string): Promise<EnvValue[]> {
-  const app = await readAppFile(file);
+  const app = reviewer ? await readAppFile(appCredentialFile(session, reviewer.name)) : null;
   if (!app?.privateKey || app.privateKey === 'undefined') return [];
   return [
     { name: 'GRAPHYARD_REVERT_APPROVER_APP_ID', value: String(app.appId), secret: false },
     { name: 'GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID', value: String(app.installationId), secret: false },
     { name: 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY', value: app.privateKey, secret: true },
   ];
-}
-
-// ---------------------------------------------------------------------------
-// Self-provisioning an existing installation (GY-1416)
-//
-// An installation deployed before the plan derived a variable never got it: production predates
-// GY-1352, so its main guard had no revert approver although the reviewer App's registration sat
-// on this host. A variable the plan derives from a credential saved here is never a human request.
-// `master setup` finds each one the running deployment lacks and, with --apply, sets exactly those
-// through the provider adapter — secrets over stdin, never printed — with one audit entry each.
-// ---------------------------------------------------------------------------
-
-/** A variable the install plan derives from a credential saved on this host, and which credential. */
-export interface DerivedVariable extends EnvValue { source: string }
-/** One variable `master setup --apply` set: never its value, only its fingerprint. */
-export interface SelfProvisionAudit { at: string; variable: string; secret: boolean; fingerprint: string; source: string; provider: Provider; service: string }
-export interface SelfProvisionReport {
-  provider: Provider; service: string; mode: 'plan' | 'apply';
-  /** The service and its variables were read, so `missing` is exact; false when either could not be (nothing is then applied). */
-  observed: boolean;
-  /** The adapter sets a subset of variables in place (`applyVariables`); without it `install --apply` sets them with the rest. */
-  canApply: boolean;
-  missing: (PlanValue & { source: string })[];
-  set: string[];
-  /** Variables an earlier run set whose redeploy failed: this run redeployed them (or, planning, owes it). */
-  redeployed: string[]; pendingRedeploy: string[];
-  audit: SelfProvisionAudit[]; next: string | null;
-}
-/**
- * What an applying run staged and has not yet finished, kept between runs: variables set on the
- * deployment whose redeploy has not succeeded, and audit entries for variables set but not yet
- * written to the audit log. The next run redeploys the one and writes the other.
- */
-export interface PendingSetup { redeploy: string[]; audit: SelfProvisionAudit[] }
-export interface PendingRedeploy { read(): Promise<PendingSetup>; write(staged: PendingSetup): Promise<void> }
-export const derivedFrom = (values: EnvValue[], source: string): DerivedVariable[] => values.map(value => ({ ...value, source }));
-
-/**
- * Every variable an install session derives from credentials this host holds: the core variables
- * once every principal credential exists, the saved control-plane App registration, and the revert
- * approver from the reviewer App's registration (`revertApproverEnv`).
- */
-export async function derivedVariables(session: InstallSession): Promise<DerivedVariable[]> {
-  const saved = session.savedApp.app;
-  return [
-    ...(session.materialized ? derivedFrom(coreEnv(session), `the install plan's credentials under ${session.directory}`) : []),
-    ...(saved ? derivedFrom(githubEnv(saved.facts, session.record?.github?.ciAppIds ?? []), `the control-plane App registration ${saved.file}`) : []),
-    ...derivedFrom(await revertApproverEnv(session), session.reviewers[0] ? `the reviewer App registration ${appCredentialFile(session, session.reviewers[0].name)}` : ''),
-  ];
-}
-
-/** A variable is present when it, or its file-mounted twin (`…_PRIVATE_KEY_FILE`), is set. */
-const presentOn = (variables: Record<string, string>, name: string) => variables[name] !== undefined || variables[`${name}_FILE`] !== undefined;
-
-/**
- * Plan, or with `apply` set, the derived variables the running deployment lacks. Only absent
- * variables are touched: a present one, whatever its value, is the deployment's own (drift is
- * `install --plan`'s to report). The report and every audit entry carry fingerprints, never a secret.
- */
-export async function selfProvision(target: { adapter: ProviderAdapter; context: AdapterContext }, derived: DerivedVariable[],
-  options: { apply: boolean; audit?: (entry: SelfProvisionAudit) => Promise<void>; now?: () => number; pending?: PendingRedeploy }): Promise<SelfProvisionReport> {
-  const { adapter, context } = target, vault = context.vault;
-  for (const value of derived) if (value.secret) vault.add(value.value);
-  const observation = await adapter.observe(context);
-  // A listing that failed reads as no variables: applying from it would overwrite every live value.
-  const observed = observation.app && observation.variablesObserved === true;
-  const canApply = typeof adapter.applyVariables === 'function';
-  // The first occurrence of a name wins.
-  const first = derived.filter((value, index) => derived.findIndex(other => other.name === value.name) === index);
-  const missing = !observed ? [] : first.filter(value => value.value !== '' && !presentOn(observation.variables, value.name));
-  const staged = canApply && observed ? await options.pending?.read() ?? { redeploy: [], audit: [] } : { redeploy: [], audit: [] };
-  const pending = staged.redeploy;
-  const report: SelfProvisionReport = {
-    provider: context.provider, service: context.service, mode: options.apply ? 'apply' : 'plan', observed, canApply,
-    missing: missing.map(value => ({ ...planValue(value, true), source: value.source })), set: [], redeployed: [], pendingRedeploy: pending, audit: [],
-    next: !observation.app ? `The ${context.service} service was not observed on ${context.provider}; check the provider CLI's login and link (${context.railwayDir}), or name the service with --service NAME, then rerun`
-      : !observed ? `The ${context.service} service's variables could not be read on ${context.provider}; nothing is applied from an unread listing. Rerun once the provider CLI lists them`
-      : !missing.length && !pending.length && !staged.audit.length ? null
-      : !canApply ? `The ${context.provider} adapter rewrites the whole environment: graphyard install --provider ${context.provider} --repo ${context.repository} --apply sets these with the rest`
-      : options.apply ? null : 'graphyard master setup --apply',
-  };
-  if (options.apply && canApply && (missing.length || pending.length || staged.audit.length)) {
-    const at = new Date((options.now ?? Date.now)()).toISOString();
-    const entries = missing.map((value): SelfProvisionAudit => ({ at, variable: value.name, secret: value.secret, fingerprint: fingerprint(value.value), source: value.source, provider: context.provider, service: context.service }));
-    // Staged before the writes: variables set but never redeployed read as present on the next run,
-    // which then redeploys them, and an audit entry not yet written is written by the next run.
-    const audits = [...staged.audit, ...entries], redeploy = [...new Set([...pending, ...missing.map(value => value.name)])];
-    if (redeploy.length) {
-      await options.pending?.write({ redeploy, audit: audits });
-      // With no values, applyVariables only redeploys.
-      await adapter.applyVariables!(context, missing.map(({ name, value, secret }) => ({ name, value, secret })));
-      await options.pending?.write({ redeploy: [], audit: audits });
-    }
-    report.redeployed = pending; report.pendingRedeploy = [];
-    // Each entry leaves the staged set once written, so a failed append neither loses nor repeats one.
-    for (const [index, entry] of audits.entries()) {
-      await options.audit?.(entry);
-      await options.pending?.write({ redeploy: [], audit: audits.slice(index + 1) });
-      report.audit.push(entry);
-    }
-    report.set = missing.map(value => value.name);
-  }
-  vault.assertClean(JSON.stringify(report), 'the setup report');
-  return vault.scrub(report);
-}
-
-/**
- * The deployment a host names without an install record (one provisioned by hand, as production
- * was): the provider, its service and the directory its CLI is linked from.
- */
-export function deploymentTarget(input: { provider: Provider; repository: string; service: string; linkDirectory: string; workspace?: string | null; transport?: Transport; fetch?: typeof fetch }): { adapter: ProviderAdapter; context: AdapterContext } {
-  const transport = input.transport ?? localTransport(), installId = installIdFor(input.repository);
-  const context: AdapterContext = {
-    provider: input.provider, repository: input.repository, installId, service: input.service, domain: null, image: DEFAULT_IMAGE,
-    workdir: `/opt/graphyard/${installId}`, sourceRoot: fileURLToPath(new URL('../..', import.meta.url)), sshHost: null, sshUser: 'root', sshKey: null,
-    workspace: input.workspace ?? null, serverType: 'cx22', serverTypeExplicit: false, plannedAgents: 2, location: 'nbg1', databasePassword: '', port: SERVER_PORT, dataPath: null,
-    railwayDir: input.linkDirectory, host: null, spend: { maxMonthly: null, confirmPrice: null }, wait: ms => new Promise(accept => setTimeout(accept, ms)),
-    transport, ssh: (host, user = 'root') => sshTransport(host, user, transport), fetch: input.fetch ?? fetch, vault: new Vault(),
-  };
-  return { adapter: adapterFor(input.provider), context };
 }
 
 const PENDING = 'generated on apply';
@@ -715,7 +587,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   if (migratedFrom) for (const principal of session.principals) {
     if (migratedFrom.principals.some(old => old.fingerprint === fingerprint(session.tokens.get(principal.id)!))) throw new Error(`The host reuses a credential of the old installation (${principal.id}); the old loop would keep its leases`);
   }
-  record = { ...record, url, domain: context.domain, service: context.service, provider: context.provider, selfContained: !!context.host, migratedFrom, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, principals: session.principals.map(principal => ({ id: principal.id, role: principal.role, ...(principal.sessionKind ? { sessionKind: principal.sessionKind } : {}), ...(principal.proofs?.length ? { proofs: principal.proofs } : {}), fingerprint: fingerprint(session.tokens.get(principal.id)!) })), updatedAt: new Date(deps.now()).toISOString() };
+  record = { ...record, url, domain: context.domain, provider: context.provider, selfContained: !!context.host, migratedFrom, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, principals: session.principals.map(principal => ({ id: principal.id, role: principal.role, ...(principal.sessionKind ? { sessionKind: principal.sessionKind } : {}), ...(principal.proofs?.length ? { proofs: principal.proofs } : {}), fingerprint: fingerprint(session.tokens.get(principal.id)!) })), updatedAt: new Date(deps.now()).toISOString() };
   await writeInstallRecord(session.directory, record, vault);
 
   // GitHub: the App manifest flow needs the live HTTPS origin, so it runs after the URL exists.

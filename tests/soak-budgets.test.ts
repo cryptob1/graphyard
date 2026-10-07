@@ -317,36 +317,3 @@ test('unit:decisions-step-bounded — a history read slower than the step\'s dea
   for (let round = 0; round < 3; round += 1) assert.equal((await cycle()).reads.size, 0, `and none in the cycles after it (round ${round + 1})`);
   assert.equal(new Set(decided).size, decided.length, 'the refresh requested nothing again');
 });
-
-test('unit:soak-invariants-hold — the loop\'s setup step over a day on a Railway deployment that lacks the revert approver: it sets the variables and redeploys once, then never again while the deployment stays healthy; when they vanish and every redeploy fails for four hours, the failing run is one bounded failed action and its retries back off; once redeploys succeed it settles with one redeploy, and every invariant holds', { timeout: 600_000 }, async () => {
-  // GY-1416: step 7e starts `master setup --apply` beside the cycle at most hourly, and a run that
-  // throws fails only its own isolated action. A redeploy that keeps failing must not become a
-  // redeploy every few minutes, nor a growing set of actions.
-  const fails = { from: 2 * hour, to: 6 * hour };
-  const { final, violations, failures, lost, state, provisionDay } = await simulateDay({
-    hours: 12, selfProvision: { redeployFails: fails },
-    plan: { items: 2, leftovers: 0, slowRecompute: 0, releaseEveryMs: 1_000, workMs: 50 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, attested: 0, exhaustedReviewer: 0, unstable: 0, lowLane: 0, outOfQueue: { item: 2, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 2 } },
-  });
-  assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'the day\'s items are delivered beside the setup step');
-  assert.deepEqual(violations, [], 'every system invariant holds while setup applies, fails and recovers');
-  assert.deepEqual(failures, [], 'no cycle failed: a failed setup run fails only its own action');
-  assert.deepEqual(lost, [], 'no worker lost its lease');
-  const window = (from: number, to: number) => provisionDay.redeploys.filter(entry => entry.at >= from && entry.at < to);
-  // Healthy: the first run sets both variables and redeploys once; the hourly runs after it touch nothing.
-  assert.deepEqual(window(0, fails.from).map(entry => entry.ok), [true], `one redeploy before the failing window: ${JSON.stringify(provisionDay.redeploys)}`);
-  assert.deepEqual(provisionDay.sets.filter(entry => entry.at < fails.from).map(entry => entry.name).sort(), ['GRAPHYARD_REVERT_APPROVER_APP_ID', 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY']);
-  assert.ok(provisionDay.runs.filter(at => at < fails.from).length <= 3, `at most hourly: ${provisionDay.runs.map(at => Math.round(at / minute))}`);
-  // Failing: the vanished variables are set again once, and the failing redeploys back off (10, 20, 40, 80 min…), never one a cycle.
-  const failing = window(fails.from, fails.to);
-  assert.ok(failing.length >= 2 && failing.length <= 6 && failing.every(entry => !entry.ok), `bounded failing redeploys in four hours: ${failing.map(entry => Math.round(entry.at / minute))}`);
-  assert.deepEqual(provisionDay.sets.filter(entry => entry.at >= fails.from).map(entry => entry.name).sort(), ['GRAPHYARD_REVERT_APPROVER_APP_ID', 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY'], 'set once; the retries only redeploy');
-  const gaps = failing.slice(1).map((entry, index) => entry.at - failing[index].at);
-  assert.ok(gaps.every((gap, index) => index === 0 || gap > gaps[index - 1]), `the retries back off: ${gaps.map(gap => Math.round(gap / minute))} min`);
-  // Recovered: one redeploy settles it, and the deployment stays healthy with none after it.
-  const after = window(fails.to, 12 * hour);
-  assert.deepEqual(after.map(entry => entry.ok), [true], `one redeploy once redeploys succeed: ${JSON.stringify(after)}`);
-  // The failing runs are one isolated config action, never a growing set.
-  assert.ok(provisionDay.actions.every(entry => entry.keys.length <= 1), 'at most one setup action at any cycle');
-  assert.deepEqual(Object.keys(state.actions).filter(key => key.includes('self-provision')), ['isolated:config:setup self-provision']);
-  assert.match(state.actions['isolated:config:setup self-provision']!.detail, /setup self-provision failed: railway redeploy exited 1/);
-});
