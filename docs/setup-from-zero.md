@@ -45,7 +45,7 @@ Providers differ only in `--provider` ([install](install.md); Herdr: `--herdr-re
 
 ## 5. Reviewer and revert-approver Apps
 
-`--reviewer NAME` registers the reviewer App every review needs (**HUMAN:** confirm) and makes it the main guard's revert approver (`GRAPHYARD_REVERT_APPROVER_*`; each `--apply` resets hand-set values); on compose key mounts as file (`_PRIVATE_KEY_FILE`; `server.env` takes no multi-line PEM). **Verify:** `reviewer-app`; readiness `revert-approver` `ready`. Otherwise `gy master reviewer setup` (HTTPS or loopback origin, checked before the page opens) plus the [variables](deployment.md#variables).
+`--reviewer NAME` registers the reviewer App every review needs (**HUMAN:** confirm) and makes it the main guard's revert approver (`GRAPHYARD_REVERT_APPROVER_*`; each `--apply` resets hand-set values); on compose key mounts as file (`_PRIVATE_KEY_FILE`; `server.env` takes no multi-line PEM). **Verify:** `reviewer-app`; readiness `revert-approver` `ready`. Otherwise `gy master reviewer setup` (HTTPS or loopback origin, checked before the page opens); `gy master setup --apply` sets its [variables](deployment.md#variables).
 
 ## 6. Onboard the checkout
 
