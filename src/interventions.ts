@@ -251,13 +251,17 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
         if (after) entry.plannedFiles = after;
         const reason = text(details.reason ?? details.intent?.reason, 'requirements revised');
         const cleared = row.work ? !row.work.blocker : true;
+        // An item no attempt holds (backlog, ready) that nobody asked about and nothing blocks is being
+        // planned, not rescued: its coordinator revising the scope of work no worker has started or
+        // resumed waited on no one, so it is no intervention (GY-1396). A blocker it answers still is.
+        const replanned = (stage === 'backlog' || stage === 'ready') && details.liveScopeWidening !== true && !!row.work && !row.work.blocker;
         if (entry.asks.length && (widened || cleared)) {
           // A widening answers the scope request; a blocker it clears beside one was an escalation of its own.
           const scopeAsked = entry.asks.some(ask => ask.kind === 'scope-request');
           const widens = (ask: Ask) => widened && (ask.kind === 'scope-request' || !scopeAsked);
           for (const ask of entry.asks) if (widens(ask) || cleared) emit(row, widens(ask) ? 'scope-widening' : 'escalation', { requestedAt: ask.at, blocked: ask.blocked, stage: ask.stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: reason, trigger: widens(ask) ? ask.trigger ?? ask.kind : ask.kind, sources: [...ask.sources, source] });
           entry.asks = entry.asks.filter(ask => !widens(ask) && !cleared);
-        } else if (widened) emit(row, 'scope-widening', { requestedAt: row.at, blocked: `files outside plannedFiles: ${(after ?? []).filter((path: string) => !(before ?? []).includes(path)).join(', ')}`, stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: reason, trigger: 'operator-widening', sources: [source] });
+        } else if (widened && !replanned) emit(row, 'scope-widening', { requestedAt: row.at, blocked: `files outside plannedFiles: ${(after ?? []).filter((path: string) => !(before ?? []).includes(path)).join(', ')}`, stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: reason, trigger: 'operator-widening', sources: [source] });
         break;
       }
       case 'unblock': {
