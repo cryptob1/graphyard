@@ -116,6 +116,21 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
     : await db.query(`SELECT ${columns} FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) ORDER BY seq DESC LIMIT $2`, [[...interventionLedgerKinds], limit + 1, options.workId ?? null]);
   const truncated = result.rows.length > limit;
   const window = result.rows.slice(0, limit).reverse();
+  // A decision the window acts on but whose request lies beyond the reach — one that waited longer
+  // than a day — is read by its id, so the rework it applies is still judged by its request (GY-1389).
+  if (options.since) {
+    const requested = new Set(window.filter(row => row.kind === 'decision.requested').map(row => `${row.work_id}:${row.top?.id}`));
+    const missing = [...new Map(window.filter(row => row.work_id && row.kind.startsWith('decision.') && typeof row.top?.id === 'string' && !requested.has(`${row.work_id}:${row.top.id}`))
+      .map(row => [`${row.work_id}:${row.top.id}`, { work: row.work_id as string, id: row.top.id as string, before: Number(row.seq) }])).values()];
+    if (missing.length) {
+      const earlier = await db.query(`SELECT found.* FROM unnest($1::uuid[], $2::text[], $3::bigint[]) AS s(work, id, before)
+          CROSS JOIN LATERAL (SELECT ${columns} FROM events WHERE work_id = s.work AND seq < s.before AND kind IN ('decision.requested', 'decision.approved') AND payload->>'id' = s.id) found`,
+      [missing.map(entry => entry.work), missing.map(entry => entry.id), missing.map(entry => entry.before)]);
+      const seen = new Set(window.map(row => String(row.seq)));
+      window.push(...earlier.rows.filter(row => !seen.has(String(row.seq))));
+      window.sort((a, b) => Number(a.seq) - Number(b.seq));
+    }
+  }
 
   // The full snapshots the window's deltas extend, once each.
   const bases = new Map<number, { workId: string | null; work: Record<string, any> | null }>();
@@ -309,7 +324,10 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
       case 'decision.requested': {
         // A request carrying a grounds binding is the loop's own (GY-407): it names the recorded fact —
         // a standing change request, a failed check, a base conflict, a mechanical finding — it rests on.
-        if (row.payload?.action === 'rework') entry.reworkDecision = { seq: row.seq, at: row.at, id: row.payload.id, stage, binding: typeof row.payload.input?.binding === 'string' && row.payload.input.binding ? row.payload.input.binding : null, approvedBy: null };
+        // Only the loop's operator-agent identity requests on grounds: a binding a person's credential
+        // sent (the requester the decide route records) is not the loop's provenance, and stays counted.
+        const loopRequested = !row.payload?.requester || row.payload.requester.role === 'operator-agent';
+        if (row.payload?.action === 'rework') entry.reworkDecision = { seq: row.seq, at: row.at, id: row.payload.id, stage, binding: loopRequested && typeof row.payload.input?.binding === 'string' && row.payload.input.binding ? row.payload.input.binding : null, approvedBy: null };
         break;
       }
       case 'decision.approved': {

@@ -120,6 +120,8 @@ const coordinator: Principal = { id: 'master-loop', role: 'coordinator', session
 const worker: Principal = { id: 'implementer', role: 'worker', sessionKind: 'ai' };
 const credentials = [operator, coordinator, worker].map(principal => ({ ...principal, token: `rounds-${principal.id}-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
+// The loop requests its rounds as the master's operator-agent identity, as `master autonomy` provisions it.
+const masterAgent = { id: 'graphyard-master-rounds', token: `graphyard-master-rounds-${'m'.repeat(32)}`, capabilities: ['decision:rework'] };
 const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 let serial = 0;
@@ -133,6 +135,7 @@ before(async () => {
   http = server(engine, credentials, null, undefined, { env: { ...process.env, GRAPHYARD_INTERVENTION_PATTERNS: '0' } });
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
+  await ok(token(operator), 'POST', 'operator-agents', { id: masterAgent.id, displayName: masterAgent.id, capabilities: masterAgent.capabilities, scope: { repositories: [repository], workItems: ['*'] }, token: masterAgent.token, reason: 'Onboarding provisions the master agent' });
 });
 after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); });
 
@@ -156,33 +159,37 @@ async function submitted(title: string) {
     baseTip: 'b'.repeat(40), baseTree: '7e'.repeat(20), files: ['src/a.ts', 'docs/a.md'], at: new Date().toISOString() };
   return engine.observe(work.id, work.revision, observation);
 }
-const rework = (work: Work, input: Record<string, unknown>) => ok(token(operator), 'POST', `work/${work.key}/decide`, { action: 'rework', input: { previousWorkerStopped: true, ...input }, reason: `${work.key}: required CI check test failed; the item returns to a worker` });
+const rework = (work: Work, input: Record<string, unknown>, credential = masterAgent.token) => ok(credential, 'POST', `work/${work.key}/decide`, { action: 'rework', input: { previousWorkerStopped: true, ...input }, reason: `${work.key}: required CI check test failed; the item returns to a worker` });
 const reworksOf = (report: InterventionReport, key: string) => report.interventions.filter(entry => entry.kind === 'rework' && entry.work?.key === key);
 
-test('integration:rework-review-rounds-report — the loop\'s grounded rework applied by the risk lane is no intervention in GET /api/interventions; a hand request applied the same way is one; and a grounded request recorded before the window opened still reads as grounded', async () => {
+test('integration:rework-review-rounds-report — the loop\'s grounded rework applied by the risk lane is no intervention in GET /api/interventions; a hand request applied the same way is one, as is a binding a person\'s credential sent; and a grounded request recorded long before the window opened still reads as grounded', async () => {
   const loop = await submitted('loop-round');
   const applied = await rework(loop, { binding: `${loop.candidate!.sha}:ci:test` });
   assert.equal(applied.state, 'applied', 'the medium lane applies a rework as it is requested');
   assert.equal(applied.approvedBy, 'graphyard-risk-lane');
   const hand = await submitted('hand-round');
   assert.equal((await rework(hand, {})).state, 'applied');
+  // A binding is the loop's provenance only from the loop's identity: a person sending one is still stepping in.
+  const forged = await submitted('forged-round');
+  assert.equal((await rework(forged, { binding: `${forged.candidate!.sha}:ci:test` }, token(operator))).state, 'applied');
 
   const report = await ok(token(coordinator), 'GET', 'interventions?window=7') as InterventionReport;
   assert.deepEqual(reworksOf(report, loop.key), [], 'the loop\'s own review round is no signal');
   assert.deepEqual(reworksOf(report, hand.key).map(entry => entry.trigger), ['decision'], 'a coordinator\'s hand request is one');
+  assert.deepEqual(reworksOf(report, forged.key).map(entry => entry.trigger), ['decision'], 'a binding from a person\'s credential is no loop provenance');
 
-  // The boundary: request and approval an hour before the window, the rework inside it.
+  // The boundary: request and approval a day and more before the window — beyond the reach — the rework inside it.
   const early = await submitted('early-round');
   await rework(early, { binding: `${early.candidate!.sha}:ci:test` });
   // The ledger is append-only; the fixture backdates two rows with its triggers off for this one session.
   const client = await store.pool.connect();
   try {
     await client.query('SET session_replication_role = replica');
-    await client.query(`UPDATE events SET created_at = created_at - interval '2 hours' WHERE work_id=$1 AND kind IN ('decision.requested','decision.approved')`, [early.id]);
+    await client.query(`UPDATE events SET created_at = created_at - interval '30 hours' WHERE work_id=$1 AND kind IN ('decision.requested','decision.approved')`, [early.id]);
   } finally { await client.query('RESET session_replication_role').catch(() => {}); client.release(); }
   const since = new Date(Date.now() - 60 * 60_000).toISOString();
   const { rows } = await readInterventionLedger(store.reportPool, { since });
-  assert.ok(rows.some(row => row.workId === early.id && row.kind === 'decision.requested'), 'the decision behind an in-window rework is read from before the window');
+  assert.ok(rows.some(row => row.workId === early.id && row.kind === 'decision.requested'), 'the decision behind an in-window rework is read by its id, however long before the window it was requested');
   assert.ok(typeof (interventions as Record<string, unknown>).interventionDecisionReachMs === 'number', 'the reach is a named bound');
   const folded = foldInterventions(rows, await store.list(), new Date().toISOString()).interventions;
   assert.deepEqual(folded.filter(entry => entry.kind === 'rework' && entry.work?.id === early.id), [], 'not read as a rework nobody requested');
