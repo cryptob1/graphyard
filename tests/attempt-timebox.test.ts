@@ -42,13 +42,13 @@ async function setup() {
     masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers });
   return { directory, master };
 }
-
+/** An attempt holding a live lease, its session running since five hours ago (the role maximum is four). Its session is bound to a pushed head, as a progressing attempt's is: one with no submission progress is ended at the 120-minute worker bound first (GY-1460). */
 /** An attempt holding a live lease, its session running since five hours ago (the role maximum is four). */
 function held(overrides: Partial<Work> = {}): Work {
   const epoch = overrides.epoch ?? 1;
   const leased = overrides.lease !== null;
   const session = { id: `alpha-principal:${epoch}`, kind: 'implementation' as const, principal: 'alpha-principal', epoch, runtime: 'claude', host: 'machine-a',
-    workspace: null, tab: null, pane: 'w1:p1', agentName: 'agent-alpha', role: null, head: null, attach: 'herdr pane attach w1:p1', transcript: null,
+    workspace: null, tab: null, pane: 'w1:p1', agentName: 'agent-alpha', role: null, head: 'c'.repeat(40), attach: 'herdr pane attach w1:p1', transcript: null,
     subject: 'GY-885: Disposable attempts', state: 'running' as const, outcome: null, startedAt: iso(-5 * 3_600_000), updatedAt: iso(-60_000), endedAt: null };
   return {
     id: 'work-885', key: 'GY-885', title: 'Disposable attempts', description: '', type: 'feature', priority: 1,
