@@ -9,13 +9,20 @@
  * filed as the item's follow-up batch and the item goes on toward merge (daemon/cycle-review-cap.ts).
  */
 
-/** What the round is read from: the pipeline timeline's rework rounds (pipeline-speed.ts `recordRework`). */
-type Rounds = { pipeline?: { reworkRounds?: number } | null };
+/**
+ * What the round is read from: the pipeline timeline's rework rounds (pipeline-speed.ts `recordRework`),
+ * or — on the coordination view the loop reads, which drops the timeline — the count that view keeps
+ * beside it (`reworkRounds`, server/work-view.ts `CoordinationRounds`). Every cap reader goes through
+ * here: one that read only the timeline saw each head as round 1 on the loop (GY-1389).
+ */
+type Rounds = { pipeline?: { reworkRounds?: number } | null; reworkRounds?: number };
+/** The rework rounds an item has taken, from whichever record of them it carries. */
+export const reworkRoundsOf = (work: Rounds) => work.pipeline?.reworkRounds ?? work.reworkRounds ?? 0;
 /** The review rounds an item takes before only a blocking finding stands against it: master.json `reviewRoundCap`. */
 export const defaultReviewRoundCap = 3;
 export const reviewRoundCapOf = (config?: { reviewRoundCap?: number } | null) => config?.reviewRoundCap ?? defaultReviewRoundCap;
 /** The review round the item's current head is in: its first review is round 1, and each rework round starts the next. */
-export const reviewRound = (work: Rounds) => (work.pipeline?.reworkRounds ?? 0) + 1;
+export const reviewRound = (work: Rounds) => reworkRoundsOf(work) + 1;
 /** Whether the item's current review is past the cap: rounds 1..cap are ordinary, every later one is capped. */
 export const pastReviewCap = (work: Rounds, cap: number) => reviewRound(work) > cap;
 export interface ReviewRoundStatus { round: number; cap: number; capped: boolean }

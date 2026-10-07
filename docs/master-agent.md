@@ -7,11 +7,11 @@ The master (`coordinator`) routes and administers GitHub unasked; never implemen
 
 Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)); Close finished agent sessions. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
-`master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from [dirty, branch or non-forward checkouts](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level) (`escalation:dirty-checkout`); [forward ones self-recover](operations.md#resources-and-disk). The loop launches, wakes and rotates the [master session](master-agent-sessions.md#the-loops-own-master-session). Railway: set `productionEnvironment`.
+`master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from [dirty, branch or non-forward checkouts](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level) (`escalation:dirty-checkout`); [forward ones self-recover](operations.md#resources-and-disk). The loop launches, wakes and rotates the [master session](master-agent-sessions.md#the-loops-own-master-session). Railway: `productionEnvironment`.
 
 ### System-driven items
 
-Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, `decide attest|merge`, except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` when unauthorized or without an operator agent.
+Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, `decide attest|merge` and loop-owned `decide rework` (`--precedent` answers refusals), except stopped-loop recovery, unproduced `manual:` attestations, and unauthorized or operator-agent-less `decide merge`.
 
 The loop attests unproduced `manual:` proofs through an independent approver, once per head, base and policy revision (`loopDecisions.attestations`).
 
@@ -25,7 +25,7 @@ that host's loop. `dispatch.sessionReconcile` reports each closure:
 - **Ended**: agentless pane or terminal state. `idle`, `done` and
   `blocked` are deliberately not terminal.
 - **Superseded**: a review or proof session for a head the item moved past; a delivered item is closed the same
-  way as any other. Implementation sessions are left to the lease.
+  way as any other. Implementation sessions: the lease.
 - **Duplicate**: the older of two sessions for one role and head.
 
 A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) is flagged, not closed.

@@ -191,8 +191,11 @@ test('unit:bot-threads-advisory-after-round-2 — after two rework rounds a bot 
   const refused = decide(item(2, [botFinding], verdict));
   assert.equal(refused?.action, 'rework');
   assert.match(refused!.binding, /:verdict:/);
-  // Past it (GY-1118) neither the verdict nor a person's thread is reworked: the review-cap step files or escalates the verdict.
-  assert.equal(decide(item(4, [botFinding, personFinding], verdict)), null);
+  // Past it (GY-1118) neither the verdict nor a person's thread is a routine round: the verdict, which
+  // Graphyard cannot withdraw here, is the loop's own capped request, an independent approver's to judge (GY-1389).
+  const capped = decide(item(4, [botFinding, personFinding], verdict));
+  assert.deepEqual([capped?.action, capped?.binding], ['rework', `${head}:capped:graphyard-reviewer[bot]`]);
+  assert.doesNotMatch(capped!.reason, /maintainer|chatgpt-codex-connector/, 'no thread is its ground');
 });
 
 test('a thread rework request stays within the control plane\'s reason bound however many threads, and however long their paths', () => {
