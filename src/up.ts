@@ -14,7 +14,7 @@ import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type O
 
 /**
  * `graphyard up` (GY-1419): every machine step of a first installation, in order — preflight,
- * control plane, host supervisor and Herdr, onboarding, agent accounts, harness, master loop — and
+ * control plane, host supervisor and Herdr, the master's agent identities (GY-1479), onboarding, agent accounts, harness, master loop — and
  * a wait on the first-run checklist (src/model/setup-checklist.ts) wherever a person must act.
  * Each step is an existing idempotent command run as a child of this CLI, and each completed step
  * is recorded in .graphyard/up.json, so a rerun after any interruption skips what is done and never
@@ -33,7 +33,7 @@ import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type O
  * no browser profile stops before anything runs: App creation is never handed to a person.
  */
 
-export const upSteps = ['preflight', 'control-plane', 'host-supervisor', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal'] as const;
+export const upSteps = ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal'] as const;
 export type UpStep = typeof upSteps[number];
 
 export interface UpRequest {
@@ -97,6 +97,8 @@ export interface UpDependencies {
    * credential in OPERATOR_TOKEN_FILE, or null when none can be minted (no such file on this machine).
    */
   signIn?(operatorTokenFile: string | null): Promise<string | null>;
+  /** The operator's admin credential read from OPERATOR_TOKEN_FILE, or null when this machine holds none (GY-1479). */
+  operatorToken?(operatorTokenFile: string | null): Promise<string | null>;
   emit(event: UpEvent): void;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -160,6 +162,8 @@ interface UpState {
   /** The work item that pull request is filed as (GY-1478), and the request id that files it once. */
   onboardingWork?: string | null;
   onboardingRequest?: string | null;
+  /** The host that provisioned the master's agent identities itself (GY-1479), where its loop runs. */
+  identitiesHost?: string | null;
 }
 export const upStateFile = (root: string) => resolve(root, '.graphyard/up.json');
 
@@ -190,17 +194,33 @@ const manifestUrl = (line: string) => line.match(/\bOpen (http:\/\/127\.0\.0\.1:
  */
 function installSignIn(stdout: string) {
   const output = parseJson(stdout);
-  if (!output || typeof output !== 'object') return { claim: null, operatorTokenFile: null };
+  if (!output || typeof output !== 'object') return { claim: null, operatorTokenFile: null, identitiesHost: null };
   const admin = Array.isArray(output.principals) ? output.principals.find((principal: any) => principal?.role === 'admin') : null;
   const operatorTokenFile = typeof admin?.tokenFile === 'string' ? admin.tokenFile as string
     : !output.host && typeof output.installDirectory === 'string' && typeof admin?.id === 'string' ? resolve(output.installDirectory, 'tokens', `${admin.id}.token`) : null;
-  return { claim: typeof output.signIn === 'string' && /#claim=[A-Za-z0-9_-]{16,200}$/.test(output.signIn) ? output.signIn as string : null, operatorTokenFile };
+  const identitiesHost = output.host?.masterIdentities === true ? String(output.host.host ?? 'the host') : null;
+  return { claim: typeof output.signIn === 'string' && /#claim=[A-Za-z0-9_-]{16,200}$/.test(output.signIn) ? output.signIn as string : null, operatorTokenFile, identitiesHost };
 }
-/** Keep where the operator's credential is saved (the path, never the secret), for the sign-in link. */
+/**
+ * Keep where the operator's credential is saved (the path, never the secret), for the sign-in link,
+ * and the host that provisioned the master's identities when a host install did.
+ */
 async function rememberSignIn(root: string, state: UpState, stdout: string) {
-  const { claim, operatorTokenFile } = installSignIn(stdout);
-  if (operatorTokenFile && operatorTokenFile !== state.operatorTokenFile) { state.operatorTokenFile = operatorTokenFile; await writeState(root, state); }
+  const { claim, operatorTokenFile, identitiesHost } = installSignIn(stdout);
+  if ((operatorTokenFile && operatorTokenFile !== state.operatorTokenFile) || (identitiesHost && identitiesHost !== state.identitiesHost)) {
+    if (operatorTokenFile) state.operatorTokenFile = operatorTokenFile;
+    if (identitiesHost) state.identitiesHost = identitiesHost;
+    await writeState(root, state);
+  }
   return claim;
+}
+
+/** Both of the master's agent identities are recorded in master.json and their credential files are readable. */
+async function provisioned(root: string) {
+  const config = await readFile(resolve(root, '.graphyard/master.json'), 'utf8').then(parseJson, () => null);
+  const identities = [config?.operatorAgent, config?.approver];
+  if (identities.some(identity => typeof identity?.credentialFile !== 'string')) return false;
+  return (await Promise.all(identities.map(identity => readFile(identity.credentialFile, 'utf8').then(text => text.trim().length >= 32, () => false)))).every(Boolean);
 }
 
 export async function runUp(request: UpRequest, deps: UpDependencies): Promise<UpResult> {
@@ -361,6 +381,20 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       const token = await deps.masterToken();
       if (!token) throw new UpStop('host-supervisor: no master credential is recorded for the installed control plane', upExitCodes.failed);
       await run('host-supervisor', ['master', 'init', '--token-stdin', ...(request.browserProfile ? ['--browser-profile', request.browserProfile] : [])], { stdin: token });
+    });
+
+    // GY-1479: the master's operator-agent and approver identities (`master autonomy --apply`), provisioned
+    // with the admin credential the install saved, so the new master creates, releases and unblocks work
+    // with no further command. That credential is never something an agent session may read.
+    await step('master-autonomy', async () => {
+      // A host install provisions them on the host, where its loop runs and the admin credential stays.
+      if (state.identitiesHost) return `the master's agent identities were provisioned on ${state.identitiesHost}, where its loop runs`;
+      const admin = await deps.operatorToken?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
+      // An install whose operator already ran the command keeps those identities; the admin credential only refreshes them.
+      if (!admin && await provisioned(deps.root)) return 'the master\'s operator-agent and approver identities were already provisioned';
+      if (!admin) throw new UpStop(`master-autonomy: the operator's admin credential is not on this machine${state.operatorTokenFile ? ` (${state.operatorTokenFile} is unreadable)` : ''}, so the master's agent identities cannot be provisioned; pipe it to graphyard master autonomy --admin-token-stdin --apply here, then rerun ${rerun()}`, upExitCodes.prerequisite);
+      await run('master-autonomy', ['master', 'autonomy', '--admin-token-stdin', '--apply', '--harness', request.master], { stdin: admin });
+      return 'the master creates, releases and unblocks work with its own operator-agent identity';
     });
 
     await step('onboarding', async () => {
@@ -780,6 +814,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       return url && token ? (await planeRequest(url, token)('work-snapshot'))?.work ?? null : null;
     },
     signIn: async file => { const url = await serverUrl(); return url ? mintSignIn(url, file) : null; },
+    operatorToken: async file => { if (!file) return null; try { const token = (await readFile(file, 'utf8')).trim(); return token.length >= 32 ? token : null; } catch { return null; } },
     sleep: ms => new Promise(accept => setTimeout(accept, ms)), now: () => Date.now(),
     cli: (args, options = {}) => new Promise((accept, reject) => {
       const child = spawn(process.execPath, [cliPath, ...args], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'], ...(options.signal ? { signal: options.signal } : {}), ...(options.env ? { env: { ...process.env, ...options.env } } : {}) });

@@ -134,6 +134,13 @@ test('unit:host-install-plan — apply provisions the fixture host: units, runti
     assert.equal(master.input, session.tokens.get('owner-project-master'));
     assert.ok(!master.args.some(arg => arg.includes(master.input!)), 'the coordinator credential is never an argument');
     assert.ok(master.args.includes('--herdr-workspace') && master.args.includes('w1'));
+    // GY-1479: the master's agent identities are provisioned on the host, with the admin credential on standard input.
+    const autonomy = hostOf(fixture).commands.find(command => command.args.includes('master') && command.args.includes('autonomy'))!;
+    assert.ok(autonomy.args.includes('--admin-token-stdin') && autonomy.args.includes('--apply'), autonomy.args.join(' '));
+    assert.equal(autonomy.input, session.tokens.get(session.principals.find(principal => principal.role === 'admin')!.id));
+    assert.ok(!autonomy.args.some(arg => arg.includes(autonomy.input!)), 'the admin credential is never an argument');
+    assert.ok(hostOf(fixture).commands.indexOf(autonomy) > hostOf(fixture).commands.indexOf(master), 'after master init wrote the master configuration');
+    assert.equal(summary.host!.masterIdentities, true);
     assert.ok(lines.some(line => line.includes('graphyard-executor.mjs --install --count 2')));
     assert.ok(lines.some(line => line.includes('systemctl --user enable --now graphyard-master-owner-project.service')));
 
