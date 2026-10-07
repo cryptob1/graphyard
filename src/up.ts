@@ -23,7 +23,7 @@ import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type O
  *
  * Interactive, a human step prints the dashboard's Setup page address once and waits for the step
  * to turn green. That address is a one-time sign-in link minted with the operator's own credential
- * (or the host install's claim) and ending `&setup`, so opening it signs the person in and lands on
+ * (a host install's, from its redeemed claim) and ending `&setup`, so opening it signs the person in and lands on
  * the Setup page with no token to paste. With --agent, every step has a non-interactive path (the
  * App manifest is driven through the master's browser profile and recorded under
  * .graphyard/master-actions like every master browser flow, accounts come from login homes already
@@ -96,9 +96,16 @@ export interface UpDependencies {
   masterToken(): Promise<string | null>;
   /**
    * A one-time dashboard sign-in address (`SERVER/#sign-in=CODE`) minted with the operator's admin
-   * credential in OPERATOR_TOKEN_FILE, or null when none can be minted (no such file on this machine).
+   * credential: TOKEN when given, else the one in OPERATOR_TOKEN_FILE; null when none can be minted
+   * (no such file on this machine).
    */
-  signIn?(operatorTokenFile: string | null): Promise<string | null>;
+  signIn?(operatorTokenFile: string | null, token?: string): Promise<string | null>;
+  /**
+   * GY-1477: spend a host install's one-time claim link (`SERVER/#claim=CODE`) for the operator's admin
+   * credential, kept in memory only, so every link `up` prints (the wait's and the final one) is minted
+   * fresh; null when the claim is refused.
+   */
+  redeemClaim?(claim: string): Promise<string | null>;
   emit(event: UpEvent): void;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -245,7 +252,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   const pollMs = deps.pollMs ?? 5_000;
   const humanWaitMs = deps.humanWaitMs ?? upWaitMs(request);
   const machineWaitMs = deps.machineWaitMs ?? 600_000;
-  let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null), claim: string | null = null, onboarding: OnboardingWait | null = null, signIn: string | null = null;
+  let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null), claim: string | null = null, operator: string | null = null, onboarding: OnboardingWait | null = null, signIn: string | null = null;
   const handoffs: UpResult['handoffs'] = [];
   const handedOff = new Set<string>();
   const handoff = (step: UpStep): Handoff => (sentence, link) => {
@@ -283,6 +290,18 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     deps.emit({ kind: 'note', text: `The dashboard is served on your tailnet only (${shell}): open ${share.url} from your other devices.` });
     return share.url;
   };
+  /**
+   * A fresh one-time sign-in link. A host install keeps the operator credential on the host, so its
+   * claim is redeemed here once and the credential held in memory for every later link; without that,
+   * the claim itself is printed (once), else the operator's local credential mints one.
+   */
+  const mint = async () => {
+    if (claim && !operator && deps.redeemClaim) { operator = await deps.redeemClaim(claim).catch(() => null); if (operator) claim = null; }
+    if (operator) return await deps.signIn?.(null, operator).catch(() => null) ?? null;
+    const minted = claim ?? await deps.signIn?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
+    claim = null;
+    return minted;
+  };
   /** The base links are printed for: the tailnet URL when the dashboard is served there, else the server's own. */
   const linkBase = async () => await reach() ?? await deps.serverUrl();
   const resolveSetupUrl = async () => { const url = await linkBase(); if (url) setupUrl = setupAddress(url); return setupUrl; };
@@ -293,17 +312,16 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   };
   /**
    * The interactive wait: the Setup address printed once for the whole run, then a poll until IDS
-   * are green. It signs the person in: the host install's claim, else a link the operator's own
-   * credential mints; only when neither exists does it fall back to the bare address.
+   * are green. It signs the person in with a link `mint` gives; only when none can be had does it
+   * fall back to the bare address.
    */
   const announce = async (ids: SetupItemId[]) => {
     if (prompts > 0 || request.agent) return;
     const server = await linkBase();
     if (!server) return;
     await resolveSetupUrl();
-    const minted = claim ?? await deps.signIn?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
+    const minted = await mint();
     const signIn = minted && signInAt(minted, server);
-    claim = null;
     const url = setupAddress(server, signIn);
     prompts++;
     deps.emit({ kind: 'waiting', setupUrl: url, waitingFor: ids, sentence: signIn
@@ -503,11 +521,10 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         return `submitted as ${state.goal}`;
       });
     }
-    // GY-1477: setup ends with the one sign-in link itself (the host install's unused claim, else one the
-    // operator's credential mints), on the reachable address, so nobody runs graphyard login afterwards.
+    // GY-1477: setup ends with the one sign-in link itself (minted with the operator's credential, a host
+    // install's from its redeemed claim), on the reachable address, so nobody runs graphyard login afterwards.
     const base = await linkBase();
-    const minted = base ? claim ?? await deps.signIn?.(state.operatorTokenFile ?? null).catch(() => null) ?? null : null;
-    claim = null;
+    const minted = base ? await mint() : null;
     signIn = minted && base ? (state.goal ? signInAt(minted, base) : setupAddress(base, signInAt(minted, base))) : null;
     const open = signIn ? `${signIn} (signs you in; works once, within 10 minutes)` : setupUrl ?? 'the dashboard';
     return result(true, upExitCodes.green, state.goal ? `Graphyard is building ${state.goal}; follow it on the dashboard: open ${open}` : `Everything is green. Open ${open} and describe what you want built${request.agent ? ', or rerun with --goal FILE' : ''}.`);
@@ -762,16 +779,28 @@ export async function rememberPendingSudo(root: string, state: SudoState | null,
   await rename(`${file}.${process.pid}.tmp`, file);
 }
 
-/** A one-time dashboard sign-in address minted with the operator's admin credential in FILE (as `graphyard login` mints it). */
-export async function mintSignIn(server: string, file: string | null, fetcher: typeof fetch = fetch): Promise<string | null> {
-  if (!file) return null;
-  let token: string;
-  try { token = (await readFile(file, 'utf8')).trim(); } catch { return null; }
+/** A one-time dashboard sign-in address minted with the operator's admin credential, TOKEN or the one in FILE (as `graphyard login` mints it). */
+export async function mintSignIn(server: string, file: string | null, fetcher: typeof fetch = fetch, token = ''): Promise<string | null> {
+  if (!token && file) { try { token = (await readFile(file, 'utf8')).trim(); } catch { return null; } }
   if (token.length < 32) return null;
   const response = await fetcher(`${server.replace(/\/+$/, '')}/api/sign-in-links`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: '{}', signal: AbortSignal.timeout(30_000) });
   if (!response.ok) return null;
   const link = await response.json() as { code?: string };
   return typeof link.code === 'string' ? `${server.replace(/\/+$/, '')}/#sign-in=${link.code}` : null;
+}
+
+/**
+ * GY-1477: spend a host install's one-time claim (`SERVER/#claim=CODE`) for the admin credential it
+ * yields (POST /api/signin/claim, as the dashboard would), so `up` can mint fresh sign-in links on a
+ * machine that holds no operator token file. The credential is returned, never stored or printed.
+ */
+export async function redeemSignInClaim(link: string, fetcher: typeof fetch = fetch): Promise<string | null> {
+  const match = link.match(/^(https?:\/\/[^#]+?)\/*#claim=([A-Za-z0-9_-]{16,200})$/);
+  if (!match) return null;
+  const response = await fetcher(`${match[1]}/api/signin/claim`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: match[2] }), signal: AbortSignal.timeout(30_000) });
+  if (!response.ok) return null;
+  const { token } = await response.json() as { token?: string };
+  return typeof token === 'string' && token.length >= 32 ? token : null;
 }
 
 /** What `init --scan --apply` writes and the manual flow commits (docs/setup-from-zero.md, step 6). */
@@ -855,7 +884,8 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       const url = await serverUrl(), token = await masterToken();
       return url && token ? (await planeRequest(url, token)('work-snapshot'))?.work ?? null : null;
     },
-    signIn: async file => { const url = await serverUrl(); return url ? mintSignIn(url, file) : null; },
+    signIn: async (file, token) => { const url = await serverUrl(); return url ? mintSignIn(url, file, fetch, token) : null; },
+    redeemClaim: claim => redeemSignInClaim(claim),
     tailnet: async () => {
       // No Tailscale, or one not running, is no tailnet: the offer is simply not made.
       try {

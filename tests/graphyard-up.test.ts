@@ -28,6 +28,8 @@ const SERVER = 'http://127.0.0.1:4310';
 const CODE = 'c'.repeat(43);
 /** Where the simulated install saves the operator's admin credential: what mints the sign-in link. */
 const OPERATOR_TOKEN = '/install/acme-shop/tokens/acme-shop-operator.token';
+/** The admin credential a host install's claim yields: held in memory by up, never printed. */
+const HOST_SECRET = 'h'.repeat(48);
 
 interface World {
   calls: string[][]; installed: boolean; app: boolean; reviewer: boolean; accounts: boolean; loop: boolean;
@@ -40,8 +42,10 @@ interface World {
   /** Called on each sleep: where a test plays the person acting on the Setup page. */
   onSleep: (world: World, ticks: number) => void;
   ticks: number;
-  /** The credential files the run minted a sign-in link from. */
+  /** The credential files the run minted a sign-in link from ('memory' for a redeemed claim's credential). */
   signIns: (string | null)[];
+  /** The claim links the run redeemed. */
+  redeemed?: string[];
   /** The request id of each goal record (`graphyard goal FILE`). */
   creates: (string | null)[];
   /** The onboarding pull request once published, and whether it has merged. */
@@ -77,7 +81,9 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
     // A host install records the master's configuration only once it completes; a local one before its App step.
     serverUrl: async () => w.installed && (!w.host || (w.app && w.reviewer)) ? SERVER : null,
     masterToken: async () => w.installed ? 'm'.repeat(40) : null,
-    signIn: async file => { w.signIns.push(file); return file === OPERATOR_TOKEN ? `${SERVER}/#sign-in=${CODE}` : null; },
+    signIn: async (file, token) => { w.signIns.push(token ? 'memory' : file); return file === OPERATOR_TOKEN || token === HOST_SECRET ? `${SERVER}/#sign-in=${CODE}` : null; },
+    // The server spends a claim once: a second redemption is refused.
+    redeemClaim: async claim => { const spent = (w.redeemed ??= []).includes(claim); w.redeemed.push(claim); return !spent && claim === `${SERVER}/#claim=${CODE}` ? HOST_SECRET : null; },
     status: async () => status(w),
     publishOnboarding: async () => { w.calls.push(['publish-onboarding']); w.onboardingPullRequest ??= 'https://github.com/acme/shop/pull/1'; return w.onboardingMerged ? null : { pullRequest: w.onboardingPullRequest }; },
     // The person merges the onboarding pull request while up waits on it: the first read finds it open.
@@ -168,16 +174,19 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   assert.deepEqual((blockedEvents.find(event => event.kind === 'waiting') as any).waitingFor, ['github-app', 'reviewer-app']);
   assert.equal(installApplies(blocked), 1);
 
-  // A host install keeps its credentials on the host: the printed address is the install's own one-time
-  // claim link, carried to the Setup page, and no link is minted from a credential this machine lacks.
+  // A host install keeps its credentials on the host: up redeems the install's one-time claim itself and
+  // holds the credential in memory, so the wait and the final summary each get a fresh sign-in link.
   const hostRoot = await temporaryDirectory('graphyard-up-host');
   const host = world({ host: true, noLogins: true, onSleep: (w, ticks) => { if (ticks === 3) { w.app = true; w.reviewer = true; } if (ticks === 12) w.accounts = true; } });
   const hostEvents: UpEvent[] = [];
   const hosted = await runUp(request({ provider: 'hetzner' }), dependencies(host, hostRoot, hostEvents));
   assert.equal(hosted.exitCode, 0);
-  assert.deepEqual(hostEvents.filter(event => event.kind === 'waiting').map(event => (event as any).setupUrl), [`${SERVER}/#claim=${CODE}&setup`]);
-  assert.deepEqual(host.signIns, ['/var/lib/graphyard/tokens/acme-shop-operator.token'], 'the claim is used while waiting; only the final summary tries the host-side credential');
-  assert.equal(hosted.signIn, null, 'which this machine lacks, so no link is invented');
+  assert.deepEqual(hostEvents.filter(event => event.kind === 'waiting').map(event => (event as any).setupUrl), [`${SERVER}/#sign-in=${CODE}&setup`]);
+  assert.deepEqual(host.redeemed, [`${SERVER}/#claim=${CODE}`], 'the claim is redeemed once');
+  assert.deepEqual(host.signIns, ['memory', 'memory'], 'both links are minted from the credential the claim yielded, never the host-side token file');
+  assert.equal(hosted.signIn, `${SERVER}/#sign-in=${CODE}&setup`, 'a remote-host install also ends with a sign-in link');
+  assert.ok(hosted.next.includes(hosted.signIn!), 'carried by the final summary');
+  assert.ok(!JSON.stringify(hosted).includes(HOST_SECRET) && !hostEvents.some(event => JSON.stringify(event).includes(HOST_SECRET)), 'and no token value appears in the summary or any printed line');
   assert.deepEqual(requestedView(`#claim=${CODE}&setup`), { view: 'setup', hash: `#claim=${CODE}` });
 
   // Herdr bound to another server: the install runs with --no-herdr and never with --herdr-rebind.
@@ -695,6 +704,29 @@ test('unit:up-final-signin-link — a green up ends with one single-use sign-in 
     for (const secret of [MASTER, OPERATOR]) assert.ok(!summary.includes(secret), 'no credential value in the summary');
     assert.ok(!summary.includes('graphyard login'), 'nobody is sent to graphyard login');
   }
+  // A remote-host install keeps the operator token file on the host: up redeems the install's claim
+  // (POST /api/signin/claim) and mints the final link with that credential, held in memory only.
+  const { redeemSignInClaim, mintSignIn } = await up();
+  const posted: { url: string; body: string; authorization: string | null }[] = [];
+  const fetcher = (async (url: string, init: RequestInit) => {
+    posted.push({ url, body: String(init.body), authorization: new Headers(init.headers).get('Authorization') });
+    if (url.endsWith('/api/signin/claim')) return Response.json(JSON.parse(String(init.body)).code === CODE && posted.length === 1 ? { token: HOST_SECRET, principal: 'acme-shop-operator' } : { error: 'already used' }, { status: posted.length === 1 ? 200 : 410 });
+    return Response.json({ code: 's'.repeat(43) });
+  }) as typeof fetch;
+  const HOSTED = 'https://graphyard.acme.example';
+  assert.equal(await redeemSignInClaim(`${HOSTED}/#claim=${CODE}`, fetcher), HOST_SECRET);
+  assert.deepEqual(posted[0], { url: `${HOSTED}/api/signin/claim`, body: JSON.stringify({ code: CODE }), authorization: null });
+  assert.equal(await redeemSignInClaim(`${HOSTED}/#claim=${CODE}`, fetcher), null, 'a spent claim yields nothing');
+  assert.equal(await mintSignIn(HOSTED, '/var/lib/graphyard/tokens/acme-shop-operator.token', fetcher, HOST_SECRET), `${HOSTED}/#sign-in=${'s'.repeat(43)}`, 'minted with the in-memory credential, not the host-side file');
+  assert.equal(posted.at(-1)!.authorization, `Bearer ${HOST_SECRET}`);
+  const hostRoot = await temporaryDirectory('graphyard-up-final-host');
+  const host = world({ host: true, app: true, reviewer: true, accounts: true });
+  const hostEvents: UpEvent[] = [];
+  const hosted = await runUp(request({ provider: 'hetzner' }), dependencies(host, hostRoot, hostEvents));
+  assert.equal(hosted.exitCode, 0, hosted.next);
+  assert.equal(hosted.signIn, `${SERVER}/#sign-in=${CODE}&setup`, 'a remote-host install ends with a sign-in link too');
+  assert.ok(hosted.next.includes(hosted.signIn!));
+  for (const text of [JSON.stringify(hosted), JSON.stringify(hostEvents)]) assert.ok(!text.includes(HOST_SECRET) && !text.includes(`#claim=${CODE}`), 'no token value, and not the spent claim');
   // A run that stops prints no link: the one it would print could expire before the rerun.
   const stoppedRoot = await temporaryDirectory('graphyard-up-final-stopped');
   const stopped = world({ failOnce: new Set(['init --scan --apply']), app: true, reviewer: true });

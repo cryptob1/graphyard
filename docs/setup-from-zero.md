@@ -18,7 +18,7 @@ A new Hetzner server waits (exit 3) for price approval; rerun: `--confirm-price 
 
 ## The Setup page
 
-A step needing a person prints one link (`SERVER/#sign-in=CODE&setup` from the operator credential, or a host install's `#claim=CODE&setup`) and waits until green; it signs you in once (within 10 minutes) to the Setup page (also Settings → Agents). A green run ends with a fresh link; [phone access](dashboard.md#from-your-phone). Each live item has a sentence, button:
+A step needing a person prints one link (`SERVER/#sign-in=CODE&setup`, minted from the operator credential or a host install's claim) and waits until green; it signs you in once (within 10 minutes) to the Setup page (also Settings → Agents). A green run ends with a fresh link; [phone access](dashboard.md#from-your-phone). Each live item has a sentence, button:
 
 | Item | Button
 | --- | ---
