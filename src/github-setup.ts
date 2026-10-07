@@ -42,6 +42,11 @@ export function publiclyReachable(origin: string) {
   }
   return true;
 }
+/** GitHub refuses an App name longer than this ("Name cannot be longer than 34 characters"). */
+export const APP_NAME_LIMIT = 34;
+/** The first candidate GitHub accepts, so a long OWNER/REPO falls back to a shorter name before refusing (GY-1476). */
+const fitAppName = (candidates: string[]) => candidates.find(name => name.length <= APP_NAME_LIMIT && name === name.trim() && !/[-._]$/.test(name) && !/^[-._]/.test(name));
+const clip = (text: string, length: number) => length > 0 ? text.slice(0, length).replace(/[-._]+$/, '') : '';
 /**
  * A reviewer App is a separate identity with no control-plane authority: it reads code and
  * writes pull request comments, and never publishes Graphyard's own gate check.
@@ -49,21 +54,27 @@ export function publiclyReachable(origin: string) {
 export function reviewerAppManifest(reviewer: string, repository: string, deployment: string, callback: string) {
   if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(reviewer)) throw new Error('Reviewer name must be a lowercase identifier');
   const origin = manifestOrigin(repository, deployment);
-  const name = `${repository.replace('/', '-')} review ${reviewer}`;
-  if (name.length > 34) throw new Error(`GitHub App names are limited to 34 characters; "${name}" is too long, so choose a shorter reviewer name`);
+  const repo = repository.split('/')[1];
+  const name = fitAppName([`${repository.replace('/', '-')} review ${reviewer}`, `${repo} review ${reviewer}`, `${clip(repo, APP_NAME_LIMIT - ` review ${reviewer}`.length)} review ${reviewer}`]);
+  if (!name) throw new Error(`GitHub App names are limited to ${APP_NAME_LIMIT} characters; "${repo} review ${reviewer}" is too long even with the repository name shortened, so choose a shorter reviewer name`);
   return { name, url: origin, public: false,
     redirect_url: `${callback}/created`, setup_url: `${callback}/installed`,
     // The reviewer declaration carries no checks, administration, or contents: write: a
     // reviewer can never publish Graphyard's merge check or write code.
     default_permissions: requiredPermissions(reviewerPermissions),
-    default_events: [...reviewerEvents] };
+    // GitHub refuses events on an App with no hook ("Hook url cannot be blank"), and an origin it
+    // cannot reach registers none, so a local install's reviewer subscribes to nothing (GY-1476).
+    default_events: publiclyReachable(origin) ? [...reviewerEvents] : [] };
 }
 export function appManifest(repository: string, deployment: string, callback: string) {
   const origin = manifestOrigin(repository, deployment);
   const url = new URL(origin);
   // GitHub validates a hook URL even when the hook is inactive, so an origin it cannot reach
   // (a local Compose install, which polls instead) sends no hook_attributes at all (GY-1474).
-  return { name: `Graphyard ${repository.replace('/', '-')}`, url: url.origin, public: false,
+  const repo = repository.split('/')[1];
+  const name = fitAppName([`Graphyard ${repository.replace('/', '-')}`, `Graphyard ${repo}`, `Graphyard ${clip(repo, APP_NAME_LIMIT - 'Graphyard '.length)}`]);
+  if (!name) throw new Error(`GitHub App names are limited to ${APP_NAME_LIMIT} characters, and no shorter name fits ${repository}`);
+  return { name, url: url.origin, public: false,
     ...(publiclyReachable(url.origin) ? { hook_attributes: { url: `${url.origin}/api/github/webhook`, active: true } } : {}),
     redirect_url: `${callback}/created`, setup_url: `${callback}/installed`,
     // Exactly the declared control-plane set; the merge queue's Contents: write lives there.
@@ -467,10 +478,16 @@ export async function startGithubSetup(root: string, repository: string, deploym
    */
   reusable?: string[];
   reuse?: (slug: string) => Promise<AppCredentials & { installationId: number }>;
+  /**
+   * GY-1476: the App's installation on the repository, read as the App itself (its JWT), or null.
+   * An operator who installs the App outside this page (from a phone, where the redirect to
+   * 127.0.0.1 cannot load) is found here, so the page never asks for an Install already done.
+   */
+  findInstallation?: (app: AppCredentials) => Promise<number | null>;
 } = {}, reviewer?: string) {
   if (reviewer !== undefined && !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(reviewer)) throw new Error('Reviewer name must be a lowercase identifier');
   // Refused before the page opens, not when the human first loads it.
-  const hooked = publiclyReachable(manifestOrigin(repository, deployment));
+  manifestOrigin(repository, deployment);
   await localDirectory(root);
   const file = dependencies.file ?? credentialFile(root, reviewer);
   let app: AppCredentials | undefined;
@@ -495,6 +512,21 @@ export async function startGithubSetup(root: string, repository: string, deploym
     const repo = await github.request('');
     if (repo.full_name?.toLowerCase() !== repository.toLowerCase()) throw new Error('Installation cannot access the expected repository');
   });
+  const findInstallation = dependencies.findInstallation ?? (async (credential: AppCredentials) => {
+    const installation = await appCall(credential.appId, credential.privateKey, `App ${credential.slug}`, fetch)(`/repos/${repository}/installation`);
+    return Number.isSafeInteger(installation?.id) && installation.id > 0 ? installation.id as number : null;
+  });
+  /** Records an installation the operator made elsewhere; false while there is none (or it cannot be read). */
+  async function detectInstallation() {
+    if (!app || app.installationId) return !!app?.installationId;
+    const registered = app;
+    const installationId = await findInstallation(registered).catch(() => null);
+    if (!installationId || app !== registered) return false;
+    await verify(registered, installationId);
+    const next = { ...registered, installationId }; await persist(next); app = next;
+    if (dependencies.record) await dependencies.record(next as AppCredentials & { installationId: number });
+    return true;
+  }
   async function persist(value: AppCredentials, initial = false) {
     // Both writes are atomic: the manifest flow polls this file and must never read it half-written.
     const temporary = `${file}.${randomBytes(8).toString('hex')}.tmp`;
@@ -533,6 +565,7 @@ export async function startGithubSetup(root: string, repository: string, deploym
         if (app?.installationId) return html(200, reviewer
           ? `<p>Reviewer App registered and installation verified. Add this entry to the server's <code>GRAPHYARD_REVIEWER_APPS</code> registry, then name <code>${escape(reviewer)}</code> from a reviewer profile:</p><pre>${escape(JSON.stringify({ id: reviewer, runtime: reviewer, appId: app.appId, botUserId: app.botUserId }, null, 2))}</pre><p>Set <code>runtime</code> to the agent runtime that will post the verdicts. The private key stays in this machine's credential file and is never needed by Graphyard.</p>`
           : '<p>App registered and installation verified. Credentials are saved locally with restricted file permissions. You may close setup and configure Railway.</p>');
+        if (app && await detectInstallation().catch(() => false)) { res.writeHead(303, { Location: '/' }); return res.end(); }
         if (app) return html(200, `<p>App registered. Install it only on ${escape(repository)}.</p><a href="https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new">Install GitHub App</a>${sudoForm(state, repository, !!reviewer)}`);
         const manifest = reviewer ? reviewerAppManifest(reviewer, repository, deployment, `http://${address}`) : appManifest(repository, deployment, `http://${address}`);
         const reusable = dependencies.reuse ? dependencies.reusable ?? [] : [];
@@ -563,9 +596,11 @@ export async function startGithubSetup(root: string, repository: string, deploym
         if (!code || !/^[a-zA-Z0-9_-]{1,200}$/.test(code)) return html(400, '<p>Missing GitHub registration code.</p>');
         exchanging = true;
         const result = await convert(code);
-        // Only a manifest with hook_attributes gets a webhook secret back. A webhook-less control-plane
-        // App (a local origin, GY-1474) still needs GITHUB_WEBHOOK_SECRET, so it gets a local one.
-        if (!Number.isSafeInteger(result.id) || !result.slug || !result.pem || !(reviewer || !hooked || result.webhook_secret)) throw new Error('GitHub returned incomplete App credentials');
+        // Only a manifest with hook_attributes gets a webhook secret back. A control-plane App without
+        // one (a local origin, GY-1474) still needs GITHUB_WEBHOOK_SECRET, so it gets a local one: the
+        // App and its one-time key already exist, and refusing here would orphan them (GY-1476). Install
+        // writes the secret to the App's webhook whenever it configures one.
+        if (!Number.isSafeInteger(result.id) || !result.slug || !result.pem) throw new Error('GitHub returned incomplete App credentials');
         const webhookSecret = result.webhook_secret || (reviewer ? '' : randomBytes(32).toString('hex'));
         const next: AppCredentials = { appId: result.id, slug: result.slug, privateKey: result.pem, webhookSecret, repository };
         if (reviewer) {
@@ -589,7 +624,9 @@ export async function startGithubSetup(root: string, repository: string, deploym
   });
   // Validate before binding; port 0 is useful for isolated tests.
   if (reviewer) reviewerAppManifest(reviewer, repository, deployment, 'http://127.0.0.1'); else appManifest(repository, deployment, 'http://127.0.0.1');
+  // A saved App the operator already installed is recorded before any Install step is shown (GY-1476).
+  await detectInstallation().catch(() => false);
   await new Promise<void>((accept, reject) => { http.once('error', reject); http.listen(port, '127.0.0.1', accept); })
     .catch((error: any) => { throw error?.code === 'EADDRINUSE' ? appPageBusy(port) : error; });
-  return { http, url: `http://127.0.0.1:${(http.address() as any).port}`, file };
+  return { http, url: `http://127.0.0.1:${(http.address() as any).port}`, file, installed: !!app?.installationId, detectInstallation: () => detectInstallation().catch(() => false) };
 }

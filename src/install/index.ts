@@ -11,13 +11,13 @@ import { requiredPullRequestChecks, type DeliveryPolicy } from '../model/deliver
 import { applyWiring, deploymentAdapters, observeReleaseWiring, wiringActions, type DeploymentAdapter, type DeploymentContext } from './deploy-target.js';
 import { adapterFor, carriesCredential, isProviderReference, quotedPrice, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
 import { existingMachineAdapter, generateHostSecrets, hostLayout, hostPlan, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
-import { applyProtection, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, installationToken, protectionSatisfied, readProtection, GRAPHYARD_CHECKS, readWebhookConfig, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
+import { applyProtection, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, installationToken, protectionSatisfied, readProtection, GRAPHYARD_CHECKS, readWebhookConfig, repositoryInstallation, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
 import { assertOutsideRepository, configHome, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord } from './secrets.js';
-import { AppStepPending, readAppFile, readSavedApp, type SavedApp } from './manifest.js';
-import { appRoles, importApp, listApps, reuseExistingApp, savedRegistrations, type AppCredentials, type AppRole, type SavedRegistration } from '../github-setup.js';
+import { AppStepPending, readAppFile, readSavedApp, readUninstalledApp, type SavedApp } from './manifest.js';
+import { appRoles, importApp, listApps, publiclyReachable, reuseExistingApp, savedRegistrations, type AppCredentials, type AppRole, type SavedRegistration } from '../github-setup.js';
 import { herdrBoundElsewhere, herdrPluginBinding, herdrRebindRefusal } from '../repository-setup.js';
 import { localTransport, sshTransport, type Transport } from './transport.js';
 import { durableCheckoutPreflight, underTestRunner } from '../supervisor.js';
@@ -201,18 +201,26 @@ function mainCheckout(root: string) {
  * checkout. A registration for another repository is never reused; a named file that cannot be
  * used is a preflight failure rather than a silent fallback to the browser.
  */
-async function findSavedApp(root: string, directory: string, inputs: InstallInputs): Promise<InstallSession['savedApp']> {
-  const forRepository = (app: SavedApp | null) => !!app && (app.repository ?? '').toLowerCase() === inputs.repository.toLowerCase();
+async function findSavedApp(root: string, directory: string, inputs: InstallInputs, fetcher: typeof fetch): Promise<InstallSession['savedApp']> {
+  const forRepository = (app: Pick<SavedApp, 'repository'> | null) => !!app && (app.repository ?? '').toLowerCase() === inputs.repository.toLowerCase();
+  // A registration without its installation (the operator installed the App outside the setup
+  // page, say from a phone) is completed from the App's own JWT before any App page opens (GY-1476).
+  const installed = async (file: string): Promise<SavedApp | null> => {
+    const app = await readUninstalledApp(file).catch(() => null);
+    if (!app || !forRepository(app)) return null;
+    const installationId = await repositoryInstallation(app.facts, inputs.repository, fetcher).catch(() => null);
+    return installationId ? { file, repository: app.repository, facts: { ...app.facts, installationId }, detected: true } : null;
+  };
   if (inputs.githubAppFile) {
     const file = resolve(inputs.githubAppFile);
     let app: SavedApp | null;
-    try { app = await readSavedApp(file); } catch (error: any) { return { app: null, error: `${file} is unreadable: ${error.code === 'ENOENT' ? 'no such file' : error.message}` }; }
+    try { app = await readSavedApp(file) ?? await installed(file); } catch (error: any) { return { app: null, error: `${file} is unreadable: ${error.code === 'ENOENT' ? 'no such file' : error.message}` }; }
     if (!app) return { app: null, error: `${file} holds no complete control-plane App registration (appId, installationId and privateKey)` };
     if (!forRepository(app)) return { app: null, error: `${file} registers the App for ${app.repository ?? 'no repository'}, not ${inputs.repository}` };
     return { app, error: null };
   }
   for (const file of [resolve(directory, 'github-app.json'), resolve(root, '.graphyard', 'github-app.json'), resolve(mainCheckout(root), '.graphyard', 'github-app.json')]) {
-    const app = await readSavedApp(file).catch(() => null);
+    const app = await readSavedApp(file).catch(() => null) ?? await installed(file);
     if (forRepository(app)) return { app, error: null };
   }
   return { app: null, error: null };
@@ -373,7 +381,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
     context.host!.secretsUnreadable = stored.unreadable;
   }
   const materialized = tokens.size === principals.length && !!context.databasePassword;
-  const savedApp = await findSavedApp(root, directory, inputs);
+  const savedApp = await findSavedApp(root, directory, inputs, dependencies.fetch ?? fetch);
   const registrations = await hostRegistrations(root, dependencies.configHome);
   for (const entry of registrations) { vault.add(entry.app.privateKey); if (entry.app.webhookSecret) vault.add(entry.app.webhookSecret); }
   if (savedApp.app) { vault.add(savedApp.app.facts.privateKey); if (savedApp.app.facts.webhookSecret) vault.add(savedApp.app.facts.webhookSecret); }
@@ -1011,8 +1019,11 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   if (!await waitForHealth(session, url)) throw new Error('The service did not return to health after the GitHub credentials were written');
 
   const app = appClient(facts, deps.fetch);
-  const polling = pollsGitHub(context.provider);
-  const webhookConfig = polling ? null : await readWebhookConfig(app);
+  // An App registered for an origin GitHub cannot reach (loopback, private) has no hook, whatever
+  // the provider: PATCHing its /app/hook/config 404s, so it is configured and proved like a local
+  // install's, which is to say not at all (GY-1476).
+  const webhookConfig = pollsGitHub(context.provider) ? null : await readWebhookConfig(app);
+  const polling = pollsGitHub(context.provider) || (!publiclyReachable(url) && !webhookConfig?.url);
   // A GitHub App has one webhook. A reused App whose webhook still reaches a live installation keeps
   // it unless this install is the cutover (--migrate), so a trial host never takes an existing
   // installation's events away from it.
@@ -1229,7 +1240,9 @@ async function resolveApp(session: InstallSession, url: string, record: InstallR
     try {
       await installationToken(saved.facts, deps.fetch);
       const own = appCredentialFile(session);
-      if (saved.file !== own) { await writeFile(own, await readFile(saved.file, 'utf8'), { mode: 0o600 }); await chmod(own, 0o600); }
+      // An installation found through the App's JWT is recorded with the registration (GY-1476).
+      if (saved.detected) { await writeFile(own, JSON.stringify({ ...JSON.parse(await readFile(saved.file, 'utf8')), installationId: saved.facts.installationId }, null, 2), { mode: 0o600 }); await chmod(own, 0o600); }
+      else if (saved.file !== own) { await writeFile(own, await readFile(saved.file, 'utf8'), { mode: 0o600 }); await chmod(own, 0o600); }
       deps.log(`Reusing the GitHub App ${saved.facts.slug} (app ${saved.facts.appId}) from ${saved.file}; no browser step`);
       if (record.github && record.github.appId !== saved.facts.appId) deps.log(`GitHub App changed from ${record.github.appId} to ${saved.facts.appId}`);
       return { ...saved.facts, reused: true };

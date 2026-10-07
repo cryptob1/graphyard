@@ -55,9 +55,10 @@ test('unit:local-install-no-webhook — a compose install says in preflight that
   } finally { await fixture.cleanup(); }
 });
 
-test('unit:manifest-no-loopback-hook — a webhook-less App for a loopback origin is created although GitHub returns no webhook secret, and still gets a local one', async () => {
+test('unit:manifest-no-loopback-hook — a control-plane App is created although GitHub returns no webhook secret, and gets a local one rather than its credentials being discarded', async () => {
   const { startGithubSetup } = await setup();
-  for (const [deployment, created] of [['http://127.0.0.1:4310', true], ['https://graphyard.example', false]] as const) {
+  // GY-1476: a hosted origin too keeps the App GitHub already created; install writes the secret to its webhook.
+  for (const [deployment, created] of [['http://127.0.0.1:4310', true], ['https://graphyard.example', true]] as const) {
     const root = await temporaryDirectory('manifest-setup'); execFileSync('git', ['init', '-q', root]);
     const page = await startGithubSetup(root, 'owner/scratch', deployment, 0, { convert: async () => ({ id: 123, slug: 'graphyard-scratch', pem: 'test-only-private-key', webhook_secret: null }) });
     try {
