@@ -40,6 +40,13 @@ export function promotionWait(state: { deployment?: { source?: string; sha: stri
 
 /** The promotion that would serve the pending deliveries is on schedule: a candidate in validation, or not yet due. */
 export const promotionOnSchedule = (wait: PromotionWait | null | undefined, now: number) => !!wait && (wait.inFlight || (!!wait.nextDueAt && Date.parse(wait.nextDueAt) > now));
+/**
+ * The promotion wait that excuses a loop behind its checkout (GY-1400, GY-1464): the loop loaded the
+ * release production verifiably serves, and what it has not loaded waits on a promotion on schedule.
+ * The loaded-revision reading counts nothing and the self-upgrade owes no restart for exactly this.
+ */
+export const promotionHolds = (wait: PromotionWait | null | undefined, loaded: string | null | undefined, now: number) =>
+  !!wait && wait.pending.length > 0 && sameCommit(loaded, wait.deployedSha) && promotionOnSchedule(wait, now);
 /** The loop's checkout is aligned with the release production verifiably serves: a restart reloads that same release. */
 export const alignedWithDeployment = (wait: PromotionWait | null | undefined) => !!wait && sameCommit(wait.alignedRelease, wait.deployedSha);
 /** How the promotion wait reads in a line: when it is due, or that a candidate is in validation. */

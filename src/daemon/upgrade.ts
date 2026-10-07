@@ -15,6 +15,7 @@ import type { ChildRun } from '../child-runner.js';
 import { shortCommit, type ExecutorRestartResult } from '../executor-fleet.js';
 import type { MasterConfig } from '../master.js';
 import { alignLoopUnit, loopUnitOf } from '../supervisor.js';
+import { promotionHolds, promotionWait } from '../master/release-lag.js';
 import { storeAction, touchStanding, message, type DaemonState, type UpgradeStallCause } from './state.js';
 import { detailChanged } from './decisions.js';
 
@@ -280,23 +281,35 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   //    checkout holds code the running loop did not load; only an idle checkout is skipped: one
   //    holding what the loop loaded, or one a completed pass already moved to without loaded code
   //    (a docs-only alignment restarts nothing, so the loaded commit never catches up with it) from
-  //    what the loop loaded. A production that is observed but serves none of the awaited
-  //    deliveries yet is not unverified: the promotion wait holds, as before.
+  //    what the loop loaded. Production observed — serving none of the awaited deliveries yet, or a
+  //    release already aligned — leaves the checkout where it stands, but a checkout holding code
+  //    the loop did not load still owes the restart onto its own HEAD (GY-1464): a re-execution
+  //    that failed or never ended the process, or a move the loop did not make, must not pin the
+  //    loop on stale code until the next promotion. Only the promotion wait the loaded-revision
+  //    reading excuses holds it: the loop runs the release production serves and the promotion
+  //    that would serve the rest is on schedule.
   const observation = state.deployment;
   const observed = !!observation && observation.source !== 'unavailable' && !!observation.sha;
   const release = observed && observation!.deployed.length ? observation!.sha : null;
   const unverified = !observed;
   const loaded = state.release?.commit ?? null;
-  if (!release) {
-    if (!state.upgrade.pending) {
-      if (observed) return { outcome: 'skipped', reason: 'no delivered item is verified deployed yet' };
-      const head = loaded ? (await checkoutState(deps.root, deps.run)).commit : null;
-      const last = state.upgrade.last;
-      const processed = !!head && last?.to === head && last.code === false && last.from === loaded;
-      if (!head || head === loaded || processed) return { outcome: 'skipped', reason: 'no delivered item is verified deployed yet' };
+  /** A move a completed pass already processed from what the loop loaded, touching no loaded code. */
+  const processed = (head: string) => { const last = state.upgrade.last; return last?.to === head && last.code === false && last.from === loaded; };
+  if (!state.upgrade.pending && (!release || state.upgrade.alignedRelease === release)) {
+    const idle = release ? `release ${shortCommit(release)} was already aligned` : 'no delivered item is verified deployed yet';
+    const head = loaded ? (await checkoutState(deps.root, deps.run)).commit : null;
+    if (!head || head === loaded || processed(head)) return { outcome: 'skipped', reason: idle };
+    if (observed) {
+      if (promotionHolds(promotionWait(state), loaded, now())) return { outcome: 'skipped', reason: idle };
+      // The restart owed onto the checkout's own HEAD, with no fetch and no move.
+      let code: boolean;
+      try { code = upgradeTouchesCode((await git('diff', '--name-only', `${loaded}..${head}`)).split('\n').map(path => path.trim()).filter(Boolean)); }
+      catch (error) { return unaligned(`the diff from ${shortCommit(loaded)} to ${shortCommit(head)} could not be read: ${message(error)}`, 'checkout-failed'); }
+      state.upgrade.pending = { from: loaded, to: head, code };
+      await persist();
+      return finish(state.upgrade.pending);
     }
-  } else if (state.upgrade.alignedRelease === release && !state.upgrade.pending)
-    return { outcome: 'skipped', reason: `release ${shortCommit(release)} was already aligned` };
+  }
 
   // 2. The base tip, from a fresh fetch.
   let to: string;
@@ -319,8 +332,9 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // The checkout already holds the tip: finish what an earlier pass still owes, or align and
     // clear a refusal that no longer describes anything.
     if (state.upgrade.pending) return finish(state.upgrade.pending);
-    // Unverified, the tip itself is code the running loop never loaded: the restart onto it is owed.
-    if (unverified && loaded && loaded !== to) {
+    // The tip itself is code the running loop never loaded: the restart onto it is owed, verified
+    // or not (GY-1464), unless a completed pass already processed it without loaded code.
+    if (loaded && loaded !== to && !processed(to)) {
       let code: boolean;
       try { code = upgradeTouchesCode((await git('diff', '--name-only', `${loaded}..${to}`)).split('\n').map(path => path.trim()).filter(Boolean)); }
       catch (error) { return unaligned(`the diff from ${shortCommit(loaded)} to ${shortCommit(to)} could not be read: ${message(error)}`, 'checkout-failed'); }
