@@ -2427,8 +2427,10 @@ export class Engine {
     // rule, and one the control plane raised for an epoch whose blocked report or stopped-worker
     // attestation is in the ledger never needed a human either. Settle both here, on deploy and
     // on every later tick, with the note that says why and the attestation it rests on, so the
-    // backlog does not wait on one click per item.
-    for (const settled of settleableLeaseLoss(work, attestations)) {
+    // backlog does not wait on one click per item. A control-plane lease-loss whose lost attempt the
+    // record shows can no longer act — superseded, or ended with no lease and no fence — is settled
+    // here too once it has stood its bound (GY-1393), not by an approver round.
+    for (const settled of settleableLeaseLoss(work, attestations, now.getTime())) {
       resolveEscalation(work, settled.escalation.trigger);
       ledger.push({ kind: 'escalation.auto-settled', details: { trigger: settled.escalation.trigger, epoch: settled.epoch, escalation: settled.escalation, note: settled.note, cause: settled.cause, attestation: settled.attestation, submission: work.submission } });
     }

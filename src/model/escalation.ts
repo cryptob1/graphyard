@@ -104,8 +104,46 @@ export function leaseLossSettlementNote(cause: LeaseLapseCause, attestation: Att
   return cause === 'blocked-awaiting-operator' ? `auto-settled: blocked report for epoch ${attestation?.epoch} explains the lapse${source}`
     : `auto-settled: stopped-worker attestation for epoch ${attestation?.epoch} explains the lapse${source}`;
 }
-export interface LeaseLossSettlement { escalation: Escalation; epoch: number; cause: LeaseLapseCause; attestation: Attestation | null; exhaustion?: ExhaustionRecord; note: string }
-export function settleableLeaseLoss(work: Pick<Work, 'submission' | 'capacity' | 'escalation' | 'escalations'>, attestations: Attestation[] = []): LeaseLossSettlement[] {
+/**
+ * GY-1393. How long a control-plane lease-loss stands before reconciliation settles it on the
+ * record alone (`endedLeaseLoss`): long enough for every reader that samples standing escalations —
+ * the deploy-lease-loss invariant and the session-liveness faults among them — to see it on at least
+ * one loop cycle, and far shorter than the approver round it replaced, which took 3 to 229 minutes.
+ */
+export const leaseLossSettleMs = 5 * 60_000;
+/**
+ * GY-1393. Why a standing control-plane lease-loss can no longer act, read from the record alone,
+ * or null. `superseded` when a newer attempt took the item: a claim needs the old lease ended, and
+ * the newer attempt's containment fence can only stand once the lost epoch's was lowered. Only the
+ * latest attempt's own lease or submission shows it: a submission survives the rework claim that
+ * follows it, so an older one would vouch for a later attempt that lapsed unexplained (its own
+ * lease-loss suppressed as a repeat of this one). `ended` when the item is between attempts with
+ * no lease and no containment fence — after the lost epoch, or after later attempts that lapsed too
+ * (GY-1373 stood from epoch 1 through 18 more) — every worker's supervisor lowered its fence at
+ * exit, or the loop settled it after verifying the supervisor gone. A lead-raised concern, a delivered item, or a
+ * lost epoch whose fence still stands is never settled here.
+ */
+export function endedLeaseLoss(work: Pick<Work, 'stage' | 'epoch' | 'lease' | 'submission' | 'containmentQuarantine'>, escalation: Escalation): { cause: 'superseded' | 'ended'; epoch: number; evidence: string } | null {
+  const epoch = leaseLossEpoch(escalation);
+  if (work.stage === 'done' || escalation.actor !== 'graphyard' || epoch === null) return null;
+  const fence = work.containmentQuarantine;
+  if (fence && fence.epoch <= epoch) return null;
+  const newer = work.epoch > epoch && (work.lease && work.lease.epoch === work.epoch ? `epoch ${work.lease.epoch} is held by ${work.lease.owner}`
+    : work.submission && work.submission.epoch === work.epoch ? `epoch ${work.submission.epoch} submitted PR #${work.submission.pr}` : null);
+  if (newer) return { cause: 'superseded', epoch, evidence: `a newer attempt superseded it: ${newer}, a claim is granted only after the epoch ${epoch} lease has ended, and ${fence ? `the containment fence now standing belongs to epoch ${fence.epoch}` : 'no containment fence stands'}` };
+  // Later attempts that lapsed too raised no lease-loss of their own (a repeat of a standing trigger
+  // is history), so this one stands for them as well: with no lease and no fence, every one has ended.
+  if (work.epoch >= epoch && !work.lease && !fence) return { cause: 'ended', epoch, evidence: `${work.epoch > epoch ? `every attempt from epoch ${epoch} to epoch ${work.epoch} has ended` : 'no newer attempt holds the item'}, and it holds no lease and no containment fence, so each supervisor lowered its fence or was verified gone` };
+  return null;
+}
+export interface LeaseLossSettlement { escalation: Escalation; epoch: number; cause: LeaseLapseCause | 'superseded' | 'ended'; attestation: Attestation | null; exhaustion?: ExhaustionRecord; note: string }
+/**
+ * The standing lease-losses reconciliation settles. Given `now`, a control-plane lease-loss whose
+ * lost attempt can no longer act (`endedLeaseLoss`) is settled once it has stood `leaseLossSettleMs`:
+ * that judgement rests only on the record, so an approver asked to confirm it confirmed facts the
+ * control plane already held (GY-1393: 28 such approver rounds in 7 days).
+ */
+export function settleableLeaseLoss(work: Pick<Work, 'submission' | 'capacity' | 'escalation' | 'escalations'> & Partial<Pick<Work, 'stage' | 'epoch' | 'lease' | 'containmentQuarantine'>>, attestations: Attestation[] = [], now?: number): LeaseLossSettlement[] {
   const settlements: LeaseLossSettlement[] = [];
   for (const escalation of standingEscalations(work)) {
     const epoch = leaseLossEpoch(escalation);
@@ -114,8 +152,13 @@ export function settleableLeaseLoss(work: Pick<Work, 'submission' | 'capacity' |
     // the lapse the control plane itself raised is explained by what the control plane wrote. A
     // bound submission explains the epoch whoever raised it, and settles it as it always has.
     const explained = leaseLapseCause(work, { epoch }, escalation.actor === 'graphyard' ? attestations : []);
-    if (explained && (escalation.actor === 'graphyard' || explained.cause === 'submitted'))
+    if (explained && (escalation.actor === 'graphyard' || explained.cause === 'submitted')) {
       settlements.push({ escalation, epoch, ...explained, note: leaseLossSettlementNote(explained.cause, explained.attestation, explained.exhaustion ?? null) });
+      continue;
+    }
+    const ended = now !== undefined && work.epoch !== undefined && now - Date.parse(escalation.at) >= leaseLossSettleMs
+      ? endedLeaseLoss({ stage: work.stage ?? 'build', epoch: work.epoch, lease: work.lease ?? null, submission: work.submission, containmentQuarantine: work.containmentQuarantine ?? null }, escalation) : null;
+    if (ended) settlements.push({ escalation, epoch, cause: ended.cause, attestation: null, note: `auto-settled: ${ended.evidence}; nothing from the lost attempt can act or merge` });
   }
   return settlements;
 }

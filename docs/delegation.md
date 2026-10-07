@@ -23,6 +23,6 @@ Unresolved triggers refuse the merge gate. A `requirement-weakening` raised by a
 Resolutions record `escalation.resolved`.
 
 - Explained `lease-loss`: reconciliation, or `admin` `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`.
-- `lease-loss` of a superseded/stopped epoch: loop's two-party decision (stale if the superseding lease lapses).
+- Control-plane `lease-loss` whose lost attempt can no longer act (superseded by a newer held/submitted epoch, or ended with no lease and no containment fence): reconciliation auto-settles it after 5 min standing (`auto-settled: … nothing from the lost attempt can act or merge`); no approver round. Its own standing fence keeps it waiting.
 - `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, or a lead-raised `lease-loss`: master-requested two-party decision, or a declared human session (`admin`, `sessionKind: "human"`; settles any).
 - `requirement-weakening` raised by applying an approved `requirements` decision: that approval, citing the decision and approver.
