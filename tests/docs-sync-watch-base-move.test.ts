@@ -257,6 +257,27 @@ test('unit:docs-sync-hold-bound-within-blocked-bound — the hold lasts at most 
   assert.equal(docsSyncHolding(state.docsSyncs, work, clock), null);
 });
 
+test('unit:docs-sync-ended-hold-stays-ended — a hold found ended stays awaiting its observation though Herdr lists the session working again, and is no longer a hold the silence measure exempts', async () => {
+  const state = emptyDaemonState(config()), record = { synced: [] as DocsSyncPlan[], agents: [] as string[] }, notes: string[] = [];
+  let work = conflicted(tip, iso(-30_000), { id: 'work-unit-ended' });
+  const route = (now: number) => docsSyncRoute({ config: { baseBranch: 'main' }, state, snapshot: { work: [work] }, stamp: new Date(now).toISOString(), clock: now, inventorySpent: () => {},
+    effects: { docsSync: launch(record), persist: async () => {}, closeSession: async () => {} },
+    sessions: async () => ({ agents: record.agents.map(name => ({ name, pane_id: 'pane-s', agent_status: 'working' }) as any), available: true }),
+    note: async (_key, _item, _kind, outcome, detail) => { notes.push(`${outcome}: ${detail}`); } });
+  assert.ok((await route(clock).hold(work)).held, 'the docs-sync holds the item');
+  const name = record.agents[0];
+  record.agents.length = 0;
+  const ended = await route(clock + minute).hold(work);
+  assert.deepEqual(ended, { held: false, awaiting: iso(minute) }, 'the session is gone: the hold ends, awaiting an observation since');
+  record.agents.push(name);
+  const listed = await route(clock + 2 * minute).hold(work);
+  assert.deepEqual(listed, { held: false, awaiting: iso(minute) }, 'listed working again, the ended hold is not resurrected');
+  assert.equal(docsSyncHolding(state.docsSyncs, work, clock + 2 * minute), null, 'and the silence measure exempts nothing');
+  work = conflicted(tip, iso(minute + 30_000), { id: 'work-unit-ended' });
+  assert.equal((await route(clock + 3 * minute).hold(work)).held, false);
+  assert.match(notes.at(-1)!, new RegExp(`docs-sync session ${name} ended without moving`), 'an observation since settles it as ended when the loop found it gone');
+});
+
 test('integration:docs-sync-expiry-requests-rework-in-one-cycle — at the end of its bound, or when its session ends, the step wakes the observation and requests the rework within one cycle', async () => {
   // With the loop's own observation waker: the reading lands in the cycle and the rework is requested in it.
   const run = loop('work-expiry', { observe: true });

@@ -173,16 +173,22 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
       await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the conflict returns to a worker`);
       return { held: false };
     }
-    const seen = await sessions(), listed = watch.agentName ? seen.agents.find(agent => agent.name === watch.agentName) : undefined;
-    const overdue = clock >= docsSyncHoldDeadline(watch);
-    // A runtime that stopped (idle or done) ended its turn: the session pushed, or aborted and stopped.
-    if (listed && ['idle', 'done'].includes(listed.agent_status ?? '')) watch.stoppedAt ??= stamp; else if (listed) delete watch.stoppedAt;
-    const stopped = !!listed && !!watch.stoppedAt && clock - Date.parse(watch.stoppedAt) >= docsSyncStoppedMs;
-    if (!overdue && !stopped && (listed || !seen.available)) { if (listed) await effects.persist(state); return standing(item, key, watch, cutoff); }
-    // Gone, or past its bound: the push may not have been observed yet. Only an observation taken
-    // after the loop found that, still on the reviewed head, shows the docs-sync gave up; the step
-    // wakes the observation job for it (GY-1436) instead of holding until one arrives unprompted.
-    watch.goneAt ??= stamp;
+    // A hold the loop found ended stays ended (GY-1436): a session Herdr lists working again before
+    // the observation lands does not resurrect it, so its rework follows within the cycle, not at the bound.
+    if (!watch.goneAt) {
+      const seen = await sessions(), listed = watch.agentName ? seen.agents.find(agent => agent.name === watch.agentName) : undefined;
+      // A runtime that stopped (idle or done) ended its turn: the session pushed, or aborted and stopped.
+      if (listed && ['idle', 'done'].includes(listed.agent_status ?? '')) watch.stoppedAt ??= stamp; else if (listed) delete watch.stoppedAt;
+      const stopping = !!listed && !!watch.stoppedAt && clock - Date.parse(watch.stoppedAt) >= docsSyncStoppedMs;
+      if (clock < docsSyncHoldDeadline(watch) && !stopping && (listed || !seen.available)) { if (listed) await effects.persist(state); return standing(item, key, watch, cutoff); }
+      // Gone, or past its bound: the push may not have been observed yet. Only an observation taken
+      // after the loop found that, still on the reviewed head, shows the docs-sync gave up; the step
+      // wakes the observation job for it (GY-1436) instead of holding until one arrives unprompted.
+      watch.goneAt = stamp;
+    }
+    // How the hold ended is read at the moment the loop found it ended, whichever cycle settles it.
+    const endedAt = Date.parse(watch.goneAt), overdue = endedAt >= docsSyncHoldDeadline(watch);
+    const stopped = !!watch.stoppedAt && endedAt - Date.parse(watch.stoppedAt) >= docsSyncStoppedMs;
     if (!(item.observation && Date.parse(item.observation.at) > Date.parse(watch.goneAt))) { await effects.persist(state); return { held: false, awaiting: watch.goneAt }; }
     const aborted = !overdue && stopped;
     watch.failed = (overdue ? `the docs-sync session ran past its ${docsSyncHoldMs / 60_000}-minute bound without moving ${head.slice(0, 12)}`

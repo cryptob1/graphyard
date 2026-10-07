@@ -450,7 +450,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // Rework waits for an observation that still describes the item (GY-144); the step wakes it unless paused (GY-793) and re-decides.
     // The loop's own landed wake of the submitted head counts as that observation, whatever its age (GY-1266, GY-1257).
     const woken = state.actions[`wake:observation:${item.id}`];
-    let wait = hold?.awaiting ? `${item.key}: its docs-sync hold ended at ${hold.awaiting}; rework waits for an observation since then showing the head unmoved`
+    const endedWait = (subject: Work, at: string) => `${subject.key}: its docs-sync hold ended at ${at}; rework waits for an observation since then showing the head unmoved`;
+    let wait = hold?.awaiting ? endedWait(item, hold.awaiting)
       : decision.action === 'rework' ? reworkObservationWait(item, clock, pause, woken?.state === 'done' ? woken.at : null) : null;
     const fresh = wait && !pause && wake && !state.approvals[key] ? await wake(item, clock) : null;
     const again = fresh && routineDecision(fresh, config, now(), assessment, fresh.candidate?.sha === item.candidate?.sha ? cycle.baseFailed.get(item.id) : undefined, [], [], refused);
@@ -460,7 +461,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // The fresh reading settles an ended docs-sync hold in the cycle it ended (GY-1436).
       const settled = hold?.awaiting && docsConflict(item, decision) ? await docsSync.hold(item) : null;
       if (settled?.held) return noteHold(item, settled.wait);
-      wait = settled?.awaiting ? `${item.key}: its docs-sync hold ended at ${settled.awaiting}; rework waits for an observation since then showing the head unmoved` : reworkObservationWait(item, now(), pause);
+      wait = settled?.awaiting ? endedWait(item, settled.awaiting) : reworkObservationWait(item, now(), pause);
     }
     const watch = state.approvals[key];
     if (wait) {
