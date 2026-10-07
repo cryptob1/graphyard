@@ -14,11 +14,11 @@ cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --repo OWNER/REPO   # 
 
 A new Hetzner server waits (exit 3) for price approval: rerun with `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`.
 
-`up` runs, in order: preflight, control plane, host supervisor and Herdr, master identities (`master autonomy --apply` with the admin credential the install saved; without one on this machine, exit 2 until it is run there), onboarding, accounts, harness, master loop. Onboarding opens a `graphyard/onboarding` pull request; goals wait for its merge. `.graphyard/up.json` records finished steps; a rerun skips them, reusing (never contradicting) its `--repo`/`--provider`. Ctrl-C also stops the install child. A Herdr plugin bound elsewhere is never repointed (`--no-herdr`). A preflight failure (exit 2) names the [prerequisite](#1-machine-prerequisites).
+`up` runs, in order: preflight, control plane, host supervisor and Herdr, master identities (`master autonomy --apply` with the saved admin credential, else exit 2), onboarding, accounts, harness, master loop. Onboarding opens a `graphyard/onboarding` pull request; goals await its merge. A rerun skips steps `.graphyard/up.json` records as finished, reusing (never contradicting) its `--repo`/`--provider`. Ctrl-C also stops the install child. A Herdr plugin bound elsewhere is never repointed (`--no-herdr`). A preflight failure (exit 2) names the [prerequisite](#1-machine-prerequisites).
 
 ## The Setup page
 
-A step needing a person prints one link (`SERVER/#sign-in=CODE&setup` from the operator credential, or a host install's `#claim=CODE&setup`) and waits until green; it signs you in once, within 10 minutes, opening the Setup page (also in Settings → Agents). Each live item has a sentence and a button:
+A step needing a person prints one link (`SERVER/#sign-in=CODE&setup` from the operator credential, or a host install's `#claim=CODE&setup`) and waits until green. It signs you in once, within 10 minutes, to the Setup page (also Settings → Agents). Each live item has a sentence and a button:
 
 | Item | Button
 | --- | ---
@@ -26,7 +26,7 @@ A step needing a person prints one link (`SERVER/#sign-in=CODE&setup` from the o
 | An account that writes code, one that reviews | **Connect an account** (API key or subscription sign-in)
 | Branch protection, coordinator running | none: Graphyard does these
 
-Once green, **Describe what you want built** records a goal, like `graphyard goal`.
+Once green, **Describe what you want built** records a goal (`graphyard goal`).
 
 ## Agent setup: graphyard up --agent
 
@@ -34,7 +34,7 @@ Agents run `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-prof
 
 ## Troubleshooting: the manual steps
 
-What `up` runs; **HUMAN** marks what agents cannot. `graphyard doctor` prints `setupFromZero.lines`, a `PASS`/`FAIL` line per prerequisite, each failure naming its step; `next` names the first gap.
+What `up` runs; **HUMAN** marks what agents cannot. `graphyard doctor` prints `setupFromZero.lines`: `PASS`/`FAIL` per prerequisite, failures naming their step; `next` names the first gap.
 
 ## 1. Machine prerequisites
 
@@ -50,7 +50,7 @@ bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with
 
 ## 2. Graphyard and the repository
 
-The repository needs `origin` on GitHub and a GitHub Actions workflow testing on `pull_request`; that job becomes the required check. **Verify:** doctor readiness `repository`, `required-checks` and `test-formats` are `ready`.
+The repository needs a GitHub `origin` and an Actions workflow testing on `pull_request`, which becomes the required check. **Verify:** doctor readiness `repository`, `required-checks` and `test-formats` are `ready`.
 
 ## 3. Install the control plane
 
@@ -58,7 +58,7 @@ The repository needs `origin` on GitHub and a GitHub Actions workflow testing on
 
 ## 4. Register the GitHub App
 
-`--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)).
+`--apply` serves and prints `http://127.0.0.1:4311`, opening no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)).
 
 ## 5. Reviewer and revert-approver Apps
 
@@ -90,7 +90,7 @@ gy master init --browser-profile Default \
 gy master restart
 ```
 
-**HUMAN:** `--browser-profile` names a Chrome profile signed in to GitHub. **Verify:** `gy master status` shows `setup.supervisor` active.
+**HUMAN:** `--browser-profile` names a GitHub-signed-in Chrome profile. **Verify:** `gy master status` shows `setup.supervisor` active.
 
 ## 11. Hosted variables (Railway only)
 
