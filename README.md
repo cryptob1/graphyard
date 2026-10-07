@@ -12,10 +12,10 @@ Backlog → Ready → Build → Review → Test → Acceptance → Merge → Don
 
 ## Install
 
-From your repository ([checklist](docs/setup-from-zero.md) step 3):
+From your repository, `graphyard up` runs the whole first-run setup and prints the dashboard Setup page link ([setup](docs/setup-from-zero.md)):
 
 ```sh
-node /path/to/graphyard/bin/graphyard.mjs install --provider railway --repo OWNER/REPO --plan   # then --apply
+node /path/to/graphyard/bin/graphyard.mjs up --repo OWNER/REPO --provider railway   # install alone: install --provider P --repo OWNER/REPO --plan, then --apply
 ```
 
 **[docs/install.md](docs/install.md) is the primary install path**; `--provider compose` evaluates locally.

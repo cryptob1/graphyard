@@ -32,14 +32,38 @@ export interface SetupItem {
 /** Where the installer serves the GitHub App manifest page while it waits for the App (src/install/manifest.ts). */
 export const defaultAppSetupUrl = 'http://127.0.0.1:4311';
 
+/**
+ * The address `graphyard up` prints (GY-1419): the dashboard's Setup page, signed in. A one-time
+ * sign-in link (`#sign-in=CODE`, or a host install's `#claim=CODE`) carries `&setup`, so the person
+ * who opens it lands on the Setup page once the link signs them in; without a link it is `#setup`.
+ */
+export function setupAddress(server: string, signIn?: string | null) {
+  return signIn ? `${signIn}&setup` : `${server.replace(/\/+$/, '')}/#setup`;
+}
+
+/**
+ * The page an address opens and the fragment the sign-in page reads (GY-1419): `#setup` alone, or a
+ * sign-in or claim fragment followed by `&setup`, opens the Setup page; the `&setup` marker is taken
+ * off so the sign-in page sees the exact fragment it redeems. Any other fragment opens no page.
+ */
+export function requestedView(hash: string): { view: 'setup' | null; hash: string } {
+  if (hash === '#setup') return { view: 'setup', hash };
+  const signIn = /^(#(?:sign-in|claim)=[A-Za-z0-9_-]{16,200})&setup$/.exec(hash);
+  return signIn ? { view: 'setup', hash: signIn[1] } : { view: null, hash };
+}
+
 const roleTitle: Record<RequiredSetupRole, string> = { worker: 'An agent account that writes code', reviewer: 'An agent account that reviews code' };
 
-/** Whether ROLE has an account that is connected, signed in and allowed to take that role now. */
+/**
+ * Whether ROLE has an account that is connected, signed in and allowed to take that role now: the
+ * fleet's own `eligible` judgement (runtime and model configured, quota left) counts, so an account
+ * every session would be refused never turns the item green.
+ */
 function roleReady(fleet: any, role: RequiredSetupRole) {
   const entry = Array.isArray(fleet?.roles) ? fleet.roles.find((candidate: any) => candidate?.role === role) : null;
   if (!entry || !Array.isArray(entry.accounts) || !entry.accounts.length) return false;
   const accounts: any[] = Array.isArray(fleet?.accounts) ? fleet.accounts : [];
-  return accounts.some(account => entry.accounts.includes(account?.name) && account.enabled !== false && account.loggedIn !== false && account.smoke?.result !== 'fail');
+  return accounts.some(account => entry.accounts.includes(account?.name) && account.enabled !== false && account.loggedIn !== false && account.eligible !== false && account.smoke?.result !== 'fail');
 }
 
 /**

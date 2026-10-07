@@ -1,9 +1,11 @@
+import { randomUUID } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { dirname, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { checklistGreen, goalWorkItem, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
-import { agentBrowserPage, detectSudo, type BrowserPage } from './master-browser.js';
+import { goalWorkItem, setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
+import { actionsDirectory, agentBrowserPage, passSudo, recordingPage, type BrowserPage, type RecordedStep } from './master-browser.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
 
 /**
@@ -16,11 +18,15 @@ import { masterCredential, planeRequest } from './setup-from-zero.js';
  * server: that refusal is answered with --no-herdr.
  *
  * Interactive, a human step prints the dashboard's Setup page address once and waits for the step
- * to turn green. With --agent, every step has a non-interactive path (the App manifest is driven
- * through the master's browser profile, accounts come from login homes already on the host, the
- * goal from a file) and only a step that needs a person's own device or identity — a GitHub Mobile
- * or passkey approval, a subscription login's browser approval — is handed off, as one sentence
- * plus a link or code; the run resumes on its own once it completes.
+ * to turn green. That address is a one-time sign-in link minted with the operator's own credential
+ * (or the host install's claim) and ending `&setup`, so opening it signs the person in and lands on
+ * the Setup page with no token to paste. With --agent, every step has a non-interactive path (the
+ * App manifest is driven through the master's browser profile and recorded under
+ * .graphyard/master-actions like every master browser flow, accounts come from login homes already
+ * on the host, the goal from a file) and only a step that needs a person's own device or identity —
+ * a GitHub Mobile or passkey approval, a subscription login's browser approval — is handed off, as
+ * one sentence plus a link or code; the run resumes on its own once it completes. Agent mode with
+ * no browser profile stops before anything runs: App creation is never handed to a person.
  */
 
 export const upSteps = ['preflight', 'control-plane', 'host-supervisor', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal'] as const;
@@ -36,7 +42,7 @@ export interface UpRequest {
   master: string;
   /** A file holding the goal to submit once the checklist is green. */
   goalFile: string | null;
-  /** The Chrome profile signed in to GitHub that drives the App manifest in agent mode. */
+  /** The Chrome profile signed in to GitHub that drives the App manifest in agent mode; the master's recorded one when omitted. */
   browserProfile: string | null;
 }
 
@@ -53,17 +59,22 @@ export type Handoff = (sentence: string, link: { url?: string | null; code?: str
 export interface UpDependencies {
   root: string;
   /** Runs one graphyard command; stderr lines go to onLine as they arrive. */
-  cli(args: string[], options?: { stdin?: string; onLine?: (line: string) => void }): Promise<{ code: number; stdout: string }>;
+  cli(args: string[], options?: { stdin?: string; env?: Record<string, string>; onLine?: (line: string) => void }): Promise<{ code: number; stdout: string }>;
   /** The control plane's /api/status as the recorded master identity, or null while none answers. */
   status(): Promise<any | null>;
   /** The control plane's address once the install recorded it. */
   serverUrl(): Promise<string | null>;
   /** The master credential the install recorded for that control plane (.graphyard/master.json). */
   masterToken(): Promise<string | null>;
+  /**
+   * A one-time dashboard sign-in address (`SERVER/#sign-in=CODE`) minted with the operator's admin
+   * credential in OPERATOR_TOKEN_FILE, or null when none can be minted (no such file on this machine).
+   */
+  signIn?(operatorTokenFile: string | null): Promise<string | null>;
   emit(event: UpEvent): void;
   sleep(ms: number): Promise<void>;
   now(): number;
-  /** Agent mode: drive the App manifest page at URL in the master's browser profile. */
+  /** Agent mode: drive the App manifest page at URL in the master's browser profile, recorded as a master browser flow. */
   driveApp?(url: string, handoff: Handoff): Promise<DriveOutcome>;
   pollMs?: number;
   /** How long a step waits on a person before the run stops (resumable); Infinity interactively. */
@@ -75,6 +86,7 @@ export interface UpDependencies {
 export interface UpResult {
   ok: boolean;
   exitCode: number;
+  /** The Setup page's address (no sign-in code: the one printed while waiting was single use). */
   setupUrl: string | null;
   completed: UpStep[];
   /** How many times the run printed the Setup address and waited on a person. */
@@ -90,7 +102,13 @@ export const upExitCodes = { green: 0, failed: 1, prerequisite: 2, waiting: 3 } 
 
 class UpStop extends Error { constructor(message: string, readonly exitCode: number) { super(message); } }
 
-interface UpState { version: 1; repository: string; provider: string; completed: UpStep[]; noHerdr: boolean; goal: string | null }
+interface UpState {
+  version: 1; repository: string; provider: string; completed: UpStep[]; noHerdr: boolean; goal: string | null;
+  /** Where the install saved the operator's admin credential (a path, never the secret): what mints the sign-in link. */
+  operatorTokenFile?: string | null;
+  /** The goal's request id, fixed before the first try so a rerun after an interruption never creates it twice. */
+  goalRequest?: string | null;
+}
 export const upStateFile = (root: string) => resolve(root, '.graphyard/up.json');
 
 async function readState(root: string, request: UpRequest): Promise<UpState> {
@@ -112,13 +130,33 @@ async function writeState(root: string, state: UpState) {
 const parseJson = (text: string) => { try { return JSON.parse(text); } catch { return null; } };
 /** The manifest page the installer announces while it waits for an App. */
 const manifestUrl = (line: string) => line.match(/\bOpen (http:\/\/127\.0\.0\.1:\d+)\S*/)?.[1] ?? null;
+/**
+ * What an install's JSON output (its plan, or its summary, complete or paused) says about signing
+ * in: a host install's one-time claim link, printed once and kept only in memory, and where the
+ * operator's admin credential is saved when it is saved on this machine (a host install keeps it on
+ * the host, so its plan names none).
+ */
+function installSignIn(stdout: string) {
+  const output = parseJson(stdout);
+  if (!output || typeof output !== 'object') return { claim: null, operatorTokenFile: null };
+  const admin = Array.isArray(output.principals) ? output.principals.find((principal: any) => principal?.role === 'admin') : null;
+  const operatorTokenFile = typeof admin?.tokenFile === 'string' ? admin.tokenFile as string
+    : !output.host && typeof output.installDirectory === 'string' && typeof admin?.id === 'string' ? resolve(output.installDirectory, 'tokens', `${admin.id}.token`) : null;
+  return { claim: typeof output.signIn === 'string' && /#claim=[A-Za-z0-9_-]{16,200}$/.test(output.signIn) ? output.signIn as string : null, operatorTokenFile };
+}
+/** Keep where the operator's credential is saved (the path, never the secret), for the sign-in link. */
+async function rememberSignIn(root: string, state: UpState, stdout: string) {
+  const { claim, operatorTokenFile } = installSignIn(stdout);
+  if (operatorTokenFile && operatorTokenFile !== state.operatorTokenFile) { state.operatorTokenFile = operatorTokenFile; await writeState(root, state); }
+  return claim;
+}
 
 export async function runUp(request: UpRequest, deps: UpDependencies): Promise<UpResult> {
   const state = await readState(deps.root, request);
   const pollMs = deps.pollMs ?? 5_000;
   const humanWaitMs = deps.humanWaitMs ?? (request.agent ? 3_600_000 : Infinity);
   const machineWaitMs = deps.machineWaitMs ?? 600_000;
-  let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null);
+  let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null), claim: string | null = null;
   const handoffs: UpResult['handoffs'] = [];
   const handedOff = new Set<string>();
   const handoff = (step: UpStep): Handoff => (sentence, link) => {
@@ -129,19 +167,29 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     handoffs.push(entry); deps.emit({ kind: 'handoff', ...entry });
   };
   const checklist = async () => (last = setupChecklist(await deps.status().catch(() => null)));
-  const resolveSetupUrl = async () => { const url = await deps.serverUrl(); if (url) setupUrl = `${url.replace(/\/$/, '')}/#setup`; return setupUrl; };
+  const resolveSetupUrl = async () => { const url = await deps.serverUrl(); if (url) setupUrl = setupAddress(url); return setupUrl; };
   const complete = async (step: UpStep, detail?: string) => {
     if (!state.completed.includes(step)) state.completed.push(step);
     await writeState(deps.root, state);
     deps.emit({ kind: 'step', step, state: 'done', ...(detail ? { detail } : {}) });
   };
-  /** The interactive wait: the Setup address printed once for the whole run, then a poll until IDS are green. */
+  /**
+   * The interactive wait: the Setup address printed once for the whole run, then a poll until IDS
+   * are green. It signs the person in: the host install's claim, else a link the operator's own
+   * credential mints; only when neither exists does it fall back to the bare address.
+   */
   const announce = async (ids: SetupItemId[]) => {
     if (prompts > 0 || request.agent) return;
-    const url = await resolveSetupUrl();
-    if (!url) return;
+    const server = await deps.serverUrl();
+    if (!server) return;
+    await resolveSetupUrl();
+    const signIn = claim ?? await deps.signIn?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
+    claim = null;
+    const url = setupAddress(server, signIn);
     prompts++;
-    deps.emit({ kind: 'waiting', setupUrl: url, waitingFor: ids, sentence: `Open ${url} and follow the checklist; this command carries on as each step turns green.` });
+    deps.emit({ kind: 'waiting', setupUrl: url, waitingFor: ids, sentence: signIn
+      ? `Open ${url} to sign in to the Setup page and follow the checklist (the link works once, within 10 minutes); this command carries on as each step turns green.`
+      : `Open ${url}, sign in with the link graphyard login prints, and follow the checklist; this command carries on as each step turns green.` });
   };
   const waitGreen = async (ids: SetupItemId[], human: boolean, whilePending?: (pending: SetupItemId[], polls: number) => Promise<void>) => {
     const deadline = deps.now() + (human ? humanWaitMs : machineWaitMs);
@@ -155,7 +203,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       await deps.sleep(pollMs);
     }
   };
-  const run = async (step: UpStep, args: string[], options: { stdin?: string; onLine?: (line: string) => void } = {}) => {
+  const run = async (step: UpStep, args: string[], options: { stdin?: string; env?: Record<string, string>; onLine?: (line: string) => void } = {}) => {
     const result = await deps.cli(args, options);
     if (result.code !== 0) throw new UpStop(`${step}: graphyard ${args[0]}${args[1] && !args[1].startsWith('-') ? ` ${args[1]}` : ''} exited ${result.code}${result.stdout.trim() ? `: ${result.stdout.trim().split('\n').slice(-1)[0].slice(0, 400)}` : ''}`, upExitCodes.failed);
     return result.stdout;
@@ -169,9 +217,15 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   };
 
   try {
+    // Agent mode creates the Apps in a browser; without a profile it would hand the whole App
+    // creation to a person, which only a device approval may be. It stops before anything runs.
+    if (request.agent && !state.completed.includes('control-plane') && !deps.driveApp) throw new UpStop('Agent mode creates the GitHub Apps in a Chrome profile signed in to GitHub, and none is given or recorded: pass --browser-profile PROFILE and rerun graphyard up --agent.', upExitCodes.prerequisite);
+
     await step('preflight', async () => {
       for (let attempt = 0; attempt < 2; attempt++) {
-        const plan = parseJson(await run('preflight', installArgs('--plan')));
+        const planned = await run('preflight', installArgs('--plan'));
+        const plan = parseJson(planned);
+        await rememberSignIn(deps.root, state, planned);
         const failed: { name: string; detail?: string; fix?: string }[] = (plan?.preflight ?? []).filter((check: any) => check && check.ok === false);
         // A Herdr plugin bound to another server keeps that server (GY-1413): up never passes --herdr-rebind.
         if (failed.some(check => check.name === 'Herdr plugin') && !state.noHerdr) {
@@ -189,7 +243,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // The install waits on the App pages itself; it pauses (exit 1) after 900 s and a rerun resumes it.
       const deadline = deps.now() + humanWaitMs;
       for (;;) {
-        let drive: Promise<DriveOutcome> | null = null;
+        // One browser drive at a time, in the order the installer serves its App pages; every outcome is reported.
+        let drives: Promise<DriveOutcome[]> = Promise.resolve([]);
         let running = true;
         const watcher = (async () => {
           while (running) {
@@ -201,14 +256,14 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         })();
         const result = await deps.cli(installArgs('--apply'), { onLine: line => {
           const url = manifestUrl(line);
-          if (!url || !request.agent) return;
-          if (!deps.driveApp) { handoff('control-plane')('Create the GitHub App in a browser signed in to GitHub, then install it on the repository only.', { url }); return; }
-          drive = deps.driveApp(url, handoff('control-plane'));
+          if (!url || !request.agent || !deps.driveApp) return;
+          drives = drives.then(async outcomes => [...outcomes, await deps.driveApp!(url, handoff('control-plane'))]);
         } }).finally(() => { running = false; });
         await watcher;
-        const outcome = await (drive as Promise<DriveOutcome> | null);
-        if (outcome?.state === 'failed') deps.emit({ kind: 'note', text: `The browser could not finish the App page (${outcome.reason}); finish it by hand` });
+        const failed = (await drives).filter((outcome): outcome is Extract<DriveOutcome, { state: 'failed' }> => outcome.state === 'failed');
+        claim = await rememberSignIn(deps.root, state, result.stdout) ?? claim;
         if (result.code === 0) return 'control plane installed with its GitHub Apps';
+        if (failed.length) throw new UpStop(`control-plane: the browser could not finish the App page (${failed.map(outcome => outcome.reason).join('; ')}); its record is under .graphyard/master-actions, and rerunning graphyard up --agent resumes`, upExitCodes.failed);
         const paused = parseJson(result.stdout);
         if (!paused?.resume || deps.now() >= deadline) throw new UpStop(`control-plane: graphyard install exited ${result.code}${paused?.resume ? '; the App page is still unconfirmed, rerun graphyard up to resume' : ''}`, paused?.resume ? upExitCodes.waiting : upExitCodes.failed);
         deps.emit({ kind: 'note', text: 'The App page is still waiting for a person; serving it again' });
@@ -254,7 +309,9 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         const item = goalWorkItem(await readFile(resolve(deps.root, request.goalFile!), 'utf8'));
         const file = resolve(deps.root, '.graphyard/up-goal.json');
         await writeFile(file, `${JSON.stringify(item, null, 2)}\n`, { mode: 0o600 });
-        const created = parseJson(await run('goal', ['master', 'create', file, 'Goal submitted by graphyard up']));
+        // The request id is saved before the first try: a rerun replays the same create, which the control plane answers once.
+        if (!state.goalRequest) { state.goalRequest = randomUUID(); await writeState(deps.root, state); }
+        const created = parseJson(await run('goal', ['master', 'create', file, 'Goal submitted by graphyard up'], { env: { GRAPHYARD_REQUEST_ID: state.goalRequest } }));
         state.goal = created?.key ?? created?.id ?? 'created';
         return `submitted as ${state.goal}`;
       });
@@ -281,19 +338,19 @@ export function upRequestFromArgs(args: string[]): UpRequest {
 /**
  * Agent mode's App step (AC-5): the installer's manifest page, driven in the master's browser
  * profile — register the App, then install it on the repository alone (GitHub preselects it from
- * `repository_ids[]`). A Confirm-access prompt is the one thing handed to a person: its GitHub
- * Mobile code, after which the drive carries on by itself.
+ * `repository_ids[]`). A Confirm-access prompt is passed the way every master browser flow passes
+ * it (passSudo: GitHub Mobile is triggered, on the passkey-first page too) and its two-digit code
+ * is the one thing handed to a person, after which the drive carries on by itself.
  */
-export function browserAppDriver(options: { page: BrowserPage; repository: string; ids: () => { owner: number; repository: number }; sleep: (ms: number) => Promise<void>; timeoutMs?: number }) {
+export function browserAppDriver(options: { page: BrowserPage; repository: string; ids: () => { owner: number; repository: number }; sleep: (ms: number) => Promise<void>; timeoutMs?: number; record?: string; onClose?: (outcome: DriveOutcome) => Promise<void> | void }) {
   const { page } = options;
   const owner = options.repository.split('/')[0];
   const awaitSudo = async (handoff: Handoff) => {
-    const deadline = Date.now() + (options.timeoutMs ?? 600_000);
-    for (let sudo = detectSudo(page.url(), page.text()); sudo.sudo; sudo = detectSudo(page.url(), page.text())) {
-      handoff(sudo.code ? `Approve the GitHub Mobile prompt on your phone and choose ${sudo.code}` : 'Confirm access to GitHub on your device (GitHub Mobile or your passkey)', { url: page.url(), code: sudo.code });
-      if (Date.now() >= deadline) throw new Error('Confirm access was not approved in time');
-      await options.sleep(3_000);
-    }
+    // passSudo's flow names the closest master browser flow; its rerun advice is this command's.
+    try {
+      await passSudo(page, { flow: 'installation-accept', record: options.record ?? 'graphyard up', sleep: options.sleep, timeoutMs: options.timeoutMs ?? 600_000,
+        onCode: state => handoff(state.code ? `Approve the GitHub Mobile prompt on your phone and choose ${state.code}` : 'Confirm access to GitHub on your device (GitHub Mobile or your passkey)', { url: page.url(), code: state.code }) });
+    } catch (error: any) { throw new Error(String(error?.message ?? error).replace(/rerun master browser installation-accept/g, 'rerun graphyard up --agent')); }
   };
   const press = async (kind: 'button' | 'link', text: string, handoff: Handoff) => {
     await awaitSudo(handoff);
@@ -303,6 +360,7 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
     await awaitSudo(handoff);
   };
   return async (url: string, handoff: Handoff): Promise<DriveOutcome> => {
+    let outcome: DriveOutcome;
     try {
       page.open(url);
       const register = page.locate('button', 'Register Graphyard App →') ?? page.locate('button', 'Register reviewer App →');
@@ -314,21 +372,74 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
         page.open(`${install.href}/permissions?suggested_target_id=${ids.owner}&repository_ids[]=${ids.repository}`);
         await press('button', 'Install', handoff);
       }
-      return { state: 'done' };
-    } catch (error: any) { return { state: 'failed', reason: String(error?.message ?? error).split('\n')[0] }; }
-    finally { page.close(); }
+      outcome = { state: 'done' };
+    } catch (error: any) { outcome = { state: 'failed', reason: String(error?.message ?? error).split('\n')[0] }; }
+    try { page.close(); } catch { /* recorded on the step */ }
+    await options.onClose?.(outcome);
+    return outcome;
   };
+}
+
+/**
+ * The browser profile agent mode drives the App pages in: the one passed, else the one the master
+ * recorded (`master init --browser-profile`), else none, and agent mode stops before it starts.
+ */
+export function upBrowserProfile(root: string, request: UpRequest): { profile: string; executable?: string } | null {
+  if (request.browserProfile) return { profile: request.browserProfile };
+  try { const browser = JSON.parse(readFileSync(resolve(root, '.graphyard/master.json'), 'utf8')).browser; return typeof browser?.profile === 'string' && browser.profile ? browser : null; }
+  catch { return null; }
+}
+
+/**
+ * A recorded drive (AC-5): the App pages run through the master's recording page, so every step and
+ * a screenshot after each mutation land in .graphyard/master-actions/<stamp>-app-create-<id>/,
+ * with record.json written when the drive ends, as every master browser flow records its run.
+ */
+export function recordedAppDriver(root: string, request: UpRequest, browser: { profile: string; executable?: string }, page: (session: string) => BrowserPage = session => agentBrowserPage(browser, session)) {
+  const startedAt = new Date(), id = randomUUID();
+  const directory = resolve(actionsDirectory(root), `${startedAt.toISOString().replace(/[:.]/g, '-')}-app-create-${id.slice(0, 8)}`);
+  const steps: RecordedStep[] = [];
+  const session = `graphyard-up-${request.repository.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase()}`;
+  let created = false;
+  const recorded = recordingPage(page(session), { directory, steps, now: () => new Date() });
+  const drive = browserAppDriver({
+    page: { ...recorded, open: url => { if (!created) { created = true; mkdirSync(directory, { recursive: true, mode: 0o700 }); } return recorded.open(url); } },
+    repository: request.repository, record: relative(root, directory), sleep: ms => new Promise(accept => setTimeout(accept, ms)),
+    ids: () => {
+      const repo = JSON.parse(execFileSync('gh', ['api', `repos/${request.repository}`], { encoding: 'utf8', timeout: 30_000 }));
+      return { owner: Number(repo.owner?.id), repository: Number(repo.id) };
+    },
+    onClose: async outcome => {
+      if (!created) return;
+      await writeFile(resolve(directory, 'record.json'), `${JSON.stringify({ id, flow: 'app-create', startedAt: startedAt.toISOString(), completedAt: new Date().toISOString(), actor: { profile: browser.profile }, target: { repository: request.repository }, outcome: outcome.state === 'done' ? 'applied' : 'refused', ...(outcome.state === 'failed' ? { reason: outcome.reason } : {}), screenshots: steps.filter(step => step.screenshot).length, steps }, null, 2)}\n`, { mode: 0o600 });
+    },
+  });
+  return { directory, drive };
+}
+
+/** A one-time dashboard sign-in address minted with the operator's admin credential in FILE (as `graphyard login` mints it). */
+export async function mintSignIn(server: string, file: string | null, fetcher: typeof fetch = fetch): Promise<string | null> {
+  if (!file) return null;
+  let token: string;
+  try { token = (await readFile(file, 'utf8')).trim(); } catch { return null; }
+  if (token.length < 32) return null;
+  const response = await fetcher(`${server.replace(/\/+$/, '')}/api/sign-in-links`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: '{}', signal: AbortSignal.timeout(30_000) });
+  if (!response.ok) return null;
+  const link = await response.json() as { code?: string };
+  return typeof link.code === 'string' ? `${server.replace(/\/+$/, '')}/#sign-in=${link.code}` : null;
 }
 
 /** The real dependencies: this CLI's own commands as children, the master identity's status read. */
 export function upDependencies(root: string, cliPath: string, request: UpRequest, emit: (event: UpEvent) => void): UpDependencies {
   const serverUrl = async () => { try { return String(JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8')).url ?? '') || null; } catch { return null; } };
   const masterToken = async () => { const url = await serverUrl(); return url ? (await masterCredential(root, url))?.token ?? null : null; };
+  const browser = request.agent ? upBrowserProfile(root, request) : null;
   return {
     root, emit, serverUrl, masterToken,
+    signIn: async file => { const url = await serverUrl(); return url ? mintSignIn(url, file) : null; },
     sleep: ms => new Promise(accept => setTimeout(accept, ms)), now: () => Date.now(),
     cli: (args, options = {}) => new Promise((accept, reject) => {
-      const child = spawn(process.execPath, [cliPath, ...args], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] });
+      const child = spawn(process.execPath, [cliPath, ...args], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'], ...(options.env ? { env: { ...process.env, ...options.env } } : {}) });
       let stdout = '', pending = '';
       child.stdout.on('data', chunk => { stdout += chunk; });
       child.stderr.on('data', chunk => {
@@ -344,13 +455,8 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       const url = await serverUrl(), token = await masterToken();
       return url && token ? planeRequest(url, token)('status') : null;
     },
-    ...(request.agent && request.browserProfile ? { driveApp: browserAppDriver({
-      page: agentBrowserPage({ profile: request.browserProfile }, 'graphyard-up'), repository: request.repository, sleep: ms => new Promise(accept => setTimeout(accept, ms)),
-      ids: () => {
-        const repo = JSON.parse(execFileSync('gh', ['api', `repos/${request.repository}`], { encoding: 'utf8', timeout: 30_000 }));
-        return { owner: Number(repo.owner?.id), repository: Number(repo.id) };
-      },
-    }) } : {}),
+    // Each App page gets its own recorded drive, so each has its own record directory.
+    ...(browser ? { driveApp: (url: string, handoff: Handoff) => recordedAppDriver(root, request, browser).drive(url, handoff) } : {}),
   };
 }
 

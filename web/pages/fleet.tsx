@@ -315,7 +315,7 @@ export function ConnectWizard({ providers, hosts, wizard, setWizard, onConnect, 
 }
 
 /** Settings › Agents: connect an account without a shell, and every agent the control plane launches (GY-409). */
-export default function FleetPage({ api, status, observedAt }: Pick<Dashboard, 'api' | 'status' | 'observedAt'>) {
+export default function FleetPage({ api, status, observedAt, onOpenSetup }: Pick<Dashboard, 'api' | 'status' | 'observedAt'> & { onOpenSetup?: () => void }) {
   const [fleet, setFleet] = useState<FleetView | null>(status?.fleet ?? null);
   const [connects, setConnects] = useState<ConnectView[]>(status?.connects ?? []);
   const [providers, setProviders] = useState<ConnectProviderView[]>([]);
@@ -406,6 +406,8 @@ export default function FleetPage({ api, status, observedAt }: Pick<Dashboard, '
   return <><PageHeader crumbs={['Settings', 'Agents']} guide="/docs/onboarding#connect-an-account" eyebrow="EVERY AGENT IS CONFIGURED HERE" title="Agents">
       Which agents can work right now, which are spent and until when, and why. Every launch picks the first eligible account of its role; a change here takes effect on the next action, with no restart and no file edit. A pasted key is sealed to your agent host in this browser and never readable by the server.
     </PageHeader>
+    {/* The first-run checklist (GY-1419) for the admin: reachable from Settings beside the accounts it checks. */}
+    {onOpenSetup && <p><button data-open-setup onClick={onOpenSetup}>Open the first-run Setup checklist</button></p>}
     {loadError && <div role="alert" className="notice danger">{loadError} <button onClick={() => void load()}>Retry loading the agents</button></div>}
     {!fleet && !loadError && <p role="status">Loading the agents…</p>}
     {fleet && canEdit && <PageSection title="Connect an account" actions={!wizard.open && <button className="connect-button" data-connect-account onClick={() => setWizard({ ...closedWizard, open: true, host: hosts[0]?.host ?? null })}>Connect an account</button>}>

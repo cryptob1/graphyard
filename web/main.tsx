@@ -14,6 +14,17 @@ import LoginPage, { REJECTED_NOTICE } from './pages/login';
 import WorkDetails, { useOpenedWork } from './pages/work-details';
 import CreateWork from './pages/create-work';
 import { readsFlowAnalytics, useStepMoves } from './step-moves';
+import { requestedView } from '../src/model/setup-checklist';
+
+/**
+ * The page the address asks for (GY-1419), read once before anything renders: the `&setup` marker
+ * leaves the address bar so the sign-in page redeems the exact link fragment it knows.
+ */
+const initialView = (() => {
+  const requested = requestedView(location.hash);
+  if (requested.hash !== location.hash) history.replaceState(null, '', `${location.pathname}${location.search}${requested.hash}`);
+  return requested.view ?? 'work';
+})();
 
 /**
  * The dashboard shell: session state, polling, the sidebar generated from the view
@@ -29,8 +40,8 @@ function App() {
   const [error, setError] = useState('');
   const [connected, setConnected] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
-  // `graphyard up` prints the dashboard's address with #setup (GY-1419): that link opens the Setup page.
-  const [view, setView] = useState(() => location.hash === '#setup' ? 'setup' : 'work');
+  // `graphyard up` prints a sign-in link ending `&setup` (GY-1419): once it signs the person in, the Setup page opens.
+  const [view, setView] = useState(initialView);
   const [filter, setFilter] = useState<OpenGroup | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [events, setEvents] = useState<any[]>([]);

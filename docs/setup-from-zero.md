@@ -3,7 +3,7 @@
 
 > set up Graphyard for OWNER/REPO following docs/setup-from-zero.md
 
-One command, then the one page it prints. The setup agent acts as the **master** identity `install --apply` records; the operator credential stays with the human and is never given to an agent. The [install hard rules](install.md#hard-rules) apply: never print a credential.
+One command, then the page it prints. The setup agent acts as the **master** identity `install --apply` records; the operator credential stays with the human and is never given to an agent. The [install hard rules](install.md#hard-rules) apply: never print a credential.
 
 ## One command: graphyard up
 
@@ -12,11 +12,11 @@ git clone https://github.com/cryptob1/graphyard.git ~/graphyard && (cd ~/graphya
 cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --repo OWNER/REPO   # --provider compose (default), railway or hetzner
 ```
 
-`up` runs every machine step in order: preflight, control plane, host supervisor and Herdr, onboarding, agent accounts, harness, master loop. Finished steps are recorded in `.graphyard/up.json`: a rerun after any interruption skips them, registering no identity, App or variable twice. A Herdr plugin bound to another server is left alone (`--no-herdr`), never repointed. A preflight failure (exit 2) names the [prerequisite](#1-machine-prerequisites) to fix.
+`up` runs every machine step in order: preflight, control plane, host supervisor and Herdr, onboarding, accounts, harness, master loop. Finished steps are recorded in `.graphyard/up.json`: a rerun after any interruption skips them, registering no identity, App or variable twice. A Herdr plugin bound to another server is left alone (`--no-herdr`), never repointed. A preflight failure (exit 2) names the [prerequisite](#1-machine-prerequisites) to fix.
 
 ## The Setup page
 
-When a step needs a person, `up` prints the dashboard's Setup address (`SERVER/#setup`) once and waits for it to turn green. Each checklist item is read live, with one sentence and one button:
+When a step needs a person, `up` prints one link and waits until the step is green. The link (`SERVER/#sign-in=CODE&setup`, minted with the operator credential, or a host install's `#claim=CODE&setup`) signs you in once, within 10 minutes, and opens the Setup page; Settings → Agents also links there. Each item is read live, with one sentence and one button:
 
 | Item | Button |
 | --- | --- |
@@ -24,15 +24,15 @@ When a step needs a person, `up` prints the dashboard's Setup address (`SERVER/#
 | An account that writes code, one that reviews | **Connect an account**: Settings → Agents → Connect (an API key, or a subscription sign-in) |
 | Branch protection, coordinator running | none: Graphyard does these |
 
-Once every item is green the page asks **Describe what you want built** and submits it as the first work item, which the master refines. Branch protection requires `Graphyard / merge` once the first pull request reports it: rerun `up` then.
+When all are green the page asks **Describe what you want built** and submits it as a first work item the master refines. Once the first pull request reports `Graphyard / merge`, rerun `up` to require it.
 
 ## Agent setup: graphyard up --agent
 
-An agent sets Graphyard up with `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-profile PROFILE]`: no prompts, JSON events on stderr, the summary on stdout, exit `0` green, `1` failed, `2` machine prerequisite, `3` still waiting (rerun resumes). It creates the Apps in the master's browser profile (Chrome, signed in to GitHub), connects accounts already logged in on the host, sets deployment variables from saved credentials, and submits the goal from FILE. Only a person's own device is handed off — a GitHub Mobile or passkey approval, a subscription login's browser approval — as a `handoff` event with one sentence and a link or code; the run resumes once it completes.
+An agent sets Graphyard up with `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-profile PROFILE]`: no prompts, JSON events on stderr, the summary on stdout, exit `0` green, `1` failed, `2` prerequisite, `3` still waiting (rerun resumes). It creates the Apps in a Chrome profile signed in to GitHub (passed, else the master's recorded one; with neither it exits `2` before anything runs), recording the drive under `.graphyard/master-actions/`; connects accounts logged in on the host; sets deployment variables from saved credentials; submits the goal from FILE once. Only a person's own device is handed off — a GitHub Mobile or passkey approval, a subscription login's browser approval — as a `handoff` event with one sentence and a link or code; the run resumes once it completes.
 
 ## Troubleshooting: the manual steps
 
-What `up` runs, for when a step fails; **HUMAN** marks what an agent cannot do. `graphyard doctor` prints `setupFromZero.lines`: one `PASS`/`FAIL` line per prerequisite, each failure naming its step below; `next` names the first gap.
+What `up` runs, for when a step fails; **HUMAN** marks what agents cannot do. `graphyard doctor` prints `setupFromZero.lines`: one `PASS`/`FAIL` line per prerequisite, each failure naming its step below; `next` names the first gap.
 
 ## 1. Machine prerequisites
 
@@ -96,6 +96,6 @@ Set `RAILWAY_API_TOKEN` (**HUMAN:** the account owner issues it) and size `GRAPH
 
 ## 12. First item end to end
 
-The Setup page's goal, or `gy master create item.json REASON` ([work.json](../examples/work.json)). **Verify:** `gy status GY-1` reaches `done`; doctor `production.serving` reaches the merge commit, `production.incidents` `[]` ([production observation](deployment.md#production-deployment-observation)). Without a deploy job, merged is the end.
+The Setup page's goal, or `gy master create item.json REASON` ([work.json](../examples/work.json)). **Verify:** `gy status GY-1` reaches `done`; doctor `production.serving` reaches the merge commit, `production.incidents` `[]` ([production observation](deployment.md#production-deployment-observation)). Without a deploy job, merged ends it.
 
 Gaps found walking it: [setup-from-zero audit](setup-from-zero-audit.md).
