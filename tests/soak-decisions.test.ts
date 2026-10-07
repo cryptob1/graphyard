@@ -190,7 +190,7 @@ test('unit:soak-invariants-hold — after a restart the first request for a refu
   assert.ok(![...herdr.agents.values()].some(agent => /approver/i.test(agent.name ?? '')), 'no approver session is left open at the end of the day');
 });
 
-test('unit:soak-decisions-scope-once — every invariant holds across direct wide scope requests: a rule-approved ask folds and answers once, a finding-grounded ask widens once, an unrepresentable ask is refused with nothing retrying it, and a partly grounded ask reaches its approver through transient refusals and a late history read with no scope fault', { timeout: 600_000 }, async () => {
+test('unit:soak-invariants-hold — direct wide scope requests: a rule-approved ask folds and answers once, a finding-grounded ask widens once, an unrepresentable ask is refused with nothing retrying it, and a partly grounded ask reaches its approver through transient refusals and a late history read with no scope fault', { timeout: 600_000 }, async () => {
   const day = await simulateDay({ hours: 4, scope: true });
   assertLaunchesConfined(day, coordinatorRoot!);
   const { items, final, violations, failures, state, escalations, transientRefused, lateReads, decideCalls } = day;
@@ -217,9 +217,7 @@ test('unit:soak-decisions-scope-once — every invariant holds across direct wid
   assert.equal((await api(principals.operatorAgent, 'GET', `work/${found.id}/decisions`)).decisions.filter((decision: any) => decision.action === 'requirements').length, 0, 'the loop widened on the finding directly, without routing a decision');
 
   // The unrepresentable ask: refused by the rule, decided once, never applied, never routed, and
-  // never re-decided: the escalation stands and nothing retries it for the rest of the day. Its
-  // worker waits on the refusal for hours, which the worker bound (GY-1460) does not count: ending
-  // that attempt would only launch one that asks again (GY-1472).
+  // never re-decided: the escalation stands and nothing retries it for the rest of the day.
   const blocked = final.find(item => item.key === items[scopePlan.unrepresentable - 1].key)!;
   assert.equal(blocked.stage, 'build', 'the item is held in build');
   assert.match(blocked.scopeDecision!.reason, new RegExp(`no fold represents the ask within the ${plannedFilesMax} entries plannedFiles holds \\(${plannedFilesMax + 1} after folding\\)`));
