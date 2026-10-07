@@ -13,11 +13,35 @@ function manifestOrigin(repository: string, deployment: string) {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Expected owner/repository');
   const url = new URL(deployment);
   // A local Compose install serves plain HTTP on loopback (GY-1352): GitHub never reaches it, so its
-  // App is registered with the webhook off and the control plane polls instead.
+  // App is registered without a webhook and the control plane polls instead.
   if ((url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback(url))) || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error('Use the deployed HTTPS origin (or http:// on loopback for a local Compose install), without credentials or a path');
   return url.origin;
 }
-const loopback = (url: URL) => ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
+const loopback = (url: URL) => ['localhost', '[::1]'].includes(url.hostname) || /^127\.\d+\.\d+\.\d+$/.test(url.hostname);
+/**
+ * Whether GitHub could ever deliver to ORIGIN (GY-1474). Loopback (127.0.0.0/8, ::1, localhost),
+ * private, link-local and unspecified addresses are not; GitHub refuses a manifest whose hook URL
+ * names one, even with the hook inactive.
+ */
+export function publiclyReachable(origin: string) {
+  const host = new URL(origin).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.internal')) return false;
+  const v4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(host)?.slice(1).map(Number);
+  if (v4) {
+    const [a, b] = v4;
+    return !(a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168));
+  }
+  if (host.includes(':')) {
+    // URL serialises an IPv4-mapped host as hex groups (::ffff:127.0.0.1 → ::ffff:7f00:1), so the
+    // last 32 bits are decoded and judged as the IPv4 address they carry.
+    const dotted = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(host)?.[1];
+    const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host)?.slice(1).map(group => parseInt(group, 16));
+    const mapped = dotted ?? (hex && [hex[0] >> 8, hex[0] & 255, hex[1] >> 8, hex[1] & 255].join('.'));
+    if (mapped) return publiclyReachable(`http://${mapped}`);
+    return !(host === '::' || host === '::1' || /^f[cd]/.test(host) || /^fe[89ab]/.test(host));
+  }
+  return true;
+}
 /**
  * A reviewer App is a separate identity with no control-plane authority: it reads code and
  * writes pull request comments, and never publishes Graphyard's own gate check.
@@ -37,8 +61,10 @@ export function reviewerAppManifest(reviewer: string, repository: string, deploy
 export function appManifest(repository: string, deployment: string, callback: string) {
   const origin = manifestOrigin(repository, deployment);
   const url = new URL(origin);
+  // GitHub validates a hook URL even when the hook is inactive, so an origin it cannot reach
+  // (a local Compose install, which polls instead) sends no hook_attributes at all (GY-1474).
   return { name: `Graphyard ${repository.replace('/', '-')}`, url: url.origin, public: false,
-    hook_attributes: { url: `${url.origin}/api/github/webhook`, active: !loopback(url) },
+    ...(publiclyReachable(url.origin) ? { hook_attributes: { url: `${url.origin}/api/github/webhook`, active: true } } : {}),
     redirect_url: `${callback}/created`, setup_url: `${callback}/installed`,
     // Exactly the declared control-plane set; the merge queue's Contents: write lives there.
     default_permissions: requiredPermissions(controlPlanePermissions),
@@ -444,7 +470,7 @@ export async function startGithubSetup(root: string, repository: string, deploym
 } = {}, reviewer?: string) {
   if (reviewer !== undefined && !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(reviewer)) throw new Error('Reviewer name must be a lowercase identifier');
   // Refused before the page opens, not when the human first loads it.
-  manifestOrigin(repository, deployment);
+  const hooked = publiclyReachable(manifestOrigin(repository, deployment));
   await localDirectory(root);
   const file = dependencies.file ?? credentialFile(root, reviewer);
   let app: AppCredentials | undefined;
@@ -537,8 +563,11 @@ export async function startGithubSetup(root: string, repository: string, deploym
         if (!code || !/^[a-zA-Z0-9_-]{1,200}$/.test(code)) return html(400, '<p>Missing GitHub registration code.</p>');
         exchanging = true;
         const result = await convert(code);
-        if (!Number.isSafeInteger(result.id) || !result.slug || !result.pem || !(reviewer || result.webhook_secret)) throw new Error('GitHub returned incomplete App credentials');
-        const next: AppCredentials = { appId: result.id, slug: result.slug, privateKey: result.pem, webhookSecret: result.webhook_secret ?? '', repository };
+        // Only a manifest with hook_attributes gets a webhook secret back. A webhook-less control-plane
+        // App (a local origin, GY-1474) still needs GITHUB_WEBHOOK_SECRET, so it gets a local one.
+        if (!Number.isSafeInteger(result.id) || !result.slug || !result.pem || !(reviewer || !hooked || result.webhook_secret)) throw new Error('GitHub returned incomplete App credentials');
+        const webhookSecret = result.webhook_secret || (reviewer ? '' : randomBytes(32).toString('hex'));
+        const next: AppCredentials = { appId: result.id, slug: result.slug, privateKey: result.pem, webhookSecret, repository };
         if (reviewer) {
           const bot = await resolveBot(result.slug);
           if (!Number.isSafeInteger(bot?.id) || bot.id <= 0 || bot.type !== 'Bot') throw new Error('GitHub did not return a usable reviewer bot identity');

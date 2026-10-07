@@ -679,12 +679,25 @@ export function githubCliPreflight(provider: Provider, status: { code: number; s
   return { name: 'GitHub CLI', ok: true, detail: `authenticated for branch protection and CI discovery with ${held ? `scopes ${needed.join(', ')}` : 'unlisted scopes'}${note}` };
 }
 
+/**
+ * A local Compose install serves loopback only, so GitHub can never deliver to it (GY-1474): its App
+ * is registered without a webhook, the control plane polls GitHub, and every step that expects a
+ * delivery is skipped rather than reported as failing.
+ */
+export const pollsGitHub = (provider: Provider) => provider === 'compose';
+export function webhookPreflight(provider: Provider): PreflightItem | null {
+  return pollsGitHub(provider) ? { name: 'GitHub webhook', ok: true, detail: `${provider} is local: the control plane polls GitHub and registers no webhook, so webhook configuration and delivery verification are skipped` } : null;
+}
+type WebhookProof = DeliveryProof & { skipped?: true };
+
 export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   const { adapter, context, record } = session;
   const preflight = await adapter.preflight(context);
   const gh = githubCli(context.transport);
   const ghStatus = await gh(['auth', 'status'], { allowFailure: true });
   preflight.push(githubCliPreflight(context.provider, ghStatus, session.inputs.repository));
+  const polling = webhookPreflight(context.provider);
+  if (polling) preflight.push(polling);
   // The master loop runs from this checkout and its unit refuses a temporary directory: say so
   // before anything is created (GY-1457). A host install runs its loop on the host instead. The
   // test suite's checkouts are all temporary, so it checks durableCheckoutPreflight directly.
@@ -755,7 +768,9 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     { name: 'GITHUB_PRIVATE_KEY', value: REDACTED, secret: true },
     { name: 'GITHUB_WEBHOOK_SECRET', value: REDACTED, secret: true, ...(record?.github ? { fingerprint: record.github.webhookFingerprint } : saved?.facts.webhookSecret ? { fingerprint: fingerprint(saved.facts.webhookSecret) } : { note: 'returned by the App manifest flow' }) },
   ] });
-  actions.push({ id: 'github.webhook', target: 'github', state: appConfigured ? 'update' : 'create', title: `Point the App webhook at ${observation.url ? webhookUrlFor(observation.url) : '<service URL>/api/github/webhook'} with the shared secret the server holds` });
+  actions.push(pollsGitHub(context.provider)
+    ? { id: 'github.webhook', target: 'github', state: 'satisfied', title: 'Skipped: a local install registers no App webhook; the control plane polls GitHub' }
+    : { id: 'github.webhook', target: 'github', state: appConfigured ? 'update' : 'create', title: `Point the App webhook at ${observation.url ? webhookUrlFor(observation.url) : '<service URL>/api/github/webhook'} with the shared secret the server holds` });
   actions.push({ id: 'github.ci-app-ids', target: 'github', state: record?.github?.ciAppIds.length ? 'satisfied' : 'create', title: `Detect the GitHub App IDs publishing checks on ${session.inputs.baseBranch} and set GITHUB_CI_APP_IDS`, values: record?.github?.ciAppIds.length ? [{ name: 'GITHUB_CI_APP_IDS', value: record.github.ciAppIds.join(','), secret: false }] : [] });
 
   const protection = preflight.some(item => item.name === 'GitHub CLI' && item.ok) ? await readProtection(gh, session.inputs.repository, session.inputs.baseBranch) : null;
@@ -778,13 +793,11 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   const reusedReviewer = reusedFor(session, 'reviewer');
   if (session.inputs.reviewer) actions.push({ id: 'github.reviewer', target: 'github', state: record?.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer) ? 'satisfied' : 'create', title: `${reusedReviewer ? `Reuse the reviewer App ${reusedReviewer} as "${session.inputs.reviewer}" (the repository is added to its installation)` : `Register the reviewer App "${session.inputs.reviewer}"`}, add its identity to GRAPHYARD_REVIEWER_APPS, and set it as the main guard's revert approver (GRAPHYARD_REVERT_APPROVER_*)`, ...(reusedReviewer ? {} : { human: 'One additional browser confirmation, because a reviewer is a separate GitHub identity with no control-plane authority.' }) });
 
-  // A local Compose install serves loopback only, so GitHub can never deliver to it. Saying
-  // so in the plan keeps an agent from chasing an unconfirmable step as if it were a failure.
-  const webhookExpectation = context.provider === 'compose'
-    ? ' A loopback Compose install is unreachable from GitHub, so this stays unconfirmed by design; the rest of the verification is unaffected.'
-    : '';
   actions.push({ id: 'verify.status', target: 'graphyard', state: 'update', title: 'Verify authenticated GET /api/status reports the admin actor, the managed repository, and the bound App' });
-  actions.push({ id: 'verify.webhook', target: 'graphyard', state: 'update', title: `Publish one neutral check run and confirm GitHub delivered it to the server.${webhookExpectation}` });
+  // A local install has no webhook to deliver to, so its delivery check is skipped, not failed.
+  actions.push(pollsGitHub(context.provider)
+    ? { id: 'verify.webhook', target: 'graphyard', state: 'satisfied', title: 'Skipped: a local install registers no webhook, so there is no delivery to verify; the control plane polls GitHub' }
+    : { id: 'verify.webhook', target: 'graphyard', state: 'update', title: 'Publish one neutral check run and confirm GitHub delivered it to the server.' });
   if (!host) {
     actions.push({ id: 'local.profiles', target: 'local', state: record?.profiles.length ? 'satisfied' : 'create', title: 'Register master, reviewer, and worker profiles for authenticated agent runtimes on this machine' });
     actions.push(herdrAction(session, herdr, herdrRelink, herdrTarget));
@@ -895,7 +908,7 @@ export interface InstallSummary {
   principals: { id: string; role: string; fingerprint: string; tokenFile: string }[];
   github: { appId: number; installationId: number; slug: string; ciAppIds: number[] } | null;
   protection: string; health: boolean; status: { actor: string; role: string; repository: string; githubAppId: number | null };
-  webhook: DeliveryProof; profiles: ProfileRegistration; drift: PlanDrift[]; nextSteps: string[];
+  webhook: WebhookProof; profiles: ProfileRegistration; drift: PlanDrift[]; nextSteps: string[];
   /** The self-contained host: its units, runtimes, accounts and Herdr workspace (GY-717). */
   host?: HostFleetResult;
   /** The single-use dashboard sign-in for the admin; printed once, stored on the host only as a hash. */
@@ -998,12 +1011,14 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   if (!await waitForHealth(session, url)) throw new Error('The service did not return to health after the GitHub credentials were written');
 
   const app = appClient(facts, deps.fetch);
-  const webhookConfig = await readWebhookConfig(app);
+  const polling = pollsGitHub(context.provider);
+  const webhookConfig = polling ? null : await readWebhookConfig(app);
   // A GitHub App has one webhook. A reused App whose webhook still reaches a live installation keeps
   // it unless this install is the cutover (--migrate), so a trial host never takes an existing
   // installation's events away from it.
   const webhookElsewhere = facts.reused && !context.host?.migrate && webhookConfig?.url && webhookConfig.url !== webhookUrlFor(url) && await answersHealth(session, String(webhookConfig.url)) ? String(webhookConfig.url) : null;
   if (webhookElsewhere) log(`The App webhook stays with ${webhookElsewhere}, an installation that still answers; rerun with --migrate to move it here`);
+  else if (polling) log('A local install registers no App webhook; the control plane polls GitHub');
   else {
     if (webhookConfig?.url !== webhookUrlFor(url)) log(`Repointing the App webhook to ${webhookUrlFor(url)}`);
     await configureWebhook(app, url, facts.webhookSecret);
@@ -1035,8 +1050,9 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   const status = await authenticatedStatus(session, url);
   const installation = installationClient(facts, deps.fetch);
   const since = deps.now();
-  let webhook: DeliveryProof;
-  if (webhookElsewhere) webhook = { delivered: false, statusCode: null, event: null, at: null, detail: `the reused App's webhook still serves ${webhookElsewhere}; this installation receives no GitHub events until it is moved here with --migrate` };
+  let webhook: WebhookProof;
+  if (polling) webhook = { delivered: false, skipped: true, statusCode: null, event: null, at: null, detail: 'skipped: a local install registers no webhook; the control plane polls GitHub' };
+  else if (webhookElsewhere) webhook = { delivered: false, statusCode: null, event: null, at: null, detail: `the reused App's webhook still serves ${webhookElsewhere}; this installation receives no GitHub events until it is moved here with --migrate` };
   else try {
     await triggerDelivery(installation, session.inputs.repository, await headSha(gh, session.inputs.repository, session.inputs.baseBranch));
     webhook = await verifyDelivery(app, since, deps.wait);
@@ -1262,7 +1278,7 @@ async function registerProfiles(session: InstallSession, url: string, appPending
   return registerLocalProfiles(request);
 }
 
-function nextSteps(session: InstallSession, url: string, mergeCheckExists: boolean, webhook: DeliveryProof, profiles: ProfileRegistration) {
+function nextSteps(session: InstallSession, url: string, mergeCheckExists: boolean, webhook: WebhookProof, profiles: ProfileRegistration) {
   const host = session.context.host;
   const steps = [
     host ? 'Open the signIn link once to sign in to the dashboard as the admin; it works a single time, then use Agents → Connect an account for each runtime.'
@@ -1271,7 +1287,7 @@ function nextSteps(session: InstallSession, url: string, mergeCheckExists: boole
   ];
   if (!session.reviewers.length && !session.inputs.reviewer) steps.push(`No reviewer App is registered, so no independent review can pass: rerun with --reviewer NAME (docs/setup-from-zero.md step 5).`);
   if (!mergeCheckExists) steps.push(`Rerun "graphyard install --provider ${session.context.provider} --repo ${session.inputs.repository} --apply" after Graphyard publishes "${CHECK_NAME}" on the first pull request, so branch protection can require the App-bound check.`);
-  if (!webhook.delivered) steps.push(`Webhook delivery is unconfirmed: ${webhook.detail}`);
+  if (!webhook.delivered && !webhook.skipped) steps.push(`Webhook delivery is unconfirmed: ${webhook.detail}`);
   if (host) steps.push(`Everything runs on the host as the ${host.layout.user} account; nobody logs into it. Accounts start unconnected until connected from the dashboard.`);
   else if (!profiles.workers.length) steps.push('No authenticated agent runtime was found on this machine; sign in to a supported runtime and rerun --apply, or add a worker profile with "graphyard master worker add".');
   if (!session.principals.some(principal => principal.role === 'producer')) steps.push('No proof producer was created. Add one with --producer-proof NAME for each proof that CI may submit; a producer must never be given to an implementation worker.');

@@ -110,7 +110,8 @@ test('the installer verifies /healthz, authenticated /api/status, and webhook de
     runHerdr: args => { herdrCommands.push(args); return args[1] === 'config-dir' ? join(configHome, 'herdr-plugin') : ''; },
   };
 
-  const session = await prepareInstall(root, { repository: 'owner/project', provider: 'compose', workers: 2 }, dependencies);
+  // A hosted provider: a local Compose install registers no webhook and skips delivery (GY-1474).
+  const session = await prepareInstall(root, { repository: 'owner/project', provider: 'railway', workers: 2 }, dependencies);
   const summary = await applyInstall(session, await buildPlan(session));
 
   assert.equal(summary.health, true, 'GET /healthz did not report a healthy database');

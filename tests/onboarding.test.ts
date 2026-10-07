@@ -48,7 +48,7 @@ test('App manifest refuses unsafe deployment URLs and requests the declared cont
   const manifest = appManifest('owner/repo', 'https://example.com', 'http://127.0.0.1:4311');
   // The merge queue publishes merge commits and queue refs, which is the declared reason for Contents: write.
   assert.equal(manifest.default_permissions.contents, 'write'); assert.equal(manifest.public, false);
-  assert.equal(manifest.hook_attributes.url, 'https://example.com/api/github/webhook');
+  assert.equal(manifest.hook_attributes?.url, 'https://example.com/api/github/webhook');
 });
 
 test('reviewer App manifest registers an independent identity without control-plane authority', async () => {

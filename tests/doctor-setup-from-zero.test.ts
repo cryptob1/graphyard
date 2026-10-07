@@ -156,11 +156,11 @@ test('unit:doctor-setup-from-zero — a scratch repository whose tests run on No
   assert.equal(frameworkReportFormats['node:test'].format, 'junit-xml-v1');
 });
 
-test('unit:doctor-setup-from-zero — a local Compose install registers its App on the loopback origin with the webhook off; any other plain-HTTP origin is still refused', () => {
+test('unit:doctor-setup-from-zero — a local Compose install registers its App on the loopback origin with no webhook; any other plain-HTTP origin is still refused', () => {
   const local = appManifest('owner/scratch', 'http://127.0.0.1:4310', 'http://127.0.0.1:4311');
   assert.equal(local.url, 'http://127.0.0.1:4310');
-  assert.deepEqual(local.hook_attributes, { url: 'http://127.0.0.1:4310/api/github/webhook', active: false });
-  assert.equal(appManifest('owner/scratch', 'https://graphyard.example', 'http://127.0.0.1:4311').hook_attributes.active, true);
+  assert.equal('hook_attributes' in local, false);
+  assert.equal(appManifest('owner/scratch', 'https://graphyard.example', 'http://127.0.0.1:4311').hook_attributes?.active, true);
   assert.equal(reviewerAppManifest('claude', 'owner/scratch', 'http://localhost:4310', 'http://127.0.0.1:4311').url, 'http://localhost:4310');
   assert.throws(() => appManifest('owner/scratch', 'http://graphyard.example', 'http://127.0.0.1:4311'), /HTTPS origin/);
 });

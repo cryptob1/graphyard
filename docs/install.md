@@ -22,7 +22,7 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 - `railway`: `npm i -g @railway/cli`, `railway login`.
 - `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--ssh-key NAME`, `--domain`. `manual:host-install-live` or `manual:…install…-live` coordinators need `HCLOUD_TOKEN`, `HETZNER_SPEND_CAP_USD_MONTHLY` in repo-root `.env` (`0600`, uncommitted); optional `HETZNER_SSH_KEY` names registered key (else throwaway).
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; `--ssh-host`, `--domain`.
-- `compose` (local): `curl -fsSL https://get.docker.com | sh`.
+- `compose` (local): `curl -fsSL https://get.docker.com | sh`. It polls GitHub: its App has no webhook (GitHub refuses a loopback or private hook URL), so webhook steps are skipped.
 
 ## Step 1: plan and approve
 
@@ -46,7 +46,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; [protects](gi
 
 ## Step 4: summary
 
-**Verify** `health`, `webhook.delivered` (compose polls), `profiles.master.configured`, `status.role` `admin`; follow `nextSteps`, never read `tokenFile`.
+**Verify** `health`, `webhook.delivered` (compose: `webhook.skipped`), `profiles.master.configured`, `status.role` `admin`; follow `nextSteps`, never read `tokenFile`.
 
 ## Step 5: first pull request
 
