@@ -21,7 +21,7 @@ import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, 
 import { contextOverflows } from '../model/escalation-context.js';
 import { ReportSections } from '../master/sections.js';
 import { terminalDecisions } from './decision-report.js';
-import { promotionWait, releaseLagStatus } from '../master/release-lag.js';
+import { releaseLagStatus } from '../master/release-lag.js';
 import { Timings, timedApi, timedStep, withTimings } from '../master/timings.js';
 import { hotspots } from './hotspots.js';
 import { stallAttention } from './stall-attention.js';
@@ -114,7 +114,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees,
       // The slow intervention report: the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
-  const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors, promotion: 'error' in daemonState ? null : promotionWait(daemonState) }));
+  const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors }));
   // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406),
   // queue-head lag (GY-492), slow renewals (GY-558) and conflict hotspots (GY-566).
   const { observation, health, stalledItems } = stallAttention(snapshot, coordinator, derivedStalls, hs.attention);
