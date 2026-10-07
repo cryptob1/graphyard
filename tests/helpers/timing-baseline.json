@@ -401,6 +401,7 @@
     "tests/install-secret-scan.test.ts": 1276,
     "tests/install-secrets.test.ts": 1173,
     "tests/install-verification.test.ts": 2184,
+    "tests/intervention-exemptions.test.ts": 600,
     "tests/intervention-feedback.test.ts": 5125,
     "tests/intervention-pattern-human-only-decision-build.test.ts": 3200,
     "tests/interventions-scale.test.ts": 41000,
