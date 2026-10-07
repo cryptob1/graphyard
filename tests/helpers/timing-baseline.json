@@ -360,6 +360,7 @@
     "tests/flow-replay-play.test.ts": 622,
     "tests/flow-report-cache.test.ts": 8451,
     "tests/followups-after-ship.test.ts": 689,
+    "tests/formal-review-baseline-pr.test.ts": 2900,
     "tests/generated-files-setup.test.ts": 3386,
     "tests/generated-index.test.ts": 5748,
     "tests/github-budget.test.ts": 3755,
