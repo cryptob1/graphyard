@@ -12,7 +12,6 @@ import type { AgentRegistry, FleetAccountInput, FleetModel, FleetRole, FleetRole
 import type { ProfileRegistration } from './index.js';
 import { suffixedSessionName } from '../session-name.js';
 import { executorGlob, executorInstance, installUnitsFile, type InstallUnits, parseInstallUnits, perInstallUnits, readInstallUnits } from './units.js';
-import { dirname } from 'node:path';
 
 /**
  * The self-contained Graphyard host (GY-717).
@@ -243,6 +242,8 @@ export interface HostSettings {
   ref: string;
   /** Where the installer's own CLI is, for the migration's backup on this machine. */
   localCli: string;
+  /** The checkout of the repository being managed on this machine, whose `.graphyard/units.json` names the old install's units (GY-1441). */
+  localRoot: string;
   localNode: string;
   /** The operator machine's install directory, for the migration's backup file. */
   localDirectory: string;
@@ -449,7 +450,8 @@ async function freezeOldLoop(ctx: AdapterContext) {
   // Stop the old server first to prevent new writes via webhooks and API calls after the backup.
   await local.exec('systemctl', ['stop', 'graphyard-server.service'], { allowFailure: true, timeout: 180_000 });
   // Only the units the old install recorded (GY-1441): another install on this machine keeps running.
-  const old = readInstallUnits(dirname(dirname(ctx.host!.localCli)));
+  // The record lives in the managed checkout master init ran in, never beside the installer's CLI.
+  const old = readInstallUnits(ctx.host!.localRoot);
   await local.exec('systemctl', ['--user', 'disable', '--now', old.master], { allowFailure: true, timeout: 180_000 });
   await local.exec('systemctl', ['--user', 'stop', executorGlob(old)], { allowFailure: true, timeout: 900_000 });
   const state = await local.exec('systemctl', ['--user', 'is-active', old.master], { allowFailure: true, timeout: 60_000 });

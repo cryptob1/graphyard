@@ -9,7 +9,7 @@ import { launchAppearanceMs } from '../src/daemon/effects.js';
 import { harnessDecision } from '../src/harness.js';
 import * as herdrModule from '../src/master/herdr.js';
 import { closeHerdrPane, listHerdrAgents, listHerdrPanes, observeHerdrAgents, stopCreatedHerdrTab } from '../src/master/herdr.js';
-import { loadMasterConfig, masterConfigSchema, masterHarness, setupMaster, type MasterConfig } from '../src/master.js';
+import { liveMasterConfig, loadMasterConfig, masterConfigSchema, masterHarness, setupMaster, type MasterConfig } from '../src/master.js';
 import { executorUnitTemplate, installExecutorSupervision, type SystemctlRunner } from '../src/repository-setup.js';
 import * as supervisorModule from '../src/supervisor.js';
 import { installLoopSupervisor, loopUnitText } from '../src/supervisor.js';
@@ -221,6 +221,22 @@ test('unit:herdr-scope-per-install — the install\'s workspace scopes every inv
   assert.ok(!herdr.panes.has('wA:p1'), 'the install\'s own leftover shell is closed');
   assert.ok(herdr.panes.has('wB:p1') && herdr.panes.has('wB:p2'), 'another install\'s matching panes are untouched');
   assert.ok(!herdr.commands.some(args => args.some(arg => arg.startsWith('wB:'))), 'no command ever named a pane in wB');
+
+  // A live reload the loop refuses keeps its scope: an edit that moves the workspace together with a
+  // setting the loop is bound to leaves every sweep in wA, and only an accepted reload moves it.
+  const live = liveMasterConfig(root, await loadMasterConfig(root));
+  const stored = JSON.parse(await readFile(join(root, '.graphyard/master.json'), 'utf8'));
+  await writeFile(join(root, '.graphyard/master.json'), JSON.stringify({ ...stored, herdrWorkspace: 'wB', baseBranch: 'release' }));
+  const refused = await live.reload();
+  assert.match(refused.refused ?? '', /baseBranch/);
+  assert.equal(scope.herdrScope(), 'wA', 'a refused reload never moves the Herdr scope');
+  assert.deepEqual((await listHerdrPanes(herdr.run)).map(pane => pane.pane_id), ['wA:p2']);
+  await writeFile(join(root, '.graphyard/master.json'), JSON.stringify({ ...stored, herdrWorkspace: 'wB' }));
+  assert.equal((await live.reload()).refused, null);
+  assert.equal(scope.herdrScope(), 'wB', 'an accepted reload adopts the new workspace');
+  await writeFile(join(root, '.graphyard/master.json'), '{');
+  assert.match((await live.reload()).refused ?? '', /could not be reloaded/);
+  assert.equal(scope.herdrScope(), 'wB');
   scope.scopeHerdr(null);
 });
 
@@ -312,4 +328,30 @@ test('unit:per-install-units — repositories whose names differ only in punctua
   assert.throws(() => loopUnitOf(root), /does not record this install's units/);
   await assert.rejects(resolveInstallUnits(root, 'owner/project', unitDirectory), /does not record this install's units/);
   assert.equal(await readFile(join(root, installUnitsFile), 'utf8'), '{"version":2}', 'the unreadable record is left for the operator, not overwritten');
+});
+
+test('unit:per-install-units — install --migrate stops the units the managed checkout recorded, even when the installer\'s CLI lies outside that checkout, and never another install\'s legacy units', async () => {
+  const { applyInstall, buildPlan, prepareInstall } = await import('../src/install/index.js');
+  const { MIGRATE_SOURCE_VARIABLE } = await import('../src/install/host.js');
+  const { harness } = await import('./install-harness.js');
+  const { installUnitsFile, perInstallUnits } = await units();
+  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test',
+    extraResponses: [
+      { match: 'is-active graphyard-master-owner-project.service', result: { stdout: 'inactive\n', stderr: '', code: 3 } },
+      { match: 'db backup', result: { stdout: '', stderr: 'db backup: stopped here, after the freeze', code: 1 } },
+    ] });
+  try {
+    // master init recorded per-install names in the managed checkout; the CLI is an installed launcher elsewhere.
+    const recorded = perInstallUnits('owner/project');
+    await mkdir(join(fixture.root, '.graphyard'), { recursive: true });
+    await writeFile(join(fixture.root, installUnitsFile), JSON.stringify(recorded));
+    const outside = await temporaryDirectory('installed-launcher');
+    const deps = { ...fixture.deps, cliPath: join(outside, 'bin/graphyard.mjs'), environment: { [MIGRATE_SOURCE_VARIABLE]: 'postgres://graphyard:old-password-0123456789@old.example.test:5432/graphyard' } };
+    const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'host' as const, selfContained: true, sshHost: '203.0.113.20', sshUser: 'root', domain: 'graphyard.example.test', migrate: true }, deps);
+    await assert.rejects(applyInstall(session, await buildPlan(session)), /stopped here, after the freeze/);
+    const local = fixture.commandLines();
+    assert.ok(local.includes(`systemctl --user disable --now ${recorded.master}`), local.join('\n'));
+    assert.ok(local.includes('systemctl --user stop graphyard-executor-owner-project@*.service'), local.join('\n'));
+    assert.ok(!local.some(line => line.includes(legacyLoopUnit) || line.includes('graphyard-executor@')), 'another install\'s legacy units are never stopped');
+  } finally { await fixture.cleanup(); }
 });

@@ -424,12 +424,16 @@ export function liveMasterConfig(root: string, initial: MasterConfig, load: (roo
     current: initial,
     async reload(): Promise<ConfigReload> {
       const at = new Date(clock()).toISOString();
+      // A refused reload keeps every loaded setting, the Herdr scope included: loading applies the
+      // file's workspace, so the scope the loop runs under is put back whenever the reload is refused (GY-1441).
+      const keep = (refused: string): ConfigReload => { scopeHerdr(live.current.herdrWorkspace); return { config: live.current, changed: [], at, refused }; };
       let next: MasterConfig;
       try { next = await load(root); }
-      catch (error) { return { config: live.current, changed: [], at, refused: `.graphyard/master.json could not be reloaded (${error instanceof Error ? error.message : String(error)}); the loop keeps the settings it last loaded` }; }
+      catch (error) { return keep(`.graphyard/master.json could not be reloaded (${error instanceof Error ? error.message : String(error)}); the loop keeps the settings it last loaded`); }
       const { changed, bound } = masterConfigChanges(live.current, next);
-      if (bound.length) return { config: live.current, changed: [], at, refused: `.graphyard/master.json changes ${bound.join(', ')}, which a running master loop is bound to; restart master run to adopt ${bound.length === 1 ? 'it' : 'them'}. Until then the loop keeps its loaded settings, including every other change` };
+      if (bound.length) return keep(`.graphyard/master.json changes ${bound.join(', ')}, which a running master loop is bound to; restart master run to adopt ${bound.length === 1 ? 'it' : 'them'}. Until then the loop keeps its loaded settings, including every other change`);
       live.current = next;
+      scopeHerdr(next.herdrWorkspace);
       return { config: next, changed, refused: null, at };
     },
   };
