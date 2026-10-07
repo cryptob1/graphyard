@@ -681,7 +681,8 @@ test('unit:up-final-signin-link — a green up ends with one single-use sign-in 
     const green = world({ app: true, reviewer: true });
     // The minted link carries a server code, never the operator credential that mints it.
     const minted: string[] = [];
-    const result = await runUp(request({ agent }), dependencies(green, root, [], { masterToken: async () => green.installed ? MASTER : null,
+    // Bounded, so a tree whose accounts step waits on a person fails here instead of waiting forever.
+    const result = await runUp(request({ agent }), dependencies(green, root, [], { humanWaitMs: 1_000, masterToken: async () => green.installed ? MASTER : null,
       signIn: async file => { assert.equal(file, OPERATOR_TOKEN); const link = `${SERVER}/#sign-in=${String(minted.length).padStart(43, 'k')}`; minted.push(link); return link; },
       ...(agent ? { driveApp: async () => ({ state: 'done' as const }) } : {}) }));
     assert.equal(result.exitCode, 0, result.next);
