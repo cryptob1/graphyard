@@ -518,3 +518,147 @@ test('manual:main-guard-abandon-reason the abandonment record and attention line
   assert.equal(new Set(lines).size, 4, 'each cause reads differently');
   for (const line of lines) assert.match(line, /main's required check test stays red until the next merge to main re-runs CI/);
 });
+
+// GY-1468: a run on main cancelled in an infrastructure step is not a failing test.
+const shardRuns = (shards: string[], aggregate: string, from = 0): CheckRun[] => [
+  ...shards.map((result, index) => ({ name: `test shard ${index + 1}`, result, appId: ci, id: from + index })),
+  { name: 'test', result: aggregate, appId: ci, id: from + 10 }, { name: 'typecheck', result: 'success', appId: ci, id: from + 11 },
+];
+/** Main's run of 2026-10-07: shards 1 and 2 cancelled at the job timeout inside the apt step, the rest green, the aggregate `test` failed. */
+const cancelledRun = (from = 0) => shardRuns(['cancelled', 'cancelled', 'success', 'success', 'success', 'success'], 'failure', from);
+/** The fake's Actions runs: each cancelled job names run 4242 at its attempt; a rerun bumps the attempt and leaves the rerun's jobs queued. */
+function withReruns(fake: ReturnType<typeof world>, commit: string, attempt = 1) {
+  const reruns: number[] = [];
+  fake.ports.cancelledRun = async () => ({ id: 4242, attempt });
+  fake.ports.rerunCancelled = async (checkRun, run) => {
+    reruns.push(checkRun); assert.equal(run.id, 4242);
+    attempt += 1;
+    fake.checks.set(commit, [...fake.checks.get(commit)!, ...shardRuns(['queued', 'queued'], 'queued', 100 * attempt).filter(check => check.result === 'queued')]);
+    return 'requested';
+  };
+  return { reruns, attempt: () => attempt };
+}
+
+test('unit:main-guard-cancelled-run-not-culprit a main run whose only failures are cancelled jobs, and the aggregate test failing on them, opens no revert: main is pending, the failed jobs are rerun once per attempt, and only a concluded rerun is judged', async () => {
+  // The verdict: cancelled shards under a failed aggregate are `cancelled`; a real shard failure is `fail`; a job still running is `pending`.
+  assert.deepEqual(commitVerdict(cancelledRun(), required, [ci]), { verdict: 'cancelled', failing: ['test'], checkRun: 0 });
+  assert.deepEqual(commitVerdict(shardRuns(['timed_out', 'success'], 'failure'), required, [ci]), { verdict: 'cancelled', failing: ['test'], checkRun: 0 });
+  assert.deepEqual(commitVerdict(shardRuns(['cancelled', 'failure'], 'failure'), required, [ci]), { verdict: 'fail', failing: ['test'] });
+  assert.deepEqual(commitVerdict(shardRuns(['cancelled', 'in_progress'], 'failure'), required, [ci]), { verdict: 'pending' });
+  assert.deepEqual(commitVerdict(runs({ test: 'cancelled', typecheck: 'success' }), required, [ci]), { verdict: 'cancelled', failing: ['test'], checkRun: 0 });
+
+  const [base, A] = ['b0', 'a1'].map(sha);
+  const history: MainCommit[] = [{ sha: A, parent: base }, { sha: base, parent: null }];
+  const itemA = delivered('GY-1465', A, 942);
+  const fake = world(history, [itemA]);
+  fake.checks.set(base, green); fake.checks.set(A, cancelledRun());
+  const actions = withReruns(fake, A);
+  const options = { required, ciAppIds: [ci], now: new Date(at), verdicts: new Map(), cancelled: new Set<string>() };
+
+  // Tick 1: no culprit; the run's failed jobs are rerun from a cancelled job.
+  let tick = await runMainGuard(fake.ports, options);
+  assert.deepEqual(tick.main, { state: 'pending', probe: A, cancelled: { failing: ['test'], checkRun: 0 } });
+  assert.deepEqual(fake.calls.opened, [], 'a cancelled run never opens a revert');
+  assert.deepEqual(actions.reruns, [0]);
+  assert.equal(itemA.mainGuardReverts, undefined); assert.equal(itemA.stage, 'done');
+  assert.deepEqual(tick.errors, []);
+
+  // Tick 2: the rerun's jobs are queued, so main is pending and nothing is rerun again.
+  tick = await runMainGuard(fake.ports, options);
+  assert.deepEqual(tick.main, { state: 'pending', probe: A });
+  assert.deepEqual(actions.reruns, [0]);
+
+  // The rerun passes: main is green and nothing was reverted.
+  fake.checks.set(A, [...cancelledRun(), ...shardRuns(['success', 'success'], 'success', 200).filter(check => check.name !== 'typecheck' && !/shard [3-6]/.test(check.name))]);
+  tick = await runMainGuard(fake.ports, options);
+  assert.deepEqual(tick.main, { state: 'green' });
+  assert.deepEqual(fake.calls.opened, []);
+  assert.equal(itemA.stage, 'done'); assert.equal(itemA.mainGuardReverts, undefined);
+
+  // A rerun that concludes with a real failure is what names the culprit, and only then.
+  const [B] = ['b2'].map(sha);
+  history.unshift({ sha: B, parent: A });
+  const itemB = delivered('GY-1466', B, 943); fake.items.push(itemB);
+  fake.checks.set(B, cancelledRun());
+  withReruns(fake, B);
+  tick = await runMainGuard(fake.ports, options);
+  assert.equal(tick.main.state, 'pending'); assert.deepEqual(fake.calls.opened, []);
+  fake.checks.set(B, [...cancelledRun(), ...shardRuns(['failure', 'success'], 'failure', 300).filter(check => check.name !== 'typecheck')]);
+  tick = await runMainGuard(fake.ports, options);
+  assert.deepEqual(tick.main, { state: 'broken', culprit: B, parent: A, failing: ['test'] });
+  assert.deepEqual(fake.calls.opened, [B]);
+});
+
+test('unit:main-guard-real-failure-reverted a main run with a genuine test failure on the merge while its parent passed is reverted exactly as before, with nothing rerun', async () => {
+  const [base, A] = ['b0', 'a1'].map(sha);
+  const history: MainCommit[] = [{ sha: A, parent: base }, { sha: base, parent: null }];
+  const itemA = delivered('GY-2', A, 702);
+  const fake = world(history, [itemA]);
+  fake.checks.set(base, green); fake.checks.set(A, shardRuns(['failure', 'success', 'success'], 'failure'));
+  const actions = withReruns(fake, A);
+  const options = { required, ciAppIds: [ci], now: new Date(at) };
+  let tick = await runMainGuard(fake.ports, options);
+  assert.deepEqual(tick.main, { state: 'broken', culprit: A, parent: base, failing: ['test'] });
+  assert.deepEqual(fake.calls.opened, [A]);
+  assert.deepEqual(actions.reruns, [], 'a real failure is not rerun');
+  const revert = itemA.mainGuardReverts![0].revert!;
+  fake.checks.set(revert.head, green);
+  tick = await runMainGuard(fake.ports, options);
+  assert.deepEqual(fake.calls.merged, [revert.pr]);
+  assert.equal(itemA.stage, 'ready');
+  assert.match(itemA.mainGuardReverts![0].reason!, /broke main: test failed on that merge commit while its parent passed/);
+  // A cancelled revert's own checks are still not merged: it is given up as before.
+  assert.equal(commitVerdict(runs({ test: 'cancelled', typecheck: 'success' }), required, [ci]).verdict, 'cancelled');
+});
+
+test('unit:main-guard-cancel-bound-escalates a run still cancelled past the rerun bound is reported once to the master as an infrastructure fault naming the run, never reverted', async () => {
+  const limit = (mainGuard as { mainCancelledRerunLimit?: number }).mainCancelledRerunLimit ?? 3;
+  const [base, A] = ['b0', 'a1'].map(sha);
+  const history: MainCommit[] = [{ sha: A, parent: base }, { sha: base, parent: null }];
+  const itemA = delivered('GY-1465', A, 942);
+  const fake = world(history, [itemA]);
+  fake.checks.set(base, green);
+  const options = { required, ciAppIds: [ci], now: new Date(at), cancelled: new Set<string>() };
+  // Every attempt is cancelled again: the guard reruns up to the bound, then reports.
+  let attempt = 1; const reruns: number[] = [];
+  fake.ports.cancelledRun = async () => ({ id: 4242, attempt });
+  fake.ports.rerunCancelled = async checkRun => { reruns.push(checkRun); attempt += 1; return 'requested'; };
+  for (let tick = 0; tick < limit + 3; tick++) {
+    fake.checks.set(A, cancelledRun(1000 * attempt));
+    const result = await runMainGuard(fake.ports, options);
+    assert.equal(result.main.state, 'pending', 'a cancelled main is never broken');
+    assert.deepEqual(result.errors, []);
+  }
+  assert.equal(reruns.length, limit, 'reruns stop at the bound');
+  assert.deepEqual(fake.calls.opened, [], 'nothing is reverted');
+  assert.equal(itemA.stage, 'done'); assert.equal(itemA.delivery?.mergeSha, A);
+  assert.equal(itemA.mainGuardReverts?.length, 1, 'reported once');
+  const fault = itemA.mainGuardReverts![0];
+  assert.equal(fault.cause, 'cancelled'); assert.equal(fault.revert, null); assert.deepEqual(fault.run, { id: 4242, attempt: limit + 1 });
+  assert.match(fault.reason!, /infrastructure fault: CI run 4242 on main's merge/);
+  const lines = mainGuardAttention(fake.items);
+  assert.equal(lines.length, 1);
+  assert.deepEqual(lines[0].red, [], 'raised once, not every cycle');
+  assert.match(lines[0].text, /infrastructure fault: CI run 4242.*not reverted.*rerun run 4242/);
+  assert.doesNotMatch(lines[0].text, /broke main/);
+
+  // A master rerun that then fails for real is still reverted.
+  fake.checks.set(A, [...cancelledRun(), ...shardRuns(['failure', 'success'], 'failure', 9000).filter(check => check.name !== 'typecheck')]);
+  const result = await runMainGuard(fake.ports, options);
+  assert.equal(result.main.state, 'broken');
+  assert.deepEqual(fake.calls.opened, [A]);
+});
+
+test('unit:ci-bubblewrap-install-bounded the CI bubblewrap install retries apt and is bounded well inside the shard timeout', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const workflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  const shard = workflow.slice(workflow.indexOf('  test-shard:'), workflow.indexOf('  test-browser:'));
+  const shardTimeout = Number(/\n    timeout-minutes: (\d+)/.exec(shard)?.[1]);
+  const step = shard.slice(shard.indexOf('- name: Install bubblewrap'), shard.indexOf('- name: Select the test files'));
+  const stepTimeout = Number(/timeout-minutes: (\d+)/.exec(step)?.[1]);
+  assert.ok(stepTimeout > 0 && stepTimeout * 2 <= shardTimeout, `the install step is bounded at ${stepTimeout} min, at most half the shard's ${shardTimeout}`);
+  assert.match(step, /for attempt in 1 2 3/, 'apt is retried');
+  assert.match(step, /Acquire::Retries=/);
+  for (const call of step.match(/apt-get (update|install)/g) ?? []) assert.ok(new RegExp(`timeout \\d+ ${call}`).test(step), `${call} is bounded by timeout`);
+  assert.equal(step.match(/apt-get (update|install)/g)?.length, 2);
+});

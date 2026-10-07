@@ -2080,6 +2080,12 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     await this.request(`/actions/runs/${job.run_id}/rerun-failed-jobs`, 'POST', {});
     return named;
   }
+  /** The workflow run of the Actions job behind check run `checkRunId`, and that job's attempt (GY-1468). */
+  async jobRun(checkRunId: number): Promise<{ id: number; attempt: number | null }> {
+    const job = await this.request(`/actions/jobs/${checkRunId}`);
+    demand(Number.isSafeInteger(job?.run_id), `Check run ${checkRunId} is not a GitHub Actions job; it cannot be rerun`);
+    return { id: job.run_id, attempt: Number.isSafeInteger(job.run_attempt) ? job.run_attempt : null };
+  }
   /**
    * The workflow run a rerun was requested on (GY-1096): its status (`queued`, `waiting`,
    * `in_progress`, `completed`, ...), conclusion and current attempt, or null when GitHub has none.
@@ -2633,7 +2639,7 @@ export const mainGuardIntervalMs = 30_000;
  * one whose delivery is the merge that broke main — and records each revert step on that item under
  * `main-guard.revert.<state>`, reopening it for rework when its revert merged.
  */
-export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'evaluate'>, github: Pick<GitHub, 'mainHistory' | 'commitChecks' | 'openMainRevert' | 'revertPull' | 'mergeChanges' | 'revertChanges' | 'approveRevert' | 'mergeRevert' | 'closeRevert'>, now = new Date(), verdicts = new Map<string, CommitVerdict>(), approved = new Set<string>()): Promise<MainGuardTick> {
+export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' | 'evaluate'>, github: Pick<GitHub, 'mainHistory' | 'commitChecks' | 'openMainRevert' | 'revertPull' | 'mergeChanges' | 'revertChanges' | 'approveRevert' | 'mergeRevert' | 'closeRevert'> & Partial<Pick<GitHub, 'jobRun' | 'rerunFailedJobs'>>, now = new Date(), verdicts = new Map<string, CommitVerdict>(), approved = new Set<string>(), cancelled = new Set<string>()): Promise<MainGuardTick> {
   const pool = engine.store.pool;
   const required = await mainGuardRequired(pool);
   return runMainGuard({
@@ -2648,6 +2654,15 @@ export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' 
     approveRevert: (pr, head, body) => github.approveRevert(pr, head, body),
     mergeRevert: (work, revert) => github.mergeRevert(work, revert),
     closeRevert: (pr, reason) => github.closeRevert(pr, reason),
+    // GY-1468: a run on main that concluded only cancelled is rerun, never reverted; GitHub refuses
+    // a rerun while the run is still in progress, which waits for the next tick.
+    ...(typeof github.jobRun === 'function' && typeof github.rerunFailedJobs === 'function' ? {
+      cancelledRun: (checkRun: number) => github.jobRun!(checkRun),
+      rerunCancelled: async (checkRun: number, run: { id: number; attempt: number | null }) => {
+        try { await github.rerunFailedJobs!(checkRun, { run: { runId: run.id, ...(run.attempt !== null ? { attempt: run.attempt } : {}) } }); return 'requested' as const; }
+        catch (error) { if (error instanceof RerunPending && !error.unreadable) return 'waiting' as const; throw error; }
+      },
+    } : {}),
     record: (snapshot, revert: MainGuardRevert) => engine.store.transaction(async (db, at) => {
       const work: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [snapshot.id])).rows[0]?.document;
       demand(work, 'Work item not found', 404);
@@ -2655,9 +2670,9 @@ export async function guardGitHubMain(engine: Pick<Engine, 'store' | 'ciAppIds' 
       if (reopened) engine.evaluate(work, (await lockedWork(db, [work.id])).map(item => item.id === work.id ? work : item), at);
       await save(db, work, 'graphyard', `main-guard.revert.${revert.state}`, at, { revert, reopened });
     }),
-  }, { required, ciAppIds: engine.ciAppIds, now, verdicts, approved });
+  }, { required, ciAppIds: engine.ciAppIds, now, verdicts, approved, cancelled });
 }
-const mainGuardRead = new WeakMap<Engine, number>(), mainGuardVerdicts = new WeakMap<Engine, Map<string, CommitVerdict>>(), mainGuardApproved = new WeakMap<Engine, Set<string>>(), mainGuardFailure = new WeakMap<Engine, string>();
+const mainGuardRead = new WeakMap<Engine, number>(), mainGuardVerdicts = new WeakMap<Engine, Map<string, CommitVerdict>>(), mainGuardApproved = new WeakMap<Engine, Set<string>>(), mainGuardCancelled = new WeakMap<Engine, Set<string>>(), mainGuardFailure = new WeakMap<Engine, string>();
 /** The revert approver App from `GRAPHYARD_REVERT_APPROVER_APP_ID`/`_INSTALLATION_ID`/`_PRIVATE_KEY` (or `_FILE`); undefined when unset. */
 export async function revertApproverFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<RevertApprover | undefined> {
   if (!env.GRAPHYARD_REVERT_APPROVER_APP_ID) return undefined;
@@ -2799,7 +2814,10 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
     if (!mainGuardApproved.has(engine)) mainGuardApproved.set(engine, new Set());
     const approved = mainGuardApproved.get(engine)!;
     if (approved.size > historyEntries) approved.clear();
-    const failed = await guardGitHubMain(engine, github, new Date(), verdicts, approved).then(tick => tick.errors.join('; '), error => error instanceof Error ? error.message : String(error));
+    if (!mainGuardCancelled.has(engine)) mainGuardCancelled.set(engine, new Set());
+    const cancelled = mainGuardCancelled.get(engine)!;
+    if (cancelled.size > historyEntries) cancelled.clear();
+    const failed = await guardGitHubMain(engine, github, new Date(), verdicts, approved, cancelled).then(tick => tick.errors.join('; '), error => error instanceof Error ? error.message : String(error));
     if (failed && mainGuardFailure.get(engine) !== failed) await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', 'main-guard.failed', JSON.stringify({ details: { error: failed, at: new Date().toISOString() } })]).catch(() => {});
     mainGuardFailure.set(engine, failed);
   }

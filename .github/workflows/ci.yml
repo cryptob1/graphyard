@@ -82,10 +82,19 @@ jobs:
       # bubblewrap namespaces (GY-888), and a host without bubblewrap must refuse every session
       # rather than start one unconfined. Ubuntu 24.04 confines unprivileged user namespaces to
       # profiled binaries, so the runner lifts that restriction for the suite.
+      # A stalled apt mirror once held two shards in this step until the job timeout cancelled them
+      # (GY-1468): each apt call is bounded and retried, and the step fails in three minutes at most.
       - name: Install bubblewrap (the confinement suite runs real namespaces)
+        timeout-minutes: 3
+        shell: bash
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q bubblewrap
+          set -euo pipefail
+          apt=(-q -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+          for attempt in 1 2 3; do
+            if sudo timeout 50 apt-get update "${apt[@]}" && sudo timeout 50 apt-get install -y "${apt[@]}" bubblewrap; then break; fi
+            if (( attempt == 3 )); then echo "::error::bubblewrap could not be installed after 3 bounded attempts"; exit 1; fi
+            sleep 5
+          done
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
       - name: Select the test files this run executes
         run: node scripts/ci-tests.mjs select --out "$RUNNER_TEMP/selected-tests.txt"
