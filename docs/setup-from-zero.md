@@ -18,13 +18,13 @@ A new Hetzner server waits (exit 3) on the operator approving its price: rerun w
 
 ## The Setup page
 
-When a step needs a person, `up` prints one link and waits until the step is green. The link (`SERVER/#sign-in=CODE&setup` from the operator credential, or a host install's `#claim=CODE&setup`) signs you in once, within 10 minutes, and opens the Setup page (also linked from Settings → Agents). Each item is live, with one sentence and one button:
+When a step needs a person, `up` prints one link and waits until the step is green. The link (`SERVER/#sign-in=CODE&setup` from the operator credential, or a host install's `#claim=CODE&setup`) signs you in once, within 10 minutes, and opens the Setup page (also linked from Settings → Agents). Each live item has one sentence and one button:
 
-| Item | Button |
-| --- | --- |
-| GitHub App, reviewer App | **Create the GitHub App** opens `up`'s App page; create it, install it on OWNER/REPO only |
-| An account that writes code, one that reviews | **Connect an account**: Settings → Agents → Connect (an API key, or a subscription sign-in) |
-| Branch protection, coordinator running | none: Graphyard does these |
+| Item | Button
+| --- | ---
+| GitHub App, reviewer App | **Create the GitHub App** opens `up`'s App page; create it, install it on OWNER/REPO only
+| An account that writes code, one that reviews | **Connect an account**: Settings → Agents → Connect (an API key, or a subscription sign-in)
+| Branch protection, coordinator running | none: Graphyard does these
 
 When all are green, **Describe what you want built** submits a first work item the master refines. Once the first pull request reports `Graphyard / merge`, rerun `up` to require it.
 

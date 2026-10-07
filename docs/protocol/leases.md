@@ -9,7 +9,7 @@ Claims last 120 s, renewed every ≤30 s; owner mutations carry epoch (expired r
 
 ### Push credential
 
-Workers never use host `gh` logins; launchers mint into `worker-sessions/GY-N-EPOCH` (0700), set `GH_CONFIG_DIR`. `POST /api/work/UUID/push-credential` `{"epoch": N}` (`graphyard push-credential GY-N EPOCH DIR`) mints unstored App token (`contents`, `pull_requests`, `workflows` write) expiring by claim + 4h; refused for lapsed/submitted epochs or base queue allowing App bypass; `watch` re-mints near expiry, revokes at exit. GitHub credential failures block attempt (branch kept), relaunching with backoff once `github-credential` clears; a third in a row holds the item for an approver.
+Workers never use host `gh` logins; launchers mint into `worker-sessions/GY-N-EPOCH` (0700), set `GH_CONFIG_DIR`. `POST /api/work/UUID/push-credential` `{"epoch":N}` (`graphyard push-credential GY-N EPOCH DIR`) mints unstored App token (`contents`, `pull_requests`, `workflows` write) expiring by claim + 4h; refused for lapsed/submitted epochs or base queue allowing App bypass; `watch` re-mints near expiry, revokes at exit. GitHub credential failures block attempt (branch kept), relaunching with backoff once `github-credential` clears; a third in a row holds the item for an approver.
 
 ## How a lease ends
 

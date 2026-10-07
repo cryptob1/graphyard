@@ -1,19 +1,19 @@
 <!-- page: Agent protocol | 1 | work mutations. -->
 # Work commands
 
-All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)); mutations `Idempotency-Key`, reused only for identical retries. Errors: `{ "error": "reason" }`; `409` refusal is read, not retried.
+All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)); mutations `Idempotency-Key`, reused only for identical retries. Errors: `{"error":"reason"}`; `409` refusal is read, not retried.
 
 `POST /api/work` ([example](../../examples/work.json)): `title`, `criteria`; optionally `dependencies`, `exclusiveResources`, `plannedFiles`, `split` ([decomposition](#splitting-an-item) opt-out/in), `producerProofs` (producer-runnable `manual:` proofs); `parent`/`children` only split sets. Others: `POST /api/work/KEY/COMMAND`:
 
 - `requirements`: document, `expectedPolicyRevision`, `reason`; `admin` (operator agents additively); omitted `split` kept; stale revisions refused (`Policy revision changed`) before lease/quarantine checks; a partly widened scope request's findings aren't re-read mid-approval. `rule: "successor"` (operator agents, additive) marks the loop's re-plan onto split or renamed files; interventions skip it.
 - `decomposition` (coordinator): `{event:"started"|"decided"|"failed",…}`; `decided` (`payload.children`) makes the [split](#splitting-an-item).
 - `ready`, `unblock`: `{"reason":…}` (operator agents: `expectedRevision`; `master unblock` retries stale refusals (≤3) while blocker stands). Two-party `release`/`unblock`/pinned `close` decisions survive loop-bookkeeping moves (sessions, gates, next action, action queue); others settle them `stale`. A head-bound `rework` (`input.binding` `SHA:GROUNDS`) is refused while another candidate stands; its approval then settles `stale` (grounds outdated).
-- `resolve`: `{"trigger":…, "expectedRevision":…, "reason":…}`; human `admin`, or `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` explaining `lease-loss`.
-- `rework`, `recover` (delivered quarantine): `admin`, `{"reason":…, "previousWorkerStopped":true}`.
-- `repair` `{"reason":…}` (coordinator/admin) rebuilds a head carrying another item's unlanded commits; `refresh` `{"reason":…, "base":SHA}` (coordinator, admin, `intent:unblock` operator agent) merges the base tip into an open candidate, keeping carried approval.
+- `resolve`: `{"trigger":…,"expectedRevision":…,"reason":…}`; human `admin`, or `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` explaining `lease-loss`.
+- `rework`, `recover` (delivered quarantine): `admin`, `{"reason":…,"previousWorkerStopped":true}`.
+- `repair` `{"reason":…}` (coordinator/admin) rebuilds a head carrying another item's unlanded commits; `refresh` `{"reason":…,"base":SHA}` (coordinator, admin, `intent:unblock` operator agent) merges the base tip into an open candidate, keeping carried approval.
 - `claim` `{}`; `heartbeat`, `release` `{"epoch":1}` (`release` takes `"cause"` or `"failure":{"message":…}` → `workspace.failed`; untouched claims keep epochs); `blocked` `{"epoch":1,"reason":…,"partialWork":…}` (reason releases; null clears); `blocker-probe` (coordinator; `pass` clears routine [blocker](leases.md#blocked-work-unblocks-itself)); `workspace` `{"epoch":1,"host":…,"path":…,"branch":"graphyard/gy-1-1"}`, optional `preserved` (`workspace.preserved`).
 - `submit`: `{"epoch":1,"pr":123}`; `409` if non-`plannedFiles` file [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope) or an applied retro check fails.
-- `deployment`: `{"sha":…, "mergeSha":…, "source":"endpoint", "observedAt":…}`; coordinator/admin, delivered work, once.
+- `deployment`: `{"sha":…,"mergeSha":…,"source":"endpoint","observedAt":…}`; coordinator/admin, delivered work, once.
 - `triage` `{judgement}` (coordinator): [backlog](../master-agent.md#machine-filed-backlog).
 - `POST /api/retro/synthesize` (coordinator/admin) drafts [retro artefacts](../operations-reference.md#retro-synthesis) as caller; `POST /api/retro/ID/approve|refuse` `{reason}` per rules (`403`; `409` once judged).
 

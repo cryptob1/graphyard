@@ -146,5 +146,5 @@ test('the documented acknowledgement retry contract states the bound the runner 
   assert.ok(contract.includes(`no send starts more than **${acknowledgementRetry.windowMs / 1000} seconds** after the first`), 'the time bound matches the code');
   const pauses = Array.from({ length: acknowledgementRetry.attempts - 1 }, (_, i) => acknowledgementRetry.retryMs * 2 ** i / 1000);
   assert.ok(contract.includes(`paused ${pauses.slice(0, -1).join(', ')} and ${pauses.at(-1)} seconds apart`), 'the pauses match the code');
-  assert.match(contract, /No heartbeat is sent and the attestor is not told to proceed until the acknowledgement is confirmed/);
+  assert.match(contract, /Until the acknowledgement is confirmed, no heartbeat is sent nor the attestor told to proceed/);
 });
