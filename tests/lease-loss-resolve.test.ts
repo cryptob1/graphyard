@@ -41,7 +41,7 @@ test('unit:lease-loss-resolve-routine — a control-plane lease-loss whose lost 
   assert.equal(superseded?.cause, 'superseded');
   assert.equal(superseded.at, lost.at, 'it settles exactly the escalation it judged');
   assert.match(superseded.note, /epoch 2 is held by graphyard-opencode-1/);
-  assert.match(superseded.note, /nothing from the lost attempt can act or merge/);
+  assert.match(superseded.note, /^auto-settled: superseded — epoch 2 is held by graphyard-opencode-1, so nothing from epoch 1 can act or merge$/);
 
   // The lost epoch's own fence still stands: it has not been shown stopped, so nothing settles.
   assert.deepEqual(settle(item({ containmentQuarantine: { owner: 'graphyard-claude-2', epoch: 1, at: iso(-9 * 60_000), settlementHash: 'b'.repeat(64) } } as Partial<Work>)), []);
@@ -49,6 +49,9 @@ test('unit:lease-loss-resolve-routine — a control-plane lease-loss whose lost 
   assert.deepEqual(settle(item({ epoch: 1, lease: { owner: 'graphyard-claude-2', epoch: 1, expiresAt: iso(60_000) }, containmentQuarantine: null } as Partial<Work>)), []);
   // Between attempts with no fence and no lease: every attempt has ended.
   assert.equal(settle(item({ epoch: 1, lease: null, containmentQuarantine: null } as Partial<Work>))[0]?.cause, 'ended');
+  // A superseded one settles at once (GY-1390); an ended one only once it has stood its bound.
+  assert.equal(settleableLeaseLoss(item())[0]?.cause, 'superseded');
+  assert.deepEqual(settleableLeaseLoss(item({ epoch: 1, lease: null, containmentQuarantine: null } as Partial<Work>), [], at - 1), []);
 
   // Only the latest attempt's own submission shows supersession. Epoch 2 submitted, rework moved the
   // item to epoch 3, and epoch 3 lapsed (its lease-loss a suppressed repeat of epoch 1's): the epoch-2

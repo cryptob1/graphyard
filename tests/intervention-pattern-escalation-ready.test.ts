@@ -18,7 +18,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // fence stands", "No newer attempt holds the item … holds no lease and no containment fence", or,
 // for GY-1373/1374/1375, later attempts granted and expired with the item now holding no lease and
 // no fence. Each approver round waited 3 to 229 minutes to confirm facts the control plane already
-// had. Reconciliation now settles such a lease-loss itself once it has stood `leaseLossSettleMs`,
+// had. Reconciliation now settles such a lease-loss itself: a superseded one at once (GY-1390), and
+// one whose attempts have all ended once it has stood `leaseLossSettleMs`;
 // and the loop no longer asks for the resolve.
 //
 // Each class is replayed below from the record the resolution cited.
@@ -51,11 +52,12 @@ for (const instance of instances) {
     const work = instance.work(), escalation = standingEscalations(work)[0];
     assert.equal(routineDecision(work, { autoMerge: true }, after5(escalation.at))?.action, undefined, 'no resolve decision, so no approver round and no intervention');
     assert.equal(withheldDecision(work, { autoMerge: true }, after5(escalation.at)), null);
-    assert.deepEqual(settleableLeaseLoss(work, [], after5(escalation.at) - 1), [], 'it stands its bound first, so every sampling reader sees it');
+    // A superseded one settles at once (GY-1390); one whose attempts all ended stands its bound first, so every sampling reader sees it.
+    assert.equal(settleableLeaseLoss(work, [], after5(escalation.at) - 1).length, instance.cause === 'superseded' ? 1 : 0);
     const [settled] = settleableLeaseLoss(work, [], after5(escalation.at));
     assert.equal(settled?.cause, instance.cause);
     assert.match(settled.note, instance.evidence);
-    assert.match(settled.note, /^auto-settled: .*nothing from the lost attempt can act or merge$/);
+    assert.match(settled.note, /^auto-settled: (superseded|ended) — .*, so nothing from epoch \d+ can act or merge$/);
   });
 }
 
