@@ -5,7 +5,7 @@ import { dirname, resolve, basename } from 'node:path';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { nameForLaunch } from '../session-name.js';
 import { launchAuthorization } from '../repository-setup.js';
-import { type HarnessPlan, type HarnessRule, writeHarnessPermissions, masterHarnessPlan, harnessDecision } from '../harness.js';
+import { type HarnessPlan, type HarnessRule, writeHarnessPermissions, masterHarnessPlan, harnessDecision, claudeRuleProblem } from '../harness.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { coordinatorCheckoutRoot, workerConfinementRefusal } from './profiles.js';
@@ -61,7 +61,7 @@ function withMasterOwnedRules(plan: HarnessPlan, config: MasterConfig): HarnessP
  * never the master's. Like the master's rules these are a prompt policy, not authority: the
  * lease, the session's own credential and branch protection remain the enforcement.
  */
-export type SessionRole = 'worker' | 'reviewer' | 'producer';
+export type SessionRole = 'worker' | 'reviewer' | 'producer' | 'docs-sync';
 export interface SessionHarnessInput { role: SessionRole; kind: string | undefined; cliPath: string; repository: string; baseBranch: string; credentialHome: string; credentialDirectories: string[]; branch?: string; pr?: number;
   /** The detached checkout Graphyard allocated for a reviewer session under the managed worktree root. */
   checkout?: string }
@@ -117,6 +117,23 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
       { rule: 'Edit(./**)', why: 'The review session is read-only.' },
       { rule: 'Write(./**)', why: 'The review session is read-only.' },
     ];
+  } else if (input.role === 'docs-sync') {
+    if (!input.branch) throw new Error('A docs-sync harness names the item branch it may push');
+    const push = `git push ${docsSyncPushTarget(input.branch)}`;
+    allow = [
+      { rule: 'Bash(git merge:*)', why: 'Merge the conflicting base tip into the reviewed head, or abort that merge.' },
+      { rule: 'Bash(git add:*)', why: 'Stage the resolved docs pages.' },
+      { rule: 'Bash(git commit:*)', why: 'Commit the resolved merge.' },
+      { rule: `Bash(${push})`, why: 'Push the resolved merge to the item\'s own branch: a plain push, never forced, refused by GitHub when the branch moved.' },
+      { rule: 'Bash(npm ci)', why: 'Install dependencies when the checkout has none linked.' },
+      { rule: 'Bash(npm test:*)', why: 'Rerun the docs obligation and word-budget tests.' },
+    ];
+    const forced = workerHarnessPlan({ cliPath: input.cliPath, branch: input.branch, baseBranch: input.baseBranch, credentialHome: input.credentialHome }).deny
+      .filter(entry => entry.rule.startsWith('Bash(git push ') || entry.rule.startsWith('Bash(git -* push '));
+    deny = [...secrets, ...noVerdict, ...forced, ...docsSyncPushDenials(input.branch).filter(entry => !forced.some(existing => existing.rule === entry.rule)),
+      { rule: 'Bash(git rebase:*)', why: 'The session merges the base tip; a rebase would rewrite the reviewed history.' },
+      ...['claim', 'complete', 'evidence'].map(command => ({ rule: `Bash(${cli} ${command}:*)`, why: `A docs-sync session never runs ${command}: the control plane observes the pushed head and runs the proofs again.` })),
+    ];
   } else {
     allow = [
       { rule: `Bash(${cli} evidence:*)`, why: 'Submit the evidence of the proof group this session was launched for, under its own producer credential.' },
@@ -128,6 +145,47 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
     deny = [...secrets, ...noPush, ...noVerdict];
   }
   return { harness: 'claude', file: null, allow, deny, manual: null, note: `Role-scoped ${input.role} rules; the session loads these and the operator's user settings, never the repository's project or local settings where the master's rules live.` };
+}
+
+/** The one push a docs-sync session makes, after `git push`: the resolved merge to the item's own branch. */
+export const docsSyncPushTarget = (branch: string) => `origin HEAD:refs/heads/${branch}`;
+/**
+ * Denies every `git push` but the docs-sync session's own one, in each spelling a rule can name. A
+ * permission glob cannot say "this ref and no other", and the session runs under bypassPermissions,
+ * where an unmatched command runs; so the push is fenced by where its text departs from the own
+ * command: a character the own command never contains, anywhere (`*` excepted: a rule cannot name
+ * it, and Git refuses a refspec whose destination alone is a pattern); a different character at any
+ * position; text after the own refspec; a strict prefix (a shorter branch name); a flag or a push
+ * behind git's global options. A `:` followed by `*` would read as Claude Code's prefix marker
+ * (claudeRuleProblem), so a departure to `:` is spelled out one character further.
+ */
+export function docsSyncPushDenials(branch: string): HarnessRule[] {
+  const own = docsSyncPushTarget(branch);
+  const used = new Set(own), afterColon = own[own.indexOf(':') + 1];
+  const why = 'A docs-sync session pushes only its resolved merge to the item\'s own branch.';
+  const rules = new Map<string, HarnessRule>();
+  const add = (body: string, reason = why) => { const rule = `Bash(git push${body ? ` ${body}` : ''})`; if (!claudeRuleProblem(rule) && !rules.has(rule)) rules.set(rule, { rule, why: reason }); };
+  add('', 'A bare push reaches the upstream or every matching branch.');
+  rules.set('Bash(git -* push*)', { rule: 'Bash(git -* push*)', why: `${why} Never behind git's global options.` });
+  // A character the own command never contains, anywhere. A backslash is among them: bash drops
+  // the escape, so `refs/heads/\main` would otherwise reach the base ref through a text no rule names.
+  for (const character of new Set([...emptySourceStarts, ...'+=,%^#!?[]}\\<>()\t'])) if (!used.has(character)) add(`*${character}*`, `${why} The own push never contains ${JSON.stringify(character)}.`);
+  // A colon followed by anything but what follows the own one (a rule may not put `*` right after `:`).
+  for (const character of used) if (character !== afterColon && character !== ':' && character !== ' ') add(`*:${character}*`);
+  add('*:'); add('*: *');
+  for (let index = 0; index <= own.length; index++) {
+    const prefix = own.slice(0, index);
+    if (index > 0 && index < own.length && !prefix.endsWith(' ')) add(prefix, `${why} A shorter refspec names another ref.`);
+    for (const character of used) {
+      if (character === own[index]) continue;
+      if (character === ':') add(`${prefix}:${afterColon}*`);
+      else if (character !== ' ') add(`${prefix}${character}*`);
+      else if (index > 0 && index < own.length && !prefix.endsWith(' ')) add(`${prefix} *`, `${why} Arguments after this point name another ref.`);
+    }
+  }
+  // After the own refspec nothing follows: `OWN *` would read as a prefix rule matching the push itself.
+  for (const character of used) if (character !== ' ' && character !== ':') add(`${own} *${character}*`, `${why} Nothing follows the own refspec.`);
+  return [...rules.values()];
 }
 
 /** Where a session's role file lives: beside the ledgers, ignored by Git, never inside a worktree it is launched for. */

@@ -14,6 +14,7 @@ import LoginPage, { REJECTED_NOTICE } from './pages/login';
 import WorkDetails, { useOpenedWork } from './pages/work-details';
 import CreateWork from './pages/create-work';
 import { readsFlowAnalytics, useStepMoves } from './step-moves';
+import { initialView } from './pages/setup';
 
 /**
  * The dashboard shell: session state, polling, the sidebar generated from the view
@@ -29,7 +30,7 @@ function App() {
   const [error, setError] = useState('');
   const [connected, setConnected] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
-  const [view, setView] = useState('work');
+  const [view, setView] = useState(initialView);
   const [filter, setFilter] = useState<OpenGroup | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [events, setEvents] = useState<any[]>([]);

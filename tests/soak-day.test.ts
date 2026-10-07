@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { listTestFiles, releaseCandidateTests, repositoryRoot } from '../scripts/ci-tests.mjs';
 import { paneSweepLimit } from '../src/daemon/cycle-reclaim.js';
@@ -54,7 +54,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const hours = Number(process.env.SOAK_HOURS ?? 24);
   const day = await simulateDay({ hours, backlog: true, github806: true, remedies: true, plan: { blockedMerge: blockedMergeItem, ...memoryDay }, diagnosisLimit, staleDiagnosis: true, promotion: true });
   assertLaunchesConfined(day, coordinatorRoot!);
-  const { reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, attestations, producerRuns, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, herdr, landingRefusals, foreignPane, previousWorktrees, closedLeased, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, diagnosisRuns, decideCalls, baseBreak, baseFailure, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks, diagnosisRaces, diagnosisRequestRaces } = day;
+  const { reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, attestations, producerRuns, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, herdr, landingRefusals, foreignPane, previousWorktrees, closedLeased, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, diagnosisRuns, decideCalls, baseBreak, baseFailure, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks, diagnosisRaces, diagnosisRequestRaces } = day;
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);
   assert.deepEqual(undelivered.map(item => `${item.key} ${item.stage}: ${item.gates.flatMap(gate => gate.reasons).join('; ')}`), [], 'all fifteen items are delivered');
   // GY-1060: every item merged under protection requiring `secrets` beside the policy's checks, so
@@ -250,6 +250,10 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.deepEqual(herdr.list().filter(agent => /docs-sync/.test(agent.name ?? '')), [], 'no docs-sync session is left open');
   assert.ok(docsSyncRuns.every(run => herdr.closed.includes(run.pane)), 'the loop closed the docs-sync session it launched');
   assert.ok(Object.values(state.docsSyncs).every(watch => watch.settledAt) && Object.keys(state.docsSyncs).length <= docsSyncRuns.length, `every docs-sync record settled, and none accumulate: ${JSON.stringify(state.docsSyncs)}`);
+  // GY-1433: under a root with project settings each launch wrote a role file, and each settle removed it.
+  const roleFiles = (() => { try { return readdirSync(join(docsSyncRoot, '.graphyard', 'harness')); } catch { return []; } })();
+  assert.ok(docsSyncRuns.length > 0 && docsSyncRuns.every(run => run.roleFile?.startsWith(join(docsSyncRoot, '.graphyard', 'harness', 'docs-sync-'))), 'each docs-sync launch wrote its role file');
+  assert.ok(roleFiles.every(file => !file.startsWith('docs-sync-')), `no docs-sync role file outlives its settled session: ${roleFiles.join(', ')}`);
   // GY-711: the doctor fired from the real cycle on its ten-minute interval across the day — the
   // cursor holds its recent runs (all reported), the ledger holds every summary the loop posted,
   // and the scripted finding reached the run record it belongs to.

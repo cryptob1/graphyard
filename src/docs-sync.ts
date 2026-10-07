@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync, symlinkSync } from 'node:fs';
 import { access, constants, readdir, rm } from 'node:fs/promises';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { Work } from './model.js';
 import { runChild, type ChildRun } from './child-runner.js';
 import type { CoordinatorConfinement, MasterConfig } from './master/profiles.js';
@@ -8,6 +8,7 @@ import { loadMasterConfig } from './master/config.js';
 import { accountLaunch } from './master/environments.js';
 import { closeFailedLaunch, launchStartMs, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from './master/launch.js';
 import { checkoutGitDirectory } from './master/checkout-git.js';
+import { prepareSessionHarness, sessionHarnessFile } from './master/harness.js';
 import { sessionGitAdminDirectory } from './master/profiles.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson, observeHerdrAgents } from './master/herdr.js';
 import { autonomousSession, destructivePromptGuidance, herdrAttach } from './master/dispatch.js';
@@ -79,12 +80,16 @@ export function docsSyncPrompt(config: Pick<MasterConfig, 'repository' | 'cliPat
 
 const covers = (outer: string, path: string) => { const from = relative(outer, path); return from === '' || (from !== '..' && !from.startsWith(`..${sep}`) && !isAbsolute(from)); };
 
-/** Remove every docs-sync checkout no visible docs-sync session owns, so a finished or failed one does not hold disk. */
+/**
+ * Remove every docs-sync checkout, and every docs-sync role file (GY-1433), no visible docs-sync
+ * session owns, so a finished or failed one does not hold disk: a loop that died before settling
+ * its session leaves both to this orphan reclaim.
+ */
 export async function reclaimDocsSyncCheckouts(root: string, visible: readonly string[], run: ChildRun = runChild): Promise<string[]> {
+  const removed = await reclaimDocsSyncHarnesses(root, visible);
   const parent = resolve(root, '.graphyard', 'docs-sync');
   let entries: string[];
-  try { entries = await readdir(parent); } catch { return []; }
-  const removed: string[] = [];
+  try { entries = await readdir(parent); } catch { return removed; }
   for (const entry of entries) {
     const at = entry.lastIndexOf('-');
     if (at <= 0 || visible.includes(docsSyncSessionName({ key: entry.slice(0, at), head: entry.slice(at + 1) }))) continue;
@@ -150,6 +155,42 @@ export async function docsSyncCheckoutRefusal(checkout: string, confinement: Coo
 }
 
 /**
+ * The docs-sync session's role harness (GY-1433): like every session the master launches under a
+ * repository that carries project settings, a Claude docs-sync session loads only the operator's
+ * user settings plus its own role file (`--setting-sources user --settings FILE`), never the
+ * repository's .claude/settings.local.json where the master's `git push` deny lives. The role file
+ * allows the merge, the commit and the one plain push to the item's own branch and denies every
+ * other push, graphyard claim/complete/evidence, review verdicts and the secret paths. The file is
+ * named per plan, so two docs-sync sessions never share one, and it is removed when the session
+ * settles (`releaseDocsSyncHarness`), its launch fails, or the orphan reclaim finds no session for it.
+ */
+export async function docsSyncHarness(root: string, config: MasterConfig, plan: Pick<DocsSyncPlan, 'key' | 'head' | 'branch'>, kind: string) {
+  return prepareSessionHarness(root, config, { role: 'docs-sync', kind, profile: docsSyncHarnessProfile(plan), branch: plan.branch });
+}
+const docsSyncHarnessProfile = (plan: Pick<DocsSyncPlan, 'key' | 'head'>) => `${plan.key}-${plan.head.slice(0, 7)}`;
+/** The docs-sync session's role file for one plan; written only for a Claude session under a repository with project settings. */
+export const docsSyncHarnessFile = (root: string, plan: Pick<DocsSyncPlan, 'key' | 'head'>) => sessionHarnessFile(root, 'docs-sync', docsSyncHarnessProfile(plan));
+/** Remove one docs-sync session's role file, as its settle or failed launch leaves it; absent is fine. */
+export async function releaseDocsSyncHarness(root: string, plan: Pick<DocsSyncPlan, 'key' | 'head'>) {
+  await rm(docsSyncHarnessFile(root, plan), { force: true });
+}
+/** Remove every docs-sync role file whose session (named by item and head, as the file is) is not visible. */
+async function reclaimDocsSyncHarnesses(root: string, visible: readonly string[]): Promise<string[]> {
+  const parent = dirname(sessionHarnessFile(root, 'docs-sync', 'x'));
+  let entries: string[];
+  try { entries = await readdir(parent); } catch { return []; }
+  const removed: string[] = [];
+  for (const entry of entries) {
+    const match = /^docs-sync-(.+)-([0-9a-f]{7})\.json$/.exec(entry);
+    if (!match || visible.includes(docsSyncSessionName({ key: match[1], head: match[2] }))) continue;
+    const path = resolve(parent, entry);
+    await rm(path, { force: true });
+    removed.push(path);
+  }
+  return removed;
+}
+
+/**
  * Launch the docs-sync session for one plan on a reviewer-class account: the accounts the reviewer
  * profiles name, chosen as an approver's are (`selectApproverAccount`). The instruction is the
  * session's own first request, like every session Graphyard launches.
@@ -173,8 +214,9 @@ export async function launchDocsSync(root: string, work: Work, plan: DocsSyncPla
   // this process holds it against the reclaim pass for the session's bounded life and settles it
   // after; a loop that dies first leaves it to the orphan reclaim. `.graphyard/docs-sync` is only
   // swept, for checkouts launches before GY-866 left there.
-  let checkout: string | undefined, launch: ReturnType<typeof accountLaunch>, managed: Awaited<ReturnType<typeof coordinationCheckout>> | undefined, unhold = () => {};
-  const unwind = async () => { unhold(); if (managed) await settleCheckout(root, managed.directory); };
+  let checkout: string | undefined, launch: ReturnType<typeof accountLaunch>, harness: Awaited<ReturnType<typeof docsSyncHarness>>, managed: Awaited<ReturnType<typeof coordinationCheckout>> | undefined, unhold = () => {};
+  // The role file goes with the checkout: on a failed launch now, and after the session's bounded life.
+  const unwind = async () => { unhold(); await releaseDocsSyncHarness(root, plan).catch(() => undefined); if (managed) await settleCheckout(root, managed.directory); };
   // A launch that fails leaves a checkout no session will ever own, so it is reclaimed now, its
   // worktree registration with it, rather than at the next launch (GY-1273).
   const reclaim = async () => { if (checkout) await removeDocsSyncCheckout(root, checkout, run ?? runChild).catch(() => undefined); await unwind(); };
@@ -184,6 +226,8 @@ export async function launchDocsSync(root: string, work: Work, plan: DocsSyncPla
     unhold = holdCheckout(managed.directory);
     checkout = await prepareDocsSyncCheckout(root, plan, run, managed.worktree);
     launch = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, chosen.account ?? null, { writable: docsSyncWritablePaths(root, checkout) });
+    // The harness follows the chosen account's runtime: a Claude account loads its role file, never the master's rules.
+    harness = await docsSyncHarness(root, config, plan, kind);
     const refusal = await docsSyncCheckoutRefusal(checkout, await (seams.confinement ?? sessionConfinement)(kind, launch.args, { directory: checkout }));
     if (refusal) throw new Error(refusal);
   } catch (error) {
@@ -198,7 +242,7 @@ export async function launchDocsSync(root: string, work: Work, plan: DocsSyncPla
     await registeredLaunch(register, { id: `docs-sync:${plan.head}:${plan.base}`, kind: 'coordination', role: 'docs-sync', runtime: kind, host: config.hostId, head: plan.head,
       agentName: name, pane: created.pane, attach: herdrAttach(created.pane, config.herdrWorkspace), ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
       subject: `${work.key}: docs-sync onto ${plan.base.slice(0, 12)}`, state: 'running' },
-    () => startAgentSession(name, kind, created.pane, launch.args, docsSyncPrompt(config, plan, root, checkout), run, { directory: checkout, retry: `docs-sync of ${work.key}`, contract: launch.contract, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined);
+    () => startAgentSession(name, kind, created.pane, [...launch.args, ...harness.args], docsSyncPrompt(config, plan, root, checkout), run, { directory: checkout, retry: `docs-sync of ${work.key}`, contract: launch.contract, environment: launch.environment, timeoutMs: launchStartMs(config), role: harness.role }), () => undefined);
   } catch (error) {
     if (pane || tab) await closeFailedLaunch(pane, tab, run).catch(() => undefined);
     await reclaim();
@@ -216,9 +260,12 @@ export interface DocsSyncEffects {
   docsSync: (work: Work, plan: DocsSyncPlan) => Promise<{ agentName: string; pane: string | null; account: string | null; runtime: string; session: string | null }>;
   /** The paths git reports conflicting when `head` merges with `base`, from this checkout (`localConflictPaths`); null when it cannot tell. */
   conflictPaths: (work: Work, head: string, base: string) => Promise<string[] | null>;
+  /** Called when the loop settles a docs-sync session: removes its role file (`releaseDocsSyncHarness`, GY-1433). */
+  docsSyncSettled: (plan: Pick<DocsSyncPlan, 'key' | 'head'>) => Promise<void>;
 }
 
 export const docsSyncEffects = (root: string, run: ChildRun, register: (work: Work) => SessionRegistrar): DocsSyncEffects => ({
   docsSync: async (work, plan) => launchDocsSync(root, work, plan, await observeHerdrAgents(run), run, register(work)),
   conflictPaths: async (work, head, base) => work.candidate ? localConflictPaths(root, work.candidate.branch, head, base, run) : null,
+  docsSyncSettled: plan => releaseDocsSyncHarness(root, plan),
 });

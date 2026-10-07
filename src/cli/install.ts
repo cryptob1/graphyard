@@ -16,6 +16,7 @@ import { readSecretFromStdin } from './context.js';
 import { documentationDrift } from '../model/documentation.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
+import { describeUpEvent, runUp, upDependencies, upRequestFromArgs } from '../up.js';
 
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
   const setup = await startGithubSetup(root, repository, deployment);
@@ -53,6 +54,35 @@ export async function capacityForPrincipals(principalsFile: string, status: () =
 
 /** Repository onboarding: install a control plane, propose and apply the delivery workflow, register Apps, inspect readiness. */
 export const installCommands = defineCommands([
+  {
+    name: 'up',
+    help: [
+      '  up --repo OWNER/NAME [--provider compose|railway|hetzner] [--reviewer NAME]',
+      '     [--master claude|codex] [--agent] [--goal FILE] [--browser-profile PROFILE]',
+      '     [--confirm-price X | --max-monthly N] [--ssh-key NAME] [--ssh-host HOST] [--ssh-user USER]',
+      '                                First-run setup in one command: preflight, control plane,',
+      '                                host supervisor and Herdr, onboarding, agent accounts,',
+      '                                harness and master loop, resumable (.graphyard/up.json).',
+      '                                Onboarding files are published as a pull request; the goal',
+      '                                waits for it to merge. Price and SSH flags pass to install.',
+      '                                A step that needs a person prints one one-time link that signs',
+      '                                in to the dashboard Setup page, and waits for it to turn green.',
+      '                                --agent runs every step non-interactively (JSON events on',
+      '                                stderr), creating the Apps in the given or the master\'s recorded',
+      '                                browser profile (none: exit 2), and hands off only device',
+      '                                approvals. Exit 0 green, 1 failed, 2 prerequisite, 3 still',
+      '                                waiting (rerun resumes).',
+    ],
+    // `up` installs the control plane and records the connection; it never reads a stale one.
+    readsConnection: () => false,
+    async run(context) {
+      const request = upRequestFromArgs([context.id, ...context.args].filter((value): value is string => value !== undefined));
+      const emit = (event: Parameters<typeof describeUpEvent>[0]) => console.error(request.agent ? JSON.stringify(event) : describeUpEvent(event));
+      const result = await runUp(request, upDependencies(context.repositoryRoot(), await context.activeCliPath(), request, emit));
+      context.print(result);
+      process.exitCode = result.exitCode;
+    },
+  },
   {
     name: 'install',
     help: [
