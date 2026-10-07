@@ -1,35 +1,60 @@
-<!-- page: Build integrations | 2 | cases, runners. -->
+<!-- page: Build integrations | 2 | test cases, runners. -->
 # E2E validation
 
-An `e2e:` proof passes from pinned candidate, bundle, separate [collector](runner-setup.md). `graphyard validation define|build|candidate|request|dispatch|ack|heartbeat|result FILE.json` wraps `POST /api/validation/ACTION`: `admin` defines test cases (**Settings → Test cases**, `graphyard scenario scenario.json`); runners (`worker`) poll, ack, heartbeat; builders and collectors (`producer`) attest, publish, never both per build; `e2e:ID` pins latest immutable revision; only trusted attempts append **Tests** runs.
+An `e2e:` proof passes from a pinned candidate, bundle and separate [collector](runner-setup.md). `graphyard validation define|build|candidate|request|dispatch|ack|heartbeat|result FILE.json` wraps `POST /api/validation/ACTION`. `admin` defines; runners (`worker`) poll, ack and heartbeat; builders and collectors (`producer`) attest and publish, never both for one build.
+
+## Test cases
+
+`admin` defines them (**Settings → Test cases**, `graphyard scenario scenario.json`); `e2e:ID` pins the latest immutable revision; only trusted attempts append **Tests** runs.
 
 ## E2E case repository
 
-`e2e/cases/ID.json`, code-reviewed: `id` (file name), `title`, optional `description`, `tags`, `target` (`uat`/`any`), `required` (default `false`), ordered `steps`:
+A case is `e2e/cases/ID.json`, reviewed like code: `id` (the file name), `title`, optional `description`, `tags`, `target` (`uat` or `any`), `required` (default `false`) and ordered `steps`:
 
-- `http`: `method`, `path`, optional `body`, expected `status`; `expect` checks dotted JSON `path` (`equals`, `exists`, `type`, `includes`); `save` keeps values.
-- `browser` (Playwright Chromium): `open` `path`, `fill` `label` with `value`, `click`/`expectText` `text`, optionally by `role`; `exact: false` matches substrings.
+- `http`: `method`, `path`, optional `body`, expected `status`, `expect` checks on the JSON answer at a dotted `path` (one of `equals`, `exists`, `type`, `includes`), and `save` to keep values for later steps.
+- `browser` (Playwright Chromium): `open` a `path`, `fill` a `label` with a `value`, `click` or `expectText` a `text`, optionally by `role`; `exact: false` matches a substring.
 
-Values: `{{token}}`, `{{run}}`, `{{case}}`, saved. `graphyard e2e list` refuses malformed cases by file, field. `graphyard e2e sync` (`admin`) registers scenario revisions; edits make new ones, proofs keep theirs. `graphyard e2e run CASE|--tag T|--target uat|--all --url URL`: `GRAPHYARD_TOKEN`/`--token-file`, no token argument; `--step-timeout` (30 s); `--retries N` (none); prints failing steps, reasons; `--report` JSON; non-zero on failure; records base URL, served SHA, duration, outcome, failing step unless `--no-record`. **Tests** shows last outcome, SHA, environment, 20-run pass rate, flaky flag, failed steps, required/optional.
+Values may name `{{token}}`, `{{run}}`, `{{case}}` or a saved value. `graphyard e2e list` validates every file, refusing a malformed case by file and field.
 
-**Every release candidate runs `uat` cases**, in id order, as [`release validate`](delivery.md#release-candidates)'s `e2e` suite (`GRAPHYARD_UAT_URL`, `GRAPHYARD_UAT_TOKEN`; `--suite` commands write detail to `GRAPHYARD_SUITE_DETAIL`); `graphyard e2e record REPORT` records every attempt.
+To add one: write the file, run it, open a pull request. `graphyard e2e sync` (`admin`) registers each case as a scenario revision; an edited case becomes a new revision while proofs keep theirs. `graphyard e2e run CASE|--tag T|--target uat|--all --url URL` uses `GRAPHYARD_TOKEN` or `--token-file`, never a token argument; each step times out (`--step-timeout`, 30 s) and cases are not retried unless `--retries N`. It prints each failing step and reason, writes a JSON report (`--report`), exits non-zero on any failure, and records each run (base URL, served SHA, duration, outcome, failing step) on its revision unless `--no-record`.
+
+**Tests** shows each case's last outcome, SHA and environment, pass rate and flaky flag over its last 20 runs, each failed run's step, and whether the case is required or optional.
+
+**Every release candidate runs the `uat` cases**: the `e2e` suite of [`release validate`](delivery.md#release-candidates) runs them in id order against UAT with `GRAPHYARD_UAT_URL` and `GRAPHYARD_UAT_TOKEN` (a `--suite` command's detail is what it writes to `GRAPHYARD_SUITE_DETAIL`); `graphyard e2e record REPORT` then records every attempt.
 
 ## Release verdicts
 
-One retry: **passed**; **failed** (both); **flaky** (retry passed at same served SHA; `RUN:attempt-1`, `RUN:attempt-2` recorded); **unrun** (stopped by failed required case, which report names; listed apart, uncounted). Only failed or unaccepted flaky required cases block; optional ones marked on **Tests**. At unreported commit, pass-after-failure is failed.
+Each case in a release run ends in one state:
 
-Flaky required cases block promotion until `evidence` decision (`{"case":ID,"runId":RUN,"sha":FULL_SHA}` on hold item, another agent approving) accepts; refused unless both attempts recorded at that SHA. `release promote` reads only that run's and SHA's applied decisions. Workflow's `release promote ID` (`GRAPHYARD_URL`, `GRAPHYARD_TOKEN`) promotes only passing UATs.
+- **passed**;
+- **failed**: both attempts failed (a release run retries a case once);
+- **flaky**: the first attempt failed and the retry passed at the same served SHA; both attempts are kept and recorded (`RUN:attempt-1`, `RUN:attempt-2`);
+- **unrun**: a required case failed and stopped the run, so this case never ran; the report names the stopping case.
 
-`e2e/contract.json` lists required customer outcomes: `id`, `title`, optional `criteria`, proving `cases` (shareable). Pre-cut `graphyard release contract` refuses `release cut`, naming outcome, case, when bound case is missing, invalid, not `uat`-targeted or optional, or required case proves nothing.
+Only required cases block: a failed one, or a flaky one no evidence decision accepts. Unrun cases are listed apart, never counted as failures or passes. Optional cases run, are recorded and show on **Tests** marked optional, but never fail `release validate`. A run at an unreported commit binds no flaky result: a pass after a failure there is failed.
+
+A flaky required case blocks promotion until an `evidence` decision accepts it: one agent requests it on the case's release hold item with `{"case": ID, "runId": RUN, "sha": FULL_SHA}`, a different agent approves it (self-approval is refused), and the server refuses it unless both attempts are recorded at that SHA. `release promote` reads applied evidence decisions only for that run and SHA; an acceptance never carries to another SHA. The workflow promotes only a passing UAT, so a candidate held only by accepted flaky cases is promoted by running `release promote ID` with `GRAPHYARD_URL` and `GRAPHYARD_TOKEN` set.
+
+## Release contract
+
+`e2e/contract.json` lists each required customer outcome: `id`, `title`, optional `criteria` (how a customer would state it) and the `cases` that prove it. A case may prove several outcomes. `graphyard release contract`, the pre-cut check the release-candidate workflow runs before `release cut`, refuses the cut, naming the outcome and case, when a bound case is missing, invalid, not targeted at `uat` or not required, or when a required case is bound to no outcome.
 
 ## Goals and acceptance
 
-`graphyard goal FILE` records goal (`statement`, `users`, `constraints`, `deployTarget`); `master status` lists open goals. With both master identities, loop's `acceptance` role (`run.diagnostician` models) drafts outcomes, one required `uat` case each, contract bindings in one pull request, judged by approver identity (never author), redrafted if refused (≤3). Merged at approved head once CI passes (`goal land`), else redrafted. `complete` and later heads refuse changes to protected case or `e2e/contract.json` lacking that item's `goal case-change`, approved by neither requester nor implementer. [Planner](how-graphyard-works.md#from-goal-to-work-items) plans items; `goal deliver` needs each done and served in production.
+`graphyard goal FILE` records a goal (`statement`, `users`, `constraints`, `deployTarget`); `master status` lists open goals. With both master identities, the loop's `acceptance` role (`run.diagnostician` models) drafts outcomes, one required `uat` case each, and contract bindings in one pull request, judged by the approver identity, never its author, and redrafted when refused (three drafts at most). Graphyard merges it at the approved head once CI passes (`goal land`), else redrafts it. Then `complete` and later heads refuse changes to a protected case or `e2e/contract.json` without that item's `goal case-change`, approved by neither requester nor implementer. The [planner](how-graphyard-works.md#from-goal-to-work-items) then plans the items; `goal deliver` needs each done and served in production.
 
 ## Release holds
 
-One hold per failed outcome (not suite or case): item tagged `rc-hold/OUTCOME/CANDIDATE` listing failed/flaky cases, failing steps, unmet criteria; later failures attach; clears once every attached case passes on newer candidate UAT serves at exact SHA (`graphyard release holds`). Folding: two-party `fold` decision (`{"outcome":A,"into":B}`), then `release fold A --decision ID`. Process/infrastructure incidents (freeze breaches, attestation delays, runner outages, deployment/container suites) file follow-ups.
+A failing candidate files one release hold per failed outcome, never one per suite or case: a work item with the failed or flaky cases, their failing steps and the outcome's unmet criteria, and a ledger tag `rc-hold/OUTCOME/CANDIDATE`. A later failure of an outcome whose hold is open is attached to that hold instead of filed again. A hold clears only when every case attached to it passes on a newer candidate UAT serves at its exact SHA. `graphyard release holds` lists them.
+
+Folding one outcome's hold into another's needs a `fold` decision (`{"outcome": A, "into": B}`) requested by one agent and approved by another; `release fold A --decision ID` then records it.
+
+Process and infrastructure incidents (freeze breaches, attestation delays, runner outages, a failing deployment or container suite) are not customer risks: they file the candidate's ordinary follow-up item, never a hold.
 
 ## Candidates, requests, reports
 
-`kind: bundle` pins `scenario`, `scenarioRevision`, `scenarioHash`, `digest`, `runnerImageDigest`, `reportFormat` (`graphyard-playwright-v1`/`junit-xml-v1`; skips, retries, timeouts, miscounts fail; `graphyard runner verify-report junit-xml-v1 inventory.json report.xml` previews). Operators create candidates from build attestations; requests bind observed targets. Runners `ack` within 30 s, heartbeat every 20 s; passes need `matched` target, verified artifacts, settled run; recover: `cancel`, `settle`, `retry`; `graphyard validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics) stalls.
+`kind: bundle` pins `scenario`, `scenarioRevision`, `scenarioHash`, `digest`, `runnerImageDigest`, `reportFormat`. Operators create candidates from build attestations.
+
+Requests bind observed targets. Runners `ack` within 30 s and heartbeat every 20 s; a pass needs a `matched` target, verified artifacts and a settled run. Recover with `cancel`, `settle` or `retry`; `graphyard validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics) stalls.
+
+`reportFormat`: `graphyard-playwright-v1` or `junit-xml-v1`; skips, retries, timeouts and miscounts fail (`graphyard runner verify-report junit-xml-v1 inventory.json report.xml` previews).

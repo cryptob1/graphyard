@@ -1,67 +1,83 @@
-<!-- page: Start here | 2 | terms, roles. -->
+<!-- page: Start here | 2 | terms, roles, who decides. -->
 # Glossary
 
 ### 1. Human operator (human authority)
 
-`admin` with `sessionKind: "human"`; alone decides goals, priorities, spending, accounts, people's credentials. **Canonical usage:** *human operator*; bare *operator* = this person.
+`admin` with `sessionKind: "human"`; alone decides goals, priorities, spending, accounts, people's credentials.
+
+**Canonical usage:** *human operator*; bare *operator* = this person.
 
 ### 2. AI agent
 
-Model holding only its credential's authority. **Canonical usage:** name role.
+A model in a runtime, holding only its credential's authority.
+
+**Canonical usage:** name the role (*worker*, *master*, *approver*…).
 
 ### 3. Agent session (Herdr-managed session or runtime)
 
-Running agent instance. **Canonical usage:** *session*; host: *runtime*.
+One running agent instance.
+
+**Canonical usage:** *session*; its host: *runtime*.
 
 ### 4. Principal, role, and credential
 
-*Principal*: authenticated identity; *role*: authority class; *credential* (*token*): secret. **Canonical usage:** one principal per concurrent session.
+*Principal*: authenticated identity; *role*: authority class; *credential* (*token*): secret.
+
+**Canonical usage:** one principal per concurrent session.
 
 ### 5. Worker lease and worktree
 
-*Lease*: worker's timed hold on one item at one *epoch*; *assigned worktree*: registered `(host, path)` checkout, reserved branch. **Canonical usage:** *lease*, *epoch*, *assigned worktree*.
+*Lease*: worker's timed hold on one item at one *epoch*; *assigned worktree*: registered `(host, path)` checkout, reserved branch.
+
+**Canonical usage:** *lease*, *epoch*, *assigned worktree*.
 
 ### 6. Independent reviewer and proof producer
 
-*Reviewer*: non-author GitHub identity approving exact head; *proof producer*: `producer` granted named proofs. Neither implements. **Canonical usage:** *reviewer*, *proof producer*.
+*Reviewer*: non-author GitHub identity approving the exact head; *proof producer*: `producer` granted exact proof names. Neither implements.
+
+**Canonical usage:** *reviewer*, *proof producer*.
 
 ### 7. Graphyard control plane
 
-Server, database, dashboard, CLI. **Canonical usage:** Graphyard *records*, *refuses*, *authorizes*, never *runs* sessions.
+Server, database, dashboard, CLI.
+
+**Canonical usage:** Graphyard *records*, *refuses*, *authorizes*, never *runs* sessions.
 
 ### 8. Herdr runtime
 
-Launches sessions, reports liveness. **Canonical usage:** *Herdr*; other runtimes by product name.
+Launches sessions, reports liveness.
+
+**Canonical usage:** *Herdr*; other runtimes by product name.
 
 ## The roles at a glance
 
 Role | Held by | May | Never
 ---|---|---|---
 | `admin` | Human operator | Any decision | Share with AI
-| `operator-agent` | Master, approver | Add intent; request, approve | Self-approve; merge
-| `coordinator` | Master loop | Dispatch, reconcile merges | Implement, prove
-| `slice-lead` | Slice lead | Rule, escalate | Implement, merge
+| `operator-agent` | Master, approver | Add intent; request/approve decisions | Approve own request; merge
+| `coordinator` | Master loop | Dispatch, reconcile merges | Implement, produce evidence
+| `slice-lead` | Slice lead | Rule on slice, escalate | Implement, merge
 | `worker` | Worker | Claim, heartbeat, register, submit | Satisfy acceptance
-| `producer` | CI, runner, observer | Report granted proofs | Prove own work
+| `producer` | CI, runner, observer | Report granted proofs | Prove its own work
 | `reader` | Dashboards | Read | Mutate
 
 ## Who decides
 
-Master applies non-weakening intent directly; two-party decisions (`graphyard master decide GY-N ACTION REASON`, approved by another's `graphyard master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework the record doesn't ground, recovery, `manual:` attestation, proof grants, triage closures, merges with automatic merging off; gates decide the rest; human-only decisions [park](master-agent-reference.md#items-scope-and-human-waits) items.
+The master applies non-weakening intent directly. Two-party decisions (`graphyard master decide GY-N ACTION REASON`, applied by a separate approver's `graphyard master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework the record does not ground, recovery, `manual:` attestation, proof grants, triage closures and merges with automatic merging off. Gates decide the rest; human-only decisions [park](master-agent-reference.md#items-scope-and-human-waits) items.
 
-An approved-but-unapplied decision never blocks the action's next request: bound to passed head and base, it settles `superseded` (naming both heads), new one judged; else resumes unjudged, settling applied, failed or `stale` (pinned revision moved). Requests resume it after 60 s (risk-lane rework at once; earlier refusals name `resume`); once its approver session ends (even hand-put), next cycle sends `POST /api/work/:id/decide` `{"action":"resume","decision":ID}`. Meanwhile `master status` shows `approved but unapplied since <approvedAt>`, `loop-silence` fault.
+An approved decision is applied by its approval. One left approved with no outcome never blocks the next request of its action: a rework or recover approved for a head and base the item has moved past settles `superseded`, recording the head it was bound to and the current one, and the new request is judged for the current candidate; one whose head still holds is resumed under its recorded approval, never re-judged, and settles applied, failed naming why, or `stale` if the revision it pinned moved. Any request for the item resumes it after 60 seconds (a risk-lane rework at once); a request refused inside that grace names the `resume` that settles it at once. Once its approver session has ended, the loop's next cycle resumes it at once with `POST /api/work/:id/decide` and `{ "action": "resume", "decision": ID }` instead of relaunching an approver, also for a decision put to an approver by hand; until it settles, `master status` names it `approved but unapplied since <approvedAt>`, a `loop-silence` fault, not an approver's wait.
 
-A revision-bound close settles `stale` if item moves before approval; loop rereads it, re-validates grounds as the server applies them (item open; `ref` item held, unclosed, delivered for `superseded`), re-requests at current revision, launching its approver (a diagnosis's close is left to it; racing re-requests re-validate on fresh read). While a close is requested or approved-unapplied, the loop takes no other decision on it (bot round, rework, attestation, observation wake), withdraws its own standing requests, neither withdraws capped change requests nor dispatches, rereading history before dispatch, at queued launch start and before such a withdrawal. Stale settles form one `wait:decision-stale:<id>:close` action (attempt count, expected and current revisions) until close applies; after three in a row, loop stops, `master status` raising one `Decision GY-N/ACTION (ACTION) is stale` line for the series.
+A close bound to the item revision settles `stale` when the item moves before its approval. The loop reads the item again, re-validates the closure's grounds as the server will apply them (the item is still open, and the item its `ref` names is held, not itself closed, and delivered for a `superseded` closure), and requests the same closure against the current revision, launching its approver; a close a diagnosis carries is left to the diagnosis. While a close stands requested or approved and unapplied, the loop takes no other decision on the item (no bot round, rework or attestation, and no observation wake), withdraws its own requests standing there, and neither withdraws a capped change request nor dispatches a worker for it, reading afresh the history of an item it is about to dispatch, again when a queued launch starts, and of an item whose capped change request it is about to withdraw, so a close asked since the last cycle holds it too. A re-request that races the item again re-validates the grounds on the fresh read. A series of stale settles is one `wait:decision-stale:<id>:close` action naming the attempt count and the expected and current revisions, retired once the close applies; after three in a row the loop stops, and `master status` raises one `Decision GY-N/ACTION (ACTION) is stale` line for the series, whatever its later attempts.
 
 ## Diagram legend
 
 Shape and colour | Term
 ---|---
 Amber rounded box | Human operator
-Green rounded box | Agent session
-Blue square box | Control plane
+Green rounded box | Agent session (one role, credential)
+Blue square box | Graphyard control plane
 Violet box | Herdr runtime
-Grey square box | GitHub
-Dashed chip | Credential, epoch or worktree
-Solid arrow | Command
-Dashed arrow | Observation
+Grey square box | GitHub, external facts
+Dashed chip | Credential, lease epoch or worktree
+Solid arrow | Authenticated command
+Dashed arrow | Observation, never authority
