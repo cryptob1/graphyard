@@ -361,7 +361,7 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
   const passkeyDrive = browserAppDriver({ page: passkey, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: async () => { if (++polls === 2) approved = true; } });
   assert.deepEqual(await passkeyDrive('http://127.0.0.1:4311', (sentence, link) => { passkeyHanded.push({ sentence, url: link.url ?? null, code: link.code ?? null }); }), { state: 'done' });
   assert.equal(mobile, false, 'GitHub Mobile is not triggered while the page offers a passkey');
-  assert.deepEqual(passkeyHanded, [{ sentence: "Confirm access with your passkey or password at https://github.com/sessions/sudo in the Chrome profile the agent drives (GitHub ties the confirmation to that browser's session)", url: 'https://github.com/sessions/sudo', code: null }]);
+  assert.deepEqual(passkeyHanded, [{ sentence: "Confirm access once in your own Chrome at https://github.com/settings/apps/new with your passkey or password: GitHub then holds sudo mode for the session the agent's browser shares, and the flow continues by itself within 10 s\nGitHub's Confirm-access page (https://github.com/sessions/sudo) offers: passkey, Mobile", url: 'https://github.com/sessions/sudo', code: null }]);
   // The operator chose GitHub Mobile (--github-mobile): the drive activates it and hands off only the code it shows.
   approved = false; polls = 0;
   const mobileHanded: { sentence: string; code: string | null }[] = [];
