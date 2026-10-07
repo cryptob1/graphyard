@@ -41,6 +41,6 @@ Unacted producer requests (never started, launch refused, exited at launch) rela
 
 ## Pipeline speed
 
-Target (10+ deliveries): submit→merge p50 ≤30 min, p90 ≤60 min. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
+Target (10+ deliveries): submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
 
 The loop's decisions step stays within 10 s a cycle at ~90 open items: one `decision.*` ledger read names moved items, rereading only those; a history whose ledger has not moved is kept, not read. Loop widenings refused by 5xx or stale revision, and decisions or withdrawals whose history read times out, retry next cycle (two in a row: fault); moot ones (delivered, request answered, lease ended, head moved) count none.
