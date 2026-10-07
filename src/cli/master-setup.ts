@@ -82,7 +82,9 @@ export const loopProvisionFile = (root: string) => resolve(root, '.graphyard', '
  */
 export async function loopSelfProvision(root: string, master: Pick<MasterConfig, 'repository' | 'reviewer'>, options: { now?: number; setup?: typeof masterSetup } = {}): Promise<LoopSelfProvision> {
   const now = options.now ?? Date.now(), last = loopProvisionRuns.get(root);
-  if (last && !last.running && last.failed && !last.reported) { last.reported = true; throw new Error(`setup self-provision ${last.outcome}`); }
+  // A failed run is reported once, after its retry starts when due: reporting never costs the retry a step.
+  const unreported = last && !last.running && last.failed && !last.reported ? last : null;
+  if (unreported) unreported.reported = true;
   if (!last || (!last.running && now - last.at >= loopProvisionDelay(last.failures))) {
     const entry = { at: now, running: true, outcome: 'running', failed: false, failures: last?.failures ?? 0, reported: false };
     loopProvisionRuns.set(root, entry);
@@ -94,6 +96,7 @@ export async function loopSelfProvision(root: string, master: Pick<MasterConfig,
         await writeAtomically(loopProvisionFile(root), { at: new Date(entry.at).toISOString(), outcome: entry.outcome, failed: entry.failed }).catch(() => undefined);
       });
   }
+  if (unreported) throw new Error(`setup self-provision ${unreported.outcome}`);
   return (await lastLoopSelfProvision(root))!;
 }
 export async function lastLoopSelfProvision(root: string): Promise<LoopSelfProvision | null> {

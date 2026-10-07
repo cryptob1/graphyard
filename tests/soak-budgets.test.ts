@@ -340,8 +340,11 @@ test('unit:soak-invariants-hold — the loop\'s setup step over a day on a Railw
   const failing = window(fails.from, fails.to);
   assert.ok(failing.length >= 2 && failing.length <= 6 && failing.every(entry => !entry.ok), `bounded failing redeploys in four hours: ${failing.map(entry => Math.round(entry.at / minute))}`);
   assert.deepEqual(provisionDay.sets.filter(entry => entry.at >= fails.from).map(entry => entry.name).sort(), ['GRAPHYARD_REVERT_APPROVER_APP_ID', 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY'], 'set once; the retries only redeploy');
-  const gaps = failing.slice(1).map((entry, index) => entry.at - failing[index].at);
-  assert.ok(gaps.every((gap, index) => index === 0 || gap > gaps[index - 1]), `the retries back off: ${gaps.map(gap => Math.round(gap / minute))} min`);
+  // The back-off is measured between run starts: a run's redeploy is recorded when it reaches it,
+  // which on a slow host can fall a cycle after the run started.
+  const retries = provisionDay.runs.filter(at => at >= fails.from && at < fails.to);
+  const gaps = retries.slice(1).map((at, index) => at - retries[index]);
+  assert.ok(gaps.length >= 2 && gaps.every((gap, index) => index === 0 || gap > gaps[index - 1]), `the retries back off: ${gaps.map(gap => Math.round(gap / minute))} min; runs ${provisionDay.runs.map(at => Math.round(at / minute))}`);
   // Recovered: one redeploy settles it, and the deployment stays healthy with none after it.
   const after = window(fails.to, 12 * hour);
   assert.deepEqual(after.map(entry => entry.ok), [true], `one redeploy once redeploys succeed: ${JSON.stringify(after)}`);
