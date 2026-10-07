@@ -16,8 +16,7 @@ import { readSecretFromStdin } from './context.js';
 import { documentationDrift } from '../model/documentation.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
-import { describeUpEvent, runUp, upDependencies, upRequestFromArgs } from '../up.js';
-import { submitSudoCode } from '../master-browser.js';
+import { describeUpEvent, runUp, upDependencies, upRequestFromArgs, upSudoCode } from '../up.js';
 
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
   const setup = await startGithubSetup(root, repository, deployment);
@@ -61,8 +60,7 @@ export const installCommands = defineCommands([
       '  up --repo OWNER/NAME [--provider compose|railway|hetzner] [--reviewer NAME]',
       '     [--master claude|codex] [--agent] [--goal FILE] [--browser-profile PROFILE]',
       '     [--confirm-price X | --max-monthly N] [--ssh-key NAME] [--ssh-host HOST] [--ssh-user USER]',
-      '     [--reuse-app SLUG]... [--github-mobile]',
-      '  up --sudo-code CODE|email',
+      '     [--reuse-app SLUG]... [--github-mobile]        up --sudo-code CODE|email',
       '                                First-run setup in one command: preflight, control plane,',
       '                                host supervisor and Herdr, onboarding, agent accounts,',
       '                                harness and master loop, resumable (.graphyard/up.json).',
@@ -70,29 +68,20 @@ export const installCommands = defineCommands([
       '                                waits for it to merge. Price and SSH flags pass to install.',
       '                                A step that needs a person prints one one-time link that signs',
       '                                in to the dashboard Setup page, and waits for it to turn green.',
-      '                                --agent runs every step non-interactively (JSON events on',
-      '                                stderr), creating the Apps in the given or the master\'s recorded',
-      '                                browser profile (none: exit 2), and hands off only device',
-      '                                approvals: a Confirm-access prompt is handed off with every',
-      '                                method the page offers, re-checked every 10 s, so confirming',
-      '                                once in your own Chrome continues it (--github-mobile: GitHub',
-      '                                Mobile first, with the passkey or password link added after',
-      '                                60 s unapproved). --sudo-code hands the waiting run a 6-digit',
-      '                                authenticator or email code (email: have GitHub email one).',
-      '                                --reuse-app passes to install. Exit 0 green, 1 failed,',
-      '                                2 prerequisite, 3 still waiting (rerun resumes).',
+      '                                --agent runs every step non-interactively (JSON events on stderr),',
+      '                                creating the Apps in the given or master\'s browser profile (none: exit',
+      '                                2), handing off only device approvals: Confirm access lists the page\'s',
+      '                                methods, re-checked every 10 s (confirm in your Chrome, or --sudo-code',
+      '                                a 6-digit authenticator/email code; email: GitHub sends one); with',
+      '                                --github-mobile, Mobile first, password link after 60 s. --reuse-app',
+      '                                passes to install. Exit 0 green, 1 failed, 2 prerequisite, 3 waiting.',
     ],
     // `up` installs the control plane and records the connection; it never reads a stale one.
     readsConnection: () => false,
     async run(context) {
       const args = [context.id, ...context.args].filter((value): value is string => value !== undefined);
-      // GY-1450: a code for the run waiting at Confirm access, taken once by its drive; never echoed.
-      const sudoCode = args.findIndex(arg => arg === '--sudo-code' || arg.startsWith('--sudo-code='));
-      if (sudoCode >= 0) {
-        const kind = await submitSudoCode(context.repositoryRoot(), args[sudoCode].includes('=') ? args[sudoCode].slice('--sudo-code='.length) : args[sudoCode + 1] ?? '');
-        context.print({ ok: true, handed: kind === 'email' ? 'a request for an emailed code' : 'a 6-digit code', next: 'The waiting graphyard up types it into GitHub\'s Confirm-access page within its next check.' });
-        return;
-      }
+      const handed = await upSudoCode(context.repositoryRoot(), args);
+      if (handed) return context.print(handed);
       const request = upRequestFromArgs(args);
       const emit = (event: Parameters<typeof describeUpEvent>[0]) => console.error(request.agent ? JSON.stringify(event) : describeUpEvent(event));
       const result = await runUp(request, upDependencies(context.repositoryRoot(), await context.activeCliPath(), request, emit));

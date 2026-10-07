@@ -3,7 +3,7 @@
 
 > set up Graphyard for OWNER/REPO following docs/setup-from-zero.md
 
-One command, then the page it prints. The setup agent acts as the **master** identity `install --apply` records; the operator credential stays with the human and is never given to an agent. The [install hard rules](install.md#hard-rules) apply: never print a credential.
+One command, then the page it prints. The setup agent acts as the **master** identity `install --apply` records; the operator credential stays with the human, never given to an agent. The [install hard rules](install.md#hard-rules) apply: never print a credential.
 
 ## One command: graphyard up
 
@@ -12,29 +12,29 @@ git clone https://github.com/cryptob1/graphyard.git ~/graphyard && (cd ~/graphya
 cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --repo OWNER/REPO   # --provider compose (default), railway or hetzner
 ```
 
-A new Hetzner server waits (exit 3) on the operator approving its price: rerun with `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`, passed to `install`.
+A new Hetzner server waits (exit 3) for price approval: rerun with `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`, passed to `install`.
 
-`up` runs every machine step in order: preflight, control plane, host supervisor and Herdr, onboarding, accounts, harness, master loop. Onboarding opens a `graphyard/onboarding` pull request with its files; goals wait for it to merge. Finished steps are recorded in `.graphyard/up.json`; a rerun skips them. A Herdr plugin bound to another server is left alone (`--no-herdr`), never repointed. A preflight failure (exit 2) names the [prerequisite](#1-machine-prerequisites) to fix.
+`up` runs every machine step in order: preflight, control plane, host supervisor and Herdr, onboarding, accounts, harness, master loop. Onboarding opens a `graphyard/onboarding` pull request with its files; goals wait for it to merge. A rerun skips steps recorded finished in `.graphyard/up.json`. A Herdr plugin bound to another server is never repointed (`--no-herdr`). A preflight failure (exit 2) names the [prerequisite](#1-machine-prerequisites).
 
 ## The Setup page
 
-When a step needs a person, `up` prints one link and waits until the step is green. The link (`SERVER/#sign-in=CODE&setup` from the operator credential, or a host install's `#claim=CODE&setup`) signs you in once, within 10 minutes, and opens the Setup page (also linked from Settings → Agents). Each item is live, with one sentence and one button:
+When a step needs a person, `up` prints one link and waits until the step is green. The link (`SERVER/#sign-in=CODE&setup` from the operator credential, or a host install's `#claim=CODE&setup`) signs you in once, within 10 minutes, and opens the Setup page (also linked from Settings → Agents). Each item is live, with one button:
 
 | Item | Button |
 | --- | --- |
 | GitHub App, reviewer App | **Create the GitHub App** opens `up`'s App page; create it, install it on OWNER/REPO only |
-| An account that writes code, one that reviews | **Connect an account**: Settings → Agents → Connect (an API key, or a subscription sign-in) |
+| An account that writes code, one that reviews | **Connect an account**: Settings → Agents → Connect (an API key or subscription sign-in) |
 | Branch protection, coordinator running | none: Graphyard does these |
 
 When all are green, **Describe what you want built** records a goal, like `graphyard goal`. Once the first pull request reports `Graphyard / merge`, rerun `up` to require it.
 
 ## Agent setup: graphyard up --agent
 
-An agent sets Graphyard up with `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary on stdout, exit `0` green, `1` failed, `2` prerequisite, `3` waiting. It creates the Apps in a Chrome profile signed in to GitHub (passed, else the master's; with neither, and no `--reuse-app` for both Apps, it exits `2`), recorded under `.graphyard/master-actions/`; connects host accounts; sets deployment variables from saved credentials; records FILE as a goal once. Only a device step becomes a `handoff` event (a link or code; *Confirm access* takes several lines): a subscription login's approval, or *Confirm access*: confirm once in your own Chrome on a sudo-protected page (the handoff names it; the run re-checks every 10 s), or hand an authenticator or email code to the App page or `graphyard up --sudo-code CODE` (`email` asks GitHub to send one; no record or screenshot holds the code); the handoff lists every method the page offers, GitHub Mobile only with `--github-mobile` (unapproved for 60 s, the password link too).
+An agent runs `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary on stdout, exit `0` green, `1` failed, `2` prerequisite, `3` waiting. It creates the Apps in a Chrome profile signed in to GitHub (passed, else the master's; neither, and no `--reuse-app` for both Apps: exit `2`), recorded under `.graphyard/master-actions/`; connects host accounts; sets deployment variables from saved credentials; records FILE as a goal once. Only device steps become `handoff` events: a subscription login's approval, or *Confirm access*, listing the page's methods: confirm once in your Chrome on the named sudo-protected page (re-checked every 10 s), or pass an authenticator or email code via the App page or `up --sudo-code CODE` (`email`: GitHub sends one; never recorded); GitHub Mobile only with `--github-mobile` (60 s unapproved adds the password link).
 
 ## Troubleshooting: the manual steps
 
-What `up` runs, for when a step fails; **HUMAN** marks what agents cannot do. `graphyard doctor` prints `setupFromZero.lines`: one `PASS`/`FAIL` line per prerequisite, each failure naming its step below; `next` names the first gap.
+What `up` runs, for a failed step; **HUMAN** marks what agents cannot do. `graphyard doctor` prints `setupFromZero.lines`: one `PASS`/`FAIL` line per prerequisite, each failure naming its step below; `next` names the first gap.
 
 ## 1. Machine prerequisites
 
@@ -50,7 +50,7 @@ bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with
 
 ## 2. Graphyard and the repository
 
-The repository needs `origin` on GitHub and a GitHub Actions workflow running its tests on `pull_request`; that job becomes the required check. **Verify:** doctor readiness `repository`, `required-checks` and `test-formats` are `ready`.
+The repository needs `origin` on GitHub and a GitHub Actions workflow testing on `pull_request`, which becomes the required check. **Verify:** doctor readiness `repository`, `required-checks` and `test-formats` are `ready`.
 
 ## 3. Install the control plane
 
@@ -70,7 +70,7 @@ The repository needs `origin` on GitHub and a GitHub Actions workflow running it
 
 ## 7. Branch protection
 
-`--apply` protects the base branch; once the first pull request shows `Graphyard / merge`, rerun it so that check is required. **Verify:** `branch-protection` passes.
+`--apply` protects the base branch; once the first pull request shows `Graphyard / merge`, rerun it to require that check. **Verify:** `branch-protection` passes.
 
 ## 8. Agent environments
 
@@ -100,4 +100,4 @@ Set `RAILWAY_API_TOKEN` (**HUMAN:** the account owner issues it) and size `GRAPH
 
 The Setup page's goal, or `gy master create item.json REASON` ([work.json](../examples/work.json)). **Verify:** `gy status GY-1` reaches `done`; doctor `production.serving` reaches the merge commit, `production.incidents` `[]` ([production observation](deployment.md#production-deployment-observation)). Without a deploy job, merged ends it.
 
-Gaps found walking it: [setup-from-zero audit](setup-from-zero-audit.md).
+Known gaps: [setup-from-zero audit](setup-from-zero-audit.md).

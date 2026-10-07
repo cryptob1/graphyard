@@ -5,7 +5,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { goalSubmission, setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
-import { actionsDirectory, agentBrowserPage, passSudo, recordingPage, sudoInstruction, takeSudoCode, type BrowserPage, type RecordedStep, type SudoOptions } from './master-browser.js';
+import { actionsDirectory, agentBrowserPage, passSudo, recordingPage, submitSudoCode, sudoInstruction, takeSudoCode, type BrowserPage, type RecordedStep, type SudoOptions } from './master-browser.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
 
 /**
@@ -378,6 +378,14 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   function result(ok: boolean, exitCode: number, next: string): UpResult {
     return { ok, exitCode, setupUrl, completed: [...state.completed], prompts, handoffs, checklist: last.map(({ id, done, line }) => ({ id, done, line })), goal: state.goal, next };
   }
+}
+
+/** `graphyard up --sudo-code CODE|email` (GY-1450): hands the run waiting at Confirm access a code, never echoing it; null without the flag. */
+export async function upSudoCode(root: string, args: string[]) {
+  const at = args.findIndex(arg => arg === '--sudo-code' || arg.startsWith('--sudo-code='));
+  if (at < 0) return null;
+  const kind = await submitSudoCode(root, args[at].includes('=') ? args[at].slice('--sudo-code='.length) : args[at + 1] ?? '');
+  return { ok: true, handed: kind === 'email' ? 'a request for an emailed code' : 'a 6-digit code', next: 'The waiting graphyard up types it into GitHub\'s Confirm-access page within its next check.' };
 }
 
 /** `graphyard up`'s flags. */
