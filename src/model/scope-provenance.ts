@@ -36,7 +36,7 @@ export const routedWideningRequest = (reason: unknown): reason is string => type
  * scopeRoutineDecision), which a decision a master requests by hand does not; a scope blocker's is
  * known by the reason the loop writes for it.
  */
-export const routedWideningDecision = (payload: { action?: unknown; input?: { answers?: unknown } | null; reason?: unknown } | null | undefined): boolean =>
+export const routedWideningDecision = (payload: { action?: unknown; input?: { answers?: unknown; [field: string]: unknown } | null; reason?: unknown } | null | undefined): boolean =>
   payload?.action === 'requirements' && (isObject(payload.input?.answers) || routedWideningRequest(payload.reason));
 
 /**

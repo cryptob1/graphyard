@@ -4,10 +4,11 @@ import test from 'node:test';
 import { foldInterventions, type InterventionLedgerRow } from '../src/interventions.js';
 import { blockerScopeDecision } from '../src/daemon/decisions.js';
 import { scopeDecisionReason } from '../src/model/scope.js';
-import { groundedWideningReason, wideningSettlement } from '../src/model/scope-provenance.js';
+import { groundedWideningReason, handScopeWideningRefusal, routedScopeAsk, routedWideningDecision, scopeAskCommand, wideningSettlement } from '../src/model/scope-provenance.js';
+import { nextCommand } from '../src/model/board.js';
 import type { Work } from '../src/model.js';
 
-// GY-1388: 425 build-stage scope widenings in 7 days, most of them settled by the control plane on
+// GY-1388: 427 build-stage scope widenings in 7 days, most of them settled by the control plane on
 // its own — the loop's audited grounds, or the independent approver on an ask the loop routed — and
 // a partly widened ask counted twice. Each test replays the ledger shape of a linked instance through
 // the real fold and the real reason builders.
@@ -86,4 +87,35 @@ test('unit:scope-widening-settled-by-control-plane — a widening somebody autho
   assert.equal(wideningSettlement({ intent: { reason: quoted }, reason: quoted }, [quoted]), null);
   // A decision a master requested in its own words is applied the same way, and counts.
   assert.equal(widenings([...ask(30, ['src/c.ts'], planned), ...decided(35, planned, [...planned, 'src/c.ts'], 'GY-1381: AC-1 needs src/c.ts')]).length, 1);
+});
+
+test('unit:routed-scope-ask-not-pre-empted — the guard and the board leave a routed ask to the approver, and only while it judges it', () => {
+  const now = Date.parse(at(10));
+  const refused = { at: at(1), state: 'refused' as const, reason: 'outside the rule', decidedBy: 'graphyard', waitedMs: 0, paths: ['src/b.ts'], requestedBy: 'graphyard-opencode-1', requestedAt: at(0), epoch: 1 };
+  const item = { key, plannedFiles: ['src/a.ts'], criteria, lease: { owner: 'graphyard-opencode-1', epoch: 1, expiresAt: at(30) }, blocker: 'Scope request refused: outside the rule',
+    scopeRequest: { epoch: 1, paths: ['src/b.ts'], reason: 'the change needs it', requestedBy: 'graphyard-opencode-1', at: at(0), decision: refused } } as unknown as Work;
+  assert.ok(routedScopeAsk(item, ['src/a.ts', 'src/b.ts'], now), 'a widening covering the routed ask pre-empts it');
+  assert.equal(routedScopeAsk(item, ['src/a.ts', 'docs/x.md'], now), null, 'one leaving the asked path alone does not');
+  assert.equal(routedScopeAsk({ ...item, scopeRequest: { ...item.scopeRequest!, decision: { ...refused, decidedBy: approver } } }, ['src/a.ts', 'src/b.ts'], now), null, 'an approver\'s refusal leaves it the master\'s');
+  assert.equal(routedScopeAsk({ ...item, scopeRequest: { ...item.scopeRequest!, decision: undefined } }, ['src/a.ts', 'src/b.ts'], now), null, 'an undecided ask is the rule\'s next step, not the approver\'s');
+  assert.equal(routedScopeAsk({ ...item, lease: { ...item.lease!, expiresAt: at(5) } }, ['src/a.ts', 'src/b.ts'], now), null, 'an ended attempt\'s ask is moot');
+  const request = item.scopeRequest!;
+  assert.match(handScopeWideningRefusal(key, request, 'd-1', true, now)!, /routed it as requirements decision d-1/);
+  assert.match(handScopeWideningRefusal(key, request, null, false, now)!, /within 15 minutes of the rule's refusal/);
+  assert.equal(handScopeWideningRefusal(key, request, null, true, now), null, 'a decision that ended leaves it the master\'s');
+  assert.equal(handScopeWideningRefusal(key, request, null, false, Date.parse(at(17))), null, 'no routed decision within the bound (no approver serves): the master\'s');
+  assert.match(handScopeWideningRefusal(key, request, 'd-1', true, Date.parse(at(50)))!, /d-1/, 'a pending decision holds past the bound');
+  assert.equal(scopeAskCommand(item, now), `graphyard master decisions ${key}`);
+  assert.equal(scopeAskCommand({ ...item, scopeRequest: { ...request, decision: { ...refused, decidedBy: approver } } }, now), `graphyard master scope ${key}`);
+  assert.equal(nextCommand(item, 'blocked', 'master', undefined, now), `graphyard master decisions ${key}`, 'the board names the decision, never master scope');
+});
+
+test('unit:scope-widening-settled-by-control-plane — a routed decision is known by the ask it answers, and an applied one whose request lies beyond the report\'s reach still reads as routed', () => {
+  assert.equal(routedWideningDecision({ action: 'requirements', input: { plannedFiles: [], answers: { epoch: 1, at: at(0) } }, reason: 'GY-1381: in a master\'s words' }), true);
+  assert.equal(routedWideningDecision({ action: 'requirements', input: { plannedFiles: [] }, reason: 'GY-1381: in a master\'s words' }), false);
+  const reason = routedReason(['src/d.ts']);
+  assert.equal(wideningSettlement({ reason: `${reason} [decision 0b8f3a52, requested by ${operator}, approved by ${approver}: ok]` }, []), 'routed-approver');
+  const planned = ['src/a.ts'];
+  // Only the application lies inside the window: the request row before it is beyond the reach.
+  assert.deepEqual(widenings([...ask(40, ['src/d.ts'], planned), decided(44, planned, [...planned, 'src/d.ts'], reason)[1]]), []);
 });

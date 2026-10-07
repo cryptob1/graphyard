@@ -507,3 +507,33 @@ test('integration:successor-replan-not-intervention — the loop\'s successor re
   assert.deepEqual(foldInterventions([legacyRow({ intent: { reason: legacyReason } })], [], at).interventions, []);
   assert.deepEqual(foldInterventions([legacyRow({})], [], at).interventions.map(entry => entry.kind), ['scope-widening']);
 });
+
+test('integration:routed-scope-ask-not-pre-empted — GY-1388: a hand widening of an ask the loop routes to the approver is refused until that decision ends, then applies', async () => {
+  // GY-1377 on 6 October 2026: asked 18:09:01, refused by the rule 18:09:26, `master scope` 18:11:33,
+  // the loop's routed decision 18:11:55 — stale on arrival, and the hand widening an intervention.
+  let work = await claimed('routed ask');
+  const path = 'src/elsewhere/Helper.ts';
+  await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths: [path], reason: 'The change calls the helper there' });
+  work = await engine.execute(operator, 'autoscope', work.id, { epoch: work.epoch }, randomUUID());
+  assert.equal(work.scopeRequest?.decision?.state, 'refused');
+  assert.equal(work.scopeRequest?.decision?.decidedBy, 'graphyard');
+  const refusal = /scope request is the independent approver's to judge: the loop routes it as a requirements decision within 15 minutes of the rule's refusal.*graphyard master decisions/;
+  await assert.rejects(approveScopeRequest(process.cwd(), masterScopeConfig(), [work.key], { coordinator: snapshotRead }), refusal);
+  const hand = await call(master.token, 'POST', `work/${work.id}/requirements`, { ...widen(work, [path]), reason: 'Additive, criteria unchanged' });
+  assert.equal(hand.status, 409, JSON.stringify(hand.body));
+  assert.match(hand.body.error, refusal, 'master requirements is the same hand widening');
+  // A widening that leaves the asked path alone pre-empts nothing.
+  await ok(master.token, 'POST', `work/${work.id}/requirements`, { ...widen(work, ['docs/routed.md']), reason: 'The docs page is the item\'s own' });
+  work = await reload(work.id);
+
+  // The loop routes it: while the approver's decision is pending, the hand widening is refused by that decision's id.
+  const decision = randomUUID();
+  const ledger = (kind: string, payload: Record<string, unknown>) => store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, master.id, kind, JSON.stringify(payload)]);
+  await ledger('decision.requested', { id: decision, action: 'requirements', input: { plannedFiles: [...work.plannedFiles, path], answers: { epoch: work.scopeRequest!.epoch, at: work.scopeRequest!.at } }, reason: 'routed' });
+  await assert.rejects(approveScopeRequest(process.cwd(), masterScopeConfig(), [work.key], { coordinator: snapshotRead }), new RegExp(`the loop routed it as requirements decision ${decision}`));
+  // Stale (or refused, failed, withdrawn): the ask is the master's again, and `master scope` applies it under the live lease.
+  await ledger('decision.stale', { id: decision, action: 'requirements', reason: 'the item moved' });
+  const applied = await approveScopeRequest(process.cwd(), masterScopeConfig(), [work.key], { coordinator: snapshotRead }) as Work;
+  assert.ok(applied.plannedFiles.includes(path));
+  assert.ok(applied.lease && applied.lease.epoch === work.epoch, 'the attempt keeps its lease');
+});
