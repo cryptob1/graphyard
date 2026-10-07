@@ -5,10 +5,11 @@ import { executorFleetReport, executorRestartTimeoutMs, readExecutorRegistration
 export const executorsHelp = [
   '  master executors              Every executor registered on this host with the release it loaded',
   '                                beside the coordinator\'s own, and which of them stand down',
-  '  master executors restart [--timeout SECONDS]',
+  '  master executors restart [--timeout SECONDS] [--all]',
   '                                Stop and start every executor registered on this host through its',
   '                                supervisor and wait for each to register again on the current',
-  '                                release; refused while any executor holds a claimed action',
+  '                                release; refused while any executor holds a claimed action. A slot',
+  '                                already running the current release is left running unless --all',
 ];
 
 export interface ExecutorsCommandApi {
@@ -34,12 +35,12 @@ export async function executorsCommand(master: Pick<MasterConfig, 'credentialFil
     return { host: master.hostId, ...report, lines: report.executors.map(row => row.line) };
   }
   if (action === 'restart') {
-    const { values } = parseArgs({ args: rest, options: { timeout: { type: 'string' } }, allowPositionals: false });
+    const { values } = parseArgs({ args: rest, options: { timeout: { type: 'string' }, all: { type: 'boolean' } }, allowPositionals: false });
     const timeoutSeconds = values.timeout ? Number(values.timeout) : executorRestartTimeoutMs / 1000;
     if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 5 || timeoutSeconds > 900) throw new Error('Use master executors restart --timeout with whole seconds between 5 and 900');
-    const result: ExecutorRestartResult = await restartExecutors(master, { actions: api.actions, coordinatorCommit: api.coordinatorCommit, run: api.run, alive: api.alive, sleep: api.sleep, timeoutMs: timeoutSeconds * 1000 });
+    const result: ExecutorRestartResult = await restartExecutors(master, { actions: api.actions, coordinatorCommit: api.coordinatorCommit, run: api.run, alive: api.alive, sleep: api.sleep, timeoutMs: timeoutSeconds * 1000, skipCurrent: !values.all });
     if (result.result !== 'restarted') process.exitCode = 1;
     return { host: master.hostId, ...result };
   }
-  throw new Error('Use master executors, or master executors restart [--timeout SECONDS]');
+  throw new Error('Use master executors, or master executors restart [--timeout SECONDS] [--all]');
 }

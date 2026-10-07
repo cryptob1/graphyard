@@ -400,8 +400,9 @@ test('unit:restart-leaves-runs a scratch run writes under the loop\'s checkout, 
     const run = piRunner({ command: 'pi', spawn: capturingSpawn(spawned), pollMs: 20, exitGraceMs: 1_000 }).start('Triage it', { tool: 'graphyard_decide', validate: value => value, timeoutMs: 60_000, cwd: root });
     assert.match(spawned[0].args[1], new RegExp(`>'${join(root, '.graphyard', 'scratch-runs')}/[^']+/stdout\\.jsonl'`));
     // Its bound holds without a watcher: coreutils' timeout past the watcher's own bound.
-    assert.ok(spawned[0].args[1].includes(`sleep ${61 + scratchBoundMarginSeconds}; kill -TERM -$$; sleep 5; kill -KILL -$$ ) & watchdog=$!; `), spawned[0].args[1]);
-    assert.match(spawned[0].args[1], /kill -KILL "\$watchdog" 2>\/dev\/null; printf/, 'the watchdog ends once Pi has exited');
+    // Nothing in it ignores TERM around its wait (GY-1432): only the instant it signals its own group.
+    assert.ok(spawned[0].args[1].includes(`sleep ${61 + scratchBoundMarginSeconds} & nap=$!; wait "$nap"; trap '' TERM; kill -TERM -$$; trap 'exit 0' TERM; for grace in 1 2 3 4 5; do kill -0 $$ 2>/dev/null || exit 0; sleep 1; done; kill -KILL -$$ ) & watchdog=$!; `), spawned[0].args[1]);
+    assert.match(spawned[0].args[1], /kill -TERM "\$watchdog" 2>\/dev\/null; printf/, 'the watchdog ends once Pi has exited');
     run.cancel('the test only inspects the launch');
     await run.result();
     // A checkout it cannot write to falls back to the temp directory.
