@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync } from 'node:fs';
-import { mkdir, readdir, readFile, stat, utimes, writeFile } from 'node:fs/promises';
+import { existsSync, writeFileSync } from 'node:fs';
+import { chmod, mkdir, readdir, readFile, stat, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describeTmpReclaim, readTempOwner, reclaimTmpDirectories, tempOwnerMarker, writeTempOwner } from '../src/tmp-reclaim.js';
@@ -225,4 +225,62 @@ test('unit:tmp-reclaim: the loop\'s reclaim step records the bytes the /tmp pass
   const recorded = await readReclaimReports(root);
   assert.deepEqual(recorded.at(-1)?.tmp, { removed: 2, bytes: 5e8 }, 'the reclaim record carries the bytes freed');
   await settleTmpReclaim();
+});
+
+// GY-1401: the loop's pass failed `ENOTEMPTY` on the same stale entry every cycle — a verify tree
+// still filling while `rm` walked it — and its half-finished removal made the entry look freshly
+// written, so it stood in the resources report as a permanent error line.
+const staleTree = async (root: string, name: string) => {
+  const entry = join(root, name), deepest = join(entry, 'work', '.graphyard', 'verify', 'tree');
+  await mkdir(deepest, { recursive: true });
+  for (let index = 0; index < 50; index++) await writeFile(join(deepest, `file-${index}`), 'x');
+  const past = new Date(Date.now() - 8 * 3_600_000);
+  for (const path of [deepest, join(entry, 'work', '.graphyard', 'verify'), join(entry, 'work', '.graphyard'), join(entry, 'work'), entry]) await utimes(path, past, past);
+  return { entry, deepest };
+};
+
+test('unit:tmp-reclaim-nonempty-entry-removed: a stale entry whose nested verify tree gains files while it is removed is removed, not abandoned', async () => {
+  const root = await temporaryDirectory('reclaim-nonempty');
+  const { entry, deepest } = await staleTree(root, 'graphyard-filling');
+  // A writer that keeps adding files to the nested tree while the removal walks it, for longer than one rm attempt. It
+  // writes below the entry's own children, so the scan still judges the entry stale by the mtimes it reads.
+  let writes = 0, writing = true;
+  const write = () => {
+    if (!writing) return;
+    for (const dir of [deepest, join(entry, 'work', '.graphyard')]) try { writeFileSync(join(dir, `late-${writes++}`), 'y'); } catch { /* removed already */ }
+    setImmediate(write);
+  };
+  setImmediate(write);
+  const stop = setTimeout(() => { writing = false; }, 100);
+  try {
+    const report = await reclaimTmpDirectories({ now: Date.now(), tmpRoot: root, held: new Set(), unfinished: new Set() });
+    assert.deepEqual(report.errors, [], 'the removal retried the refilling tree rather than failing ENOTEMPTY');
+    assert.deepEqual(report.removed.map(removed => removed.path), [entry]);
+    assert.equal(existsSync(entry), false, 'the non-empty stale entry is gone');
+    assert.ok(writes > 0, 'files were created while the removal ran');
+  } finally { writing = false; clearTimeout(stop); }
+});
+
+test('unit:tmp-reclaim-error-isolated: one entry\'s removal failure leaves the rest of the pass reclaimed, names only that entry, and the next pass takes it', { skip: process.getuid?.() === 0 && 'root removes a read-only directory\'s entries' }, async t => {
+  const root = await temporaryDirectory('reclaim-isolated');
+  const { entry: stuck, deepest } = await staleTree(root, 'graphyard-stuck');
+  const { entry: other } = await staleTree(root, 'graphyard-other');
+  // The nested tree cannot be emptied this pass: its directory refuses removal of its entries.
+  await chmod(deepest, 0o555);
+  t.after(() => chmod(deepest, 0o755).catch(() => {}));
+  const unfinished = new Set<string>();
+  const first = await reclaimTmpDirectories({ now: Date.now(), tmpRoot: root, held: new Set(), unfinished, retryMs: 20 });
+  assert.deepEqual(first.removed.map(removed => removed.path), [other], 'the remaining removable entry is still reclaimed in the same pass');
+  assert.equal(first.errors.length, 1);
+  assert.ok(first.errors[0].startsWith(`${stuck}: `), `the report names only the failing entry: ${first.errors[0]}`);
+  assert.equal(existsSync(other), false);
+  // Whatever blocked it clears; the half-finished removal left the entry looking freshly written,
+  // so only the carried retry takes it — the next pass, not hours later, and no standing error.
+  await chmod(deepest, 0o755);
+  await utimes(stuck, new Date(), new Date());
+  const second = await reclaimTmpDirectories({ now: Date.now(), tmpRoot: root, held: new Set(), unfinished });
+  assert.deepEqual(second.errors, [], 'the entry does not accrue as a standing error across two consecutive passes');
+  assert.deepEqual(second.removed.map(removed => removed.path), [stuck]);
+  assert.equal(existsSync(stuck), false);
+  assert.equal(unfinished.size, 0, 'nothing is left carried once it is removed');
 });
