@@ -412,7 +412,7 @@ test('unit:blocked-board-shows-class — the board and master status show each b
   const routine = await block(await claimed('Board: credential'), `${incidents[0][0]} (board)`);
   const genuine = await block(await claimed('Board: genuine'), `${incidents[8][0]} (board)`);
   const parked = await claimed('Board: human-only');
-  await ok(token(implementer), 'POST', `work/${parked.id}/park`, { epoch: parked.epoch, kind: 'money-or-accounts', needed: 'a Railway team seat', reason: 'The deploy needs a paid seat' });
+  await ok(token(implementer), 'POST', `work/${parked.id}/park`, { recommendation: 'Approve', why: 'Nothing else unblocks the item.', epoch: parked.epoch, kind: 'money-or-accounts', needed: 'a Railway team seat', reason: 'The deploy needs a paid seat' });
   await loop.cycle(state);
 
   const snapshot = await ok(token(coordinator), 'GET', 'work-snapshot');

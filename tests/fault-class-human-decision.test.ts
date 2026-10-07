@@ -109,7 +109,7 @@ test('manual:fault-class-human-decision — GY-1313 and GY-1365: each necessary 
     let work: Work = await engine.execute(operator, 'create', null, { title: `${instance.subject} replay`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
     work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
     work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
-    await call(token(worker), 'POST', `work/${work.key}/park`, { epoch: work.epoch, kind: instance.kind satisfies HumanDecisionKind, needed: instance.needed, reason: instance.reason }, 200);
+    await call(token(worker), 'POST', `work/${work.key}/park`, { recommendation: 'Approve', why: 'Nothing else unblocks the item.', epoch: work.epoch, kind: instance.kind satisfies HumanDecisionKind, needed: instance.needed, reason: instance.reason }, 200);
     work = await reload(work.id);
     assert.ok(parkedOnHuman(work), `${instance.subject} is parked`);
     assert.equal(work.lease, null, 'the park ends the attempt\'s lease');
