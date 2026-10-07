@@ -16,7 +16,7 @@ import type { Goal } from '../src/model/goal.js';
  */
 soakControlPlanes('soak-acceptance', 411);
 
-test('unit:soak.acceptance-goals — across a day the loop drives three goals to delivering: one draft run per revision, a failed open or post retried with the same draft and pull request, a refused or closed-unmerged draft closed and drafted again, a failed run retried after an hour, a conflicting approved draft reopened from the current base without another run, landing asked at most once per poll interval, pull requests read at most once per poll interval, and every invariant holding', { timeout: 600_000 }, async () => {
+test('unit:soak.acceptance-goals — across a day the loop drives three goals to planning: one draft run per revision, a failed open or post retried with the same draft and pull request, a refused or closed-unmerged draft closed and drafted again, a failed run retried after an hour, a conflicting approved draft reopened from the current base without another run, landing asked at most once per poll interval, pull requests read at most once per poll interval, and every invariant holding', { timeout: 600_000 }, async () => {
   const day = await simulateDay({
     hours: 6, acceptance: true,
     plan: { items: 4, leftovers: 1, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, attested: 0, exhaustedReviewer: 0, unstable: 0, lowLane: 0, outOfQueue: { item: 4, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 4 } },
@@ -27,11 +27,11 @@ test('unit:soak.acceptance-goals — across a day the loop drives three goals to
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no lease was lost');
 
-  // Every goal reached delivering: its acceptance pull request merged and its cases are protected.
+  // Every goal reached planning (GY-1418): its acceptance pull request merged and its cases are protected.
   const goals = (await api(principals.coordinator, 'GET', 'goals')).goals as Goal[];
   const goal = (name: string) => goals.find(entry => entry.key === acceptance.goals[name])!;
   for (const name of ['signup', 'billing', 'audit']) {
-    assert.equal(goal(name).stage, 'delivering', `${name} was delivered to its implementation: ${goal(name).stage}`);
+    assert.equal(goal(name).stage, 'planning', `${name} was handed to the planner: ${goal(name).stage}`);
     assert.ok(goal(name).protected.cases.length === 1 && goal(name).merged?.pr === goal(name).acceptance!.pr, `${name}'s merged pull request protects its one case`);
   }
   const runs = (name: string, role: 'draft' | 'judge') => acceptance.runs.filter(run => run.goal === name && run.role === role);

@@ -12,6 +12,10 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions.
 5. **Acceptance**: granted producers report proofs its [lane](#risk-lanes) requires.
 6. **Done**: Graphyard rechecks gates, merges, observes.
 
+## From goal to work items
+
+A goal reaches work items through intake, acceptance, approval, planning, approval and delivery. `graphyard goal FILE` records it; the acceptance role writes its customer outcomes and required `uat` cases ([validation](validation.md)), approved by an identity other than their author. Once that pull request merges, the `planner` role writes an architecture note (at most 400 words) and items, each naming the outcomes it serves, the cases it must pass, its `plannedFiles` and the items it lands after. A plan leaving an outcome uncovered, letting parallel items share a file, or touching a required case is refused with the reason. Another identity approves the plan (`goal plan-approve`); only then does the loop create and release the items (`planned`, then `delivering`), and the dispatcher starts none before its dependencies are delivered. The goal is `delivered` once every item is done and production serves it.
+
 ## Shared project memory
 
 Sessions start with a role-scoped digest (≤500 words) of decisions, recurring faults and recent merges, built from applied records (`.graphyard/project-memory.json`; `projectMemory` in `master status`).

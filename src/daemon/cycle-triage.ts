@@ -1,9 +1,10 @@
-// Concern: cycle step 7c — the machine-filed backlog (GY-402): the triage runs; and the goals the acceptance role drafts (GY-1417).
+// Concern: cycle step 7c — the machine-filed backlog (GY-402): the triage runs; the goals the acceptance role drafts (GY-1417) and the planner plans (GY-1418).
 import { researchRunner, researchSettings } from '../research.js';
 import { triageStep } from '../triage.js';
 import { detailChanged } from './decisions.js';
 import { record } from './effects.js';
 import { acceptanceStep } from './acceptance.js';
+import { plannerStep } from './planner.js';
 import type { Cycle } from './cycle.js';
 
 /**
@@ -18,6 +19,8 @@ export async function triageBacklogStep(cycle: Cycle) {
   };
   // The acceptance role's goals (GY-1417) move first: they need no research account.
   await acceptanceStep(cycle);
+  // A goal whose acceptance merged is planned, its plan judged, released and delivered (GY-1418).
+  await plannerStep(cycle);
   if (!effects.recordTriage || !effects.research || !config.run?.research) return;
   await isolate('decision', null, 'triage', async () => {
     const settings = researchSettings(config.run);

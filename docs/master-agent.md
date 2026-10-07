@@ -1,13 +1,13 @@
 <!-- page: Operate Graphyard | 5 | loop, dispatch, merges. -->
 # Master-agent operating mode
 
-The master (`coordinator`) routes and administers GitHub unasked; never implements, reviews or proves. Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); the rest it does itself or via an approver, never asking a human to run what an agent may.
+The master (`coordinator`) routes and administers GitHub unasked; never implements, reviews or proves; no longer hand-decomposes goals ([goal pipeline](how-graphyard-works.md#from-goal-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); the rest it does itself or via an approver, never asking a human to run what an agent may.
 
 ## Operate
 
 Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)); Close finished agent sessions. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, and every merge is verified against the exact deployed release or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production` flags main ahead of production.
 
-`master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from [dirty, branch or non-forward checkouts](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level) (`escalation:dirty-checkout`); [forward ones self-recover](operations.md#resources-and-disk). The loop launches, wakes and rotates the [master session](master-agent-sessions.md#the-loops-own-master-session). Railway: `productionEnvironment`.
+`master run` is the `graphyard-master.service` unit ([supervision](onboarding.md#the-loop-must-be-supervised)); on `daemon.liveness` `stalled`/`absent`: `systemctl --user restart graphyard-master`, never from [dirty, branch or non-forward checkouts](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level) (`escalation:dirty-checkout`); [forward ones self-recover](operations.md#resources-and-disk). The loop launches, wakes and rotates the [master session](master-agent-sessions.md#the-loops-own-master-session).
 
 ### System-driven items
 
@@ -38,11 +38,11 @@ another session's handle finished to free a slot.
 
 ### System invariants
 
-Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Fault thresholds: `invariants` in `.graphyard/master.json`; `tests/soak-*.test.ts` enforce.
+Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0); thresholds: `invariants` in `.graphyard/master.json`; `tests/soak-*.test.ts` enforce.
 
 ### The pipeline doctor
 
-Every `run.doctor.intervalMinutes` (default 10) the loop's [doctor](onboarding.md#the-pipeline-doctor-on-by-default) checks stuck work. Sanctioned: `scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`; never merge, dispatch, evidence or leases. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (default 10) the loop's [doctor](onboarding.md#the-pipeline-doctor-on-by-default) checks stuck work. Sanctioned: `scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`; never merge, dispatch, evidence or leases.
 
 ## Research and diagnosis
 
@@ -50,7 +50,7 @@ Every `run.doctor.intervalMinutes` (default 10) the loop's [doctor](onboarding.m
 
 ## Machine-filed backlog
 
-Review follow-ups are never filed: worth-fixing findings are fixed in-PR. Pi (`run.research`) triages follow-up and fault items (closure needs approval; `triageConcurrency` 2).
+Review follow-ups are never filed; worth-fixing findings are fixed in-PR. Pi (`run.research`) triages follow-up and fault items (closure needs approval; `triageConcurrency` 2).
 
 ## Automatic dispatch at submit
 
