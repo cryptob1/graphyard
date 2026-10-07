@@ -23,7 +23,7 @@ Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next wo
 
 ## Retro synthesis
 
-`GRAPHYARD_INTERVENTION_PATTERNS=1` (default off; `GET /api/interventions` reports `scan`) opens an item per crossed pattern each minute and drafts changes per recurring refusal or rework cause (`retro.drafted`: wording, check, producer method, fault-catalogue entry), each [approved](protocol/work-commands.md) or refused by a non-drafting AI operator agent (`decision:approve`). Approved requirements show as [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse a failing `complete`. Off, `master status` says a crossed pattern waits on enabling it (configuration fault).
+Beside the tick, the scan (`GRAPHYARD_INTERVENTION_PATTERNS=0` disables; `GET /api/interventions` reports `scan`) opens an item per crossed pattern each minute and drafts changes per recurring refusal or rework cause (`retro.drafted`: wording, check, producer method, fault-catalogue entry), each [approved](protocol/work-commands.md) or refused by a non-drafting AI operator agent (`decision:approve`). Approved requirements show as [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse a failing `complete`. Off, `master status` flags crossed patterns as configuration faults.
 
 ## Flaky CI check
 

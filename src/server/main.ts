@@ -10,7 +10,7 @@ import { Delivery } from '../delivery.js';
 import { ProofGrants } from '../proof-grants.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
 import { projectFlow } from '../flow-analytics.js';
-import { interventionScan, openPatternItems } from '../interventions.js';
+import { openPatternItems, startPatternScan } from '../interventions.js';
 import { startRetroIndexWatch, synthesizeRetro } from '../retro-synthesis.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
@@ -93,6 +93,7 @@ export async function main(options: MainOptions = {}) {
   // reconciliation tick retries it.
   let ready = false, validating = false, prepared = false, closing = false;
   let watching: ReturnType<typeof startProductionWatch> | null = null;
+  let scanning: ReturnType<typeof startPatternScan> | null = null;
   let observing: ReturnType<typeof startObservationWorkers> | null = null;
   let validationTask: Promise<void> | null = null;
   const services: typeof http.services & { readiness?: boolean } = http.services;
@@ -143,6 +144,14 @@ export async function main(options: MainOptions = {}) {
     // the concurrency the installation sets, whatever the rest of the tick is doing (GY-492).
     observing = github ? startObservationWorkers(engine, github, capacity.concurrency) : null;
     console.log(`Observation workers: ${observing?.concurrency ?? 0} (database pool ${capacity.poolMax})`);
+    // A recurring intervention becomes work on its own (GY-98), once a minute and beside the tick,
+    // never in it (GY-1381): its ledger read held the whole tick on 2026-09-23. On unless
+    // GRAPHYARD_INTERVENTION_PATTERNS=0.
+    scanning = startPatternScan(async () => {
+      for (const work of (await openPatternItems(engine, http.services.interventionPolicy)).opened) console.log(`Opened ${work.key} for a recurring intervention pattern: ${work.title}`);
+      // The same window read by cause (GY-970): drafts for independent approval, never work items.
+      for (const artefact of (await synthesizeRetro(engine.store, http.services.interventionPolicy)).drafted) console.log(`Drafted retro artefact ${artefact.id} (${artefact.kind}) for ${artefact.pattern.label}`);
+    }, { failed: error => console.error('intervention pattern scan failed', error instanceof Error ? error.message : 'unknown') });
   };
   const [handle] = http.listeners('request') as ((req: IncomingMessage, res: ServerResponse) => void)[];
   http.removeAllListeners('request');
@@ -155,9 +164,7 @@ export async function main(options: MainOptions = {}) {
     handle(req, res);
   });
 
-  // A recurring intervention becomes work on its own (GY-98): the detection reads the ledger, so
-  // it runs once a minute rather than every tick.
-  let patternsAt = 0, receiptsPrunedAt = 0, ledgerCompactedAt = 0;
+  let receiptsPrunedAt = 0, ledgerCompactedAt = 0;
   const reconciliation = startReconciliation(async step => {
     if (!ready) { await step('validation.startup', () => runStartupValidation()); if (!ready) return; }
     // The delivery sweep is bounded per tick and resumes from its persisted cursor, so a
@@ -169,14 +176,6 @@ export async function main(options: MainOptions = {}) {
     if (Date.now() - receiptsPrunedAt >= receiptPruneIntervalMs) { receiptsPrunedAt = Date.now(); await step('pruneReceipts', () => pruneReceipts(store.pool).catch(error => { console.error('receipt pruning failed', error instanceof Error ? error.message : 'unknown'); return 0; })); }
     // Routine ledger rows past the retention window go in bounded, audited batches (store/compaction.ts).
     if (Date.now() - ledgerCompactedAt >= ledgerCompactionIntervalMs) { ledgerCompactedAt = Date.now(); await step('compactLedger', () => compactLedger(store.pool, { retentionMs: configuredLedgerRetentionMs() }).catch(error => { console.error('ledger compaction failed', error instanceof Error ? error.message : 'unknown'); return null; })); }
-    // The pattern scan's ledger query is quadratic in the events table and held the whole tick for
-    // good once the table grew (2026-09-23): it runs only where an operator opts in until it is bounded.
-    if (interventionScan().enabled && Date.now() - patternsAt >= 60_000) {
-      patternsAt = Date.now();
-      for (const work of (await step('openPatternItems', () => openPatternItems(engine, http.services.interventionPolicy))).opened) console.log(`Opened ${work.key} for a recurring intervention pattern: ${work.title}`);
-      // The same window read by cause (GY-970): drafts for independent approval, never work items.
-      for (const artefact of (await step('synthesizeRetro', () => synthesizeRetro(engine.store, http.services.interventionPolicy))).drafted) console.log(`Drafted retro artefact ${artefact.id} (${artefact.kind}) for ${artefact.pattern.label}`);
-    }
     if (github) {
       const preflight = await step('github.preflight', () => github.preflightIfDue());
       if (preflight) await announcePreflight(preflight);
@@ -188,7 +187,7 @@ export async function main(options: MainOptions = {}) {
 
   const close = async () => {
     closing = true;
-    reconciliation.stop(); watching?.stop(); watching = null; await observing?.stop(); observing = null; retroIndex.stop();
+    reconciliation.stop(); watching?.stop(); watching = null; await observing?.stop(); observing = null; await scanning?.stop(); scanning = null; retroIndex.stop();
     process.off('SIGTERM', shutdown); process.off('SIGINT', shutdown);
     await new Promise<void>(resolve => http.close(() => resolve()));
     await Promise.resolve(githubCache?.close());
