@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { startGithubSetup } from '../github-setup.js';
 import type { AppFacts } from './github.js';
 
-export interface ManifestOptions { port?: number; reviewer?: string; timeoutMs?: number; poll?: number; announce?: (message: string) => void; wait?: (ms: number) => Promise<void>; dependencies?: Parameters<typeof startGithubSetup>[4] }
+export interface ManifestOptions { port?: number; reviewer?: string; timeoutMs?: number; poll?: number; announce?: (message: string) => void; wait?: (ms: number) => Promise<void>; detectEveryMs?: number; dependencies?: Parameters<typeof startGithubSetup>[4] }
 
 /**
  * Drives the App-manifest browser flow to completion. The installer prints one URL, the
@@ -13,13 +13,19 @@ export async function runManifestFlow(root: string, repository: string, origin: 
   const announce = options.announce ?? (message => console.log(message));
   const wait = options.wait ?? ((ms: number) => new Promise(accept => setTimeout(accept, ms)));
   const setup = await startGithubSetup(root, repository, origin, options.port ?? 4311, options.dependencies ?? {}, options.reviewer);
-  announce(`Open ${setup.url} in a browser on this machine and confirm the ${options.reviewer ? `reviewer App "${options.reviewer}"` : 'Graphyard App'}, then install it on ${repository}. Over SSH, forward port ${options.port ?? 4311} first. Credentials return to ${setup.file}; they are never printed.`);
+  // An App the operator already installed is recorded by setup itself, so no page is announced (GY-1476).
+  if (!setup.installed) announce(`Open ${setup.url} in a browser on this machine and confirm the ${options.reviewer ? `reviewer App "${options.reviewer}"` : 'Graphyard App'}, then install it on ${repository}. Over SSH, forward port ${options.port ?? 4311} first. Credentials return to ${setup.file}; they are never printed.`);
   const timeoutMs = options.timeoutMs ?? APP_STEP_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
+  const detectEveryMs = options.detectEveryMs ?? 10_000;
+  let detectedAt = Date.now();
   try {
     for (;;) {
       const facts = await readAppFile(setup.file);
       if (facts) return facts;
+      // An installation made outside the page (a phone cannot load its 127.0.0.1 redirect) is
+      // looked up as the App every few seconds, so the step finishes without the page.
+      if (Date.now() - detectedAt >= detectEveryMs) { detectedAt = Date.now(); if (await setup.detectInstallation()) continue; }
       if (Date.now() >= deadline) throw new AppStepPending(setup.file, await savedRegistration(setup.file), timeoutMs, options.reviewer);
       await wait(options.poll ?? 2_000);
     }
@@ -54,8 +60,18 @@ export async function readAppFile(file: string): Promise<(AppFacts & { slug: str
   return { appId: saved.appId, slug: String(saved.slug), installationId: saved.installationId, privateKey: String(saved.privateKey), webhookSecret: String(saved.webhookSecret ?? ''), ...(saved.botUserId ? { botUserId: saved.botUserId } : {}) };
 }
 
-/** A saved control-plane App registration and the repository it was registered for. */
-export interface SavedApp { file: string; repository: string | null; facts: AppFacts & { slug: string; botUserId?: number } }
+/**
+ * A saved control-plane App registration and the repository it was registered for. `detected` marks
+ * an installation found through the App's JWT that the file does not record yet (GY-1476).
+ */
+export interface SavedApp { file: string; repository: string | null; facts: AppFacts & { slug: string; botUserId?: number }; detected?: true }
+
+/** A control-plane App GitHub returned to FILE whose installation the file does not record yet. */
+export async function readUninstalledApp(file: string): Promise<{ repository: string | null; facts: Omit<AppFacts, 'installationId'> & { slug: string } } | null> {
+  const saved = JSON.parse(await readFile(file, 'utf8'));
+  if (!Number.isSafeInteger(saved?.appId) || Number.isSafeInteger(saved?.installationId) || saved.reviewer || typeof saved.privateKey !== 'string' || !saved.privateKey) return null;
+  return { repository: typeof saved.repository === 'string' ? saved.repository : null, facts: { appId: saved.appId, slug: String(saved.slug), privateKey: saved.privateKey, webhookSecret: String(saved.webhookSecret ?? '') } };
+}
 
 /**
  * Reads an App registration saved by the manifest flow (`graphyard github-setup`, `init`, or an
