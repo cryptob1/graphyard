@@ -3,7 +3,7 @@
 
 ## Items, scope and human waits
 
-Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (flags before `--` refused). Auto-granted if grounded: docs; files criteria or follow-ups name; `web/`/`browser-tests/` for `docs/`-planning items; files review findings name; tests pinning planned text; symbol definitions; successors; companions (docs-budget gate, timing baseline, importing tests, planned modules' imports and importers). An `approve-scope` executor or the loop decides (standing decisions replay), else approvers judge (a partial grant's rest: same cycle). `master scope GY-N [--allow-broad-scope] REASON` applies refused requests save one the approver holds (routed, or refused <15 min ago: `master decisions`); leases stay (`--wait` reads it). Ending attempts (submit, release, lapse, rework, requirements) close open/refused requests (`attempt ended`); `master unblock GY-N` closes stale ones. Human decisions: `park GY-N EPOCH KIND NEEDED --ask ASK [--step STEP]… --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you), `answer`).
+Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (flags before `--` refused). Auto-granted if grounded: docs; files criteria or follow-ups name; `web/`/`browser-tests/` for `docs/`-planning items; files review findings name; tests pinning planned text; symbol definitions; successors; companions (docs-budget gate, timing baseline, importing tests, planned modules' imports/importers). An `approve-scope` executor or the loop decides (standing decisions replay), else approvers judge (a partial grant's rest: same cycle). `master scope GY-N [--allow-broad-scope] REASON` applies refused requests save one the approver holds (routed, or refused <15 min ago: `master decisions`); leases stay (`--wait` reads it); ending attempts (submit, release, lapse, rework, requirements) close open/refused requests (`attempt ended`), `master unblock GY-N` stale ones. Human decisions: `park GY-N EPOCH KIND NEEDED --ask ASK [--step STEP]… --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you), `answer`; [host-doable](deployment.md) refused).
 
 ## Conflict avoidance
 
@@ -37,7 +37,9 @@ Missing/retired rules (`gh api *merge*`, `gh api graphql*`) are `harness` drift;
 
 ## Typed actions and executors
 
-One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units, claiming rows under their own credential; `master executors restart` moves them to the current release, skipping slots already on it unless `--all`. Verified deployments move clean checkouts to the base tip, restart stale executors, then the loop (`upgrade` attention if dirty). A fenced or claim-renewing executor counts as alive. A slot stopped under 2 minutes is mid-upgrade; past that, `systemctl --user start` names it, and unserved kinds read as slots down, not missing capacity. Every poll and renewal upserts the executor's `executor_presence` row, so a redeployed control plane reads the fleet at once; an empty fleet is judged on evidence — a poll heard, or rows older than the 120s window — never process age.
+One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units (own credential); `master executors restart` moves them to the current release, skipping current slots unless `--all`. Verified deployments move clean checkouts to the base tip, restart stale executors then the loop (`upgrade` attention when dirty). A fenced or claim-renewing executor counts as alive. Polls and renewals upsert `executor_presence`; an empty fleet is judged on evidence (a poll heard, or rows older than the 120s window), never process age.
+
+A declared slot not `active` (systemd, else `PRINCIPAL@HOST/N` presence) is a `resources` fault naming `journalctl --user -u graphyard-executor@N.service`, unless stopped under 2 minutes; unserved lines say slots are down, not saturated. `graphyard-executor.mjs --install` requires `Restart=always`, `RestartSec` ≤ 60 s. Worker starts fenced under 2 minutes retry once it lapses; longer fences fail naming it.
 
 A `resync` (`POST /api/work/:id/resync` `{ since }`) completes only on an observation newer than its claim.
 
@@ -51,7 +53,7 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator`, `s
 
 ### Producer-runtime faults
 
-A producer request spent with no attempt acting (never started, launch refused, exited at launch) requests no rework; it relaunches on a profile none of them ran on.
+A producer request spent with no attempt acting (never started, refused, exited at launch) requests no rework; it relaunches on an unused profile.
 
 ## Fault classes
 

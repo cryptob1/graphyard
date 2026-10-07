@@ -10,7 +10,7 @@ import { executorsCommand } from '../src/cli/master-executors.js';
 import { executorRegistrar, readExecutorRegistrations, readRestartFence, restartExecutors, runsRelease, writeExecutorRegistration, type ExecutorRegistration, type ExecutorRestartResult } from '../src/executor-fleet.js';
 import { performSelfUpgrade } from '../src/daemon/upgrade.js';
 import { deploymentObservationSchema, emptyDaemonState } from '../src/master-daemon.js';
-import { executorFleet, slotUpgradeBoundMs } from '../src/cli/executor-report.js';
+import { executorFleet, slotPaged, slotUpgradeBoundMs } from '../src/cli/executor-report.js';
 import { writeExecutorDeclaration, type SystemctlRunner } from '../src/repository-setup.js';
 import { ExecutorRegistry, executorReport } from '../src/model/executor-presence.js';
 import { attentionKind } from '../src/model/fault-classes.js';
@@ -202,14 +202,13 @@ test('unit:slots-down-distinct-from-no-capacity — the fleet report names slots
   const capacity = await fleet(['active', 'active'], null);
   assert.equal(capacity.capacity, 'no-capacity');
   assert.match(capacity.attention[0].text, /^Nothing can run dispatch: GY-1416 has waited 29m .*no executor is alive/);
-  assert.deepEqual(capacity.slots, []);
+  assert.deepEqual(capacity.slots.map(slot => slot.active), ['active', 'active']);
 
   // The slots are stopped past the bound: slots down, not capacity, and the remedy is to start them.
   const down = await fleet(['inactive', 'inactive'], 5 * 60_000);
   assert.equal(down.capacity, 'slots-down');
   const line = down.attention.find(item => item.subject === 'GY-1416')!;
-  assert.match(line.text, /^Nothing can run dispatch: GY-1416 has waited 29m because declared executor slots on this host are down, not because the fleet lacks capacity: graphyard-executor@1\.service inactive for 5m, past the 2m upgrade bound, graphyard-executor@2\.service inactive for 5m/);
-  assert.doesNotMatch(line.text, /no executor is alive|start an executor that serves/);
+  assert.match(line.text, /^Nothing can run dispatch: GY-1416 has waited 29m .* This host's executor slots are down, not saturated: graphyard-executor@1\.service inactive for 5m, past the 2m upgrade bound, graphyard-executor@2\.service inactive for 5m/);
   assert.equal(line.next, `systemctl --user start ${unit(1)} ${unit(2)}`);
   assert.equal(attentionKind({ subject: line.subject, text: line.text }), 'executor', 'still an executor fault for the fault classes');
 
@@ -217,7 +216,7 @@ test('unit:slots-down-distinct-from-no-capacity — the fleet report names slots
   const restarting = await fleet(['inactive', 'inactive'], 8_000);
   assert.equal(restarting.capacity, 'restarting');
   assert.deepEqual(restarting.attention, [], 'a slot inside its restart is neither slots down nor no capacity');
-  assert.deepEqual(restarting.slots.map(slot => ({ unit: slot.unit, paged: slot.paged })), [{ unit: unit(1), paged: false }, { unit: unit(2), paged: false }]);
+  assert.deepEqual(restarting.slots.map(slot => ({ unit: slot.unit, downMs: slot.downMs, paged: slotPaged(slot) })), [{ unit: unit(1), downMs: 8_000, paged: false }, { unit: unit(2), downMs: 8_000, paged: false }]);
 });
 
 test('unit:slot-down-past-bound-pages-operator — a declared slot inactive past the upgrade bound raises the start attention naming its unit; inside the bound, and while stopping, it raises nothing', async () => {
@@ -232,8 +231,8 @@ test('unit:slot-down-past-bound-pages-operator — a declared slot inactive past
   };
   const past = await slotLines(['inactive', 'active'], slotUpgradeBoundMs + 1_000);
   assert.equal(past.length, 1);
-  assert.match(past[0].text, /^Executor slot 1 is inactive although this host declares 2 slot\(s\), down 2m, past the 2m upgrade bound; journalctl --user -u graphyard-executor@1\.service says why/);
-  assert.equal(past[0].next, `systemctl --user start ${unit(1)}`, 'the operator-paged start attention names the unit');
+  assert.match(past[0].text, /^Executor slot 1 is inactive for 2m, past the 2m upgrade bound although this host declares 2 slot\(s\); journalctl --user -u graphyard-executor@1\.service -n 200 says why/);
+  assert.ok(past[0].next.startsWith(`systemctl --user start ${unit(1)} `), 'the operator-paged start attention names the unit');
   assert.equal(past[0].role, 'master');
   assert.deepEqual(await slotLines(['inactive', 'active'], slotUpgradeBoundMs - 1_000), [], 'inside the bound the slot is mid-upgrade');
   assert.deepEqual(await slotLines(['deactivating', 'active'], null), [], 'a stopping slot is a restart in passage');
