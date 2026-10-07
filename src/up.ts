@@ -119,6 +119,7 @@ export interface UpDependencies {
   fileOnboarding?(url: string, operatorTokenFile: string | null, requestId: string): Promise<{ key: string } | null>;
   /** The control plane's work items, as the master identity reads them; null while none answers. */
   work?(): Promise<any[] | null>;
+  /**
    * GY-1480: the CLI checkout the master loop will run from, and the paths that make it dirty (empty
    * when clean). The loop refuses to start from a dirty one, so preflight refuses first.
    */

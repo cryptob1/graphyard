@@ -754,6 +754,7 @@ test('unit:onboarding-pr-visible — while the onboarding pull request is open, 
   const unread = page(null, true);
   assert.doesNotMatch(unread, /Describe what you want built/);
   assert.match(visible(unread), /Checking whether the onboarding change has merged/);
+});
 
 test('unit:onboarding-generates-workflow — onboarding a repository with no CI writes a delivery workflow (build and test for its stack, then Graphyard\'s gate) into the onboarding change, up claims only the workflows the apply wrote, and publishOnboarding refuses naming a file it means to publish that is missing', async () => {
   const { buildProposal, collectScanInput, deliveryGateJob, deliveryWorkflowFile, hasNoCi, renderDeliveryWorkflow, writeDeliveryWorkflow } = await import('../src/onboarding.js');
@@ -883,4 +884,37 @@ test('unit:up-preflight-clean-cli — up refuses at preflight, naming the dirty 
   assert.equal(lateResult.exitCode, upExitCodes.prerequisite);
   assert.match(lateResult.next, /^master-loop: .*src\/up\.ts/);
   assert.ok(!late.calls.some(args => args.join(' ') === 'master restart'), 'the loop is not restarted onto a dirty checkout');
+});
+
+test('unit:research-worktree-managed-repo — the loop makes its research scratch worktree from the managed repository\'s own checkout, not from the Graphyard CLI checkout, when the two differ', async () => {
+  const { openResearchScratch, researchScratchSource } = await import('../src/daemon/run.js');
+  const repository = async (name: string, file: string) => {
+    const directory = await temporaryDirectory(name);
+    const git = (...args: string[]) => execFileSync('git', ['-C', directory, ...args], { encoding: 'utf8' }).trim();
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.email', 't@example.com'); git('config', 'user.name', 'T');
+    await mkdir(join(directory, 'bin'), { recursive: true });
+    await writeFile(join(directory, file), `${name}\n`);
+    git('add', '.'); git('commit', '-q', '-m', name);
+    return { directory, head: git('rev-parse', 'HEAD') };
+  };
+  const cli = await repository('graphyard-cli', 'bin/graphyard.mjs');
+  const managed = await repository('managed-game', 'game.js');
+  const config = { cliPath: join(cli.directory, 'bin', 'graphyard.mjs'), repository: 'acme/game', run: { worktreeRoot: await temporaryDirectory('research-scratch-root') } } as any;
+  // The source is the managed repository the loop runs for; only a loop given none falls back to the CLI's checkout.
+  assert.equal(researchScratchSource(config, managed.directory), resolve(managed.directory));
+  assert.equal(researchScratchSource(config), resolve(cli.directory));
+  const logs: string[] = [];
+  const scratch = await openResearchScratch(researchScratchSource(config, managed.directory), config, managed.head, line => logs.push(line));
+  assert.deepEqual(logs, [], 'the managed commit is found where the worktree is made');
+  assert.ok(scratch && scratch.endsWith('checkout'), `the scratch holds a worktree of the release (${scratch})`);
+  const inScratch = (...args: string[]) => execFileSync('git', ['-C', scratch!, ...args], { encoding: 'utf8' }).trim();
+  assert.equal(inScratch('rev-parse', 'HEAD'), managed.head);
+  assert.equal(resolve(scratch!, inScratch('rev-parse', '--git-common-dir')), resolve(managed.directory, '.git'), 'the worktree belongs to the managed repository');
+  assert.ok(!execFileSync('git', ['-C', cli.directory, 'worktree', 'list'], { encoding: 'utf8' }).includes(scratch!), 'the CLI checkout holds no research worktree');
+  // The CLI checkout holds no commit of the managed repository: a worktree made there fails as the pilot's did.
+  const fromCli: string[] = [];
+  const config2 = { ...config, run: { worktreeRoot: await temporaryDirectory('research-scratch-cli-root') } };
+  await openResearchScratch(researchScratchSource(config2), config2, managed.head, line => fromCli.push(line));
+  assert.match(fromCli.join('\n'), /holds no worktree of/);
 });

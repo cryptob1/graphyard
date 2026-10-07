@@ -148,6 +148,43 @@ export async function adoptHeadlessRuns(state: DaemonState, effects: DaemonEffec
 }
 
 /**
+ * GY-1480: the checkout the research scratch worktree is made from — the managed repository's own,
+ * whose commit the loop's release names, never the Graphyard CLI checkout, which holds no such
+ * commit when the managed repository is another one. Without a repository it is the CLI's checkout,
+ * which is the managed repository when Graphyard manages itself.
+ */
+export const researchScratchSource = (config: Pick<MasterConfig, 'cliPath'>, repository?: string | null) => repository ? resolve(repository) : coordinatorCheckoutRoot(config.cliPath);
+
+/**
+ * The research scratch checkout under SOURCE's managed worktree root, holding a detached worktree
+ * of RELEASE (a commit of SOURCE) when one can be made: the directory sessions start in, or null
+ * when no scratch could be allocated.
+ */
+export async function openResearchScratch(source: string, config: MasterConfig, release: string | null, log: (line: string) => void): Promise<string | null> {
+  try {
+    // The path is the repository's, not this process's: a restarted loop takes up the scratch
+    // the loop before it left, so the detached research runs registered there (GY-453) stay in a
+    // directory that exists and are adopted from the registry they were written to.
+    const stable = loopScratchCheckout(worktreeRoot(source, config));
+    const scratch = existsSync(stable.directory) ? stable : await allocateManagedCheckout(source, config, 'approval', 'loop-scratch', '0'.repeat(40), '0'.repeat(8));
+    if (!release) return scratch.directory;
+    try {
+      // A worktree the loop before left is moved onto this loop's release; the run registry
+      // under its ignored .graphyard/ stays where it is.
+      if (existsSync(scratch.worktree)) await defaultChildRun('git', ['-C', scratch.worktree, 'checkout', '--detach', '--force', '--quiet', release]);
+      else await defaultChildRun('git', ['-C', source, 'worktree', 'add', '--detach', '--quiet', scratch.worktree, release]);
+      return scratch.worktree;
+    } catch (error) {
+      log(`[graphyard-master] the research scratch checkout holds no worktree of ${release.slice(0, 12)}: ${message(error)}`);
+      return scratch.directory;
+    }
+  } catch (error) {
+    log(`[graphyard-master] research, triage and the diagnostician are off: no scratch checkout outside the coordinator checkout could be allocated: ${message(error)}`);
+    return null;
+  }
+}
+
+/**
  * Supervised entry point. The process owns no lease and no credential beyond the coordinator token,
  * so a restart is always safe: it reconciles the cursor against Graphyard and keeps cycling.
  *
@@ -167,7 +204,9 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   /** The process whose unhandled rejections and uncaught exceptions the loop catches; defaults to this one. */
   process?: Pick<NodeJS.Process, 'on' | 'off'>;
   /** Reads how the coordinator checkout stands; defaults to reading it from the configured CLI launcher's root. */
-  checkout?: () => CoordinatorCheckout | Promise<CoordinatorCheckout> } ) {
+  checkout?: () => CoordinatorCheckout | Promise<CoordinatorCheckout>;
+  /** The managed repository's checkout the loop runs for; its research scratch is a worktree of it (GY-1480). Defaults to the CLI launcher's checkout. */
+  repository?: string } ) {
   // Progress goes to stderr so stdout stays the machine-readable result the CLI prints.
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
   const interval = () => typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
@@ -181,30 +220,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   // loop launches, and without the scratch it does not run at all.
   // A loop with neither has no scratch to place, so it needs no CLI launcher to place it from.
   const needsScratch = Boolean(raw.research) || 'diagnostician' in raw;
-  const scratchRoot = needsScratch ? coordinatorCheckoutRoot(config.cliPath) : '';
-  let scratchDirectory: string | null = null;
-  if (needsScratch) {
-    try {
-      // The path is the repository's, not this process's: a restarted loop takes up the scratch
-      // the loop before it left, so the detached research runs registered there (GY-453) stay in a
-      // directory that exists and are adopted from the registry they were written to.
-      const stable = loopScratchCheckout(worktreeRoot(scratchRoot, config));
-      const scratch = existsSync(stable.directory) ? stable : await allocateManagedCheckout(scratchRoot, config, 'approval', 'loop-scratch', '0'.repeat(40), '0'.repeat(8));
-      scratchDirectory = scratch.directory;
-      const release = raw.loadedRelease?.commit;
-      if (release) {
-        try {
-          // A worktree the loop before left is moved onto this loop's release; the run registry
-          // under its ignored .graphyard/ stays where it is.
-          if (existsSync(scratch.worktree)) await defaultChildRun('git', ['-C', scratch.worktree, 'checkout', '--detach', '--force', '--quiet', release]);
-          else await defaultChildRun('git', ['-C', scratchRoot, 'worktree', 'add', '--detach', '--quiet', scratch.worktree, release]);
-          scratchDirectory = scratch.worktree;
-        } catch (error) { log(`[graphyard-master] the research scratch checkout holds no worktree of ${release.slice(0, 12)}: ${message(error)}`); }
-      }
-    } catch (error) {
-      log(`[graphyard-master] research, triage and the diagnostician are off: no scratch checkout outside the coordinator checkout could be allocated: ${message(error)}`);
-    }
-  }
+  const scratchDirectory = needsScratch ? await openResearchScratch(researchScratchSource(config, options.repository), config, raw.loadedRelease?.commit ?? null, log) : null;
   const scoped = new Proxy(raw, { get(target, property, receiver) {
     if (property === 'research') return target.research && scratchDirectory ? { ...target.research, cwd: scratchDirectory } : undefined;
     if (property === 'diagnostician') { const diagnostician = target.diagnostician; return diagnostician && scratchDirectory ? { ...diagnostician, cwd: scratchDirectory } : undefined; }
