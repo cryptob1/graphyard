@@ -5,7 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { Work } from '../model.js';
 import { hostDoableAsk, hostDoableRefusal, parkRefusal, type HostDoableAsk, type HumanRequestRow } from '../model/human-request.js';
 import { configHome } from '../install/secrets.js';
-import { scopeRequestOutcome } from '../model/scope.js';
+import { scopeRequestOutcome, scopeRequestWaitMs } from '../model/scope.js';
 import type { CliContext } from './context.js';
 import { workMutation, type CliCommand } from './registry.js';
 import { parkCommand, parkInput } from './park-command.js';
@@ -27,8 +27,10 @@ export const scopeRequestCommand: CliCommand = {
     '                                Ask to widen plannedFiles with PATH... for a reason; the',
     '                                widening rule, a review finding or the independent approver',
     '                                decides it and the attempt keeps its lease. `scope-request',
-    '                                GY-N EPOCH --wait` waits up to 9 minutes and prints the',
-    '                                outcome; `--wait` among the PATHs files the request and',
+    '                                GY-N EPOCH --wait` waits up to 15 minutes, as long as the',
+    '                                approver path takes (run it in the background where a',
+    '                                shell bounds commands shorter), and prints the outcome;',
+    '                                `--wait` among the PATHs files the request and',
     '                                then waits the same way. Any other argument before -- that',
     '                                begins with - is refused. `scope-request GY-N EPOCH -`',
     '                                withdraws the request.',
@@ -70,8 +72,8 @@ export function scopeRequestArgs(args: readonly string[]) {
 /**
  * The outcome of this attempt's open scope request, read from the item as the control plane holds
  * it (GY-176): the worker's own command reads durable state, so nothing is pasted into its session.
- * Polls until the request is decided or no longer open, or the wait (bounded under a shell tool's
- * ten-minute limit) runs out, and reports it pending then. Every read carries the control
+ * Polls until the request is decided or no longer open, or the wait (`scopeRequestWaitMs`, the whole
+ * bound the loop settles an ask in, approver included: GY-1484) runs out, and reports it pending then. Every read carries the control
  * plane's own time, which is what the lease deadline is measured against. An approval clears the request, so one
  * decided before the worker waits is read from the decision this attempt's request received.
  */
@@ -80,7 +82,7 @@ export async function awaitScopeOutcome(context: Pick<CliContext, 'api'>, work: 
   const request = work.scopeRequest?.epoch === epoch ? work.scopeRequest : decided && { at: decided.requestedAt, paths: decided.paths };
   if (!request) throw new Error(`${work.key} has no scope request for epoch ${epoch}; ask with scope-request ${work.key} ${epoch} PATH... -- REASON`);
   const ask = { epoch, at: request.at, paths: request.paths }, cli = options.cli ?? 'graphyard';
-  const deadline = Date.now() + (options.waitMs ?? 540_000);
+  const deadline = Date.now() + (options.waitMs ?? scopeRequestWaitMs);
   for (;;) {
     // Liveness is judged on the control plane's clock, from the same read as the item: the lease
     // deadline it issued is compared with its own `now`, never this host's.

@@ -157,6 +157,12 @@ export interface Work extends Create {
    */
   scopeRequest?: ScopeRequestState | null;
   /**
+   * An ask still with the independent approver when its attempt ended (GY-1484), carried to the item
+   * rather than dropped: the next claim adopts it as that attempt's open request, and a widening that
+   * covers it clears it.
+   */
+  carriedScopeRequest?: ScopeRequestState | null;
+  /**
    * The last scope decision the control plane took for this item, applied or refused, with the
    * request it answered and how long that request waited. An approved request is applied and
    * cleared; a refused one stays open, carrying the same decision, for the operator to decide.
