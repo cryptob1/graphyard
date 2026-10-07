@@ -14,6 +14,7 @@ import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, ope
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
+import { containmentPhase } from './model/containment.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
 import { unauthorizedMergeViolation } from './merge-queue.js';
 import { conflictSince, requestedBaseRefresh, disprovedConflict, withDisprovedConflict, dismissedApproval, onto, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, checkRerunLimit, owedRerunAfter, type BaseRefresh, type CheckRerun, type OwedRerunOutcome, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type RestoredApproval } from './merge-queue.js';
@@ -49,6 +50,9 @@ import { deliverSplitParent, splitChildRevisionRefusal } from './decomposition.j
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
 import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type SavedVersion } from './store/locked-read.js';
 
+/** When a containment fence's authority lapsed, read from the record before it was lowered; null while its lease is live or it records no deadline. */
+const fenceLapsedAt = (work: Work | null, now: number) => { const phase = work ? containmentPhase(work, now) : null; return phase && phase.state !== 'live' ? phase.lapsedAt : null; };
+
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
 const publicArtifactUrl = z.url().max(2000).refine(value => {
@@ -78,7 +82,7 @@ const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional() }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
   requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs, split: createSchema.shape.split,
-    answers: z.object({ epoch: z.number().int().positive(), at: z.string().datetime(), sha: z.string().regex(/^[0-9a-f]{40}$/).nullable().optional() }).strict().optional() }).strict(),
+    answers: z.object({ epoch: z.number().int().positive(), at: z.string().datetime(), sha: z.string().regex(/^[0-9a-f]{40}$/).nullable().optional() }).strict().optional(), rule: z.literal('successor').optional() }).strict(),
   reviewpolicy: z.object({ provider: z.enum(reviewProviders), reviewerProfiles: z.array(reviewerProfileSchema).min(1).max(10).optional(), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
@@ -99,7 +103,9 @@ const commands = {
   quarantine: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/), scope: containmentScopeSchema.optional() }).strict(),
   launch: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   settle: z.object({ epoch, settlementToken: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
-  autosettle: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(2000), verification: containmentVerificationSchema }).strict(),
+  // `origin: 'loop'` marks the loop's own settlement of a verified-dead fence, which the intervention
+  // report counts only when it came past the settle bound (GY-1392); a hand `master settle-containment` sends none.
+  autosettle: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(2000), verification: containmentVerificationSchema, origin: z.literal('loop').optional() }).strict(),
   // GY-860 AC-2: `failure` releases a claim whose worktree the host could not create. The attempt
   // is undone — the epoch returns, the untouched reservation and timeline entry go, the lease is
   // released — and the ledger keeps the git message, so the failure is on the item without
@@ -160,11 +166,8 @@ const commands = {
   // the base tip it names into a candidate a repaired base failure held (GY-528). The reconciliation
   // job runs it and records it on `baseRefresh`, where the binding carry decides what the head keeps.
   refresh: z.object({ reason: z.string().trim().min(1).max(2000), base: sha }).strict(),
-  // The coordinator reporting that the guarded merge refused this exact candidate (GY-831): a
-  // carried approval it could not re-post, or one reason repeated since `since`. The control plane
-  // decides what follows from the record: a carried approval is cleared so the review gate asks
-  // for a fresh review of the tip, and otherwise the candidate is marked for a rework decision.
-  mergerefused: z.object({ sha, baseSha: sha, policyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), since: z.iso.datetime().optional() }).strict(),
+  // No `mergerefused`: GitHub merges on every passing gate (GY-1235) and Graphyard keeps no guarded
+  // merge (GY-1236), so nothing reports a merge refusal and none sends a candidate back (GY-1391).
 } as const;
 const executorName = z.string().trim().min(1).max(200).regex(/^[^\u0000-\u001f\u007f]+$/);
 const actionClaimSchema = z.object({
@@ -975,23 +978,6 @@ export class Engine {
         // Beside `baseRefresh`, not in it: an approval an earlier refresh carried onto this head still binds until the merge runs.
         work.baseRefreshRequest = { head: candidate!.sha, base: data.base, policyRevision: work.policyRevision, by: actor.id, at: now.toISOString(), reason: data.reason };
       }
-      if (command === 'mergerefused') {
-        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-        const candidate = work.candidate;
-        demand(candidate && candidate.sha === data.sha && candidate.baseSha === data.baseSha && work.policyRevision === data.policyRevision && !work.observation?.merged,
-          `${work.key} candidate changed since the refused merge; the refusal no longer describes it`, 409);
-        const carried = carriedApproval(work), at = now.toISOString();
-        if (carried) {
-          // Every record that carried the approval onto this candidate stops carrying it, naming the
-          // review it could not re-post so the same dismissal is never restored over the refusal.
-          const refused = { reviewer: carried.reviewer, ...(carried.reviewId !== undefined ? { reviewId: carried.reviewId } : {}), originalSha: carried.originalSha, at };
-          const reason = `the guarded merge could not use the carried approval of ${carried.originalSha.slice(0, 12)} by ${carried.reviewer}${carried.reviewId !== undefined ? ` (review ${carried.reviewId})` : ''}: ${data.reason}; a fresh independent approval of ${candidate!.sha.slice(0, 12)} is required`;
-          for (const carry of onto(work, candidate!.sha)) if (carry.approval.carried) carry.approval = { carried: false, reason: reason.slice(0, 2000), refused };
-        }
-        work.mergeRefusal = { sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, reason: data.reason, since: data.since ?? at, at, by: actor.id, action: carried ? 'rereview' : 'rework',
-          ...(carried ? { approval: { reviewer: carried.reviewer, ...(carried.reviewId !== undefined ? { reviewId: carried.reviewId } : {}), originalSha: carried.originalSha } } : {}),
-          carry: structuredClone(currentCarry(work)) };
-      }
       if (command === 'reviewpolicy') {
         if (actor.role !== 'operator-agent') admin(actor);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
@@ -1043,6 +1029,10 @@ export class Engine {
           // approver's judgement of the worker's reason and the criteria (GY-176) names no head.
           if (data.answers.sha !== undefined) demand((work.candidate?.sha ?? null) === data.answers.sha, `The findings this widening rests on were read for ${data.answers.sha?.slice(0, 12) ?? 'no head'}, which is no longer the item's head`);
         }
+        // The loop's own re-plan onto a planned file's successors (GY-1397): only the operator agent
+        // names that rule, and only for a purely additive widening, so the record tells it apart
+        // from a widening a person or a coordinator made.
+        if (data.rule) demand(actor.role === 'operator-agent' && widening, 'Only the operator agent\'s purely additive planned-files widening is a rule-grounded re-plan');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
         if (work.parent) {
           const parent: Work | undefined = (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [work.parent])).rows[0]?.document;
@@ -1586,6 +1576,8 @@ export class Engine {
       else settleDelivered(work, all, now);
       await this.recordDispatch(db, work, now);
       await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch }
+        // The instant the fence's authority lapsed, from the record it lowered, so the report can date the settlement against it (GY-1392).
+        : command === 'autosettle' ? { ...data, lapsedAt: fenceLapsedAt(before, now.getTime()) }
         : command === 'autoscope' ? { ...data, decision, before: { plannedFiles: before?.plannedFiles ?? [], blocker: before?.blocker ?? null } }
         : actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null, ...(command === 'requirements' ? { liveScopeWidening: widening } : {}), ...(closedScope ? { closedScopeRequest: closedScope } : {}) }
         // A requirements revision an approved decision applies records whether it was a live widening too (GY-549).

@@ -67,7 +67,7 @@ export function successorsOf(planned: readonly string[], successions: readonly S
 /** The audited ground a successor is granted on: `successor of src/master-daemon.ts via <commit>`. */
 export const successorGround = (successor: Successor) => `successor of ${successor.of} via ${successor.commit.slice(0, 12)}`;
 
-/** The additive requirements revision that re-plans an item onto its planned files' successors: everything else is carried over unchanged. */
+/** The additive requirements revision that re-plans an item onto its planned files' successors: everything else is carried over unchanged, and `rule` marks it as the loop's own, never an intervention (GY-1397). */
 export const successorWidening = (work: { policyRevision: number; criteria: unknown[]; dependencies: readonly string[]; plannedFiles?: readonly string[]; exclusiveResources?: readonly string[]; producerProofs?: readonly string[] }, paths: readonly string[], reason: string) => ({
   expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies,
-  plannedFiles: [...new Set([...(work.plannedFiles ?? []), ...paths])], exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], reason });
+  plannedFiles: [...new Set([...(work.plannedFiles ?? []), ...paths])], exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], reason, rule: 'successor' as const });
