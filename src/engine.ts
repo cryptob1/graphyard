@@ -160,11 +160,8 @@ const commands = {
   // the base tip it names into a candidate a repaired base failure held (GY-528). The reconciliation
   // job runs it and records it on `baseRefresh`, where the binding carry decides what the head keeps.
   refresh: z.object({ reason: z.string().trim().min(1).max(2000), base: sha }).strict(),
-  // The coordinator reporting that the guarded merge refused this exact candidate (GY-831): a
-  // carried approval it could not re-post, or one reason repeated since `since`. The control plane
-  // decides what follows from the record: a carried approval is cleared so the review gate asks
-  // for a fresh review of the tip, and otherwise the candidate is marked for a rework decision.
-  mergerefused: z.object({ sha, baseSha: sha, policyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), since: z.iso.datetime().optional() }).strict(),
+  // No `mergerefused`: GitHub merges on every passing gate (GY-1235) and Graphyard keeps no guarded
+  // merge (GY-1236), so nothing reports a merge refusal and none sends a candidate back (GY-1391).
 } as const;
 const executorName = z.string().trim().min(1).max(200).regex(/^[^\u0000-\u001f\u007f]+$/);
 const actionClaimSchema = z.object({
@@ -974,23 +971,6 @@ export class Engine {
         demand(!requestedBaseRefresh(work), `A refresh of ${work.key} head ${candidate!.sha.slice(0, 12)} is already requested; the reconciliation job runs it`);
         // Beside `baseRefresh`, not in it: an approval an earlier refresh carried onto this head still binds until the merge runs.
         work.baseRefreshRequest = { head: candidate!.sha, base: data.base, policyRevision: work.policyRevision, by: actor.id, at: now.toISOString(), reason: data.reason };
-      }
-      if (command === 'mergerefused') {
-        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-        const candidate = work.candidate;
-        demand(candidate && candidate.sha === data.sha && candidate.baseSha === data.baseSha && work.policyRevision === data.policyRevision && !work.observation?.merged,
-          `${work.key} candidate changed since the refused merge; the refusal no longer describes it`, 409);
-        const carried = carriedApproval(work), at = now.toISOString();
-        if (carried) {
-          // Every record that carried the approval onto this candidate stops carrying it, naming the
-          // review it could not re-post so the same dismissal is never restored over the refusal.
-          const refused = { reviewer: carried.reviewer, ...(carried.reviewId !== undefined ? { reviewId: carried.reviewId } : {}), originalSha: carried.originalSha, at };
-          const reason = `the guarded merge could not use the carried approval of ${carried.originalSha.slice(0, 12)} by ${carried.reviewer}${carried.reviewId !== undefined ? ` (review ${carried.reviewId})` : ''}: ${data.reason}; a fresh independent approval of ${candidate!.sha.slice(0, 12)} is required`;
-          for (const carry of onto(work, candidate!.sha)) if (carry.approval.carried) carry.approval = { carried: false, reason: reason.slice(0, 2000), refused };
-        }
-        work.mergeRefusal = { sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, reason: data.reason, since: data.since ?? at, at, by: actor.id, action: carried ? 'rereview' : 'rework',
-          ...(carried ? { approval: { reviewer: carried.reviewer, ...(carried.reviewId !== undefined ? { reviewId: carried.reviewId } : {}), originalSha: carried.originalSha } } : {}),
-          carry: structuredClone(currentCarry(work)) };
       }
       if (command === 'reviewpolicy') {
         if (actor.role !== 'operator-agent') admin(actor);

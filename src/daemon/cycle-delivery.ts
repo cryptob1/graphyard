@@ -8,7 +8,7 @@ import { readyToRetry } from './sessions.js';
 import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, githubPause, observationWakeDue, standingVerdict } from './decisions.js';
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
-import { defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, stillVerifying, withinDeploymentBudget } from './deployment.js';
+import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
 import { mainGuardAttention } from '../main-guard.js';
 
 /**
@@ -111,9 +111,13 @@ export async function deploymentStep(cycle: Cycle) {
   // A carried answer was computed for the deliveries of the cycle that asked; recorded under this
   // cycle's key, it leaves out a delivery landed since until the next read answers for that one too.
   const budgetMs = deploymentStepBudgetMs(config.run.intervalSeconds * 1000), deadline = now() + budgetMs, deferred: string[] = [];
-  const observed = await withinDeploymentBudget(state, 'observation', () => effects.observeDeployment(delivered, state.deployment?.containment ?? null), deadline, now);
+  // GY-1398: a verified observation younger than the reuse window that already places every
+  // delivery and leaves none pending stands as it is: the cycle starts no release read at all.
+  const reuseMs = (config.run.deploymentReuseMinutes ?? defaultDeploymentReuseMinutes) * 60_000;
+  const reused = reusableDeployment(state.deployment, delivered, now(), reuseMs);
+  const observed = reused ? { ok: true as const, value: state.deployment! } : await withinDeploymentBudget(state, 'observation', () => effects.observeDeployment(delivered, state.deployment?.containment ?? null), deadline, now);
   if (observed === stillVerifying) deferred.push('the release observation');
-  else try {
+  else if (!reused) try {
     if (!observed.ok) throw observed.error;
     const observation = observed.value;
     state.deployment = deploymentObservationSchema.parse(boundDeployment(observation));
@@ -139,7 +143,7 @@ export async function deploymentStep(cycle: Cycle) {
   //       cycle's read and dispatch stamps are kept, so a failure never repeats every cycle.
   const promotion = effects.promotion, promotionFailure = 'promotion:failed';
   if (promotion && readyToRetry(state.actions[promotionFailure], state.cycle)) {
-    const checked = await withinDeploymentBudget(state, 'promotion', () => promotionCycle(state.promotion ?? null, promotion, { now: now(), everyMinutes: config.run.promoteEveryMinutes ?? defaultPromoteEveryMinutes }), deadline, now);
+    const checked = await withinDeploymentBudget(state, 'promotion', () => promotionCycle(state.promotion ?? null, promotion, { now: now(), everyMinutes: config.run.promoteEveryMinutes ?? defaultPromoteEveryMinutes, intervalMs: config.run.intervalSeconds * 1000 }), deadline, now);
     if (checked === stillVerifying) deferred.push('the promotion check');
     else {
       if (!checked.ok) throw checked.error;
