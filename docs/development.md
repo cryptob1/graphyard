@@ -19,7 +19,7 @@ A required check failing on base head too: no rework, no approver (waiting while
 
 ## Documentation
 
-`docs/README.md`, `docs/protocol.md`: generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; [`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files-never-conflict) exempts them from the regression guard. README.md and `docs/` keep `graphyard.json`'s `wordBudget` (12,000 words, 1,200 per page; `tests/docs-budget.test.ts`), one topic per page: page over cap fails CI, total only warns; at 97% loop files one trim item (keeping every CLI command and HTTP route), never parking on operator.
+`docs/README.md`, `docs/protocol.md`: generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; [`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files-never-conflict) exempts them from the regression guard. README.md and `docs/` keep `graphyard.json`'s `wordBudget` (16,000 words, 1,200 per page; `tests/docs-budget.test.ts`), one topic per page: page over cap fails CI, total only warns; at 97% loop files one trim item (keeping every CLI command and HTTP route), never parking on operator.
 
 ### Documentation that rarely conflicts
 
