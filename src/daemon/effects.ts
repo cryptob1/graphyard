@@ -41,7 +41,7 @@ import { withRoleDefaults } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
-import { observeDeployment, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
+import { localAncestry, observeDeployment, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
 import { loopThroughputMeasurement, type LoopThroughputOutcome } from '../throughput.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
@@ -721,16 +721,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('merge-queue', config);
       publishedMergeQueue = published;
     },
+    // Ancestry as the deployment observation derives it: this checkout's own object store, the base branch fetched once per measurement.
     measureThroughput: (work, observedSha) => loopThroughputMeasurement(root, { work, observedSha, now: () => Date.now(), origin: new URL(current().url).origin,
-      status: coordinatorStatus, readItem: id => asCoordinator(`work/${encodeURIComponent(id)}`),
-      // Ancestry from this checkout's object store; a commit it does not hold yet is fetched once with the base branch.
-      contains: async (ancestor, descendant) => {
-        const ask = async () => { try { await run('git', ['-C', root, 'merge-base', '--is-ancestor', ancestor, descendant]); return true; } catch (error: any) { return error?.status === 1 ? false : null; } };
-        const first = await ask();
-        if (first !== null) return first;
-        try { await run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${current().baseBranch}:refs/remotes/origin/${current().baseBranch}`]); } catch { /* unknown stays unknown */ }
-        return ask();
-      } }),
+      status: coordinatorStatus, readItem: id => asCoordinator(`work/${encodeURIComponent(id)}`), contains: localAncestry(root, current().baseBranch, run).contains }),
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),

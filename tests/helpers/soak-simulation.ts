@@ -29,6 +29,7 @@ import { type DecidePayload, diagnosticianSettings } from '../../src/runner/payl
 import { clearDecompositionRuns } from '../../src/decomposition-step.js';
 import { type ScopeRequestState, scopeRefusalBlocker } from '../../src/model/scope.js';
 import { stoppedStates } from '../../src/daemon/effects.js';
+import { loopThroughputMeasurement, throughputClaim } from '../../src/throughput.js';
 import { type RunOptions, type RunRecord, type RunResult, type Runner } from '../../src/runner/types.js';
 import { type DiagnosticianEffects } from '../../src/daemon/diagnosis.js';
 import { terminalDecisions } from '../../src/cli/decision-report.js';
@@ -1230,8 +1231,30 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       promotion.dispatches.push(now);
     },
   } : undefined;
+  // GY-1385: the loop's own throughput measurement after each verified deployment, through the
+  // real loopThroughputMeasurement, recorded under a directory of this day's own. The plane's status
+  // names a deployed release only statusLagMs after the loop first asks for it, as a rollout that
+  // lags the deployment record does, so the loop's wait and its bounded re-asks run on every day.
+  // The claim is the day's first merged item: before it merges there is no window, and nothing is measured.
+  const initialProduction = production.sha;
+  const throughput = { root: await temporaryDirectory('soak-measurements'), statusLagMs: 3 * minute, statusReads: 0, firstAsk: new Map<string, number>(),
+    asks: [] as { sha: string; outcome: string; revision: string | null; elapsed: number; read: number }[], claim: () => github.merges[0]?.key ?? throughputClaim.item };
+  const servingRevision = () => {
+    const last = production.deploys.at(-1), since = last && throughput.firstAsk.get(last.sha);
+    return last && (since === undefined || clock.now() < since + throughput.statusLagMs) ? production.deploys.at(-2)?.sha ?? initialProduction : production.sha;
+  };
+  const measureThroughput: DaemonEffects['measureThroughput'] = async (work, observedSha) => {
+    if (!throughput.firstAsk.has(observedSha)) throughput.firstAsk.set(observedSha, clock.now());
+    const outcome = await loopThroughputMeasurement(throughput.root, { work, observedSha, now: clock.now, origin: url, claimKey: throughput.claim(),
+      status: async () => { throughput.statusReads++; return { now: new Date(clock.now()).toISOString(), release: { version: '0.9.1', revision: servingRevision() } }; },
+      readItem: id => api(principals.coordinator, 'GET', `work/${encodeURIComponent(id)}`),
+      contains: async (ancestor, descendant) => github.contains(descendant, ancestor) });
+    throughput.asks.push({ sha: observedSha, outcome: outcome.outcome, revision: outcome.revision, elapsed: clock.now() - dayStart, read: outcome.read?.length ?? 0 });
+    return outcome;
+  };
   const effects: DaemonEffects = {
     ...(promotionEffect ? { promotion: promotionEffect } : {}),
+    measureThroughput,
     agents: () => { finishDuringCycle(); return headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(); },
     herdr: () => ({ agents: headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(), available: true }),
     ...(headless ? { adoptRuns: () => adoptRuns(headless.root, { approver: async owner => ({ options: approverRunOptions('', String(owner.context.decision), {}, 30 * minute),
@@ -2293,7 +2316,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { promotion, reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },

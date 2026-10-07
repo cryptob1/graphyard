@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { agentOwner, type AttentionItem } from './master.js';
 import { actionIdleMs, actionRetryDelay, type ActionRecord, type ActionRow } from './model/actions.js';
@@ -456,11 +456,19 @@ export async function measureThroughput(summaries: Work[], readItem: (id: string
   return { report: verifyThroughput(work, now, { ...options, claimKey }), read: wanted.map(item => item.id) };
 }
 
-/** Writes one report as a timestamped JSON file under `directory`, returning the path relative to `root`. */
-export async function recordThroughputMeasurement(root: string, report: ThroughputReport, directory = throughputMeasurementDirectory): Promise<string> {
+/** How many recorded measurements the directory keeps: one per release, so a long-lived loop's record stays bounded. */
+export const throughputMeasurementRetention = 30;
+
+/**
+ * Writes one report as a timestamped JSON file under `directory`, returning the path relative to
+ * `root`, and retires the oldest files past `retention`: `master status` reads only the newest.
+ */
+export async function recordThroughputMeasurement(root: string, report: ThroughputReport, directory = throughputMeasurementDirectory, retention = throughputMeasurementRetention): Promise<string> {
   await mkdir(join(root, directory), { recursive: true });
   const file = join(directory, `${report.measuredAt.replace(/[:.]/g, '-')}.json`);
   await writeFile(join(root, file), JSON.stringify(report, null, 2) + '\n');
+  const kept = (await readdir(join(root, directory))).filter(name => name.endsWith('.json')).sort();
+  for (const name of kept.slice(0, Math.max(0, kept.length - retention))) await unlink(join(root, directory, name)).catch(() => undefined);
   return file;
 }
 
@@ -479,28 +487,35 @@ export interface LoopThroughputOutcome {
  * The loop's own post-deploy measurement (GY-1385), taken after it verifies a deployment of
  * `observedSha`: at most one per release the control plane reports serving, read with the loop's
  * coordinator credential. The release identity comes from the plane's own status, never from this
- * checkout; whether it contains the claim's merge is asked of git (`contains`). A release already
- * measured is not measured again; one the plane does not serve yet is waited for, so the
- * measurement is of the release the deployment verified.
+ * checkout; whether it contains the claim's merge is asked of git (`contains`). The measurement is
+ * of the release the deployment verified and no other: while the plane reports serving a different
+ * revision — it lags the deployment record, or it still runs a release that was never measured —
+ * the outcome is `waiting` and nothing is recorded, so a release is never marked measured on the
+ * strength of another's figures. A release already measured is not measured again.
+ * `claimKey` names the delivered claim whose release opens the window; it is GY-87 everywhere
+ * but a simulated ledger.
  */
 export async function loopThroughputMeasurement(root: string, input: {
   work: Work[]; observedSha: string; now: () => number; origin: string;
   status: () => Promise<Parameters<typeof deployedRevision>[0] & { now?: string; release?: { version?: string | null } | null }>;
   readItem: (id: string) => Promise<Work>;
   contains: (ancestor: string, descendant: string) => Promise<boolean | null>;
+  claimKey?: string;
 }): Promise<LoopThroughputOutcome> {
-  const claim = input.work.find(item => item.key === throughputClaim.item);
-  if (!claim || claim.stage !== 'done' || !claim.delivery) return { outcome: 'skipped', revision: null, detail: `${throughputClaim.item} is not delivered here, so there is no throughput claim to measure` };
+  const claimKey = input.claimKey ?? throughputClaim.item;
+  const claim = input.work.find(item => item.key === claimKey);
+  if (!claim || claim.stage !== 'done' || !claim.delivery) return { outcome: 'skipped', revision: null, detail: `${claimKey} is not delivered here, so there is no throughput claim to measure` };
   const status = await input.status();
   const { revision, source } = deployedRevision(status);
-  if (!revision || revision === 'unknown') return { outcome: 'skipped', revision: null, detail: `The control plane reports no build revision, so ${throughputClaim.item}'s throughput cannot be measured against the release serving` };
+  if (!revision || revision === 'unknown') return { outcome: 'skipped', revision: null, detail: `The control plane reports no build revision, so ${claimKey}'s throughput cannot be measured against the release serving` };
   const previous = await readThroughputMeasurement(root).catch(() => null);
-  if (previous?.report.deployed?.revision === revision) return revision === input.observedSha
-    ? { outcome: 'current', revision, detail: `${throughputClaim.item}'s throughput is already measured for ${revision.slice(0, 12)} (${previous.report.verdict}, ${previous.file})`, file: previous.file }
-    : { outcome: 'waiting', revision, detail: `The control plane still serves ${revision.slice(0, 12)}, already measured; ${input.observedSha.slice(0, 12)} is measured once it serves` };
+  const measured = previous?.report.deployed?.revision === revision;
+  if (revision.toLowerCase() !== input.observedSha.toLowerCase()) return { outcome: 'waiting', revision,
+    detail: `The control plane serves ${revision.slice(0, 12)}${measured ? ' (already measured)' : ', not yet measured'} while the verified deployment is ${input.observedSha.slice(0, 12)}; ${input.observedSha.slice(0, 12)} is measured once it serves` };
+  if (measured) return { outcome: 'current', revision, detail: `${claimKey}'s throughput is already measured for ${revision.slice(0, 12)} (${previous!.report.verdict}, ${previous!.file})`, file: previous!.file };
   const mergeSha = claim.delivery.mergeSha;
   let containsClaim: boolean | null = null, reason: string | null = null;
-  if (!mergeSha) reason = `${throughputClaim.item} records no merge commit to compare the deployed revision against`;
+  if (!mergeSha) reason = `${claimKey} records no merge commit to compare the deployed revision against`;
   else {
     containsClaim = mergeSha.toLowerCase() === revision.toLowerCase() ? true : await input.contains(mergeSha, revision);
     if (containsClaim === false) reason = `${mergeSha.slice(0, 12)} is not an ancestor of the deployed ${revision.slice(0, 12)}`;
@@ -509,10 +524,10 @@ export async function loopThroughputMeasurement(root: string, input: {
   const now = input.now();
   const deployed: DeployedRelease = { revision, revisionSource: source, version: status?.release?.version ?? null, origin: input.origin,
     observedAt: status?.now ?? new Date(now).toISOString(), containsClaim, reason };
-  const { report, read } = await measureThroughput(input.work, input.readItem, now, { deployed });
+  const { report, read } = await measureThroughput(input.work, input.readItem, now, { deployed, claimKey });
   const file = await recordThroughputMeasurement(root, report);
   return { outcome: 'recorded', revision, file, report, read,
-    detail: `Recorded ${throughputClaim.item}'s throughput measurement for ${revision.slice(0, 12)} in ${file}, reading ${read.length} deliveries whole: ${report.verdict}: ${report.reason}` };
+    detail: `Recorded ${claimKey}'s throughput measurement for ${revision.slice(0, 12)} in ${file}, reading ${read.length} deliveries whole: ${report.verdict}: ${report.reason}` };
 }
 
 /** The newest recorded measurement, with the file it came from; null when none was ever taken. */

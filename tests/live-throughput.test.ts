@@ -10,7 +10,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
-import { actionExecution, actionIdleSpans, claimWindow, coordinatorFingerprints, deliveryActions, deployedRevision as revisionOf, loopThroughputMeasurement, measureThroughput, populationRule, throughputStatus, type LoopThroughputOutcome, readThroughputMeasurement, renderThroughput, throughputClaim, throughputClaimVisibility, throughputMeasurementCommand, throughputMeasurementDirectory, unrealReasons, verifyThroughput, type DeployedRelease, type ThroughputReport } from '../src/throughput.js';
+import { actionExecution, actionIdleSpans, claimWindow, coordinatorFingerprints, deliveryActions, deployedRevision as revisionOf, loopThroughputMeasurement, measureThroughput, populationRule, recordThroughputMeasurement, throughputStatus, type LoopThroughputOutcome, readThroughputMeasurement, renderThroughput, throughputClaim, throughputClaimVisibility, throughputMeasurementCommand, throughputMeasurementDirectory, unrealReasons, verifyThroughput, type DeployedRelease, type ThroughputReport } from '../src/throughput.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { actionRetryDelay } from '../src/model/actions.js';
 import { emptyDaemonState, runCycle, writeDaemonState, type DaemonEffects } from '../src/master-daemon.js';
@@ -536,6 +536,14 @@ test('unit:throughput-recorded-by-loop — after a verified deployment the loop 
       readItem: async (id: string) => { read.push(id); return byId.get(id)!; },
       contains: async () => true as boolean | null });
 
+    // The plane still serves a release nobody measured while the deployment record names the new
+    // one: nothing is measured, so the new release is never marked measured on the old one's figures.
+    revision = commit('previous-release');
+    const lagging = await loopThroughputMeasurement(root, input(deployedRevision));
+    assert.equal(lagging.outcome, 'waiting'); assert.deepEqual(read, []);
+    assert.match(lagging.detail, /not yet measured while the verified deployment is/);
+    assert.equal(await readThroughputMeasurement(root), null, 'nothing was recorded for the lagging plane');
+    revision = deployedRevision;
     const first = await loopThroughputMeasurement(root, input(deployedRevision));
     assert.equal(first.outcome, 'recorded');
     assert.equal(first.report!.deployed.revision, deployedRevision);
@@ -569,10 +577,22 @@ test('unit:throughput-recorded-by-loop — after a verified deployment the loop 
     revision = commit('third-release');
     const unknown = await loopThroughputMeasurement(root, { ...input(revision), contains: async () => null });
     assert.equal(unknown.report!.deployed.containsClaim, null); assert.equal(unknown.report!.verdict, 'unverified');
-    // Without GY-87 delivered there is nothing to measure, and the plane is not asked.
+    // Without GY-87 delivered there is nothing to measure, and the plane is not asked; a simulated
+    // ledger names its own delivered claim instead.
     const reads = statusReads;
     assert.equal((await loopThroughputMeasurement(root, { ...input(revision), work: summaries.filter(item => item.key !== throughputClaim.item) })).outcome, 'skipped');
     assert.equal(statusReads, reads);
+    revision = commit('fourth-release');
+    const named = await loopThroughputMeasurement(root, { ...input(revision), work: (await store.list()).map(summary), claimKey: claimed.key });
+    assert.equal(named.outcome, 'recorded'); assert.equal(named.report!.window.basis, 'deployment-observation');
+    // The record stays bounded: past the retention the oldest files are retired and the newest still reads back.
+    const before = (await readdir(join(root, throughputMeasurementDirectory))).sort();
+    assert.equal(before.length, 4);
+    const newest = { ...named.report!, measuredAt: new Date(Date.now() + 60_000).toISOString() };
+    const kept = await recordThroughputMeasurement(root, newest, undefined, 2);
+    const after = (await readdir(join(root, throughputMeasurementDirectory))).sort();
+    assert.deepEqual(after, [before[3], kept.split('/').pop()], 'the two newest files remain');
+    assert.equal((await readThroughputMeasurement(root))!.report.measuredAt, newest.measuredAt);
   } finally { await rm(root, { recursive: true, force: true }); }
 
   // The loop's deployment step asks for it after each verified deployment, once per release.
@@ -603,22 +623,40 @@ test('unit:throughput-recorded-by-loop — after a verified deployment the loop 
     assert.equal(state.actions[`throughput:${commit('served-1')}`].state, 'done');
     await runCycle(master, state, effects, () => Date.now());
     assert.deepEqual(asked, [commit('served-1')], 'at most once per release');
-    // A release the plane does not serve yet is asked again until it does; a failure backs off and is retried.
-    observed = { source: 'endpoint', sha: commit('served-2') };
+    // A release the plane does not serve yet is asked again on the failure backoff until it does,
+    // never once per cycle; a failure backs off the same way and is retried.
+    const served2 = commit('served-2'), askedFor = (sha: string) => asked.filter(entry => entry === sha).length;
+    observed = { source: 'endpoint', sha: served2 };
     answer = async () => ({ outcome: 'waiting', revision: commit('served-1'), detail: 'still serving served-1' });
     await runCycle(master, state, effects, () => Date.now());
     await runCycle(master, state, effects, () => Date.now());
-    assert.equal(asked.filter(sha => sha === commit('served-2')).length, 2);
-    assert.equal(state.actions[`throughput:${commit('served-2')}`].state, 'waiting');
-    answer = async () => { throw new Error('plane refused work/x (502)'); };
+    assert.equal(askedFor(served2), 2, 'asked on the cycle after the first wait');
+    assert.equal(state.actions[`throughput:${served2}`].state, 'waiting');
+    assert.equal(state.actions[`throughput:${served2}`].attempts, 2, 'every ask is counted');
     await runCycle(master, state, effects, () => Date.now());
-    assert.equal(state.actions[`throughput:${commit('served-2')}`].state, 'failed');
-    assert.match(state.actions[`throughput:${commit('served-2')}`].detail, /could not be recorded .*502/);
-    answer = async () => ({ outcome: 'recorded', revision: commit('served-2'), detail: 'Recorded for served-2' });
-    for (let cycles = 0; cycles < 4 && state.actions[`throughput:${commit('served-2')}`].state !== 'done'; cycles++) await runCycle(master, state, effects, () => Date.now());
-    assert.equal(state.actions[`throughput:${commit('served-2')}`].state, 'done');
+    assert.equal(askedFor(served2), 2, 'the third cycle waits the backoff out');
+    answer = async () => { throw new Error('plane refused work/x (502)'); };
+    for (let cycles = 0; cycles < 4 && state.actions[`throughput:${served2}`].state !== 'failed'; cycles++) await runCycle(master, state, effects, () => Date.now());
+    assert.equal(state.actions[`throughput:${served2}`].state, 'failed');
+    assert.match(state.actions[`throughput:${served2}`].detail, /could not be recorded .*502/);
+    answer = async () => ({ outcome: 'recorded', revision: served2, detail: 'Recorded for served-2' });
+    for (let cycles = 0; cycles < 10 && state.actions[`throughput:${served2}`].state !== 'done'; cycles++) await runCycle(master, state, effects, () => Date.now());
+    assert.equal(state.actions[`throughput:${served2}`].state, 'done');
     const count = asked.length;
     await runCycle(master, state, effects, () => Date.now());
     assert.equal(asked.length, count);
+    // A plane that lags for many cycles is asked a handful of times, not once per cycle, and a
+    // newer observation supersedes the wait: the superseded release is never asked again.
+    const served3 = commit('served-3'), served4 = commit('served-4');
+    observed = { source: 'endpoint', sha: served3 };
+    answer = async () => ({ outcome: 'waiting', revision: served2, detail: 'still serving served-2' });
+    for (let cycles = 0; cycles < 12; cycles++) await runCycle(master, state, effects, () => Date.now());
+    assert.ok(askedFor(served3) >= 3 && askedFor(served3) <= 5, `twelve lagging cycles cost ${askedFor(served3)} asks`);
+    observed = { source: 'endpoint', sha: served4 };
+    answer = async () => ({ outcome: 'recorded', revision: served4, detail: 'Recorded for served-4' });
+    const lagged = askedFor(served3);
+    for (let cycles = 0; cycles < 10 && state.actions[`throughput:${served4}`]?.state !== 'done'; cycles++) await runCycle(master, state, effects, () => Date.now());
+    assert.equal(state.actions[`throughput:${served4}`].state, 'done');
+    assert.equal(askedFor(served3), lagged, 'the superseded release is not asked again');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
