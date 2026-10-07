@@ -8,7 +8,7 @@ import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, latencySampleSchema, message, scopeMeasurementSchema } from './state.js';
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, uncountedScopeFailure, withheldDecision } from './decisions.js';
 import { candidateMovedMeanwhile, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
 import { record } from './effects.js';
@@ -354,11 +354,15 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // the item still needs the decision, so it is asked again: a bounded number of times, and on
     // the same widening interval as any refused action. The watch stays until a new request
     // replaces it, so the bound survives a request that is itself refused.
+    // GY-1484: a widening that failed only because its scope request closed is given its request back while the paths stay unplanned.
+    // Given back once per failed decision: a cycle that re-reads the same failure before its re-request lands takes nothing more.
+    const uncounted = uncountedScopeFailure(watch, judged, item);
+    if (uncounted && watch.givenBack !== watch.decision) Object.assign(watch, { requests: Math.max(0, watch.requests - 1), givenBack: watch.decision });
     if (watch.requests >= maxDecisionRequests) { if (!watch.exhaustedAt) await escalateUnjudged(item, watch, step.detail); return; }
     if (state.actions[key]?.state === 'failed' && !readyToRetry(state.actions[key], state.cycle)) return;
     // One the server settled stale, superseded or withdrawn never failed: it no longer describes the item, and asking again is the
     // loop's own next step, not a failed action — GY-949's superseded rework counted at 15:37:28 and applied a minute later (GY-1315).
-    const moved = judged?.state === 'stale' || judged?.state === 'superseded' || judged?.state === 'withdrawn';
+    const moved = judged?.state === 'stale' || judged?.state === 'superseded' || judged?.state === 'withdrawn' || uncounted;
     if (!state.actions[`${base}:ended`]) await note(`${base}:ended`, item, 'decision', moved ? 'done' : 'failed', `${step.detail}; ${item.key} still needs it, so it is requested again`);
     await request(item, decision, key, watch);
   };

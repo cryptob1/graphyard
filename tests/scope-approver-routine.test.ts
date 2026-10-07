@@ -203,7 +203,7 @@ test('unit:scope-approver-routine — a blocker the worker reports while its req
   assert.equal(work.scopeRequest, null);
 });
 
-test('unit:scope-approver-routine — an approval is refused once the asking attempt no longer holds the lease, with the policy revision unchanged', async () => {
+test('unit:scope-approver-routine — an approval that lands after the asking attempt ended still applies, and the next attempt inherits the answered ask (GY-1484)', async () => {
   let work = await claimed('stale approval');
   const asked = await ask(work, [helper], 'The layout measures through the helper');
   const loop = harness(), state = emptyDaemonState(loopConfig());
@@ -211,17 +211,19 @@ test('unit:scope-approver-routine — an approval is refused once the asking att
   const [requested] = await standing(work);
   // The asking attempt ends and a new one claims the item while the approver is still deciding.
   await engine.execute(implementer, 'release', work.id, { epoch: asked.epoch }, randomUUID());
-  // The refusal belonged to the attempt that ended, so the release closed it (GY-597): no unblock is needed.
+  // The release closed the attempt's request (GY-597) and lifted its refusal; the ask still with the approver is carried (GY-1484).
   const released = await reload(work.id);
   assert.equal(released.scopeRequest, null);
   assert.equal(released.blocker, null);
+  assert.deepEqual(released.carriedScopeRequest?.paths, [helper]);
   work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
   assert.equal(work.policyRevision, asked.policyRevision, 'nothing moved the policy revision');
+  assert.equal(work.scopeRequest?.epoch, asked.epoch + 1, 'the new attempt inherits the ask');
   const late = await call(approver.token, 'POST', `work/${work.id}/approve`, { decision: requested.id, reason: 'The helper is AC-1 spelled out' });
-  assert.equal(late.body.state, 'failed', JSON.stringify(late.body));
-  assert.match(JSON.stringify(late.body), /no longer open|no longer holds the lease/);
+  assert.equal(late.body.state, 'applied', JSON.stringify(late.body));
   work = await reload(work.id);
-  assert.deepEqual(work.plannedFiles, [layout], 'the new attempt, which never asked, is not widened');
+  assert.deepEqual(work.plannedFiles, [layout, helper], 'the approved widening applies to the item');
+  assert.equal(work.scopeRequest, null, 'and answers the inherited ask');
   assert.equal(work.lease!.epoch, asked.epoch + 1);
 });
 

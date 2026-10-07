@@ -156,6 +156,8 @@ export interface Work extends Create {
    * override for what the item does not already imply (see model/scope.ts).
    */
   scopeRequest?: ScopeRequestState | null;
+  /** An ask still with the approver when its attempt ended (GY-1484): the next claim adopts it; a widening covering it clears it. */
+  carriedScopeRequest?: ScopeRequestState | null;
   /**
    * The last scope decision the control plane took for this item, applied or refused, with the
    * request it answered and how long that request waited. An approved request is applied and

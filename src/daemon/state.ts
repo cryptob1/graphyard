@@ -280,6 +280,8 @@ export const approvalWatchSchema = z.object({
   account: z.string().max(200).nullable().default(null), runtime: z.string().max(40).nullable().default(null),
   /** The worker scope request a `requirements` decision answers (GY-176): whose, and for what. */
   scope: z.object({ epoch: z.number().int().min(1), at: z.string(), requestedBy: z.string().max(200), paths: z.array(z.string().max(500)).max(50) }).strict().nullable().default(null),
+  /** The failed decision whose request was given back because only its scope request closed (GY-1484): once per decision, never per cycle. */
+  givenBack: z.string().max(100).nullable().default(null),
   /** The agent-registry session the current approver runs on (GY-190), ended once the decision is judged,
    * or as soon as its quota is spent so the replacement has the slot (GY-182). */
   session: z.string().max(200).nullable().default(null),

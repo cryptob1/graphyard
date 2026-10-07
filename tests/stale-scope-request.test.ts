@@ -93,7 +93,8 @@ test('unit:scope-request-ends-with-attempt — a refused request from epoch 7 is
   assert.equal(work.nextAction?.kind, 'dispatch', `the reworked item is dispatchable: ${JSON.stringify(work.nextAction)}`);
   work = await engine.execute(worker, 'claim', work.id, {}, id());
   assert.equal(work.epoch, 8, 'the next attempt claims the item');
-  assert.equal(work.scopeRequest ?? null, null);
+  // The rule refusal was still the approver's to judge, so the ask is inherited (GY-1484), but never its blocker.
+  assert.deepEqual([work.scopeRequest?.epoch, work.blocker], [8, null]);
   assert.ok(!ready(work).reasons.some(reason => reason.startsWith(scopeRefusalBlocker)), 'epoch 8 carries no scope refusal');
 
   // A lease that lapses under the request: reconciliation ends the attempt and closes the ask.

@@ -1,6 +1,6 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, RefusedResponse } from '../model.js';
-import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker } from '../model/scope.js';
+import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
 import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, type ReviewThread, describeThread } from '../merge-queue.js';
@@ -682,6 +682,21 @@ export const approverJudgeBoundMs = 600_000, approverSettleMs = 60_000, maxAppro
  * product hands it over, and counts as a decision fault only once it outlasts it.
  */
 export const masterTurnWaitBoundMs = 30 * 60_000;
+/** What the control plane answers a widening whose scope request closed before it applied (engine `requirements`). */
+export const closedScopeAnswerFailure = /The scope request this widening answers is no longer open|which asked for this scope, no longer holds the lease/;
+/**
+ * GY-1484. A requirements decision that settled failed only because the scope request it answered
+ * closed — its wait window ran out or its attempt ended before the application — judged nothing
+ * against the widening: the approver's judgement stood, the request around it did not. While the
+ * paths it asked for are still outside plannedFiles, the planned-file blocker it answers still
+ * stands, so the failure is not counted toward `maxDecisionRequests`: the loop keeps asking until an
+ * approval lands or the operator resolves the scope, rather than stopping at three such races.
+ */
+export function uncountedScopeFailure(watch: Pick<ApprovalWatch, 'action' | 'scope'>, judged: { state: string; outcome?: string | null } | null | undefined, work: Pick<Work, 'plannedFiles'>): boolean {
+  if (watch.action !== 'requirements' || judged?.state !== 'failed' || !closedScopeAnswerFailure.test(judged.outcome ?? '')) return false;
+  const asked = watch.scope?.paths ?? [];
+  return asked.length > 0 && unplannedPaths(work.plannedFiles, asked).length > 0;
+}
 /**
  * A headless approver run lost to something outside the loop (GY-453: killed, recording no exit)
  * judged nothing, so its launch is given back — but only this many times per decision. Past it, a
