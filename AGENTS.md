@@ -105,8 +105,11 @@ decision (requirement rewrites, escalation resolution, `manual:` attestation,
 rework, containment recovery, proof grants, and merge approval when automatic
 merging is off) with `graphyard master decide GY-N ACTION REASON`, then launch the
 independent approver with `graphyard master approver GY-N DECISION`, except for a
-low- or medium-lane rework, which the server applies as it is requested
-(`approvedBy: graphyard-risk-lane`), so no approver is launched for it. The loop
+low- or medium-lane rework, and a rework whose head failed a trusted proof, had its
+attestation refused or conflicts with its base, which the server applies as it is
+requested (`approvedBy: graphyard-risk-lane`), so no approver is launched for it.
+Put a `manual:` docs or criterion judgement to the attestation's approver rather than
+requesting a rework on it: the loop returns a refused head on its own. The loop
 watches that session as it watches its own approvers and closes it, recording why,
 once its decision settles or its item is delivered; it closes any other approver
 session left open the same way. The server
