@@ -159,7 +159,7 @@ export async function deploymentStep(cycle: Cycle) {
 
   // 7a'''. GY-1385: GY-87's throughput claim is measured, not asserted. After a verified deployment
   //        the loop records one measurement for the release the control plane serves, at most once
-  //        per release, with its own coordinator credential, reading only the window's deliveries
+  //        per verified release (an unverified one is re-measured hourly, GY-1437), with its own coordinator credential, reading only the window's deliveries
   //        whole; master status reads it back as verified or with its shortfall. One action per
   //        observed release: a plane that does not serve it yet answers `waiting`, asked again on
   //        the failure backoff (one status read per ask, never one per cycle) until it serves or a
@@ -175,7 +175,9 @@ export async function deploymentStep(cycle: Cycle) {
       else {
         const outcome = measured.ok ? measured.value : null;
         const detail = outcome ? outcome.detail : `GY-87's throughput measurement could not be recorded for ${verified.sha.slice(0, 12)}: ${message((measured as { error: unknown }).error)}`;
-        const entryState = !outcome ? 'failed' : outcome.outcome === 'waiting' ? 'waiting' : 'done';
+        // An unverified measurement of the serving release is not settled (GY-1437): it waits on the
+        // same backoff and is measured again as session-free deliveries accumulate.
+        const entryState = !outcome ? 'failed' : outcome.outcome === 'waiting' || outcome.settled === false ? 'waiting' : 'done';
         // Every ask is recorded, so the backoff counts them; a wait whose reason stands is not reported again.
         const entry = await record(state, key, { kind: 'deployment', work: null, principal: null, state: entryState, detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
         if (entryState !== 'waiting' || detailChanged(previous, detail)) performed.push(entry);
@@ -236,7 +238,8 @@ export async function deploymentStep(cycle: Cycle) {
 
 /**
  * When the throughput measurement for an observed release is asked again: a release never asked
- * is asked now, a measured one (`done`) never again, and a wait on the plane or a failure on the
+ * is asked now, a verified one (`done`) never again, and a wait on the plane, an unverified
+ * measurement still accumulating its population (GY-1437), or a failure on the
  * failure backoff (`readyToRetry`, doubling per ask up to its cap), so a plane that lags the
  * deployment record costs one status read per ask rather than per cycle.
  */

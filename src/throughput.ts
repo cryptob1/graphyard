@@ -1,6 +1,7 @@
 import { mkdir, readdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { agentOwner, type AttentionItem } from './master.js';
+import { agentOwner, humanOwner, type AttentionItem } from './master.js';
+import { appendThroughputLedger, failedEntry, readThroughputLedger, recordedEntry, throughputPursuit, type ThroughputPursuit } from './throughput-ledger.js';
 import { actionIdleMs, actionRetryDelay, type ActionRecord, type ActionRow } from './model/actions.js';
 import { acceptedMergeAt, nearestRankPercentiles, pipelineSpeed, type Percentiles } from './pipeline-speed.js';
 import type { Work } from './model.js';
@@ -497,9 +498,18 @@ export async function recordThroughputMeasurement(root: string, report: Throughp
   return file;
 }
 
+/**
+ * How long an unverified measurement of the serving release stands before the loop measures it
+ * again (GY-1437): session-free deliveries accumulate while one release serves, so a claim short of
+ * its population is re-read as they land rather than frozen at the first read's count.
+ */
+export const throughputRemeasureMs = 60 * 60_000;
+
 export interface LoopThroughputOutcome {
   /** `recorded`: measured now; `current`: the serving release is already measured; `waiting`: the plane does not serve the observed release yet; `skipped`: nothing to measure. */
   outcome: 'recorded' | 'current' | 'waiting' | 'skipped';
+  /** False while the serving release's measurement is unverified: the loop asks again on its backoff (GY-1437). */
+  settled?: boolean;
   revision: string | null;
   detail: string;
   file?: string;
@@ -516,7 +526,9 @@ export interface LoopThroughputOutcome {
  * of the release the deployment verified and no other: while the plane reports serving a different
  * revision — it lags the deployment record, or it still runs a release that was never measured —
  * the outcome is `waiting` and nothing is recorded, so a release is never marked measured on the
- * strength of another's figures. A release already measured is not measured again.
+ * strength of another's figures. A release measured verified is not measured again; one measured
+ * unverified is measured again once its record is `throughputRemeasureMs` old (GY-1437), and every
+ * attempt, recorded or failed, is appended to the ledger (`throughput-ledger.ts`).
  * `claimKey` names the delivered claim whose release opens the window; it is GY-87 everywhere
  * but a simulated ledger.
  */
@@ -537,7 +549,6 @@ export async function loopThroughputMeasurement(root: string, input: {
   const measured = previous?.report.deployed?.revision === revision;
   if (revision.toLowerCase() !== input.observedSha.toLowerCase()) return { outcome: 'waiting', revision,
     detail: `The control plane serves ${revision.slice(0, 12)}${measured ? ' (already measured)' : ', not yet measured'} while the verified deployment is ${input.observedSha.slice(0, 12)}; ${input.observedSha.slice(0, 12)} is measured once it serves` };
-  if (measured) return { outcome: 'current', revision, detail: `${claimKey}'s throughput is already measured for ${revision.slice(0, 12)} (${previous!.report.verdict}, ${previous!.file})`, file: previous!.file };
   const mergeSha = claim.delivery.mergeSha;
   let containsClaim: boolean | null = null, reason: string | null = null;
   if (!mergeSha) reason = `${claimKey} records no merge commit to compare the deployed revision against`;
@@ -547,11 +558,24 @@ export async function loopThroughputMeasurement(root: string, input: {
     else if (containsClaim === null) reason = `git could not compare ${mergeSha.slice(0, 12)} with the deployed ${revision.slice(0, 12)} from the loop's checkout`;
   }
   const now = input.now();
+  if (measured && (previous!.report.verdict === 'verified' || now - Date.parse(previous!.report.measuredAt) < throughputRemeasureMs)) {
+    const verified = previous!.report.verdict === 'verified';
+    return { outcome: 'current', settled: verified, revision, file: previous!.file,
+      detail: `${claimKey}'s throughput is already measured for ${revision.slice(0, 12)} (${previous!.report.verdict}, ${previous!.file})${verified ? '' : `; measured again from ${new Date(Date.parse(previous!.report.measuredAt) + throughputRemeasureMs).toISOString()} as deliveries accumulate`}` };
+  }
   const deployed: DeployedRelease = { revision, revisionSource: source, version: status?.release?.version ?? null, origin: input.origin,
     observedAt: status?.now ?? new Date(now).toISOString(), containsClaim, reason };
-  const { report, read } = await measureThroughput(input.work, input.readItem, now, { deployed, claimKey });
+  const ledger = join(root, throughputMeasurementDirectory);
+  let measurement: Awaited<ReturnType<typeof measureThroughput>>;
+  try { measurement = await measureThroughput(input.work, input.readItem, now, { deployed, claimKey }); }
+  catch (error) {
+    await appendThroughputLedger(ledger, failedEntry(error, { source: 'loop', revision, needed: throughputClaim.minimumDeliveries, at: new Date(now).toISOString() })).catch(() => undefined);
+    throw error;
+  }
+  const { report, read } = measurement;
   const file = await recordThroughputMeasurement(root, report);
-  return { outcome: 'recorded', revision, file, report, read,
+  await appendThroughputLedger(ledger, recordedEntry(report, { source: 'loop', file, output: renderThroughput(report) }));
+  return { outcome: 'recorded', settled: report.verdict === 'verified', revision, file, report, read,
     detail: `Recorded ${claimKey}'s throughput measurement for ${revision.slice(0, 12)} in ${file}, reading ${read.length} deliveries whole: ${report.verdict}: ${report.reason}` };
 }
 
@@ -575,6 +599,8 @@ export interface ThroughputVisibility {
   shortfall: ThroughputReport['shortfall'];
   command: string;
   attention: AttentionItem | null;
+  /** The standing pursuit from the ledger (GY-1437): when it opened, when it escalates, and the blocker. */
+  pursuit: ThroughputPursuit | null;
 }
 
 /**
@@ -590,26 +616,39 @@ export interface ThroughputVisibility {
  * The attention item is raised only once there is a delivery to measure: an installation that has
  * delivered nothing has nothing to verify, and an item nobody can act on is not attention.
  */
-export function throughputClaimVisibility(measurement: { report: ThroughputReport; file: string } | null, deployed: { revision: string | null; version: string | null }, deliveries: number): ThroughputVisibility {
+export function throughputClaimVisibility(measurement: { report: ThroughputReport; file: string } | null, deployed: { revision: string | null; version: string | null }, deliveries: number, pursuit: ThroughputPursuit | null = null): ThroughputVisibility {
   const command = throughputMeasurementCommand;
-  const base = { claim: throughputClaim, deployed, command,
+  // The ledger's pursuit (GY-1437): inside its bound the loop carries the claim, so the line is in
+  // motion until it is due; past the bound it escalates to the operator, naming the blocker.
+  const owner = (reason: string): AttentionItem => {
+    const text = `${throughputClaim.item}'s throughput claim is unverified against the deployed release: ${reason}`;
+    if (!pursuit) return { subject: 'throughput', text, ...agentOwner('master', command) };
+    if (!pursuit.escalated) return { subject: 'throughput', text: `${text}; ${pursuit.text}`, inMotionUntil: pursuit.dueAt, ...agentOwner('master', command) };
+    return { subject: 'throughput', text: `${text}; escalated: ${pursuit.text}`, ...(pursuit.blocker === 'missing-credentials'
+      ? humanOwner('issuing credentials to people', `Issue the measurement a coordinator or reader credential for the control plane, then run ${command}`)
+      : humanOwner('goals and priorities', pursuit.blocker === 'no-session-free-deliveries'
+        ? `Decide whether to let routine deliveries run with no master session until ${throughputClaim.minimumDeliveries} accumulate, or to accept ${throughputClaim.item}'s claim as unverified`
+        : `Decide how ${throughputClaim.item}'s throughput claim is to be verified given the blocker named, then run ${command}`)) };
+  };
+  const base = { claim: throughputClaim, deployed, command, pursuit,
     measurement: measurement ? { at: measurement.report.measuredAt, deployedRevision: measurement.report.deployed?.revision ?? null,
       admitted: measurement.report.population?.admitted ?? 0, submitToMergeP50Ms: measurement.report.submitToMerge?.p50Ms ?? null,
       idleMaxMs: measurement.report.idle?.maxMs ?? null, file: measurement.file } : null };
   const unverified = (reason: string, shortfall: ThroughputReport['shortfall'] = null): ThroughputVisibility => ({ ...base, verdict: 'unverified', reason, shortfall,
-    attention: deliveries ? { subject: 'throughput', text: `${throughputClaim.item}'s throughput claim is unverified against the deployed release: ${reason}`, ...agentOwner('master', command) } : null });
+    attention: deliveries ? owner(reason) : null });
   if (!measurement) return unverified(`no post-deploy measurement has ever been recorded under ${throughputMeasurementDirectory}, so the claim (${throughputClaim.statement}) is delivered but unproven; the loop records one after it next verifies a deployment`);
   const measured = measurement.report.deployed?.revision ?? null;
   if (!deployed.revision || deployed.revision === 'unknown') return unverified(`the control plane reports no build revision, so the last measurement (of ${measured ?? 'an unnamed release'} at ${measurement.report.measuredAt}) cannot be matched to what is serving`, measurement.report.shortfall ?? null);
   if (measured !== deployed.revision) return unverified(`the last measurement was taken against ${measured ?? 'an unnamed release'} at ${measurement.report.measuredAt}; the release now serving is ${deployed.revision.slice(0, 12)}`, measurement.report.shortfall ?? null);
   if (measurement.report.deployed?.containsClaim !== true) return unverified(`the last measurement did not establish that ${deployed.revision.slice(0, 12)} contains ${throughputClaim.item}'s merge${measurement.report.deployed?.reason ? `: ${measurement.report.deployed.reason}` : ''}`, measurement.report.shortfall ?? null);
   if (measurement.report.verdict !== 'verified') return unverified(measurement.report.reason, measurement.report.shortfall ?? null);
-  return { ...base, verdict: 'verified', reason: measurement.report.reason, shortfall: null, attention: null };
+  return { ...base, pursuit: null, verdict: 'verified', reason: measurement.report.reason, shortfall: null, attention: null };
 }
 
 /** The claim's visibility as master status reads it: the recorded measurement, the release the control plane says is serving, and the delivered items. */
-export async function throughputStatus(root: string, coordinator: Parameters<typeof deployedRevision>[0] & { release?: { version?: string | null } | null }, work: Work[]): Promise<ThroughputVisibility> {
+export async function throughputStatus(root: string, coordinator: Parameters<typeof deployedRevision>[0] & { release?: { version?: string | null } | null }, work: Work[], now = Date.now()): Promise<ThroughputVisibility> {
   return throughputClaimVisibility(await readThroughputMeasurement(root).catch(() => null),
     { revision: deployedRevision(coordinator).revision, version: coordinator?.release?.version ?? null },
-    work.filter(item => item.stage === 'done' && item.delivery).length);
+    work.filter(item => item.stage === 'done' && item.delivery).length,
+    throughputPursuit(await readThroughputLedger(join(root, throughputMeasurementDirectory)), now));
 }
