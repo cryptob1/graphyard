@@ -12,7 +12,8 @@ import type { Services } from './routes.js';
 // A rework on a low- or medium-lane item needs no approver decision (GY-883 AC-2): the risk lane
 // approves and applies it. So does one on any lane whose ground the record shows (GY-1394,
 // model/rework-ground.ts): a trusted proof failed on the head, an approver refused its attestation,
-// or GitHub reports it conflicting. Approval and application are separate transactions for every action but
+// or the control plane's own test merge conflicts with its base (GitHub's reading alone is no
+// ground, GY-375). Approval and application are separate transactions for every action but
 // resolve and merge, so an interruption between them is settled here rather than left standing
 // approved: first only the lane's own (GY-1110), then any approver's — superseded once the item
 // moved past it (GY-1297), or resumed under its recorded approval (GY-1297, GY-1300).
