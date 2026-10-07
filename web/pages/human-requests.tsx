@@ -3,6 +3,7 @@ import { humanDecisionLabel, humanOnlyRefusal, openHumanOnly, parkRule, type Hum
 import type { Work } from '../../src/model/work';
 import { formatDuration } from '../../src/model/duration';
 import { shortShas } from '../../src/model/format';
+import { humanAsk } from '../../src/model/human-ask';
 import type { Dashboard } from './dashboard';
 
 /**
@@ -60,7 +61,7 @@ export const researchQuestionRule = 'research-question';
 export function researchQuestionRows(work: readonly Pick<Work, 'id' | 'key' | 'title' | 'stage' | 'epoch' | 'researchBrief'>[], now: number): HumanRequestRow[] {
   return work.filter(item => item.stage !== 'done').flatMap(item => (item.researchBrief?.questions ?? []).filter(question => !question.answer).map(question => ({
     rule: researchQuestionRule, work: item.key, id: item.id, title: item.title,
-    request: { id: question.id, kind: question.kind, needed: question.question, requestedBy: 'the research step',
+    request: { id: question.id, kind: question.kind, needed: question.question, requestedBy: 'the research step', ask: question.question, why: `${question.why} Recommended: ${question.recommendation}.`,
       reason: `${question.why} Recommended: ${question.recommendation}. The build proceeds on this recommendation, provisionally; answer by ${question.deadline} to settle it before the head is built.`,
       epoch: item.epoch, at: question.at },
     waitedMs: Math.max(0, now - Date.parse(question.at)), decision: humanDecisionLabel[question.kind],
@@ -81,10 +82,13 @@ export function signedInAs(actor: { role?: string | null; sessionKind?: string |
 export const signInAction = 'Sign in as the operator';
 
 /**
- * One waiting action. Its choices are buttons, each one click (GY-738): a note beside them is
- * optional, except for a choice that asks for words (a different cap) or a secret (sealed to the
- * requesting host). A session the rule refuses is told why and offered the operator's sign-in.
- * Free words and the terminal equivalent stay available, folded away, never the primary path.
+ * One waiting action, read like a short note from a colleague (GY-1408): the ask as its heading,
+ * its steps as a numbered list, why in one line, then the choices. Each is said once; what the
+ * requester recorded for the next agent (the exact need, the reason, the terminal command) is
+ * folded under "Details for agents", closed by default. Its choices are buttons, each one click
+ * (GY-738): a note beside them is optional, except for a choice that asks for words (a different
+ * cap) or a secret (sealed to the requesting host). A session the rule refuses is told why and
+ * offered the operator's sign-in. Free words stay available, folded away, never the primary path.
  */
 export function RequestCard({ row, refusal, busy, open, answer, send, signIn }: { row: HumanRequestRow; refusal: string | null; busy: boolean; open(): void; answer(text: string, body: Record<string, unknown>): Promise<void>; send?(body: Record<string, unknown>): Promise<void>; signIn?(): void }) {
   const [text, setText] = useState('');
@@ -105,8 +109,10 @@ export function RequestCard({ row, refusal, busy, open, answer, send, signIn }: 
   const ready = (choice: HumanOnlyChoice) => !busy && (choice.input !== 'text' || !!note.trim()) && (choice.input !== 'secret' || !!secret);
   return <div className="card human-request">
     <div className="card-top"><button className="text-button" onClick={open}>{row.work} <span data-title>{row.title}</span></button><span title={`Asked ${row.request.at}`}>Waiting {formatDuration(row.waitedMs / 60000)}</span></div>
-    <h3>{shortShas(row.request.needed)}</h3>
-    <p className="reason">{row.decision} · asked by {row.request.requestedBy}: {shortShas(row.request.reason)}</p>
+    <h3>{shortShas(humanAsk(row.request))}</h3>
+    {!!row.request.steps?.length && <ol className="human-steps">{row.request.steps.map((step, index) => <li key={index}>{step}</li>)}</ol>}
+    {row.request.why && <p className="human-why">{row.request.why}</p>}
+    <p className="muted human-kind">{row.decision} · asked by {row.request.requestedBy}</p>
     {refusal ? <div className="login-actions"><p className="muted">This session cannot answer it: {shortShas(refusal)}.</p>{signIn && <button type="button" onClick={signIn}>{signInAction}</button>}</div> : <>
       {choices.length > 0 && <form onSubmit={event => event.preventDefault()}>
         {choices.some(choice => choice.input === 'secret') && <label>Value to provide (sealed to the requesting host, never stored as typed)<input type="password" autoComplete="off" value={secret} onChange={event => setSecret(event.target.value)}/></label>}
@@ -119,7 +125,10 @@ export function RequestCard({ row, refusal, busy, open, answer, send, signIn }: 
         <div className="list-tools"><button type="submit" disabled={busy || !text.trim()}>{post.submit}</button>
           {post.decline && <button type="button" className="text-button" disabled={busy || !text.trim()} onClick={() => submit(post.decline!.body)}>{post.decline.submit}</button>}</div>
       </form></details>
-      <details><summary className="muted">From a terminal</summary><code>{row.answer.cli}</code></details>
     </>}
+    <details className="agent-details"><summary className="muted">Details for agents</summary>
+      <dl><dt>Needed</dt><dd>{shortShas(row.request.needed)}</dd><dt>Reason</dt><dd>{shortShas(row.request.reason)}</dd>
+        {!refusal && <><dt>From a terminal</dt><dd><code>{row.answer.cli}</code></dd></>}</dl>
+    </details>
   </div>;
 }

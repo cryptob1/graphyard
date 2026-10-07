@@ -9,8 +9,7 @@ import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonAct
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
 import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
-import { decisionReads, lateDecisionRead, resumedApplication } from './decision-reads.js';
-import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
+import { decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication } from './decision-reads.js';
 import { record } from './effects.js';
 import type { FaultKind } from '../model/fault-classes.js';
 import type { Cycle } from './cycle.js';
@@ -114,15 +113,6 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         const watch = state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: judged.id, requestedAt: stamp, settledAt: pending ? null : stamp, scope: decision.scope ?? null });
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s requirements decision ${judged.id} for this widening was already refused by ${judged.refusal?.approver ?? 'its approver'}; nothing to request`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         if (!pending) await noteScopeOutcome(item, watch, judged);
-        return;
-      }
-      // So is a refused attestation of this head (GY-1394): the watch keeps the refusal, and the
-      // routine step returns the head to a worker on it, as it does for a refusal it watched.
-      const refusedAttest = decision.action === 'attest' ? history.find(entry => entry.action === 'attest' && entry.input?.proof === decision.input?.proof
-        && entry.input?.sha === item.candidate?.sha && entry.input?.baseSha === item.candidate?.baseSha && entry.input?.policyRevision === item.policyRevision && refusedAttestationWatch(entry)) : undefined;
-      if (refusedAttest) {
-        state.approvals[key] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: refusedAttest.id, requestedAt: stamp, settledAt: stamp, refusal: refusedAttestationWatch(refusedAttest) });
-        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s attest decision ${refusedAttest.id} for ${String(decision.input?.proof)} on this head was already refused by ${refusedAttest.refusal?.approver ?? 'its approver'}; nothing to request, and ${item.key} returns to a worker on that refusal`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         return;
       }
       // The control plane holds one requirements decision at a time. One that answers no scope
@@ -257,9 +247,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     } catch (error) {
       // A history read that only missed the step's deadline judged nothing (GY-1293): one alone is
       // no decision fault, and its request is asked again next cycle; the second in a row counts.
+      // An item delivered after the snapshot needs no decision (GY-1405): the refusal is no fault.
       const detail = `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`;
-      const late = lateDecisionRead(detail) && !(previous?.state === 'failed' && lateDecisionRead(previous.detail));
-      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, late ? null : undefined));
+      const moot = deliveredMeanwhile(detail), late = lateDecisionRead(detail) && !(previous?.state === 'failed' && lateDecisionRead(previous.detail));
+      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: moot ? `${detail}; ${item.key} was delivered after this cycle's snapshot, so it needs no ${decision.action} decision` : detail, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, late || moot ? null : undefined));
     }
   };
   /**
@@ -332,10 +323,6 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       // A refused widening is the worker's answer, not the master's: the control plane recorded it
       // on the item, and the worker reads there that it stays inside plannedFiles.
       if (watch.scope && judged) { await noteScopeOutcome(item, watch, judged); return; }
-      // A refused attestation is the approver's judgement that the head fails the proof (GY-1394): the
-      // routine step returns that head to a worker on it, applied with no second approver.
-      const attested = watch.action === 'attest' ? refusedAttestationWatch(judged) : null;
-      if (attested) { watch.refusal = attested; await note(`${base}:refused`, item, 'decision', 'done', `${step.detail}; ${item.key} returns to a worker on that refusal`); return; }
       await note(`escalation:decision-refused:${watch.decision}`, item, 'escalation', 'done', `${step.detail}. The loop does not request it again or launch another approver; answer the refusal: read it with graphyard master decisions ${item.key}, then request what the item needs with a reason that cites ${watch.decision} and gives what the refused request lacked, or act on the refusal instead`);
       return;
     }
@@ -403,9 +390,6 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const noteWait = async (item: Work, detail: string) => { const waitKey = `wait:rework:${item.id}`; if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   const mechanical = effects.mechanicalFixes ? await effects.mechanicalFixes().then(read => read.requests, () => []) : []; // GY-971 planned bot rounds
   const routinePass = budget.pass(), attestPass = budget.pass();
-  // Attestations an approver refused (GY-1394), kept on their watches, indexed once per cycle by item.
-  const refusedByWork = new Map<string, RefusedAttestation[]>();
-  for (const watch of Object.values(state.approvals)) if (watch.action === 'attest' && watch.refusal) refusedByWork.set(watch.work, [...refusedByWork.get(watch.work) ?? [], { decision: watch.decision, refusal: watch.refusal }]);
   for (const read of workToProcess) await isolate('decision', read, read.key, async () => {
     let item = read;
     const assessment = assessments[item.id];
@@ -415,11 +399,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const scoped = settled.get(item.id) ?? item;
     const scope = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? blockerScopeDecision(scoped);
     if (scope) item = scoped;
-    const refused = refusedByWork.get(item.key) ?? [];
-    let decision = scope ?? routineDecision(item, config, clock, assessment, cycle.baseFailed.get(item.id), exhausted, mechanical, refused);
+    let decision = scope ?? routineDecision(item, config, clock, assessment, cycle.baseFailed.get(item.id), exhausted, mechanical);
     if (!decision) {
       // Still called for, only not attestable this cycle: its request is not one the item moved past.
-      const called = neededDecision(item, config, cycle.baseFailed.get(item.id), exhausted, mechanical, refused);
+      const called = neededDecision(item, config, cycle.baseFailed.get(item.id), exhausted, mechanical);
       if (called) unattestable.add(decisionKey(item, called));
       // The item needs the decision and the loop will not attest what it could not verify. Step 3b
       // has already escalated an open item whose fence this host assessed and could not settle.
@@ -438,7 +421,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const woken = state.actions[`wake:observation:${item.id}`];
     let wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause, woken?.state === 'done' ? woken.at : null) : null;
     const fresh = wait && !pause && wake && !state.approvals[key] ? await wake(item, clock) : null;
-    const again = fresh && routineDecision(fresh, config, now(), assessment, fresh.candidate?.sha === item.candidate?.sha ? cycle.baseFailed.get(item.id) : undefined, [], [], refused);
+    const again = fresh && routineDecision(fresh, config, now(), assessment, fresh.candidate?.sha === item.candidate?.sha ? cycle.baseFailed.get(item.id) : undefined);
     if (fresh && again?.action !== 'rework') return noteWait(item, `${item.key}: woke its observation for a rework decision; the reading at ${fresh.observation?.at ?? 'unknown'} no longer calls for one`);
     if (fresh && again) { item = fresh; decision = again; key = decisionKey(item, decision); needed.add(key); wait = reworkObservationWait(item, now(), pause); }
     const watch = state.approvals[key];
@@ -499,7 +482,13 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         }
       } catch (error) {
         withdrawn = false; watch.closeAttempts += 1;
-        await note(`approver:${watch.decision}:withdrawn`, item, 'decision', 'failed', `Could not withdraw ${watch.action} decision ${watch.decision}, which ${watch.work} no longer needs: ${message(error)}`);
+        // GY-1405: a history read that only missed the step's deadline judged nothing, as on the
+        // request path (GY-1293): one alone is no fault, and the withdrawal is tried next cycle; the
+        // second in a row counts. A withdrawal refused on an item delivered meanwhile is moot.
+        const withdrawKey = `approver:${watch.decision}:withdrawn`, prior = state.actions[withdrawKey];
+        const detail = `Could not withdraw ${watch.action} decision ${watch.decision}, which ${watch.work} no longer needs: ${message(error)}`;
+        const late = lateDecisionRead(detail) && !(prior?.state === 'failed' && lateDecisionRead(prior.detail));
+        await note(withdrawKey, item, 'decision', 'failed', detail, now(), late || deliveredMeanwhile(detail) ? null : undefined);
       }
     }
     // An item no longer open has no pane to close, but its registry session still holds a slot.

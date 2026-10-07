@@ -91,7 +91,8 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const closed = isClosed(item);
   const showSteps = !closed && (group === 'moving' || group === 'blocked' || group === 'shipped' || (!!item.submission && group !== 'backlog'));
   // The why, in plain words and without the pull request, which the header links once.
-  const why = group === 'needs-you' && item.humanRequest ? `Waiting on your decision about ${humanDecisionLabel[item.humanRequest.kind]}: ${item.humanRequest.reason}`
+  // A parked request says what it is about once; its card below carries the ask (GY-1408), so neither line restates it.
+  const why = group === 'needs-you' && item.humanRequest ? `Waiting on your decision about ${humanDecisionLabel[item.humanRequest.kind]}.`
     : group === 'moving' ? `${steps.label}.`
       // Merged work blocked at Deploy says what the release lacks, not that it shipped.
       : group === 'blocked' && steps.current === 'deploy' ? `${steps.detail.replace(/^./, c => c.toUpperCase())}.`
@@ -124,7 +125,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     </div>
     <section className={`where-now group-${group ?? 'shipped'}`} aria-label="Where it is now">
       <p className={`status-sentence tone-${plain.tone}`}><Explained sentence={why}/></p>
-      <p className="next-line"><span className="next-label">Who acts next:</span> <strong>{actor.who}</strong>{actor.does && actor.does !== steps.label ? <> — {actor.does}</> : null}</p>
+      <p className="next-line"><span className="next-label">Who acts next:</span> <strong>{actor.who}</strong>{actor.does && actor.does !== steps.label && !waitingOnYou.length ? <> — {actor.does}</> : null}</p>
       {showSteps && <StepsDetail steps={steps}/>}
       {waitingOnYou.map(row => <RequestCard key={row.request.id} row={row} refusal={humanOnlyRefusal(row.rule, status?.actor ?? {})} busy={busy} open={() => {}} signIn={signOut}
         answer={(text, post) => action(row.id, row.answer.post.command, { ...post, [row.answer.post.field]: text })} send={body => action(row.id, row.answer.post.command, body)}/>)}

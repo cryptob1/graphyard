@@ -21,6 +21,12 @@ export const decisionReadDeadlineMs = 10_000;
  * read was still started, so it is asked again on the next cycle, never on the widening backoff.
  */
 export const lateDecisionRead = (detail: string) => / ms read deadline passed before .+ answered; it is read again next cycle/.test(detail);
+/**
+ * GY-1405. A decision the server refused because the item was delivered after the cycle's snapshot
+ * ("Delivered work is immutable"): the item needs no decision any more, so the refusal judged
+ * nothing and is no decision fault — the next snapshot shows it done (GY-1336's diagnosis rule).
+ */
+export const deliveredMeanwhile = (detail: string) => /Delivered work is immutable/.test(detail);
 /** How long a kept history may go without being read afresh, whatever the ledger says (GY-1241). */
 export const decisionRefreshMs = 30 * 60_000;
 /**
