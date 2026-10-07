@@ -1,12 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appManifest, publiclyReachable } from '../src/github-setup.js';
-import { applyInstall, buildPlan, prepareInstall, webhookPreflight } from '../src/install/index.js';
 import { harness, REPOSITORY } from './install-harness.js';
+
+// Imported per test, so a base without these exports fails each case rather than the whole file.
+const setup = () => import('../src/github-setup.js') as Promise<any>;
+const install = () => import('../src/install/index.js') as Promise<any>;
 
 const CALLBACK = 'http://127.0.0.1:4311';
 
-test('unit:manifest-no-loopback-hook — GitHub refuses a hook URL it cannot reach even when inactive, so a loopback or private origin sends no hook_attributes and a public one an active hook', () => {
+test('unit:manifest-no-loopback-hook — GitHub refuses a hook URL it cannot reach even when inactive, so a loopback or private origin sends no hook_attributes and a public one an active hook', async () => {
+  const { appManifest, publiclyReachable } = await setup();
   for (const origin of ['http://127.0.0.1:4310', 'http://127.8.9.10:4310', 'http://localhost:4310', 'http://[::1]:4310']) {
     const manifest = appManifest('owner/scratch', origin, CALLBACK);
     assert.equal('hook_attributes' in manifest, false, `${origin} sent hook_attributes`);
@@ -22,6 +25,7 @@ test('unit:manifest-no-loopback-hook — GitHub refuses a hook URL it cannot rea
 });
 
 test('unit:local-install-no-webhook — a compose install says in preflight that it polls GitHub and registers no webhook, and skips every webhook step instead of failing it', async () => {
+  const { applyInstall, buildPlan, prepareInstall, webhookPreflight } = await install();
   const line = webhookPreflight('compose');
   assert.ok(line?.ok);
   assert.match(line!.detail, /polls GitHub and registers no webhook/);
@@ -31,18 +35,18 @@ test('unit:local-install-no-webhook — a compose install says in preflight that
   try {
     const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, fixture.deps);
     const plan = await buildPlan(session);
-    const preflight = plan.preflight.find(item => item.name === 'GitHub webhook');
+    const preflight = plan.preflight.find((item: any) => item.name === 'GitHub webhook');
     assert.ok(preflight?.ok, 'the compose preflight has no webhook line');
     assert.match(preflight!.detail, /polls GitHub and registers no webhook/);
     for (const id of ['github.webhook', 'verify.webhook']) {
-      const action = plan.actions.find(entry => entry.id === id)!;
+      const action = plan.actions.find((entry: any) => entry.id === id)!;
       assert.equal(action.state, 'satisfied', `${id} is not skipped`);
       assert.match(action.title, /^Skipped:/);
     }
     const summary = await applyInstall(session, plan);
     assert.equal(summary.webhook.skipped, true);
     assert.match(summary.webhook.detail, /^skipped:/);
-    assert.ok(!summary.nextSteps.some(step => /Webhook delivery is unconfirmed/.test(step)), 'the skipped delivery is reported as a failure');
+    assert.ok(!summary.nextSteps.some((step: string) => /Webhook delivery is unconfirmed/.test(step)), 'the skipped delivery is reported as a failure');
     assert.ok(!fixture.requests.some(request => request.url.includes('/app/hook/') || request.url.includes('/check-runs')), 'a local install touched the App webhook or published a delivery check');
     assert.equal(fixture.state.hookConfig, null);
   } finally { await fixture.cleanup(); }
