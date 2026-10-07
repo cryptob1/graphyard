@@ -408,7 +408,7 @@ export async function appPagePortFree(port = 4311) {
  * page asks for, when it offers an authenticator app or an email code: six digits, or a request
  * that GitHub email one. The drive types the code into the page; it is never shown or logged.
  */
-const sudoForm = (state: string) => `<h2>GitHub asking to confirm access?</h2><p>Confirming once in your own Chrome on any sudo-protected GitHub page (such as https://github.com/settings/apps/new) lets setup continue by itself. Or hand it the 6-digit code from your authenticator app or an email:</p><form method="post" action="/sudo-code"><input type="hidden" name="state" value="${state}"><input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" aria-label="6-digit code" required> <button>Send code</button></form><form method="post" action="/sudo-code"><input type="hidden" name="state" value="${state}"><input type="hidden" name="email" value="1"><button>Email me a code</button></form>`;
+const sudoForm = (state: string) => `<h2>GitHub asking to confirm access?</h2><p>When <code>graphyard up</code> drives this page, its browser runs on a copy of your Chrome profile, so confirming in your own Chrome does not reach it. Hand it the 6-digit code from your authenticator app (enter it right after the app shows a new one) or an email, or open this page in your own browser and click its button above: your live GitHub session confirms access, and the drive continues by itself:</p><form method="post" action="/sudo-code"><input type="hidden" name="state" value="${state}"><input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" aria-label="6-digit code" required> <button>Send code</button></form><form method="post" action="/sudo-code"><input type="hidden" name="state" value="${state}"><input type="hidden" name="email" value="1"><button>Email me a code</button></form>`;
 
 export async function startGithubSetup(root: string, repository: string, deployment: string, port = 4311, dependencies: {
   convert?: (code: string) => Promise<any>;
@@ -460,6 +460,11 @@ export async function startGithubSetup(root: string, repository: string, deploym
     // link() refuses an existing file, keeping the initial write's exclusive-create guarantee.
     try { await link(temporary, file); } finally { await unlink(temporary); }
   }
+  // GY-1459: a step finished here — perhaps in the operator's own browser, whose live session holds
+  // sudo mode — ends the Confirm-access wait of the `graphyard up` drive running on a profile copy.
+  const settled = async () => {
+    try { const { signalSudoSettled } = await import('./master-browser.js'); await signalSudoSettled(root); } catch { /* no drive is waiting on it */ }
+  };
   const http = createServer(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store'); res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -528,6 +533,7 @@ export async function startGithubSetup(root: string, repository: string, deploym
           next.reviewer = reviewer; next.botUserId = bot.id;
         }
         await persist(next, true); app = next;
+        await settled();
         res.writeHead(303, { Location: '/' }); return res.end();
       }
       if (url.pathname === '/installed') {
@@ -536,6 +542,7 @@ export async function startGithubSetup(root: string, repository: string, deploym
         await verify(app, installationId);
         const next = { ...app, installationId }; await persist(next); app = next;
         if (dependencies.record) await dependencies.record(next as AppCredentials & { installationId: number });
+        await settled();
         res.writeHead(303, { Location: '/' }); return res.end();
       }
       html(404, '<p>Page not found.</p>');
