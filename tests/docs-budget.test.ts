@@ -15,9 +15,9 @@ const read = (path: string) => readFileSync(`${root}${path}`, 'utf8');
 // Graphyard's own documentation budget is this repository's configuration, not a product rule for
 // managed projects (GY-574): graphyard.json's documentation.wordBudget sets the total, the per-page
 // cap and the pages counted, exactly as the control plane reads any project's. It is 16,000 words,
-// per page 1,200 (GY-1453 raised the total from 12,000 so the set sits at least 5% under it). The total is never a merge gate: over it this test
-// warns and passes, and the loop's headroom step and its one trim item restore the room; a page
-// over its cap still fails here.
+// per page 1,200 (GY-1453 raised the total from 12,000 so the set sits at least 5% under it). The
+// total is never a merge gate: over it this test warns and passes, and the loop's headroom step and
+// its one trim item restore the room; a page over its cap still fails here.
 const budget = docsWordBudgetOf(parseRepositoryConfig(read('graphyard.json')).documentation)!;
 const { total: TOTAL_BUDGET, perPage: PAGE_BUDGET } = budget;
 const pages = ['README.md', 'AGENTS.md', ...readdirSync(`${root}docs`, { recursive: true, withFileTypes: true })
