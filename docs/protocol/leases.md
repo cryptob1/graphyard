@@ -5,7 +5,7 @@ Claims last 120 s, renewed every ≤30 s; owner mutations carry the epoch, and e
 
 ## `watch`
 
-`graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials; lease loss sends SIGTERM, then SIGKILL, to the process group. Contained launches record a quarantine naming their systemd scope unit. A dead supervisor fences the item until an operator attests the stop or `POST /api/work/UUID/autosettle` (`coordinator`/`admin`) proves authority expired 120+ s ago with nothing alive; an attempt the loop ended on its record (exhaustion, closed submitted session) with its supervisor verified gone settles in that ending action. A supervisor unable to settle records why; 5xx or stale-verification refusals retry next cycle.
+`graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials; lease loss sends SIGTERM, then SIGKILL, to the process group. Contained launches record a quarantine naming their systemd scope unit. A dead supervisor fences the item until an operator attests the stop or `POST /api/work/UUID/autosettle` (`coordinator`/`admin`) proves authority expired 120+ s ago with nothing alive; an attempt the loop ended on its record (exhaustion, closed submitted session) with its supervisor verified gone settles in that ending action. A supervisor unable to settle records why; 5xx or stale-verification refusals retry next cycle. The loop's settlement sends `origin: "loop"` and the server records the fence's `lapsedAt`; [interventions](../dashboard.md) count it only past grace plus 10 minutes, a hand settlement always.
 
 ### Push credential
 
@@ -16,7 +16,7 @@ A GitHub credential failure ends the attempt `blocked`, branch kept; once the `g
 ## How a lease ends
 
 - `submit` (CLI `complete`); later heartbeats get `Implementation lease for epoch N ended when GY-N was submitted; stop heartbeating after complete`.
-- `park`: records a human-only request, releases; `blocked` with a reason records the blocker, releases, keeps partial work.
+- `park`: records a human-only request naming every human step at once (a scope widening or a deferred step is refused: use `scope-request`), releases; `blocked` with a reason records the blocker, releases, keeps partial work.
 - Coordinator `capacity` report (`event: "exhausted"`): freed for another account.
 - Expiry, classified by the epoch's ledger: unwithdrawn `blocked` report (from before a blocked release) → `lease.expired` cause `blocked-awaiting-operator`; admin `--previous-worker-stopped` → `stopped-by-attestation`; `capacity.exhausted` → `exhausted-capacity`; none → `lease-loss` escalation, auto-settled once a record explains it ([settling](../delegation.md#who-may-settle-what)).
 

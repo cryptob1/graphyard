@@ -137,7 +137,8 @@ test('unit:operator-sign-in-link — graphyard login prints a one-time link that
   }
   const human = page(status.actor, rows, [work]);
   assert.ok(!human.includes(signInAction) && human.includes('human operator'), 'the human session sees who it is and the choices');
-  await ok(session, `work/${work.id}/answer`, { ...row.choices![0].body });
+  // The default Approve takes the operator's words (GY-1395): a bare press resumed items with nothing set up.
+  await ok(session, `work/${work.id}/answer`, { ...row.choices![0].body, [row.choices![0].note!]: 'Bought the staging plan' });
   assert.equal((await reload(work.id)).humanRequests!.at(-1)!.answer!.by, operator.id, 'the answer is the operator\'s');
 });
 

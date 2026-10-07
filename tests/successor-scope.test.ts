@@ -146,7 +146,7 @@ test('unit:split-replans-open-items — after a split merges, an open item plann
   assert.deepEqual(items.get('GY-10')!.plannedFiles, ['src/big.ts', 'docs/guide.md', 'src/big/a.ts', 'src/big/b.ts'], 'the successors are added and nothing is removed');
   assert.equal(items.get('GY-10')!.scopeRequest ?? null, null, 'no scope request was needed');
   assert.match(big.reason, new RegExp(`src/big/a\\.ts \\(successor of src/big\\.ts via ${split.slice(0, 12)}\\)`));
-  assert.deepEqual({ ...big.revision, plannedFiles: undefined, reason: undefined }, { expectedPolicyRevision: 1, criteria: items.get('GY-10')!.criteria, dependencies: [], exclusiveResources: [], producerProofs: [], plannedFiles: undefined, reason: undefined }, 'criteria, dependencies and containment are carried over unchanged');
+  assert.deepEqual({ ...big.revision, plannedFiles: undefined, reason: undefined }, { expectedPolicyRevision: 1, criteria: items.get('GY-10')!.criteria, dependencies: [], exclusiveResources: [], producerProofs: [], plannedFiles: undefined, reason: undefined, rule: 'successor' }, 'criteria, dependencies and containment are carried over unchanged');
   // A successor map a split commit records is a ground too, when git cannot see the rename.
   assert.deepEqual(replans.find(entry => entry.key === 'GY-12')!.paths, ['src/new-name.ts']);
   assert.match(replans.find(entry => entry.key === 'GY-12')!.reason, new RegExp(`successor of src/old-name\\.ts via ${trailered.slice(0, 12)}`));

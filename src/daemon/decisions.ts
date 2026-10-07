@@ -293,11 +293,8 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   // differs from that recommendation (GY-259): the head no longer builds what was asked.
   const research = researchRework(work);
   if (research) return { action: 'rework', ...research };
-  // The guarded merge refused this very candidate for the same reason past the loop's bound, and
-  // no carried approval was there to re-require (GY-831): nothing the control plane holds re-binds
-  // it, so the candidate returns to a worker rather than holding its merge.
-  const refused = work.reworkRequested ? null : repeatedMergeRefusal(work);
-  if (refused) return { action: 'rework', reason: `${work.key}: the guarded merge refused candidate ${refused.sha.slice(0, 12)} on every attempt since ${refused.since} with the same reason: ${refused.reason.slice(0, 1200)}. Nothing the control plane holds re-binds it, so the candidate returns to a worker.`, binding: `${refused.sha}:merge-refused` };
+  // No merge refusal returns a head (GY-1391): the guarded merge that recorded them is gone (GY-1236),
+  // and a refusal a document still carries from before re-binds nothing a worker could change.
   // An unexercised `manual:` proof is answered by an attestation carrying its exercise record
   // (GY-523), never by rework: nothing in the change is wrong, only the record of the attestation.
   const attestation = attestationDecision(work);
@@ -762,7 +759,6 @@ export function approvalStep(watch: ApprovalWatch, decision: { id?: string; acti
 }
 /** Every gate green on a submitted candidate: what "mergeable" means to the cycle and its budget. */
 export const mergeableCandidate = (work: Work) => work.stage === 'merge' && !!work.candidate && !work.violations.length && work.gates.every(gate => gate.passed);
-/** GY-831. The repeated merge refusal the control plane recorded for exactly the current candidate that calls for a rework decision, or null. */
 /**
  * GY-1394. The refusal an approver recorded on an attest decision, as the watch keeps it, or null.
  * Only an attestation of a pass bound to a head counts: the refusal judges exactly that head.
@@ -789,10 +785,6 @@ export function refusedAttestationRework(work: Work, refused: readonly RefusedAt
   if (!entry) return null;
   return { reason: `${work.key}: ${entry.refusal.approver} refused the attestation of ${entry.refusal.proof} on candidate ${candidate.sha.slice(0, 12)} (decision ${entry.decision}): "${boundDetail(entry.refusal.reason, 1200)}". The refusal stands for this head, so the item returns to a worker to fix what it names and push a new head, whose attestation is requested afresh.`,
     binding: `${candidate.sha}:attest-refused:${entry.decision}` };
-}
-export function repeatedMergeRefusal(work: Pick<Work, 'mergeRefusal' | 'candidate' | 'policyRevision'>) {
-  const refusal = work.mergeRefusal, candidate = work.candidate;
-  return refusal && refusal.action === 'rework' && candidate && refusal.sha === candidate.sha && refusal.baseSha === candidate.baseSha && refusal.policyRevision === work.policyRevision ? refusal : null;
 }
 
 export const approvedUnapplied = 'approved but unapplied since'; // An approved decision with no outcome recorded (GY-1300); metrics reads it back from the watch.

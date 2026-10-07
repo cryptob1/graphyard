@@ -40,7 +40,9 @@ export type HumanChoice = z.infer<typeof humanChoiceSchema>;
 const decline: HumanChoice = { id: 'decline', label: 'Decline', outcome: 'declined', input: 'none' };
 /** The choices a request offers when its requester named none: one per kind, always ending with Decline. */
 export function defaultChoices(kind: HumanDecisionKind, sealed = false): HumanChoice[] {
-  if (kind === 'money-or-accounts') return [{ id: 'approve', label: 'Approve', outcome: 'provided', input: 'none' }, { id: 'approve-other', label: 'Approve with a different cap…', outcome: 'provided', input: 'text' }, decline];
+  // An account or spend is approved or set up in words (GY-1395): a bare Approve resumed GY-1384 and
+  // GY-1365 with nothing provided, and the resumed worker could only ask again.
+  if (kind === 'money-or-accounts') return [{ id: 'approve', label: 'Approve, saying what you approved or set up…', outcome: 'provided', input: 'text' }, { id: 'approve-other', label: 'Approve with a different cap…', outcome: 'provided', input: 'text' }, decline];
   if (kind === 'credentials-for-people') return [sealed ? { id: 'provide', label: 'Provide now', outcome: 'provided', input: 'secret' } : { id: 'provided', label: 'Provided it', outcome: 'provided', input: 'text' }, decline];
   return [{ id: 'agree', label: 'Go ahead as asked', outcome: 'provided', input: 'none' }, { id: 'differently', label: 'Go ahead differently…', outcome: 'provided', input: 'text' }, decline];
 }
@@ -62,6 +64,22 @@ export const humanRequestSchema = z.object({
   /** The requesting host's public key (PEM): a `secret` choice's value is sealed to it. */
   sealTo: z.string().trim().min(1).max(4000).optional(),
 }).strict().refine(data => data.sealTo || !data.choices?.some(choice => choice.input === 'secret'), 'A secret choice needs sealTo, the requesting host\'s public key');
+/**
+ * Why a park is refused before it reaches the human, or null when it may park (GY-1395). Two of
+ * the build stage's human-only decisions were not the human's to make, or not the whole ask:
+ * - a scope widening (GY-1113 parked "master scope to widen plannedFiles…"): `scope-request`
+ *   puts that to an approver, and only a refused widening reaches the master's `master scope`;
+ * - a request that defers human steps to later parks (GY-1384: "will each park once more, one at
+ *   a time"): every park is one more wait, so NEEDED names every human step the item still needs.
+ */
+const scopeWideningAsk = /\bplanned ?files\b|\bscope[- ]request\b|\bmaster scope\b|\bwiden(?:s|ed|ing)?\b[^.]{0,60}\bscope\b/i;
+const deferredAsk = /\bone at a time\b|\bpark (?:once )?(?:again|more)\b|\bpark (?:it )?later\b/i;
+export function parkRefusal(data: { needed: string }): string | null {
+  if (scopeWideningAsk.test(data.needed)) return 'A scope widening is not a human-only decision: ask for it with graphyard scope-request GY-N EPOCH PATH… -- REASON, which an approver decides';
+  if (deferredAsk.test(data.needed)) return 'Ask for every human step the item still needs in this one request: NEEDED may not leave steps to later parks';
+  return null;
+}
+
 export const humanAnswerSchema = z.object({
   request: z.string().uuid(),
   /** `provided`: the thing asked for now exists, so the item resumes. `declined`: it will not, and the item stays parked with the answer as its blocker. A choice sets it. */
