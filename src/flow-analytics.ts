@@ -2025,6 +2025,8 @@ export interface DeliverySpeed {
   deliveryMode: DeliveryPathMode;
   /** The sentences the report carries: the live delivery mode, and any coverage gap. */
   statements: string[];
+  /** Where each item's ready→production time went, stage by stage (GY-1382); absent when its reads did not run. */
+  stages?: DeliveryStageBreakdown;
 }
 const slowestShown = 3;
 const figure = (samples: DeliverySpeedSample[], extra: { pending?: DeliverySpeedSample[]; unmeasured?: number } = {}): DeliverySpeedFigure => {
@@ -2085,16 +2087,19 @@ const hours = (ms: number) => `${Math.round(ms / 360_000) / 10}h`;
  * measure is judged only on at least `deliverySpeedMinimumSample` measured items, and ready→merged
  * only when the ready-event read was complete: a partial or sparse figure is reported, never alarmed.
  */
-export function deliverySpeedBreaches(speed: DeliverySpeed, minimumSample = deliverySpeedMinimumSample): { measure: 'readyToMerged' | 'mergedToProduction'; text: string }[] {
+export function deliverySpeedBreaches(speed: DeliverySpeed, minimumSample = deliverySpeedMinimumSample): { measure: 'readyToMerged' | 'mergedToProduction'; text: string; stage: DeliveryStageDominant | null }[] {
   const measures = [
     { measure: 'readyToMerged' as const, label: 'Ready→merged into main', target: speed.targets.readyToMergedP90Ms, judged: speed.readyEventsComplete !== false },
     { measure: 'mergedToProduction' as const, label: `Merged→promoted to ${speed.productionEnvironment}`, target: speed.targets.mergedToProductionP90Ms, judged: true },
   ];
+  const named = (samples: DeliverySpeedSample[]) => samples.map(sample => `${sample.key} ${hours(sample.ms)}${sample.pending ? ' (pending)' : ''}${sample.reverted ? ' (reverted)' : ''}`).join(', ');
   return measures.flatMap(({ measure, label, target, judged }) => {
     const value = speed[measure][deliverySpeedJudgedWindow];
     if (!judged || value.count < minimumSample || value.p90Ms === null || value.p90Ms <= target) return [];
-    const slowest = value.slowest.map(sample => `${sample.key} ${hours(sample.ms)}${sample.pending ? ' (pending)' : ''}${sample.reverted ? ' (reverted)' : ''}`).join(', ');
-    return [{ measure, text: `${label} p90 is ${hours(value.p90Ms)} over ${judgedWindowLabel} (${value.count} item${value.count === 1 ? '' : 's'}), above the ${hours(target)} target; slowest: ${slowest}` }];
+    // The stage holding the p90 (GY-1382), so the line says where the time goes, not only which items are slow.
+    const stage = speed.stages?.dominant[measure] ?? null;
+    const held = stage ? `; the largest share of the p90 is held in ${deliveryStageLabels[stage.stage]} (${Math.round(stage.share * 100)}% of the slowest tenth's time), most delayed there: ${named(stage.items)}` : '';
+    return [{ measure, stage, text: `${label} p90 is ${hours(value.p90Ms)} over ${judgedWindowLabel} (${value.count} item${value.count === 1 ? '' : 's'}), above the ${hours(target)} target; slowest: ${named(value.slowest)}${held}` }];
   });
 }
 /**
@@ -2121,6 +2126,169 @@ export async function readReadyInstants(readEvents: (path: string) => Promise<an
   return { readyAt, complete };
 }
 /**
+ * Where delivery time goes (GY-1382): each item merged into main in a window, split into the seven
+ * stages its ready→production time passes through, so a breached target names the stage that holds
+ * it. The stages partition the interval: ready (ready to the first claim), implementation (first
+ * claim to first submit), then the submitted span to the merge by the pull-request step each
+ * recorded gate fact placed the item at (`stepMoves`, read through the steps drill-down) — build
+ * while CI and the build gate have not passed it (Validate and Test, and the hand-in before the
+ * first gate fact after the submit), review while the review gate refuses and through every rework
+ * round (Build, or out of the flow waiting for a builder, after the hand-in), proof while acceptance
+ * evidence is owed (Prove), merge while only the merge gate refuses (Merge) — and merged→production
+ * from the merge to the release observed serving it. Each boundary is clamped between its
+ * neighbours, so one item's stages always sum to its ready→production time (ready→merged while the
+ * promotion is pending). The first claim and first submit are the item's own timeline (`pipeline`,
+ * which every settled summary carries), so no ledger walk is needed for them; an item is measured
+ * only when that timeline records both and its ready instant and step moves were read. A bounded
+ * read, or a timeline reconstructed from a ledger that no longer holds the item's start, leaves
+ * the item unmeasured, never guessed.
+ */
+export const deliveryStages = ['ready', 'implementation', 'build', 'review', 'proof', 'merge', 'production'] as const;
+export type DeliveryStage = typeof deliveryStages[number];
+export const deliveryStageLabels: Record<DeliveryStage, string> = { ready: 'ready (until claim)', implementation: 'implementation (claim to first submit)', build: 'build',
+  review: 'review (with rework rounds)', proof: 'proof', merge: 'merge', production: 'merged→production' };
+/** The stage each pull-request step counts toward once the item was handed in; before the hand-in, Build and outside count as build. */
+type SubmittedStage = 'build' | 'review' | 'proof' | 'merge';
+const stageOfStep: Record<FlowStep | 'outside', SubmittedStage> = { build: 'review', outside: 'review', validate: 'build', test: 'build', review: 'review', prove: 'proof', merge: 'merge', deploy: 'merge' };
+export interface DeliveryStageMove { at: number; to: FlowStep | 'outside' }
+export interface DeliveryStageInput { readyAt: number; claimedAt: number; submittedAt: number; mergedAt: number; promotedAt: number | null; moves: readonly DeliveryStageMove[] }
+/** One item's time in each stage; `production` is null while the promotion is pending. */
+export function itemDeliveryStages(input: DeliveryStageInput): Record<DeliveryStage, number | null> {
+  const clamp = (value: number, low: number, high: number) => Math.min(high, Math.max(low, value));
+  const ready = input.readyAt, merged = Math.max(input.mergedAt, ready);
+  const claimed = clamp(input.claimedAt, ready, merged), submitted = clamp(input.submittedAt, claimed, merged);
+  const span: Record<SubmittedStage, number> = { build: 0, review: 0, proof: 0, merge: 0 };
+  // The step at the submit is the last move at or before it; the hand-in ends at the first step past Build.
+  const moves = [...input.moves].sort((a, b) => a.at - b.at);
+  let step: FlowStep | 'outside' = moves.filter(move => move.at <= submitted).at(-1)?.to ?? 'build', from = submitted, handedIn = false;
+  const account = (until: number) => {
+    if (step !== 'build' && step !== 'outside') handedIn = true;
+    span[handedIn ? stageOfStep[step] : 'build'] += Math.max(0, until - from);
+    from = Math.max(from, until);
+  };
+  for (const move of moves.filter(move => move.at > submitted && move.at < merged)) { account(move.at); step = move.to; }
+  account(merged);
+  return { ready: claimed - ready, implementation: submitted - claimed, ...span, production: input.promotedAt === null ? null : Math.max(input.promotedAt, merged) - merged };
+}
+export interface DeliveryStageWindow { measured: number; unmeasured: number; stages: Record<DeliveryStage, DeliverySpeedFigure> }
+export interface DeliveryStageDominant { stage: DeliveryStage; share: number; items: DeliverySpeedSample[] }
+export interface DeliveryStageBreakdown {
+  windows: Record<DeliverySpeedWindow, DeliveryStageWindow>;
+  /** The stage holding each measure's p90 over the judged window (`dominantDeliveryStage`). */
+  dominant: Record<'readyToMerged' | 'mergedToProduction', DeliveryStageDominant | null>;
+  /** Why items went unmeasured, when a read was bounded or failed. */
+  statements: string[];
+}
+export interface DeliveryStageReads {
+  /** Step moves by work key. Every merged item the read reached has one (its merge), so an item absent was not reached and is unmeasured. */
+  moves: ReadonlyMap<string, readonly DeliveryStageMove[]>;
+  /** The instant up to which every step move was read; an item merged after it is unmeasured. */
+  movesCoveredUntil: number;
+  /** Where the steps read began: an item submitted before it is unmeasured, its step at the submit unread. */
+  movesFrom: number;
+  statements?: string[];
+}
+/**
+ * An item's first claim and first submit from its own timeline (`pipeline`): the earliest attempt's
+ * claim and the first submission. A timeline reconstructed from a ledger that no longer holds the
+ * item's start (`backfill.retained` false), or whose reconstruction is unfinished, may lack the
+ * first attempt, so it measures nothing rather than a later claim.
+ */
+export function firstClaimAndSubmit(work: Work): { claimedAt: number; submittedAt: number } | null {
+  const timeline = work.pipeline;
+  if (!timeline || (timeline.backfill && (!timeline.backfill.retained || timeline.backfill.truncated))) return null;
+  const claimedAt = (timeline.attempts ?? []).reduce<number | null>((first, attempt) => { const at = time(attempt.claimedAt); return at === null ? first : first === null ? at : Math.min(first, at); }, null);
+  const submittedAt = time(timeline.submittedAt);
+  return claimedAt === null || submittedAt === null ? null : { claimedAt, submittedAt };
+}
+export function deliveryStageBreakdown(items: readonly Work[], reads: DeliveryStageReads, options: { now: number; readyAt?: ReadonlyMap<string, string>; readyComplete?: boolean; productionEnvironment?: string }): DeliveryStageBreakdown {
+  const now = options.now, readyComplete = options.readyComplete ?? true, productionEnvironment = options.productionEnvironment ?? defaultProductionEnvironment;
+  const entries = items.flatMap(work => {
+    const merge = mainMerge(work);
+    if (!merge || merge.mergedAt > now) return [];
+    const readyAt = time(options.readyAt?.get(work.id) ?? (readyComplete ? work.createdAt : null)), firsts = firstClaimAndSubmit(work);
+    const promoted = merge.reverted ? null : time(releaseObservedAt(work, productionEnvironment)), promotedAt = promoted !== null && promoted <= now ? promoted : null;
+    const covered = firsts !== null && reads.moves.has(work.key) && merge.mergedAt <= reads.movesCoveredUntil && firsts.submittedAt >= reads.movesFrom;
+    const stages = readyAt === null || firsts === null || !covered ? null
+      : itemDeliveryStages({ readyAt, ...firsts, mergedAt: merge.mergedAt, promotedAt, moves: reads.moves.get(work.key) ?? [] });
+    // The measures as `deliverySpeed` samples them, kept for every item so the slowest tenth is judged over the whole population, measured or not.
+    return [{ key: work.key, mergedAt: merge.mergedAt, readyToMergedMs: readyAt === null ? null : Math.max(0, merge.mergedAt - readyAt), productionMs: promotedAt === null ? null : Math.max(0, promotedAt - merge.mergedAt), stages }];
+  });
+  const windows = {} as DeliveryStageBreakdown['windows'];
+  for (const window of deliverySpeedWindows) {
+    const inWindow = entries.filter(entry => entry.mergedAt > now - window.ms), measured = inWindow.filter(entry => entry.stages);
+    windows[window.id] = { measured: measured.length, unmeasured: inWindow.length - measured.length,
+      stages: Object.fromEntries(deliveryStages.map(stage => [stage, figure(measured.flatMap(entry => entry.stages![stage] === null ? [] : [{ key: entry.key, ms: entry.stages![stage]! }]))])) as DeliveryStageWindow['stages'] };
+  }
+  const judged = entries.filter(entry => entry.mergedAt > now - deliverySpeedWindows.find(window => window.id === deliverySpeedJudgedWindow)!.ms);
+  const tails = { readyToMerged: dominantDeliveryStage(judged, 'readyToMerged'), mergedToProduction: dominantDeliveryStage(judged, 'mergedToProduction') };
+  const unmeasured = windows[deliverySpeedJudgedWindow].unmeasured;
+  return { windows, dominant: { readyToMerged: tails.readyToMerged.dominant, mergedToProduction: tails.mergedToProduction.dominant },
+    statements: [...(reads.statements ?? []),
+      ...(unmeasured ? [`${unmeasured} item${unmeasured === 1 ? '' : 's'} merged over ${judgedWindowLabel} ${unmeasured === 1 ? 'has' : 'have'} no stage breakdown: a ready instant or step move was not read, or the timeline records no first claim or submit.`] : []),
+      ...(['readyToMerged', 'mergedToProduction'] as const).flatMap(measure => tails[measure].unmeasured
+        ? [`No stage is named for ${measureLabels[measure]}: ${tails[measure].unmeasured} of the ${tails[measure].tail} item${tails[measure].tail === 1 ? '' : 's'} in its slowest tenth over ${judgedWindowLabel} ${tails[measure].unmeasured === 1 ? 'has' : 'have'} no stage breakdown.`] : [])] };
+}
+const preMergeStages = deliveryStages.filter(stage => stage !== 'production');
+const measureLabels = { readyToMerged: 'ready→merged', mergedToProduction: 'merged→production' } as const;
+export interface DeliveryStageTail {
+  dominant: DeliveryStageDominant | null;
+  /** The items at or above the measure's p90, and how many of them have no stage breakdown; one withholds the attribution. */
+  tail: number; unmeasured: number;
+}
+/**
+ * The stage holding a measure's p90 over the judged window: over the items at or above the measure's
+ * p90 (its slowest tenth), the stage with the largest summed time, its share of their time, and the
+ * items most delayed in that stage. Ready→merged is split across the six pre-merge stages;
+ * merged→production is one stage. The p90 is taken over every sampled item, measured or not, as the
+ * headline figure is; when an item of the slowest tenth has no stage breakdown the attribution is
+ * withheld (`dominant` null, `unmeasured` counted) rather than drawn from the other items, so a
+ * breach is never sent to a stage the unmeasured items may not have been held in.
+ */
+export function dominantDeliveryStage(items: readonly { key: string; readyToMergedMs: number | null; productionMs: number | null; stages: Record<DeliveryStage, number | null> | null }[], measure: 'readyToMerged' | 'mergedToProduction'): DeliveryStageTail {
+  const candidates: readonly DeliveryStage[] = measure === 'readyToMerged' ? preMergeStages : ['production'];
+  const totals = items.flatMap(item => {
+    const ms = measure === 'readyToMerged' ? item.readyToMergedMs : item.productionMs;
+    return ms === null ? [] : [{ item, ms }];
+  });
+  const p90 = distribution(totals.map(entry => entry.ms)).p90Ms;
+  if (p90 === null) return { dominant: null, tail: 0, unmeasured: 0 };
+  const tail = totals.filter(entry => entry.ms >= p90).map(entry => entry.item), unmeasured = tail.filter(item => !item.stages).length;
+  if (unmeasured) return { dominant: null, tail: tail.length, unmeasured };
+  const sums = candidates.map((stage: DeliveryStage) => ({ stage, ms: tail.reduce((sum, item) => sum + (item.stages![stage] ?? 0), 0) }));
+  const whole = sums.reduce((sum, entry) => sum + entry.ms, 0), top = sums.reduce((best, entry) => entry.ms > best.ms ? entry : best);
+  const delayed = items.flatMap(item => item.stages?.[top.stage] == null ? [] : [{ key: item.key, ms: item.stages[top.stage]! }])
+    .sort((a, b) => b.ms - a.ms || a.key.localeCompare(b.key)).slice(0, slowestShown);
+  return { dominant: { stage: top.stage, share: whole ? top.ms / whole : 0, items: delayed }, tail: tail.length, unmeasured: 0 };
+}
+/** The pages the step-moves read takes at most. */
+export const deliveryStagePages = { moves: 25 } as const;
+/**
+ * Every item's moves between the pull-request steps from `since` on, read page by page through the
+ * flow steps drill-down over its 90-day window. A page holds whole items; an item a bounded read
+ * stopped inside is dropped. `coveredUntil` is where the flow read reached (its coverage), and a
+ * read that stopped at its page bound covers no item it did not reach.
+ */
+export async function readStepMovesSince(readFlow: (path: string) => Promise<any>, since: string, now: number, pageBound: number = deliveryStagePages.moves) {
+  const moves = new Map<string, DeliveryStageMove[]>();
+  let next: string | null = since, coveredUntil = now, complete = false;
+  for (let pages = 0; pages < pageBound && next !== null; pages++) {
+    const page = await readFlow(`analytics/flow/drilldown?${new URLSearchParams({ window: String(flowWindows.at(-1)), metric: 'steps', key: next })}`);
+    for (const row of page.rows ?? []) {
+      const at = time(row.observedAt), to = String(row.bucket ?? '');
+      if (at !== null && (to === 'outside' || (flowSteps as readonly string[]).includes(to))) (moves.get(row.workKey) ?? moves.set(row.workKey, []).get(row.workKey)!).push({ at, to: to as FlowStep | 'outside' });
+    }
+    if (page.coverage?.truncated) coveredUntil = Math.min(coveredUntil, time(page.coverage.toCovered) ?? coveredUntil);
+    next = page.next ?? null;
+    complete = next === null;
+  }
+  // Stopped at the bound: the item it stopped inside is partial, and items after it were not reached.
+  const reached = complete ? null : next!.split(/\s+/).find(token => token.startsWith('after:') || token.startsWith('within:')) ?? null;
+  const cut = reached?.startsWith('within:') ? /^within:(.+):\d+$/.exec(reached)?.[1] ?? null : null;
+  if (cut) moves.delete(cut);
+  return { moves, coveredUntil, complete };
+}
+/**
  * The speed measures `master status` adds beside the snapshot's own: rework rounds split by cause
  * (GY-643), written onto `speed`, and delivery speed on the GitHub path (GY-1232) with one attention
  * line per breached target. Ready instants come from a bounded read of `ready` events since the
@@ -2138,11 +2306,34 @@ export async function speedSections(speed: Record<string, any>, masterApi: (path
   let productionEnvironment: string | undefined;
   try { productionEnvironment = productionEnvironmentFromEnv(); } catch { /* an invalid name falls back to the default */ }
   const report = deliverySpeed(snapshot.work, { now, readyAt: read.readyAt, readyComplete: read.complete, targets: options.targets, productionEnvironment });
+  if (window.length) {
+    const reads = await deliveryStageReads(masterApi, window, now, sections);
+    if (reads) report.stages = deliveryStageBreakdown(snapshot.work, reads, { now, readyAt: read.readyAt, readyComplete: read.complete, productionEnvironment });
+  }
   const attention = deliverySpeedBreaches(report).map(breach => ({ subject: 'delivery speed', text: breach.text,
     // agentOwner('master', …)'s shape, built here: src/master/attention.ts imports Node-only modules this browser-bundled file must not.
     role: 'master' as const, approvedBy: null, human: false, humanOnly: null,
-    next: 'Find what held the slowest items (graphyard status GY-N) and file the fix that removes it; the targets are deliverySpeed in master.json' }));
+    next: breach.stage
+      ? `Remove what holds items in ${deliveryStageLabels[breach.stage.stage]}: find what held ${breach.stage.items.map(item => item.key).join(', ')} there (graphyard status GY-N) and file the fix that removes that hold; the targets are deliverySpeed in master.json`
+      : 'Find what held the slowest items (graphyard status GY-N) and file the fix that removes it; the targets are deliverySpeed in master.json' }));
   return { report, attention };
+}
+/**
+ * The one read behind the stage breakdown: the step moves since the 7-day population's earliest
+ * first submit (at most the flow's 90-day window back), as no item is at a pull-request step before
+ * it is submitted. The first claims and submits need no read: the snapshot's own timelines carry
+ * them. A failed read marks its section and leaves the breakdown out; a bounded one says so and
+ * leaves the items it did not reach unmeasured.
+ */
+async function deliveryStageReads(masterApi: (path: string) => Promise<any>, population: readonly Work[], now: number,
+  sections: { mark(section: string, route: string | null, error: unknown): void }): Promise<DeliveryStageReads | null> {
+  const earliestSubmit = population.reduce<number>((least, work) => Math.min(least, firstClaimAndSubmit(work)?.submittedAt ?? least), now);
+  const movesFrom = Math.max(now - flowWindows.at(-1)! * day, earliestSubmit);
+  const steps = await readStepMovesSince(masterApi, new Date(movesFrom).toISOString(), now)
+    .catch(error => { sections.mark('delivery stages', 'GET /api/analytics/flow/drilldown?metric=steps', error); return null; });
+  if (!steps) return null;
+  const statements = steps.complete ? [] : [`The step-moves read reached its ${deliveryStagePages.moves}-page bound: items it did not reach have no stage breakdown.`];
+  return { moves: steps.moves, movesCoveredUntil: steps.coveredUntil, movesFrom, statements };
 }
 const merged7d = (items: readonly Work[], now: number) => items.filter(work => {
   const mergedAt = mainMerge(work)?.mergedAt ?? null;

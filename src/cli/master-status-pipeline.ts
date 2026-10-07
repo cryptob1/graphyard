@@ -48,7 +48,7 @@ export async function buildPipelineStatus(
   const status = routedScopeStatus(await timedStep('timing failures', () => qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository))), snapshot.work, cycling?.approvals, master);
   for (const worker of status.workers) Object.assign(worker, launches.rows[worker.profile] ?? {});
   // Rework rounds by cause (GY-643, GY-725) onto `speed`, delivery speed on the GitHub path with its
-  // breach attention (GY-1232); a failed read marks its section.
+  // breach attention (GY-1232) and the stage holding each item's time (GY-1382); a failed read marks its section.
   const delivery = await speedSections(status.speed, masterApi, snapshot, { root, targets: master.deliverySpeed, sections });
   return { probe, sessions, status, delivery };
 }
