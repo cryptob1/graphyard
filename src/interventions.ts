@@ -39,7 +39,7 @@ export function loopSettledInBound(details: { origin?: unknown; lapsedAt?: unkno
 
 /** The event kinds the fold reads. Every other row of the ledger is left unread. */
 export const interventionLedgerKinds = [
-  'rework', 'decision.requested', 'decision.failed', 'decision.withdrawn', 'decision.stale',
+  'rework', 'decision.requested', 'decision.failed', 'decision.withdrawn', 'decision.stale', 'decision.declined', 'decision.superseded',
   'scope', 'autoscope', 'requirements', 'blocked', 'unblock',
   'merge.reconciliation.refused', 'merge.operator-authorized', 'merge.reconciled',
   'quarantine', 'settle', 'autosettle', 'recover', 'lease.expired', 'escalation.resolved',
@@ -319,7 +319,7 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
         if (row.payload?.action === 'rework') entry.reworkDecision = { seq: row.seq, at: row.at, id: row.payload.id, stage, binding: typeof row.payload.input?.binding === 'string' ? row.payload.input.binding : null };
         break;
       }
-      case 'decision.failed': case 'decision.withdrawn': case 'decision.stale': {
+      case 'decision.failed': case 'decision.withdrawn': case 'decision.stale': case 'decision.declined': case 'decision.superseded': {
         if (entry.reworkDecision?.id === row.payload?.id) entry.reworkDecision = null;
         break;
       }

@@ -72,6 +72,21 @@ test('unit:rework-instances-replayed — the grounds are read from the record, n
   assert.equal(routineReworkGround(clean, `${clean.candidate.sha}:conflict`), 'conflict');
 });
 
+test('unit:rework-instances-replayed — a situated rework an approver declined or superseded binds nothing: a later rework of that head by hand is still an intervention, and the declined request is not left waiting', () => {
+  const instance = fixture.instances.find(entry => entry.decision?.binding && routineReworkGround({ candidate: entry.rework.grounds.candidate }, entry.decision.binding))!;
+  const grounds = { candidate: instance.rework.grounds.candidate };
+  assert.ok(routineReworkGround(grounds, instance.decision!.binding), 'the binding alone grounds the round');
+  for (const kind of ['decision.declined', 'decision.superseded']) {
+    const [requested, rework] = rowsOf(instance, grounds);
+    const closed: InterventionLedgerRow = { seq: requested.seq + 1, workId: instance.workId, actor: 'grounds-approver', kind, at: requested.at, details: null, stageBefore: instance.stage, payload: { id: instance.decision!.id, reason: 'a flake' } };
+    const folded = (rows: InterventionLedgerRow[]) => foldInterventions(rows, itemsOf([instance]), fixture.window.to).interventions.filter(entry => entry.kind === 'rework');
+    assert.equal(folded([requested, rework]).length, 0, 'the loop\'s own round');
+    const [byHand] = folded([requested, closed, rework]);
+    assert.ok(byHand && byHand.trigger === 'direct' && byHand.resolvedAt === rework.at, `${kind}: the hand rework is counted`);
+    assert.equal(folded([requested, closed]).length, 0, `${kind}: nothing waits on a closed request`);
+  }
+});
+
 test('unit:rework-instances-replayed — GY-1126: a rework bound to a head the item moved past is refused, and its approval settles stale', () => {
   const instance = fixture.instances.find(entry => entry.key === 'GY-1126' && entry.decision?.binding && entry.decision.situation?.sha !== entry.rework.grounds.candidate.sha)!;
   assert.ok(instance, 'the listed GY-1126 instance');
