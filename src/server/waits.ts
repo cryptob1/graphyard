@@ -2,7 +2,8 @@ import { createCipheriv, createHash, publicEncrypt, randomBytes, randomUUID, con
 import type pg from 'pg';
 import { activeLease, demand, operatorScopeIncludes, type Principal, type Work } from '../model.js';
 import { capacityEventSchema, capacityRetryAt, capacitySignature, retainedExhaustions, type CapacityState, type ExhaustionRecord } from '../model/capacity.js';
-import { describeHumanRequest, humanAnswerSchema, humanDecisionLabel, humanOnlyReadsDecisions, humanOnlyRefusal, humanRequestBlocker, humanRequestSchema, openHumanOnly, parkRefusal, parkRule, resolveHumanAnswer, retainedHumanRequests, type HumanOnlySubject, type HumanRequest } from '../model/human-request.js';
+import { describeHumanRequest, humanDecisionLabel, humanOnlyReadsDecisions, humanOnlyRefusal, humanRequestBlocker, humanRequestSchema, openHumanOnly, parkRefusal, parkRule, recommendationIssues, retainedHumanRequests, type HumanOnlySubject, type HumanRequest } from '../model/human-request.js';
+import { humanAnswerSchema, resolveHumanAnswer } from '../model/human-answer.js';
 import { decisionsByWork } from './decision-ledger.js';
 import { scopeAskPaths } from '../model/blocker-class.js';
 import { closeEndedScopeRequest } from '../engine.js';
@@ -84,9 +85,12 @@ export async function requestHumanDecision(services: Services, actor: Principal,
     // coordinator to widen the item by hand once it was back at ready.
     const scope = scopeAskPaths(`${data.needed}\n${data.reason}`, work!.plannedFiles);
     demand(!scope.length, `A plannedFiles widening is not a human-only decision: ask for ${scope.join(', ')} with \`graphyard scope-request ${work!.key} ${data.epoch} ${scope.join(' ')} -- REASON\` and wait for its answer with \`graphyard scope-request ${work!.key} ${data.epoch} --wait\``, 409);
+    // GY-1410: the human is told what the requester recommends, and why, first; a request without both is refused, naming the field.
+    const unadvised = recommendationIssues(data);
+    demand(!unadvised.length, unadvised.join('; '), 422);
     // The requester's choices are kept as they chose them; a request without any offers its kind's defaults (`requestChoices`).
     const request: HumanRequest = { id: randomUUID(), kind: data.kind, reason: data.reason, needed: data.needed, requestedBy: actor.id, epoch: data.epoch, at: now.toISOString(),
-      ...(data.ask ? { ask: data.ask } : {}), ...(data.steps ? { steps: data.steps } : {}), ...(data.why ? { why: data.why } : {}),
+      ...(data.ask ? { ask: data.ask } : {}), ...(data.steps ? { steps: data.steps } : {}), ...(data.why ? { why: data.why } : {}), recommendation: data.recommendation,
       ...(data.choices ? { choices: data.choices } : {}), ...(data.sealTo ? { sealTo: data.sealTo } : {}) };
     work!.humanRequest = request;
     work!.blocker = describeHumanRequest(request);
