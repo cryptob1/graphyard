@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { type FileHandle, mkdir, open, utimes, writeFile } from 'node:fs/promises';
 import { readdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { wakeFromWebhook } from '../../src/store.js';
 import { GitHub, idleObservationSeconds, processJob } from '../../src/github.js';
@@ -51,7 +52,13 @@ import { temporaryDirectory } from './temp-dirs.js';
 import { lostRunReason, sessionRetry } from '../../src/producer.js';
 import { type SelfUpgradeOutcome, performSelfUpgrade } from '../../src/daemon/upgrade.js';
 import { watchdogPlan } from '../../src/daemon/liveness.js';
-import { loopWatchdogSeconds } from '../../src/supervisor.js';
+import { loopSelfProvision, masterSetup } from '../../src/cli/master-setup.js';
+import { deploymentTarget } from '../../src/install/index.js';
+import { type Transport } from '../../src/install/transport.js';
+import { loopUnitName, loopWatchdogSeconds } from '../../src/supervisor.js';
+import { executorUnit, writeExecutorDeclaration } from '../../src/repository-setup.js';
+import { healUserSupervision } from '../../src/user-manager.js';
+import { hostSupervisionKey } from '../../src/daemon/cycle-host.js';
 import { ChildProcessError } from '../../src/child-runner.js';
 import { probeBlocker } from '../../src/daemon/blocker-probes.js';
 import { type BlockerClass } from '../../src/model/blocker-class.js';
@@ -124,7 +131,7 @@ import { type DiagnosisRun, type Failover, MANUAL, type MainGuardDay, PROOF, api
  * approver refuses the capped rework request of each of `refused` (GY-1389).
  */
 export let days = 0;
-export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; slowDeployment?: { from: number; to: number; observationMs: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
   staleDiagnosis?: boolean;
@@ -149,6 +156,13 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   promotion?: boolean;
   /** GY-1389: the review-round cap, the items whose change requests name a blocking finding past it, and those whose capped round the approver refuses. */
   reviewCap?: { cap: number; items: number[]; refused: number[] };
+  /**
+   * GY-1428: the loop's host-supervision step runs the real repair over a simulated host declaring
+   * two executor slots. Its user manager stops answering at `managerDown.from`, taking both slots
+   * with it, and logind refuses to start it until `managerDown.to`; a revival's waits move the
+   * day's clock. From `crashLoop.from` to `.to` slot 1 crashes half a minute after each start.
+   */
+  hostSupervision?: { managerDown: { from: number; to: number }; crashLoop: { from: number; to: number } };
   /** GY-1417: record three goals and wire the acceptance role (acceptanceWorld below). */
   acceptance?: boolean }) {
   const dayStart = clock.now();
@@ -1271,8 +1285,30 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     throughput.asks.push({ sha: observedSha, outcome: outcome.outcome, revision: outcome.revision, elapsed: clock.now() - dayStart, read: outcome.read?.length ?? 0 });
     return outcome;
   };
+  // GY-1428: the simulated host the host-supervision day's loop repairs, and what it asked of it.
+  const hostDay = options.hostSupervision && { ...options.hostSupervision, root: await temporaryDirectory('soak-host'), manager: true, revived: false,
+    slots: new Map<string, { state: string; startedAt: number }>([1, 2].map(slot => [executorUnit(slot), { state: 'active', startedAt: clock.now() }])),
+    revivals: [] as number[], starts: [] as { elapsed: number; units: string[] }[], peakRows: 0 };
+  if (hostDay) { execFileSync('git', ['init', '-q'], { cwd: hostDay.root }); await writeExecutorDeclaration(hostDay.root, { version: 1, count: 2, kinds: null, intervalSeconds: 5 }); }
+  const hostSystemctl = (args: string[]) => {
+    const day = hostDay!, down = elapsed >= day.managerDown.from && !day.revived;
+    if (down) { for (const slot of day.slots.values()) slot.state = 'inactive'; throw Object.assign(new Error('Command failed: systemctl --user'), { stderr: 'Failed to connect to user scope bus via local transport: Connection refused\n', stdout: '' }); }
+    const unit = args.at(-1)!, slot = day.slots.get(unit);
+    if (slot && unit === executorUnit(1) && elapsed >= day.crashLoop.from && elapsed < day.crashLoop.to && slot.state === 'active' && clock.now() - slot.startedAt >= 30_000) slot.state = 'failed';
+    if (args[0] === 'is-active') { const state = unit === loopUnitName ? 'active' : slot?.state ?? 'inactive'; if (state === 'active') return state; throw Object.assign(new Error(`Command failed: systemctl --user is-active ${unit}`), { stdout: `${state}\n`, stderr: '' }); }
+    if (args[0] === 'is-enabled') return 'enabled';
+    if (args[0] === 'enable') { const units = args.slice(2); day.starts.push({ elapsed, units }); for (const name of units) day.slots.set(name, { state: 'active', startedAt: clock.now() }); }
+    return '';
+  };
+  const hostLoginctl = () => {
+    hostDay!.revivals.push(elapsed);
+    if (elapsed < hostDay!.managerDown.to) throw Object.assign(new Error('Command failed: loginctl enable-linger'), { stderr: 'Could not enable linger: Access denied\n' });
+    hostDay!.revived = true; return '';
+  };
   const effects: DaemonEffects = {
     ...(promotionEffect ? { promotion: promotionEffect } : {}),
+    ...(hostDay ? { healHostSupervision: allow => healUserSupervision(hostDay.root, { systemctl: hostSystemctl, loginctl: hostLoginctl, masked: () => false, platform: 'linux',
+      wait: async ms => { fenced.drift += ms; await moveClock(ms); } }, allow) } : {}),
     measureThroughput,
     agents: () => { finishDuringCycle(); return headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(); },
     herdr: () => ({ agents: headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(), available: true }),
@@ -1624,6 +1660,41 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       return api(principals.coordinator, 'POST', `work/${item.id}/deployment`, { sha: observation.sha, mergeSha: item.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt });
     };
     effects.requestSmoke = async item => { deploymentDay.smokes.push(item.key); };
+  }
+  // ---- GY-1416: the loop's setup step (7e) on a Railway deployment that lacks the revert approver.
+  // ---- The real `master setup --apply` runs against a scripted Railway CLI on the simulated clock;
+  // ---- at `redeployFails.from` the variables vanish and every redeploy fails until `redeployFails.to`.
+  const provisionDay = { runs: [] as number[], sets: [] as { name: string; at: number }[], redeploys: [] as { at: number; ok: boolean }[], actions: [] as { at: number; keys: string[] }[] };
+  if (options.selfProvision) {
+    const window = options.selfProvision.redeployFails, provisionRoot = await temporaryDirectory('soak-self-provision');
+    const at = () => clock.now() - dayStart, failing = () => at() >= window.from && at() < window.to;
+    const deployed: Record<string, string> = { GITHUB_APP_ID: '1234' };
+    let vanished = false;
+    const transport: Transport = {
+      description: 'soak railway',
+      async exec(_program, args, options = {}) {
+        if (args[0] === 'status') return { code: 0, stdout: JSON.stringify({ name: 'graphyard', services: { edges: [{ node: { name: 'graphyard' } }] } }), stderr: '' };
+        if (args[0] === 'variables' && args.includes('--json')) return { code: 0, stdout: JSON.stringify(deployed), stderr: '' };
+        if (args[0] === 'variable' && args[1] === 'set') { deployed[args[args.length - 1]] = options.input ?? ''; provisionDay.sets.push({ name: args[args.length - 1], at: at() }); }
+        args.forEach((arg, index) => { if (args[index - 1] === '--set') { deployed[arg.slice(0, arg.indexOf('='))] = arg.slice(arg.indexOf('=') + 1); provisionDay.sets.push({ name: arg.slice(0, arg.indexOf('=')), at: at() }); } });
+        if (args[0] === 'redeploy') { provisionDay.redeploys.push({ at: at(), ok: !failing() }); if (failing()) throw new Error('railway redeploy exited 1: deployment failed'); }
+        return { code: args[0] === 'domain' ? 1 : 0, stdout: '', stderr: '' };
+      },
+      async putFile() { throw new Error('Railway variables are never written as files'); },
+    };
+    const target = deploymentTarget({ provider: 'railway', repository, service: 'graphyard', linkDirectory: provisionRoot, transport });
+    const derived = [{ name: 'GRAPHYARD_REVERT_APPROVER_APP_ID', value: '55001', secret: false, source: 'the reviewer App registration' },
+      { name: 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY', value: 'soak-reviewer-private-key-material', secret: true, source: 'the reviewer App registration' }];
+    const setup = ((root: string, master: Parameters<typeof masterSetup>[1], setupOptions: Parameters<typeof masterSetup>[2]) => {
+      provisionDay.runs.push(at());
+      return masterSetup(root, master, setupOptions, { locate: async () => ({ ...target, derived }), now: () => clock.now() });
+    }) as typeof masterSetup;
+    effects.selfProvision = async () => {
+      // The variables vanish from the deployment as the failing window opens (a service recreated by hand).
+      if (!vanished && at() >= window.from) { vanished = true; for (const value of derived) delete deployed[value.name]; }
+      provisionDay.actions.push({ at: at(), keys: Object.keys(state.actions).filter(key => key.includes('self-provision')) });
+      return loopSelfProvision(provisionRoot, { repository: config.repository }, { now: clock.now(), setup });
+    };
   }
   if (options.staleRelease) {
     // The backlog's history reads take real time, as a slow control plane's do; master status's own
@@ -2224,6 +2295,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       catch (error) { failures.push(`${new Date(now).toISOString()}: ${error instanceof Error ? error.message : String(error)}`); }
       for (const key of Object.keys(state.actions)) actionKeys.add(key);
       blockerKeysPeak = Math.max(blockerKeysPeak, Object.keys(state.actions).filter(key => key.startsWith('blocker:')).length);
+      if (hostDay) hostDay.peakRows = Math.max(hostDay.peakRows, Object.keys(state.actions).filter(key => key.startsWith(hostSupervisionKey)).length);
       // Only the day that holds a merge BLOCKED pays for the extra snapshot read each cycle.
       if (plan.blockedMerge) mergeStallSightings.push(...mergeStallAttention(await snapshot()).map(line => ({ subject: line.subject, text: line.text, at: clock.now() })));
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
@@ -2337,11 +2409,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, staleMerges, restartLog, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null };
+    wakes, staleMerges, restartLog, hostDay, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null };
 }
 
 /**

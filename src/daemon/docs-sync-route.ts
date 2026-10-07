@@ -4,9 +4,10 @@
 import type { Work } from '../model.js';
 import type { HerdrAgent } from '../master.js';
 import { message, type DaemonActionKind, type DaemonState } from './state.js';
+import type { FaultKind } from '../model/fault-classes.js';
 import type { DaemonEffects } from './effects.js';
 import { conflictRoute, docsSyncWatchFor, docsSyncWatchKey, docsSyncWatchSchema, routedConflictRetention, routedConflictSchema, routedConflictWindowMs, type DocsSyncWatch } from '../model/docs-sync.js';
-import { docsSyncMaxMs, type DocsSyncPlan } from '../docs-sync.js';
+import { docsSyncMaxMs, docsSyncSessionName, docsSyncStoppedMs, type DocsSyncPlan } from '../docs-sync.js';
 
 /**
  * The decision step's docs-sync route. A confirmed conflict of the current head is classified once
@@ -14,9 +15,14 @@ import { docsSyncMaxMs, type DocsSyncPlan } from '../docs-sync.js';
  * docs-sync session instead of a rework decision; `holds` is true while that session holds the
  * item. The session is found by its own identity — item and head, as it is named — so a base tip
  * that moves while it runs leaves it holding the item rather than launching it a second time
- * (GY-1423). A docs-sync that ends — or runs past its bound — while an observation taken since still
- * shows the same head gave the conflict up, and the rework decision follows as before, as it does
- * for every conflict that touches anything else.
+ * (GY-1423). A session of that name already visible in Herdr when the loop holds no watch for it —
+ * the watch was lost to a restart, or written by a loop that keyed it by base tip — is adopted, not
+ * launched again and refused (GY-1430). A docs-sync that ends — its pane gone, or its runtime
+ * stopped for docsSyncStoppedMs, as its instruction says it stops when it aborts — or runs past its
+ * bound while an observation taken since still shows the same head gave the conflict up, and the
+ * rework decision follows as before, as it does for every conflict that touches anything else. One
+ * that stopped of its own accord took the route its instruction names, so it is no decision fault;
+ * one that vanished or ran past its bound still is.
  */
 export function docsSyncRoute({ config, state, effects, snapshot, sessions, note, inventorySpent, stamp, clock }: {
   config: { baseBranch: string };
@@ -24,7 +30,7 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
   effects: Pick<DaemonEffects, 'conflictPaths' | 'docsSync' | 'persist' | 'closeSession' | 'endRegistrySession'>;
   snapshot: { work: Work[] };
   sessions: () => Promise<{ agents: HerdrAgent[]; available: boolean }>;
-  note: (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string) => Promise<unknown>;
+  note: (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at?: number, faultKind?: FaultKind | null) => Promise<unknown>;
   inventorySpent: () => void;
   stamp: string;
   clock: number;
@@ -62,6 +68,13 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
       if (routed.route === 'rework') return false;
       const plan: DocsSyncPlan = { key: item.key, pr: item.candidate!.pr, branch: item.candidate!.branch, baseBranch: config.baseBranch, head, base, paths: paths! };
       const actionKey = `docs-sync:${key}`;
+      // GY-1430: the session this item and head name is already running, so the loop holds it again.
+      const name = docsSyncSessionName(plan), running = (await sessions()).agents.find(agent => agent.name === name);
+      if (running) {
+        state.docsSyncs[key] = docsSyncWatchSchema.parse({ work: item.key, head, base, paths: plan.paths, agentName: name, pane: running.pane_id ?? null, launchedAt: stamp });
+        await note(actionKey, item, 'decision', 'done', `Adopted docs-sync session ${name}, already running in Herdr for ${item.key} at ${head.slice(0, 12)}: ${routed.reason}; no rework decision is requested while it runs`);
+        return true;
+      }
       try {
         const launched = await effects.docsSync!(item, plan); inventorySpent();
         state.docsSyncs[key] = docsSyncWatchSchema.parse({ work: item.key, head, base, paths: plan.paths, agentName: launched.agentName, pane: launched.pane, session: launched.session, launchedAt: stamp });
@@ -77,16 +90,22 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
     if (watch.failed) return false;
     const seen = await sessions(), listed = watch.agentName ? seen.agents.find(agent => agent.name === watch.agentName) : undefined;
     const overdue = clock - Date.parse(watch.launchedAt) >= docsSyncMaxMs;
-    if (!overdue && (listed || !seen.available)) return true;
+    // A runtime that stopped (idle or done) ended its turn: the session pushed, or aborted and stopped.
+    if (listed && ['idle', 'done'].includes(listed.agent_status ?? '')) watch.stoppedAt ??= stamp; else if (listed) delete watch.stoppedAt;
+    const stopped = !!listed && !!watch.stoppedAt && clock - Date.parse(watch.stoppedAt) >= docsSyncStoppedMs;
+    if (!overdue && !stopped && (listed || !seen.available)) { if (listed) await effects.persist(state); return true; }
     // Gone, or past its bound: the push may not have been observed yet. Only an observation taken
     // after the loop found that, still on the reviewed head, shows the docs-sync gave up.
     watch.goneAt ??= stamp;
     if (!(item.observation && Date.parse(item.observation.at) > Date.parse(watch.goneAt))) { await effects.persist(state); return true; }
-    watch.failed = (overdue ? `the docs-sync session ran past ${docsSyncMaxMs / 60_000} minutes without moving ${head.slice(0, 12)}` : `docs-sync session ${watch.agentName} ended without moving ${head.slice(0, 12)}`).slice(0, 1000);
+    const aborted = !overdue && stopped;
+    watch.failed = (overdue ? `the docs-sync session ran past ${docsSyncMaxMs / 60_000} minutes without moving ${head.slice(0, 12)}`
+      : aborted ? `docs-sync session ${watch.agentName} stopped without moving ${head.slice(0, 12)}`
+      : `docs-sync session ${watch.agentName} ended without moving ${head.slice(0, 12)}`).slice(0, 1000);
     watch.settledAt = stamp;
     await settle(item, watch, watch.failed);
     markRework(item.key, head, watch.base);
-    await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the conflict returns to a worker`);
+    await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the conflict returns to a worker`, undefined, aborted ? null : undefined);
     return false;
   };
   return { holds, sweep };

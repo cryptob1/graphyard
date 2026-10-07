@@ -14,6 +14,7 @@ import { masterSessionStep } from './cycle-master.js';
 import { scopeStep, successorStep } from './cycle-scope.js';
 import { blockerStep } from './cycle-blockers.js';
 import { reclaimStep } from './cycle-reclaim.js';
+import { hostSupervisionStep } from './cycle-host.js';
 import { dispatchStep } from './cycle-dispatch.js';
 import { decisionStep } from './cycle-decisions.js';
 import { baseFailureStep } from './cycle-base-failures.js';
@@ -218,6 +219,8 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   const { settled, budget } = await timings.step('scope', () => scopeStep(cycle));
   // 2c. Open items planning a file the base split or renamed are re-planned onto its successors.
   await timings.step('successors', () => successorStep(cycle, settled));
+  // 2c2. The host's systemd user manager revived and its declared executor slots started (GY-1428), before the probes below read it.
+  await timings.step('host supervision', () => cycle.isolate('config', null, 'host supervision', () => hostSupervisionStep(cycle)));
   // 2d. Every standing blocker is re-checked: its cause probed, cleared once the probe passes (GY-1008).
   await timings.step('blockers', () => blockerStep(cycle));
   spent('decisions');
@@ -262,6 +265,8 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // 7d. The pipeline doctor (GY-711): the deterministic remedies every cycle, and one doctor run
   //     every `run.doctor.intervalMinutes`. It shares the deployment step's clock too.
   await timings.step('doctor', () => doctorStep(cycle));
+  // 7e. Setup (GY-1416): derived deployment variables the deployment lacks are set by the loop, never asked of a human.
+  if (effects.selfProvision) await timings.step('setup', () => cycle.isolate('config', null, 'setup self-provision', () => effects.selfProvision!()));
   spent('deployment');
 
   await settleLaunches();

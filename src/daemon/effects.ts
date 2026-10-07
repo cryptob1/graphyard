@@ -14,6 +14,7 @@ import { successorWidening } from '../model/successors.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type HostMemoryReading, type ResourceReclaimReport, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
+import { healUserSupervision, type UserSupervisionAllowance, type UserSupervisionHeal } from '../user-manager.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
@@ -134,12 +135,10 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * when the repository has no such workflow, absent on a loop wired without it.
    */
   promotion?: PromotionReads | null;
-  /**
-   * Publishes `mergeQueue.rerunFailedChecks` to the control plane, which reruns a failed required
-   * check by it (GY-516); sent only on a change, and read at the start of every cycle so a
-   * reconfiguration applies before the next observation.
-   */
+  /** Publishes `mergeQueue.rerunFailedChecks` to the control plane, which reruns a failed required check by it (GY-516); sent only on a change, and read at the start of every cycle so a reconfiguration applies before the next observation. */
   publishMergeSettings?: () => Promise<unknown>;
+  /** GY-1416: the loop's setup step, `master setup --apply` beside the cycle at most hourly; it sets derived deployment variables only where the provider adapter applies them in place. */
+  selfProvision?: () => Promise<unknown>;
   /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
   requestSmoke: (work: Work) => void | Promise<void>;
   /**
@@ -179,6 +178,8 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   planeHealth?: () => Promise<string | null>;
   /** This host's memory (GY-612): below its floor, new launches are deferred. A loop wired without it never defers. */
   hostMemory?: () => Promise<HostMemoryReading | null>;
+  /** GY-1428: revive this host's silent user manager and start its declared slots found down, as the step allows (user-manager.ts). */
+  healHostSupervision?: (allow: UserSupervisionAllowance) => Promise<UserSupervisionHeal>;
   /** GY-1008: probe a blocker's cause as the next attempt meets it (blocker-probes.ts), and record it as the coordinator; a pass clears it. */ probeBlocker?: (work: Work, classification: BlockerClassification) => Promise<BlockerProbeResult | null>; recordBlockerProbe?: (work: Work, body: BlockerProbeRecord) => Promise<Work>;
   /**
    * Requests one routine decision with the master's own operator-agent identity and returns it.
@@ -657,7 +658,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     closeSession: pane => closeHerdrPane(pane, run),
     reclaimResources: (work, agents) => reclaimResources(root, withRoleDefaults(current()), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
     planeHealth: () => dispatchRefusal(current().url, fetcher),
-    hostMemory: readHostMemory,
+    hostMemory: readHostMemory, healHostSupervision: allow => healUserSupervision(root, {}, allow),
     probeBlocker: (work, classification) => loopBlockerProbe(current(), root, run, () => dispatchRefusal(current().url, fetcher))(work, classification), recordBlockerProbe: (work, body) => mutate(`work/${work.id}/blocker-probe`, body) as Promise<Work>,
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
@@ -704,6 +705,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('production-environment', { environment });
       publishedEnvironment = environment;
     },
+    selfProvision: async () => (await import('../cli/master-setup.js')).loopSelfProvision(root, current()), // imported when first run: only this step reads the install modules
     publishMergeSettings: async () => {
       const config = { rerunFailedChecks: rerunFailedChecks(current()) };
       const published = JSON.stringify(config);
