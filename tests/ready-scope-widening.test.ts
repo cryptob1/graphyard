@@ -10,7 +10,7 @@ import { classifyBlocker, itemBlockerClass, scopeAskPaths } from '../src/model/b
 import { blockedAttemptMarker } from '../src/model/capacity.js';
 import { scopeRefusalBlocker } from '../src/model/scope.js';
 import { blockerScopeDecision } from '../src/daemon/decisions.js';
-import { foldInterventions, type InterventionLedgerRow } from '../src/interventions.js';
+import { foldInterventions, readInterventionLedger, type InterventionLedgerRow } from '../src/interventions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -118,10 +118,11 @@ test('unit:named-scope-blocker-routes-with-attempt-commit — a blocker that nam
 
 test('unit:ready-replan-is-no-intervention — a widening of an item no attempt has worked on, that nobody asked for and nothing blocked, is planning; one of an item an attempt released, submitted or was reworked from, one that answers a blocker standing before it, or one of a live attempt, is still a scope-widening intervention (GY-1376, GY-1005)', () => {
   const at = (seconds: number) => new Date(Date.parse('2026-10-06T00:00:00.000Z') + seconds * 1000).toISOString();
-  type Shape = { stage?: string; epoch?: number; blocker?: string | null; after?: string | null; live?: boolean; before?: Record<string, unknown> };
-  const widen = (workId: string, { stage = 'ready', epoch = 0, blocker = null, after = blocker, live = false, before }: Shape): InterventionLedgerRow[] => [
+  type Shape = { stage?: string; epoch?: number; blocker?: string | null; after?: string | null; before?: Record<string, unknown> };
+  // The engine records `liveScopeWidening: true` on every additive revision, live lease or not.
+  const widen = (workId: string, { stage = 'ready', epoch = 0, blocker = null, after = blocker, before }: Shape): InterventionLedgerRow[] => [
     { seq: 1, workId, actor: 'master-op', kind: 'requirements', at: at(1), details: { reason: 'first plan' }, work: { key: workId, stage, epoch, plannedFiles: ['src/a.ts'], blocker }, stageBefore: stage },
-    { seq: 2, workId, actor: 'master-op', kind: 'requirements', at: at(2), details: { reason: 'widened', ...(live ? { liveScopeWidening: true } : {}), before: before ?? { plannedFiles: ['src/a.ts'] } },
+    { seq: 2, workId, actor: 'master-op', kind: 'requirements', at: at(2), details: { reason: 'widened', liveScopeWidening: true, before: before ?? { plannedFiles: ['src/a.ts'] } },
       work: { key: workId, stage, epoch, plannedFiles: ['src/a.ts', 'src/b.ts'], blocker: after }, stageBefore: stage },
   ];
   const widenings = (rows: InterventionLedgerRow[]) => foldInterventions(rows, [], at(10)).interventions.filter(entry => entry.kind === 'scope-widening').map(entry => [entry.stage, entry.trigger]);
@@ -145,5 +146,41 @@ test('unit:ready-replan-is-no-intervention — a widening of an item no attempt 
   assert.deepEqual(widenings(widen('GY-1113', { blocker: 'Waiting on a human-only decision (goals and priorities): widen plannedFiles' })), counted, 'answering a standing blocker by hand');
   assert.deepEqual(widenings(widen('cleared', { blocker: 'Scope request refused: src/b.ts', after: null })), counted, 'a widening that clears the blocker it answers');
   assert.deepEqual(widenings(widen('cleared-doc', { after: null, before: document({ epoch: 0, blocker: 'Scope request refused: src/b.ts', pipeline: { attempts: [] } }) })), counted, 'the same, judged from the whole document');
-  assert.deepEqual(widenings(widen('GY-1', { stage: 'build', epoch: 1, live: true })), [['build', 'operator-widening']], 'widening a live attempt');
+  assert.deepEqual(widenings(widen('GY-1', { stage: 'build', epoch: 1 })), [['build', 'operator-widening']], 'widening a live attempt');
+  assert.deepEqual(widenings(widen('live-ready', { epoch: 1, before: document({ epoch: 1, lease: { epoch: 1, owner: 'w', expiresAt: at(600) }, pipeline: { attempts: [{ epoch: 1, owner: 'w', claimedAt: at(0), endedAt: null, end: null }] } }) })), counted, 'an attempt that holds the item');
+});
+
+test('integration:ready-replan-through-endpoint-is-no-intervention — an additive requirements revision posted to an unclaimed ready item is folded as no scope-widening intervention, while the same revision after an attempt ended still counts (GY-1376, GY-1005)', async () => {
+  // The master's own operator-agent identity, revising through the endpoint it uses.
+  const agent = { id: 'replan-agent', token: `replan-agent-${'r'.repeat(32)}` };
+  const registered = await post(operator, 'operator-agents', { id: agent.id, displayName: agent.id, capabilities: ['intent:create', 'intent:ready', 'policy:requirements'], scope: { repositories: ['owner/ready-scope'], workItems: ['*'] }, token: agent.token, reason: 'The master revises scope' });
+  assert.equal(registered.status, 200, JSON.stringify(registered.body));
+  const revise = async (work: Work, plannedFiles: string[], reason: string) => {
+    const response = await fetch(`${url}/api/work/${work.key}/requirements`, { method: 'POST', headers: { Authorization: `Bearer ${agent.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() },
+      body: JSON.stringify({ expectedPolicyRevision: work.policyRevision, reason, criteria: work.criteria.map(({ id, text, proofs }) => ({ id, text, proofs })), dependencies: [], plannedFiles, exclusiveResources: [] }) });
+    const body = await response.json() as Work;
+    assert.equal(response.status, 200, JSON.stringify(body));
+    return body;
+  };
+  let fresh = await engine.execute(operator, 'create', null, { title: `replan ${++serial}`, plannedFiles: ['src/a.ts'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }] }, id());
+  fresh = await engine.execute(operator, 'ready', fresh.id, {}, id());
+  const planned = await revise(fresh, ['src/a.ts', 'src/b.ts'], 'the item also needs src/b.ts');
+  assert.deepEqual(planned.plannedFiles, ['src/a.ts', 'src/b.ts']);
+  const rescued = await revise(planned, ['src/a.ts', 'src/b.ts', 'src/c.ts'], 'and src/c.ts');
+
+  let worked = await claimed('replan-worked');
+  await post(coordinator, `work/${worked.id}/capacity`, { event: 'exhausted', cause: 'interrupted', role: 'worker', epoch: worked.epoch, profile: 'alpha', account: null, runtime: 'claude', reason: 'the session vanished', resetsAt: null, partialWork: { state: 'clean' } });
+  worked = await reload(worked.id);
+  assert.equal(worked.stage, 'ready');
+  await revise(worked, ['src/a.ts', 'src/b.ts'], 'the last worker needed src/b.ts');
+
+  const widenings = async (workId: string) => {
+    const { rows } = await readInterventionLedger(store.pool, { workId });
+    const additive = rows.filter(row => row.kind === 'requirements');
+    assert.ok(additive.length && additive.every(row => row.details?.liveScopeWidening === true), 'the engine flags every additive revision');
+    return foldInterventions(rows, await store.list(), new Date().toISOString()).interventions.filter(entry => entry.kind === 'scope-widening').map(entry => [entry.stage, entry.trigger]);
+  };
+  assert.equal(rescued.stage, 'ready');
+  assert.deepEqual(await widenings(fresh.id), [], 'planning an item no attempt has worked on waits on no one');
+  assert.deepEqual(await widenings(worked.id), [['ready', 'operator-widening']], 'widening for an attempt that ended still counts');
 });

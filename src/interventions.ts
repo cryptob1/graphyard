@@ -308,8 +308,10 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
         // An item at backlog or ready that no attempt has worked on, that nobody asked about and that
         // nothing blocked is being planned, not rescued: its coordinator revising the scope of work no
         // worker has started waited on no one, so it is no intervention (GY-1396). A blocker it
-        // answers, or an item an attempt released, submitted or was reworked from, still is.
-        const replanned = (stage === 'backlog' || stage === 'ready') && details.liveScopeWidening !== true && !!row.work
+        // answers, or an item an attempt holds, released, submitted or was reworked from, still is.
+        // `liveScopeWidening` says only that the revision is additive, not that a lease was live,
+        // so the item as the revision found it decides.
+        const replanned = (stage === 'backlog' || stage === 'ready') && !!row.work
           && unstarted(details.before, row.work.epoch, blockerBefore === undefined ? row.work.blocker : blockerBefore);
         if (entry.asks.length && (widened || cleared)) {
           // A widening answers the scope request; a blocker it clears beside one was an escalation of its own.
