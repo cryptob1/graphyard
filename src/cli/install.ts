@@ -59,9 +59,12 @@ export const installCommands = defineCommands([
     help: [
       '  up --repo OWNER/NAME [--provider compose|railway|hetzner] [--reviewer NAME]',
       '     [--master claude|codex] [--agent] [--goal FILE] [--browser-profile PROFILE]',
+      '     [--confirm-price X | --max-monthly N] [--ssh-key NAME] [--ssh-host HOST] [--ssh-user USER]',
       '                                First-run setup in one command: preflight, control plane,',
       '                                host supervisor and Herdr, onboarding, agent accounts,',
       '                                harness and master loop, resumable (.graphyard/up.json).',
+      '                                Onboarding files are published as a pull request; the goal',
+      '                                waits for it to merge. Price and SSH flags pass to install.',
       '                                A step that needs a person prints one one-time link that signs',
       '                                in to the dashboard Setup page, and waits for it to turn green.',
       '                                --agent runs every step non-interactively (JSON events on',

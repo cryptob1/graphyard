@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync } from 'node:fs';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { goalWorkItem, setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
@@ -44,6 +44,11 @@ export interface UpRequest {
   goalFile: string | null;
   /** The Chrome profile signed in to GitHub that drives the App manifest in agent mode; the master's recorded one when omitted. */
   browserProfile: string | null;
+  /**
+   * Passed on to `graphyard install` unchanged: the operator's consent to a created server's monthly
+   * price (`--confirm-price X` or `--max-monthly N`) and the SSH key or machine it is reached with.
+   */
+  install?: { confirmPrice?: string | null; maxMonthly?: string | null; sshKey?: string | null; sshHost?: string | null; sshUser?: string | null };
 }
 
 export type UpEvent =
@@ -74,6 +79,14 @@ export interface UpDependencies {
   emit(event: UpEvent): void;
   sleep(ms: number): Promise<void>;
   now(): number;
+  /**
+   * Publish the onboarding files `init --scan --apply` wrote (AGENTS.md, .gitignore, graphyard.json,
+   * .github/workflows) as a pull request against the base branch, reusing one already open; null when
+   * the base branch already holds them.
+   */
+  publishOnboarding(): Promise<{ pullRequest: string } | null>;
+  /** Whether the onboarding pull request at URL has merged, so the base branch carries the delivery workflows. */
+  onboardingMerged(url: string): Promise<boolean>;
   /** Agent mode: drive the App manifest page at URL in the master's browser profile, recorded as a master browser flow. */
   driveApp?(url: string, handoff: Handoff): Promise<DriveOutcome>;
   pollMs?: number;
@@ -108,6 +121,8 @@ interface UpState {
   operatorTokenFile?: string | null;
   /** The goal's request id, fixed before the first try so a rerun after an interruption never creates it twice. */
   goalRequest?: string | null;
+  /** The pull request that publishes the onboarding files, until it merges. */
+  onboardingPullRequest?: string | null;
 }
 export const upStateFile = (root: string) => resolve(root, '.graphyard/up.json');
 
@@ -208,7 +223,10 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     if (result.code !== 0) throw new UpStop(`${step}: graphyard ${args[0]}${args[1] && !args[1].startsWith('-') ? ` ${args[1]}` : ''} exited ${result.code}${result.stdout.trim() ? `: ${result.stdout.trim().split('\n').slice(-1)[0].slice(0, 400)}` : ''}`, upExitCodes.failed);
     return result.stdout;
   };
-  const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, '--reviewer', request.reviewer, mode, ...(state.noHerdr ? ['--no-herdr'] : [])];
+  const passed = request.install ?? {};
+  const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, '--reviewer', request.reviewer, mode, ...(state.noHerdr ? ['--no-herdr'] : []),
+    ...([['--confirm-price', passed.confirmPrice], ['--max-monthly', passed.maxMonthly], ['--ssh-key', passed.sshKey], ['--ssh-host', passed.sshHost], ['--ssh-user', passed.sshUser]] as const).flatMap(([flag, value]) => value ? [flag, value] : [])];
+  const rerun = () => `graphyard up --repo ${request.repository} --provider ${request.provider}${request.agent ? ' --agent' : ''}`;
   const step = async (name: UpStep, body: () => Promise<string | void>) => {
     if (state.completed.includes(name)) { deps.emit({ kind: 'step', step: name, state: 'skipped', detail: 'done by an earlier run' }); return; }
     deps.emit({ kind: 'step', step: name, state: 'start' });
@@ -233,6 +251,9 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
           deps.emit({ kind: 'note', text: 'Herdr\'s graphyard plugin is bound to another server; it is left as it is (--no-herdr). Workers start from the CLI.' });
           continue;
         }
+        // Spending money is the operator's decision: an unconfirmed price waits on that consent (exit 3), it is not a failure.
+        const price = failed.find(check => check.name === 'Monthly price');
+        if (price && failed.length === 1) throw new UpStop(`Creating the server needs the operator's consent to its price: ${price.detail ?? 'not confirmed'}. Once they approve it, rerun ${rerun()} --confirm-price PRICE (or --max-monthly N); nothing has been created.`, upExitCodes.waiting);
         if (failed.length) throw new UpStop(`Preflight needs a person on this machine: ${failed.map(check => `${check.name}: ${check.detail ?? 'failed'}${check.fix ? ` (fix: ${check.fix})` : ''}`).join('; ')}. Fix it, then rerun graphyard up.`, upExitCodes.prerequisite);
         return `${(plan?.preflight ?? []).length} checks passed`;
       }
@@ -281,7 +302,11 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       await run('onboarding', ['init', '--scan']);
       const url = await deps.serverUrl();
       await run('onboarding', ['init', '--scan', '--apply', ...(url ? ['--url', url] : [])]);
-      return 'delivery workflow proposed and applied';
+      // The files are written to this checkout only; the base branch needs them before any work is
+      // delivered, so they are published as a pull request (the base is protected, never pushed to).
+      const published = await deps.publishOnboarding().catch((error: any) => { throw new UpStop(`onboarding: publishing the onboarding files failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard up to retry`, upExitCodes.failed); });
+      state.onboardingPullRequest = published?.pullRequest ?? null;
+      return published ? `delivery workflow applied and published in ${published.pullRequest}` : 'delivery workflow applied; the base branch already holds it';
     });
 
     await step('accounts', async () => {
@@ -304,6 +329,17 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     });
 
     await waitGreen(last.map(item => item.id), true);
+    // No goal is submitted until the onboarding pull request has merged and the base carries the workflows.
+    if (state.onboardingPullRequest) {
+      const pullRequest = state.onboardingPullRequest;
+      const deadline = deps.now() + humanWaitMs;
+      for (let polls = 0; !(await deps.onboardingMerged(pullRequest)); polls++) {
+        if (polls === 0) deps.emit({ kind: 'note', text: `Waiting for the onboarding pull request ${pullRequest} to merge: it adds Graphyard's delivery workflows to the base branch.` });
+        if (deps.now() >= deadline) throw new UpStop(`Still waiting for the onboarding pull request ${pullRequest} to merge; rerun ${rerun()} to resume`, upExitCodes.waiting);
+        await deps.sleep(pollMs);
+      }
+      state.onboardingPullRequest = null; await writeState(deps.root, state);
+    }
     if (request.goalFile) {
       await step('goal', async () => {
         const item = goalWorkItem(await readFile(resolve(deps.root, request.goalFile!), 'utf8'));
@@ -329,10 +365,12 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
 
 /** `graphyard up`'s flags. */
 export function upRequestFromArgs(args: string[]): UpRequest {
-  const { values } = parseArgs({ args, options: { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, reviewer: { type: 'string' }, master: { type: 'string' }, goal: { type: 'string' }, 'browser-profile': { type: 'string' } }, allowPositionals: false });
+  const { values } = parseArgs({ args, options: { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, reviewer: { type: 'string' }, master: { type: 'string' }, goal: { type: 'string' }, 'browser-profile': { type: 'string' },
+    'confirm-price': { type: 'string' }, 'max-monthly': { type: 'string' }, 'ssh-key': { type: 'string' }, 'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' } }, allowPositionals: false });
   if (!values.repo || !/^[\w.-]+\/[\w.-]+$/.test(values.repo)) throw new Error('Use graphyard up --repo OWNER/NAME [--provider compose|railway|hetzner] [--agent]');
   return { repository: values.repo, provider: values.provider ?? 'compose', agent: !!values.agent, reviewer: values.reviewer ?? 'claude', master: values.master ?? 'claude',
-    goalFile: values.goal ?? null, browserProfile: values['browser-profile'] ?? null };
+    goalFile: values.goal ?? null, browserProfile: values['browser-profile'] ?? null,
+    install: { confirmPrice: values['confirm-price'] ?? null, maxMonthly: values['max-monthly'] ?? null, sshKey: values['ssh-key'] ?? null, sshHost: values['ssh-host'] ?? null, sshUser: values['ssh-user'] ?? null } };
 }
 
 /**
@@ -429,6 +467,40 @@ export async function mintSignIn(server: string, file: string | null, fetcher: t
   return typeof link.code === 'string' ? `${server.replace(/\/+$/, '')}/#sign-in=${link.code}` : null;
 }
 
+/** What `init --scan --apply` writes and the manual flow commits (docs/setup-from-zero.md, step 6). */
+export const onboardingFiles = ['AGENTS.md', '.gitignore', 'graphyard.json', '.github/workflows'] as const;
+export const onboardingBranch = 'graphyard/onboarding';
+
+/**
+ * Publish the onboarding files as one commit on the base branch's tip, on `graphyard/onboarding`,
+ * and a pull request for it. The commit is built in a scratch index, so the operator's checkout,
+ * branch and staged changes are untouched. Rerun, it reuses the open pull request; when the base
+ * branch already holds exactly these files, nothing is published.
+ */
+export async function publishOnboarding(root: string, repository: string, run: (program: string, args: string[], env?: Record<string, string>) => string): Promise<{ pullRequest: string } | null> {
+  const open = run('gh', ['pr', 'list', '--repo', repository, '--head', onboardingBranch, '--state', 'open', '--json', 'url', '--jq', '.[0].url // ""']).trim();
+  if (open) return { pullRequest: open };
+  const base = run('gh', ['repo', 'view', repository, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']).trim();
+  run('git', ['fetch', '--quiet', 'origin', base]);
+  const baseCommit = run('git', ['rev-parse', 'FETCH_HEAD']).trim();
+  const index = resolve(root, '.graphyard', `onboarding-index.${process.pid}`);
+  await mkdir(dirname(index), { recursive: true });
+  try {
+    const env = { GIT_INDEX_FILE: index };
+    run('git', ['read-tree', baseCommit], env);
+    const present = onboardingFiles.filter(file => existsSync(resolve(root, file)));
+    if (present.length) run('git', ['add', '--', ...present], env);
+    const tree = run('git', ['write-tree'], env).trim();
+    if (tree === run('git', ['rev-parse', `${baseCommit}^{tree}`]).trim()) return null;
+    const commit = run('git', ['commit-tree', tree, '-p', baseCommit, '-m', 'Add Graphyard onboarding: coordination instructions, configuration and delivery workflows'], env).trim();
+    // The branch is this command's own: an earlier, interrupted publish is replaced, never merged into.
+    run('git', ['push', '--force', 'origin', `${commit}:refs/heads/${onboardingBranch}`]);
+  } finally { await rm(index, { force: true }); }
+  const created = run('gh', ['pr', 'create', '--repo', repository, '--base', base, '--head', onboardingBranch, '--title', 'Add Graphyard onboarding',
+    '--body', `The files graphyard up wrote while onboarding this repository: ${onboardingFiles.join(', ')}. Merging it puts Graphyard's delivery workflows on ${base}.`]).trim();
+  return { pullRequest: created.split('\n').filter(Boolean).pop()! };
+}
+
 /** The real dependencies: this CLI's own commands as children, the master identity's status read. */
 export function upDependencies(root: string, cliPath: string, request: UpRequest, emit: (event: UpEvent) => void): UpDependencies {
   const serverUrl = async () => { try { return String(JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8')).url ?? '') || null; } catch { return null; } };
@@ -436,6 +508,8 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
   const browser = request.agent ? upBrowserProfile(root, request) : null;
   return {
     root, emit, serverUrl, masterToken,
+    publishOnboarding: () => publishOnboarding(root, request.repository, (program, args, env) => execFileSync(program, args, { cwd: root, encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env: { ...process.env, ...env } } : {}) })),
+    onboardingMerged: async url => execFileSync('gh', ['pr', 'view', url, '--json', 'state', '--jq', '.state'], { encoding: 'utf8', timeout: 60_000 }).trim() === 'MERGED',
     signIn: async file => { const url = await serverUrl(); return url ? mintSignIn(url, file) : null; },
     sleep: ms => new Promise(accept => setTimeout(accept, ms)), now: () => Date.now(),
     cli: (args, options = {}) => new Promise((accept, reject) => {

@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createElement } from 'react';
@@ -42,10 +43,14 @@ interface World {
   signIns: (string | null)[];
   /** The request id of each goal create. */
   creates: (string | null)[];
+  /** The onboarding pull request once published, and whether it has merged. */
+  onboardingPullRequest: string | null; onboardingMerged: boolean;
+  /** The Hetzner server's monthly price is shown but not yet confirmed. */
+  priceUnconfirmed: boolean;
 }
 
 function world(overrides: Partial<World> = {}): World {
-  return { calls: [], installed: false, app: false, reviewer: false, accounts: false, loop: false, host: false, herdrElsewhere: false, failOnce: new Set(), onSleep: () => {}, ticks: 0, signIns: [], creates: [], ...overrides };
+  return { calls: [], installed: false, app: false, reviewer: false, accounts: false, loop: false, host: false, herdrElsewhere: false, failOnce: new Set(), onSleep: () => {}, ticks: 0, signIns: [], creates: [], onboardingPullRequest: null, onboardingMerged: false, priceUnconfirmed: false, ...overrides };
 }
 
 const status = (w: World) => w.installed ? {
@@ -65,6 +70,9 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
     masterToken: async () => w.installed ? 'm'.repeat(40) : null,
     signIn: async file => { w.signIns.push(file); return file === OPERATOR_TOKEN ? `${SERVER}/#sign-in=${CODE}` : null; },
     status: async () => status(w),
+    publishOnboarding: async () => { w.calls.push(['publish-onboarding']); w.onboardingPullRequest ??= 'https://github.com/acme/shop/pull/1'; return w.onboardingMerged ? null : { pullRequest: w.onboardingPullRequest }; },
+    // The person merges the onboarding pull request while up waits on it: the first read finds it open.
+    onboardingMerged: async url => { assert.equal(url, w.onboardingPullRequest); w.calls.push(['onboarding-merged?']); const merged = w.onboardingMerged; w.onboardingMerged = true; return merged; },
     async cli(args, options = {}) {
       w.calls.push(args);
       const joined = args.join(' ');
@@ -72,7 +80,7 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
       for (const prefix of w.failOnce) if (joined.startsWith(prefix)) { w.failOnce.delete(prefix); return { code: 1, stdout: '{"error":"interrupted"}' }; }
       if (args[0] === 'install' && args.includes('--plan')) {
         return { code: 0, stdout: JSON.stringify({ installId: 'acme-shop', installDirectory: '/install/acme-shop', ...(w.host ? { host: { units: [] } } : {}), principals: [{ id: 'acme-shop-operator', role: 'admin', sessionKind: 'human' }, { id: 'acme-shop-master', role: 'coordinator', sessionKind: 'ai' }],
-          preflight: [{ name: 'GitHub CLI', ok: true }, ...(w.herdrElsewhere && !args.includes('--no-herdr') ? [{ name: 'Herdr plugin', ok: false, detail: 'bound to https://other.example' }] : [])] }) };
+          preflight: [{ name: 'GitHub CLI', ok: true }, ...(w.priceUnconfirmed && !args.includes('--confirm-price') ? [{ name: 'Monthly price', ok: false, detail: 'cx33 (8 GB) at fsn1: 6.49 EUR/month; not confirmed, so nothing will be created' }] : []), ...(w.herdrElsewhere && !args.includes('--no-herdr') ? [{ name: 'Herdr plugin', ok: false, detail: 'bound to https://other.example' }] : [])] }) };
       }
       if (args[0] === 'install' && args.includes('--apply')) {
         w.installed = true;
@@ -101,7 +109,10 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   const result = await runUp(request(), dependencies(fresh, root, events));
   assert.equal(result.exitCode, 0, result.next);
   assert.deepEqual(result.completed, ['preflight', 'control-plane', 'host-supervisor', 'onboarding', 'accounts', 'harness', 'master-loop']);
-  assert.deepEqual(fresh.calls.map(args => args.slice(0, 2).join(' ')), ['install --provider', 'install --provider', 'master init', 'init --scan', 'init --scan', 'master harness', 'master restart'], 'preflight, control plane, host supervisor, onboarding, harness, master loop, in order');
+  assert.deepEqual(fresh.calls.map(args => args.slice(0, 2).join(' ')), ['install --provider', 'install --provider', 'master init', 'init --scan', 'init --scan', 'publish-onboarding', 'master harness', 'master restart', 'onboarding-merged?', 'onboarding-merged?'], 'preflight, control plane, host supervisor, onboarding (applied, then published), harness, master loop, in order; then the onboarding pull request merges');
+  // Onboarding is done only once its files are published: init --scan --apply writes them to this checkout alone.
+  assert.ok(events.some(event => event.kind === 'step' && event.step === 'onboarding' && event.state === 'done' && /published in https:\/\/github\.com\/acme\/shop\/pull\/1/.test(event.detail ?? '')));
+  assert.ok(events.some(event => event.kind === 'note' && /onboarding pull request .* to merge/.test(event.text)), 'it says what it waits on');
   assert.ok(result.checklist.every(item => item.done), 'the checklist is green');
   const waits = events.filter(event => event.kind === 'waiting');
   assert.equal(waits.length, 1, 'the Setup address is printed once for the whole run');
@@ -172,11 +183,66 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   assert.equal(refused.exitCode, 2);
   assert.match(refused.next, /GitHub CLI: not logged in \(fix: gh auth login\)/);
   assert.equal(broken.calls.length, 1, 'nothing past the preflight ran');
+
+  // A new Hetzner server's price is the operator's consent: unconfirmed, up waits on it (exit 3) and creates
+  // nothing; given --confirm-price and an SSH key, up passes both to every install run and carries on.
+  const { upRequestFromArgs } = await up();
+  const priceRoot = await temporaryDirectory('graphyard-up-price');
+  const priced = world({ app: true, reviewer: true, accounts: true, priceUnconfirmed: true });
+  const unconfirmed = await runUp(request({ provider: 'hetzner' }), dependencies(priced, priceRoot, []));
+  assert.equal(unconfirmed.exitCode, 3, unconfirmed.next);
+  assert.match(unconfirmed.next, /operator's consent to its price: cx33 .*6\.49 EUR\/month.*--confirm-price PRICE \(or --max-monthly N\); nothing has been created/);
+  assert.equal(installApplies(priced), 0);
+  const unconfirmedCalls = priced.calls.length;
+  const consented = upRequestFromArgs(['--repo', 'acme/shop', '--provider', 'hetzner', '--confirm-price', '6.49', '--ssh-key', 'laptop']);
+  assert.equal((await runUp(consented, dependencies(priced, priceRoot, []))).exitCode, 0);
+  for (const args of priced.calls.slice(unconfirmedCalls).filter(args => args[0] === 'install')) {
+    assert.deepEqual(args.slice(args.indexOf('--confirm-price'), args.indexOf('--confirm-price') + 2), ['--confirm-price', '6.49']);
+    assert.deepEqual(args.slice(args.indexOf('--ssh-key'), args.indexOf('--ssh-key') + 2), ['--ssh-key', 'laptop']);
+  }
+  assert.equal(installApplies(priced), 1);
+
+  // The onboarding files are published as one commit on the base branch's tip, on graphyard/onboarding,
+  // with a pull request; the operator's checkout is untouched, and a base that already holds them publishes nothing.
+  const { publishOnboarding } = await up();
+  const gitRoot = await temporaryDirectory('graphyard-up-publish');
+  const git = (cwd: string, args: string[], env: Record<string, string> = {}) => execFileSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com', ...env } });
+  const origin = join(gitRoot, 'origin.git'), checkout = join(gitRoot, 'checkout');
+  git(gitRoot, ['init', '--quiet', '--bare', '-b', 'main', origin]);
+  git(gitRoot, ['clone', '--quiet', origin, checkout]);
+  await writeFile(join(checkout, 'README.md'), 'shop\n');
+  git(checkout, ['add', 'README.md']); git(checkout, ['commit', '--quiet', '-m', 'first']); git(checkout, ['push', '--quiet', 'origin', 'HEAD:main']);
+  await mkdir(join(checkout, '.github/workflows'), { recursive: true });
+  await writeFile(join(checkout, '.github/workflows/graphyard.yml'), 'name: Graphyard\n');
+  await writeFile(join(checkout, 'AGENTS.md'), '# Agents\n');
+  await writeFile(join(checkout, 'graphyard.json'), '{}\n');
+  await writeFile(join(checkout, 'notes.txt'), 'not onboarding\n');
+  const gh: string[][] = [];
+  const runner = (opened: () => string) => (program: string, args: string[], env?: Record<string, string>) => {
+    if (program === 'git') return git(checkout, args, env);
+    gh.push(args);
+    if (args[0] === 'pr' && args[1] === 'list') return opened();
+    if (args[0] === 'repo') return 'main\n';
+    return 'https://github.com/acme/shop/pull/1\n';
+  };
+  assert.deepEqual(await publishOnboarding(checkout, 'acme/shop', runner(() => '\n')), { pullRequest: 'https://github.com/acme/shop/pull/1' });
+  assert.deepEqual(git(origin, ['ls-tree', '-r', '--name-only', 'graphyard/onboarding']).trim().split('\n'), ['.github/workflows/graphyard.yml', 'AGENTS.md', 'README.md', 'graphyard.json'], 'only the onboarding files, on the base tip');
+  assert.equal(git(origin, ['rev-parse', 'graphyard/onboarding^']).trim(), git(origin, ['rev-parse', 'main']).trim());
+  assert.deepEqual(gh.find(args => args[1] === 'create')!.slice(0, 8), ['pr', 'create', '--repo', 'acme/shop', '--base', 'main', '--head', 'graphyard/onboarding']);
+  assert.equal(git(checkout, ['status', '--porcelain', '--', 'AGENTS.md']).trim(), '?? AGENTS.md', 'the operator\'s index is untouched');
+  // Rerun with the pull request open: it is reused, nothing is pushed again.
+  const before = gh.length;
+  assert.deepEqual(await publishOnboarding(checkout, 'acme/shop', runner(() => 'https://github.com/acme/shop/pull/1\n')), { pullRequest: 'https://github.com/acme/shop/pull/1' });
+  assert.equal(gh.length, before + 1);
+  // Once merged into the base, there is nothing left to publish.
+  git(origin, ['update-ref', 'refs/heads/main', 'graphyard/onboarding']);
+  assert.equal(await publishOnboarding(checkout, 'acme/shop', runner(() => '')), null);
 });
 
 test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with zero prompts when no device approval is needed, hands off exactly one step when one is, and submits the goal from a file', async () => {
   const { browserAppDriver, recordedAppDriver, runUp, upBrowserProfile, upRequestFromArgs } = await up();
-  assert.deepEqual(upRequestFromArgs(['--repo', 'acme/shop', '--agent', '--goal', 'goal.txt']), { repository: 'acme/shop', provider: 'compose', agent: true, reviewer: 'claude', master: 'claude', goalFile: 'goal.txt', browserProfile: null });
+  assert.deepEqual(upRequestFromArgs(['--repo', 'acme/shop', '--agent', '--goal', 'goal.txt']), { repository: 'acme/shop', provider: 'compose', agent: true, reviewer: 'claude', master: 'claude', goalFile: 'goal.txt', browserProfile: null,
+    install: { confirmPrice: null, maxMonthly: null, sshKey: null, sshHost: null, sshUser: null } });
   assert.throws(() => upRequestFromArgs(['--provider', 'compose']), /--repo OWNER\/NAME/);
 
   // No device approval: the browser drive confirms both Apps, the registry proposal connects the accounts.
@@ -195,6 +261,7 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
   const create = quiet.calls.find(args => args[0] === 'master' && args[1] === 'create')!;
   assert.ok(create, 'the goal is submitted');
   assert.equal(result.goal, 'GY-1');
+  assert.ok(quiet.calls.findIndex(args => args[0] === 'master' && args[1] === 'create') > quiet.calls.findLastIndex(args => args[0] === 'onboarding-merged?'), 'the goal is submitted only once the onboarding pull request has merged');
   assert.ok(result.completed.includes('goal'));
   assert.ok(events.every(event => JSON.parse(JSON.stringify(event)).kind), 'every event is JSON');
 
@@ -235,6 +302,15 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
   assert.equal((await runUp(request({ agent: true, goalFile: 'goal.txt' }), goalDeps())).exitCode, 0);
   assert.equal(goalWorld.creates.length, 2);
   assert.ok(goalWorld.creates[0] && goalWorld.creates[0] === goalWorld.creates[1], 'both tries carry one request id');
+
+  // An onboarding pull request that never merges holds the goal back: the run stops resumable (exit 3) and submits nothing.
+  const unmergedRoot = await temporaryDirectory('graphyard-up-unmerged');
+  await writeFile(join(unmergedRoot, 'goal.txt'), 'A sign-up page that sends a welcome email');
+  const unmerged = world({ app: true, reviewer: true, accounts: true });
+  const held = await runUp(request({ agent: true, goalFile: 'goal.txt' }), dependencies(unmerged, unmergedRoot, [], { humanWaitMs: 10, driveApp: async () => ({ state: 'done' }), onboardingMerged: async () => false }));
+  assert.equal(held.exitCode, 3, held.next);
+  assert.match(held.next, /onboarding pull request https:\/\/github\.com\/acme\/shop\/pull\/1 to merge/);
+  assert.deepEqual(unmerged.creates, [], 'no goal while the base lacks the delivery workflows');
 
   // The browser drive itself: a Confirm-access page is the one handoff, then the App installs on the repository alone.
   const opened: string[] = [], clicked: string[] = [];
