@@ -1,13 +1,12 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { availableRuntimes, describeMergeGate, discover } from '../onboarding.js';
+import { availableRuntimes, describeMergeGate, discover, installedOnboarding } from '../onboarding.js';
 import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
 import { appPageBusy, appPagePortFree, startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, readDocumentationConfig, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { protectionRun } from '../protection.js';
 import { applyInstall, buildPlan, InstallPaused, prepareInstall, providers, type InstallRequest } from '../install/index.js';
-import { installedOnboarding } from '../onboarding.js';
 import { runManifestFlow } from '../install/manifest.js';
 import { delegationLimitAssignments } from '../install/limits.js';
 import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../install/ci-proofs.js';
