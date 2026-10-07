@@ -68,19 +68,36 @@ export function routedScopeAsk(work: Pick<Work, 'scopeRequest' | 'lease' | 'plan
   return unplannedPaths(work.plannedFiles, request.paths).some(path => plannedFiles.some(planned => pathScopeContains(planned, path))) ? request : null;
 }
 
+/** A routed `requirements` decision on an ask, as the decision ledger records it (server/scope-holds.ts). */
+export type RoutedScopeDecision = { id: string; ended: boolean };
+
 /**
- * Why an operator agent's hand widening of a routed ask is refused, or null when it may proceed:
- * while the approver's decision on it is pending, and — before the loop has requested one — for
- * the bound the loop promises to settle a scope ask in (`scopeBlockedBudgetMs`). A decided, stale,
- * failed or withdrawn decision, or none past that bound (no approver serves), leaves it the master's.
+ * Whether the independent approver still holds a routed ask (GY-1388): the pending decision's id,
+ * '' before the loop has requested one within the bound it promises to settle a scope ask in
+ * (`scopeBlockedBudgetMs`), or null once the ask is the master's again — a decided, stale, failed or
+ * withdrawn decision, or none past that bound (no approver serves). The guard, the board and `master
+ * status` all read this one answer, so none names a command another refuses.
  */
-export function handScopeWideningRefusal(key: string, request: { at: string; decision?: { at: string } | null }, pending: string | null, decided: boolean, now: number): string | null {
-  const within = now - Date.parse(request.decision?.at ?? request.at) < scopeBlockedBudgetMs;
-  if (!pending && (decided || !within)) return null;
+export function approverScopeHold(request: { at: string; decision?: { at: string } | null }, decisions: readonly RoutedScopeDecision[], now: number): string | null {
+  const pending = decisions.find(entry => !entry.ended);
+  if (pending) return pending.id;
+  return !decisions.length && now - Date.parse(request.decision?.at ?? request.at) < scopeBlockedBudgetMs ? '' : null;
+}
+
+/** Why an operator agent's hand widening of a routed ask is refused, or null when it may proceed (`approverScopeHold`). */
+export function handScopeWideningRefusal(key: string, request: { at: string; decision?: { at: string } | null }, decisions: readonly RoutedScopeDecision[], now: number): string | null {
+  const pending = approverScopeHold(request, decisions, now);
+  if (pending === null) return null;
   return `${key}'s scope request is the independent approver's to judge: ${pending ? `the loop routed it as requirements decision ${pending}` : `the loop routes it as a requirements decision within ${scopeBlockedBudgetMs / 60_000} minutes of the rule's refusal`}, and a hand widening would pre-empt that judgement. Read it with graphyard master decisions ${key}; a master widens it by hand only once that decision is refused, stale or withdrawn${pending ? '' : ', or none comes within the bound'}`;
 }
 
-/** The command that takes a refused scope ask forward: the approver's decision while the loop routes it, otherwise `master requirements` past the cap or `master scope`. */
-export const scopeAskCommand = (work: Work, now: number) => work.scopeRequest?.decision?.decidedBy === 'graphyard' && routableScopeRequest(work, now)
-  ? `graphyard master decisions ${work.key}`
-  : terminalScopeRefusal(work) ? `graphyard master requirements ${work.key} FILE REASON` : `graphyard master scope ${work.key}`;
+/**
+ * The command that takes a refused scope ask forward: the approver's decision while it holds the ask
+ * (`approverScopeHold` over the routed decisions known, the ledger's or the loop's watches; none
+ * known reads as none requested), otherwise `master requirements` past the cap or `master scope`.
+ */
+export function scopeAskCommand(work: Work, now: number, decisions: readonly RoutedScopeDecision[] = []) {
+  const request = work.scopeRequest;
+  if (request?.decision?.decidedBy === 'graphyard' && routableScopeRequest(work, now) && approverScopeHold(request, decisions, now) !== null) return `graphyard master decisions ${work.key}`;
+  return terminalScopeRefusal(work) ? `graphyard master requirements ${work.key} FILE REASON` : `graphyard master scope ${work.key}`;
+}

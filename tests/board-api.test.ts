@@ -69,8 +69,8 @@ function scenario(): Work[] {
 
 /** GET /api/board, through the route the server registers, over a store holding `work`. */
 const boardRoute = statusRoutes.routes.find(route => route.method === 'GET' && route.path === '/api/board')!;
-async function served(work: Work[]): Promise<Board> {
-  const pool = { query: async (sql: string) => sql.includes('clock_timestamp') ? { rows: [{ now: new Date(NOW) }] } : { rows: [] } };
+async function served(work: Work[], decisions: unknown[] = []): Promise<Board> {
+  const pool = { query: async (sql: string) => sql.includes('clock_timestamp') ? { rows: [{ now: new Date(NOW) }] } : sql.includes('decision.requested') ? { rows: decisions } : { rows: [] } };
   const services = { engine: { store: { pool, fleet: async () => work }, ciAppIds: [1] }, production: null };
   return boardRoute.handle({ actor: { id: 'operator', role: 'admin' }, services, operatorVisible: (items: unknown[]) => items } as any, []) as Promise<Board>;
 }
@@ -87,10 +87,15 @@ test('unit:board-api-matches-dashboard — GET /api/board gives each open item i
     assert.deepEqual({ group: item.group, actor: item.actor, command: item.command }, { group, actor, command }, key);
   };
   expect('GY-172', 'blocked', 'master', 'graphyard master scope GY-172');
-  // GY-1388: refused by the rule alone, the ask is the approver's while the loop routes it, so the
-  // card names that decision, never `master scope`, which would pre-empt it.
+  // GY-1388: refused by the rule alone, the ask is the approver's while its routed decision is
+  // pending in the ledger, so the card names that decision, never `master scope`, which the engine
+  // refuses. Once that decision ends, or none came within the bound, the ask is the master's again.
   const routed = work.map(item => item.key === 'GY-172' ? { ...item, scopeRequest: { ...item.scopeRequest!, decision: { ...item.scopeRequest!.decision!, decidedBy: 'graphyard' } } } : item);
-  assert.equal(entry(await served(routed), 'GY-172').command, 'graphyard master decisions GY-172');
+  const ask = routed.find(item => item.key === 'GY-172')!;
+  const ledger = (ended: boolean) => [{ work_id: ask.id, id: 'd-172', at: ask.scopeRequest!.at, epoch: 2, ended }];
+  assert.equal(entry(await served(routed, ledger(false)), 'GY-172').command, 'graphyard master decisions GY-172');
+  assert.equal(entry(await served(routed, ledger(true)), 'GY-172').command, 'graphyard master scope GY-172');
+  assert.equal(entry(await served(routed), 'GY-172').command, 'graphyard master scope GY-172', 'none within the bound: no approver serves');
   expect('GY-173', 'blocked', 'master', 'graphyard master requirements GY-173 FILE REASON');
   expect('GY-174', 'blocked', 'master', 'graphyard master decide GY-174 resolve REASON');
   expect('GY-175', 'up-next', 'held', null);

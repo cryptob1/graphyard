@@ -4,7 +4,7 @@ import { deliveryState } from './delivery.js';
 import { answerCommand, parkedOnHuman, type HumanRequestRow } from './human-request.js';
 import { humanAsk } from './human-ask.js';
 import { scopeRefusalBlocker } from './scope.js';
-import { scopeAskCommand } from './scope-provenance.js';
+import { scopeAskCommand, type RoutedScopeDecision } from './scope-provenance.js';
 import { shortShas } from './format.js';
 import { OVERDUE_MINUTES, statusDuration } from './duration.js';
 import { phaseOf, plainReason, plainStatus, statusSince } from './plain-status.js';
@@ -214,7 +214,7 @@ const refusalsOf = (work: Work, gate: string) => work.gates.find(entry => entry.
 
 /**
  * The exact command that takes the next step, when there is one to run: a scope refusal is the
- * approver's decision while the loop routes it (GY-1388), else `master scope` — or `master
+ * approver's decision while it holds the ask (GY-1388), else `master scope` — or `master
  * requirements` where no fold represents the ask under the cap, which the plain union `master
  * scope` posts cannot carry (GY-936) — a recorded blocker `master unblock`,
  * an escalation `master decide … resolve`, a merged item production does not serve
@@ -222,13 +222,13 @@ const refusalsOf = (work: Work, gate: string) => work.gates.find(entry => entry.
  * answer its row names. Null where the next step is a session already running or a turn nobody can
  * take early.
  */
-export function nextCommand(work: Work, group: Group | null, actor: ActorRole, humanRow?: HumanRequestRow, now = Date.now()): string | null {
+export function nextCommand(work: Work, group: Group | null, actor: ActorRole, humanRow?: HumanRequestRow, now = Date.now(), scopeDecisions?: readonly RoutedScopeDecision[]): string | null {
   const key = work.key;
   if (actor === 'human-only') return humanRow?.answer.cli ?? (work.humanRequest ? answerCommand(key, work.humanRequest) : null);
   if (actor === 'approver') return `graphyard master decisions ${key}`;
   if (actor === 'reviewer') return `graphyard master review ${key}`;
   if (group === 'backlog') return actor === 'master' ? `graphyard master release ${key}` : null;
-  if (work.scopeRequest && work.blocker?.startsWith(scopeRefusalBlocker)) return scopeAskCommand(work, now);
+  if (work.scopeRequest && work.blocker?.startsWith(scopeRefusalBlocker)) return scopeAskCommand(work, now, scopeDecisions);
   if (work.blocker) return blockerView(work)?.needsSomeone === false ? null : `graphyard master unblock ${key} REASON`;
   if (work.stage === 'done') return actor === 'master' ? `graphyard master verify-deployment ${key}` : null;
   if (refusalsOf(work, 'merge').some(reason => escalation.test(reason))) return `graphyard master decide ${key} resolve REASON`;
@@ -260,7 +260,7 @@ export interface Board {
 }
 
 /** Every open item into its group with its next actor, command, since and overdue. */
-export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRow[] | null, release: ReleaseView = noRelease): Board {
+export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRow[] | null, release: ReleaseView = noRelease, scopeDecisions?: ReadonlyMap<string, readonly RoutedScopeDecision[]>): Board {
   const { byGroup, open } = classify(work, now, humanRows, release);
   const stalls = new Map(stalledCards(work.filter(item => item.stage !== 'done' && !isClosed(item)), now).map(card => [card.item.id, card]));
   const rows = new Map((humanRows ?? []).map(row => [row.id, row]));
@@ -272,7 +272,7 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
       : group === 'blocked' && stalls.has(entry.id) ? stalls.get(entry.id)!.heldSince
         : timed ? stepSince(entry, now, null, release) : statusSince(entry, now);
     const blocker = blockerView(entry); return { id: entry.id, key: entry.key, title: entry.title, priority: entry.priority, group, stage: entry.stage, owner: entry.lease?.owner ?? entry.lastAssignment?.owner ?? null,
-      actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id), now), since, overdue: timed && statusDuration(since, now).overdue, ...(blocker ? { blocker } : {}) };
+      actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id), now, scopeDecisions?.get(entry.id)), since, overdue: timed && statusDuration(since, now).overdue, ...(blocker ? { blocker } : {}) };
   };
   const board = Object.fromEntries(groups.map(group => [group, byGroup[group].map(entry => item(entry, group))])) as Record<OpenGroup, BoardItem[]>;
   return { now: new Date(now).toISOString(), overdueAfterMs: OVERDUE_MINUTES * 60_000, groups: board,
@@ -284,7 +284,7 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
  * `production`, `ciAppIds`): what `GET /api/board` serves, and what `master status` builds for
  * itself when the server it talks to predates the route.
  */
-export const boardFromStatus = (work: Work[], now: number, status: any) => buildBoard(work, now, status?.humanOnly, releaseView(status));
+export const boardFromStatus = (work: Work[], now: number, status: any) => buildBoard(work, now, status?.humanOnly, releaseView(status), status?.scopeDecisions);
 
 /** True for a response shaped as a board. */
 export const isBoard = (value: any): value is Board => !!value && typeof value === 'object' && !!value.groups && groups.every(group => Array.isArray(value.groups[group]));

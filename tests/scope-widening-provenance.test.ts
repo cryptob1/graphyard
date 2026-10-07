@@ -6,6 +6,7 @@ import { blockerScopeDecision } from '../src/daemon/decisions.js';
 import { scopeDecisionReason } from '../src/model/scope.js';
 import { groundedWideningReason, handScopeWideningRefusal, routedScopeAsk, routedWideningDecision, scopeAskCommand, wideningSettlement } from '../src/model/scope-provenance.js';
 import { nextCommand } from '../src/model/board.js';
+import { scopeRequestAttention } from '../src/cli/owed-report.js';
 import type { Work } from '../src/model.js';
 
 // GY-1388: 427 build-stage scope widenings in 7 days, most of them settled by the control plane on
@@ -100,14 +101,25 @@ test('unit:routed-scope-ask-not-pre-empted — the guard and the board leave a r
   assert.equal(routedScopeAsk({ ...item, scopeRequest: { ...item.scopeRequest!, decision: undefined } }, ['src/a.ts', 'src/b.ts'], now), null, 'an undecided ask is the rule\'s next step, not the approver\'s');
   assert.equal(routedScopeAsk({ ...item, lease: { ...item.lease!, expiresAt: at(5) } }, ['src/a.ts', 'src/b.ts'], now), null, 'an ended attempt\'s ask is moot');
   const request = item.scopeRequest!;
-  assert.match(handScopeWideningRefusal(key, request, 'd-1', true, now)!, /routed it as requirements decision d-1/);
-  assert.match(handScopeWideningRefusal(key, request, null, false, now)!, /within 15 minutes of the rule's refusal/);
-  assert.equal(handScopeWideningRefusal(key, request, null, true, now), null, 'a decision that ended leaves it the master\'s');
-  assert.equal(handScopeWideningRefusal(key, request, null, false, Date.parse(at(17))), null, 'no routed decision within the bound (no approver serves): the master\'s');
-  assert.match(handScopeWideningRefusal(key, request, 'd-1', true, Date.parse(at(50)))!, /d-1/, 'a pending decision holds past the bound');
-  assert.equal(scopeAskCommand(item, now), `graphyard master decisions ${key}`);
+  const pending = [{ id: 'd-1', ended: false }], ended = [{ id: 'd-0', ended: true }];
+  assert.match(handScopeWideningRefusal(key, request, pending, now)!, /routed it as requirements decision d-1/);
+  assert.match(handScopeWideningRefusal(key, request, [], now)!, /within 15 minutes of the rule's refusal/);
+  assert.equal(handScopeWideningRefusal(key, request, ended, now), null, 'a decision that ended leaves it the master\'s');
+  assert.equal(handScopeWideningRefusal(key, request, [], Date.parse(at(17))), null, 'no routed decision within the bound (no approver serves): the master\'s');
+  assert.match(handScopeWideningRefusal(key, request, [...ended, ...pending], Date.parse(at(50)))!, /d-1/, 'a pending decision holds past the bound');
   assert.equal(scopeAskCommand({ ...item, scopeRequest: { ...request, decision: { ...refused, decidedBy: approver } } }, now), `graphyard master scope ${key}`);
-  assert.equal(nextCommand(item, 'blocked', 'master', undefined, now), `graphyard master decisions ${key}`, 'the board names the decision, never master scope');
+  // The board and `master status` name exactly what the guard leaves open (GY-1388 review PRRT_kwDOUZby-s6pw-MH, -MK).
+  const late = Date.parse(at(17)), stillLeased = { ...item, lease: { ...item.lease!, expiresAt: at(90) } } as Work;
+  for (const [decisions, when, holds] of [[[], now, true], [pending, now, true], [ended, now, false], [[], late, false], [pending, Date.parse(at(50)), true], [ended, late, false]] as const) {
+    const guard = handScopeWideningRefusal(key, request, decisions, when) !== null;
+    assert.equal(guard, holds);
+    const command = holds ? `graphyard master decisions ${key}` : `graphyard master scope ${key}`;
+    assert.equal(scopeAskCommand(stillLeased, when, decisions), command, `the command agrees with the guard (${JSON.stringify(decisions)} at ${new Date(when).toISOString()})`);
+    assert.equal(nextCommand(stillLeased, 'blocked', 'master', undefined, when, decisions), command, 'the board names what the guard allows');
+    const watches = decisions.map(entry => ({ work: key, action: 'requirements', decision: entry.id, settledAt: entry.ended ? at(9) : null, scope: { epoch: 1, at: at(0) } }));
+    const owed = scopeRequestAttention({ work: [stillLeased], now: new Date(when).toISOString() }, watches);
+    assert.deepEqual(owed.map(entry => entry.next), holds ? [] : [command], 'master status owes the master only what the guard lets it run');
+  }
 });
 
 test('unit:scope-widening-settled-by-control-plane — a routed decision is known by the ask it answers, and an applied one whose request lies beyond the report\'s reach still reads as routed', () => {

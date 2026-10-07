@@ -27,6 +27,7 @@ import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCi
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeDecision } from './model/scope.js';
 import { mergedScopeRequest, plannedFilesCovered, widenedPlannedFiles } from './model/scope-collapse.js';
 import { handScopeWideningRefusal, routedScopeAsk } from './model/scope-provenance.js';
+import { routedScopeDecisions } from './server/scope-holds.js';
 import { configuredDocumentation, documentationObligation, recordDocumentationSubmission, type DocumentationPolicy } from './model/documentation.js';
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { submittedBranchMoved } from './model/assignment.js';
@@ -1042,9 +1043,7 @@ export class Engine {
         // ask. The Idempotency-Key is the client's to choose, so it exempts nothing.
         const routedAsk = actor.role === 'operator-agent' && widening && !data.answers && !data.rule ? routedScopeAsk(work, data.plannedFiles, now.getTime()) : null;
         if (routedAsk) {
-          const decisions = (await db.query(`SELECT r.payload->>'id' AS id, (SELECT s.kind FROM events s WHERE s.work_id=r.work_id AND s.seq>r.seq AND s.payload->>'id'=r.payload->>'id' AND s.kind IN ('decision.applied','decision.failed','decision.declined','decision.superseded','decision.stale','decision.withdrawn') LIMIT 1) AS ended
-            FROM events r WHERE r.work_id=$1 AND r.kind='decision.requested' AND r.payload->>'action'='requirements' AND r.payload->'input'->'answers'->>'at'=$2 AND (r.payload->'input'->'answers'->>'epoch')::int=$3`, [work.id, routedAsk.at, routedAsk.epoch])).rows as { id: string; ended: string | null }[];
-          const refusal = handScopeWideningRefusal(work.key, routedAsk, decisions.find(entry => !entry.ended)?.id ?? null, decisions.length > 0, now.getTime());
+          const refusal = handScopeWideningRefusal(work.key, routedAsk, (await routedScopeDecisions(db, [work])).get(work.id) ?? [], now.getTime());
           demand(!refusal, refusal!, 409);
         }
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
