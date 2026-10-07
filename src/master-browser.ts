@@ -222,8 +222,19 @@ export function sudoAttention(state: SudoState | null, now = Date.now()) {
   if (Date.parse(state.deadline) <= now) return { ...state, instruction: `The ${state.flow} flow timed out waiting for sudo approval; rerun master browser ${state.flow}` };
   return { ...state, instruction: `${sudoInstruction(state, 'your device')}; the ${state.flow} flow is waiting` };
 }
-/** Where a waiting flow takes an authenticator or email code (GY-1450): a local page, a command, or both. */
-export interface SudoCodeRoute { page?: string | null; command?: string | null }
+/**
+ * Where a waiting flow takes an authenticator or email code (GY-1450): a local page, a command, or
+ * both; and, when known, whether the drive shares the operator's live Chrome session (GY-1457).
+ */
+export interface SudoCodeRoute { page?: string | null; command?: string | null; profile?: { mode: BrowserProfileMode; name: string } | null }
+/**
+ * Whether the headless drive shares the operator's live Chrome session (GY-1457). A Chrome profile
+ * named by its name (such as Default) is opened by agent-browser as a copy, whose session is its
+ * own, so a confirmation in the operator's Chrome may not reach it; a profile directory named by
+ * its path is opened as itself, so the session is the one that directory's Chrome holds.
+ */
+export type BrowserProfileMode = 'shared' | 'copy';
+export const browserProfileMode = (profile: string): BrowserProfileMode => /[\\/]/.test(profile) ? 'shared' : 'copy';
 const listMethods = (methods: readonly SudoMethod[]) => {
   const names = methods.map(method => sudoMethodNames[method]);
   return names.length > 1 ? `${names.slice(0, -1).join(', ')} or ${names[names.length - 1]}` : names[0] ?? '';
@@ -232,17 +243,28 @@ const listMethods = (methods: readonly SudoMethod[]) => {
  * What a person acts on. A Confirm-access page handed off (anything but a Mobile push): the first
  * line is the one confirmation that always works — once, in the operator's own Chrome, which
  * grants sudo mode to the session the agent's profile copy shares — then every method the page
- * offers, then, when the flow takes codes (ROUTE), where an authenticator or email code goes. A
+ * offers, then, when the flow takes codes (ROUTE), where an authenticator or email code goes. When
+ * ROUTE names the drive's profile (GY-1457), a first line says whether it shares the live Chrome
+ * session; on a copy the own-Chrome line is left out, and when the page offers no code method the
+ * drive can take, that line says so and names what does reach it (Mobile, a shared profile, the
+ * App-import route). Only the code methods the page offers are ever listed. A
  * GitHub Mobile prompt: its code and, once it has gone a minute unapproved, the other route too.
  */
 export function sudoInstruction(state: Pick<SudoState, 'code' | 'method' | 'url' | 'fallback' | 'offered' | 'emailed'>, device = 'your phone', route: SudoCodeRoute = {}) {
   if (state.method && state.method !== 'mobile') {
     const offered = state.offered?.length ? state.offered : [state.method];
-    const lines = [`Confirm access once in your own Chrome at ${sudoProtectedPage} with your passkey or password: GitHub then holds sudo mode for the session the agent's browser shares, and the flow continues by itself within 10 s`,
-      `GitHub's Confirm-access page${state.url ? ` (${state.url})` : ''} offers: ${offered.map(method => sudoMethodNames[method]).join(', ')}`];
+    const profile = route.profile;
     const where = [route.page ? `at ${route.page}` : '', route.command ? `with ${route.command} CODE` : ''].filter(Boolean).join(' or ');
-    if (where && offered.includes('authenticator')) lines.push(`For your authenticator app, enter its 6-digit code ${where}`);
-    if (where && offered.includes('email')) lines.push(state.emailed ? `GitHub emailed you a code: enter its 6 digits ${where}`
+    // Only a code method the page offers can be typed in: passSudo acts on nothing else.
+    const codes = where ? (['authenticator', 'email'] as const).filter(method => offered.includes(method)) : [];
+    const unreached = `none of the page's methods reaches the drive: ${offered.includes('mobile') ? 'rerun with --github-mobile to approve a GitHub Mobile prompt, ' : ''}pass --browser-profile a Chrome profile directory path to share your live session, or take the App-import route`;
+    const lines = [
+      ...(profile ? [profile.mode === 'shared' ? `The drive uses your live Chrome session (profile ${profile.name}), so a confirmation in your own Chrome reaches it`
+        : `The drive runs on a copy of your Chrome profile ${profile.name}, not your live session, so a confirmation in your own Chrome does not reach it: ${codes.length ? 'use a code below' : unreached}`] : []),
+      ...(profile?.mode === 'copy' ? [] : [`Confirm access once in your own Chrome at ${sudoProtectedPage} with your passkey or password: GitHub then holds sudo mode for the session the agent's browser shares, and the flow continues by itself within 10 s`]),
+      `GitHub's Confirm-access page${state.url ? ` (${state.url})` : ''} offers: ${offered.map(method => sudoMethodNames[method]).join(', ')}`];
+    if (codes.includes('authenticator')) lines.push(`For your authenticator app, enter its 6-digit code ${where}`);
+    if (codes.includes('email')) lines.push(state.emailed ? `GitHub emailed you a code: enter its 6 digits ${where}`
       : `For an email code, ask for it ${[route.page ? `at ${route.page}` : '', route.command ? `with ${route.command} email` : ''].filter(Boolean).join(' or ')}, then enter its 6 digits ${where}`);
     return lines.join('\n');
   }

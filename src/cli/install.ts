@@ -6,7 +6,7 @@ import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
 import { appPageBusy, appPagePortFree, startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, readDocumentationConfig, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { protectionRun } from '../protection.js';
-import { appCommand, applyInstall, buildPlan, InstallPaused, installRequestFromArgs, prepareInstall } from '../install/index.js';
+import { appCommand, applyInstall, appStepWait, buildPlan, InstallPaused, installRequestFromArgs, prepareInstall } from '../install/index.js';
 import { runManifestFlow } from '../install/manifest.js';
 import { delegationLimitAssignments } from '../install/limits.js';
 import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../install/ci-proofs.js';
@@ -60,23 +60,23 @@ export const installCommands = defineCommands([
       '  up --repo OWNER/NAME [--provider compose|railway|hetzner] [--reviewer NAME]',
       '     [--master claude|codex] [--agent] [--goal FILE] [--browser-profile PROFILE]',
       '     [--confirm-price X | --max-monthly N] [--ssh-key NAME] [--ssh-host HOST] [--ssh-user USER]',
-      '     [--reuse-app SLUG]... [--github-mobile]',
+      '     [--reuse-app SLUG]... [--github-mobile] [--wait MINUTES] [--no-wait]',
       '  up --sudo-code CODE|email',
-      '                                First-run setup in one command: preflight, control plane,',
-      '                                host supervisor and Herdr, onboarding, agent accounts,',
-      '                                harness and master loop, resumable (.graphyard/up.json; a',
-      '                                rerun reuses its --repo/--provider). Ctrl-C stops the install too.',
-      '                                Onboarding files are published as a pull request; the goal',
-      '                                waits for it to merge. Price and SSH flags pass to install.',
-      '                                A step that needs a person prints one one-time link that signs',
-      '                                in to the dashboard Setup page, and waits for it to turn green.',
+      '                                First-run setup in one command: preflight, control plane, host supervisor and',
+      '                                Herdr, onboarding, agent accounts, harness and master loop, resumable (.graphyard/up.json;',
+      '                                a rerun reuses its --repo/--provider). Ctrl-C stops the install too. Onboarding files are',
+      '                                published as a pull request; the goal waits for it to merge. Price and SSH flags pass to',
+      '                                install. A step that needs a person prints one one-time link that signs in to the',
+      '                                dashboard Setup page, and waits for it to turn green.',
       '                                --agent runs every step non-interactively (JSON events on stderr), Apps in',
       '                                the given or master\'s browser profile (none: exit 2), handing off only device',
-      '                                approvals: Confirm access lists the page\'s methods, re-checked every 10 s',
-      '                                (confirm in your Chrome, or --sudo-code a 6-digit authenticator/email code;',
-      '                                email: GitHub sends one); --github-mobile: Mobile first, password link after',
-      '                                60 s; a drive that gives up hands off the still-served App page. --reuse-app',
-      '                                passes to install. Exit 0 green, 1 failed, 2 prereq, 3 waiting.',
+      '                                approvals. Confirm access lists the page\'s methods, re-checked every 10 s: confirm in',
+      '                                your Chrome (shared profile only), or --sudo-code a 6-digit authenticator/email code',
+      '                                (email: GitHub sends one); --github-mobile: Mobile first, password link after 60 s;',
+      '                                or app import both Apps and --reuse-app each (--no-wait exits 3 saying so). A drive',
+      '                                that gives up hands off the still-served App page. --wait MINUTES bounds each wait on',
+      '                                a person (agent: 20), App page and Confirm access too; a rerun resumes a pending',
+      '                                Confirm access. Exit 0 green, 1 failed, 2 prereq, 3 waiting.',
     ],
     // `up` installs the control plane and records the connection; it never reads a stale one.
     readsConnection: () => false,
@@ -114,8 +114,8 @@ export const installCommands = defineCommands([
       '                                production resources that cost money are created only with',
       '                                --create-environments. A Herdr graphyard plugin bound to',
       '                                another server is repointed only with --herdr-rebind.',
-      '                                An App step nobody confirms within 900 s exits 1 with a',
-      '                                JSON summary and the exact resume command.',
+      '                                An App step nobody confirms within 900 s (under up: its --wait,',
+      '                                plus a minute) exits 1 with a JSON summary and the exact resume command.',
       '                                See docs/install.md for the agent-executable runbook.',
     ],
     // The installer creates the connection file; it must never read a stale one.
@@ -124,7 +124,7 @@ export const installCommands = defineCommands([
       const { values, request: inputs } = installRequestFromArgs(context.rest);
       const session = await prepareInstall(process.cwd(), inputs, {
         cliPath: await context.activeCliPath(), hostId: context.individualHostId(), log: line => console.error(line),
-        githubApp: request => runManifestFlow(request.root, request.repository, request.origin, { reviewer: request.reviewer, announce: line => console.error(line), dependencies: { file: request.file, ...(request.reuse ? { reusable: request.reuse.slugs, reuse: request.reuse.adopt } : {}) } }),
+        githubApp: request => runManifestFlow(request.root, request.repository, request.origin, { reviewer: request.reviewer, announce: line => console.error(line), ...appStepWait(process.env), dependencies: { file: request.file, ...(request.reuse ? { reusable: request.reuse.slugs, reuse: request.reuse.adopt } : {}) } }),
       }, values.apply ? 'apply' : 'plan');
       if (values.logs) return console.log(await session.adapter.logs(session.context));
       const plan = await buildPlan(session);
