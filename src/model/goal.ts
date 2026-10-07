@@ -290,7 +290,7 @@ export function protectedCaseRefusals(work: Pick<Work, 'key'> & Partial<Pick<Wor
 
 // ---- The ledger: one event per change, each carrying the whole goal ------------------------------
 export const goalEventKinds = ['goal.recorded', 'goal.draft', 'goal.approve', 'goal.refuse', 'goal.closed', 'goal.merged', 'goal.deliver', 'goal.case-change', 'goal.case-change-approve', 'goal.case-change-refuse',
-  'goal.plan', 'goal.plan-approve', 'goal.plan-refuse', 'goal.released'] as const;
+  'goal.plan', 'goal.plan-approve', 'goal.plan-refuse', 'goal.plan-invalid', 'goal.released'] as const;
 /** A goal recorded before planning existed (GY-1418) said `planned` for an approved, unmerged acceptance draft: that stage is `accepted` now. */
 export const currentGoal = (goal: Goal): Goal => goal.stage === 'planned' && !goal.merged ? { ...goal, stage: 'accepted' } : goal;
 interface Queryable { query(sql: string, params?: unknown[]): Promise<{ rows: any[] }> }

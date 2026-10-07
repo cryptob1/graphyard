@@ -1,4 +1,4 @@
-import type { Goal } from '../../src/model/goal.js';
+import { appendGoal, applyGoalCommand, type Goal } from '../../src/model/goal.js';
 import { type GoalPlan, planItemInput, planOrder } from '../../src/model/goal-plan.js';
 import type { Work } from '../../src/model.js';
 import type { PlannerEffects } from '../../src/daemon/planner.js';
@@ -16,10 +16,21 @@ import { clock } from './soak-world.js';
  * planned again after an hour; its first release dies after the control plane created its first
  * item, so the retry must find that item instead of making it twice; and its first delivery is
  * refused by a bad gateway. `billing`'s first plan is refused by the approver. `audit` plans,
- * is approved and released at the first try, into two parallel items.
+ * is approved and released at the first try, into two parallel items. `rewrite`, recorded here with
+ * its acceptance already merged, is planned with a wildcard file boundary its parallel items share
+ * every time, so its plan rounds run out before any approver sees one and it is left to the master.
  */
-export function plannerWorld(dayStart: number, goals: Record<string, string>) {
+export async function plannerWorld(dayStart: number, accepted: Record<string, string>) {
+  const recorded = (await api(principals.operatorAgent, 'POST', 'goals', { statement: 'Customers can use rewrite without help', users: ['Repository operators'], constraints: [], deployTarget: 'uat' })) as Goal;
+  const at = new Date(clock.now()).toISOString(), outcome = `rewrite-${recorded.revision}`;
+  let rewrite = applyGoalCommand(recorded, 'draft', { outcomes: [{ id: outcome, title: 'A customer completes rewrite', criteria: ['The rewrite page answers'], case: { id: outcome, title: 'rewrite answers', tags: ['api'], target: 'uat', required: true,
+    steps: [{ kind: 'http', name: 'read the board', method: 'GET', path: '/api/board', status: 200 }] } }], pr: 4999, branch: 'graphyard/rewrite-acceptance', head: 'e'.repeat(40) }, { actor: principals.operatorAgent, at });
+  rewrite = applyGoalCommand(rewrite, 'approve', { reason: 'What a customer asked for' }, { actor: principals.approver, at });
+  rewrite = applyGoalCommand(rewrite, 'merged', { pr: 4999, mergeSha: 'f'.repeat(40) }, { actor: principals.coordinator, at });
+  await appendGoal(engine.store.pool, principals.coordinator.id, 'merged', rewrite, { pr: 4999 });
+  const goals: Record<string, string> = { ...accepted, rewrite: rewrite.key };
   const day = {
+    goals,
     runs: [] as { goal: string; role: 'plan' | 'judge'; revision: number; at: number }[],
     releases: [] as { goal: string; ok: boolean; at: number }[],
     delivers: [] as { goal: string; ok: boolean; at: number }[],
@@ -37,6 +48,7 @@ export function plannerWorld(dayStart: number, goals: Record<string, string>) {
     const base = `src/goal/${name}`;
     if (name === 'signup' && runs === 1) return { note: note(goal), items: [planItem(goal, 'api', [`${base}/api.ts`, `${base}/shared.ts`]), planItem(goal, 'ui', [`${base}/ui.ts`, `${base}/shared.ts`])] };
     if (name === 'signup') return { note: note(goal), items: [planItem(goal, 'api', [`${base}/api.ts`, `${base}/shared.ts`]), planItem(goal, 'ui', [`${base}/ui.ts`, `${base}/shared.ts`], ['api'])] };
+    if (name === 'rewrite') return { note: note(goal), items: [planItem(goal, 'model', [`${base}/**`]), planItem(goal, 'view', [`${base}/view.ts`])] };
     if (name === 'audit') return { note: note(goal), items: [planItem(goal, 'log', [`${base}/log.ts`]), planItem(goal, 'report', [`${base}/report.ts`])] };
     return { note: note(goal), items: [planItem(goal, 'invoice', [`${base}/invoice.ts`])] };
   };
@@ -54,6 +66,7 @@ export function plannerWorld(dayStart: number, goals: Record<string, string>) {
     goals: async () => (await api(principals.coordinator, 'GET', 'goals?open=1')).goals,
     runner: async (role, attempt, goal) => ({ runner: runner(role, goal), runtime: `soak-${attempt}`, model: attempt }),
     plan: (goal, plan) => api(principals.operatorAgent, 'POST', `goals/${goal.key}/plan`, plan, `planner:${goal.id}:${goal.revision}`),
+    invalid: (goal, reason) => api(principals.operatorAgent, 'POST', `goals/${goal.key}/plan-invalid`, { reason }, `planner:${goal.id}:${goal.revision}:invalid`),
     judge: (goal, judgement) => api(principals.approver, 'POST', `goals/${goal.key}/plan-${judgement.verdict}`, { reason: judgement.reason }, `planner:${goal.id}:${goal.revision}:judged`),
     release: async goal => {
       const name = named(goal.key), first = !day.releases.some(entry => entry.goal === name);

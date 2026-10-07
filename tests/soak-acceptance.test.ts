@@ -5,6 +5,7 @@ import { api, principals, soakControlPlanes } from './helpers/soak-plane.js';
 import { simulateDay } from './helpers/soak-simulation.js';
 import { acceptancePollMs } from '../src/daemon/acceptance.js';
 import { planPollMs, planRetryMs, planStepRetryMs } from '../src/daemon/planner.js';
+import { maxPlanRounds } from '../src/model/goal-plan.js';
 import { plannedWork } from './helpers/soak-planner.js';
 import type { Goal } from '../src/model/goal.js';
 
@@ -78,13 +79,14 @@ test('unit:soak.acceptance-goals — across a day the loop drives three goals to
   assert.equal(keys.length, 3, `one action per goal: ${keys.join(', ')}`);
 });
 
-test('unit:soak.planner-goals — across a day the loop plans, judges, releases and delivers three merged goals: one plan run per plan, a plan refused before approval planned again after an hour, one judgement per posted plan, an approver refusal planned again, a release that died after creating an item retried without making it twice, items dispatched only after the items they depend on are done, delivery asked at most once per poll interval, and every invariant holding', { timeout: 600_000 }, async () => {
+test('unit:soak.planner-goals — across a day the loop plans, judges, releases and delivers three merged goals: one plan run per plan, a plan refused before approval planned again after an hour, one judgement per posted plan, an approver refusal planned again, a goal whose plans are all refused before approval left to the master after its plan rounds, a release that died after creating an item retried without making it twice, items dispatched only after the items they depend on are done, delivery asked at most once per poll interval, and every invariant holding', { timeout: 600_000 }, async () => {
   const day = await simulateDay({
     hours: 14, acceptance: true, planner: true,
-    plan: { items: 4, leftovers: 1, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, attested: 0, exhaustedReviewer: 0, unstable: 0, lowLane: 0, outOfQueue: { item: 4, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 4 } },
+    // Production is redeployed through the afternoon, so the planned items' merges are observed served.
+    plan: { deploys: [2 * hour + 30 * minute, 5 * hour, 9 * hour, 11 * hour, 13 * hour], items: 4, leftovers: 1, slowRecompute: 0, workMs: 15 * minute, rework: new Set(), deaths: new Set(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set(), misread: new Set(), exits: new Set(), spentProducer: 0, lostRuns: 0, attested: 0, exhaustedReviewer: 0, unstable: 0, lowLane: 0, outOfQueue: { item: 4, afterMs: 99 * hour }, blind: { from: 99 * hour, to: 100 * hour }, split: { at: 99 * hour, item: 4 } },
   });
   const { violations, failures, lost, state } = day;
-  const goalsOf = day.acceptanceDay!.goals, planner = day.plannerDay!;
+  const planner = day.plannerDay!, goalsOf = planner.goals;
   assert.deepEqual(violations, [], 'every system invariant holds while goals are planned and delivered');
   assert.deepEqual(failures, [], 'no cycle failed');
   assert.deepEqual(lost, [], 'no lease was lost');
@@ -111,7 +113,8 @@ test('unit:soak.planner-goals — across a day the loop plans, judges, releases 
   assert.equal(signupPlans.length, 2, 'one run for the refused plan, one for the plan posted');
   assert.ok(signupPlans[1].at - signupPlans[0].at >= planRetryMs, 'a plan refused before approval is planned again after an hour, not every cycle');
   assert.equal(runs('signup', 'judge').length, 1, 'the refused plan was never judged');
-  assert.equal(goal('signup').planDrafts, 1);
+  assert.equal(goal('signup').planDrafts, 2, 'the plan refused before approval counts as a round');
+  assert.deepEqual((await history('signup')).slice(-6), ['goal.merged', 'goal.plan-invalid', 'goal.plan', 'goal.plan-approve', 'goal.released', 'goal.deliver']);
   // Its first release died after the control plane created the first item; the retry came ten minutes later and found that item.
   const releases = planner.releases.filter(entry => entry.goal === 'signup');
   assert.deepEqual(releases.map(entry => entry.ok), [false, true]);
@@ -128,10 +131,20 @@ test('unit:soak.planner-goals — across a day the loop plans, judges, releases 
   assert.equal(runs('audit', 'plan').length, 1); assert.equal(runs('audit', 'judge').length, 1);
   assert.ok(work.audit.every(item => !item.dependencies.length));
   assert.deepEqual(await history('audit'), ['goal.recorded', 'goal.draft', 'goal.approve', 'goal.closed', 'goal.draft', 'goal.approve', 'goal.merged', 'goal.plan', 'goal.plan-approve', 'goal.released', 'goal.deliver']);
+  // rewrite: every plan let parallel items share a wildcard boundary, so each was refused before approval, an hour apart,
+  // until its plan rounds ran out; then the loop ran it no more and left it to the master, never creating an item.
+  const rewrite = runs('rewrite', 'plan');
+  assert.equal(rewrite.length, maxPlanRounds, `one paid run per round, none past the cap: ${JSON.stringify(rewrite)}`);
+  rewrite.slice(1).forEach((run, index) => assert.ok(run.at - rewrite[index].at >= planRetryMs, 'each refused plan is planned again after an hour'));
+  assert.equal(runs('rewrite', 'judge').length, 0, 'no approver saw a refused plan');
+  assert.equal(goal('rewrite').stage, 'planning'); assert.equal(goal('rewrite').planDrafts, maxPlanRounds);
+  assert.deepEqual(await history('rewrite'), ['goal.recorded', 'goal.merged', ...Array(maxPlanRounds).fill('goal.plan-invalid')]);
+  assert.match(state.actions[`planner:${goal('rewrite').id}`].detail, /the loop plans no more and leaves it to the master/);
+  assert.deepEqual(work.rewrite, []);
   // One plan run per plan revision and one judgement per posted plan, everywhere.
   for (const role of ['plan', 'judge'] as const) {
     const seen = planner.runs.filter(run => run.role === role).map(run => `${run.goal}:${run.revision}`);
-    assert.equal(new Set(seen).size + (role === 'plan' ? 1 : 0), seen.length, `one ${role} run per revision but signup's refused plan: ${seen.join(', ')}`);
+    assert.equal(new Set(seen).size, seen.length, `one ${role} run per revision: ${seen.join(', ')}`);
   }
   // Delivery was asked once every item was served, each request at most once per poll interval: signup's failed request came back five minutes later.
   for (const name of ['signup', 'billing', 'audit']) {
@@ -140,5 +153,5 @@ test('unit:soak.planner-goals — across a day the loop plans, judges, releases 
     asks.slice(1).forEach((entry, index) => assert.ok(entry.at - asks[index].at >= planPollMs, `${name}'s delivery was asked again after ${entry.at - asks[index].at} ms`));
   }
   const keys = Object.keys(state.actions).filter(key => key.startsWith('planner:'));
-  assert.equal(keys.length, 3, `one planner action per goal: ${keys.join(', ')}`);
+  assert.equal(keys.length, 4, `one planner action per goal: ${keys.join(', ')}`);
 });

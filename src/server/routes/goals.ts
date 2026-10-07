@@ -2,8 +2,7 @@ import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import { CHECK_NAME, demand, operatorCapability, type OperatorCapability, type Principal, type Work } from '../../model.js';
 import { appendGoal, applyGoalCommand, goalCommandSchemas, goalHistory, goalKeyPattern, goalSummary, implementersOf, readGoals, recordGoal, type Goal, type GoalCommand, type Landing } from '../../model/goal.js';
-import { planItemInput, planOrder } from '../../model/goal-plan.js';
-import { deliveryState } from '../../model/delivery.js';
+import { planItemInput, planItemMark, planOrder, servedInProduction } from '../../model/goal-plan.js';
 import type { Engine } from '../../engine.js';
 import { landableCarried } from '../../landable-check.js';
 import type { GitHub } from '../../github.js';
@@ -32,7 +31,7 @@ function allow({ actor, services }: RouteContext, roles: Principal['role'][], ca
  */
 const permitted: Record<Exclude<GoalCommand, 'record' | 'merged' | 'released'>, (context: RouteContext) => void> = {
   draft: intent, approve: judge, refuse: judge, closed: intent, deliver: intent, land: intent, 'case-change-approve': judge, 'case-change-refuse': judge,
-  plan: intent, 'plan-approve': judge, 'plan-refuse': judge, release: intent,
+  plan: intent, 'plan-approve': judge, 'plan-refuse': judge, 'plan-invalid': intent, release: intent,
   'case-change': context => demand(!['reader', 'producer'].includes(context.actor.role), 'A reader or producer cannot request a case change', 403),
 };
 const find = (goals: Goal[], ref: string) => goals.find(goal => goal.key === ref || goal.id === ref);
@@ -105,14 +104,12 @@ export async function recordLanding(store: Pick<Store, 'transaction'>, goal: Goa
   });
 }
 
-/** An item delivers its goal once it is done and production serves it: deployed (and smoke-passed, when its policy asks for the smoke proof). */
-const served = (work: Work | undefined) => !!work && work.stage === 'done' && ['delivered', 'smoke-passed'].includes(deliveryState(work) ?? '');
-
 /**
  * Creates and releases an approved plan's items in dependency order, as the calling operator agent
  * (GY-1418): each is created with the ids of the items it depends on, so the dispatcher's ready gate
- * holds it until they are done. Every create and release is keyed by the plan and the item, so a retry
- * after a partial release finds the items already made instead of making them twice. Then, under the
+ * holds it until they are done. A retry after a partial release finds the items already made by the
+ * mark their description opens with (planItemMark), which outlives the per-item idempotency keys'
+ * receipts, instead of making them twice. Then, under the
  * lock, the goal is recorded released only when every item exists, is released and carries exactly
  * its planned dependencies.
  */
@@ -122,7 +119,9 @@ export async function releasePlan(engine: Pick<Engine, 'execute' | 'store'>, act
   const created = new Map<string, Work>();
   for (const item of planOrder(plan)) {
     const key = `goal-plan:${goal.id}:${plan.draftedAt}:${item.ref}`;
-    let work = await engine.execute(actor, 'create', null, planItemInput({ ...goal, plan, planApproval: approval }, item, created), `${key}:create`) as Work;
+    const input = planItemInput({ ...goal, plan, planApproval: approval }, item, created), mark = planItemMark(goal, plan, item);
+    let work = (await engine.store.pool.query('SELECT document FROM work_items WHERE document->>\'title\' = $1 AND left(document->>\'description\', $2) = $3 ORDER BY number LIMIT 1', [input.title, mark.length, mark])).rows[0]?.document as Work | undefined
+      ?? await engine.execute(actor, 'create', null, input, `${key}:create`) as Work;
     if (!work.ready) work = await engine.execute(actor, 'ready', work.id, { expectedRevision: work.revision, reason: `${goal.key}'s plan was approved by ${approval.by}` }, `${key}:ready`) as Work;
     created.set(item.ref, work);
   }
@@ -213,7 +212,7 @@ export const goalRoutes = defineRoutes('goals', [
     },
   },
   {
-    method: 'POST', path: /^\/api\/goals\/([^/]+)\/(draft|approve|refuse|closed|deliver|plan|plan-approve|plan-refuse|case-change|case-change-approve|case-change-refuse)$/,
+    method: 'POST', path: /^\/api\/goals\/([^/]+)\/(draft|approve|refuse|closed|deliver|plan|plan-approve|plan-refuse|plan-invalid|case-change|case-change-approve|case-change-refuse)$/,
     async handle(context, [ref, verb]) {
       const command = verb as Exclude<GoalCommand, 'record' | 'land' | 'merged' | 'release' | 'released'>;
       permitted[command](context);
@@ -230,7 +229,7 @@ export const goalRoutes = defineRoutes('goals', [
         // a grant for an item not yet created could be approved by whoever later implements it.
         let implementers: string[] = [], undelivered: string[] | undefined;
         // Delivery waits on every named item being done and served by production, never a bare assertion.
-        if (command === 'deliver') { undelivered = []; for (const key of goalCommandSchemas.deliver.parse(input).items) if (!served(await workByKey(db, key))) undelivered.push(key); }
+        if (command === 'deliver') { undelivered = []; for (const key of goalCommandSchemas.deliver.parse(input).items) if (!servedInProduction(await workByKey(db, key))) undelivered.push(key); }
         if (command === 'case-change') demand(await workByKey(db, goalCommandSchemas[command].parse(input).work), `${input.work} is no work item; a case change names the existing item that needs it`, 404);
         if (command === 'case-change-approve' || command === 'case-change-refuse') {
           const change = goal.caseChanges.find(entry => entry.id === goalCommandSchemas[command].parse(input).change);

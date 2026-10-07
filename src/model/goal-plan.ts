@@ -2,6 +2,9 @@ import { z } from 'zod';
 import { caseDirectory, caseId, contractFile } from '../e2e/case.js';
 import { criterionSchema } from './policy.js';
 import { demand } from './refusal.js';
+import { pathScopesOverlap } from './scope.js';
+import { deliveryState } from './delivery.js';
+import type { Work } from './work.js';
 import type { Goal, GoalContext } from './goal.js';
 
 /**
@@ -37,8 +40,6 @@ export type PlanItem = z.infer<typeof planItemSchema>;
 export const goalPlanSchema = z.object({ note: line(6000), items: z.array(planItemSchema).min(1).max(30) }).strict();
 export type GoalPlan = z.infer<typeof goalPlanSchema>;
 const words = (text: string) => text.trim().split(/\s+/).filter(Boolean).length;
-/** Whether one planned path covers the other: the same file, or a directory (ending in /) holding it. */
-const pathsMeet = (a: string, b: string) => a === b || (a.endsWith('/') && b.startsWith(a)) || (b.endsWith('/') && a.startsWith(b));
 /** Every item ref each item lands after, directly or through another. */
 function reaches(plan: Pick<GoalPlan, 'items'>) {
   const direct = new Map(plan.items.map(item => [item.ref, item.dependsOn]));
@@ -52,7 +53,7 @@ function reaches(plan: Pick<GoalPlan, 'items'>) {
  * Pure: every reason a plan cannot go to approval, each naming what to change. The note is at most
  * planNoteMaxWords words; every approved outcome is served by at least one item; each item names
  * the goal's required cases it must make pass (at least the case of every outcome it serves);
- * dependencies name items of the plan without a cycle; two items neither of which lands after the
+ * each item's criterion ids are unique; dependencies name items of the plan without a cycle; two items neither of which lands after the
  * other share no planned file; and no item plans a change to a protected case or the contract.
  */
 export function planRefusals(goal: Pick<Goal, 'key' | 'protected' | 'acceptance'>, plan: GoalPlan): string[] {
@@ -70,9 +71,11 @@ export function planRefusals(goal: Pick<Goal, 'key' | 'protected' | 'acceptance'
     if (unknown.length) refusals.push(`item ${item.ref} names case${unknown.length === 1 ? '' : 's'} ${unknown.join(', ')}, which ${goal.key} does not require; its cases are ${goal.protected.cases.join(', ')}`);
     const owed = item.outcomes.map(id => caseOfOutcome.get(id)).filter((id): id is string => !!id && !item.cases.includes(id));
     if (owed.length) refusals.push(`item ${item.ref} serves an outcome without naming the case that proves it: add ${owed.join(', ')} to its cases`);
+    const ids = item.criteria.map(criterion => criterion.id), repeated = [...new Set(ids.filter((id, index) => ids.indexOf(id) !== index))];
+    if (repeated.length) refusals.push(`item ${item.ref} names criterion ${repeated.join(', ')} twice: each criterion id is unique within its item`);
     const missing = item.dependsOn.filter(ref => !refs.includes(ref) || ref === item.ref);
     if (missing.length) refusals.push(`item ${item.ref} depends on ${missing.join(', ')}, which ${missing.length === 1 ? 'is' : 'are'} not another item of this plan`);
-    const guarded = item.plannedFiles.filter(path => path === contractFile || goal.protected.cases.some(id => pathsMeet(path, `${caseDirectory}/${id}.json`)));
+    const guarded = item.plannedFiles.filter(path => pathScopesOverlap(path, contractFile) || goal.protected.cases.some(id => pathScopesOverlap(path, `${caseDirectory}/${id}.json`)));
     if (guarded.length) refusals.push(`item ${item.ref} plans ${guarded.join(', ')}: no item edits or weakens a required case or its contract binding`);
   }
   const uncovered = goal.protected.outcomes.filter(id => !plan.items.some(item => item.outcomes.includes(id)));
@@ -82,7 +85,7 @@ export function planRefusals(goal: Pick<Goal, 'key' | 'protected' | 'acceptance'
   if (cyclic.length) refusals.push(`items ${cyclic.join(', ')} depend on each other in a cycle`);
   for (const [index, a] of plan.items.entries()) for (const b of plan.items.slice(index + 1)) {
     if (a.ref === b.ref || closure.get(a.ref)!.has(b.ref) || closure.get(b.ref)!.has(a.ref)) continue;
-    const shared = a.plannedFiles.filter(path => b.plannedFiles.some(other => pathsMeet(path, other)));
+    const shared = a.plannedFiles.filter(path => b.plannedFiles.some(other => pathScopesOverlap(path, other)));
     if (shared.length) refusals.push(`items ${a.ref} and ${b.ref} may run in parallel yet both plan ${shared.join(', ')}: give them separate files or make one depend on the other`);
   }
   return refusals;
@@ -104,6 +107,8 @@ export const planCommandSchemas = {
   plan: goalPlanSchema,
   'plan-approve': z.object({ reason }).strict(),
   'plan-refuse': z.object({ reason }).strict(),
+  // A plan the loop refused before approval (planRefusals, or a 422 on posting it): it counts toward maxPlanRounds.
+  'plan-invalid': z.object({ reason }).strict(),
   release: z.object({}).strict(),
   released: z.object({ items: z.array(releasedItemSchema).min(1).max(30) }).strict(),
 } as const;
@@ -125,6 +130,10 @@ export function applyPlanCommand(goal: Goal, next: Goal, command: Exclude<PlanCo
     demand(actor.id !== goal.plan.author, `Self-approval refused: ${actor.id} authored the plan of ${goal.key}; an approver on a different identity judges it`, 403);
     if (command === 'plan-approve') { next.planApproval = { by: actor.id, at, reason: data.reason }; next.stage = 'planned'; }
     else { next.planRefusal = { by: actor.id, at, reason: data.reason }; next.plan = null; next.stage = 'planning'; }
+  } else if (command === 'plan-invalid') {
+    const data = planCommandSchemas[command].parse(input);
+    demand(goal.stage === 'planning', `${goal.key} is ${goal.stage}; only a plan being drafted is refused before approval`);
+    next.planRefusal = { by: actor.id, at, reason: data.reason }; next.planDrafts = (goal.planDrafts ?? 0) + 1;
   } else if (command === 'released') {
     // Recorded by the release route once every planned item exists, carries its dependencies and is released.
     const data = planCommandSchemas.released.parse(input);
@@ -147,10 +156,18 @@ export function planNext(goal: Goal): { who: string; command: string } | null {
   return null;
 }
 
+/**
+ * An item delivers its goal once it is done and production serves it: a deployment observed
+ * covering its merge, and the smoke proof passed when its policy asks for one. Read by the deliver
+ * route and the loop alike.
+ */
+export const servedInProduction = (work: Work | undefined) => !!work && work.stage === 'done' && !!work.delivery?.deployment && ['delivered', 'smoke-passed'].includes(deliveryState(work) ?? '');
+/** The first line of a released plan item's description: the durable mark a retried release finds it by, whatever receipts expired. */
+export const planItemMark = (goal: Pick<Goal, 'key'>, plan: { draftedAt: string }, item: Pick<PlanItem, 'ref'>) => `Plan item ${item.ref} of ${goal.key}'s plan drafted ${plan.draftedAt}.`;
 /** What creating one approved plan item sends: its criteria and file boundary, the dependencies already created, and the goal, outcomes, required cases and architecture note it serves. */
-export function planItemInput(goal: Pick<Goal, 'key' | 'statement' | 'acceptance'> & { plan: GoalPlan & { author: string }; planApproval: { by: string } }, item: PlanItem, created: ReadonlyMap<string, { id: string }>) {
+export function planItemInput(goal: Pick<Goal, 'key' | 'statement' | 'acceptance'> & { plan: GoalPlan & { author: string; draftedAt: string }; planApproval: { by: string } }, item: PlanItem, created: ReadonlyMap<string, { id: string }>) {
   const outcomes = (goal.acceptance?.outcomes ?? []).filter(outcome => item.outcomes.includes(outcome.id));
-  const description = [item.description, '',
+  const description = [planItemMark(goal, goal.plan, item), item.description, '',
     `Planned for ${goal.key} (${goal.statement}) by ${goal.plan.author}; the plan was approved by ${goal.planApproval.by}.`,
     `It serves outcome${outcomes.length === 1 ? '' : 's'} ${outcomes.map(outcome => `${outcome.id} (${outcome.title})`).join(', ') || item.outcomes.join(', ')}, and must make the required uat case${item.cases.length === 1 ? '' : 's'} ${item.cases.map(id => `${caseDirectory}/${id}.json`).join(', ')} pass. Those cases are protected: never edit or weaken them; a needed change goes through graphyard goal case-change.`,
     '', `Architecture note for ${goal.key}:`, goal.plan.note].join('\n').trim();

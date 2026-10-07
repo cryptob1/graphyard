@@ -1184,7 +1184,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const diagnosed: DiagnosisRun[] = [];
   clearDrafts(); clearPlans();
   const acceptance = options.acceptance ? await acceptanceWorld(dayStart) : null;
-  const planner = acceptance && options.planner ? plannerWorld(dayStart, acceptance.day.goals) : null;
+  const planner = acceptance && options.planner ? await plannerWorld(dayStart, acceptance.day.goals) : null;
   // GY-1092: for `diagnosisLimit` the provider refuses every run for its spent quota, naming no reset.
   const limited = () => !!options.diagnosisLimit && clock.now() - dayStart >= options.diagnosisLimit.from && clock.now() - dayStart < options.diagnosisLimit.to;
   const diagnostician: DiagnosticianEffects = {
@@ -1638,6 +1638,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       }));
     };
   }
+  // GY-1418: a goal is delivered only once production is observed serving every item, so the planner's day records each observation on the real route.
+  if (planner) effects.recordDeployment = (item, observation) => api(principals.coordinator, 'POST', `work/${item.id}/deployment`, { sha: observation.sha, mergeSha: item.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt });
   // ---- GY-1354: the slow-deployment day. Inside the window the release observation answers
   // ---- `observationMs` after it is asked, as cycle 12624's did in 587.1s: the cycle that asks spends the
   // ---- deployment step's whole budget on it and is cut, and the read stays in flight across cycles.

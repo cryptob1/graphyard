@@ -113,12 +113,18 @@ test('unit:planner-plan-validation — a plan covers every approved outcome, nam
   // Overlap: two items neither of which depends on the other share no planned file, a directory included.
   assert.match(refused({ note, items: [item('api', ['signup'], ['src/api.ts']), item('billing', ['billing'], ['src/billing.ts', 'src/api.ts'])] }), /items api and billing may run in parallel yet both plan src\/api\.ts/);
   assert.match(refused({ note, items: [item('api', ['signup'], ['src/api.ts']), item('billing', ['billing'], ['src/'])] }), /items api and billing may run in parallel yet both plan src\/api\.ts/);
+  // Every plannedFiles form counts: a dir/* or dir/** boundary meets the files under it.
+  for (const wide of ['src/billing/**', 'src/billing/*'])
+    assert.match(refused({ note, items: [item('api', ['signup'], ['src/billing/x.ts']), item('billing', ['billing'], [wide])] }), /items api and billing may run in parallel yet both plan src\/billing\/x\.ts/);
+  // A criterion id an item names twice would be refused at create, after approval: it is refused before.
+  assert.match(refused({ note, items: [{ ...item('api', ['signup'], ['src/api.ts']), criteria: [...criteria('one'), ...criteria('two')] }, item('billing', ['billing'], ['src/billing.ts'])] }), /item api names criterion AC-1 twice/);
   // Cases: each item names the required cases it must make pass, and only the goal's.
   assert.match(refused({ note, items: [{ ...item('api', ['signup'], ['src/api.ts']), cases: ['billing-case'] }, item('billing', ['billing'], ['src/billing.ts'])] }), /item api serves an outcome without naming the case that proves it: add signup-case/);
   assert.match(refused({ note, items: [{ ...item('api', ['signup'], ['src/api.ts']), cases: ['signup-case', 'other-case'] }, item('billing', ['billing'], ['src/billing.ts'])] }), /item api names case other-case, which GOAL-1 does not require/);
   assert.match(refused({ note, items: [item('api', ['signup', 'refunds'], ['src/api.ts']), item('billing', ['billing'], ['src/billing.ts'])] }), /item api serves refunds, which GOAL-1 did not approve/);
   // No item edits a required case or its contract binding.
   assert.match(refused({ note, items: [item('api', ['signup'], ['src/api.ts', 'e2e/cases/signup-case.json']), item('billing', ['billing'], ['e2e/contract.json'])] }), /item api plans e2e\/cases\/signup-case\.json: no item edits or weakens a required case.*item billing plans e2e\/contract\.json/);
+  assert.match(refused({ note, items: [item('api', ['signup'], ['src/api.ts', 'e2e/cases/**']), item('billing', ['billing'], ['e2e/'])] }), /item api plans e2e\/cases\/\*\*: no item edits.*item billing plans e2e\//);
   // Dependencies: refs of this plan, no cycle.
   assert.match(refused({ note, items: [item('api', ['signup'], ['src/api.ts'], ['nowhere']), item('billing', ['billing'], ['src/billing.ts'])] }), /item api depends on nowhere, which is not another item of this plan/);
   const cycle: GoalPlan = { note, items: [item('api', ['signup'], ['src/api.ts'], ['billing']), item('billing', ['billing'], ['src/billing.ts'], ['api'])] };
@@ -149,6 +155,7 @@ test('unit:planner-plan-validation — a plan covers every approved outcome, nam
     goals: async () => [current],
     runner: async (role, attempt) => ({ runner: stubRunner(() => role === 'plan' ? plans.shift() : { goal: goal.key, verdict: 'approve', reason: 'Fine' }, prompts, tools), runtime: 'stub', model: attempt }),
     plan: async (target, plan) => { posted.push(plan); current = applyGoalCommand(target, 'plan', plan, { actor: planAuthor, at: new Date().toISOString() }); return current; },
+    invalid: async (target, reason) => (current = applyGoalCommand(target, 'plan-invalid', { reason }, { actor: planAuthor, at: new Date().toISOString() })),
     judge: async target => target, release: async target => target, deliver: async target => target,
   };
   const state = emptyDaemonState(config);
@@ -165,18 +172,33 @@ test('unit:planner-plan-validation — a plan covers every approved outcome, nam
   assert.deepEqual(posted, [], 'a refused plan never reaches an approver');
   assert.equal(state.actions[`planner:${goal.id}`].state, 'failed');
   assert.match(state.actions[`planner:${goal.id}`].detail, /refused before approval: items api and billing may run in parallel yet both plan src\/api\.ts/);
+  // The refusal is recorded on the goal, so it counts toward the plan rounds whatever restarts the loop.
+  assert.equal(current.stage, 'planning'); assert.equal(current.planDrafts, 1); assert.match(current.planRefusal!.reason, /may run in parallel/);
   await step(); assert.equal(tools.length, 1, 'the next plan waits out the retry');
   await step(60 * 60_000);
   assert.match(prompts[1], /items api and billing may run in parallel/, 'the next run answers the refusal');
   await step();
-  assert.equal(posted.length, 1); assert.equal(current.stage, 'plan-review'); assert.equal(current.plan?.author, planAuthor.id);
+  assert.equal(posted.length, 1); assert.equal(current.stage, 'plan-review'); assert.equal(current.plan?.author, planAuthor.id); assert.equal(current.planDrafts, 2);
   assert.match(state.actions[`planner:${goal.id}`].detail, /Recorded GOAL-1's plan: ui after api; api; billing; it awaits an approver other than its author/);
   // Past its plan rounds, a refused goal is the master's.
   assert.match(goalSummary({ ...goal, planDrafts: maxPlanRounds }).next!.who, new RegExp(`${maxPlanRounds} plans were refused`));
+
+  // Plans refused before approval use up the rounds too: a planner that keeps overlapping is run maxPlanRounds times, an hour apart, then never again.
+  let stubborn: Goal = mergedGoal('GOAL-2');
+  const overlap = () => ({ goal: stubborn.key, note, items: [item('api', ['signup'], ['src/shared/**']), item('billing', ['billing'], ['src/shared/billing.ts'])] });
+  const stubbornRuns: string[] = [];
+  fx.goals = async () => [stubborn];
+  fx.runner = async (_role, attempt) => ({ runner: stubRunner(overlap, stubbornRuns, []), runtime: 'stub', model: attempt });
+  fx.invalid = async (target, reason) => (stubborn = applyGoalCommand(target, 'plan-invalid', { reason }, { actor: planAuthor, at: new Date().toISOString() }));
+  for (let hour = 0; hour < maxPlanRounds + 2; hour++) { await step(60 * 60_000); await step(); }
+  assert.equal(stubbornRuns.length, maxPlanRounds, 'one paid run per round, and none past the cap');
+  assert.equal(stubborn.planDrafts, maxPlanRounds); assert.equal(stubborn.stage, 'planning');
+  assert.match(state.actions[`planner:${stubborn.id}`].detail, /the loop plans no more and leaves it to the master/);
+  assert.match(goalSummary(stubborn).next!.who, /^master: /);
 });
 
 test('unit:planner-approval-and-dispatch-order — only an approver who did not write the plan approves it, only then are its items created and released with their dependencies, the dispatcher holds each until those are delivered, and the goal moves planned, delivering, delivered', async () => {
-  const { clearPlans, currentGoal, planJudgementTool, plansSettled, plannerStep, planTool, servedInProduction } = await planner();
+  const { clearPlans, currentGoal, planItemInput, planJudgementTool, planOrder, plansSettled, plannerStep, planTool, servedInProduction } = await planner();
   clearPlans();
   // A goal whose acceptance merged, in the ledger as the land route leaves it.
   const goal = mergedGoal('GOAL-1');
@@ -201,8 +223,17 @@ test('unit:planner-approval-and-dispatch-order — only an approver who did not 
     goals: async () => (await ok(master, 'GET', 'goals?open=1')).goals,
     runner: async (role, attempt, target) => ({ runner: stubRunner(() => role === 'plan' ? { goal: target.key, ...goodPlan() } : { goal: target.key, ...verdict }, prompts, tools), runtime: 'stub', model: attempt }),
     plan: (target, plan) => ok(planAuthor, 'POST', `goals/${target.key}/plan`, plan),
+    invalid: (target, reason) => ok(planAuthor, 'POST', `goals/${target.key}/plan-invalid`, { reason }),
     judge: (target, judgement) => ok(approver, 'POST', `goals/${target.key}/plan-${judgement.verdict}`, { reason: judgement.reason }),
-    release: async target => { if (failRelease-- > 0) throw new Error('Graphyard refused goals (502)'); return ok(planAuthor, 'POST', `goals/${target.key}/release`, {}); },
+    release: async target => {
+      if (failRelease-- > 0) {
+        // The control plane created the first item, then died; that create's receipt is long gone by the retry.
+        const plan = target.plan!, first = planOrder(plan)[0];
+        await engine.execute(planAuthor, 'create', null, planItemInput({ ...target, plan, planApproval: target.planApproval! }, first, new Map()), randomUUID());
+        throw new Error('Graphyard refused goals (502)');
+      }
+      return ok(planAuthor, 'POST', `goals/${target.key}/release`, {});
+    },
     deliver: (target, items, reason) => ok(planAuthor, 'POST', `goals/${target.key}/deliver`, { items, reason }),
   };
   const state = emptyDaemonState(config);
@@ -235,6 +266,7 @@ test('unit:planner-approval-and-dispatch-order — only an approver who did not 
 
   // Released in dependency order, each with the ids of the items it depends on; a failed release is retried and makes nothing twice.
   await step();
+  assert.equal((await allWork()).length, 1, 'the failed release left its first item behind');
   assert.match(state.actions[`planner:${goal.id}`].detail, /Could not release GOAL-1's approved plan/);
   await step(10 * 60_000);
   current = await read();
@@ -243,7 +275,7 @@ test('unit:planner-approval-and-dispatch-order — only an approver who did not 
   const again: Goal = await ok(planAuthor, 'POST', `goals/${goal.key}/release`, {});
   assert.deepEqual(again.items, current.items, 'a repeated release answers the items already made');
   let work = await allWork();
-  assert.equal(work.length, 3, 'one work item per planned item');
+  assert.equal(work.length, 3, 'one work item per planned item: the retry found the item the failed release made by its mark, not its expired receipt');
   const byRef = (ref: string) => work.find(entry => entry.id === current.items!.find(planned => planned.ref === ref)!.id)!;
   const [api, ui, billing] = [byRef('api'), byRef('ui'), byRef('billing')];
   assert.ok(Number(api.key.split('-')[1]) < Number(ui.key.split('-')[1]), 'created in dependency order');
@@ -263,7 +295,8 @@ test('unit:planner-approval-and-dispatch-order — only an approver who did not 
   const deliver = async (target: Work, delivery: Record<string, unknown> | null) => store.pool.query(`UPDATE work_items SET document = document || $2::jsonb WHERE id = $1`,
     [target.id, JSON.stringify({ stage: 'done', ...(delivery ? { delivery } : {}) })]);
   const merged = { mergedAt: at, mergeSha: 'c'.repeat(40), authorizationRevision: 1 };
-  await deliver(api, merged);
+  const deployment = { sha: 'c'.repeat(40), mergeSha: 'c'.repeat(40), source: 'endpoint', observedAt: at, covers: 'exact', at, observer: master.id };
+  await deliver(api, { ...merged, deployment });
   work = await allWork();
   assert.doesNotThrow(() => assertDispatchable(work.find(entry => entry.id === ui.id)!, work, at), 'once its dependency is delivered, ui is dispatched');
 
@@ -275,16 +308,20 @@ test('unit:planner-approval-and-dispatch-order — only an approver who did not 
   const early = await call(planAuthor, 'POST', `goals/${goal.key}/deliver`, { items: [api.key], reason: 'Said so' });
   assert.equal(early.status, 422); assert.match(early.text, new RegExp(`name ${ui.key}, ${billing.key} too`));
   await deliver(ui, merged);
+  // A default-policy item merged with no deployment observed covering it is not served either.
+  assert.equal(servedInProduction((await allWork()).find(entry => entry.id === ui.id)), false);
   // A smoke-gated item merged but not yet deployed is not served.
   await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{policy,deploySmoke}', 'true') WHERE id = $1`, [billing.id]);
   await deliver(billing, merged);
   assert.equal(servedInProduction((await allWork()).find(entry => entry.id === billing.id)), false);
   const unserved = await call(planAuthor, 'POST', `goals/${goal.key}/deliver`, { items: [api.key, ui.key, billing.key], reason: 'All merged' });
-  assert.equal(unserved.status, 422); assert.match(unserved.text, new RegExp(`${billing.key} is not delivered`));
+  assert.equal(unserved.status, 422); assert.match(unserved.text, new RegExp(`${ui.key}, ${billing.key} are not delivered`), 'ui has no observed deployment and billing no smoke proof');
   await step(5 * 60_000);
   assert.equal((await read()).stage, 'delivering');
-  await deliver(billing, { ...merged, deployment: { sha: 'c'.repeat(40), mergeSha: 'c'.repeat(40), source: 'endpoint', observedAt: at, covers: 'exact', at, observer: master.id },
-    smoke: { evidenceId: randomUUID(), result: 'pass', sha: 'c'.repeat(40), mergeSha: 'c'.repeat(40), producer: 'smoke', at, executed: 1, skipped: 0 } });
+  await deliver(billing, { ...merged, deployment, smoke: { evidenceId: randomUUID(), result: 'pass', sha: 'c'.repeat(40), mergeSha: 'c'.repeat(40), producer: 'smoke', at, executed: 1, skipped: 0 } });
+  await step(5 * 60_000);
+  assert.equal((await read()).stage, 'delivering', 'ui merged, but production was never observed serving it');
+  await deliver(ui, { ...merged, deployment });
   await step(5 * 60_000);
   current = await read();
   assert.equal(current.stage, 'delivered');

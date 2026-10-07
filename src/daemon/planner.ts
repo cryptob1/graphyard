@@ -4,9 +4,8 @@
 // created and released; the goal is delivered once every item is done and production serves it.
 import { z } from 'zod';
 import type { Goal } from '../model/goal.js';
-import { goalPlanSchema, maxPlanRounds, planNoteMaxWords, planRefusals, type GoalPlan } from '../model/goal-plan.js';
-import { deliveryState } from '../model/delivery.js';
-import type { Work } from '../model/work.js';
+import { deploySmokeRequired } from '../model/delivery.js';
+import { goalPlanSchema, maxPlanRounds, planNoteMaxWords, planRefusals, servedInProduction, type GoalPlan } from '../model/goal-plan.js';
 import { agentToken } from '../master/autonomy.js';
 import { capacityRefusal, selectFleetSession } from '../fleet.js';
 import { Refusal, RefusedResponse } from '../model/refusal.js';
@@ -45,6 +44,8 @@ export interface PlannerEffects {
   runner: (role: 'plan' | 'judge', attempt: 'primary' | 'fallback', goal: Goal) => Promise<PlannerRun>;
   /** Post the plan as the master's operator-agent identity: its author. */
   plan: (goal: Goal, plan: GoalPlan) => Promise<Goal>;
+  /** Record a plan refused before approval on the goal (POST /api/goals/:key/plan-invalid), so it counts toward maxPlanRounds across restarts. */
+  invalid: (goal: Goal, reason: string) => Promise<Goal>;
   /** Post the verdict as the approver identity, which never authored a plan. */
   judge: (goal: Goal, judgement: PlanJudgement) => Promise<Goal>;
   /** Ask the control plane to create and release the approved plan's items in dependency order (POST /api/goals/:key/release). */
@@ -59,23 +60,21 @@ const live = new Map<string, Promise<void>>();
 const pending = new Map<string, Pending>();
 /** When each goal's next try of a step may run: `${goal.id}:${step}`. */
 const retryAt = new Map<string, number>();
-/** The last plan refused before approval, per goal, so the next run answers it. */
-const refusedPlans = new Map<string, string>();
 export async function plansSettled() { await Promise.all([...live.values()]); }
-export function clearPlans() { for (const store of [live, pending, retryAt, refusedPlans]) store.clear(); }
+export function clearPlans() { for (const store of [live, pending, retryAt]) store.clear(); }
 
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 type Note = (goal: Goal, outcome: DaemonAction['state'], detail: string) => Promise<void>;
 
-export function plannerPrompt(config: { repository: string }, goal: Goal, lastRefusal: string | null) {
+export function plannerPrompt(config: { repository: string }, goal: Goal) {
   const input = { goal: goal.key, statement: goal.statement, users: goal.users, constraints: goal.constraints, deployTarget: goal.deployTarget,
     outcomes: (goal.acceptance?.outcomes ?? []).map(outcome => ({ id: outcome.id, title: outcome.title, criteria: outcome.criteria, case: outcome.case.id })),
-    lastRefusal: lastRefusal ?? (goal.planRefusal ? `${goal.planRefusal.by}: ${goal.planRefusal.reason}` : null) };
+    lastRefusal: goal.planRefusal ? `${goal.planRefusal.by}: ${goal.planRefusal.reason}` : null };
   return `You are the Graphyard planner (architect) for ${config.repository}. The goal below has approved customer outcomes, each proved by a required uat case that is already merged and protected. Plan how to build it. `
     + 'This session is read-only: never edit, commit, push, claim or decide anything, and never ask anyone anything. Read the repository to learn its stack and module layout. '
     + `Then call the ${planTool} tool exactly once with goal "${goal.key}", a note of at most ${planNoteMaxWords} words (stack, module layout, data and deploy approach), and items: `
     + 'each item a ref (lower-case letters, digits and -), a title, a description, the outcome ids it serves, the case ids it must make pass (at least the case of every outcome it serves), '
-    + 'criteria (AC-1, AC-2, ... each with text and unit:, integration: or manual: proofs), the plannedFiles it changes, and dependsOn naming the refs it must land after. '
+    + 'criteria (AC-1, AC-2, ... each id once, each with text and unit:, integration: or manual: proofs), the plannedFiles it changes, and dependsOn naming the refs it must land after. '
     + 'Every outcome is served by at least one item. Items that may run in parallel (neither depends on the other) share no planned file: make one depend on the other or split the files. '
     + 'No item plans a change to a required case or e2e/contract.json. Answer any refusal of the last plan. Stop after the call.\n\n'
     + `The goal, as JSON:\n${clip(JSON.stringify(input), 50_000)}`;
@@ -114,7 +113,7 @@ async function runHeadless<T>(planner: PlannerEffects, role: 'plan' | 'judge', g
 const ofGoal = (goal: Goal, parsed: { goal: string }) => { if (parsed.goal !== goal.key) throw new Error(`the answer names ${parsed.goal}, not ${goal.key}`); };
 function launch(cycle: Cycle, planner: PlannerEffects, goal: Goal, role: 'plan' | 'judge') {
   const run = role === 'plan'
-    ? runHeadless(planner, role, goal, plannerPrompt(cycle.config, goal, refusedPlans.get(goal.id) ?? null), payload => {
+    ? runHeadless(planner, role, goal, plannerPrompt(cycle.config, goal), payload => {
       const { goal: named, ...plan } = planPayloadSchema.parse(payload); ofGoal(goal, { goal: named }); return plan;
     }).then(result => ({ revision: goal.revision, plan: result.payload, runs: result.runs, deferred: result.deferred }))
     : runHeadless(planner, role, goal, planJudgementPrompt(cycle.config, goal), payload => { const parsed = planJudgementSchema.parse(payload); ofGoal(goal, parsed); return parsed; })
@@ -125,8 +124,6 @@ function launch(cycle: Cycle, planner: PlannerEffects, goal: Goal, role: 'plan' 
 const due = (cycle: Cycle, goal: Goal, step: string) => cycle.clock >= (retryAt.get(`${goal.id}:${step}`) ?? -Infinity);
 const later = (cycle: Cycle, goal: Goal, step: string, ms: number) => { retryAt.set(`${goal.id}:${step}`, cycle.clock + ms); };
 const refusedOutright = (error: unknown) => (error instanceof Refusal || error instanceof RefusedResponse) && error.status === 422;
-/** An item delivers its goal once it is done and production serves it, as the control plane's deliver route judges it. */
-export const servedInProduction = (work: Work | undefined) => !!work && work.stage === 'done' && ['delivered', 'smoke-passed'].includes(deliveryState(work) ?? '');
 
 /**
  * One loop step over every goal past its acceptance (GY-1418). Each goal moves at most one
@@ -172,20 +169,24 @@ async function planning(cycle: Cycle, planner: PlannerEffects, goal: Goal, note:
       pending.delete(goal.id); later(cycle, goal, 'plan', planRetryMs);
       return note(goal, 'failed', `The planner returned no plan for ${goal.key}: ${result.runs.join('; ')}; it is planned again in an hour`);
     }
-    // Refused with its reasons before any approver sees it; the next run is told why.
-    const refusals = planRefusals(goal, result.plan);
-    const refuse = (reason: string) => {
-      pending.delete(goal.id); later(cycle, goal, 'plan', planRetryMs); refusedPlans.set(goal.id, reason);
-      return note(goal, 'failed', `The planner's plan for ${goal.key} was refused before approval: ${reason}; it is planned again in an hour, answering that`);
+    // Refused with its reasons before any approver sees it, recorded on the goal so it counts toward
+    // the plan rounds whatever restarts the loop, and the next run is told why.
+    const refuse = async (reason: string) => {
+      try { await planner.invalid(goal, reason); }
+      catch (error) { later(cycle, goal, 'post', planStepRetryMs); return note(goal, 'failed', `The planner's plan for ${goal.key} was refused before approval (${clip(reason, 300)}), but the refusal could not be recorded: ${message(error)}; it is recorded again in ten minutes`); }
+      pending.delete(goal.id); later(cycle, goal, 'plan', planRetryMs);
+      const last = (goal.planDrafts ?? 0) + 1 >= maxPlanRounds;
+      return note(goal, 'failed', `The planner's plan for ${goal.key} was refused before approval: ${reason}; ${last ? `that was plan ${maxPlanRounds} of ${maxPlanRounds}, so the loop plans no more and leaves it to the master` : 'it is planned again in an hour, answering that'}`);
     };
-    if (refusals.length) return refuse(refusals.join('; '));
     if (!due(cycle, goal, 'post')) return;
+    const refusals = planRefusals(goal, result.plan);
+    if (refusals.length) return refuse(refusals.join('; '));
     try { await planner.plan(goal, result.plan); }
     catch (error) {
       if (refusedOutright(error)) return refuse(message(error));
       later(cycle, goal, 'post', planStepRetryMs); return note(goal, 'failed', `The plan for ${goal.key} could not be recorded: ${message(error)}; it is posted again in ten minutes`);
     }
-    pending.delete(goal.id); refusedPlans.delete(goal.id);
+    pending.delete(goal.id);
     return note(goal, 'done', `Recorded ${goal.key}'s plan: ${result.plan.items.map(item => `${item.ref}${item.dependsOn.length ? ` after ${item.dependsOn.join(', ')}` : ''}`).join('; ')}; it awaits an approver other than its author`);
   }
   if (live.has(goal.id) || !due(cycle, goal, 'plan')) return;
@@ -221,12 +222,24 @@ async function releasing(cycle: Cycle, planner: PlannerEffects, goal: Goal, note
   return note(goal, 'done', `Released ${goal.key}'s approved plan: ${(released.items ?? []).map(item => item.key).join(', ')}; the dispatcher launches each only after the items it depends on are delivered`);
 }
 
-/** Delivered once every item of the plan is done and production serves it, read at most once per poll interval. */
+/**
+ * Delivered once every item of the plan is done and production serves it, read at most once per poll
+ * interval. The delivery step records a deployment only for an item whose policy asks for the smoke
+ * proof (cycle-delivery.ts 7b), so here the loop's own release observation is recorded for the plan's
+ * other done items it found served, and the next read finds them delivered.
+ */
 async function delivering(cycle: Cycle, planner: PlannerEffects, goal: Goal, note: Note) {
   const items = goal.items ?? [];
   if (!items.length || !due(cycle, goal, 'deliver')) return;
   later(cycle, goal, 'deliver', planPollMs);
+  const observed = cycle.state.deployment, unrecorded: string[] = [];
+  for (const work of items.map(item => cycle.snapshot.work.find(entry => entry.key === item.key))) {
+    if (!work || work.stage !== 'done' || !work.delivery || work.delivery.deployment || deploySmokeRequired(work.policy)) continue;
+    if (!observed?.sha || observed.source === 'unavailable' || !observed.deployed.includes(work.key)) continue;
+    await cycle.effects.recordDeployment(work, { sha: observed.sha, source: observed.source, observedAt: observed.at }).catch(error => { unrecorded.push(`${work.key}: ${message(error)}`); });
+  }
   const waiting = items.filter(item => !servedInProduction(cycle.snapshot.work.find(work => work.key === item.key)));
+  if (unrecorded.length) return note(goal, 'failed', `${goal.key} is delivering, but production's deployment could not be recorded for ${unrecorded.join('; ')}; it is recorded again in five minutes`);
   if (waiting.length) return note(goal, 'waiting', `${goal.key} is delivering: ${waiting.map(item => item.key).join(', ')} ${waiting.length === 1 ? 'is' : 'are'} not yet done and served by production`);
   try { await planner.deliver(goal, items.map(item => item.key), `Every item of ${goal.key}'s plan is done and served by production`); }
   catch (error) { return note(goal, 'failed', `Could not record ${goal.key} delivered: ${message(error)}; it is asked again in five minutes`); }
@@ -266,6 +279,7 @@ export function plannerEffects(config: MasterConfig, root: string, calls: Calls)
       return { runner: piRunner({ command: settings.command, model }), runtime: 'pi', model };
     },
     plan: (goal, plan) => calls.asOperatorAgent('POST', `goals/${goal.key}/plan`, plan, `planner:${goal.id}:${goal.revision}`),
+    invalid: (goal, reason) => calls.asOperatorAgent('POST', `goals/${goal.key}/plan-invalid`, { reason: clip(reason, 2000) }, `planner:${goal.id}:${goal.revision}:invalid`),
     judge: (goal, judgement) => asApprover(`goals/${goal.key}/plan-${judgement.verdict}`, { reason: judgement.reason }, `planner:${goal.id}:${goal.revision}:judged`),
     release: goal => calls.asOperatorAgent('POST', `goals/${goal.key}/release`, {}, `planner:${goal.id}:${goal.revision}:release`),
     deliver: (goal, items, reason) => calls.asOperatorAgent('POST', `goals/${goal.key}/deliver`, { items, reason }, `planner:${goal.id}:${goal.revision}:deliver`),
