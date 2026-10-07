@@ -4,8 +4,9 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { executorFleet, executorSlotFaults } from '../src/cli/executor-report.js';
-import { controlPlaneHandlers, unitRestartPolicy, workerStartFence, workerStartFenceBoundMs, type ControlPlaneEffects } from '../src/executor.js';
+import * as report_ from '../src/cli/executor-report.js';
+import * as executor_ from '../src/executor.js';
+import { controlPlaneHandlers, type ControlPlaneEffects } from '../src/executor.js';
 import { runExecutorTick } from '../src/auto-dispatch.js';
 import { masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { classifyAttention } from '../src/model/fault-classes.js';
@@ -13,6 +14,13 @@ import { executorUnit, writeExecutorDeclaration, type SystemctlRunner } from '..
 import type { ActionRow } from '../src/model/actions.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+// Reached through their modules, so this file loads on a base without them and each case fails on its own.
+const { executorFleet } = report_;
+const executorSlotFaults: typeof report_.executorSlotFaults = (...args) => report_.executorSlotFaults(...args);
+const unitRestartPolicy: typeof executor_.unitRestartPolicy = unit => executor_.unitRestartPolicy(unit);
+const workerStartFence: typeof executor_.workerStartFence = (...args) => executor_.workerStartFence(...args);
+const workerStartFenceBoundMs = () => executor_.workerStartFenceBoundMs;
 
 // GY-1431: on 2026-10-07 both executor slots of the coordinator host lay inactive from 06:53:24Z
 // while three dispatches were requested and none ran; GY-1416 and GY-1427 idled claimable for
@@ -157,7 +165,7 @@ test('integration:dispatch-retry-after-fence — GY-1416\'s epoch-6 start, refus
   assert.equal(step.result, 'done', step.reason);
   assert.deepEqual(seen.launches.length, 1, 'no launch is attempted into the standing fence');
   assert.ok(at(seen.launches[0]) > at(fence.launchExpiresAt) && at(seen.launches[0]) > at(fence.leaseExpiresAt), 'the launch comes after both the lease and the launch authority expire');
-  assert.ok(seen.slept.reduce((sum, ms) => sum + ms, 0) <= workerStartFenceBoundMs, 'inside the launch bound');
+  assert.ok(seen.slept.reduce((sum, ms) => sum + ms, 0) <= workerStartFenceBoundMs(), 'inside the launch bound');
   assert.equal(settled.length, 1);
   assert.equal(settled[0][0], 'done');
   assert.match(settled[0][1], /^dispatched GY-1416 to opencode-primary; .*; retried after graphyard-opencode-2's epoch 5 fence lapsed at 2026-10-07T07:12:10\.000Z$/, 'the settlement the attempt is recorded with names the retry');
