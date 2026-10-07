@@ -73,10 +73,10 @@ test('unit:docs-sync-watch-adopt-on-base-move — the docs-sync watch is found b
     effects: { docsSync: launch(record), persist: async () => {}, closeSession: async () => { record.agents.length = 0; } },
     sessions: async () => ({ agents: record.agents.map(name => ({ name, pane_id: 'pane-s', agent_status: 'working' }) as any), available }),
     note: async (_key, _item, _kind, outcome, detail) => { notes.push(`${outcome}: ${detail}`); } });
-  assert.equal((await route().holds(work)).held, true, 'the first cycle launches the docs-sync');
+  assert.equal((await route().hold(work)).held, true, 'the first cycle launches the docs-sync');
   assert.equal(record.synced.length, 1);
   work = conflicted(moved); now += minute;
-  assert.equal((await route().holds(work)).held, true, 'the moved base keeps the running session holding the item');
+  assert.equal((await route().hold(work)).held, true, 'the moved base keeps the running session holding the item');
   assert.equal(record.synced.length, 1, 'no second launch of the same session name is attempted');
   assert.ok(!notes.some(note => note.startsWith('failed')), `nothing failed: ${notes.join(' | ')}`);
   assert.deepEqual(Object.keys(state.docsSyncs), [`work-42:${reviewed}`], 'one watch, keyed by the session\'s identity');
@@ -84,13 +84,13 @@ test('unit:docs-sync-watch-adopt-on-base-move — the docs-sync watch is found b
 
   // Herdr unavailable is no evidence the session ended.
   available = false; record.agents.length = 0;
-  assert.equal((await route().holds(work)).held, true);
+  assert.equal((await route().hold(work)).held, true);
   // The session ended without moving the head: held until an observation taken since shows it, then rework.
   available = true;
-  const ended = await route().holds(work);
+  const ended = await route().hold(work);
   assert.ok(!ended.held && ended.awaiting, 'a push not yet observed is awaited: the step wakes the observation for it');
   work = conflicted(moved, new Date(now + 1_000).toISOString()); now += 2_000;
-  assert.equal((await route().holds(work)).held, false, 'the conflict returns to a worker once the session is gone and the head did not move');
+  assert.equal((await route().hold(work)).held, false, 'the conflict returns to a worker once the session is gone and the head did not move');
   assert.match(notes.at(-1)!, /ended without moving/);
   assert.equal(state.conflicts[0].route, 'rework', 'the routed conflict it was launched for is counted as sent back');
   assert.equal(record.synced.length, 1, 'and still no second launch');
@@ -101,7 +101,7 @@ test('unit:docs-sync-watch-adopt-on-base-move — the docs-sync watch is found b
   const legacy = docsSyncRoute({ config: { baseBranch: 'main' }, state: kept, snapshot: { work: [conflicted(moved)] }, stamp: iso(minute), clock: clock + minute, inventorySpent: () => {},
     effects: { docsSync: async (_item, plan) => { relaunched.push(plan); throw new Error('already visible in Herdr'); }, persist: async () => {}, closeSession: async () => {} },
     sessions: async () => ({ agents: [{ name: 'gy-docs-sync-gy-42-aaaaaaa', pane_id: 'p', agent_status: 'working' } as any], available: true }), note: async () => {} });
-  assert.equal((await legacy.holds(conflicted(moved))).held, true, 'the running session still holds the item');
+  assert.equal((await legacy.hold(conflicted(moved))).held, true, 'the running session still holds the item');
   assert.deepEqual(relaunched, [], 'and is not launched again');
 });
 
@@ -183,12 +183,12 @@ test('unit:docs-sync-hold-wait-recorded — a standing hold answers the session,
   const route = (now: number) => docsSyncRoute({ config: { baseBranch: 'main' }, state, snapshot: { work: [work] }, stamp: new Date(now).toISOString(), clock: now, inventorySpent: () => {},
     effects: { docsSync: launch(record), persist: async () => {}, closeSession: async () => {} },
     sessions: async () => ({ agents: record.agents.map(name => ({ name, pane_id: 'pane-s', agent_status: 'working' }) as any), available: true }), note: async () => {} });
-  const hold = await route(clock).holds(work);
+  const hold = await route(clock).hold(work);
   assert.ok(hold.held, 'the docs-sync holds the item');
   const name = docsSyncSessionName({ key: 'GY-42', head: reviewed }), deadline = new Date(clock + docsSyncHoldMs).toISOString();
   assert.equal(hold.deadline, deadline);
   for (const part of [name, reviewed.slice(0, 12), tip.slice(0, 12), deadline]) assert.ok(hold.wait.includes(part), `the wait names ${part}: ${hold.wait}`);
-  const again = await route(clock + minute).holds(work);
+  const again = await route(clock + minute).hold(work);
   assert.ok(again.held && again.wait === hold.wait, 'the wait is stable from cycle to cycle');
   const subjects = (now: number, docsSyncs = state.docsSyncs) => actionableSubjects({ autoMerge: true, run: config().run }, [work], now, { approvals: {}, docsSyncs }).filter(subject => subject.kind === 'decision').map(subject => subject.detail);
   assert.ok(docsSyncHolding(state.docsSyncs, work, clock + minute), 'the hold stands inside its bound');
@@ -217,18 +217,18 @@ test('unit:conflict-route-reread-on-base-move — a moved base is classified aga
     effects: { docsSync: launch(record), conflictPaths: async () => local, persist: async () => {}, closeSession: async () => { record.agents.length = 0; } },
     sessions: async () => ({ agents: record.agents.map(name => ({ name, pane_id: 'pane-s', agent_status: 'working' }) as any), available: true }),
     note: async (_key, _item, _kind, outcome, detail) => { notes.push(`${outcome}: ${detail}`); } });
-  assert.ok((await route(clock).holds(work)).held, 'the docs-sync holds the item on its first base');
+  assert.ok((await route(clock).hold(work)).held, 'the docs-sync holds the item on its first base');
   work = conflicted(bound, iso(-30_000), { id: 'work-unit-reread' }); local = ['docs/master-agent-reference.md', 'docs/development.md'];
-  const kept = await route(clock + minute).holds(work);
+  const kept = await route(clock + minute).hold(work);
   assert.ok(kept.held && kept.watch.base === bound && kept.wait.includes(bound.slice(0, 12)), 'still docs-only: held, against the new base');
   const mixed = ['docs/setup-from-zero.md', 'tests/helpers/timing-baseline.json'];
   work = conflicted(moved, iso(-30_000), { id: 'work-unit-reread', conflictPaths: mixed }); local = mixed;
-  assert.equal((await route(clock + 2 * minute).holds(work)).held, false, 'no longer docs-only: the hold ends');
+  assert.equal((await route(clock + 2 * minute).hold(work)).held, false, 'no longer docs-only: the hold ends');
   assert.match(notes.at(-1)!, /no longer docs-only.*tests\/helpers\/timing-baseline\.json/);
   assert.equal(record.agents.length, 0, 'the docs-sync session is closed');
   assert.equal(state.conflicts[0].route, 'rework', 'the routed conflict is counted as sent back');
   assert.equal(docsSyncHolding(state.docsSyncs, work, clock + 2 * minute), null);
-  assert.equal((await route(clock + 3 * minute).holds(work)).held, false, 'and stays ended');
+  assert.equal((await route(clock + 3 * minute).hold(work)).held, false, 'and stays ended');
 });
 
 test('integration:base-move-ends-docs-hold — a base refresh confirming a conflict that is not docs-only on a new tip requests the rework in that cycle', async () => {
@@ -252,7 +252,7 @@ test('unit:docs-sync-hold-bound-within-blocked-bound — the hold lasts at most 
   state.docsSyncs[`work-unit-bound:${reviewed}`] = docsSyncWatchSchema.parse({ work: 'GY-42', head: reviewed, base: tip, paths, agentName: name, pane: 'p', launchedAt: iso(-blockedBoundMs) });
   const hold = await docsSyncRoute({ config: { baseBranch: 'main' }, state, snapshot: { work: [work] }, stamp: iso(0), clock, inventorySpent: () => {},
     effects: { persist: async () => {}, closeSession: async () => {} },
-    sessions: async () => ({ agents: [{ name, pane_id: 'p', agent_status: 'working' } as any], available: true }), note: async () => {} }).holds(work);
+    sessions: async () => ({ agents: [{ name, pane_id: 'p', agent_status: 'working' } as any], available: true }), note: async () => {} }).hold(work);
   assert.equal(hold.held, false, 'past the blocked bound the hold ends');
   assert.equal(docsSyncHolding(state.docsSyncs, work, clock), null);
 });

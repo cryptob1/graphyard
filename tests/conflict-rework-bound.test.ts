@@ -91,20 +91,20 @@ test('unit:system-driven-conflict-rework-requested — a docs-sync holds a syste
     sessions: async () => ({ agents: record.agents.map(name => ({ name, pane_id: 'pane-s', agent_status: 'working' }) as any), available: true }),
     note: async (_key, _item, _kind, outcome, detail) => { notes.push(`${outcome}: ${detail}`); } });
   // 07:42:30: the docs-page conflict is routed to a docs-sync session, inside the bound.
-  assert.equal((await route(gy1419(tips.first, at('07:42:20')), at('07:42:30')).holds(gy1419(tips.first, at('07:42:20')))).held, true);
+  assert.equal(await route(gy1419(tips.first, at('07:42:20')), at('07:42:30')).holds(gy1419(tips.first, at('07:42:20'))), true);
   assert.equal(record.synced.length, 1);
   // 07:47:30, the second tip: the running session still holds the item (GY-1423).
-  assert.equal((await route(gy1419(tips.second, at('07:47:20')), at('07:47:30')).holds(gy1419(tips.second, at('07:47:20')))).held, true);
+  assert.equal(await route(gy1419(tips.second, at('07:47:20')), at('07:47:30')).holds(gy1419(tips.second, at('07:47:20'))), true);
   // 07:50:10, past the cutoff (07:50:04): the session is stopped at once, and the give-up waits for a reading taken
   // since. None lands this cycle, so the item is still held rather than reworked on the 07:49:50 reading.
   const unobserved = async () => { observed.push(at('07:50:10')); return null; };
-  assert.equal((await route(gy1419(tips.second, at('07:49:50')), at('07:50:10')).holds(gy1419(tips.second, at('07:49:50')), unobserved)).held, true, 'a reading older than the stop decides nothing');
+  assert.equal(await route(gy1419(tips.second, at('07:49:50')), at('07:50:10')).holds(gy1419(tips.second, at('07:49:50')), unobserved), true, 'a reading older than the stop decides nothing');
   assert.equal(record.agents.length, 0, 'its session is closed at the cutoff, so nothing it does lands later');
   assert.equal(observed.length, 1, 'and the step was asked to wake a reading');
   assert.equal(state.conflicts[0].route, 'docs-sync');
   // 07:51:10: the reading woken this cycle, taken after the stop, shows the head unmoved: the conflict is given up.
   const fresh = async () => gy1419(tips.second, at('07:51:11'));
-  assert.equal((await route(gy1419(tips.second, at('07:50:00')), at('07:51:10')).holds(gy1419(tips.second, at('07:50:00')), fresh)).held, false, 'the docs-sync releases the conflict to the rework');
+  assert.equal(await route(gy1419(tips.second, at('07:50:00')), at('07:51:10')).holds(gy1419(tips.second, at('07:50:00')), fresh), false, 'the docs-sync releases the conflict to the rework');
   assert.match(notes.at(-1)!, /^failed: GY-1419: docs-sync session gy-docs-sync-gy-1419-69dcd41 was stopped at 2026-10-07T07:50:10\.000Z without having moved 69dcd419da45, as an observation at 2026-10-07T07:51:11\.000Z shows: the conflict was first recorded on 69dcd419da45 at 2026-10-07T07:42:04\.000Z, and the loop requests its rework within 10 minutes of that \(due at 2026-10-07T07:52:04\.000Z\), stopping a docs-sync 2 minutes before, so the conflict returns to a worker$/);
   assert.equal(state.conflicts[0].route, 'rework', 'and the routed conflict is counted as sent back');
 
@@ -114,11 +114,11 @@ test('unit:system-driven-conflict-rework-requested — a docs-sync holds a syste
     effects: { docsSync: launch(pushRecord), conflictPaths: async () => paths, persist: async () => {}, closeSession: async () => { pushRecord.agents.length = 0; } },
     sessions: async () => ({ agents: pushRecord.agents.map(name => ({ name, pane_id: 'pane-s', agent_status: 'working' }) as any), available: true }),
     note: async (_key, _item, _kind, outcome, detail) => { pushNotes.push(`${outcome}: ${detail}`); } });
-  assert.equal((await pushRoute(gy1419(tips.first, at('07:42:20')), at('07:42:30')).holds(gy1419(tips.first, at('07:42:20')))).held, true);
+  assert.equal(await pushRoute(gy1419(tips.first, at('07:42:20')), at('07:42:30')).holds(gy1419(tips.first, at('07:42:20'))), true);
   const synced = { ...gy1419(tips.second, at('07:50:12')), candidate: { sha: 'd0c5' + '1'.repeat(36), baseSha: tips.second, pr: 904, branch: 'graphyard/gy-1419-1', author: 'docs-sync' } } as Work;
   synced.observation = { ...synced.observation!, candidate: synced.candidate! };
   // 07:50:01 the docs-sync pushed; the 07:49:50 reading predates it, and at 07:50:10 the woken reading shows the new head.
-  assert.equal((await pushRoute(gy1419(tips.second, at('07:49:50')), at('07:50:10')).holds(gy1419(tips.second, at('07:49:50')), async () => synced)).held, true, 'the pushed head holds the item for its adoption');
+  assert.equal(await pushRoute(gy1419(tips.second, at('07:49:50')), at('07:50:10')).holds(gy1419(tips.second, at('07:49:50')), async () => synced), true, 'the pushed head holds the item for its adoption');
   assert.deepEqual(pushNotes.filter(note => note.startsWith('failed')), [], 'no give-up is recorded');
   assert.deepEqual(pushed.conflicts.map(entry => entry.route), ['docs-sync'], 'and the conflict is not counted as sent back');
   await pushRoute(synced, at('07:51:10')).sweep();
@@ -129,7 +129,7 @@ test('unit:system-driven-conflict-rework-requested — a docs-sync holds a syste
   const lateRoute = docsSyncRoute({ config: { baseBranch: 'main' }, state: late, snapshot: { work: [] }, stamp: iso(at('08:07:30')), clock: at('08:07:30'), inventorySpent: () => {},
     effects: { docsSync: launch(none), conflictPaths: async () => paths, persist: async () => {}, closeSession: async () => {} },
     sessions: async () => ({ agents: [], available: true }), note: async () => {} });
-  assert.equal((await lateRoute.holds(gy1419(tips.third, at('08:07:20')))).held, false);
+  assert.equal(await lateRoute.holds(gy1419(tips.third, at('08:07:20'))), false);
   assert.deepEqual(none.synced, [], 'no docs-sync is launched past the bound');
   assert.deepEqual(late.conflicts.map(entry => entry.route), ['rework']);
 
@@ -138,8 +138,8 @@ test('unit:system-driven-conflict-rework-requested — a docs-sync holds a syste
   const handRoute = (now: number) => docsSyncRoute({ config: { baseBranch: 'main' }, state: hand, snapshot: { work: [] }, stamp: iso(now), clock: now, inventorySpent: () => {},
     effects: { docsSync: launch(handRecord), conflictPaths: async () => paths, persist: async () => {}, closeSession: async () => {} },
     sessions: async () => ({ agents: handRecord.agents.map(name => ({ name, pane_id: 'pane-s', agent_status: 'working' }) as any), available: true }), note: async () => {} });
-  assert.equal((await handRoute(at('07:42:30')).holds(gy1419(tips.first, at('07:42:20'), false))).held, true);
-  assert.equal((await handRoute(at('07:52:10')).holds(gy1419(tips.second, at('07:51:50'), false))).held, true);
+  assert.equal(await handRoute(at('07:42:30')).holds(gy1419(tips.first, at('07:42:20'), false)), true);
+  assert.equal(await handRoute(at('07:52:10')).holds(gy1419(tips.second, at('07:51:50'), false)), true);
 });
 
 test('integration:conflict-rework-decision-cycle — replaying GY-1419 through the loop\'s cycles, the rework is requested in the first cycle past the docs-sync\'s cutoff, inside the 10-minute bound, not after the docs-sync\'s 30 minutes', async () => {

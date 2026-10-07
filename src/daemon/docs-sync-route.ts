@@ -34,7 +34,7 @@ import { conflictReworkBoundMs, conflictReworkDue } from '../model/approval.js';
  * and adopted, never reworked, and the rework is requested inside the bound rather than after
  * docsSyncMaxMs.
  *
- * GY-1436. A hold is never a bare skip: `holds` answers what the step must record. A standing hold
+ * GY-1436. A hold is never a bare skip: `hold` answers what the step must record. A standing hold
  * names its session, head, base and deadline, which the step records as the item's wait; it lasts
  * at most docsSyncHoldMs, the blocked bound, and past half of it is raised as attention naming the
  * session. A base tip that moved since the watch was classified is classified again for the new
@@ -100,10 +100,10 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
     return { held: true, watch, deadline, wait: `${item.key}: rework decision held by docs-sync session ${session} on head ${watch.head.slice(0, 12)} against base ${watch.base.slice(0, 12)} until ${deadline}, the end of its ${docsSyncHoldMs / 60_000}-minute bound` };
   };
   /**
-   * The docs-sync hold on the item's conflict. `observe` wakes the item's observation and returns
-   * the fresh reading, or null when none landed this cycle (the step then wakes the job for the next).
+   * The docs-sync hold on the item's conflict, as the step records it. `observe` wakes the item's observation and
+   * returns the fresh reading, or null when none landed this cycle (the step then wakes the job for the next).
    */
-  const holds = async (item: Work, observe?: (item: Work) => Promise<Work | null>): Promise<DocsSyncHold> => {
+  const hold = async (item: Work, observe?: (item: Work) => Promise<Work | null>): Promise<DocsSyncHold> => {
     const refresh = item.baseRefresh!, head = refresh.from.sha, base = refresh.base;
     const found = docsSyncWatchFor(state.docsSyncs, item, head), key = found?.key ?? docsSyncWatchKey(item, head), watch = found?.watch;
     // GY-1434: the loop-owned rework's bound, which no docs-sync may outlast; it is stopped a lead ahead of it.
@@ -194,5 +194,7 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
     await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the conflict returns to a worker`, undefined, aborted ? null : undefined);
     return { held: false };
   };
-  return { holds, sweep };
+  /** Whether a docs-sync holds the item's conflict. */
+  const holds = async (item: Work, observe?: (item: Work) => Promise<Work | null>) => (await hold(item, observe)).held;
+  return { hold, holds, sweep };
 }

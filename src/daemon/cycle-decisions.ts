@@ -443,7 +443,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const synced: { work: Work | null } = { work: null };
     const observe = async (work: Work) => { synced.work = wake ? await wake(work, clock) : null; if (!synced.work) await wakeObservationJob(cycle, work, 'docs-sync give-up'); return synced.work; };
     const docsConflict = (subject: Work, routine: RoutineDecision) => routine.action === 'rework' && !state.approvals[decisionKey(subject, routine)] && !!baseRefreshConflict(subject) && routine.binding === `${subject.candidate!.sha}:conflict`;
-    const hold = docsConflict(item, decision) ? await docsSync.holds(item, observe) : null;
+    const hold = docsConflict(item, decision) ? await docsSync.hold(item, observe) : null;
     if (hold?.held) return noteHold(item, hold.wait);
     if (synced.work && synced.work.candidate?.sha === item.candidate?.sha && synced.work.policyRevision === item.policyRevision) item = synced.work;
     needed.add(key);
@@ -458,7 +458,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     if (fresh && again) {
       item = fresh; decision = again; key = decisionKey(item, decision); needed.add(key);
       // The fresh reading settles an ended docs-sync hold in the cycle it ended (GY-1436).
-      const settled = hold?.awaiting && docsConflict(item, decision) ? await docsSync.holds(item) : null;
+      const settled = hold?.awaiting && docsConflict(item, decision) ? await docsSync.hold(item) : null;
       if (settled?.held) return noteHold(item, settled.wait);
       wait = settled?.awaiting ? `${item.key}: its docs-sync hold ended at ${settled.awaiting}; rework waits for an observation since then showing the head unmoved` : reworkObservationWait(item, now(), pause);
     }
