@@ -12,7 +12,7 @@ import { Store } from '../src/store.js';
 import { standingEscalations, type Observation, type Principal, type Work } from '../src/model.js';
 import { interventionKinds, interventionPolicyFromEnv, type Intervention, type InterventionKind, type InterventionReport } from '../src/model/interventions.js';
 import * as interventions from '../src/interventions.js';
-import { foldInterventions, openPatternItems, readInterventionLedger } from '../src/interventions.js';
+import { detectPatterns, foldInterventions, interventionScan, openPatternItems, readInterventionLedger } from '../src/interventions.js';
 import { classifyAttention } from '../src/model/fault-classes.js';
 import { interventionSummary } from '../src/cli/intervention-status.js';
 import InterventionsPage from '../web/pages/interventions.js';
@@ -417,11 +417,105 @@ test('unit:intervention-pattern-attention-reflects-scan — with the scan off th
 });
 
 test('integration:intervention-scan-state-reported — the interventions report says whether the server runs the pattern scan, for both settings', async () => {
-  const off = await withScan(undefined, () => ok(token(coordinator), 'GET', 'interventions?window=7'));
-  assert.deepEqual(off.scan, { enabled: false, variable: 'GRAPHYARD_INTERVENTION_PATTERNS' });
+  // On by default since GY-1381; `=0` turns it off.
+  const unset = await withScan(undefined, () => ok(token(coordinator), 'GET', 'interventions?window=7'));
+  assert.deepEqual(unset.scan, { enabled: true, variable: 'GRAPHYARD_INTERVENTION_PATTERNS' });
   assert.deepEqual((await withScan('0', () => ok(token(coordinator), 'GET', 'interventions?window=7'))).scan, { enabled: false, variable: 'GRAPHYARD_INTERVENTION_PATTERNS' });
   const on = await withScan('1', () => ok(token(coordinator), 'GET', 'interventions?window=7'));
   assert.deepEqual(on.scan, { enabled: true, variable: 'GRAPHYARD_INTERVENTION_PATTERNS' });
   // master status reads the field the server sent rather than assuming.
   assert.deepEqual(((await withScan('1', () => interventionSummary(async (path: string) => ok(token(coordinator), 'GET', path)))).summary as { scan: unknown }).scan, { enabled: true, variable: 'GRAPHYARD_INTERVENTION_PATTERNS' });
+});
+
+// GY-1381: the scan was off in production (GY-1372) while hundreds of interventions recurred, so
+// nothing filed their cause. It runs by default now, `=0` turns it off, and master status says which.
+// Read through the namespace so a base without the export fails as a test case, not at import.
+const startPatternScan = (...args: Parameters<typeof interventions.startPatternScan>) => (interventions as Record<string, unknown>).startPatternScan ? interventions.startPatternScan(...args) : assert.fail('startPatternScan is not exported');
+
+test('unit:intervention-scan-default-on — the pattern scan runs by default on a server whose interventions are enabled; GRAPHYARD_INTERVENTION_PATTERNS=0 turns it off, and master status states which is in effect', async () => {
+  assert.deepEqual(interventionScan({}), { enabled: true, variable: 'GRAPHYARD_INTERVENTION_PATTERNS' });
+  assert.deepEqual(interventionScan({ GRAPHYARD_INTERVENTION_PATTERNS: '1' }), { enabled: true, variable: 'GRAPHYARD_INTERVENTION_PATTERNS' });
+  assert.deepEqual(interventionScan({ GRAPHYARD_INTERVENTION_PATTERNS: '0' }), { enabled: false, variable: 'GRAPHYARD_INTERVENTION_PATTERNS' });
+  assert.deepEqual(interventionScan({ GRAPHYARD_INTERVENTION_PATTERNS: ' 0 ' }).enabled, false);
+
+  // The server's own timer runs the scan when the variable is unset, and not when it is 0; one scan at a time.
+  const runs = async (env: NodeJS.ProcessEnv) => {
+    let count = 0, release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const scanner = startPatternScan(async () => { count++; await held; }, { intervalMs: 3_600_000, env });
+    try {
+      const first = scanner.run();
+      assert.equal(scanner.run(), first, 'a scan still running is not doubled');
+      release(); await first;
+      return count;
+    } finally { await scanner.stop(); }
+  };
+  assert.equal(await runs({}), 1, 'unset: the scan runs');
+  assert.equal(await runs({ GRAPHYARD_INTERVENTION_PATTERNS: '0' }), 0, '=0: the scan does not run');
+  // A scan that fails is reported and the next one still runs.
+  const failures: unknown[] = [];
+  let attempts = 0;
+  const failing = startPatternScan(async () => { attempts++; throw new Error('ledger unavailable'); }, { intervalMs: 3_600_000, env: {}, failed: error => failures.push(error) });
+  try { await failing.run(); await failing.run(); } finally { await failing.stop(); }
+  assert.equal(attempts, 2); assert.equal(failures.length, 2);
+
+  // The server reports the setting in effect, and master status carries it and words the pattern line by it.
+  const unset = await withScan(undefined, () => ok(token(coordinator), 'GET', 'interventions?window=7'));
+  assert.deepEqual(unset.scan, { enabled: true, variable: 'GRAPHYARD_INTERVENTION_PATTERNS' });
+  const statusUnset = await withScan(undefined, () => interventionSummary(async (path: string) => ok(token(coordinator), 'GET', path)));
+  assert.deepEqual((statusUnset.summary as { scan: unknown }).scan, { enabled: true, variable: 'GRAPHYARD_INTERVENTION_PATTERNS' });
+  const statusOff = await withScan('0', () => interventionSummary(async (path: string) => ok(token(coordinator), 'GET', path)));
+  assert.deepEqual((statusOff.summary as { scan: unknown }).scan, { enabled: false, variable: 'GRAPHYARD_INTERVENTION_PATTERNS' });
+  const crossed = (scan: { enabled: boolean; variable: string }) => async () => ({ window: { days: 7 }, deliveries: 1, total: 3, open: 0, waitedMs: 0, ratePerDelivery: 3, byKind: [], byStage: [], costliest: [], judgements: [], ledger: null,
+    patterns: [{ kind: 'session-nudge', stage: 'build', count: 3, threshold: 3, crossed: true, work: null }], scan });
+  assert.match((await interventionSummary(crossed(interventionScan({})))).attentionItems[0].text, /the server opens one within a minute/);
+  assert.match((await interventionSummary(crossed(interventionScan({ GRAPHYARD_INTERVENTION_PATTERNS: '0' })))).attentionItems[0].text, /the automatic pattern scan is off on this server/);
+});
+
+test('unit:intervention-detect-linear — detectPatterns groups instances in one pass (no per-entry array copy) and finds an existing pattern item through a map, so its cost is linear in the instances and items it reads', () => {
+  const now = '2026-10-06T12:00:00.000Z', policy = { threshold: 3, windowDays: 7 };
+  const stages = ['build', 'review', 'test', 'merge', null] as const;
+  const kinds = interventionKinds;
+  const instance = (index: number, kind: InterventionKind, stage: string | null): Intervention => ({ id: `i-${index}`, kind, source: 'ledger', work: null, stage: stage as Intervention['stage'], blocked: 'x',
+    requestedAt: new Date(Date.parse(now) - (index % (8 * 24)) * 3_600_000 - 1).toISOString(), resolvedAt: null, waitedMs: 0, resolvedBy: null, resolution: null, sources: [] });
+  const fixture = (instances: number, items: number) => {
+    const interventions = Array.from({ length: instances }, (_, index) => instance(index, kinds[index % kinds.length], stages[index % stages.length]));
+    const work = Array.from({ length: items }, (_, index) => {
+      const pattern = index % 10 === 0 ? { kind: kinds[index % kinds.length], stage: stages[index % stages.length], instances: [{ id: `i-${index}` }, { id: `i-${index + 1}` }] } : null;
+      return { id: `w-${index}`, key: `GY-${index}`, stage: index % 20 === 0 ? 'done' : 'build', ...(pattern ? { origin: { pattern } } : {}) } as unknown as Work;
+    });
+    return { interventions, work };
+  };
+  // What the detection always answered, by the quadratic reading it replaces.
+  const reference = (interventions: Intervention[], work: Work[]) => {
+    const from = new Date(Date.parse(now) - policy.windowDays * 86_400_000).toISOString();
+    const linked = new Set(work.flatMap(item => item.origin?.pattern?.instances.map(entry => entry.id) ?? []));
+    const groups = new Map<string, Intervention[]>();
+    for (const entry of interventions.filter(entry => entry.requestedAt >= from && entry.requestedAt < now)) { const key = `${entry.kind}|${entry.stage ?? 'none'}`; groups.set(key, [...(groups.get(key) ?? []), entry]); }
+    return [...groups].map(([key, entries]) => {
+      const [kind, stage] = key.split('|');
+      const item = work.find(candidate => candidate.origin?.pattern && candidate.origin.pattern.kind === kind && (candidate.origin.pattern.stage ?? 'none') === stage && candidate.stage !== 'done') ?? null;
+      return { kind, stage: stage === 'none' ? null : stage, count: entries.length, entries, unlinked: entries.filter(entry => !linked.has(entry.id)), item, from };
+    }).sort((a, b) => b.count - a.count);
+  };
+  const small = fixture(3_000, 400);
+  assert.deepEqual(detectPatterns(small.interventions, small.work, policy, now), reference(small.interventions, small.work), 'the same patterns, counts, unlinked instances and standing items');
+  assert.ok(detectPatterns(small.interventions, small.work, policy, now).some(pattern => pattern.item) && detectPatterns(small.interventions, small.work, policy, now).some(pattern => !pattern.item));
+
+  // Each item and each instance is read a constant number of times, however many groups there are.
+  const reads = { items: 0, instances: 0 };
+  const large = fixture(60_000, 5_000);
+  const work = large.work.map(item => new Proxy(item, { get: (target, property, receiver) => { if (property === 'origin') reads.items++; return Reflect.get(target, property, receiver); } }));
+  const interventionsRead = large.interventions.map(entry => new Proxy(entry, { get: (target, property, receiver) => { if (property === 'requestedAt') reads.instances++; return Reflect.get(target, property, receiver); } }));
+  detectPatterns(interventionsRead, work, policy, now);
+  assert.ok(reads.items <= work.length, `item origins read ${reads.items} times for ${work.length} items`);
+  assert.ok(reads.instances <= 2 * interventionsRead.length, `instance instants read ${reads.instances} times for ${interventionsRead.length} instances`);
+
+  // One kind at one stage with 200,000 instances: a per-entry copy of the group would copy 2·10¹⁰ references.
+  const one = Array.from({ length: 200_000 }, (_, index) => instance(index, 'rework', 'build'));
+  const started = performance.now();
+  const [pattern] = detectPatterns(one, large.work, policy, now);
+  const elapsed = performance.now() - started;
+  assert.equal(pattern.count, one.filter(entry => entry.requestedAt >= new Date(Date.parse(now) - 7 * 86_400_000).toISOString()).length);
+  assert.ok(elapsed < 1_000, `one group of 200,000 instances took ${Math.round(elapsed)}ms`);
 });

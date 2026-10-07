@@ -78,11 +78,21 @@ const workOf = (document: Record<string, any> | null): InterventionLedgerRow['wo
  */
 export async function readInterventionLedger(db: Db, options: { limit?: number; workId?: string | null; since?: string | null } = {}): Promise<{ rows: InterventionLedgerRow[]; truncated: boolean }> {
   const limit = options.limit ?? interventionLedgerLimit;
-  const result = await db.query(`SELECT seq, work_id, actor, kind, created_at, payload->'details' AS details,
+  const columns = `seq, work_id, actor, kind, created_at, payload->'details' AS details,
       CASE WHEN kind LIKE 'decision.%' OR kind IN ('intervention.recorded','judgement.recorded') THEN payload ELSE NULL END AS top,
-      payload ? 'work' AS whole, ${projectedWork("payload->'work'")} AS work, CASE WHEN payload ? 'work' THEN NULL ELSE payload->'delta' END AS delta
-    FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) AND ($4::timestamptz IS NULL OR created_at >= $4::timestamptz) ORDER BY seq DESC LIMIT $2`,
-  [[...interventionLedgerKinds], limit + 1, options.workId ?? null, options.since ?? null]);
+      payload ? 'work' AS whole, ${projectedWork("payload->'work'")} AS work, CASE WHEN payload ? 'work' THEN NULL ELSE payload->'delta' END AS delta`;
+  // A window is read kind by kind through the (kind, created_at) index, then ordered (GY-1381).
+  // As one `kind = ANY` filter, or as `kind = k AND created_at >= since`, the planner walked the
+  // primary key or the created_at index through every routine row the window holds — a busy
+  // week's heartbeats — to find the few it reads. The bounds are written as row comparisons on
+  // (kind, created_at), which only that index serves, and `OFFSET 0` keeps each kind's read a
+  // subquery of its own so it is not flattened back into that walk.
+  const result = options.since
+    ? await db.query(`SELECT windowed.* FROM unnest($1::text[]) AS wanted(kind)
+        CROSS JOIN LATERAL (SELECT ${columns} FROM events
+          WHERE (kind, created_at) >= (wanted.kind, $4::timestamptz) AND (kind, created_at) <= (wanted.kind, 'infinity'::timestamptz) AND ($3::uuid IS NULL OR work_id=$3) OFFSET 0) windowed
+        ORDER BY seq DESC LIMIT $2`, [[...interventionLedgerKinds], limit + 1, options.workId ?? null, options.since])
+    : await db.query(`SELECT ${columns} FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) ORDER BY seq DESC LIMIT $2`, [[...interventionLedgerKinds], limit + 1, options.workId ?? null]);
   const truncated = result.rows.length > limit;
   const window = result.rows.slice(0, limit).reverse();
 
@@ -396,27 +406,68 @@ export function computeInterventionReport(folded: { interventions: Intervention[
   };
 }
 
-/** Every kind-at-stage pair with at least one instance needed inside the policy window, with the item that stands for it. */
+/**
+ * Every kind-at-stage pair with at least one instance needed inside the policy window, with the
+ * item that stands for it. One pass over the instances groups them and one pass over the items
+ * finds what they link and which open item stands for each pair (GY-1381), so the cost is linear
+ * in what it reads: the scan runs every minute over a window of thousands of instances.
+ */
 export function detectPatterns(interventions: Intervention[], work: readonly Work[], policy: InterventionPolicy, now: string) {
   const from = new Date(Date.parse(now) - policy.windowDays * day).toISOString();
-  const linked = new Set(work.flatMap(item => item.origin?.pattern?.instances.map(instance => instance.id) ?? []));
-  const recent = interventions.filter(entry => entry.requestedAt >= from && entry.requestedAt < now);
-  const groups = new Map<string, Intervention[]>();
-  for (const entry of recent) { const key = `${entry.kind}|${stageKey(entry.stage)}`; groups.set(key, [...(groups.get(key) ?? []), entry]); }
-  return [...groups].map(([key, entries]) => {
+  const linked = new Set<string>(), standing = new Map<string, Work>();
+  for (const item of work) {
+    const pattern = item.origin?.pattern;
+    if (!pattern) continue;
+    for (const instance of pattern.instances) linked.add(instance.id);
+    const key = `${pattern.kind}|${stageKey(pattern.stage)}`;
+    // The first open item in fleet order stands for the pair, as it always has.
+    if (item.stage !== 'done' && !standing.has(key)) standing.set(key, item);
+  }
+  const groups = new Map<string, { entries: Intervention[]; unlinked: Intervention[] }>();
+  for (const entry of interventions) {
+    if (entry.requestedAt < from || entry.requestedAt >= now) continue;
+    const key = `${entry.kind}|${stageKey(entry.stage)}`;
+    let group = groups.get(key);
+    if (!group) groups.set(key, group = { entries: [], unlinked: [] });
+    group.entries.push(entry);
+    if (!linked.has(entry.id)) group.unlinked.push(entry);
+  }
+  return [...groups].map(([key, { entries, unlinked }]) => {
     const [kind, stage] = key.split('|') as [InterventionKind, Stage | 'none'];
-    const item = work.find(candidate => candidate.origin?.pattern && candidate.origin.pattern.kind === kind && stageKey(candidate.origin.pattern.stage) === stage && candidate.stage !== 'done') ?? null;
-    return { kind, stage: stage === 'none' ? null : stage, count: entries.length, entries, unlinked: entries.filter(entry => !linked.has(entry.id)), item, from };
+    return { kind, stage: stage === 'none' ? null : stage, count: entries.length, entries, unlinked, item: standing.get(key) ?? null, from };
   }).sort((a, b) => b.count - a.count);
 }
 
 /**
- * Whether the server's own tick runs the pattern scan (GY-1372). Off by default: its ledger query
- * held the whole tick once the events table grew (2026-09-23), so an operator opts in. The
- * interventions report carries this state, so master status reads it rather than assuming.
+ * Whether the server runs the pattern scan (GY-1372). On by default (GY-1381): the scan reads the
+ * policy window through the (kind, created_at) index on the report pool and runs beside the
+ * reconciliation tick, never in it (`startPatternScan`), so it no longer holds the tick as it did
+ * on 2026-09-23. `GRAPHYARD_INTERVENTION_PATTERNS=0` turns it off. The interventions report
+ * carries this state, so master status reads it rather than assuming.
  */
 export const interventionScanVariable = 'GRAPHYARD_INTERVENTION_PATTERNS';
-export const interventionScan = (env: NodeJS.ProcessEnv = process.env) => ({ enabled: env[interventionScanVariable] === '1', variable: interventionScanVariable });
+export const interventionScan = (env: NodeJS.ProcessEnv = process.env) => ({ enabled: env[interventionScanVariable]?.trim() !== '0', variable: interventionScanVariable });
+
+/** How often the server runs the pattern scan: once a minute, as it did inside the tick. */
+export const patternScanIntervalMs = 60_000;
+
+/**
+ * Run the pattern scan on its own timer beside the reconciliation tick (GY-1381), as the
+ * production watch runs: the tick never awaits it, so a slow scan delays only the next scan and
+ * never a claim, a heartbeat or an observation. One scan runs at a time; a scan still running when
+ * the next is due is not doubled. The setting is read each time, so `=0` takes effect at once.
+ */
+export function startPatternScan(scan: () => Promise<void>, options: { intervalMs?: number; env?: NodeJS.ProcessEnv; failed?: (error: unknown) => void } = {}) {
+  let running: Promise<void> | null = null, stopped = false;
+  const run = () => {
+    if (running || stopped || !interventionScan(options.env).enabled) return running;
+    running = scan().catch(error => options.failed?.(error)).finally(() => { running = null; });
+    return running;
+  };
+  const timer = setInterval(run, options.intervalMs ?? patternScanIntervalMs);
+  timer.unref?.();
+  return { stop: async () => { stopped = true; clearInterval(timer); await running; }, run, get running() { return running !== null; } };
+}
 
 /** The control plane acting as itself when it opens work from feedback; the ledger names it as every other control-plane write is named. */
 export const controlPlaneActor: Principal = { id: 'graphyard', role: 'admin', sessionKind: 'ai' };
