@@ -982,15 +982,15 @@ test('integration:throughput-stall-escalates — when every delivery in a window
       assert.match(visible.attention!.next, new RegExp(`graphyard master decide ${owner.key} requirements .* graphyard master approver ${owner.key} DECISION; the loop closes ${owner.key} once it is applied`));
 
       // While it stands unanswered, deliveries keep merging (each fingerprinted: a changed finding) past
-      // the spacing: the loop neither re-measures nor raises it again, and the owner stays open.
-      const answeredAt = () => { state.actions[`throughput:${deployedRevision}`].at = new Date(Date.now() - throughputRemeasureMs - minute).toISOString(); };
+      // the spacing: the loop re-measures the serving release each hour (GY-1458) but never raises
+      // the decision again, and the owner stays open.
       for (let round = 0; round < 3; round++) {
         items.push(await mergedAt(await fingerprinted(100 + round), new Date(Date.now() - minute).toISOString()));
-        clock += throughputRemeasureMs + minute; answeredAt();
-        const cycle = await runCycle(master, state, effects, () => Date.now());
+        clock += throughputRemeasureMs + minute;
+        const cycle = await runCycle(master, state, effects, () => clock);
         assert.ok(!cycle.actions.some(action => action.kind === 'escalation'), 'raised once, not every cycle or every re-measure');
       }
-      assert.equal(measures, 1, 'no re-measure while the needs-decision stands unanswered');
+      assert.equal(measures, 4, 'the standing needs-decision does not hold back the hourly re-measure');
       assert.equal(state.actions[escalationKey].attempts, 1);
       assert.equal(owners.closed.length, 0, 'the owner never closes before the claim verifies or its decision is answered');
 
