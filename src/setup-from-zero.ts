@@ -30,6 +30,10 @@ export interface SetupFromZeroInput {
   /** The server's GET /api/status answer, or null with the failure when it did not answer. */
   status: any | null;
   failure?: string;
+  /** Whether the plane's unauthenticated /healthz answered, so a missing or refused credential is not read as an unreachable plane. */
+  reachable?: boolean;
+  /** The master credential file doctor read with (`masterCredential`), when GRAPHYARD_TOKEN(_FILE) is unset. */
+  masterCredential?: string | null;
   /** Where the agent environments live (`~/.coding_agents` unless GRAPHYARD_AGENT_ENVIRONMENTS). */
   environments: string;
   /** `gh` for the branch-protection read; tests pass a fixture. */
@@ -52,7 +56,49 @@ export function bubblewrapProbe(paths: string[]): string | null {
   } catch (error: any) { return error.code === 'ENOENT' ? 'bubblewrap (bwrap) is not installed' : `bwrap could not write them: ${error.message.split('\n')[0]}`; }
 }
 
-async function credentialsCheck(root: string, env: NodeJS.ProcessEnv): Promise<SetupCheck> {
+/**
+ * The master (coordinator) credential `install --apply` or `master init` recorded in
+ * .graphyard/master.json for this server (GY-1412): the identity a setup agent drives doctor with,
+ * so no step hands an agent the human operator's credential. Null when GRAPHYARD_TOKEN(_FILE)
+ * already chose a credential, or no 0600 master credential is recorded for this server.
+ */
+export async function masterCredential(root: string, base: string, env: NodeJS.ProcessEnv = process.env): Promise<{ file: string; token: string } | null> {
+  if (env.GRAPHYARD_TOKEN_FILE || env.GRAPHYARD_TOKEN) return null;
+  try {
+    const config = JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8'));
+    if (new URL(config.url).origin !== new URL(base).origin) return null;
+    const file = resolve(config.credentialFile), info = await lstat(file);
+    const token = (await readFile(file, 'utf8')).trim();
+    return info.isFile() && !(info.mode & 0o077) && token.length >= 32 ? { file, token } : null;
+  } catch { return null; }
+}
+
+/** An authenticated GET against the control plane, as the CLI's own requests make it. */
+export const planeRequest = (base: string, token: string) => async (path: string) => {
+  const response = await fetch(`${base}/api/${path}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) });
+  const body = await response.json();
+  if (!response.ok) throw new Error(JSON.stringify(body));
+  return body;
+};
+
+/** Whether the plane's unauthenticated /healthz answers: reachable, whatever the credential. */
+export async function planeAnswers(base: string): Promise<boolean> {
+  try { return (await fetch(`${base}/healthz`, { signal: AbortSignal.timeout(10_000) })).ok; } catch { return false; }
+}
+
+/**
+ * Doctor's next action (GY-1412): the readiness checklist's, except that while the control plane
+ * itself fails, the line naming the step that installs or connects it comes first, so a fresh
+ * machine is never sent to `init --url SERVER --token-stdin` before any server exists.
+ */
+export function setupNext(readiness: { next: string; items: { id: string; status: string }[] }, checks: SetupCheck[]) {
+  const firstGap = readiness.items.find(item => item.status !== 'ready');
+  const plane = checks.find(check => check.status === 'fail' && check.step === setupSteps.install);
+  return plane && firstGap && ['server', 'credential-role'].includes(firstGap.id) ? setupLine(plane) : readiness.next;
+}
+
+async function credentialsCheck(root: string, env: NodeJS.ProcessEnv, master?: string | null): Promise<SetupCheck> {
+  if (master) return { id: 'credentials-file', status: 'pass', step: setupSteps.install, detail: `the master credential ${master} (.graphyard/master.json) is present with mode 0600` };
   const named = env.GRAPHYARD_TOKEN_FILE ? resolve(env.GRAPHYARD_TOKEN_FILE) : null;
   const file = named ?? resolve(root, '.graphyard/connection.json');
   const check = (status: SetupCheck['status'], detail: string): SetupCheck => ({ id: 'credentials-file', status, detail, step: setupSteps.install });
@@ -132,8 +178,12 @@ export const setupLine = (check: SetupCheck) => check.status === 'pass' ? `PASS 
 export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<SetupCheck[]> {
   const env = input.env ?? process.env, status = input.status;
   const lines: SetupCheck[] = [];
-  lines.push({ id: 'control-plane', status: status ? 'pass' : 'fail', step: setupSteps.install, detail: status ? `answered as role ${status.actor?.role ?? 'unknown'}` : `not reachable: ${input.failure ?? 'no answer'}` });
-  lines.push(await credentialsCheck(input.root, env));
+  // Reachable and authenticated are separate facts (GY-1412): a plane whose /healthz answered is
+  // never reported as unreachable because the credential is missing or refused.
+  const credential = env.GRAPHYARD_TOKEN_FILE || env.GRAPHYARD_TOKEN || input.masterCredential ? 'refused' : 'missing';
+  lines.push({ id: 'control-plane', status: status ? 'pass' : 'fail', step: setupSteps.install,
+    detail: status ? `answered as role ${status.actor?.role ?? 'unknown'}` : `${input.reachable ? `reachable, credential ${credential}` : 'not reachable'}: ${input.failure ?? 'no answer'}` });
+  lines.push(await credentialsCheck(input.root, env, input.masterCredential));
   const missing = status?.appPermissions?.missing ?? [];
   const appBound = !!status?.github, verified = !!status?.appPermissions?.verifiedAt;
   lines.push({ id: 'github-app', status: appBound && verified && !missing.length ? 'pass' : 'fail', step: setupSteps.app,
