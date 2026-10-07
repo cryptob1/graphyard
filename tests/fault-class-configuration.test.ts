@@ -233,7 +233,7 @@ test('unit:upgrade-self-restart-failure-still-recorded — a systemctl failure n
       const upgraded = await performSelfUpgrade(master, state, { root: '/srv/graphyard', run: fakeGit(hex('a'), hex('b')), now: () => clock, persist: async () => {},
         restartExecutors: async to => restarted(to), restartSelf: async () => { throw failure; } });
       assert.equal(upgraded.outcome, 'failed');
-      assert.match(upgraded.outcome === 'failed' ? upgraded.reason : '', /could not re-execute itself through its supervisor/);
+      assert.match(upgraded.outcome === 'failed' ? upgraded.reason : '', /could not re-execute itself: /);
       const failed = failedActions(state);
       assert.equal(failed.length, 1);
       assert.deepEqual([failed[0][0], failed[0][1].kind, failed[0][1].faultClass], [`upgrade:${hex('b')}`, 'config', 'configuration']);

@@ -255,9 +255,9 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
       persist: async () => {}, now: () => clock,
     });
     assert.equal(unsupervised.outcome, 'failed');
-    assert.match(unsupervised.outcome === 'failed' ? unsupervised.reason : '', /could not re-execute itself through its supervisor/);
+    assert.match(unsupervised.outcome === 'failed' ? unsupervised.reason : '', /could not re-execute itself: /);
     assert.equal(selfThrew, 1);
-    assert.match([...Object.values(alone.actions)].at(-1)!.detail, /keeps running [0-9a-f]{12} until its supervisor restarts it/);
+    assert.match([...Object.values(alone.actions)].at(-1)!.detail, /keeps running [0-9a-f]{12} until it is restarted/);
 
     // The wiring: runDaemon performs the upgrade between the cycle and its wait, never mid-cycle —
     // through the shipped performSelfUpgrade here. The process before it loaded the first commit
