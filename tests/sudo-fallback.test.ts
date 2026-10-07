@@ -71,13 +71,13 @@ test('unit:sudo-method-fallback — a page offering a passkey or a password hand
     assert.deepEqual(result, { passed: true, attempts: 0, code: null });
     assert.deepEqual(fake.state.clicked, [], `${method}: GitHub Mobile was never activated`);
     assert.equal(codes.length, 1); assert.equal(codes[0].method, method); assert.equal(codes[0].url, SUDO);
-    assert.equal(sudoInstruction(codes[0]), `Confirm access with your passkey or password at ${SUDO}`);
+    assert.equal(sudoInstruction(codes[0]), `Confirm access with your passkey or password at ${SUDO} in the Chrome profile the agent drives (GitHub ties the confirmation to that browser's session)`);
     assert.match(sudoAttention(codes[0], Date.parse(codes[0].issuedAt))!.instruction, /passkey or password at https:\/\/github\.com\/sessions\/sudo.*installation-accept flow is waiting/);
     assert.deepEqual(methodSteps(steps), [['sudo-method', method]], 'the recorded steps name the method used');
   }
 });
 
-test('unit:sudo-method-fallback — a passkey or password wait reopens the page on its interval, so a confirmation made in the operator\'s browser is seen', async () => {
+test('unit:sudo-method-fallback — a passkey or password wait reopens the page on its interval, so a confirmation made in the agent\'s Chrome profile is seen', async () => {
   const { passSudo } = await browser();
   const fake = confirmPage({ passkey: true });
   let clock = 0;
@@ -139,7 +139,7 @@ test('unit:sudo-method-fallback — graphyard up hands the operator the passkey 
     const handed: { sentence: string; url: string | null }[] = [];
     const drive = browserAppDriver({ page, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: async () => { if (++polls === 2) fake.confirm(); } });
     assert.deepEqual(await drive('http://127.0.0.1:4311', (sentence, link) => { handed.push({ sentence, url: link.url ?? null }); }), { state: 'done' });
-    assert.deepEqual(handed, [{ sentence: `Confirm access with your passkey or password at ${SUDO}`, url: SUDO }], method);
+    assert.deepEqual(handed, [{ sentence: `Confirm access with your passkey or password at ${SUDO} in the Chrome profile the agent drives (GitHub ties the confirmation to that browser's session)`, url: SUDO }], method);
     assert.ok(!fake.state.clicked.includes('#mobile'), `${method}: GitHub Mobile is only the operator's choice`);
   }
 });
@@ -234,6 +234,29 @@ test('unit:reuse-app-install — an App missing a permission the role needs, or 
     await assert.rejects(reuseExistingApp({ slug: 'graphyard-acme-api', role: 'control-plane', repository: 'acme/shop', registrations, gh: elsewhere.gh, fetcher: elsewhere.fetcher, apply: true }), /not installed on acme; install it there at https:\/\/github\.com\/apps\/graphyard-acme-api\/installations\/new/);
     await assert.rejects(reuseExistingApp({ slug: 'graphyard-unknown', role: 'control-plane', repository: 'acme/shop', registrations, gh: elsewhere.gh, fetcher: elsewhere.fetcher, apply: false }), /No registration for App graphyard-unknown is saved on this host.*\(graphyard-acme-api\)/);
     await assert.rejects(reuseExistingApp({ slug: 'graphyard-acme-api', role: 'reviewer', repository: 'acme/shop', registrations, gh: elsewhere.gh, fetcher: elsewhere.fetcher, apply: false }), /registered as a control-plane App and cannot serve as the reviewer App/);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('unit:reuse-app-install — a reviewer App holding more than its declaration is refused, naming the excess; two Apps for one role are refused', async () => {
+  const { reuseExistingApp, savedRegistrations } = await githubSetup();
+  const { reusedForRole } = await install();
+  const home = await savedOnHost({ 'acme-api/github-app.json': savedApp(), 'acme-api/github-reviewer-claude.json': savedApp({ appId: 7002, slug: 'acme-api-review-claude', reviewer: 'claude' }), 'acme-web/github-reviewer-codex.json': savedApp({ appId: 7003, slug: 'acme-web-review-codex', reviewer: 'codex' }) });
+  try {
+    const registrations = await savedRegistrations([join(home, 'acme-api'), join(home, 'acme-web')]);
+    const reviewer = requiredPermissions(reviewerPermissions);
+    // A reviewer App whose registration requests Contents: write could write code: refused before anything is added.
+    const registered = fakeGitHub({ appId: 7002, registered: { ...reviewer, contents: 'write' }, granted: reviewer });
+    await assert.rejects(reuseExistingApp({ slug: 'acme-api-review-claude', role: 'reviewer', repository: 'acme/shop', registrations, gh: registered.gh, fetcher: registered.fetcher, apply: true }), /App acme-api-review-claude holds Contents: write, beyond the reviewer declaration; a reviewer App must never hold more than its declaration/);
+    assert.deepEqual(registered.github.repositories, ['acme/api'], 'nothing was added');
+    // An installation granting Checks: write could publish Graphyard's gate check: refused, naming the installation.
+    const granted = fakeGitHub({ appId: 7002, registered: reviewer, granted: { ...reviewer, checks: 'write' } });
+    await assert.rejects(reuseExistingApp({ slug: 'acme-api-review-claude', role: 'reviewer', repository: 'acme/shop', registrations, gh: granted.gh, fetcher: granted.fetcher, apply: true }), /App acme-api-review-claude's installation on acme holds Checks: write, beyond the reviewer declaration/);
+    assert.deepEqual(granted.github.repositories, ['acme/api']);
+    // A control-plane App needs Contents: write; holding it is no excess.
+    assert.equal((await reuseExistingApp({ slug: 'graphyard-acme-api', role: 'control-plane', repository: 'acme/shop', registrations, ...fakeGitHub(), apply: false })).added, false);
+    // Two reviewer slugs: both are named for refusal rather than the second silently dropped.
+    assert.deepEqual(reusedForRole(['graphyard-acme-api', 'acme-api-review-claude', 'acme-web-review-codex'], registrations, 'reviewer'), ['acme-api-review-claude', 'acme-web-review-codex']);
+    assert.deepEqual(reusedForRole(['graphyard-acme-api', 'acme-api-review-claude'], registrations, 'control-plane'), ['graphyard-acme-api']);
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 

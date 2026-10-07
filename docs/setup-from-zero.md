@@ -30,7 +30,7 @@ When all are green, **Describe what you want built** records a goal, like `graph
 
 ## Agent setup: graphyard up --agent
 
-An agent sets Graphyard up with `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary on stdout, exit `0` green, `1` failed, `2` prerequisite, `3` still waiting (rerun resumes). It creates the Apps in a Chrome profile signed in to GitHub (passed, else the master's; with neither, and no `--reuse-app`, it exits `2`), recorded under `.graphyard/master-actions/`; connects host accounts; sets deployment variables from saved credentials; records FILE as a goal once, likewise. Only a device step becomes a `handoff` event (one sentence, a link or code; then the run resumes): a subscription login's approval, or *Confirm access* by passkey or password, GitHub Mobile only with `--github-mobile` (unapproved for 60 s, the password link too).
+An agent sets Graphyard up with `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary on stdout, exit `0` green, `1` failed, `2` prerequisite, `3` waiting. It creates the Apps in a Chrome profile signed in to GitHub (passed, else the master's; with neither, and no `--reuse-app` for both Apps, it exits `2`), recorded under `.graphyard/master-actions/`; connects host accounts; sets deployment variables from saved credentials; records FILE as a goal once. Only a device step becomes a `handoff` event (one sentence, a link or code): a subscription login's approval, or *Confirm access* by passkey or password, GitHub Mobile only with `--github-mobile` (unapproved for 60 s, the password link too).
 
 ## Troubleshooting: the manual steps
 

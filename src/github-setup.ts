@@ -56,6 +56,9 @@ export interface AppPermissionInspection {
   settingsUrl: string; installationUrl: string; steps: string[]; verified: boolean;
 }
 const levelRank = (level: unknown) => ['read', 'write', 'admin'].indexOf(String(level));
+/** Permissions in LEVELS beyond the REQUIRED declaration; for a reviewer any is a boundary violation. */
+const excessPermissions = (levels: Record<string, string>, required: Record<string, PermissionLevel>) => Object.entries(levels).filter(([permission, level]) => levelRank(level) > levelRank(required[permission] ?? null))
+  .map(([permission, level]) => ({ permission, granted: level, declared: required[permission] ?? null })).sort((a, b) => a.permission < b.permission ? -1 : 1);
 /**
  * Compares a registered App with the declaration for its role. GitHub exposes no API for
  * changing a registered App's permissions, so the App-level change is a browser step and the
@@ -94,8 +97,7 @@ export async function inspectAppPermissions(root: string, options: { reviewer?: 
   }
   const appShortfalls = permissionShortfalls(registered, set);
   const installationShortfalls = installationId ? permissionShortfalls(granted, set) : [];
-  const excess = Object.entries(granted ?? registered).filter(([permission, level]) => levelRank(level) > levelRank(required[permission] ?? null))
-    .map(([permission, level]) => ({ permission, granted: level, declared: required[permission] ?? null })).sort((a, b) => a.permission < b.permission ? -1 : 1);
+  const excess = excessPermissions(granted ?? registered, required);
   const list = (shortfalls: PermissionShortfall[]) => shortfalls.map(shortfall => describePermission(shortfall.permission, shortfall.required)).join(', ');
   // The acceptance step names what each missing grant blocks, so an Actions: write gap reads as
   // the failed CI reruns it stops before a rerun is ever attempted (GY-1328).
@@ -191,6 +193,13 @@ export async function reuseExistingApp(request: AppReuseRequest): Promise<AppReu
   if (registration?.id !== app.appId) throw new Error(`GitHub returned a different App for the key saved in ${saved.file}`);
   const requested = permissionShortfalls(levels(registration.permissions), set);
   if (requested.length) throw new Error(`App ${app.slug} does not request ${list(requested)}, which the ${role} role needs; raise it at https://github.com/settings/apps/${encodeURIComponent(app.slug)}/permissions, or choose another App`);
+  // A reviewer never holds more than its declaration (never Contents: write or Checks), the same rule
+  // inspectAppPermissions applies: an App that does could write code or publish Graphyard's gate check.
+  const beyond = (levels: Record<string, string>, where: string) => {
+    const excess = role === 'reviewer' ? excessPermissions(levels, requiredPermissions(reviewerPermissions)) : [];
+    if (excess.length) throw new Error(`App ${app.slug}${where} holds ${excess.map(entry => describePermission(entry.permission, entry.granted as PermissionLevel)).join(', ')}, beyond the reviewer declaration; a reviewer App must never hold more than its declaration, so reduce it at https://github.com/settings/apps/${encodeURIComponent(app.slug)}/permissions, or choose another App`);
+  };
+  beyond(levels(registration.permissions), '');
   if (role === 'control-plane') {
     const hook = await call('/app/hook/config');
     const bound = typeof hook?.url === 'string' ? hook.url.trim() : '';
@@ -205,6 +214,7 @@ export async function reuseExistingApp(request: AppReuseRequest): Promise<AppReu
   if (installation.suspended_at) throw new Error(`App ${app.slug}'s installation on ${account} is suspended; restore it at ${installationSettingsUrl(installation.id)}`);
   const granted = permissionShortfalls(levels(installation.permissions), set);
   if (granted.length) throw new Error(`App ${app.slug}'s installation on ${account} does not grant ${list(granted)}; accept the pending permission request at ${installationSettingsUrl(installation.id)}, then rerun`);
+  beyond(levels(installation.permissions), `'s installation on ${account}`);
   const selection = installation.repository_selection === 'all' ? 'all' : 'selected';
   let added = false;
   if (request.apply) {

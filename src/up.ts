@@ -245,8 +245,15 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   try {
     // Agent mode creates the Apps in a browser; without a profile it would hand the whole App
     // creation to a person, which only a device approval may be. It stops before anything runs.
-    // A reused App needs no browser (GY-1442), so --reuse-app lets agent mode start without one.
-    if (request.agent && !state.completed.includes('control-plane') && !deps.driveApp && !request.reuseApps?.length) throw new UpStop('Agent mode creates the GitHub Apps in a Chrome profile signed in to GitHub, and none is given or recorded: pass --browser-profile PROFILE and rerun graphyard up --agent.', upExitCodes.prerequisite);
+    // A reused App needs no browser (GY-1442), so agent mode starts without one only when the
+    // install's read-only plan says the reused Apps leave no App to create in a browser.
+    const noProfile = 'Agent mode creates the GitHub Apps in a Chrome profile signed in to GitHub, and none is given or recorded: pass --browser-profile PROFILE and rerun graphyard up --agent.';
+    if (request.agent && !state.completed.includes('control-plane') && !deps.driveApp) {
+      if (!request.reuseApps?.length) throw new UpStop(noProfile, upExitCodes.prerequisite);
+      const browserApps: unknown = parseJson(await run('preflight', installArgs('--plan')))?.browserApps;
+      const left = Array.isArray(browserApps) ? browserApps.map(String) : ['control-plane', 'reviewer'];
+      if (left.length) throw new UpStop(`${noProfile} --reuse-app covers no ${left.map(role => role === 'reviewer' ? `reviewer App "${request.reviewer}"` : 'control-plane App').join(' and ')}, which would otherwise be created in that browser; reuse one for it too, or pass the profile.`, upExitCodes.prerequisite);
+    }
 
     await step('preflight', async () => {
       for (let attempt = 0; attempt < 2; attempt++) {

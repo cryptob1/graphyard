@@ -74,8 +74,8 @@ export const installCommands = defineCommands([
       '                                approvals: a Confirm-access prompt is handed off as passkey or',
       '                                password first (--github-mobile: GitHub Mobile first, with the',
       '                                passkey or password link added after 60 s unapproved).',
-      '                                --reuse-app passes to install. Exit 0 green, 1 failed, 2 prerequisite, 3 still',
-      '                                waiting (rerun resumes).',
+      '                                --reuse-app passes to install. Exit 0 green, 1 failed,',
+      '                                2 prerequisite, 3 still waiting (rerun resumes).',
     ],
     // `up` installs the control plane and records the connection; it never reads a stale one.
     readsConnection: () => false,

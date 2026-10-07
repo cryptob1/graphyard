@@ -190,7 +190,7 @@ export function sudoAttention(state: SudoState | null, now = Date.now()) {
  * GitHub Mobile code — and, once that prompt has gone a minute unapproved, the other route too.
  */
 export function sudoInstruction(state: Pick<SudoState, 'code' | 'method' | 'url' | 'fallback'>, device = 'your phone') {
-  if (state.method === 'passkey' || state.method === 'password') return `Confirm access with your passkey or password at ${state.url ?? 'the GitHub Confirm-access page'}`;
+  if (state.method === 'passkey' || state.method === 'password') return `Confirm access with your passkey or password at ${state.url ?? 'the GitHub Confirm-access page'} in the Chrome profile the agent drives (GitHub ties the confirmation to that browser's session)`;
   const mobile = state.code ? `Approve the GitHub Mobile prompt on ${device} and choose ${state.code}` : 'Confirm access to GitHub on your device (GitHub Mobile or your passkey)';
   return state.fallback ? `${mobile}, or, if no prompt arrived, confirm with your ${state.fallback.method === 'passkey' ? 'passkey' : 'password'} at ${state.fallback.url}` : mobile;
 }
@@ -223,7 +223,7 @@ export interface SudoOptions {
   prefer?: 'passkey-or-password' | 'mobile';
   /** How long a shown Mobile code may go unapproved before the passkey or password route is offered beside it (60 s). */
   mobileFallbackMs?: number;
-  /** How often a passkey or password wait reopens the page, so a confirmation made in the operator's own browser is seen (30 s). */
+  /** How often a passkey or password wait reopens the page, so a confirmation made in the agent's Chrome profile is seen (30 s). */
   reloadMs?: number;
 }
 /**

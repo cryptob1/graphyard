@@ -236,6 +236,9 @@ const ghText = (session: InstallSession) => async (args: string[]) => {
 function reuseApp(session: InstallSession, slug: string, role: AppRole, webhookUrl: string | null, apply: boolean) {
   return reuseExistingApp({ slug, role, repository: session.inputs.repository, registrations: session.registrations, webhookUrl, gh: ghText(session), fetcher: session.deps.fetch, apply });
 }
+/** Every --reuse-app slug whose saved registration serves ROLE. One App serves each role, so more than one is refused, never silently dropped. */
+export const reusedForRole = (slugs: readonly string[], registrations: readonly SavedRegistration[], role: AppRole) =>
+  slugs.filter(slug => registrations.find(entry => entry.app.slug.toLowerCase() === slug.toLowerCase())?.role === role);
 /** The --reuse-app preflight: every named App is saved here, fits a role this install fills, and passes reuseExistingApp's checks. */
 async function reusePreflight(session: InstallSession, ghReady: boolean): Promise<PreflightItem[]> {
   const items: PreflightItem[] = [];
@@ -245,6 +248,8 @@ async function reusePreflight(session: InstallSession, ghReady: boolean): Promis
     const fix = 'Name an App whose registration an earlier install or github-setup saved on this host, or drop --reuse-app to register a new App in the browser';
     if (!saved) { items.push({ name, ok: false, detail: `no registration for App ${slug} is saved on this host${session.registrations.length ? `; saved: ${session.registrations.map(entry => entry.app.slug).join(', ')}` : ''}`, fix }); continue; }
     if (saved.role === 'reviewer' && !session.inputs.reviewer) { items.push({ name, ok: false, detail: `${slug} is a reviewer App and this install registers no reviewer`, fix: 'Add --reviewer NAME so the reused App serves as that reviewer' }); continue; }
+    const sameRole = reusedForRole(session.inputs.reuseApps ?? [], session.registrations, saved.role);
+    if (sameRole.length > 1) { items.push({ name, ok: false, detail: `--reuse-app names ${sameRole.length} ${saved.role} Apps (${sameRole.join(', ')}), and this install uses one ${saved.role} App`, fix: `Keep one --reuse-app for the ${saved.role} role` }); continue; }
     if (saved.role === 'control-plane' && session.inputs.githubAppFile) { items.push({ name, ok: false, detail: '--github-app and --reuse-app both name the control-plane App', fix: 'Keep one of them' }); continue; }
     if (!ghReady) { items.push({ name, ok: false, detail: 'adding the repository to the App\'s installation needs the GitHub CLI', fix: 'Authenticate gh (see the GitHub CLI check), then rerun' }); continue; }
     try {
@@ -724,7 +729,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     actions.push(...session.delivery.adapter.plan(session.delivery.context));
   }
   const reusedReviewer = reusedFor(session, 'reviewer');
-  if (session.inputs.reviewer) actions.push({ id: 'github.reviewer', target: 'github', state: record?.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer) ? 'satisfied' : 'create', title: `${reusedReviewer ? `Reuse the reviewer App ${reusedReviewer} as "${session.inputs.reviewer}" (the repository is added to its installation)` : `Register the reviewer App "${session.inputs.reviewer}"`}, add its identity to GRAPHYARD_REVIEWER_APPS, and set it as the main guard's revert approver (GRAPHYARD_REVERT_APPROVER_*)`, human: 'One additional browser confirmation, because a reviewer is a separate GitHub identity with no control-plane authority.' });
+  if (session.inputs.reviewer) actions.push({ id: 'github.reviewer', target: 'github', state: record?.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer) ? 'satisfied' : 'create', title: `${reusedReviewer ? `Reuse the reviewer App ${reusedReviewer} as "${session.inputs.reviewer}" (the repository is added to its installation)` : `Register the reviewer App "${session.inputs.reviewer}"`}, add its identity to GRAPHYARD_REVIEWER_APPS, and set it as the main guard's revert approver (GRAPHYARD_REVERT_APPROVER_*)`, ...(reusedReviewer ? {} : { human: 'One additional browser confirmation, because a reviewer is a separate GitHub identity with no control-plane authority.' }) });
 
   // A local Compose install serves loopback only, so GitHub can never deliver to it. Saying
   // so in the plan keeps an agent from chasing an unconfirmable step as if it were a failure.
@@ -756,17 +761,19 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
       observed: `${deployed.id} declares ${deployed.sessionKind ? `sessionKind ${deployed.sessionKind}` : 'no sessionKind'}; human-only requests have no one who can answer them` });
   }
 
+  const reviewerBound = !!record?.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer);
+  const browserApps: AppRole[] = [...(appConfigured || saved || reusedApp ? [] : ['control-plane' as const]), ...(session.inputs.reviewer && !reviewerBound && !reusedReviewer ? ['reviewer' as const] : [])];
   const plan: InstallPlan = {
     version: 1, repository: session.inputs.repository, provider: context.provider, installId: session.installId,
     installDirectory: session.directory, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy,
     domain: context.domain, url: observation.url ?? record?.url ?? null, existing, secretsRedacted: true,
     preflight, principals: session.principals, actions, drift,
-    humanSteps: [...(protectionHuman ? [protectionHuman] : []), CORE_HUMAN_STEPS[0], ...(saved && !appConfigured ? [] : [APP_HUMAN_STEP]), ...CORE_HUMAN_STEPS.slice(1), ...(session.inputs.reviewer ? [`Confirm the separate reviewer App "${session.inputs.reviewer}" in the browser.`] : []),
+    humanSteps: [...(protectionHuman ? [protectionHuman] : []), CORE_HUMAN_STEPS[0], ...((saved || reusedApp) && !appConfigured ? [] : [APP_HUMAN_STEP]), ...CORE_HUMAN_STEPS.slice(1), ...(session.inputs.reviewer && !reusedReviewer ? [`Confirm the separate reviewer App "${session.inputs.reviewer}" in the browser.`] : []),
       ...(host ? ['After install, sign in once with the printed link and connect each agent account on the dashboard Agents page; nobody logs into the host.'] : []),
       ...(candidateModel ? ['Approve any UAT or production resource the plan marks as costing money before rerunning with --apply --create-environments; without that flag none is created.'] : [])],
     ...(host ? { host: hostPlan(context) } : {}),
     ...(context.provider === 'hetzner' ? { price: quotedPrice(context) } : {}),
-    delivery: deliverySummary(session),
+    delivery: deliverySummary(session), browserApps,
   };
   const serialized = JSON.stringify(plan);
   session.vault.assertClean(serialized, 'the installation plan');
