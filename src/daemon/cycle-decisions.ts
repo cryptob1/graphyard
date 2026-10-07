@@ -404,6 +404,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   };
   const wake = effects.observe && observationWaker(effects.observe);
   const noteWait = async (item: Work, detail: string) => { const waitKey = `wait:rework:${item.id}`; if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
+  // GY-1436: one stable wait per held item, naming the docs-sync session, head, base and the end of its bound.
+  const noteHold = async (item: Work, detail: string) => { const waitKey = `wait:docs-sync:${item.id}`; if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   const mechanical = effects.mechanicalFixes ? await effects.mechanicalFixes().then(read => read.requests, () => []) : []; // GY-971 planned bot rounds
   const routinePass = budget.pass(), attestPass = budget.pass();
   // Attestations an approver refused (GY-1394), kept on their watches, indexed once per cycle by item.
@@ -433,17 +435,28 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       return;
     }
     let key = decisionKey(item, decision); if (routinePass.over()) { needed.add(key); budget.defer(item); return; }
-    // A confirmed conflict confined to docs pages is a docs-sync's, not a worker's (GY-566).
-    if (decision.action === 'rework' && !state.approvals[key] && baseRefreshConflict(item) && decision.binding === `${item.candidate!.sha}:conflict` && await docsSync.holds(item)) return;
+    // A confirmed conflict confined to docs pages is a docs-sync's, not a worker's (GY-566). A standing
+    // hold is the item's recorded wait, never a bare skip (GY-1436); one that ended awaits an
+    // observation since, which the step wakes below rather than waiting for one unprompted.
+    const docsConflict = (subject: Work, routine: RoutineDecision) => routine.action === 'rework' && !state.approvals[decisionKey(subject, routine)] && !!baseRefreshConflict(subject) && routine.binding === `${subject.candidate!.sha}:conflict`;
+    const hold = docsConflict(item, decision) ? await docsSync.holds(item) : null;
+    if (hold?.held) return noteHold(item, hold.wait);
     needed.add(key);
     // Rework waits for an observation that still describes the item (GY-144); the step wakes it unless paused (GY-793) and re-decides.
     // The loop's own landed wake of the submitted head counts as that observation, whatever its age (GY-1266, GY-1257).
     const woken = state.actions[`wake:observation:${item.id}`];
-    let wait = decision.action === 'rework' ? reworkObservationWait(item, clock, pause, woken?.state === 'done' ? woken.at : null) : null;
+    let wait = hold?.awaiting ? `${item.key}: its docs-sync hold ended at ${hold.awaiting}; rework waits for an observation since then showing the head unmoved`
+      : decision.action === 'rework' ? reworkObservationWait(item, clock, pause, woken?.state === 'done' ? woken.at : null) : null;
     const fresh = wait && !pause && wake && !state.approvals[key] ? await wake(item, clock) : null;
     const again = fresh && routineDecision(fresh, config, now(), assessment, fresh.candidate?.sha === item.candidate?.sha ? cycle.baseFailed.get(item.id) : undefined, [], [], refused);
     if (fresh && again?.action !== 'rework') return noteWait(item, `${item.key}: woke its observation for a rework decision; the reading at ${fresh.observation?.at ?? 'unknown'} no longer calls for one`);
-    if (fresh && again) { item = fresh; decision = again; key = decisionKey(item, decision); needed.add(key); wait = reworkObservationWait(item, now(), pause); }
+    if (fresh && again) {
+      item = fresh; decision = again; key = decisionKey(item, decision); needed.add(key);
+      // The fresh reading settles an ended docs-sync hold in the cycle it ended (GY-1436).
+      const settled = hold?.awaiting && docsConflict(item, decision) ? await docsSync.holds(item) : null;
+      if (settled?.held) return noteHold(item, settled.wait);
+      wait = settled?.awaiting ? `${item.key}: its docs-sync hold ended at ${settled.awaiting}; rework waits for an observation since then showing the head unmoved` : reworkObservationWait(item, now(), pause);
+    }
     const watch = state.approvals[key];
     if (wait) {
       await noteWait(item, wait);

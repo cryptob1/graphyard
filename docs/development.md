@@ -29,7 +29,7 @@ A required check failure the base branch head fails too is a base failure: the l
 
 ### Documentation that rarely conflicts
 
-Candidates conflicting only in `docs/**/*.md` get docs-sync, not rework: base merges in keeping both sides, and approval stays if the non-docs diff is unchanged. A Claude docs-sync session loads only user settings plus its own role file (`.graphyard/harness/docs-sync-*.json`, removed when the session settles), never the master's push deny: it may push its merge only as `git push origin HEAD:refs/heads/BRANCH`. A docs-sync session already running in Herdr is adopted, never relaunched; one whose runtime stops for 3 minutes without pushing returns the conflict to a worker then, not at its 30-minute bound.
+Candidates conflicting only in `docs/**/*.md` get docs-sync, not rework: base merges in keeping both sides, and approval stays if the non-docs diff is unchanged. A Claude docs-sync session loads only user settings plus its own role file (`.graphyard/harness/docs-sync-*.json`, removed when the session settles), never the master's push deny: it may push its merge only as `git push origin HEAD:refs/heads/BRANCH`. A docs-sync session already running in Herdr is adopted, never relaunched; its hold is the item's recorded wait, bounded by the 10-minute blocked bound (attention naming the session at half), and is re-classified when the base moves (no longer docs-only: rework); one stopped 3 minutes without pushing, gone or past its bound gets its observation woken and rework next.
 
 ## Trusted contracts
 
