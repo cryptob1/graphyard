@@ -23,7 +23,7 @@ import { candidateKey } from './reconcile.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
 import { baseRefreshConflict } from '../merge-queue.js';
 import { mergeBaseDismissal } from '../merge-base-ancestry.js';
-import { containmentGraceMs, containmentPhase } from '../model/containment.js';
+import { containmentGraceMs, containmentPhase, containmentSettleWaitBoundMs } from '../model/containment.js';
 import { openAction } from '../model/next-action.js';
 import { carriedDecision } from '../model/concerns.js';
 import { masterTurnWaitBoundMs } from './decisions.js';
@@ -126,8 +126,7 @@ const fenceSettled = (state: Pick<DaemonState, 'actions'>, item: Work) =>
   !!item.containmentQuarantine && state.actions[`settle:${item.id}:${item.containmentQuarantine.epoch}`]?.state === 'done';
 /** The kinds a lapsed fence is counted under: the item's own record, and the settle or hold line master status derives for it. */
 const containmentKinds: ReadonlySet<FaultKind> = new Set<FaultKind>(['containment', 'containment-settleable']);
-/** How long a lapsed containment fence may wait, past its grace window, for the loop to verify and settle it before it counts as a containment fault (GY-1299). */
-export const containmentSettleWaitBoundMs = 10 * 60_000;
+export { containmentSettleWaitBoundMs };
 /**
  * GY-1299. Whether a containment fence is still in motion: its owner's lease has lapsed and the
  * fence is inside its grace window or within `containmentSettleWaitBoundMs` after it. The reclaim
