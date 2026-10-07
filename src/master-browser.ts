@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { relative, resolve } from 'node:path';
 import { z } from 'zod';
@@ -318,67 +318,117 @@ const escapeAttribute = (value: string) => value.replace(/&/g, '&amp;').replace(
 /**
  * A Confirm-access form's markup with no session-bound value left: every hidden input's value,
  * every attribute named like a token, nonce, csrf token or secret, and the value of every text or
- * password input is replaced by sudoFormRedaction. Names, ids, labels and autocomplete stay.
+ * password input is replaced by sudoFormRedaction. Names, ids, labels and autocomplete stay. A
+ * one-time code shown as text — a GitHub Mobile pairing code, or any element whose whole text is a
+ * short run of digits — and every CODES value in text or in any attribute are redacted too (GY-1482).
  */
-export function redactSudoForm(html: string) {
-  return html.replace(/<([a-zA-Z][\w:-]*)((?:\s+[^\s"'>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*(\/?)>/g, (_tag, name: string, body: string, close: string) => {
+export function redactSudoForm(html: string, codes: readonly string[] = []) {
+  const known = codes.filter(code => /^\w+$/.test(code)).map(code => new RegExp(`\\b${code}\\b`, 'g'));
+  const holdsCode = (value: string) => known.some(pattern => { pattern.lastIndex = 0; return pattern.test(value); });
+  const tags = html.replace(/<([a-zA-Z][\w:-]*)((?:\s+[^\s"'>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*(\/?)>/g, (_tag, name: string, body: string, close: string) => {
     const attributes = [...body.matchAll(/([^\s"'>\/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g)]
       .map(([, key, double, single, bare]) => ({ key, value: double ?? single ?? bare ?? null }));
     const input = name.toLowerCase() === 'input';
     const type = (attributes.find(attribute => attribute.key.toLowerCase() === 'type')?.value ?? 'text').toLowerCase();
     const rewritten = attributes.map(({ key, value }) => {
       if (value === null) return key;
-      const secret = secretAttribute.test(key) || input && key.toLowerCase() === 'value' && !structuralInputs.has(type);
+      const secret = secretAttribute.test(key) || input && key.toLowerCase() === 'value' && !structuralInputs.has(type) || holdsCode(unescapeAttribute(value));
       return `${key}="${secret ? sudoFormRedaction : escapeAttribute(unescapeAttribute(value))}"`;
     });
     return `<${name}${rewritten.map(attribute => ` ${attribute}`).join('')}${close ? ' /' : ''}>`;
   });
+  return tags.replace(/>([^<]*)</g, (_text, shown: string) => `>${known.reduce((text, pattern) => text.replace(pattern, sudoFormRedaction), shown.replace(/^(\s*)\d{2,8}(\s*)$/, `$1${sudoFormRedaction}$2`))}<`);
 }
-// The links that open a code view without sending anything. A "Send a code via email" control
-// emails a code, so it is never followed here.
-const sudoViewLinks: Record<'authenticator' | 'email', readonly string[]> = { authenticator: authenticatorLabels, email: ['Use email', 'Use your email', 'Use an email code', 'Use email code', 'Email code'] };
+// The links that open a method's view without sending anything. A "Send a code via email" control
+// emails a code and a "Use GitHub Mobile" control sends a push, so neither is followed here: their
+// views are kept when the flow itself selects them (SudoOptions.keep).
+const sudoViewLinks: Record<'passkey' | 'authenticator' | 'email', readonly string[]> = { passkey: routeLabels.passkey, authenticator: authenticatorLabels, email: ['Use email', 'Use your email', 'Use an email code', 'Use email code', 'Email code'] };
 export interface CapturedSudoForm { view: 'landing' | 'authenticator' | 'email'; file: string; url: string }
+
+/** The views of a Confirm-access page saved for fixtures: the one it loaded on and each method's (GY-1482). */
+export const confirmAccessViews = ['landing', 'passkey', 'authenticator', 'email', 'mobile'] as const;
+export type ConfirmAccessView = typeof confirmAccessViews[number];
+/** Where a flow record keeps its Confirm-access captures, beside its steps and screenshots. */
+export const confirmAccessDirectory = 'confirm-access';
+export const confirmAccessFile = (view: ConfirmAccessView) => `${confirmAccessDirectory}/confirm-access-${view}.html`;
+export interface ConfirmAccessCapture { view: ConfirmAccessView; file: string; url: string; at: string }
+/**
+ * Save forms' markup HTML as VIEW's Confirm-access capture in the flow record DIRECTORY, redacted
+ * first (CODES are the one-time codes the page showed), replacing an earlier capture of the view.
+ */
+async function saveConfirmAccess(page: BrowserPage, directory: string, view: ConfirmAccessView, html: string, codes: readonly string[], now: () => Date): Promise<ConfirmAccessCapture> {
+  const file = confirmAccessFile(view);
+  await mkdir(resolve(directory, confirmAccessDirectory), { recursive: true, mode: 0o700 });
+  await writeFile(resolve(directory, file), `${redactSudoForm(html, codes)}\n`, { mode: 0o600 });
+  page.note?.('confirm-access-capture', [view, file]);
+  return { view, file, url: page.url(), at: now().toISOString() };
+}
+/**
+ * Save the Confirm-access forms the page shows now as VIEW's capture (GY-1482): called after each
+ * method the flow selects. Throws when the page shows no Confirm-access form.
+ */
+export async function captureConfirmAccess(page: BrowserPage, directory: string, view: ConfirmAccessView, options: { codes?: readonly string[]; now?: () => Date } = {}) {
+  if (!page.markup) throw new Error('the page cannot read markup');
+  const html = page.markup();
+  if (!html) throw new Error('no Confirm-access form found');
+  return saveConfirmAccess(page, directory, view, html, options.codes ?? [], options.now ?? (() => new Date()));
+}
 /**
  * Keep the markup of a Confirm-access page's forms for fixtures (GY-1461): the view it landed on,
  * then each code view it offers (authenticator app, email code), opened by its link alone — nothing
  * is typed or submitted — and the landing page reopened afterwards so the flow proceeds exactly as
  * before. Each form is redacted before it is written. A failure is recorded as a step with its error
  * and never thrown; the capture stops once its time budget is spent.
+ *
+ * The same reads are saved as the flow's Confirm-access captures too (GY-1482, ONCAPTURE), with the
+ * passkey view besides: opened by its link, or, on a page that asks for the passkey on the view it
+ * loads on, that landing view itself — its button starts WebAuthn, so it is never pressed.
  */
-export async function captureSudoForms(page: BrowserPage, directory: string, options: { now?: () => Date; budgetMs?: number } = {}): Promise<CapturedSudoForm[]> {
+export async function captureSudoForms(page: BrowserPage, directory: string, options: { now?: () => Date; budgetMs?: number; onCapture?: (capture: ConfirmAccessCapture) => void } = {}): Promise<CapturedSudoForm[]> {
   const captured: CapturedSudoForm[] = [];
   const failed = (view: string, error: unknown) => page.note?.('sudo-form-capture', [view, `failed: ${error instanceof Error ? error.message : String(error)}`]);
+  const missed = (view: string, error: unknown) => page.note?.('confirm-access-capture', [view, `failed: ${error instanceof Error ? error.message : String(error)}`]);
   if (!page.markup) { failed('landing', 'the page cannot read markup'); return captured; }
   const now = options.now ?? (() => new Date()), budgetMs = options.budgetMs ?? 30_000;
   const started = now().getTime();
   let landing: string, text: string;
   try { landing = page.url(); text = page.text(); } catch (error) { failed('landing', error); return captured; }
-  const keep = async (view: CapturedSudoForm['view']) => {
+  let landingHtml: string | null = null;
+  const confirmAccess = async (view: ConfirmAccessView, html: string) => {
+    try { options.onCapture?.(await saveConfirmAccess(page, directory, view, html, [], now)); } catch (error) { missed(view, error); }
+  };
+  const keep = async (view: CapturedSudoForm['view'] | 'passkey') => {
     const html = page.markup!();
     if (!html) throw new Error('no Confirm-access form found');
-    const file = `sudo-form-${view}.html`;
-    await writeFile(resolve(directory, file), `${redactSudoForm(html)}\n`, { mode: 0o600 });
-    captured.push({ view, file, url: page.url() });
-    page.note?.('sudo-form-capture', [view, file]);
+    if (view === 'landing') landingHtml = html;
+    if (view !== 'passkey') {
+      const file = `sudo-form-${view}.html`;
+      await writeFile(resolve(directory, file), `${redactSudoForm(html)}\n`, { mode: 0o600 });
+      captured.push({ view, file, url: page.url() });
+      page.note?.('sudo-form-capture', [view, file]);
+    }
+    await confirmAccess(view, html);
   };
   try { await keep('landing'); } catch (error) { failed('landing', error); }
   const offered = offeredSudoMethods(text);
   // A view link the capture follows counts as offering that view, whatever the page's prose says.
-  const linked = (view: 'authenticator' | 'email') => sudoViewLinks[view].some(label => text.toLowerCase().includes(label.toLowerCase()));
+  const linked = (view: keyof typeof sudoViewLinks) => sudoViewLinks[view].some(label => text.toLowerCase().includes(label.toLowerCase()));
   let moved = false;
-  for (const view of ['authenticator', 'email'] as const) {
+  for (const view of ['passkey', 'authenticator', 'email'] as const) {
     if (!offered[view] && !linked(view)) continue;
-    if (now().getTime() - started >= budgetMs) { failed(view, `capture budget of ${Math.round(budgetMs / 1000)}s spent`); break; }
+    const fail = view === 'passkey' ? missed : failed;
+    if (now().getTime() - started >= budgetMs) { fail(view, `capture budget of ${Math.round(budgetMs / 1000)}s spent`); break; }
     try {
       if (moved) { page.open(landing); moved = false; }
       let link: Located | null = null;
       for (const label of sudoViewLinks[view]) { link = page.locate('link', label); if (link) break; }
+      if (!link && view === 'passkey') { if (landingHtml) await confirmAccess('passkey', landingHtml); else missed('passkey', 'no passkey view link and no landing form'); continue; }
       if (!link) throw new Error(view === 'email' ? 'no email view link (only a control that sends a code, which is not followed)' : 'no authenticator view link');
       moved = true;
       try { page.click(link.selector); } catch (error) { if (!link.href) throw error; page.open(link.href); }
       page.wait(1_000);
       await keep(view);
-    } catch (error) { failed(view, error); }
+    } catch (error) { fail(view, error); }
   }
   if (moved) restoreSudoLanding(page, landing, text, failed);
   return captured;
@@ -460,6 +510,12 @@ export interface SudoOptions {
   readCode?: () => Promise<SudoCodeSubmission | null> | SudoCodeSubmission | null;
   /** GY-1461: called once, when the page first asks to confirm access and before any wait, to keep its forms' markup. */
   capture?: (page: BrowserPage) => Promise<void> | void;
+  /**
+   * GY-1482: called each time the flow itself selects a method — a GitHub Mobile prompt issued (with
+   * its pairing code, to redact), an email code sent, the authenticator view opened, the passkey or a
+   * code handed to the operator — to keep that view's forms. A failure is recorded, never thrown.
+   */
+  keep?: (page: BrowserPage, view: Exclude<ConfirmAccessView, 'landing'>, codes: string[]) => Promise<unknown> | unknown;
 }
 /**
  * Pass a Confirm-access prompt without a keyboard: hand the operator the page's confirmation and
@@ -492,6 +548,10 @@ export async function passSudo(page: BrowserPage, options: SudoOptions) {
   if (landingText) { const methods = offeredSudoMethods(landingText); for (const method of sudoMethods) if (methods[method]) offered.add(method); }
   const listed = () => sudoMethods.filter(method => offered.has(method));
   let lastReload = started;
+  const keep = async (view: Exclude<ConfirmAccessView, 'landing'>, codes: string[] = []) => {
+    if (!options.keep) return;
+    try { await options.keep(page, view, codes); } catch (error) { page.note?.('confirm-access-capture', [view, `failed: ${error instanceof Error ? error.message : String(error)}`]); }
+  };
   const waiting = (fields: Pick<SudoState, 'code' | 'method'> & Partial<SudoState>): SudoState => ({ flow: options.flow, record: options.record, issuedAt: now().toISOString(), attempt: Math.max(attempt, 1), deadline, state: 'waiting', ...fields });
   const route = (method: 'passkey' | 'password') => {
     for (const label of routeLabels[method]) { const link = page.locate('link', label); if (link?.href) return link.href; }
@@ -518,13 +578,14 @@ export async function passSudo(page: BrowserPage, options: SudoOptions) {
       if (!send) { page.note?.('sudo-code', ['email', 'not offered']); return; }
       activate(send);
       page.note?.('sudo-method', ['email']);
+      await keep('email');
       state = { ...state!, method: 'email', emailed: true };
       await options.onCode(state);
       return;
     }
     const method = state!.emailed ? 'email' : offered.has('authenticator') ? 'authenticator' : 'email';
     let field = codeField();
-    if (!field && method === 'authenticator') { const view = control(authenticatorLabels); if (view) { activate(view); field = codeField(); } }
+    if (!field && method === 'authenticator') { const view = control(authenticatorLabels); if (view) { activate(view); await keep('authenticator'); field = codeField(); } }
     if (!field || !page.fill) { page.note?.('sudo-code', [method, field ? 'page cannot type' : 'no code field']); return; }
     try { page.fill(field.selector, submission.code); } catch (error) { throw new Error(withheld(error, submission.code)); }
     const verify = control(verifyLabels, ['button']);
@@ -582,6 +643,7 @@ export async function passSudo(page: BrowserPage, options: SudoOptions) {
       if (!state) {
         const method = pageMethods.find(method => methods[method])!;
         page.note?.('sudo-method', [method]);
+        if (method !== 'password') await keep(method);
         state = waiting({ code: null, method, url: current, offered: listed() });
         await options.onCode(state);
       } else {
@@ -598,10 +660,12 @@ export async function passSudo(page: BrowserPage, options: SudoOptions) {
     if (detected.code && detected.code !== state?.code) {
       if (state?.method !== 'mobile') page.note?.('sudo-method', ['mobile']);
       state = waiting({ code: detected.code, method: 'mobile', url: current });
+      await keep('mobile', [detected.code]);
       await options.onCode(state);
     } else if (!state) {
       page.note?.('sudo-method', ['mobile']);
       state = waiting({ code: null, method: 'mobile', url: current });
+      await keep('mobile');
       await options.onCode(state);
     } else if (state.code && !state.fallback && (offered.has('passkey') || offered.has('password')) && now().getTime() - Date.parse(state.issuedAt) >= mobileFallbackMs) {
       // No approval within the minute: the push may never arrive, so the other route is offered beside it.
@@ -642,6 +706,38 @@ export async function appendAdministrationEntry(root: string, entry: Administrat
 }
 export function summarizeAdministration(entries: AdministrationEntry[], sudo: SudoState | null, now = Date.now()) {
   return { sudo: sudoAttention(sudo, now), recent: entries.slice(-5).reverse().map(({ id, flow, completedAt, actor, outcome, verified, reason, record }) => ({ id, flow, at: completedAt, by: actor.browser ?? actor.cli ?? actor.os, outcome, verified, reason: reason ?? null, record })), total: entries.length };
+}
+
+// ---- Confirm-access fixtures ----------------------------------------------------------------
+
+export interface ConfirmAccessFixture { flow: string; view: ConfirmAccessView; at: string; file: string; record: string }
+/**
+ * Every Confirm-access capture the flow records hold (GY-1482), newest first: the flow, the view,
+ * when it was written, and its path from the checkout root, with the latest capture of each view
+ * named, so a worker takes a real page as its fixture instead of asking a person to record one.
+ */
+export async function listConfirmAccessFixtures(root: string) {
+  const base = actionsDirectory(root);
+  let entries: string[];
+  try { entries = await readdir(base); } catch (error: any) { if (error.code === 'ENOENT') entries = []; else throw error; }
+  const fixtures: ConfirmAccessFixture[] = [];
+  for (const name of entries) {
+    const directory = resolve(base, name);
+    let files: string[];
+    try { files = await readdir(resolve(directory, confirmAccessDirectory)); } catch { continue; }
+    let flow: string | null = null;
+    try { const record = JSON.parse(await readFile(resolve(directory, 'record.json'), 'utf8')); if (typeof record?.flow === 'string') flow = record.flow; } catch { /* a run cut short leaves no record */ }
+    flow ??= browserFlows.find(candidate => name.includes(`-${candidate}-`)) ?? 'unknown';
+    for (const file of files) {
+      const view = /^confirm-access-([a-z]+)\.html$/.exec(file)?.[1] as ConfirmAccessView | undefined;
+      if (!view || !confirmAccessViews.includes(view)) continue;
+      const path = resolve(directory, confirmAccessDirectory, file);
+      fixtures.push({ flow, view, at: (await stat(path)).mtime.toISOString(), file: relative(root, path), record: relative(root, directory) });
+    }
+  }
+  fixtures.sort((a, b) => b.at.localeCompare(a.at) || a.file.localeCompare(b.file));
+  const latest = Object.fromEntries(confirmAccessViews.flatMap(view => { const found = fixtures.find(fixture => fixture.view === view); return found ? [[view, found.file]] : []; }));
+  return { fixtures, latest, total: fixtures.length };
 }
 
 // ---- Flows ---------------------------------------------------------------------------------
@@ -703,15 +799,20 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
     actor: { browser: null, profile: config.browser.profile, cli, os: userInfo().username, host: config.hostId, coordinator: dependencies.coordinator ?? null },
     target: { repository: config.repository, appId: config.githubAppId }, record: relative(root, directory),
   };
-  // The first Confirm-access page of the flow keeps its forms' redacted markup (GY-1461).
+  // The first Confirm-access page of the flow keeps its forms' redacted markup (GY-1461) and saves it
+  // as the record's Confirm-access captures, which each method the flow selects then saves again, the
+  // latest capture of a view winning (GY-1482).
   const sudoForms: CapturedSudoForm[] = [];
+  const confirmAccess: ConfirmAccessCapture[] = [];
+  const saved = (capture: ConfirmAccessCapture) => { const index = confirmAccess.findIndex(earlier => earlier.view === capture.view); if (index < 0) confirmAccess.push(capture); else confirmAccess[index] = capture; };
   let formsCaptured = false;
-  const capture = async (current: BrowserPage) => { if (formsCaptured) return; formsCaptured = true; sudoForms.push(...await captureSudoForms(current, directory, { now })); };
+  const capture = async (current: BrowserPage) => { if (formsCaptured) return; formsCaptured = true; sudoForms.push(...await captureSudoForms(current, directory, { now, onCapture: saved })); };
+  const keep: SudoOptions['keep'] = async (current, view, codes) => saved(await captureConfirmAccess(current, directory, view, { codes, now }));
   const settle = async (state: SudoState) => { if (state.state === 'approved') await rm(sudoFile(root), { force: true }); else await atomicPrivateWrite(sudoFile(root), state); };
   // Every navigation may land on Confirm access; each is followed by the same bounded pass.
   const visit = async (url: string) => {
     page.open(url);
-    const passed = await passSudo(page, { flow, record: entry.record, onCode: state => atomicPrivateWrite(sudoFile(root), state), onSettled: settle, capture, sleep: dependencies.sleep, now, ...dependencies.sudo });
+    const passed = await passSudo(page, { flow, record: entry.record, onCode: state => atomicPrivateWrite(sudoFile(root), state), onSettled: settle, capture, keep, sleep: dependencies.sleep, now, ...dependencies.sudo });
     if (passed.attempts || passed.passed) sudo = { attempts: passed.attempts, code: passed.code };
     browserLogin ??= page.meta('user-login');
     if (!browserLogin && /github\.com\/login\b/.test(page.url())) throw new Error(`The browser profile ${config.browser!.profile} is not signed in to GitHub; sign in once in that profile, then rerun master browser ${flow}`);
@@ -777,7 +878,7 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
         await visit(`https://github.com/${config.repository}/settings/branches`);
         const rule = required(page.locate('link', config.baseBranch), `the classic protection rule for ${config.baseBranch}`, flow);
         page.click(rule.selector);
-        await passSudo(page, { flow, record: entry.record, onCode: state => atomicPrivateWrite(sudoFile(root), state), onSettled: settle, capture, sleep: dependencies.sleep, now, ...dependencies.sudo });
+        await passSudo(page, { flow, record: entry.record, onCode: state => atomicPrivateWrite(sudoFile(root), state), onSettled: settle, capture, keep, sleep: dependencies.sleep, now, ...dependencies.sudo });
         const checkbox = (label: string, checked: boolean) => { const control = required(page.locate('label', label), `the "${label}" setting`, flow); if (control.checked !== checked) page.setChecked(control.selector, checked); };
         checkbox('Require a pull request before merging', true);
         const count = required(page.locate('label', 'Required number of approvals before merging'), 'the required approvals count', flow);
@@ -802,9 +903,9 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
     if (steps.some(step => step.action === 'open')) try { page.close(); } catch { /* recorded on the step */ }
   }
   const completedAt = now().toISOString();
-  const record = { ...entry, actor: { ...entry.actor, browser: browserLogin }, completedAt, before, after, outcome, verified, reason, screenshots: steps.filter(step => step.screenshot).length, sudo, sudoForms, steps };
+  const record = { ...entry, actor: { ...entry.actor, browser: browserLogin }, completedAt, before, after, outcome, verified, reason, screenshots: steps.filter(step => step.screenshot).length, sudo, sudoForms, confirmAccess, steps };
   await writeFile(resolve(directory, 'record.json'), `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
-  const { steps: _steps, sudoForms: _sudoForms, ...ledgerEntry } = record;
+  const { steps: _steps, sudoForms: _sudoForms, confirmAccess: _confirmAccess, ...ledgerEntry } = record;
   await appendAdministrationEntry(root, ledgerEntry);
   return { ...ledgerEntry, steps: steps.length, next: outcome === 'refused' ? `Inspect ${entry.record}/record.json and its screenshots, then rerun master browser ${flow}` : flow === 'app-permissions' && outcome === 'applied' ? 'Run master browser installation-accept' : 'Run master status' };
 }
