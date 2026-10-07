@@ -45,7 +45,7 @@ gy install --provider compose --repo OWNER/REPO --reviewer claude --apply
 
 ## 5. Reviewer and revert-approver Apps
 
-`--reviewer claude` registers a second App, the independent reviewer (**HUMAN:** one more confirmation, same page); no review gate passes without it. It is also the main guard's revert approver (`GRAPHYARD_REVERT_APPROVER_*`), so a broken `main` is reverted unaided; every `--apply` resets hand-set values to it. **Verify:** `reviewer-app` passes, and readiness `revert-approver` is `ready`. An installation bound outside `install` uses `gy master reviewer setup` and sets the [variables](deployment.md#variables) itself.
+`--reviewer claude` registers a second App, the independent reviewer (**HUMAN:** one more confirmation, same page); no review gate passes without it. It is also the main guard's revert approver (`GRAPHYARD_REVERT_APPROVER_*`), so a broken `main` is reverted unaided; every `--apply` resets hand-set values to it. **Verify:** `reviewer-app` passes, and readiness `revert-approver` is `ready`. An installation bound outside `install` uses `gy master reviewer setup`; `gy master setup --apply` sets its [variables](deployment.md#variables).
 
 ## 6. Onboard the checkout
 
