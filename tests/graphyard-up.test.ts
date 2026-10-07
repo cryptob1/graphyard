@@ -28,6 +28,8 @@ const SERVER = 'http://127.0.0.1:4310';
 const CODE = 'c'.repeat(43);
 /** Where the simulated install saves the operator's admin credential: what mints the sign-in link. */
 const OPERATOR_TOKEN = '/install/acme-shop/tokens/acme-shop-operator.token';
+/** The admin credential a host install's claim yields: held in memory by up, never printed. */
+const HOST_SECRET = 'h'.repeat(48);
 /** The admin credential that file holds. */
 const ADMIN = 'a'.repeat(40);
 
@@ -42,8 +44,10 @@ interface World {
   /** Called on each sleep: where a test plays the person acting on the Setup page. */
   onSleep: (world: World, ticks: number) => void;
   ticks: number;
-  /** The credential files the run minted a sign-in link from. */
+  /** The credential files the run minted a sign-in link from ('memory' for a redeemed claim's credential). */
   signIns: (string | null)[];
+  /** The claim links the run redeemed. */
+  redeemed?: string[];
   /** The request id of each goal record (`graphyard goal FILE`). */
   creates: (string | null)[];
   /** The onboarding pull request once published, and whether it has merged. */
@@ -56,6 +60,8 @@ interface World {
   pauseAfter?: number;
   /** Whether an install is serving its App page right now. */
   serving?: boolean;
+  /** GY-1477: the host has no agent login homes, so the registry proposal connects no account; false when undefined. */
+  noLogins?: boolean;
 }
 
 function world(overrides: Partial<World> = {}): World {
@@ -77,7 +83,9 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
     // A host install records the master's configuration only once it completes; a local one before its App step.
     serverUrl: async () => w.installed && (!w.host || (w.app && w.reviewer)) ? SERVER : null,
     masterToken: async () => w.installed ? 'm'.repeat(40) : null,
-    signIn: async file => { w.signIns.push(file); return file === OPERATOR_TOKEN ? `${SERVER}/#sign-in=${CODE}` : null; },
+    signIn: async (file, token) => { w.signIns.push(token ? 'memory' : file); return file === OPERATOR_TOKEN || token === HOST_SECRET ? `${SERVER}/#sign-in=${CODE}` : null; },
+    // The server spends a claim once: a second redemption is refused.
+    redeemClaim: async claim => { const spent = (w.redeemed ??= []).includes(claim); w.redeemed.push(claim); return !spent && claim === `${SERVER}/#claim=${CODE}` ? HOST_SECRET : null; },
     // The operator's admin credential, where the install saved it on this machine (GY-1479); a host
     // install keeps it on the host, so its path names no file here.
     operatorToken: async file => file && !w.host ? ADMIN : null,
@@ -102,7 +110,7 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
         finally { w.serving = false; }
         return { code: 0, stdout: JSON.stringify(w.host ? { ok: true, principals: [{ id: 'acme-shop-operator', role: 'admin', tokenFile: '/var/lib/graphyard/tokens/acme-shop-operator.token' }], signIn: `${SERVER}/#claim=${CODE}`, host: { host: 'graphyard-acme-shop', masterIdentities: true, units: [] } } : { ok: true }) };
       }
-      if (joined === 'master registry propose --apply') { w.accounts = true; return { code: 0, stdout: '{}' }; }
+      if (joined === 'master registry propose --apply') { if (!w.noLogins) w.accounts = true; return { code: 0, stdout: '{}' }; }
       if (joined === 'master restart') { w.loop = true; return { code: 0, stdout: '{}' }; }
       if (args[0] === 'goal') return { code: 0, stdout: JSON.stringify({ key: 'GOAL-1', stage: 'acceptance-drafting' }) };
       return { code: 0, stdout: '{}' };
@@ -123,7 +131,7 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   const result = await runUp(request(), dependencies(fresh, root, events));
   assert.equal(result.exitCode, 0, result.next);
   assert.deepEqual(result.completed, ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop']);
-  assert.deepEqual(fresh.calls.map(args => args.slice(0, 2).join(' ')), ['install --provider', 'install --provider', 'master init', 'master autonomy', 'init --scan', 'init --scan', 'publish-onboarding', 'master harness', 'master restart', 'onboarding-merged?', 'onboarding-merged?'], 'preflight, control plane, host supervisor, master identities, onboarding (applied, then published), harness, master loop, in order; then the onboarding pull request merges');
+  assert.deepEqual(fresh.calls.map(args => args.slice(0, 2).join(' ')), ['install --provider', 'install --provider', 'master init', 'master autonomy', 'init --scan', 'init --scan', 'publish-onboarding', 'master registry', 'master harness', 'master restart', 'onboarding-merged?', 'onboarding-merged?'], 'preflight, control plane, host supervisor, master identities, onboarding (applied, then published), accounts, harness, master loop, in order; then the onboarding pull request merges');
   // Onboarding is done only once its files are published: init --scan --apply writes them to this checkout alone.
   assert.ok(events.some(event => event.kind === 'step' && event.step === 'onboarding' && event.state === 'done' && /published in https:\/\/github\.com\/acme\/shop\/pull\/1/.test(event.detail ?? '')));
   assert.ok(events.some(event => event.kind === 'note' && /onboarding pull request .* to merge/.test(event.text)), 'it says what it waits on');
@@ -134,7 +142,7 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   assert.equal(result.setupUrl, `${SERVER}/#setup`);
   // The printed address signs the person in with a one-time link the operator's own credential mints,
   // and lands on the Setup page: no token to paste, no command to run.
-  assert.deepEqual(fresh.signIns, [OPERATOR_TOKEN], 'one link, minted from the operator credential the install plan names');
+  assert.deepEqual(fresh.signIns, [OPERATOR_TOKEN, OPERATOR_TOKEN], 'one link while waiting and one in the final summary, each minted from the operator credential the install plan names');
   const printed = `${SERVER}/#sign-in=${CODE}&setup`;
   assert.equal((waits[0] as any).setupUrl, printed);
   assert.match((waits[0] as any).sentence, new RegExp(`^Open ${printed.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')} to sign in to the Setup page`));
@@ -171,14 +179,19 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   assert.deepEqual((blockedEvents.find(event => event.kind === 'waiting') as any).waitingFor, ['github-app', 'reviewer-app']);
   assert.equal(installApplies(blocked), 1);
 
-  // A host install keeps its credentials on the host: the printed address is the install's own one-time
-  // claim link, carried to the Setup page, and no link is minted from a credential this machine lacks.
+  // A host install keeps its credentials on the host: up redeems the install's one-time claim itself and
+  // holds the credential in memory, so the wait and the final summary each get a fresh sign-in link.
   const hostRoot = await temporaryDirectory('graphyard-up-host');
-  const host = world({ host: true, onSleep: (w, ticks) => { if (ticks === 3) { w.app = true; w.reviewer = true; } if (ticks === 12) w.accounts = true; } });
+  const host = world({ host: true, noLogins: true, onSleep: (w, ticks) => { if (ticks === 3) { w.app = true; w.reviewer = true; } if (ticks === 12) w.accounts = true; } });
   const hostEvents: UpEvent[] = [];
-  assert.equal((await runUp(request({ provider: 'hetzner' }), dependencies(host, hostRoot, hostEvents))).exitCode, 0);
-  assert.deepEqual(hostEvents.filter(event => event.kind === 'waiting').map(event => (event as any).setupUrl), [`${SERVER}/#claim=${CODE}&setup`]);
-  assert.deepEqual(host.signIns, [], 'the claim is used; nothing is minted');
+  const hosted = await runUp(request({ provider: 'hetzner' }), dependencies(host, hostRoot, hostEvents));
+  assert.equal(hosted.exitCode, 0);
+  assert.deepEqual(hostEvents.filter(event => event.kind === 'waiting').map(event => (event as any).setupUrl), [`${SERVER}/#sign-in=${CODE}&setup`]);
+  assert.deepEqual(host.redeemed, [`${SERVER}/#claim=${CODE}`], 'the claim is redeemed once');
+  assert.deepEqual(host.signIns, ['memory', 'memory'], 'both links are minted from the credential the claim yielded, never the host-side token file');
+  assert.equal(hosted.signIn, `${SERVER}/#sign-in=${CODE}&setup`, 'a remote-host install also ends with a sign-in link');
+  assert.ok(hosted.next.includes(hosted.signIn!), 'carried by the final summary');
+  assert.ok(!JSON.stringify(hosted).includes(HOST_SECRET) && !hostEvents.some(event => JSON.stringify(event).includes(HOST_SECRET)), 'and no token value appears in the summary or any printed line');
   // GY-1479: the host install provisioned the master's identities on the host, where the admin credential stays; up runs no local autonomy.
   assert.ok(!host.calls.some(args => args[1] === 'autonomy'), 'no local master autonomy for a host install');
   const identities = hostEvents.find(event => event.kind === 'step' && event.step === 'master-autonomy' && event.state === 'done') as { detail?: string } | undefined;
@@ -595,6 +608,140 @@ const server = createServer((_, response) => response.end('App page')).listen(0,
       if (upProcess.exitCode === null && upProcess.signalCode === null) upProcess.kill('SIGKILL');
     }
   }));
+});
+
+test('unit:up-accounts-propose-both-modes — up without --agent applies the host\'s agent logins at the accounts step, as agent mode does, and asks a person only for a role still empty afterwards', async () => {
+  const { runUp } = await up();
+  // Status is read a turn later, so the Apps (already confirmed here) are green as soon as the install runs.
+  const settled = (w: World) => ({ status: async () => { await yieldTurn(); return status(w); }, humanWaitMs: 1_000 });
+  for (const agent of [false, true]) {
+    // Login homes on the host: the proposal connects the accounts, and nobody is asked.
+    const root = await temporaryDirectory(`graphyard-up-accounts-${agent}`);
+    const host = world({ app: true, reviewer: true });
+    const events: UpEvent[] = [];
+    const result = await runUp(request({ agent }), dependencies(host, root, events, { ...settled(host), ...(agent ? { driveApp: async () => ({ state: 'done' as const }) } : {}) }));
+    assert.equal(result.exitCode, 0, result.next);
+    assert.equal(host.calls.filter(args => args.join(' ') === 'master registry propose --apply').length, 1, `the accounts step proposes and applies the host's logins (agent: ${agent})`);
+    assert.equal(result.prompts, 0, 'and asks nobody');
+    assert.ok(!result.handoffs.some(entry => entry.step === 'accounts'));
+  }
+  // No login homes on the host: interactively the Setup page asks for the role still empty, once, after the proposal.
+  const emptyRoot = await temporaryDirectory('graphyard-up-accounts-empty');
+  const empty = world({ app: true, reviewer: true, noLogins: true, onSleep: (w, ticks) => { if (ticks === 8) w.accounts = true; } });
+  const events: UpEvent[] = [];
+  const result = await runUp(request(), dependencies(empty, emptyRoot, events, settled(empty)));
+  assert.equal(result.exitCode, 0, result.next);
+  const proposed = empty.calls.findIndex(args => args.join(' ') === 'master registry propose --apply');
+  assert.ok(proposed >= 0, 'the proposal ran first');
+  const waits = events.filter(event => event.kind === 'waiting');
+  assert.equal(waits.length, 1);
+  assert.deepEqual((waits[0] as any).waitingFor, ['account:worker', 'account:reviewer']);
+});
+
+test('unit:up-dashboard-reachable — on a host with Tailscale, up prints the tailnet-only serve command and its URL, applies it under --share-tailnet, and moves the sign-in link onto that URL; nothing is made public', async () => {
+  const { runUp, tailnetShare, signInAt, upRequestFromArgs, upCommandFlags } = await up();
+  const node = { dnsName: 'vishrog.tail1234.ts.net.', ip: '100.64.0.7' };
+  const share = tailnetShare(SERVER, node)!;
+  assert.deepEqual(share.command, ['tailscale', 'serve', '--bg', '--http=4310', 'http://127.0.0.1:4310'], 'served on the tailnet address alone, over WireGuard');
+  assert.equal(share.url, 'http://vishrog.tail1234.ts.net:4310');
+  assert.ok(!share.command.includes('funnel'), 'never tailscale funnel');
+  assert.equal(tailnetShare(SERVER, { dnsName: null, ip: '100.64.0.7' })!.url, 'http://100.64.0.7:4310');
+  assert.equal(tailnetShare(SERVER, null), null, 'no Tailscale, no offer');
+  assert.equal(tailnetShare('https://graphyard.example.com', node), null, 'a public server is already reachable at its own address');
+  assert.equal(signInAt(`${SERVER}/#sign-in=${CODE}`, share.url), `${share.url}/#sign-in=${CODE}`);
+  assert.equal(upRequestFromArgs(['--repo', 'acme/shop', '--share-tailnet']).shareTailnet, true);
+  assert.match(upCommandFlags({ ...request(), shareTailnet: true }), / --share-tailnet$/);
+
+  // Without --share-tailnet: the command and URL are printed, nothing runs, links stay on this machine.
+  const offeredRoot = await temporaryDirectory('graphyard-up-tailnet-offer');
+  const offered = world({ onSleep: (w, ticks) => { if (ticks === 3) { w.app = true; w.reviewer = true; } } });
+  const applied: string[][] = [];
+  const offerEvents: UpEvent[] = [];
+  const quiet = await runUp(request(), dependencies(offered, offeredRoot, offerEvents, { tailnet: async () => node, applyTailnet: async command => { applied.push(command); return { ok: true }; } }));
+  assert.equal(quiet.exitCode, 0, quiet.next);
+  assert.equal(applied.length, 0, 'nothing is served without --share-tailnet');
+  const offer = offerEvents.filter(event => event.kind === 'note' && event.text.includes('tailscale serve'));
+  assert.equal(offer.length, 1, 'offered once');
+  assert.match((offer[0] as any).text, /run tailscale serve --bg --http=4310 http:\/\/127\.0\.0\.1:4310 and open http:\/\/vishrog\.tail1234\.ts\.net:4310.*--share-tailnet/);
+  assert.equal(quiet.reachableUrl, null);
+
+  // With --share-tailnet: applied once, the waiting link and the final link use the tailnet URL, and a rerun keeps it.
+  const sharedRoot = await temporaryDirectory('graphyard-up-tailnet-share');
+  const shared = world({ onSleep: (w, ticks) => { if (ticks === 3) { w.app = true; w.reviewer = true; } } });
+  const sharedEvents: UpEvent[] = [];
+  const reach = { tailnet: async () => node, applyTailnet: async (command: string[]) => { applied.push(command); return { ok: true }; } };
+  const result = await runUp(request({ shareTailnet: true }), dependencies(shared, sharedRoot, sharedEvents, reach));
+  assert.equal(result.exitCode, 0, result.next);
+  assert.deepEqual(applied, [share.command]);
+  assert.equal(result.reachableUrl, share.url);
+  assert.equal((sharedEvents.find(event => event.kind === 'waiting') as any).setupUrl, `${share.url}/#sign-in=${CODE}&setup`, 'the sign-in link uses the reachable URL');
+  assert.equal(result.setupUrl, `${share.url}/#setup`);
+  assert.ok(result.signIn!.startsWith(`${share.url}/#sign-in=`));
+  const rerun = await runUp(request({ shareTailnet: true }), dependencies(shared, sharedRoot, [], reach));
+  assert.equal(rerun.reachableUrl, share.url);
+  assert.equal(applied.length, 1, 'a rerun keeps the served address without serving again');
+
+  // A serve that cannot finish (the tailnet has not allowed it) is reported with the command; links stay local.
+  const refusedRoot = await temporaryDirectory('graphyard-up-tailnet-refused');
+  const refused = world({ app: true, reviewer: true });
+  const refusedEvents: UpEvent[] = [];
+  const local = await runUp(request({ shareTailnet: true }), dependencies(refused, refusedRoot, refusedEvents, { tailnet: async () => node, applyTailnet: async () => ({ ok: false, detail: 'Serve is not enabled on your tailnet' }) }));
+  assert.equal(local.exitCode, 0, local.next);
+  assert.equal(local.reachableUrl, null);
+  assert.ok(refusedEvents.some(event => event.kind === 'note' && /did not finish \(Serve is not enabled on your tailnet\)/.test(event.text)));
+  assert.ok(local.signIn!.startsWith(`${SERVER}/#sign-in=`));
+});
+
+test('unit:up-final-signin-link — a green up ends with one single-use sign-in link in its summary, for the reachable URL, and no credential value in it', async () => {
+  const { runUp } = await up();
+  const MASTER = 'm'.repeat(40), OPERATOR = 'o'.repeat(48);
+  for (const agent of [false, true]) {
+    const root = await temporaryDirectory(`graphyard-up-final-${agent}`);
+    const green = world({ app: true, reviewer: true });
+    // The minted link carries a server code, never the operator credential that mints it.
+    const minted: string[] = [];
+    // Bounded, so a tree whose accounts step waits on a person fails here instead of waiting forever.
+    const result = await runUp(request({ agent }), dependencies(green, root, [], { humanWaitMs: 1_000, masterToken: async () => green.installed ? MASTER : null,
+      signIn: async file => { assert.equal(file, OPERATOR_TOKEN); const link = `${SERVER}/#sign-in=${String(minted.length).padStart(43, 'k')}`; minted.push(link); return link; },
+      ...(agent ? { driveApp: async () => ({ state: 'done' as const }) } : {}) }));
+    assert.equal(result.exitCode, 0, result.next);
+    assert.equal(result.signIn, `${minted.at(-1)}&setup`, 'a fresh link minted at the end opens the Setup page, where the goal is described');
+    assert.ok(minted.length === 1 || !result.next.includes(minted[0]), 'never the link already printed while waiting: it is single use');
+    assert.ok(result.next.includes(result.signIn!), 'the summary sentence carries the link');
+    assert.match(result.next, /works once, within 10 minutes/);
+    const summary = JSON.stringify(result);
+    for (const secret of [MASTER, OPERATOR]) assert.ok(!summary.includes(secret), 'no credential value in the summary');
+    assert.ok(!summary.includes('graphyard login'), 'nobody is sent to graphyard login');
+  }
+  // A remote-host install keeps the operator token file on the host: up redeems the install's claim
+  // (POST /api/signin/claim) and mints the final link with that credential, held in memory only.
+  const { redeemSignInClaim, mintSignIn } = await up();
+  const posted: { url: string; body: string; authorization: string | null }[] = [];
+  const fetcher = (async (url: string, init: RequestInit) => {
+    posted.push({ url, body: String(init.body), authorization: new Headers(init.headers).get('Authorization') });
+    if (url.endsWith('/api/signin/claim')) return Response.json(JSON.parse(String(init.body)).code === CODE && posted.length === 1 ? { token: HOST_SECRET, principal: 'acme-shop-operator' } : { error: 'already used' }, { status: posted.length === 1 ? 200 : 410 });
+    return Response.json({ code: 's'.repeat(43) });
+  }) as typeof fetch;
+  const HOSTED = 'https://graphyard.acme.example';
+  assert.equal(await redeemSignInClaim(`${HOSTED}/#claim=${CODE}`, fetcher), HOST_SECRET);
+  assert.deepEqual(posted[0], { url: `${HOSTED}/api/signin/claim`, body: JSON.stringify({ code: CODE }), authorization: null });
+  assert.equal(await redeemSignInClaim(`${HOSTED}/#claim=${CODE}`, fetcher), null, 'a spent claim yields nothing');
+  assert.equal(await mintSignIn(HOSTED, '/var/lib/graphyard/tokens/acme-shop-operator.token', fetcher, HOST_SECRET), `${HOSTED}/#sign-in=${'s'.repeat(43)}`, 'minted with the in-memory credential, not the host-side file');
+  assert.equal(posted.at(-1)!.authorization, `Bearer ${HOST_SECRET}`);
+  const hostRoot = await temporaryDirectory('graphyard-up-final-host');
+  const host = world({ host: true, app: true, reviewer: true, accounts: true });
+  const hostEvents: UpEvent[] = [];
+  const hosted = await runUp(request({ provider: 'hetzner' }), dependencies(host, hostRoot, hostEvents));
+  assert.equal(hosted.exitCode, 0, hosted.next);
+  assert.equal(hosted.signIn, `${SERVER}/#sign-in=${CODE}&setup`, 'a remote-host install ends with a sign-in link too');
+  assert.ok(hosted.next.includes(hosted.signIn!));
+  for (const text of [JSON.stringify(hosted), JSON.stringify(hostEvents)]) assert.ok(!text.includes(HOST_SECRET) && !text.includes(`#claim=${CODE}`), 'no token value, and not the spent claim');
+  // A run that stops prints no link: the one it would print could expire before the rerun.
+  const stoppedRoot = await temporaryDirectory('graphyard-up-final-stopped');
+  const stopped = world({ failOnce: new Set(['init --scan --apply']), app: true, reviewer: true });
+  const failed = await runUp(request(), dependencies(stopped, stoppedRoot, []));
+  assert.equal(failed.exitCode, 1);
+  assert.equal(failed.signIn, null);
 });
 
 test('unit:up-provisions-master-autonomy — up gives the master its operator-agent identity with the admin credential the install saved, lists the step, and master create then succeeds with no further command', async () => {
