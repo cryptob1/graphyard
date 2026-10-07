@@ -104,8 +104,25 @@ export function leaseLossSettlementNote(cause: LeaseLapseCause, attestation: Att
   return cause === 'blocked-awaiting-operator' ? `auto-settled: blocked report for epoch ${attestation?.epoch} explains the lapse${source}`
     : `auto-settled: stopped-worker attestation for epoch ${attestation?.epoch} explains the lapse${source}`;
 }
-export interface LeaseLossSettlement { escalation: Escalation; epoch: number; cause: LeaseLapseCause; attestation: Attestation | null; exhaustion?: ExhaustionRecord; note: string }
-export function settleableLeaseLoss(work: Pick<Work, 'submission' | 'capacity' | 'escalation' | 'escalations'>, attestations: Attestation[] = []): LeaseLossSettlement[] {
+/**
+ * GY-1390. The newer attempt that superseded a lost epoch, or null. A claim is granted only after
+ * the lost lease ended, and a newer containment fence can only be raised once the lost epoch's was
+ * lowered, so while the latest attempt holds its own lease or has submitted, and no fence of the
+ * lost epoch stands, the record alone shows the lost attempt can no longer act. Only the latest
+ * attempt vouches: a submission survives the rework claim after it, so an older one would hide a
+ * later attempt that lapsed unexplained. From 30 September to 7 October 2026 the loop asked an
+ * approver to settle 227 such lease-losses, one two-party decision each, and every one counted as
+ * an escalation intervention at the build stage; reconciliation now settles them itself.
+ */
+export function supersedingAttempt(work: Pick<Work, 'submission'> & Partial<Pick<Work, 'epoch' | 'lease' | 'containmentQuarantine'>>, epoch: number): string | null {
+  if (work.epoch === undefined || work.epoch <= epoch || work.containmentQuarantine && work.containmentQuarantine.epoch <= epoch) return null;
+  if (work.lease && work.lease.epoch === work.epoch) return `epoch ${work.lease.epoch} is held by ${work.lease.owner}`;
+  if (work.submission && work.submission.epoch === work.epoch) return `epoch ${work.submission.epoch} submitted PR #${work.submission.pr}`;
+  return null;
+}
+export type LeaseLossSettlementCause = LeaseLapseCause | 'superseded';
+export interface LeaseLossSettlement { escalation: Escalation; epoch: number; cause: LeaseLossSettlementCause; attestation: Attestation | null; exhaustion?: ExhaustionRecord; note: string }
+export function settleableLeaseLoss(work: Pick<Work, 'submission' | 'capacity' | 'escalation' | 'escalations'> & Partial<Pick<Work, 'epoch' | 'lease' | 'containmentQuarantine' | 'stage'>>, attestations: Attestation[] = []): LeaseLossSettlement[] {
   const settlements: LeaseLossSettlement[] = [];
   for (const escalation of standingEscalations(work)) {
     const epoch = leaseLossEpoch(escalation);
@@ -114,8 +131,14 @@ export function settleableLeaseLoss(work: Pick<Work, 'submission' | 'capacity' |
     // the lapse the control plane itself raised is explained by what the control plane wrote. A
     // bound submission explains the epoch whoever raised it, and settles it as it always has.
     const explained = leaseLapseCause(work, { epoch }, escalation.actor === 'graphyard' ? attestations : []);
-    if (explained && (escalation.actor === 'graphyard' || explained.cause === 'submitted'))
+    if (explained && (escalation.actor === 'graphyard' || explained.cause === 'submitted')) {
       settlements.push({ escalation, epoch, ...explained, note: leaseLossSettlementNote(explained.cause, explained.attestation, explained.exhaustion ?? null) });
+      continue;
+    }
+    // A control-plane lapse a newer attempt superseded: nothing explains why the worker vanished,
+    // but nothing from it can act or merge either, which is all the concern guarded (GY-1390).
+    const newer = escalation.actor === 'graphyard' && work.stage !== 'done' ? supersedingAttempt(work, epoch) : null;
+    if (newer) settlements.push({ escalation, epoch, cause: 'superseded', attestation: null, note: `auto-settled: superseded — ${newer}, so nothing from epoch ${epoch} can act or merge` });
   }
   return settlements;
 }

@@ -7,7 +7,7 @@
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses releases *unobserved*, *stale* (rerun), not serving the merge, or already recorded. Without `--deployment-url` it reads `productionEnvironment` deployments (newest success counts).
+`master verify-deployment GY-N` emits instructions from an isolated served-commit checkout and refuses releases *unobserved*, *stale* (rerun), not serving the merge, or already recorded. Without `--deployment-url`, the newest successful `productionEnvironment` deployment counts.
 
 ## Lost worker before submission
 
@@ -27,7 +27,7 @@ Beside the tick, the scan (`GRAPHYARD_INTERVENTION_PATTERNS=0` disables; `GET /a
 
 ## Flaky CI check
 
-A failing check is [rerun](github.md#failed-checks) once (`mergeQueue.rerunFailedChecks`, 0 disables); a second failure returns the item for rework; a passing rerun clears it.
+A failing check is [rerun](github.md#failed-checks) once (`mergeQueue.rerunFailedChecks`, 0 disables); a second failure returns it for rework; a passing rerun clears it.
 
 ## Accepted evidence turns out to be wrong
 
@@ -60,7 +60,7 @@ About ten requests uncached; unchanged, none.
 
 ### What a pause means for gates
 
-A rate-limit `403`/`429` pause stops requests; gates read the last observation until it lifts. GitHub keeps merging on its branch protection, and the merge is recorded once requests resume ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
+A rate-limit `403`/`429` pause stops requests; gates read the last observation until it lifts. GitHub keeps merging on branch protection; merges are recorded on resumption ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
 
 ### Reading the budget
 
@@ -117,7 +117,7 @@ Only `admin` grants or revokes, to `producer` principals: exact name, `kind:*` o
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace per token, merge path first (`observationThroughput`). Heartbeat, claim, `complete`, `blocked` own the lease pool (`leaseHealth` in `GET /api/status`). Reconcile evaluates moved rows (all every `GRAPHYARD_RECONCILE_FULL_MS`). Until startup validation finishes, `/healthz` reports `readiness: false` and `/healthz?ready` 503.
+`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace per token, merge path first (`observationThroughput`). Heartbeat, claim, `complete`, `blocked` own the lease pool (`leaseHealth` in `GET /api/status`). Reconcile evaluates moved rows (all every `GRAPHYARD_RECONCILE_FULL_MS`). Until startup validation finishes, `/healthz` reports `readiness: false`, `/healthz?ready` 503.
 
 ### Concurrent reconciliation
 
@@ -127,4 +127,4 @@ A tick runs every 2 s and should finish within 5 s; slower ticks log `reconcilia
 2. Each batch evaluates up to 250 ms lock-free, planning at most 8 writes.
 3. Each write is its own transaction: the coordination lock (waiting at most 500 ms, holding no row), then the item's row (`FOR NO KEY UPDATE`), then commit. If anything it read moved, the item is re-evaluated first. Job wakes follow at commit, in work-id order.
 
-Three expired lock waits defer unwritten items a tick. A renewal takes only its item's lock. Before each evaluation and write, reconciliation yields to pending requests and waits up to 1 s for renewals, so a renewal waits on at most one evaluation. Stale observation snapshots retry after 2 s.
+Three expired lock waits defer unwritten items a tick. A renewal takes only its item's lock. Before each evaluation and write, reconciliation yields to pending requests and waits up to 1 s for renewals: a renewal waits on at most one evaluation. Stale observation snapshots retry after 2 s.

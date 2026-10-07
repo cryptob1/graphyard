@@ -1,5 +1,5 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
-import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, RefusedResponse } from '../model.js';
+import { type Work, type AgentReview, reviewProviderOf, standingEscalations, leaseLossEpoch, supersedingAttempt, RefusedResponse } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker } from '../model/scope.js';
 import { widenedPlannedFiles } from '../model/scope-collapse.js';
 import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
@@ -11,7 +11,7 @@ import { guardBroadScope, type MasterConfig, type ContainmentAssessment, contain
 import { researchRework } from '../research.js'; import { baseBreakHold } from '../master/base-break-refresh.js';
 import { unproducedManualProofs } from '../model/unproduced-attestation.js';
 import { mechanicalRework, type MechanicalFixRequest } from '../mechanical-findings.js';
-import { triageClosure } from '../model/machine-backlog.js';
+import { triageClosure } from '../model/machine-backlog.js'; import { refusedAttestationRework, type RefusedAttestation } from '../model/rework-ground.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf } from '../review-cap.js';
 import { sessionName } from '../session-name.js';
@@ -229,14 +229,12 @@ export function blockerScopeDecision(work: Work): RoutineDecision | null {
  * Recovery releases a delivered item whose supervisor is still quarantined. A merge decision is
  * needed only where automatic merging is off, and then for the exact candidate that is mergeable.
  */
-export function routineDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = []): RoutineDecision | null {
-  const needed = neededDecision(work, config, baseFailed, exhausted, mechanical);
+export function routineDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = [], refused: readonly RefusedAttestation[] = []): RoutineDecision | null {
+  const needed = neededDecision(work, config, baseFailed, exhausted, mechanical, refused);
   if (!needed) return null;
   // None attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item,
   // and an attestation's approver judges the proof.
   if (needed.action === 'merge' || needed.action === 'close' || needed.action === 'attest') return needed;
-  // A lease-loss a newer attempt superseded rests on the record, not on this host: see supersededLeaseLoss.
-  if (needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return needed;
   const stopped = workerStopped(work, now, assessment);
   // The grounds travel with the request: the approver cannot verify this host, so it is told
   // exactly what the requester verified and judges the attestation on that. A situated request
@@ -248,7 +246,7 @@ export function routineDecision(work: Work, config: ReviewCapConfig, now: number
  * What the item calls for, before asking whether the loop may attest that its worker is stopped.
  * `baseFailed` names required checks the base head fails too (GY-528); `exhausted`, spent producer requests (GY-496).
  */
-export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = []): RoutineDecision | null {
+export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = [], attestRefusals: readonly RefusedAttestation[] = []): RoutineDecision | null {
   if (work.stage === 'done') {
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
@@ -287,6 +285,8 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   if (ci) return { action: 'rework', ...ci };
   const spent = exhaustedProofRework(work, exhausted);
   if (spent) return { action: 'rework', ...spent };
+  const attestRefused = refusedAttestationRework(work, attestRefusals);
+  if (attestRefused) return { action: 'rework', ...attestRefused };
   // The operator answered a product question the head was built on provisionally, and the answer
   // differs from that recommendation (GY-259): the head no longer builds what was asked.
   const research = researchRework(work);
@@ -497,34 +497,34 @@ export function syncConflict(work: Work): { reason: string; binding: string } | 
     return { reason: `GitHub reports that candidate ${candidate.sha.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)}`, binding: `${candidate.sha}:sync:${tip}` };
   return null;
 }
-/** The resolve decision a standing control-plane lease-loss calls for (see `supersededLeaseLoss`), or null. */
+/** The resolve decision a standing control-plane lease-loss calls for (see `idleLeaseLoss`), or null. */
 function leaseLossDecision(work: Work): RoutineDecision | null {
-  const lost = supersededLeaseLoss(work);
+  const lost = idleLeaseLoss(work);
   return lost ? { action: 'resolve', input: { trigger: 'lease-loss' }, escalation: { trigger: 'lease-loss', at: lost.escalation.at }, binding: `lease-loss:${lost.epoch}:${lost.escalation.at}`,
-    reason: `${work.key}: the control plane raised a lease-loss for epoch ${lost.epoch} at ${lost.escalation.at} (${lost.escalation.reason}). ${lost.evidence}Nothing from the lost attempt can act or merge. Resolving clears only this concern: it decides no gate and ships nothing.` } : null;
+    reason: `${work.key}: the control plane raised a lease-loss for epoch ${lost.epoch} at ${lost.escalation.at} (${lost.escalation.reason}). No newer attempt holds the item and none is due: ${lost.idle}. Nothing from the lost attempt can act or merge. Resolving clears only this concern: it decides no gate and ships nothing.` } : null;
 }
 /**
- * The standing control-plane lease-loss the loop may ask to settle, and why. `superseded` when a
- * newer attempt took the item: a claim needs the old lease ended, and a newer attempt's containment
- * fence can only be raised once the lost epoch's fence was lowered, so the record alone shows the
- * lost attempt can no longer act. Otherwise the item is between attempts, and the request also
- * rests on this host verifying the worker stopped (`workerStopped`, applied in `routineDecision`).
- * A lead-raised concern, another trigger, or a lost epoch whose fence still stands is never asked.
+ * The standing control-plane lease-loss the loop asks to settle, or null. A lease-loss a newer
+ * attempt superseded (`supersedingAttempt`) is never asked: reconciliation settles it on the
+ * control plane's next tick (GY-1390; the loop's two-party decision for it was 227 of 298 build-stage
+ * escalation interventions in the week to 7 October 2026). Nor is one whose next action is the
+ * implementation dispatch that will supersede it: the claim does what the decision would. What
+ * remains is a lost epoch between attempts with nothing due to take the item — held, blocked, or not
+ * ready — and the request then rests on this host verifying the worker stopped (`workerStopped`,
+ * applied in `routineDecision`). A lead-raised concern, another trigger, or a lost epoch whose fence
+ * still stands is never asked.
  */
-export function supersededLeaseLoss(work: Work): { escalation: ReturnType<typeof standingEscalations>[number]; epoch: number; superseded: boolean; evidence: string } | null {
+export function idleLeaseLoss(work: Work): { escalation: ReturnType<typeof standingEscalations>[number]; epoch: number; idle: string } | null {
   if (work.stage === 'done') return null;
   for (const escalation of standingEscalations(work)) {
     const epoch = leaseLossEpoch(escalation);
     if (escalation.trigger !== 'lease-loss' || escalation.actor !== 'graphyard' || epoch === null) continue;
-    const fence = work.containmentQuarantine;
-    if (fence && fence.epoch <= epoch) continue;
-    // Only the latest attempt's own lease or submission shows it: a submission survives the rework
-    // claim that follows it, so an older one would vouch for a later attempt that lapsed unexplained
-    // (its lease-loss suppressed as a repeat of this one) and resolving would erase that loss too.
-    const newer = work.epoch > epoch && (work.lease && work.lease.epoch === work.epoch ? `epoch ${work.lease.epoch} is held by ${work.lease.owner}`
-      : work.submission && work.submission.epoch === work.epoch ? `epoch ${work.submission.epoch} submitted PR #${work.submission.pr}` : null);
-    if (newer) return { escalation, epoch, superseded: true, evidence: `A newer attempt superseded it: ${newer}, a claim is granted only after the epoch ${epoch} lease has ended, and ${fence ? `the containment fence now standing belongs to epoch ${fence.epoch}, so the epoch ${epoch} fence was lowered` : 'no containment fence stands'}. ` };
-    if (work.epoch === epoch && (!work.lease || work.lease.epoch !== epoch)) return { escalation, epoch, superseded: false, evidence: `No newer attempt holds the item. ` };
+    if (work.containmentQuarantine && work.containmentQuarantine.epoch <= epoch) continue;
+    if (supersedingAttempt(work, epoch)) continue;
+    if (work.epoch !== epoch || work.lease?.epoch === epoch) continue;
+    const next = work.nextAction;
+    if (next?.kind === 'dispatch' && next.inputs.kind === 'dispatch' && next.inputs.target === 'implementation') continue;
+    return { escalation, epoch, idle: next ? `its next action is ${next.kind}${next.reason ? ` (${next.reason.slice(0, 200)})` : ''}` : 'it has no next action' };
   }
   return null;
 }
@@ -684,7 +684,7 @@ export function workerStopped(work: Work, now: number, assessment?: ContainmentA
 /** The decision an item needs but the loop will not request, because the stopped worker is unverified. */
 export function withheldDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null): { action: RoutineDecisionAction; reason: string } | null {
   const needed = neededDecision(work, config);
-  if (!needed || needed.action === 'merge' || needed.action === 'attest' || needed.action === 'resolve' && supersededLeaseLoss(work)?.superseded) return null;
+  if (!needed || needed.action === 'merge' || needed.action === 'attest') return null;
   const unverified = workerStopped(work, now, assessment).unverified;
   return unverified ? { action: needed.action, reason: `${work.key} needs a ${needed.action} decision, but it attests that the previous worker is stopped and that is not verified: ${unverified}` } : null;
 }
