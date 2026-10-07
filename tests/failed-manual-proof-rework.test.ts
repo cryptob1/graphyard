@@ -134,16 +134,16 @@ test('unit:producer-manual-proof-never-escalated — docs/operations.md states t
 //   refusal itself (refusedAttestationRework) and the server applies it on that ground;
 //   GY-711's master judged the docs review itself before any attestation; the master instructions
 //   now leave that judgement to the attestation, whose refusal returns the head;
-// - lane: the risk lane already applied it with no approver (GY-883) — the fold no longer counts a
-//   rework the control plane approved itself;
-// - spent: every producer session never started on a spent quota; since GY-1153 the loop asks no
+// - lane: the risk lane already applied it with no approver (GY-883): a base conflict (GY-971
+//   924dfe75, GY-1107) now records that ground, and the fold no longer counts a grounded rework;
+// - spent: every producer session ended unacted (never started, quota spent); since GY-1153 the loop asks no
 //   rework for such a head and relaunches the request once an eligible account exists.
 const instances: [string, string, 'proof' | 'attest' | 'lane' | 'spent'][] = [
   ['GY-1190', '17911573', 'proof'], ['GY-717', 'd0573f13', 'proof'], ['GY-971', '924dfe75', 'lane'], ['GY-1098', 'c6358977', 'attest'],
-  ['GY-711', 'ebccbd40', 'attest'], ['GY-1098', '9439a8f4', 'attest'], ['GY-1052', '62f1eeb8', 'spent'], ['GY-980', '8d431a81', 'lane'],
+  ['GY-711', 'ebccbd40', 'attest'], ['GY-1098', '9439a8f4', 'attest'], ['GY-1052', '62f1eeb8', 'spent'], ['GY-980', '8d431a81', 'spent'],
   ['GY-1107', '714832d0', 'lane'], ['GY-1048', 'c020f65d', 'proof'], ['GY-1039', 'afa1c1c4', 'proof'], ['GY-717', '6711eaba', 'proof'],
   ['GY-1048', '4485e840', 'proof'], ['GY-1052', 'fbd8c016', 'proof'], ['GY-1039', 'dd0c1b80', 'proof'], ['GY-1048', 'acdceb88', 'proof'],
-  ['GY-1039', 'f69445c1', 'proof'], ['GY-1052', '3abd907e', 'proof'], ['GY-971', '6b56ae07', 'lane'], ['GY-1048', 'c14f480e', 'proof'],
+  ['GY-1039', 'f69445c1', 'proof'], ['GY-1052', '3abd907e', 'proof'], ['GY-971', '6b56ae07', 'spent'], ['GY-1048', 'c14f480e', 'proof'],
   ['GY-1052', '5b3b9187', 'proof'], ['GY-717', '7cb58672', 'proof'], ['GY-1048', '7e8b07a5', 'proof'], ['GY-1039', 'd611f71b', 'proof'],
   ['GY-957', 'a3afe3bf', 'proof'],
 ];
@@ -188,17 +188,19 @@ test('unit:rework-ground-recorded — a refused attestation of the head returns 
   assert.equal(neededDecision({ ...passed, reworkRequested: true } as Work, { autoMerge: true }, undefined, [], [], [{ decision: 'a7e5f000', refusal }]), null);
 });
 
-test('unit:rework-ground-recorded — a rework the control plane approved itself is no intervention; one an approver judged still is', () => {
+test('unit:rework-ground-recorded — a rework the control plane applied on a recorded ground is no intervention; one an approver judged, or the lane applied without a ground, still is', () => {
   const work = 'f0f0f0f0-0000-4000-8000-000000000001', stamp = (seconds: number) => new Date(Date.parse(at) + seconds * 1000).toISOString();
   const document = { key: 'GY-901', stage: 'acceptance', candidate: { sha: head, pr: 901 } };
-  const rows = (approver: string): InterventionLedgerRow[] => [
+  const rows = (approver: string, ground: string | null = 'a trusted proof failed on candidate aaaaaaaaaaaa'): InterventionLedgerRow[] => [
     { seq: 1, workId: work, actor: 'graphyard-master', kind: 'decision.requested', at: stamp(1), details: null, payload: { id: 'd1', action: 'rework' }, work: null, stageBefore: 'acceptance' },
-    { seq: 2, workId: work, actor: approver, kind: 'decision.approved', at: stamp(30), details: null, payload: { id: 'd1', action: 'rework' }, work: null, stageBefore: 'acceptance' },
+    { seq: 2, workId: work, actor: approver, kind: 'decision.approved', at: stamp(30), details: null, payload: { id: 'd1', action: 'rework', ...(ground ? { ground } : {}) }, work: null, stageBefore: 'acceptance' },
     { seq: 3, workId: work, actor: 'graphyard-master', kind: 'rework', at: stamp(31), details: { reason: 'a trusted proof failed' }, work: document, stageBefore: 'acceptance' },
   ];
   assert.deepEqual(foldInterventions(rows(laneApprover), [], stamp(60)).interventions, [], 'a rework the record grounded waited on nobody');
   const judged = foldInterventions(rows('graphyard-approver-graphyard'), [], stamp(60)).interventions;
   assert.deepEqual(judged.map(entry => [entry.kind, entry.stage, entry.id]), [['rework', 'acceptance', `rework:${work}:d1`]]);
+  // A lane approval with no recorded ground still counts: only a grounded rework waited on nobody.
+  assert.deepEqual(foldInterventions(rows(laneApprover, null), [], stamp(60)).interventions.map(entry => entry.kind), ['rework']);
   // Approved by the control plane but not yet applied: it is not reported as waiting either.
   const open = foldInterventions(rows(laneApprover).slice(0, 2), [{ ...item(), id: work }], stamp(60)).interventions;
   assert.deepEqual(open.filter(entry => entry.kind === 'rework'), []);

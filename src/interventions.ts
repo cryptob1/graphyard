@@ -271,9 +271,10 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
         break;
       }
       case 'decision.approved': {
-        // Approved by the control plane itself — its risk lane (GY-883) or the ground the record
-        // shows (GY-1394) — nobody stepped in, so the rework it applies is no signal.
-        if (entry.reworkDecision && entry.reworkDecision.id === row.payload?.id && row.actor === laneApprover) entry.reworkDecision.self = true;
+        // Approved by the control plane on a ground the record shows on the exact head (GY-1394):
+        // nobody stepped in, so the rework it applies is no signal. A lane approval with no
+        // recorded ground still counts.
+        if (entry.reworkDecision && entry.reworkDecision.id === row.payload?.id && row.actor === laneApprover && typeof row.payload?.ground === 'string' && row.payload.ground) entry.reworkDecision.self = true;
         break;
       }
       case 'decision.failed': case 'decision.withdrawn': case 'decision.stale': {

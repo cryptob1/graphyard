@@ -72,10 +72,11 @@ export async function applyLaneRework(services: Services, requested: DecisionRec
     const work = await findWork(db, requested.workId); demand(work, 'Work item not found', 404);
     const history = await readDecisions(db, work!), decision = history.find(entry => entry.id === requested.id)!;
     if (decision.state !== 'requested' || decisionPrecondition(decision.action, decision.input, work!)) return decision;
-    // A high-lane rework still applies at once when the record itself is its ground (GY-1394).
-    const lane = itemLane(work!), ground = reworkNeedsApprover(work!) ? reworkGround(work!, history) : null;
+    // A high-lane rework still applies at once when the record itself is its ground (GY-1394); the
+    // ground is recorded in any lane, and the intervention fold reads it.
+    const lane = itemLane(work!), ground = reworkGround(work!, history);
     if (reworkNeedsApprover(work!) && !ground) return decision;
-    const reason = ground ? `${ground}, so the record is the rework's ground and no approver decision is needed (GY-1394)` : `the ${lane} risk lane applies a rework without an approver decision (GY-883)`;
+    const reason = ground && reworkNeedsApprover(work!) ? `${ground}, so the record is the rework's ground and no approver decision is needed (GY-1394)` : `the ${lane} risk lane applies a rework without an approver decision (GY-883)${ground ? `; the record shows its ground: ${ground}` : ''}`;
     await record(db, work!, laneApprover, 'decision.approved', { id: decision.id, action: decision.action, reason, requestedBy: decision.requestedBy, approver: { id: laneApprover, role: 'risk-lane' }, lane, ...(ground ? { ground } : {}) });
     return (await readDecisions(db, work!)).find(entry => entry.id === requested.id)!;
   });
