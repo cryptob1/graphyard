@@ -1,6 +1,6 @@
 import type pg from 'pg';
 import { demand, operatorScopeIncludes, standingEscalations, type Principal, type Work } from '../model.js';
-import { foldDecisions, type Decision, type DecisionState } from '../model/approval.js';
+import { foldDecisions, reworkBoundHead, type Decision, type DecisionState } from '../model/approval.js';
 import type { Services } from './routes.js';
 import { workIdByRef } from '../store/locked-read.js';
 
@@ -112,6 +112,8 @@ export function decisionRace(decision: DecisionRecord, work: Work): StaleRace | 
     || work.candidate.baseSha !== decision.input.baseSha || work.policyRevision !== decision.input.policyRevision))
     return { expected: { sha: decision.input.sha, baseSha: decision.input.baseSha, policyRevision: decision.input.policyRevision },
       current: { sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, policyRevision: work.policyRevision } };
+  const bound = decision.action === 'rework' ? reworkBoundHead(decision.input) : null;
+  if (bound && work.candidate?.sha !== bound) return { expected: { sha: bound }, current: { sha: work.candidate?.sha ?? null } };
   if ((decision.action === 'release' || decision.action === 'unblock') && decision.input.expectedRevision !== work.revision)
     return { expected: { revision: decision.input.expectedRevision }, current: { revision: work.revision } };
   // A triage closure binds the judgement it applies; a newer judgement, or a settled one, never returns to it.

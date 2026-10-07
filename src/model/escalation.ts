@@ -105,7 +105,6 @@ export function leaseLossSettlementNote(cause: LeaseLapseCause, attestation: Att
     : `auto-settled: stopped-worker attestation for epoch ${attestation?.epoch} explains the lapse${source}`;
 }
 /**
-/**
  * GY-1390. The newer attempt that superseded a lost epoch, or null. A claim is granted only after
  * the lost lease ended, and a newer containment fence can only be raised once the lost epoch's was
  * lowered, so while the latest attempt holds its own lease or has submitted, and no fence of the
