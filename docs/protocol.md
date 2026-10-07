@@ -4,9 +4,9 @@
 
 ## Agent protocol
 
-1. [Work commands](protocol/work-commands.md) — every work mutation.
-2. [Read endpoints](protocol/read-endpoints.md) — status, snapshots and events.
-3. [Leases, workspaces and supervision](protocol/leases.md) — leases, workspaces, `watch`, blockers.
-4. [Evidence and proof authority](protocol/evidence.md) — evidence, grants, revocation.
-5. [GitHub webhook and review providers](protocol/github-webhook.md) — webhook and dispatch records.
+1. [Work commands](protocol/work-commands.md) — work mutations.
+2. [Read endpoints](protocol/read-endpoints.md) — status, events.
+3. [Leases and supervision](protocol/leases.md) — leases, `watch`.
+4. [Evidence and grants](protocol/evidence.md) — evidence, grants.
+5. [GitHub webhook](protocol/github-webhook.md) — webhook, dispatch.
 6. [Pipeline timeline](protocol/pipeline-speed.md) — the `pipeline` field.

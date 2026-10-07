@@ -1,37 +1,37 @@
-<!-- page: Operate Graphyard | 9 | recovery procedures and limits. -->
+<!-- page: Operate Graphyard | 9 | procedures, limits. -->
 # Operations reference
 
 ## Master coordination loop
 
-`master status` → `daemon`: health, `cycleTime` (30-minute p50/p95); cycles over 60 s raise `loop`. Log: `journalctl --user -u graphyard-master`.
+`master status` → `daemon`: `cycleTime` (p50/p95); cycles over 60 s raise `loop`. Log: `journalctl --user -u graphyard-master`.
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses releases *unobserved*, *stale* (rerun), not serving the merge, or already recorded. Without `--deployment-url` it reads `productionEnvironment` deployments (newest success counts).
+`master verify-deployment GY-N` refuses *unobserved* or *stale* releases and ones not serving the merge; without `--deployment-url` it reads `productionEnvironment` deployments.
 
 ## Lost worker before submission
 
-Leases expire 120 s after last heartbeat (one further lease period after a recorded renewal fault); next claim (higher epoch) keeps the worktree. Unexplained lapses raise [`lease-loss`](protocol/leases.md#how-a-lease-ends), blocking merge until [settled](delegation.md#who-may-settle-what).
+Leases expire 120 s after the last heartbeat (one further lease period after a recorded renewal fault); unexplained lapses raise [`lease-loss`](protocol/leases.md#how-a-lease-ends), blocking merge until [settled](delegation.md#who-may-settle-what).
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker, `graphyard master settle-containment GY-N "reason"` verifies nothing survives. If refused, confirm the stop, then [`rework`, or `recover-containment` once delivered](operations.md#recovery-recipes). Autosettle's [clock bound](protocol/leases.md#watch).
+`graphyard master settle-containment GY-N "reason"` verifies nothing survives; if refused, confirm the stop, then [`rework`, or `recover-containment` once delivered](operations.md#recovery-recipes) ([autosettle](protocol/leases.md#watch)).
 
 ## Submitted implementation needs rework
 
-Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next worker resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rounds by reason (55% own-change, 33% conflicts; raw median 2); `master status` `speed.reworkRounds.ownChange` excludes out-of-item causes (median 0).
+Stop the worker; `graphyard rework GY-N --previous-worker-stopped "reason"`. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rounds by reason (55% own-change, 33% conflicts; raw median 2).
 
 ## Retro synthesis
 
-Beside the tick, the scan (`GRAPHYARD_INTERVENTION_PATTERNS=0` disables; `GET /api/interventions` reports `scan`) opens an item per crossed pattern each minute and drafts changes per recurring refusal or rework cause (`retro.drafted`: wording, check, producer method, fault-catalogue entry), each [approved](protocol/work-commands.md) or refused by a non-drafting AI operator agent (`decision:approve`). Approved requirements show as [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse a failing `complete`. Off, `master status` flags crossed patterns as configuration faults.
+The scan (`GRAPHYARD_INTERVENTION_PATTERNS=0` disables; `GET /api/interventions` reports `scan`) files an item per crossed pattern and drafts changes per recurring cause, [approved](protocol/work-commands.md) or refused by a non-drafting operator agent; applied ones show as [`retroStanding`](protocol/read-endpoints.md) and refuse a failing `complete`.
 
 ## Flaky CI check
 
-A failing check is [rerun](github.md#failed-checks) once (`mergeQueue.rerunFailedChecks`, 0 disables); a second failure returns the item for rework; a passing rerun clears it.
+A failing check is [rerun](github.md#failed-checks) once (`mergeQueue.rerunFailedChecks`, 0 disables); a second failure returns the item for rework.
 
 ## Accepted evidence turns out to be wrong
 
-`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes the gate, so GitHub's required checks no longer pass on that head.
+`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes the gate on that head.
 
 ## GitHub request budget
 
@@ -43,16 +43,16 @@ A failing check is [rerun](github.md#failed-checks) once (`mergeQueue.rerunFaile
 
 | Band | Cadence
 | --- | ---
-| `merge` | every gate passing, GitHub may merge it: 20 s
+| `merge` | every gate passing: 20 s
 | `active` | awaiting check, review, base refresh, rework: 1 min
-| `steady` | unchanged: 5 min, stretched by fleet bound; review requests ≤ 10 min
-| `idle` | awaiting dispatch/escalation: 5 min, stretched if unchanged
+| `steady` | unchanged: 5 min, stretched by fleet bound
+| `idle` | awaiting dispatch/escalation: 5 min
 
 Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
 
 ### The merge-path reserve
 
-Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observations await reset (`githubBudget.deferrals`); a token (`githubBudget.tokens`) projected below reserve at reset raises `github`.
+Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observations await reset (`githubBudget.deferrals`); a token projected below reserve raises `github`.
 
 ### What an observation costs
 
@@ -60,11 +60,11 @@ About ten requests uncached; unchanged, none.
 
 ### What a pause means for gates
 
-A rate-limit `403`/`429` pause stops requests; gates read the last observation until it lifts. GitHub keeps merging on its branch protection, and the merge is recorded once requests resume ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
+A rate-limit `403`/`429` pause stops requests; gates read the last observation until it lifts, and GitHub's own merges are recorded once requests resume ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
 
 ### Reading the budget
 
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also `master status`): REST-only `perHour` across replicas (`instances`), `limit`, `share`, `target` 0.6, `byEndpoint`. Immutable, per-cycle and webhook-driven reads are [not repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
+`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable`: REST-only `perHour`, `limit`, `share`, `target` 0.6, `byEndpoint`. Repeat reads are [cached](protocol/github-webhook.md#reads-that-are-not-repeated).
 
 ### Webhook liveness
 
@@ -72,35 +72,31 @@ A silent hour: `master status` points to `https://github.com/settings/apps/APP-S
 
 ## Control-plane resources
 
-Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default 10 GiB); `tmp-inodes`, free `/tmp` (TMPDIR, `/tmp`); `loaded-revision` counts code moves. No reading faults while its remedy acts: an owed restart retried within bound, a pane unowned under 10 minutes, the loop's own lag, `/tmp` above a tenth free after a pass within 30 minutes.
+Remedies per `resources` entry: ledgers, `graphyard master run --once`; `agent-names`, `herdr pane close PANE`; `session-slots`, raise `concurrency`; `database-capacity`, `GRAPHYARD_DATABASE_MAX_BYTES` (10 GiB); `tmp-inodes`, free `/tmp`.
 
 ## Storage retention
 
-Receipts answer retries for a day; compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14, min 1), appending `ledger.compacted`.
-
-### Host memory
-
-Session-started `npm test`, `test:browser`, typecheck and `tsc --noEmit` wait for one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`) in the managed root's `.verification-slots`; CI is unbounded. Below max(10% RAM, 4 GB) available, launches defer (`escalation:dispatch:memory`; `resources` item `memory` names top consumers; one `memory-pressure` fault per dip) until 1 GB above.
+Receipts answer retries for a day; compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (default 14), appending `ledger.compacted`.
 
 ## Bootstrap mode for a self-proving change
 
-A `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to the criterion. Other gates apply; `e2e:` proofs never defer; the next item touching those paths owes it (`graphyard obligations`).
+A `policy:bootstrap` holder adds `"bootstrap": {"reason": "…", "contractPaths": ["src/herdr/recovery.ts"]}` to the criterion; `e2e:` proofs never defer, and the next item touching those paths owes it (`graphyard obligations`).
 
 ## Delivered with a failed smoke proof
 
-Stays Done, **delivered with failure**; revert via a new item, never backfill.
+Stays Done, **delivered with failure**; revert via a new item.
 
 ## Merged but not deployed
 
-An unserved merge is a [`delivery.deployment-incident`](deployment.md#production-deployment-observation) until served.
+An unserved merge is a [`delivery.deployment-incident`](deployment.md#production-deployment-observation).
 
 ## Merge bypass
 
-An ungated merge is a permanent violation: repair access, file a follow-up, never backfill. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
+An ungated merge is a permanent violation: repair access, file a follow-up, never backfill. Admin window: `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Credentials
 
-Rotate [`GRAPHYARD_PRINCIPALS`](deployment.md#variables), redeploy. Operator agents hold only listed capabilities, `graphyard operator-agent setup|list|rotate|revoke`.
+Rotate [`GRAPHYARD_PRINCIPALS`](deployment.md#variables), redeploy; operator agents: `graphyard operator-agent setup|list|rotate|revoke`.
 
 ## Proof authority grants
 
@@ -109,22 +105,16 @@ graphyard grants
 graphyard grants grant|revoke ci "integration:*,unit:*" REASON
 ```
 
-Only `admin` grants or revokes, to `producer` principals: exact name, `kind:*` or prefix (`manual:gy-43/*`).
+Only `admin` grants, to `producer` principals: exact name, `kind:*` or prefix (`manual:gy-43/*`).
 
 ## Setup proposals and drift
 
-`graphyard init --scan` writes `.graphyard/setup-proposal.json` (`--apply` applies); rescans and `doctor --profile through-merge|preview-validation|production-verification` report drift, never repair.
+`graphyard init --scan` writes `.graphyard/setup-proposal.json` (`--apply` applies); `doctor --profile through-merge|preview-validation|production-verification` reports drift.
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥ twice workers) pace per token, merge path first (`observationThroughput`). Heartbeat, claim, `complete`, `blocked` own the lease pool (`leaseHealth` in `GET /api/status`). Reconcile evaluates moved rows (all every `GRAPHYARD_RECONCILE_FULL_MS`). Until startup validation finishes, `/healthz` reports `readiness: false` and `/healthz?ready` 503.
+`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` ≥ twice) pace per token, merge path first. Heartbeat, claim, `complete` and `blocked` own the lease pool; `/healthz?ready` is 503 until startup validation finishes. Session-started test and typecheck runs share max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`); under max(10% RAM, 4 GB) free, launches defer.
 
 ### Concurrent reconciliation
 
-A tick runs every 2 s and should finish within 5 s; slower ticks log `reconciliation tick took N ms` with writes and longest lock wait. Locks, in order:
-
-1. Opening: the coordination lock, briefly, reading row versions and sweeping direct merges.
-2. Each batch evaluates up to 250 ms lock-free, planning at most 8 writes.
-3. Each write is its own transaction: the coordination lock (waiting at most 500 ms, holding no row), then the item's row (`FOR NO KEY UPDATE`), then commit. If anything it read moved, the item is re-evaluated first. Job wakes follow at commit, in work-id order.
-
-Three expired lock waits defer unwritten items a tick. A renewal takes only its item's lock. Before each evaluation and write, reconciliation yields to pending requests and waits up to 1 s for renewals, so a renewal waits on at most one evaluation. Stale observation snapshots retry after 2 s.
+A 2 s tick evaluates batches lock-free, then writes each item in its own transaction under the coordination lock (≤500 ms wait) and its row lock; a renewal waits on at most one evaluation.

@@ -8,4 +8,4 @@ Lifecycle commands append to each item's `pipeline`; it never moves a gate.
 "submittedAt":"…","resubmittedAt":"…","reworkRounds":1,"interventions":{"blocked":0,"requirements":0}}
 ```
 
-Attempt ends: `submitted`, `released`, `expired`, `reworked`; `submittedAt` (first submit) survives rework. Older items backfill from the ledger (`pipeline.backfilled`). `master status` derives row `speed` ([target](../master-agent-reference.md#pipeline-speed)); `coverage`: `measured`, `awaiting-backfill`, `events-pruned`, `no-submission`.
+Attempt ends: `submitted`, `released`, `expired`, `reworked`; older items backfill from the ledger. `master status` derives row `speed` ([target](../master-agent-reference.md#pipeline-speed)).

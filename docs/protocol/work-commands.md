@@ -1,27 +1,27 @@
-<!-- page: Agent protocol | 1 | every work mutation. -->
+<!-- page: Agent protocol | 1 | work mutations. -->
 # Work commands
 
 All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)); mutations an `Idempotency-Key`, reused only for identical retries. Errors: `{ "error": "reason" }`; a `409` refusal is read, not retried.
 
 `POST /api/work` ([example](../../examples/work.json)): `title`, `criteria`; optionally `dependencies`, `exclusiveResources`, `plannedFiles`, `split` ([decomposition](#splitting-an-item) opt-out/in), `producerProofs` (producer-runnable `manual:` proofs); `parent`/`children` are set only by a split. Others: `POST /api/work/KEY/COMMAND`:
 
-- `requirements`: document, `expectedPolicyRevision`, `reason`; `admin` (operator agents additively); `split` kept when omitted. A stale `expectedPolicyRevision` is refused as stale (`Policy revision changed`) before any lease or quarantine check. While an approver judges the rest of a partly widened scope request, the loop does not re-read its review findings.
-- `decomposition` (coordinator): `{event:"started"|"decided"|"failed",…}`; `decided` with `payload.children` makes the [split](#splitting-an-item).
-- `ready`, `unblock`: `{"reason":…}` (operator agents add `expectedRevision`); `master unblock` retries a stale-revision refusal (≤3 writes) while the same blocker stands. A two-party `release`, `unblock` or revision-pinned `close` decision still applies when the item moved since its `expectedRevision` only in loop bookkeeping (sessions, gates, next action, action queue); any other move settles it `stale`.
+- `requirements`: document, `expectedPolicyRevision`, `reason`; `admin` (operator agents additively); `split` kept when omitted; a stale revision is refused (`Policy revision changed`).
+- `decomposition` (coordinator): `{event:"started"|"decided"|"failed",…}`; `decided` makes the [split](#splitting-an-item).
+- `ready`, `unblock`: `{"reason":…}` (operator agents add `expectedRevision`; `master unblock` retries a stale revision ≤3 times). A two-party `release`, `unblock` or revision-pinned `close` decision still applies when the item moved only in loop bookkeeping; any other move settles it `stale`.
 - `resolve`: `{"trigger":…, "expectedRevision":…, "reason":…}`; human `admin`, or any `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` explaining a `lease-loss`.
 - `rework`, `recover` (delivered quarantine): `admin`, `{"reason":…, "previousWorkerStopped":true}`.
-- `repair` `{"reason":…}` (coordinator/admin) rebuilds a head carrying another item's unlanded commits; `refresh` `{"reason":…, "base":SHA}` (coordinator, admin or an operator agent with `intent:unblock`) merges the observed base tip into an open candidate's branch, keeping its approval under the carry rules.
-- `claim` `{}`; `heartbeat`, `release` `{"epoch":1}`; `release` may carry `"cause"` or `"failure":{"message":…}` (`workspace.failed`; an untouched claim keeps its epoch); `blocked` `{"epoch":1,"reason":…,"partialWork":…}` (a reason releases; null clears); `blocker-probe` (coordinator; a `pass` clears a routine [blocker](leases.md#blocked-work-unblocks-itself)); `workspace` `{"epoch":1,"host":…,"path":…,"branch":"graphyard/gy-1-1"}`, optional `preserved` (`workspace.preserved`).
+- `repair` `{"reason":…}` (coordinator/admin) rebuilds a head carrying another item's unlanded commits; `refresh` `{"reason":…, "base":SHA}` (coordinator, admin or an `intent:unblock` operator agent) merges the observed base tip into the branch under the carry rules.
+- `claim` `{}`; `heartbeat`, `release` `{"epoch":1}` (`release` may carry `"cause"` or `"failure"`; an untouched claim keeps its epoch); `blocked` `{"epoch":1,"reason":…,"partialWork":…}` (a reason releases; null clears); `blocker-probe` (coordinator; a `pass` clears a routine [blocker](leases.md#blocked-work-unblocks-itself)); `workspace` `{"epoch":1,"host":…,"path":…,"branch":"graphyard/gy-1-1"}`.
 - `submit`: `{"epoch":1,"pr":123}`; `409` if a non-`plannedFiles` file [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope) or an applied retro check fails.
 - `deployment`: `{"sha":…, "mergeSha":…, "source":"endpoint", "observedAt":…}`; coordinator/admin, delivered work, once.
-- `triage` `{judgement}` (coordinator): [backlog](../master-agent.md#machine-filed-backlog); review follow-ups are never filed.
-- `POST /api/retro/synthesize` (coordinator/admin) drafts [retro artefacts](../operations-reference.md#retro-synthesis) as caller; `POST /api/retro/ID/approve|refuse` `{reason}` by its rules (`403`; `409` once judged).
+- `triage` `{judgement}` (coordinator): [backlog](../master-agent.md#machine-filed-backlog).
+- `POST /api/retro/synthesize` (coordinator/admin) drafts [retro artefacts](../operations-reference.md#retro-synthesis); `POST /api/retro/ID/approve|refuse` `{reason}` (`403`; `409` once judged).
 
 No endpoint sets lifecycle state.
 
 ## Splitting an item
 
-Before first dispatch the loop judges an item against `run.decomposition` bounds (defaults: 4 criteria, 2 root directories, 12 paths, ~1,500 lines). Over them, a read-only Pi session (`run.research` account; `concurrency` 4, `timeoutMinutes` 10) proposes 2–10 children; within bounds, `"split": false` or a failed run, the item is dispatched unchanged. `master status` shows `split` on rows and a `splits` list. Splitting lets GitHub land small PRs instead of colliding large ones. A split is one transaction: every parent criterion goes to exactly one child (text and proofs copied), each child's `plannedFiles` sits strictly inside the parent's, and `after` orders children as dependencies. Children are ordinary `GY-N` items keeping the parent's release, dependencies, `exclusiveResources`, policy and documentation criterion. The parent is never claimed or dispatched; requirements revisions on it are refused in favour of the children's, which may add criteria but not rewrite or retire inherited ones; its last child's delivery delivers it (`decomposition.parent-delivered`). A keep-whole answer or refused split dispatches it unchanged; `"split": true` runs the session within the bounds too.
+Before first dispatch the loop judges an item against `run.decomposition` bounds (defaults: 4 criteria, 2 root directories, 12 paths, ~1,500 lines); over them, a read-only Pi session (`run.research` account) proposes 2–10 children, so GitHub lands small PRs. Within bounds, `"split": false`, a keep-whole answer or a failed run dispatches the item unchanged (`"split": true` runs the session regardless). A split is one transaction: each parent criterion goes to exactly one child, each child's `plannedFiles` sits inside the parent's, `after` orders children, and children inherit the parent's release, dependencies, `exclusiveResources`, policy and documentation criterion. The parent is never dispatched; children may add criteria but not rewrite inherited ones, and the last child's delivery delivers the parent.
 
 ## Other commands and routes
 
