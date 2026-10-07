@@ -46,7 +46,7 @@ Every `run.doctor.intervalMinutes` (default 10) the loop's [doctor](onboarding.m
 
 ## Research and diagnosis
 
-`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); human-only parks: no fix; quota refusals wait in `daemon.diagnoses` until `retryAt`, then probe; `stale`/`withdrawn` decisions and stale backlog releases re-requested (≤3), then escalated (30m fault, `decision-stale`); a revision-raced close too, once its grounds re-validate (still open, its `ref` not closed), and while a close stands the loop takes no other decision, review-cap withdrawal or dispatch on that item; a stale series is one `wait:decision-stale:` action and, from 3, one attention line; raced/delivered/[plane-wide](operations.md#incident-decision-tree) requests retry; restart-lost diagnoses, approver refusals: no `loop` fault. Base conflicts under 30m and restart-resumed merges aren't `merge` faults.
+`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); human-only parks: no fix; quota refusals wait in `daemon.diagnoses` until `retryAt`, then probe; `stale`/`withdrawn` decisions and stale backlog releases re-requested (≤3), then escalated (30m fault, `decision-stale`); raced/delivered/[plane-wide](operations.md#incident-decision-tree) requests retry; restart-lost diagnoses, approver refusals: no `loop` fault. Base conflicts under 30m and restart-resumed merges aren't `merge` faults.
 
 ## Machine-filed backlog
 

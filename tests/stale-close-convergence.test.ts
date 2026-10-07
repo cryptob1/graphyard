@@ -5,7 +5,7 @@ import type { Work } from '../src/model.js';
 import { classifyAttention } from '../src/model/fault-classes.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { closeGrounds, convergibleClose, pendingClose, staleAttentionAttempts, staleRun, staleWaitKey } from '../src/model/stale-close.js';
+import type * as StaleClose from '../src/model/stale-close.js';
 import { terminalDecisions } from '../src/cli/decision-report.js';
 import type { MechanicalFixRequest } from '../src/mechanical-findings.js';
 
@@ -99,12 +99,15 @@ function world(work: Work[], mechanical: MechanicalFixRequest[] = []) {
     },
   };
 }
+// A dynamic import: on a tree without the module (the proof's exercise against the base) each case still runs, and fails as a case.
+const staleClose = (): Promise<typeof StaleClose> => import('../src/model/stale-close.js');
 const closes = (w: ReturnType<typeof world>) => w.ledger.filter(entry => entry.action === 'close' && entry.work === 'GY-1437');
 const reworks = (w: ReturnType<typeof world>) => w.ledger.filter(entry => entry.action === 'rework' && entry.work === 'GY-1437');
 const duplicate = { kind: 'duplicate', ref: 'GY-1438' };
 const reason = 'GY-1437 duplicates GY-1438, the priority-1 owner of the same fix, so it is closed as its duplicate';
 
-test('unit:decision-stale-apply-revalidates-and-converges — a revision-raced close is re-validated against the fresh item and asked again without its pinned revision, until it applies', () => {
+test('unit:decision-stale-apply-revalidates-and-converges — a revision-raced close is re-validated against the fresh item and asked again without its pinned revision, until it applies', async () => {
+  const { closeGrounds, convergibleClose, pendingClose, staleAttentionAttempts, staleRun } = await staleClose();
   const owner = item('GY-1438'), closing = reviewed(140);
   const stale = (id: string, expected: number, now: number) => ({ id, action: 'close', state: 'stale', input: { ...duplicate, expectedRevision: expected }, outcome: staleOutcome(now) });
   // The first race: requested against 114, the item at 140 when its approver read it.
@@ -137,6 +140,7 @@ test('unit:decision-stale-apply-revalidates-and-converges — a revision-raced c
 });
 
 test('integration:close-applied-despite-two-revision-bumps — a close raced by a review settlement and a mechanical rework is applied by its second attempt, which the loop requests itself', async () => {
+  const { staleWaitKey } = await staleClose();
   const w = world([reviewed(114), item('GY-1438')]);
   const first = w.requestByHand('GY-1437', 'close', reason, duplicate);
   await w.cycle();
@@ -195,6 +199,7 @@ test('integration:advancing-steps-defer-to-pending-close — the 09:07:41 mechan
 });
 
 test('unit:decision-stale-named-wait-single-attention — repeated stale settles record one named wait and raise one attention line only after three attempts', async () => {
+  const { staleAttentionAttempts, staleWaitKey } = await staleClose();
   const w = world([reviewed(114), item('GY-1438')]);
   const key = staleWaitKey(w.find('GY-1437'), 'close');
   let latest = w.requestByHand('GY-1437', 'close', reason, duplicate).id;
