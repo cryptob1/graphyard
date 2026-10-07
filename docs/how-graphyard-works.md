@@ -20,7 +20,7 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions, each sta
 - **Medium** (60 min): remainder; adds producer-run `unit:`/`integration:`.
 - **Low** (30 min): test-only, docs-only, single-module. Required CI and one approval only.
 
-All lanes require `e2e:` proofs; low/medium reworks need no approver (approved by `graphyard-risk-lane`).
+All lanes require `e2e:` proofs; low/medium reworks need no approver (approved by `graphyard-risk-lane`). Nor does any lane's rework whose ground the record shows on the exact head: a trusted proof failed on it, an approver refused its `manual:` attestation, or the control plane's own test merge onto the moved base conflicted, not GitHub's reading alone (`src/model/rework-ground.ts`). A head already returned to a worker has spent its ground, so a later rework of it (the retry cap's) still waits. The loop turns a refused attestation into that rework itself; a grounded rework is no [intervention](dashboard.md).
 
 ## Who holds which authority
 

@@ -27,6 +27,17 @@ export const lateDecisionRead = (detail: string) => / ms read deadline passed be
  * nothing and is no decision fault — the next snapshot shows it done (GY-1336's diagnosis rule).
  */
 export const deliveredMeanwhile = (detail: string) => /Delivered work is immutable/.test(detail);
+/**
+ * GY-1430. A rework the server refused because the candidate it was bound to — the head of this
+ * cycle's snapshot — is no longer the item's ("The rework is bound to X but the current candidate is
+ * Y"): a worker submitted a new head after the snapshot, so the grounds read from it describe
+ * nothing any more and the next snapshot decides afresh. The refusal judged nothing and is no
+ * decision fault. A rework bound to any head but the snapshot's own is still one.
+ */
+export function candidateMovedMeanwhile(detail: string, item: Pick<Work, 'candidate'>): boolean {
+  const refused = /The rework is bound to ([0-9a-f]{12}) but the current candidate is ([0-9a-f]{12}|none)/.exec(detail);
+  return !!refused && !!item.candidate && refused[1] === item.candidate.sha.slice(0, 12) && refused[2] !== refused[1];
+}
 /** How long a kept history may go without being read afresh, whatever the ledger says (GY-1241). */
 export const decisionRefreshMs = 30 * 60_000;
 /**

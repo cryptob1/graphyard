@@ -125,7 +125,9 @@ export const dispatchCursorSchema = z.object({
     reasons: z.array(z.string().max(cursorTextLimit)).max(20).default([]),
     /** Each request the tick left waiting, by request id, with why (GY-710): what `master status` ages against the request's own time. */
     waits: z.array(z.object({ kind: z.enum(['review', 'producer']), work: z.string().min(1).max(40), requestId: z.string().min(1).max(64), sha: z.string().min(1).max(40),
-      reason: z.string().max(cursorTextLimit), group: z.string().max(40).optional() }).strict()).max(launchWaitLimit).default([]),
+      reason: z.string().max(cursorTextLimit), group: z.string().max(40).optional(),
+      /** When the reviewer's verdict on the request settled (GY-1429): a request already answered waits from then, not from its request. */
+      answeredAt: z.string().max(40).optional() }).strict()).max(launchWaitLimit).default([]),
     /** Where the tick's time went (GY-377): its steps and its slowest external calls. Absent on older ticks. */
     timings: timingsSchema.optional() }).strict().nullable().default(null),
   /**
@@ -168,6 +170,8 @@ export const dispatchRetryMinMs = 30_000, dispatchRetryMaxMs = 600_000, dispatch
  * standing, is attempted again: a second verdict on the same request is otherwise withheld with the first.
  */
 export const reviewerReminderBoundMs = reviewVerdictReminderMs, verdictIngestGraceMs = 5 * 60_000;
+/** How often the dispatcher wakes one item's observation for an answered review request (GY-1429). */
+export const observationWakeIntervalMs = 60_000;
 
 // The producer's finding that a proof does not exercise its criterion is read by the planner too (GY-817).
 export { unexercisedFindings };
@@ -429,6 +433,12 @@ export interface DispatchEffects {
    * GY-113 exists to end, so the shipped `dispatchEffects` always wires it.
    */
   endSession?: (closure: SessionClosure) => Promise<unknown>;
+  /**
+   * Wakes the item's observation job now (GY-1429), so a verdict a reviewer posted is read and its
+   * request settled without waiting on the observation scheduler's cadence. A dispatcher wired
+   * without it leaves the reading to that cadence.
+   */
+  wakeObservation?: (work: Work) => Promise<unknown>;
   persist: (cursor: DispatchCursor) => Promise<void>;
 }
 
@@ -636,7 +646,7 @@ export function reportClosure(entry: SessionReportEntry): SessionClosure {
 export const herdrSessionListing = (agents: HerdrAgent[]): HerdrAgent[] => agents.map(entry => ({ ...entry, agent: entry.agent || null }));
 
 export interface DispatchLaunch { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; profile: string; group?: string; proofs?: string[]; failover?: string[]; relaunched?: boolean; reason?: string }
-export interface DispatchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; reason: string; group?: string; requestedAt?: string }
+export interface DispatchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; reason: string; group?: string; requestedAt?: string; answeredAt?: string }
 export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused: (DispatchFailure & { requestId: string })[]; waiting: DispatchWait[]; skipped: number;
   /** Session records this tick reconciled against the runtime, and the ones whose closure could not be written back. */
   closed: SessionClosure[]; closeFailures: { work: string; id: string; reason: string }[];
@@ -644,6 +654,8 @@ export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused:
   sessions?: { observed: number; written: number; failures: { work: string; id: string; reason: string }[] };
   /** Review threads this tick resolved on an approval's word, and the ones it named but could not resolve. */
   threads?: string[];
+  /** Items whose observation this tick woke because a reviewer had answered their request (GY-1429). */
+  woken?: string[];
   /** Where the tick's time went: every step it ran and its slowest external calls (GY-377). */
   timings?: TimingReport }
 
@@ -797,7 +809,20 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   // cannot be taken again, whatever state it is in, and that check is theirs to make.
   const room = (profile: ReviewerProfile | ProducerProfile, records: { profile: string; agentName: string; state: string }[]) => profileSessions(profile, [...inventory(), ...held()], records);
   const atLimit = (profile: ReviewerProfile | ProducerProfile, records: { profile: string; agentName: string; state: string }[]) => { const sessions = room(profile, records); return `${profile.name}: at its concurrency limit (${sessions.running.length} running, limit ${sessions.limit})`; };
-  const wait = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, reason: string) => tick.waiting.push({ kind, work: item.key, requestId: request.id, sha: request.sha, reason, requestedAt: request.requestedAt, ...(request.group ? { group: request.group } : {}) });
+  const wait = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, reason: string, answeredAt?: string) => tick.waiting.push({ kind, work: item.key, requestId: request.id, sha: request.sha, reason, requestedAt: request.requestedAt, ...(request.group ? { group: request.group } : {}), ...(answeredAt ? { answeredAt } : {}) });
+  /**
+   * GY-1429: a review request a reviewer already answered settles only once the item's observation
+   * reads the verdict, and that reading rode the scheduler's thirty-minute review band, so a verdict
+   * posted between readings stood unread for minutes while the request aged. The verdict wakes the
+   * item's observation at once, one wake per item per tick, unless a reading newer than the verdict
+   * already stands; the tick awaits the wakes before it ends and a failed one is named on the wait.
+   */
+  const settlementWakes = new Map<string, { key: string; wake: Promise<string | null> }>();
+  const wakeSettlement = (item: Work, answeredAt: string) => {
+    const observed = Date.parse(item.observation?.at ?? ''), answered = Date.parse(answeredAt);
+    if (!effects.wakeObservation || settlementWakes.has(item.id) || Number.isFinite(observed) && Number.isFinite(answered) && observed > answered) return;
+    settlementWakes.set(item.id, { key: item.key, wake: Promise.resolve().then(() => effects.wakeObservation!(item)).then(() => null, (error: unknown) => message(error)) });
+  };
   const refuse = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, error: unknown) => {
     const previous = cursor.failures[request.id];
     const attempts = (previous?.attempts ?? 0) + 1;
@@ -901,7 +926,9 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       const settled = `${role} session attempt ${retry.attempts} ${last.state} without satisfying the request: ${last.resolution ?? 'no reason recorded'}`;
       if (kind === 'review' && last.verdict && last.verdict.state !== 'DISMISSED' && now() - settledAt < verdictIngestGraceMs) {
         tick.skipped++;
-        wait(kind, item, request, `${role} session attempt ${retry.attempts} posted ${last.verdict.state}; the control plane is given until ${new Date(settledAt + verdictIngestGraceMs).toISOString()} to read it before another attempt`);
+        const answeredAt = new Date(settledAt).toISOString();
+        wakeSettlement(item, answeredAt);
+        wait(kind, item, request, `${role} session attempt ${retry.attempts} posted ${last.verdict.state}; the control plane is given until ${new Date(settledAt + verdictIngestGraceMs).toISOString()} to read it before another attempt`, answeredAt);
         return false;
       }
       if (retry.attempts >= dispatchFailureLimit) {
@@ -1054,7 +1081,10 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
           // A request a settled session already answered waits on the control plane reading that
           // verdict (GY-1083): no launch was refused, so no failure counts against the request.
           const answered = answeredByPendingReview(error, review);
-          if (answered?.answered) wait('review', item, review, `reviewer session ${answered.agentName} already answered with ${answered.answered.state} (review ${answered.answered.reviewId}); ${launchWaitWording.settles}`);
+          if (answered?.answered) {
+            wakeSettlement(item, answered.answered.at);
+            wait('review', item, review, `reviewer session ${answered.agentName} already answered with ${answered.answered.state} (review ${answered.answered.reviewId}); ${launchWaitWording.settles}`, answered.answered.at);
+          }
           else if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error);
         }
         await persist();
@@ -1132,6 +1162,11 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     } finally { outcomes = await Promise.all([...deferred, ...producerLaunches]); }
   });
   for (const outcome of outcomes) if (outcome) throw outcome.error;
+  for (const { key, wake } of settlementWakes.values()) {
+    const failed = await wake;
+    if (!failed) { (tick.woken ??= []).push(key); continue; }
+    for (const entry of tick.waiting) if (entry.work === key && entry.answeredAt) entry.reason = bounded(`${entry.reason}; waking its observation failed: ${failed}`, cursorTextLimit);
+  }
   // A failure for a request the control plane resolved is history the cursor need not keep.
   const live = new Set(snapshot.work.flatMap(work => [...(work.autoDispatch?.review ? [work.autoDispatch.review.id] : []), ...(work.autoDispatch?.producers ?? []).map(request => request.id)]));
   for (const id of Object.keys(cursor.failures)) if (!live.has(id)) delete cursor.failures[id];
@@ -1256,6 +1291,9 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     return result;
   });
   const mutate = (path: string, body: unknown, requestId?: string) => timedCall('server', serverCallName('POST', path), () => post(path, body, requestId));
+  // An answered request's observation is woken at most once a minute per item (GY-1429): a prioritized
+  // resync that waits on no tick, the same wake the loop sends for a refused step (GY-710).
+  const observationWakes = new Map<string, number>();
   return {
     snapshot: timeoutMs => timedCall('server', 'GET work-snapshot', () => deps.snapshot(timeoutMs)),
     agents: () => listHerdrAgents(run).then(herdrSessionListing).catch(() => null),
@@ -1263,6 +1301,13 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     reconcileReviews: (work, agents) => reconcileReviews(root, current(), { run, work, agents }),
     reconcileProducers: (work, agents) => reconcileProducers(root, current(), work, agents, { run }),
     hostMemory: readHostMemory,
+    wakeObservation: async work => {
+      const at = (deps.now ?? Date.now)(), previous = observationWakes.get(work.id);
+      if (previous !== undefined && at - previous < observationWakeIntervalMs) return;
+      for (const [id, wokenAt] of observationWakes) if (at - wokenAt >= observationWakeIntervalMs) observationWakes.delete(id);
+      await mutate(`work/${work.id}/resync`, { prioritized: true, wait: false });
+      observationWakes.set(work.id, at);
+    },
     reclaimNames: async (work, agents) => (await reclaimResources(root, withReviewerDefaults(current()), { work, agents }, { namesOnly: true, closePane: pane => closeHerdrPane(pane, run) }))
       .closed.map(entry => ({ pane: entry.pane, agentName: entry.name })),
     // Each launch's reads of its own pane are watched: a runtime that exited on its provider's
@@ -1370,14 +1415,15 @@ export function tickWaits(waiting: DispatchWait[]) {
   // Past the bound the most recent requests drop, so the longest waits still raise attention.
   const requested = (entry: DispatchWait) => { const at = Date.parse(entry.requestedAt ?? ''); return Number.isFinite(at) ? at : Number.MAX_SAFE_INTEGER; };
   return [...byRequest.values()].sort((a, b) => (a.kind === 'review' ? 0 : 1) - (b.kind === 'review' ? 0 : 1) || requested(a) - requested(b)).slice(0, launchWaitLimit)
-    .map(({ kind, work, requestId, sha, reason, group }) => ({ kind, work: work.slice(0, 40), requestId: requestId.slice(0, 64), sha: sha.slice(0, 40), reason: bounded(reason, cursorTextLimit), ...(group ? { group: group.slice(0, 40) } : {}) }));
+    .map(({ kind, work, requestId, sha, reason, group, answeredAt }) => ({ kind, work: work.slice(0, 40), requestId: requestId.slice(0, 64), sha: sha.slice(0, 40), reason: bounded(reason, cursorTextLimit), ...(group ? { group: group.slice(0, 40) } : {}), ...(answeredAt ? { answeredAt: answeredAt.slice(0, 40) } : {}) }));
 }
 // GY-1067 follow-up 17: launchWaits reports review and producer requests managed by the
 // dispatcher; approver launches are managed separately by the daemon's cycle-decisions
 // loop (state.approvals) with their own escalation and tracking mechanisms.
 /** A review request waiting longer than this without a launch raises attention (GY-710). */
 export const reviewLaunchWaitAttentionMs = 15 * 60_000;
-export interface LaunchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; group: string | null; requestedAt: string; waitedMs: number; reason: string }
+/** `answeredAt` is when a reviewer's verdict answered the request (GY-1429): the wait is then the verdict's settlement, aged from it. */
+export interface LaunchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; group: string | null; requestedAt: string; waitedMs: number; reason: string; answeredAt?: string }
 /**
  * Every launch still waiting (GY-710, GY-1067), as `master status` reports it: each request the control
  * plane still holds open that has no live session, how long since the request was made, and why
@@ -1398,10 +1444,13 @@ export function launchWaits(work: Work[], cursor: Pick<DispatchCursor, 'lastTick
       if (hasLiveSession) continue;
       // GY-1067 follow-up 25: aging from request.requestedAt tracks cumulative unfulfilled time
       // across any failed/expired sessions, maintaining a bounded clock to 15-minute attention.
-      const requested = Date.parse(request.requestedAt);
+      // GY-1429: a request a reviewer already answered was launched, and the reviewer's own working
+      // time is no wait for a launch: what it waits on is its verdict's settlement, aged from the verdict.
+      const answeredAt = wait?.answeredAt && Number.isFinite(Date.parse(wait.answeredAt)) ? wait.answeredAt : undefined;
+      const since = Date.parse(answeredAt ?? request.requestedAt);
       rows.push({ kind: request.kind === 'review' ? 'review' : 'producer', work: item.key, requestId: request.id, sha: request.sha, group: request.group ?? null, requestedAt: request.requestedAt,
-        waitedMs: Number.isFinite(requested) ? Math.max(0, now - requested) : 0,
-        reason: wait?.reason ?? (failure ? `launch refused ${failure.attempts} time(s): ${failure.reason}; next attempt at ${failure.nextAt}` : 'waiting for dispatch') });
+        waitedMs: Number.isFinite(since) ? Math.max(0, now - since) : 0,
+        reason: wait?.reason ?? (failure ? `launch refused ${failure.attempts} time(s): ${failure.reason}; next attempt at ${failure.nextAt}` : 'waiting for dispatch'), ...(answeredAt ? { answeredAt } : {}) });
     }
   }
   return rows.sort((a, b) => b.waitedMs - a.waitedMs);
@@ -1415,7 +1464,7 @@ const waitedFor = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000
  */
 export function launchWaitAttention(waits: LaunchWait[]): AttentionItem[] {
   return waits.filter(wait => wait.kind === 'review' && wait.waitedMs > reviewLaunchWaitAttentionMs).map(wait => ({ subject: wait.work,
-    text: bounded(`${wait.work}'s review request ${wait.requestId} on ${wait.sha.slice(0, 12)} has waited ${waitedFor(wait.waitedMs)} (since ${wait.requestedAt}) without a reviewer launch: ${wait.reason}`, 2000),
+    text: bounded(`${wait.work}'s review request ${wait.requestId} on ${wait.sha.slice(0, 12)} has waited ${waitedFor(wait.waitedMs)} (since ${wait.answeredAt ? `its verdict at ${wait.answeredAt}, requested ${wait.requestedAt}` : wait.requestedAt}) without a reviewer launch: ${wait.reason}`, 2000),
     ...classified(launchWaitKind(wait.reason)),
     ...agentOwner('master', `Fix what the wait names, or launch it with graphyard master review ${wait.work}`) }));
 }

@@ -116,6 +116,8 @@ export const docsSyncWatchSchema = z.object({
   failed: z.string().max(1000).nullable().default(null),
   /** When the loop first found the session gone, or past its bound, while the head had not moved. */
   goneAt: z.string().optional(),
+  /** When the loop first saw the session's runtime stopped (idle or done) — its turn ended (GY-1430). */
+  stoppedAt: z.string().optional(),
   settledAt: z.string().nullable().default(null),
 }).strict();
 export type DocsSyncWatch = z.infer<typeof docsSyncWatchSchema>;

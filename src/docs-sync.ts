@@ -45,6 +45,13 @@ export async function localConflictPaths(root: string, branch: string, head: str
 export interface DocsSyncPlan { key: string; pr: number; branch: string; baseBranch: string; head: string; base: string; paths: string[] }
 /** How long a docs-sync session may run before the loop gives the conflict to a worker instead. */
 export const docsSyncMaxMs = 30 * 60_000;
+/**
+ * How long a docs-sync session's runtime may stay stopped (idle or done) before the loop takes it as
+ * ended (GY-1430): its instruction ends the turn after the push, or after aborting the merge, so a
+ * stopped session that did not move the head gave the conflict up. The pane stays listed in Herdr,
+ * so without this the loop waited out docsSyncMaxMs for it.
+ */
+export const docsSyncStoppedMs = 3 * 60_000;
 /** Within the runtimes' 32-character limit: `gy-docs-sync-gy-566-1a2b3c4`. */
 export const docsSyncSessionName = (plan: Pick<DocsSyncPlan, 'key' | 'head'>) => sessionName('gy-docs-sync', plan.key, plan.head.slice(0, 7));
 export const docsSyncCheckout = (root: string, plan: Pick<DocsSyncPlan, 'key' | 'head'>) => resolve(root, '.graphyard', 'docs-sync', `${plan.key}-${plan.head.slice(0, 7)}`);
