@@ -11,7 +11,7 @@ import { proposedConcurrency, proposedRuntimes } from '../model/registry-proposa
 import type { AgentRegistry, FleetAccountInput, FleetModel, FleetRole, FleetRoleName, FleetRuntime } from '../model/registry.js';
 import type { ProfileRegistration } from './index.js';
 import { suffixedSessionName } from '../session-name.js';
-import { executorGlob, executorInstance, installUnitsFile, type InstallUnits, parseInstallUnits, perInstallUnits, readInstallUnits } from './units.js';
+import { executorGlob, executorInstance, installUnitsFile, type InstallUnits, legacyExecutorTemplate, legacyLoopUnit, parseInstallUnits, perInstallUnits, readInstallUnits, unrecordedInstallUnits } from './units.js';
 
 /**
  * The self-contained Graphyard host (GY-717).
@@ -743,7 +743,10 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
   if (masterInit.code !== 0) throw new Error(`master init did not complete on ${hostName}: ${failure(ctx, masterInit)}`);
   // The names master init recorded (GY-1441): a host installed before them keeps the legacy loop
   // unit as its alias, so the unit to enable and report is read back, never recomputed.
-  const installUnits = parseInstallUnits(await readRemote(remote, `${layout.checkout}/${installUnitsFile}`), `${layout.checkout}/${installUnitsFile} on ${hostName}`);
+  // With no record, the legacy names are its alias only when no legacy unit on the host runs another checkout (GY-1452).
+  const recorded = await readRemote(remote, `${layout.checkout}/${installUnitsFile}`);
+  const legacy = recorded === null ? await Promise.all([legacyLoopUnit, legacyExecutorTemplate].map(async name => ({ path: `${layout.userUnitDirectory}/${name}`, text: await readRemote(remote, `${layout.userUnitDirectory}/${name}`) }))) : [];
+  const installUnits = parseInstallUnits(recorded, `${layout.checkout}/${installUnitsFile} on ${hostName}`, () => unrecordedInstallUnits(layout.checkout, legacy, HOST_HOME));
   await asUser(remote, layout.checkout, 'systemctl', ['--user', 'enable', '--now', installUnits.master]);
   const executors = await asUser(remote, layout.checkout, 'env', [...environment, 'node', `${layout.graphyard}/scripts/graphyard-executor.mjs`, '--install', '--count', String(host.executors)], { allowFailure: true });
   if (executors.code !== 0) throw new Error(`Installing ${host.executors} executor unit(s) on ${hostName} failed: ${failure(ctx, executors)}`);
