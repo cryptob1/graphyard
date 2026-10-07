@@ -320,7 +320,8 @@ test('unit:rework-ground-recorded — a high-lane rework the record grounds is a
   assert.equal(decision.state, 'applied', 'the record is the ground: no approver decision is needed');
   assert.equal(decision.approvedBy, 'graphyard-risk-lane');
   assert.match(decision.approvalReason, /candidate .* conflicts with base branch tip eeeeeeeeeeee in the control plane's own test merge, so the record is the rework's ground/);
-  assert.equal((await reread(work.id)).reworkRequested, true);  // The returned head keeps its submission, candidate and conflict until a new head is submitted,
+  assert.equal((await reread(work.id)).reworkRequested, true);
+  // The returned head keeps its submission, candidate and conflict until a new head is submitted,
   // but its ground is spent: the retry cap's rework after attempts that never submitted (GY-885)
   // judges those attempts, so it waits for the independent approver.
   const capped = await call(master.token, `work/${work.key}/decide`, { action: 'rework', input: { previousWorkerStopped: true, binding: `overlong-cap:${work.id}:${new Date().toISOString()}` }, reason: 'held: 3 attempts in a row ended without submitting' });
