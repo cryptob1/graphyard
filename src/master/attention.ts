@@ -11,7 +11,7 @@ import type { FleetView } from '../model/registry.js';
 import { roleAtCapacity } from '../fleet.js';
 import { classified, type FaultClass, type FaultKind } from '../model/fault-classes.js';
 import { humanOnlyDecisions } from './harness.js';
-import { conflictReworkBoundMs, conflictReworkDue } from '../model/approval.js';
+import { conflictReworkBoundMs, conflictReworkDue } from '../model/conflict-rework.js';
 
 /** The control-plane facts `GET /api/status` reports that are not about any one work item. */
 export interface ControlPlaneStatus {

@@ -4,7 +4,7 @@ import type { MechanicalFixRequest } from '../mechanical-findings.js';
 import { unactedProducerAttempts } from '../auto-dispatch.js';
 import { mechanicalHoldPattern } from '../model/refusal-catalogue.js';
 import { systemDriven } from './hand-actions.js';
-import { conflictReworkBoundMs, conflictReworkDue } from '../model/approval.js';
+import { conflictReworkBoundMs, conflictReworkDue } from '../model/conflict-rework.js';
 import { decisionKey } from '../daemon/reconcile.js';
 
 /**
