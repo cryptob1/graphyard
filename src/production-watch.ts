@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Store } from './store.js';
 import type { Work } from './model.js';
 import type { BuildIdentity } from './protocol-version.js';
+import { productionEnvironmentEvent, productionEnvironmentName } from './flow-analytics.js';
 
 /**
  * Production deployment observation for the managed base branch.
@@ -123,8 +124,24 @@ export function githubDeploymentsProvider(github: { request(path: string): Promi
  * The deployment list the watch reads: Railway's API when a Railway token is configured, else the
  * GitHub deployments Railway reports for the managed repository, read with the App credential.
  */
-export function productionProvider(env: Record<string, string | undefined> = process.env, github: Parameters<typeof githubDeploymentsProvider>[0] | null = null, fetcher: typeof fetch = fetch): DeploymentProvider | null {
-  return railwayProvider(env, fetcher) ?? (github ? githubDeploymentsProvider(github, env.GRAPHYARD_PRODUCTION_ENVIRONMENT?.trim() || 'production') : null);
+export function productionProvider(env: Record<string, string | undefined> = process.env, github: Parameters<typeof githubDeploymentsProvider>[0] | null = null, fetcher: typeof fetch = fetch, environment = productionWatchEnvironment(null, env)): DeploymentProvider | null {
+  return railwayProvider(env, fetcher) ?? (github ? githubDeploymentsProvider(github, environment) : null);
+}
+
+/**
+ * The deployment environment the watch reads GitHub deployments under (GY-1426): the name the master
+ * publishes to the ledger (`production.environment`, from `run.productionEnvironment`), else
+ * GRAPHYARD_PRODUCTION_ENVIRONMENT, else `production`. Railway reports deployments under
+ * `<project> / production`, so an install that sets the name only in the master's configuration
+ * is still observed under it. Never throws: an unusable value falls through to the next source.
+ */
+export function productionWatchEnvironment(published: unknown, env: Record<string, string | undefined> = process.env) {
+  return productionEnvironmentName(published) ?? productionEnvironmentName(env.GRAPHYARD_PRODUCTION_ENVIRONMENT) ?? 'production';
+}
+/** The watch's environment as the ledger and this process's settings name it now, read once at server startup. */
+export async function resolvedWatchEnvironment(pool: { query(sql: string, params?: any[]): Promise<{ rows: any[] }> }, env: Record<string, string | undefined> = process.env) {
+  const row = (await pool.query('SELECT payload->>\'environment\' AS environment FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [productionEnvironmentEvent])).rows[0];
+  return productionWatchEnvironment(row?.environment, env);
 }
 
 /** The startup log's account of where production observation comes from. */

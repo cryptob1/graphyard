@@ -29,6 +29,8 @@ function memoryStore(work: Work[]) {
     if (sql.startsWith('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL')) { events.push({ seq: events.length + 1, work_id: null, kind: params[1], payload: JSON.parse(params[2]) }); return { rows: [] }; }
     if (sql.startsWith('INSERT INTO events')) { events.push({ seq: events.length + 1, work_id: params[0], kind: params[2], payload: JSON.parse(params[3]) }); return { rows: [] }; }
     const limit = Number(sql.match(/LIMIT (\d+)/)?.[1] ?? Infinity);
+    // The published production environment (resolvedWatchEnvironment): plane events of that kind, newest first.
+    if (sql.includes("payload->>'environment'")) return { rows: events.filter(row => row.work_id === null && row.kind === params[0]).reverse().slice(0, limit).map(row => ({ environment: row.payload?.environment ?? null })) };
     if (sql.includes('kind IN ($1,$2)')) return { rows: events.filter(row => row.kind === params[0] || row.kind === params[1]).reverse().slice(0, limit) };
     if (sql.includes('kind=$1')) return { rows: events.filter(row => row.kind === params[0]).reverse().slice(0, limit) };
     throw new Error(`unexpected query ${sql}`);
@@ -432,7 +434,7 @@ test('unit:production-watch-provider-selection — a Railway token selects the R
   assert.equal(productionWatch.observationLine(null, { commit: sha(1) }), 'production observation from the build identity only; configure the GitHub App to read GitHub deployments');
   // Server startup selects through productionProvider and logs the line.
   const main = await readFile(new URL('../src/server/main.ts', import.meta.url), 'utf8');
-  assert.match(main, /productionProvider\(process\.env, github\)/);
+  assert.match(main, /productionProvider\(process\.env, github, fetch, await resolvedWatchEnvironment\(store\.pool\)\)/);
   assert.match(main, /observationLine\(provider, build\)/);
 
   // The missing-incident remedy, with no provider readable at all.
@@ -578,4 +580,112 @@ test('unit:production-watch-missing-only-when-unserved — a missing incident is
   const missing = await unknown.watch.tick(true);
   assert.equal(missing.incidents[0].status, 'missing');
   assert.match(missing.incidents[0].reason, /\(\/healthz serves no commit; github reported its newest successful deployment is of 000000000000\)$/);
+});
+
+/**
+ * GY-1426: Railway reports the production service's deployments to GitHub under `graphyard / production`,
+ * the name the master publishes as the ledger's production.environment event; the watch read only
+ * `production`, so serving stayed pinned to the last record under that name and every promotion was missing.
+ */
+const railwayEnvironment = 'graphyard / production', INCIDENT_EVENT_KIND = 'delivery.deployment-incident';
+function renamedEnvironmentPlane(published: string | null) {
+  const work = [{ id: 'work-2', key: 'GY-2', stage: 'done', delivery: { mergedAt: new Date(T0).toISOString(), mergeSha: sha(2), authorizationRevision: 1 } }] as unknown as Work[];
+  const { store, events } = memoryStore(work);
+  if (published) events.push({ seq: events.length + 1, work_id: null, kind: 'production.environment', payload: { environment: published } });
+  // The old stream ends at sha(1) under `production`; Railway's own stream serves the promoted sha(2).
+  const deployments = deploymentsGitHub(2, [
+    { id: 6901953002, sha: sha(2), environment: railwayEnvironment, statuses: [{ state: 'in_progress' }, { state: 'success' }] },
+    { id: 6901948625, sha: sha(1), environment: 'production', statuses: [{ state: 'in_progress' }, { state: 'success' }] }]);
+  const github = { ...deployments.github, request: async (path: string) => path.startsWith('/branches/') ? { commit: { sha: sha(2) } } : deployments.github.request(path) };
+  let clock = T0;
+  const watchUnder = (provider: productionWatch.DeploymentProvider | null) => new ProductionWatch(store, { provider, github, build: buildIdentity({}), baseBranch: 'main', releaseBranch: 'release/production', now: () => clock });
+  return { store, events, github, requests: deployments.requests, watchUnder, at: (ms: number) => { clock = T0 + ms; } };
+}
+
+test('unit:production-watch-environment-resolution — the ledger\'s published name wins, then GRAPHYARD_PRODUCTION_ENVIRONMENT, then production; startup passes it into the provider', async () => {
+  assert.equal(productionWatch.productionWatchEnvironment(railwayEnvironment, { GRAPHYARD_PRODUCTION_ENVIRONMENT: 'prod-eu' }), railwayEnvironment);
+  assert.equal(productionWatch.productionWatchEnvironment(` ${railwayEnvironment} `, {}), railwayEnvironment);
+  assert.equal(productionWatch.productionWatchEnvironment(null, { GRAPHYARD_PRODUCTION_ENVIRONMENT: ' prod-eu ' }), 'prod-eu');
+  for (const unusable of ['', '   ', 'x'.repeat(101), 42, undefined]) assert.equal(productionWatch.productionWatchEnvironment(unusable, { GRAPHYARD_PRODUCTION_ENVIRONMENT: 'prod-eu' }), 'prod-eu', `${JSON.stringify(unusable)} falls through`);
+  const { store, github, events } = renamedEnvironmentPlane(railwayEnvironment);
+  assert.equal(await productionWatch.resolvedWatchEnvironment(store.pool, { GRAPHYARD_PRODUCTION_ENVIRONMENT: 'prod-eu' }), railwayEnvironment);
+  events.push({ seq: events.length + 1, work_id: null, kind: 'production.environment', payload: { environment: 'renamed / production' } });
+  assert.equal(await productionWatch.resolvedWatchEnvironment(store.pool, {}), 'renamed / production', 'the newest publication wins');
+  const provider = productionWatch.productionProvider({}, github, fetch, railwayEnvironment);
+  assert.equal(provider?.description, `GitHub deployments to ${railwayEnvironment} of owner/project`);
+  assert.equal(productionWatch.productionProvider({ RAILWAY_API_TOKEN: 't', RAILWAY_SERVICE_ID: 's', RAILWAY_ENVIRONMENT_ID: 'e' }, github, fetch, railwayEnvironment)?.name, 'railway', 'a Railway token still selects Railway');
+  const main = await readFile(new URL('../src/server/main.ts', import.meta.url), 'utf8');
+  assert.match(main, /productionProvider\(process\.env, github, fetch, await resolvedWatchEnvironment\(store\.pool\)\)/, 'server startup resolves the name from the ledger');
+});
+
+test('unit:production-watch-environment-default — with no published name and the variable unset the watch reads production exactly as before', async () => {
+  assert.equal(productionWatch.productionWatchEnvironment(null, {}), 'production');
+  assert.equal(productionWatch.productionWatchEnvironment(undefined, { GRAPHYARD_PRODUCTION_ENVIRONMENT: '' }), 'production');
+  const { store, github, requests } = renamedEnvironmentPlane(null);
+  const environment = await productionWatch.resolvedWatchEnvironment(store.pool, {});
+  assert.equal(environment, 'production');
+  const provider = productionWatch.productionProvider({}, github, fetch, environment);
+  assert.equal(provider?.description, productionWatch.productionProvider({}, github)?.description);
+  assert.equal(provider?.description, 'GitHub deployments to production of owner/project');
+  const listed = await provider!.list();
+  assert.deepEqual(listed.map(deployment => deployment.commit), [sha(1)], 'only deployments named production are read');
+  assert.equal(requests[0], '/deployments?environment=production&per_page=10');
+});
+
+test('integration:production-watch-reads-ledger-environment — with the ledger recording graphyard / production the watch reads Railway\'s stream and serves the promoted release tip', async () => {
+  const { store, github, events, requests, watchUnder, at } = renamedEnvironmentPlane(railwayEnvironment);
+  const watch = watchUnder(productionWatch.productionProvider({}, github, fetch, await productionWatch.resolvedWatchEnvironment(store.pool, {})));
+  await watch.tick(true);
+  at(DEPLOYMENT_GRACE_MS + 60_000);
+  const report = await watch.tick(true);
+  assert.equal(report.providerDescription, `GitHub deployments to ${railwayEnvironment} of owner/project`);
+  assert.equal(report.serving, sha(2), 'production serves the promoted release tip');
+  assert.equal(report.servingSource, 'provider');
+  assert.equal(report.latest?.id, '6901953002');
+  assert.equal(report.release?.tip, sha(2)); assert.equal(report.release?.unservedSince, null); assert.equal(report.release?.overdue, false);
+  assert.deepEqual(report.deployed, ['GY-2']); assert.deepEqual(report.pending, []); assert.deepEqual(report.incidents, []);
+  assert.equal(events.filter(event => event.kind === 'delivery.deployment-incident').length, 0);
+  assert.ok(requests.includes(`/deployments?environment=${encodeURIComponent(railwayEnvironment)}&per_page=10`));
+  assert.ok(!requests.includes('/deployments?environment=production&per_page=10'), 'the stale name is never read');
+
+  // The defect it replaces: under the default name the same plane is pinned to sha(1) and the promotion is missing.
+  const stale = renamedEnvironmentPlane(railwayEnvironment);
+  const pinned = stale.watchUnder(productionWatch.productionProvider({}, stale.github));
+  await pinned.tick(true);
+  stale.at(DEPLOYMENT_GRACE_MS + 60_000);
+  const wrong = await pinned.tick(true);
+  assert.equal(wrong.serving, sha(1));
+  assert.deepEqual(wrong.incidents.map(incident => [incident.key, incident.status]), [['GY-2', 'missing']]);
+});
+
+test('integration:deployment-incident-recovers-renamed-environment — a missing incident raised under the stale name recovers once the corrected watch observes the promoted release serving', async () => {
+  const { store, github, events, watchUnder, at } = renamedEnvironmentPlane(railwayEnvironment);
+  // Before the fix: the watch reads `production`, and past the grace the promotion is raised missing.
+  const before = watchUnder(productionWatch.productionProvider({}, github));
+  await before.tick(true);
+  at(DEPLOYMENT_GRACE_MS + 60_000);
+  assert.deepEqual((await before.tick(true)).incidents.map(incident => [incident.key, incident.status]), [['GY-2', 'missing']]);
+  const raised = events.filter(event => event.kind === 'delivery.deployment-incident');
+  assert.equal(raised.length, 1);
+
+  // The fixed deployment restarts the server: the open incident is loaded from the ledger, and the watch reads the published name.
+  const after = watchUnder(productionWatch.productionProvider({}, github, fetch, await productionWatch.resolvedWatchEnvironment(store.pool, {})));
+  at(DEPLOYMENT_GRACE_MS + 120_000);
+  const report = await after.tick(true);
+  assert.equal(report.serving, sha(2));
+  assert.deepEqual(report.incidents, []);
+  const recovered = events.filter(event => event.kind === 'delivery.deployment-recovered');
+  assert.equal(recovered.length, 1);
+  assert.equal(recovered[0].work_id, 'work-2');
+  assert.equal(recovered[0].payload.incidentId, raised[0].payload.incident.id);
+  assert.equal(recovered[0].payload.serving, sha(2));
+  assert.equal(events.filter(event => event.work_id === 'work-2' && [INCIDENT_EVENT_KIND, 'delivery.deployment-recovered'].includes(event.kind)).at(-1)?.kind, 'delivery.deployment-recovered', 'the item\'s newest incident event is the recovery');
+  assert.deepEqual(report.deployed, ['GY-2']);
+  // The next pass leaves the item out of the pending set.
+  at(DEPLOYMENT_GRACE_MS + 180_000);
+  const next = await after.tick(true);
+  assert.deepEqual(next.pending, []); assert.deepEqual(next.incidents, []);
+  // And a restart keeps it recovered.
+  const restarted = watchUnder(productionWatch.productionProvider({}, github, fetch, railwayEnvironment));
+  assert.deepEqual((await restarted.tick(true)).incidents, []);
 });
