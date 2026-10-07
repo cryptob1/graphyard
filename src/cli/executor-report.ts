@@ -69,12 +69,16 @@ export interface SlotObservation {
  * is no upgrade in passage.
  */
 export const slotUpgradeBoundMs = executorRestartTimeoutMs;
-/** How long ago the unit last left `active`, from systemd, against `now` read from this host's clock; null when it never was or the reading fails. */
-export function slotDownMs(run: SystemctlRunner, unit: string, now: number): number | null {
+/**
+ * How long ago the unit last left `active`, from systemd, against this host's clock read after
+ * systemd answers, so the age is never a clock reading older than the stop it dates; whole ms.
+ * Null when it never was or the reading fails.
+ */
+export function slotDownMs(run: SystemctlRunner, unit: string, now: () => number = Date.now): number | null {
   try {
     const value = run(['show', unit, '-p', 'ActiveExitTimestamp', '--value', '--timestamp=unix']).trim();
     const seconds = /^@(\d+(?:\.\d+)?)$/.exec(value)?.[1];
-    return seconds ? Math.max(0, now - Number(seconds) * 1000) : null;
+    return seconds ? Math.max(0, Math.round(now() - Number(seconds) * 1000)) : null;
   } catch { return null; }
 }
 /** Whether a down slot is past the upgrade bound, and so pages. */
@@ -125,8 +129,7 @@ export async function executorFleet(root: string, masterApi: (path: string) => P
   const slots = executorSlots(supervision, presence, hostId !== undefined ? hostId : await loadMasterConfig(root).then(config => config.hostId ?? null, () => null), owned);
   // systemd dates the stop by this host's clock, so its age is read against the same clock, never
   // the control plane's `snapshot.now`: a skew between the two would page mid-upgrade or hide a slot down.
-  const hostNow = Date.now();
-  for (const entry of slots) if (entry.seenBy === 'systemd' && entry.active === 'inactive') entry.downMs = slotDownMs(run ?? defaultSystemctl, entry.unit, hostNow);
+  for (const entry of slots) if (entry.seenBy === 'systemd' && entry.active === 'inactive') entry.downMs = slotDownMs(run ?? defaultSystemctl, entry.unit);
   // Only slots down past the upgrade bound are down here: one inside it is mid-upgrade (GY-1432).
   const down = slots.filter(entry => slotDown(entry.active) && slotPaged(entry));
   const restarting = slots.some(entry => slotDown(entry.active)) && !down.length;
