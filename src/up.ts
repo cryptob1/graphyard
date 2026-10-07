@@ -61,6 +61,8 @@ export interface UpRequest {
   waitMs?: number | null;
   /** GY-1457: at Confirm access, exit 3 with the App-import route instead of waiting (`--no-wait`). */
   noWait?: boolean;
+  /** GY-1477: serve a local dashboard on this host's tailnet (`--share-tailnet`); otherwise the command is only printed. */
+  shareTailnet?: boolean;
 }
 /** Agent mode's default wait on a person: 20 minutes, the time the Confirm-access handoff asks for (GY-1457). */
 export const upAgentWaitMs = 1_200_000;
@@ -105,6 +107,10 @@ export interface UpDependencies {
   onboardingMerged(url: string): Promise<boolean>;
   /** Agent mode: drive the App manifest page at URL in the master's browser profile, recorded as a master browser flow. */
   driveApp?(url: string, handoff: Handoff): Promise<DriveOutcome>;
+  /** GY-1477: this host's Tailscale node (its MagicDNS name and tailnet address), or null without a running Tailscale. */
+  tailnet?(): Promise<Tailnet | null>;
+  /** GY-1477: runs the tailnet-only serve command tailnetShare names; ok false (with what it said) when it fails or does not finish. */
+  applyTailnet?(command: string[]): Promise<{ ok: boolean; detail?: string }>;
   pollMs?: number;
   /** How long a step waits on a person before the run stops (resumable); Infinity interactively. */
   humanWaitMs?: number;
@@ -123,6 +129,13 @@ export interface UpResult {
   handoffs: { step: UpStep; sentence: string; url: string | null; code: string | null }[];
   checklist: { id: SetupItemId; done: boolean; line: string }[];
   goal: string | null;
+  /**
+   * GY-1477: one dashboard sign-in link for the reachable address (single use, within 10 minutes),
+   * minted when the run ends green; null when none can be minted on this machine. Never a credential.
+   */
+  signIn: string | null;
+  /** GY-1477: the dashboard's address from the operator's other devices (the tailnet URL), when it is served there. */
+  reachableUrl: string | null;
   next: string;
 }
 
@@ -141,6 +154,8 @@ interface UpState {
   goalRequest?: string | null;
   /** The pull request that publishes the onboarding files, until it merges. */
   onboardingPullRequest?: string | null;
+  /** GY-1477: the tailnet address a local dashboard was served on, once `tailscale serve` applied it. */
+  tailnetUrl?: string | null;
 }
 export const upStateFile = (root: string) => resolve(root, '.graphyard/up.json');
 
@@ -184,12 +199,34 @@ async function rememberSignIn(root: string, state: UpState, stdout: string) {
   return claim;
 }
 
+/** A host's Tailscale node: its MagicDNS name (trailing dot allowed) and its tailnet IPv4 address. */
+export interface Tailnet { dnsName: string | null; ip: string | null }
+const loopbackHosts = ['127.0.0.1', 'localhost', '[::1]'];
+/**
+ * GY-1477: how a dashboard bound to this host's loopback is reached from the operator's other
+ * devices: `tailscale serve` on the same port over plain HTTP, which listens on the tailnet address
+ * alone (WireGuard carries it encrypted, and it needs no tailnet HTTPS certificate, whose approval is
+ * what left a bare `tailscale serve` waiting). Never `tailscale funnel`: nothing is made public. Null
+ * for a server not on loopback (already reachable at its own address) or a host without Tailscale.
+ */
+export function tailnetShare(server: string, tailnet: Tailnet | null): { command: string[]; url: string } | null {
+  let url: URL;
+  try { url = new URL(server); } catch { return null; }
+  if (url.protocol !== 'http:' || !loopbackHosts.includes(url.hostname)) return null;
+  const host = tailnet?.dnsName?.replace(/\.$/, '') || tailnet?.ip;
+  if (!host) return null;
+  const port = url.port || '80';
+  return { command: ['tailscale', 'serve', '--bg', `--http=${port}`, `http://127.0.0.1:${port}`], url: `http://${host}${port === '80' ? '' : `:${port}`}` };
+}
+/** A sign-in link (`SERVER/#sign-in=CODE`) moved onto BASE: the code is the server's, whichever address opens it. */
+export const signInAt = (link: string, base: string) => { const at = link.indexOf('#'); return at < 0 ? link : `${base.replace(/\/+$/, '')}/${link.slice(at)}`; };
+
 export async function runUp(request: UpRequest, deps: UpDependencies): Promise<UpResult> {
   const state = await readState(deps.root, request);
   const pollMs = deps.pollMs ?? 5_000;
   const humanWaitMs = deps.humanWaitMs ?? upWaitMs(request);
   const machineWaitMs = deps.machineWaitMs ?? 600_000;
-  let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null), claim: string | null = null;
+  let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null), claim: string | null = null, signIn: string | null = null;
   const handoffs: UpResult['handoffs'] = [];
   const handedOff = new Set<string>();
   const handoff = (step: UpStep): Handoff => (sentence, link) => {
@@ -200,7 +237,36 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     handoffs.push(entry); deps.emit({ kind: 'handoff', ...entry });
   };
   const checklist = async () => (last = setupChecklist(await deps.status().catch(() => null)));
-  const resolveSetupUrl = async () => { const url = await deps.serverUrl(); if (url) setupUrl = setupAddress(url); return setupUrl; };
+  let reached = false;
+  /**
+   * GY-1477: the dashboard's address from the operator's other devices, worked out once a server is
+   * recorded: a tailnet URL served earlier is kept; else, on a host with Tailscale, the tailnet-only
+   * serve command is applied under --share-tailnet, or printed with its URL for the operator to run.
+   */
+  const reach = async () => {
+    if (reached || state.tailnetUrl) return state.tailnetUrl ?? null;
+    const server = await deps.serverUrl();
+    if (!server) return null;
+    reached = true;
+    const share = tailnetShare(server, await deps.tailnet?.().catch(() => null) ?? null);
+    if (!share) return null;
+    const shell = share.command.join(' ');
+    if (!request.shareTailnet || !deps.applyTailnet) {
+      deps.emit({ kind: 'note', text: `The dashboard listens on this machine only. To open it from your phone or other devices on your tailnet (never publicly), run ${shell} and open ${share.url}, or rerun with --share-tailnet.` });
+      return null;
+    }
+    const applied = await deps.applyTailnet(share.command).catch((error: any) => ({ ok: false, detail: String(error?.message ?? error) }));
+    if (!applied.ok) {
+      deps.emit({ kind: 'note', text: `${shell} did not finish${applied.detail ? ` (${applied.detail.split('\n')[0].slice(0, 300)})` : ''}; the dashboard stays on this machine only. Run it yourself once Tailscale allows serve, then open ${share.url}.` });
+      return null;
+    }
+    state.tailnetUrl = share.url; await writeState(deps.root, state);
+    deps.emit({ kind: 'note', text: `The dashboard is served on your tailnet only (${shell}): open ${share.url} from your other devices.` });
+    return share.url;
+  };
+  /** The base links are printed for: the tailnet URL when the dashboard is served there, else the server's own. */
+  const linkBase = async () => await reach() ?? await deps.serverUrl();
+  const resolveSetupUrl = async () => { const url = await linkBase(); if (url) setupUrl = setupAddress(url); return setupUrl; };
   const complete = async (step: UpStep, detail?: string) => {
     if (!state.completed.includes(step)) state.completed.push(step);
     await writeState(deps.root, state);
@@ -213,10 +279,11 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
    */
   const announce = async (ids: SetupItemId[]) => {
     if (prompts > 0 || request.agent) return;
-    const server = await deps.serverUrl();
+    const server = await linkBase();
     if (!server) return;
     await resolveSetupUrl();
-    const signIn = claim ?? await deps.signIn?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
+    const minted = claim ?? await deps.signIn?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
+    const signIn = minted && signInAt(minted, server);
     claim = null;
     const url = setupAddress(server, signIn);
     prompts++;
@@ -224,13 +291,14 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       ? `Open ${url} to sign in to the Setup page and follow the checklist (the link works once, within 10 minutes); this command carries on as each step turns green.`
       : `Open ${url}, sign in with the link graphyard login prints, and follow the checklist; this command carries on as each step turns green.` });
   };
-  const waitGreen = async (ids: SetupItemId[], human: boolean, whilePending?: (pending: SetupItemId[], polls: number) => Promise<void>) => {
+  /** QUIETPOLLS: polls a machine step may still be settling, before a person is asked. */
+  const waitGreen = async (ids: SetupItemId[], human: boolean, whilePending?: (pending: SetupItemId[], polls: number) => Promise<void>, quietPolls = 0) => {
     const deadline = deps.now() + (human ? humanWaitMs : machineWaitMs);
     for (let polls = 0; ; polls++) {
       const items = await checklist();
       const pending = ids.filter(id => !items.find(item => item.id === id)?.done);
       if (!pending.length) return;
-      if (human) await announce(pending);
+      if (human && polls >= quietPolls) await announce(pending);
       if (whilePending) await whilePending(pending, polls);
       if (deps.now() >= deadline) throw new UpStop(`Still waiting on ${pending.map(id => items.find(item => item.id === id)!.title).join(', ')}; rerun graphyard up${request.agent ? ' --agent' : ''} to resume`, human ? upExitCodes.waiting : upExitCodes.failed);
       await deps.sleep(pollMs);
@@ -336,6 +404,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       }
     });
     await resolveSetupUrl();
+    await reach();
 
     await step('host-supervisor', async () => {
       const token = await deps.masterToken();
@@ -356,14 +425,13 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
 
     await step('accounts', async () => {
       const accounts: SetupItemId[] = ['account:worker', 'account:reviewer'];
-      if (request.agent) {
-        // Login homes and keys already on this host become the fleet; nothing is signed in here.
-        await run('accounts', ['master', 'registry', 'propose', '--apply']);
-        // The registry's first fold may lag the apply by a poll; only a role still empty after it is handed off.
-        await waitGreen(accounts, true, async (pending, polls) => {
-          if (polls > 0) handoff('accounts')(`Sign in to an AI coding account for ${pending.map(id => id.slice('account:'.length)).join(' and ')}: approve its browser login on your device`, { url: setupUrl });
-        });
-      } else await waitGreen(accounts, true);
+      // In either mode (GY-1477), login homes and keys already on this host become the fleet; nothing is signed in here.
+      await run('accounts', ['master', 'registry', 'propose', '--apply']);
+      // The registry's first fold may lag the apply by a poll; only a role still empty after it is asked for:
+      // handed off in agent mode, on the Setup page interactively.
+      await waitGreen(accounts, true, request.agent ? async (pending, polls) => {
+        if (polls > 0) handoff('accounts')(`Sign in to an AI coding account for ${pending.map(id => id.slice('account:'.length)).join(' and ')}: approve its browser login on your device`, { url: setupUrl });
+      } : undefined, 1);
     });
 
     await step('harness', async () => { await run('harness', ['master', 'harness', request.master, '--apply']); });
@@ -398,14 +466,21 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         return `submitted as ${state.goal}`;
       });
     }
-    return result(true, upExitCodes.green, state.goal ? `Graphyard is building ${state.goal}; follow it on the dashboard` : `Everything is green. Open ${setupUrl ?? 'the dashboard'} and describe what you want built${request.agent ? ', or rerun with --goal FILE' : ''}.`);
+    // GY-1477: setup ends with the one sign-in link itself (the host install's unused claim, else one the
+    // operator's credential mints), on the reachable address, so nobody runs graphyard login afterwards.
+    const base = await linkBase();
+    const minted = base ? claim ?? await deps.signIn?.(state.operatorTokenFile ?? null).catch(() => null) ?? null : null;
+    claim = null;
+    signIn = minted && base ? (state.goal ? signInAt(minted, base) : setupAddress(base, signInAt(minted, base))) : null;
+    const open = signIn ? `${signIn} (signs you in; works once, within 10 minutes)` : setupUrl ?? 'the dashboard';
+    return result(true, upExitCodes.green, state.goal ? `Graphyard is building ${state.goal}; follow it on the dashboard: open ${open}` : `Everything is green. Open ${open} and describe what you want built${request.agent ? ', or rerun with --goal FILE' : ''}.`);
   } catch (error) {
     if (!(error instanceof UpStop)) throw error;
     return result(false, error.exitCode, error.message);
   }
 
   function result(ok: boolean, exitCode: number, next: string): UpResult {
-    return { ok, exitCode, setupUrl, completed: [...state.completed], prompts, handoffs, checklist: last.map(({ id, done, line }) => ({ id, done, line })), goal: state.goal, next };
+    return { ok, exitCode, setupUrl, completed: [...state.completed], prompts, handoffs, checklist: last.map(({ id, done, line }) => ({ id, done, line })), goal: state.goal, signIn, reachableUrl: state.tailnetUrl ?? null, next };
   }
 }
 
@@ -454,6 +529,7 @@ export function upCommandFlags(request: UpRequest) {
   option('--ssh-user', request.install?.sshUser);
   if (request.sudo === 'mobile') flags.push('--github-mobile');
   if (request.waitMs) option('--wait', String(request.waitMs / 60_000));
+  if (request.shareTailnet) flags.push('--share-tailnet');
   return flags.map(shellWord).map(word => ` ${word}`).join('');
 }
 
@@ -475,7 +551,7 @@ export function recordedUp(root: string): { repository: string; provider: string
 export function upRequestFromArgs(args: string[], recorded: { repository: string; provider: string } | null = null): UpRequest {
   const { values } = parseArgs({ args, options: { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, reviewer: { type: 'string' }, master: { type: 'string' }, goal: { type: 'string' }, 'browser-profile': { type: 'string' },
     'confirm-price': { type: 'string' }, 'max-monthly': { type: 'string' }, 'ssh-key': { type: 'string' }, 'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' },
-    'reuse-app': { type: 'string', multiple: true }, 'github-mobile': { type: 'boolean' }, wait: { type: 'string' }, 'no-wait': { type: 'boolean' } }, allowPositionals: false });
+    'reuse-app': { type: 'string', multiple: true }, 'github-mobile': { type: 'boolean' }, wait: { type: 'string' }, 'no-wait': { type: 'boolean' }, 'share-tailnet': { type: 'boolean' } }, allowPositionals: false });
   for (const [flag, given, kept] of [['--repo', values.repo, recorded?.repository], ['--provider', values.provider, recorded?.provider]] as const) {
     if (given !== undefined && kept !== undefined && given !== kept) throw new Error(`graphyard up ${flag} ${given} conflicts with ${kept}, which the run recorded in .graphyard/up.json resumes; omit ${flag} (or pass ${kept}) to resume it, or remove .graphyard/up.json to start over for ${given}`);
   }
@@ -487,7 +563,7 @@ export function upRequestFromArgs(args: string[], recorded: { repository: string
     goalFile: values.goal ?? null, browserProfile: values['browser-profile'] ?? null,
     install: { confirmPrice: values['confirm-price'] ?? null, maxMonthly: values['max-monthly'] ?? null, sshKey: values['ssh-key'] ?? null, sshHost: values['ssh-host'] ?? null, sshUser: values['ssh-user'] ?? null },
     ...(values['reuse-app']?.length ? { reuseApps: values['reuse-app'] } : {}), ...(values['github-mobile'] ? { sudo: 'mobile' as const } : {}),
-    ...(minutes !== null ? { waitMs: minutes * 60_000 } : {}), ...(values['no-wait'] ? { noWait: true } : {}) };
+    ...(minutes !== null ? { waitMs: minutes * 60_000 } : {}), ...(values['no-wait'] ? { noWait: true } : {}), ...(values['share-tailnet'] ? { shareTailnet: true } : {}) };
 }
 
 /**
@@ -732,6 +808,20 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     publishOnboarding: () => publishOnboarding(root, request.repository, (program, args, env) => execFileSync(program, args, { cwd: root, encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env: { ...process.env, ...env } } : {}) })),
     onboardingMerged: async url => execFileSync('gh', ['pr', 'view', url, '--json', 'state', '--jq', '.state'], { encoding: 'utf8', timeout: 60_000 }).trim() === 'MERGED',
     signIn: async file => { const url = await serverUrl(); return url ? mintSignIn(url, file) : null; },
+    tailnet: async () => {
+      // No Tailscale, or one not running, is no tailnet: the offer is simply not made.
+      try {
+        const self = JSON.parse(execFileSync('tailscale', ['status', '--json'], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }))?.Self;
+        if (!self || self.Online === false) return null;
+        const ip = Array.isArray(self?.TailscaleIPs) ? self.TailscaleIPs.find((address: unknown) => typeof address === 'string' && /^\d+\.\d+\.\d+\.\d+$/.test(address)) ?? null : null;
+        return typeof self?.DNSName === 'string' || ip ? { dnsName: typeof self?.DNSName === 'string' && self.DNSName ? self.DNSName : null, ip } : null;
+      } catch { return null; }
+    },
+    // Bounded: a serve waiting on a tailnet permission is reported, never waited on (GY-1477).
+    applyTailnet: async command => {
+      try { execFileSync(command[0], command.slice(1), { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] }); return { ok: true }; }
+      catch (error: any) { return { ok: false, detail: String(error?.stderr || error?.stdout || error?.message || error).trim() }; }
+    },
     sleep: ms => new Promise(accept => setTimeout(accept, ms)), now: () => Date.now(),
     cli: (args, options = {}) => new Promise((accept, reject) => {
       const child = spawn(process.execPath, [cliPath, ...args], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'], ...(options.signal ? { signal: options.signal } : {}), ...(options.env ? { env: { ...process.env, ...options.env } } : {}) });

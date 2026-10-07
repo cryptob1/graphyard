@@ -14,11 +14,11 @@ cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --repo OWNER/REPO   # 
 
 A new Hetzner server waits (exit 3) for price approval: rerun with `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`.
 
-`up` runs, in order: preflight, control plane, host supervisor and Herdr, onboarding, accounts, harness, master loop. Onboarding opens a `graphyard/onboarding` pull request; goals wait for its merge. `.graphyard/up.json` records finished steps; a rerun skips them, reusing (never contradicting) its `--repo`/`--provider`. Ctrl-C also stops the install child. A Herdr plugin bound elsewhere is never repointed (`--no-herdr`). A preflight failure (exit 2) names the [prerequisite](#1-machine-prerequisites).
+`up` runs, in order: preflight, control plane, host supervisor and Herdr, onboarding, accounts (registers host agent logins, asks for missing roles), harness, master loop. Onboarding opens a `graphyard/onboarding` pull request; goals wait for its merge. `.graphyard/up.json` records finished steps; a rerun skips them, reusing (never contradicting) its `--repo`/`--provider`. Ctrl-C also stops the install child. A Herdr plugin bound elsewhere is never repointed (`--no-herdr`). A preflight failure (exit 2) names the [prerequisite](#1-machine-prerequisites).
 
 ## The Setup page
 
-A step needing a person prints one link (`SERVER/#sign-in=CODE&setup` from the operator credential, or a host install's `#claim=CODE&setup`) and waits until green; it signs you in once, within 10 minutes, opening the Setup page (also in Settings → Agents). Each live item has a sentence and a button:
+A step needing a person prints one link (`SERVER/#sign-in=CODE&setup` from the operator credential, or a host install's `#claim=CODE&setup`) and waits until green; it signs you in once, within 10 minutes, opening the Setup page (also in Settings → Agents). A green run ends with a fresh link; [phone access](dashboard.md#from-your-phone). Each item has a sentence and a button:
 
 | Item | Button
 | --- | ---
@@ -30,11 +30,11 @@ Once green, **Describe what you want built** records a goal, like `graphyard goa
 
 ## Agent setup: graphyard up --agent
 
-Agents run `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary on stdout; exit `0` green, `1` failed, `2` prerequisite, `3` waiting. It creates the Apps in a GitHub-signed-in Chrome profile (passed, else the master's; neither, without `--reuse-app` for both, exits `2`), recorded under `.graphyard/master-actions/`; connects host accounts, sets deployment variables from saved credentials, records FILE as one goal. Only a device step becomes a `handoff`: a subscription login's approval, or *Confirm access*, saying if the drive shares your live Chrome (profile path) or a copy (profile name), offering: confirm in your Chrome on the named page (shared only; re-checked every 10 s); a code via the App page or `up --sudo-code CODE|email` (never recorded); `--github-mobile` (password link after 60 s); or, with no live moment, create both Apps at github.com/settings/apps/new as listed (no webhook URL), `graphyard app import` each, then `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` exits `3` here). A drive giving up hands off the still-served App page. Waits on a person last `--wait MINUTES` (default 20); a rerun (same repository, provider, profile) resumes a pending *Confirm access*. Preflight fails a checkout under `/tmp` or `/var/tmp`, naming a durable path.
+Agents run `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary stdout; exit `0` green, `1` failed, `2` prerequisite, `3` waiting. It creates the Apps in a GitHub-signed-in Chrome profile (passed, else the master's; neither, without `--reuse-app` for both: exit `2`), recorded under `.graphyard/master-actions/`; sets deployment variables from saved credentials, records FILE as one goal. Only a device step becomes a `handoff`: a subscription login's approval, or *Confirm access*, saying if the drive shares your live Chrome (profile path) or a copy (profile name), offering: confirm in your Chrome on the named page (shared only; re-checked every 10 s); a code via the App page or `up --sudo-code CODE|email` (never recorded); `--github-mobile` (password link after 60 s); or, with no live moment, create both Apps at github.com/settings/apps/new as listed (no webhook URL), `graphyard app import` each, then `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` exits `3` here). A drive giving up hands off the still-served App page. Waits on a person last `--wait MINUTES` (default 20); a rerun (same repository, provider, profile) resumes pending *Confirm access*. Preflight refuses `/tmp` and `/var/tmp` checkouts.
 
 ## Troubleshooting: the manual steps
 
-What `up` runs; **HUMAN** marks what agents cannot. `graphyard doctor` prints `setupFromZero.lines`, a `PASS`/`FAIL` line per prerequisite, each failure naming its step; `next` names the first gap.
+What `up` runs; **HUMAN** marks what agents cannot. `graphyard doctor` prints `setupFromZero.lines`, a `PASS`/`FAIL` line per prerequisite naming its step; `next` names the first gap.
 
 ## 1. Machine prerequisites
 
