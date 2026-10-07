@@ -78,7 +78,7 @@ const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional() }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
   requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: z.array(criterionSchema).min(1).max(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs, split: createSchema.shape.split,
-    answers: z.object({ epoch: z.number().int().positive(), at: z.string().datetime(), sha: z.string().regex(/^[0-9a-f]{40}$/).nullable().optional() }).strict().optional() }).strict(),
+    answers: z.object({ epoch: z.number().int().positive(), at: z.string().datetime(), sha: z.string().regex(/^[0-9a-f]{40}$/).nullable().optional() }).strict().optional(), rule: z.literal('successor').optional() }).strict(),
   reviewpolicy: z.object({ provider: z.enum(reviewProviders), reviewerProfiles: z.array(reviewerProfileSchema).min(1).max(10).optional(), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
@@ -1023,6 +1023,10 @@ export class Engine {
           // approver's judgement of the worker's reason and the criteria (GY-176) names no head.
           if (data.answers.sha !== undefined) demand((work.candidate?.sha ?? null) === data.answers.sha, `The findings this widening rests on were read for ${data.answers.sha?.slice(0, 12) ?? 'no head'}, which is no longer the item's head`);
         }
+        // The loop's own re-plan onto a planned file's successors (GY-1397): only the operator agent
+        // names that rule, and only for a purely additive widening, so the record tells it apart
+        // from a widening a person or a coordinator made.
+        if (data.rule) demand(actor.role === 'operator-agent' && widening, 'Only the operator agent\'s purely additive planned-files widening is a rule-grounded re-plan');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
         if (work.parent) {
           const parent: Work | undefined = (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [work.parent])).rows[0]?.document;
