@@ -317,7 +317,11 @@ test('integration:scope-request-answered-by-executor — a request for a file an
   item = await reload(item);
   assert.deepEqual(item.plannedFiles, [...planned, target], 'nothing was widened');
   assert.match(item.blocker!, /^Scope request refused/);
-  const attention = scopeRequestAttention({ work: [item], now: new Date().toISOString() });
+  // Inside the bound the loop routes it to the approver and the engine refuses `master scope`
+  // (GY-1388), so status names it only once that bound has passed with no routed decision.
+  assert.deepEqual(scopeRequestAttention({ work: [item], now: new Date().toISOString() }), []);
+  const aged = (iso: string) => new Date(Date.parse(iso) - 16 * 60_000).toISOString(), request = item.scopeRequest!;
+  const attention = scopeRequestAttention({ work: [{ ...item, scopeRequest: { ...request, at: aged(request.at), decision: { ...request.decision!, at: aged(request.decision!.at) } } }], now: new Date().toISOString() });
   assert.equal(attention.length, 1);
   assert.match(attention[0].text, /The widening rule refuses it:/);
   assert.equal(attention[0].next, `graphyard master scope ${item.key}`);
