@@ -6,5 +6,3 @@
 6f6c98c44a7e39120578367fe641beab8cb8acf4:tests/human-decisions-ui.test.ts:private-key:215
 # GY-1352: a fake reviewer-App PEM in the revert-approver test fixture (now generated at runtime).
 0883df82456408d4121e5b185c5c67f5a01bbced:tests/doctor-setup-from-zero.test.ts:private-key:185
-# GY-1461: fake Confirm-access session values in the sudo-form-capture test fixture (now generated at runtime).
-1c06e084a7b69410fa308f638215811fcc22833b:tests/sudo-form-capture.test.ts:generic-api-key:32
