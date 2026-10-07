@@ -7,12 +7,12 @@ An AI `slice-lead` leads slice (`product`, `infrastructure`, `docs-experience`):
 
 ## Escalation
 
-| Trigger | Raised when |
-| --- | --- |
-| `lease-loss` | A lapse with no submission, no carried `blocked` report, no stopped-worker attestation, no provider exhaustion |
-| `evidence-policy-conflict` | Trusted evidence for another policy revision |
-| `security-concern` | A lead's `escalate` ruling |
-| `requirement-weakening` | A revision retires a criterion, narrows proofs |
+| Trigger | Raised when
+| --- | ---
+| `lease-loss` | A lapse with no submission, no carried `blocked` report, no stopped-worker attestation, no provider exhaustion
+| `evidence-policy-conflict` | Trusted evidence for another policy revision
+| `security-concern` | A lead's `escalate` ruling
+| `requirement-weakening` | A revision retires a criterion, narrows proofs
 
 Unresolved triggers refuse the merge gate; a replacement may claim, delivery waits. Explained lapses are `lease.expired` with a [cause](protocol/leases.md#how-a-lease-ends) (`blocked-awaiting-operator`, `stopped-by-attestation`, …); later-explained or superseded `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`, `auto-settled: superseded — epoch M is held by OWNER, …`).
 

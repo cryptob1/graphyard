@@ -7,7 +7,7 @@
 
 ## 2. Add machines
 
-Per concurrent session: worker identity and host ID (`install --workers`), or:
+Per concurrent session: worker identity, host ID (`install --workers`), or:
 
 ```sh
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
@@ -29,7 +29,7 @@ Login homes (`~/.coding_agents`: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HO
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account** (key or login) writes and smoke-tests a 0600 auth file (**Pi (z.ai key)**: Pi's `auth.json` in a `pi-<letter>` home).
+Settings › **Agents** › **Connect an account** (key or login) writes, smoke-tests a 0600 auth file (**Pi (z.ai key)**: Pi's `auth.json` in a `pi-<letter>` home).
 
 ### Configure the fleet
 
@@ -84,7 +84,7 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W / 2⌉` review 
 
 ### The pipeline doctor (on by default)
 
-Every `run.doctor.intervalMinutes` (10) a Pi **doctor** session fixes stuck, overdue work via `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release` (never merging, dispatching or evidencing); posts findings and summary (`master status` `doctor`); escalates the rest or files fault items, deduplicated against open ones at settle (proof IDs normalised; create refusals escalate; control-plane refusals retry). Reportless (models died, loop stopped) or restart-lost runs record failed, posted, no `loop` fault; the next re-covers. The loop itself settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (10) a Pi **doctor** session fixes stuck, overdue work via `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release` (never merging, dispatching or evidencing); posts findings and summary (`master status` `doctor`); escalates the rest or files fault items, deduplicated against open ones at settle (proof IDs normalised; create refusals escalate; control-plane refusals retry). Reportless (models died, loop stopped) or restart-lost runs record failed, posted, no `loop` fault; the next re-covers. The loop settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
 
 ## 4. Prove the first PR
 

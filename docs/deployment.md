@@ -17,7 +17,7 @@ One stateless container plus Postgres: `node "$GRAPHYARD_CLI" install --provider
 | `GRAPHYARD_MIN_REVIEWERS` | Reviewers with a lead (1)
 | `GRAPHYARD_MAX_REVIEWERS` | ≥ `producer` count (2)
 
-Installers derive the limits; unset one is `delegationLimits` drift.
+Installers derive limits; unset ones are `delegationLimits` drift.
 
 ### CI producer
 
@@ -33,7 +33,7 @@ Installers derive the limits; unset one is `delegationLimits` drift.
 
 Unserved five minutes after a new `GRAPHYARD_BUILD_SHA`, merge is a `delivery.deployment-incident`; until then, or while a provider attempt past the serving commit is in flight, `production` shows `aheadBy`, `rollingOut: true` and the "main is N commits ahead of production" attention waits. With `release/production` (`GRAPHYARD_PRODUCTION_BRANCH`) production is measured against it; unpromoted merge is pipeline lag. Deployments: Railway's API (`RAILWAY_API_TOKEN`/`RAILWAY_TOKEN`), else App-read GitHub deployments to `production` (`GRAPHYARD_PRODUCTION_ENVIRONMENT`); in-flight holds incident, failed names log URL. A lagging list yields to a `master verify-deployment` endpoint observation of the exact `release/production` tip <15 min old, newer than its newest success, with no failed or removed attempt there (`servingSource: endpoint`). The plane's own `/healthz` commit outranks it: equal to or containing the promoted tip, the release is served (`servingSource: build`), raising no missing incident and recovering open ones (`verifiedBy: served-identity`); missing incidents name that commit and the provider's report. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. The loop reuses its last verified observation (no GitHub reads) for `run.deploymentReuseMinutes` (15; `master config deploymentReuseMinutes=N`, `0` reads every cycle) while it serves every delivery, none pending; else reads live.
 
-The loop (coordinator credential) records GY-87's throughput claim per verified served release in `.graphyard/measurements/throughput` (newest 30), backing off on failure while another revision serves, reading only deliveries since; `master status` reports it verified or the shortfall (`scripts/measure-throughput.mjs --record` by hand, alike: a same-millisecond record takes the next `_N` suffix; newest 30 of its own kept; other files untouched).
+The loop (coordinator credential) records GY-87's throughput claim per verified served release in `.graphyard/measurements/throughput` (newest 30), backing off on failure while another revision serves, reading only deliveries since; `master status` reports it verified or the shortfall (by hand, `scripts/measure-throughput.mjs --record` alike: same-millisecond records take the next `_N` suffix; it keeps its newest 30, touching no other file).
 
 Deliveries awaiting a not-yet-due or validating [promotion](delivery.md) (the promotion window) are skipped by release lag and the `loaded-revision` [resource](operations-reference.md#control-plane-resources), naming `nextDueAt`, owing no restart; unavailable observations grant no grace. Sandboxed `systemctl --user` probes read supervision unverified, not absent, given the cursor's packaged unit.
 
@@ -47,5 +47,5 @@ Set the variables table by hand, then `node "$GRAPHYARD_CLI" github-setup https:
 
 - Compose: `cp .env.example .env`, replace secrets, `docker compose --profile full up -d`; TLS on 4310, Postgres private.
 - Kubernetes: `helm install graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials …`.
-- Railway: `railway init`, `railway add --database postgres`, set variables, `railway up`.
+- Railway: `railway init`, `railway add --database postgres`, variables, `railway up`.
 - Railway revert approver: `node scripts/provision-railway.mjs` sets `GRAPHYARD_REVERT_APPROVER_*` (key via stdin, unprinted) from `.graphyard/revert-approver.json` (0600; `{"appId", "installationId", "privateKey"}` or `"privateKeyFile"`) or `--revert-approver-stdin`, refusing an armed guard without them; full run also refuses `GRAPHYARD_PRINCIPALS` entries `credentials.json` lacks (named) or unreadable Railway variables; `--revert-approver-only` sets only those three on running plane, from `~/.config/graphyard/reviewers/`. Then `railway redeploy --service graphyard -y`; `GRAPHYARD_URL=… node scripts/provision-railway.mjs --verify` exits 0 once live guard names that App.

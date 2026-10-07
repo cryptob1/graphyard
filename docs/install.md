@@ -22,7 +22,7 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 - `railway`: `npm i -g @railway/cli`, `railway login`.
 - `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--ssh-key NAME`, `--domain`. `manual:host-install-live` or `manual:…install…-live` coordinators need `HCLOUD_TOKEN`, `HETZNER_SPEND_CAP_USD_MONTHLY` in repo-root `.env` (`0600`, uncommitted); optional `HETZNER_SSH_KEY` names a registered key (else throwaway).
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; `--ssh-host`, `--domain`.
-- `compose` (local evaluation): `curl -fsSL https://get.docker.com | sh`.
+- `compose` (local): `curl -fsSL https://get.docker.com | sh`.
 
 ## Step 1: plan and approve
 
@@ -54,7 +54,7 @@ Dispatch a [small item](onboarding.md#4-prove-the-first-pr); once `Graphyard / m
 
 ## Self-contained host
 
-`--target host --ssh-host HOST` (or `--target hetzner`): server, Postgres, loop, executors, Herdr, runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4 serves `<ip>.sslip.io`; private or `--local` needs `--domain`. Bootstrap installs gh, bubblewrap, checks namespaces as `graphyard`; unpullable image builds from the host checkout at the installer's commit. Workers push and open PRs as the App: git's credential helper and `gh` wrapper mint one-hour repository tokens from `<install>/github/`. Re-apply refuses, never rotates, unreadable host credentials.
+`--target host --ssh-host HOST` (or `--target hetzner`): server, Postgres, loop, executors, Herdr, runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4 serves `<ip>.sslip.io`; private/`--local` needs `--domain`. Bootstrap installs gh, bubblewrap, checks namespaces as `graphyard`; unpullable image builds from the host checkout at the installer's commit. Workers push and open PRs as the App: git's credential helper and `gh` wrapper mint one-hour repository tokens from `<install>/github/`. Re-apply refuses, never rotates, unreadable host credentials.
 
 Sizing: 3 GB per agent, 2 GB per verification slot, 2 GB base, max(10%, 4 GB) spare (`--confirm-price`, `--max-monthly`). A saved App (`--github-app FILE`, this install's, `.graphyard/github-app.json`) is reused once it mints token; another live installation's webhook stays until `--migrate`: stops old loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`, released on pre-cutover failure), restores; local logins move.
 
@@ -78,7 +78,7 @@ Sizing: 3 GB per agent, 2 GB per verification slot, 2 GB base, max(10%, 4 GB) sp
 
 ## Agent execution contract
 
-Run steps 1–5, report verifications; never weaken a gate.
+Run steps 1–5, report verifications, never weaken gates.
 
 ## Manual fallback (unsupported platforms)
 

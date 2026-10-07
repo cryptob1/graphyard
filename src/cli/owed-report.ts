@@ -2,11 +2,11 @@ import { reviewRoundCapOf, withReviewRounds } from '../review-cap.js';
 import { agentOwner, type AttentionItem, type AttentionOwner } from '../master.js';
 import type { Work } from '../model.js';
 import { humanNeededActions, type HumanNeededRow } from '../model/next-action.js';
-import { decideScopeRequest, scopeRefusalBlocker, terminalScopeRefusal } from '../model/scope.js';
+import { decideScopeRequest, scopeRefusalBlocker } from '../model/scope.js';
+import { scopeAskCommand } from '../model/scope-provenance.js';
 import { elapsed } from '../model/sessions.js';
 import { maxDecisionRequests } from '../daemon/decisions.js';
 import { staleRelease, staleReleaseWaitBoundMs, unappliedReleases, type DecisionHistoryRow } from '../model/stale-release.js';
-import { routedScopeRequests } from './status-attention.js';
 
 /**
  * What `master status` says about work that is waiting on a judgement rather than on capacity
@@ -27,21 +27,28 @@ import { routedScopeRequests } from './status-attention.js';
  * widening, with no master session and no command. Naming those here asked a master to run
  * `master scope` for a verdict already determined, and an item one file short of finishing waited
  * on that line being read. The verdict is recomputed from the item itself, never taken from the
- * request; a request from a lease that ended is never surfaced. Nor is one the loop has routed to
- * the independent approver (its `approvals` watch, GY-176): that is being decided, and the worker reads the outcome.
- * A terminal over-cap refusal names `master requirements`, whose revision can fold or split the
- * ask, never the plain union `master scope` posts past the same bound (GY-936).
+ * request; a request from a lease that ended is never surfaced. Nor is one the independent approver
+ * holds or has decided (GY-176, GY-1388): routed (the loop's `approvals` watch on it is unsettled),
+ * or refused by the rule within the bound before the loop routes it. That is being decided, the
+ * engine refuses `master scope` for it, and the worker reads the outcome; `scopeAskCommand` names what the master runs once
+ * the hold ends — `master requirements` for a terminal over-cap refusal, whose revision can fold or
+ * split the ask, never the plain union `master scope` posts past the same bound (GY-936).
  */
-export function scopeRequestAttention(snapshot: { work: Work[]; now: string }, approvals: Parameters<typeof routedScopeRequests>[0] = []): AttentionItem[] {
-  const routed = routedScopeRequests(approvals);
+export function scopeRequestAttention(snapshot: { work: Work[]; now: string }, approvals: readonly RoutedWatch[] = []): AttentionItem[] {
+  const now = Date.parse(snapshot.now);
   return snapshot.work.flatMap(work => {
     const request = work.scopeRequest;
-    const live = request && work.lease && work.lease.epoch === request.epoch && Date.parse(work.lease.expiresAt) > Date.parse(snapshot.now);
-    if (!live || routed(work)) return [];
+    const live = request && work.lease && work.lease.epoch === request.epoch && Date.parse(work.lease.expiresAt) > now;
+    if (!live) return [];
     const decision = request.decision ?? decideScopeRequest(work, request);
     if (decision.state === 'approved') return [];
+    const watches = approvals.filter(watch => watch.work === work.key && watch.action === 'requirements' && watch.scope?.epoch === request.epoch && watch.scope.at === request.at);
+    // The approver's own verdict on a routed ask stands: the worker reads it and stays inside plannedFiles.
+    if (watches.length && request.decision && request.decision.decidedBy !== 'graphyard') return [];
+    const command = scopeAskCommand(work, now, watches.map(watch => ({ id: watch.decision, ended: !!watch.settledAt })));
+    if (command === `graphyard master decisions ${work.key}`) return [];
     return [{ subject: work.key, text: `${request.requestedBy} needs files outside plannedFiles: ${request.paths.join(', ')} — ${request.reason}. The widening rule refuses it: ${decision.reason}`,
-      ...agentOwner('master', terminalScopeRefusal(work) ? `graphyard master requirements ${work.key} FILE REASON` : `graphyard master scope ${work.key}`) }];
+      ...agentOwner('master', command) }];
   });
 }
 

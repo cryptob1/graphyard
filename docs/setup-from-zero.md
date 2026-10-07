@@ -28,7 +28,7 @@ gy() { node "$GRAPHYARD_CLI" "$@"; }
 cd /path/to/REPO && gy init --scan
 ```
 
-A repository (even fresh from `git init`) needs a GitHub `origin` with default branch, tests and a `pull_request` workflow (its job: the required check); `node:test` is detected as `junit-xml-v1` (`--test-reporter=junit`). **Verify:** readiness `repository`, `required-checks`, `test-formats` are `ready` (`recovery` names fixes). npm 11's esbuild install-script warning is harmless (no `npm install-scripts approve esbuild` needed). No deploy target: the scan proposes `--delivery per-pr`, ending at merged.
+A repository (even fresh from `git init`) needs a GitHub `origin` with default branch, tests and a `pull_request` workflow (its job: the required check); `node:test` reads as `junit-xml-v1` (`--test-reporter=junit`). **Verify:** readiness `repository`, `required-checks`, `test-formats` are `ready` (`recovery` names fixes). npm 11's esbuild install-script warning is harmless (no `npm install-scripts approve esbuild` needed). No deploy target: the scan proposes `--delivery per-pr`, ending at merged.
 
 ## 3. Install the control plane
 
@@ -69,7 +69,7 @@ CODEX_HOME=~/.coding_agents/codex-a codex login       # HUMAN: browser login
 gy master environments --apply
 ```
 
-The second `--apply` records `skipDangerousModePermissionPrompt`; launches write folder trust to `.claude.json`/`config.toml` (keep writable). Without `.graphyard/master.json`, master commands name `install --apply` or `master init` (not `lstat` ENOENT). **Verify:** each `agent-environment:NAME` (consent, `hasCompletedOnboarding`, writability); then [registry and roles](onboarding.md#configure-the-fleet).
+Second `--apply` records `skipDangerousModePermissionPrompt`; launches write folder trust to `.claude.json`/`config.toml` (keep writable). Without `.graphyard/master.json`, master commands name `install --apply` or `master init` (not `lstat` ENOENT). **Verify:** each `agent-environment:NAME` (consent, `hasCompletedOnboarding`, writability); then [registry and roles](onboarding.md#configure-the-fleet).
 
 ## 9. Worker sandbox and harness rules
 
@@ -90,8 +90,8 @@ ID: `herdr workspace list`; **HUMAN:** `--browser-profile` is a Chrome profile s
 
 ## 11. Hosted variables (Railway only)
 
-Compose skips this. `RAILWAY_API_TOKEN` (**HUMAN:** account owner) and `GRAPHYARD_DATABASE_POOL_SIZE` ([limits](operations-reference.md)). **Verify:** doctor `production` lacks `error`.
+Not compose. `RAILWAY_API_TOKEN` (**HUMAN:** account owner) and `GRAPHYARD_DATABASE_POOL_SIZE` ([limits](operations-reference.md)). **Verify:** doctor `production` lacks `error`.
 
 ## 12. First item end to end
 
-Write an item like [work.json](../examples/work.json) with one small criterion and `"policy":{"checks":["test"],"review":true}`, then `master create FILE`; the loop dispatches, reviews, proves; GitHub merges on green `Graphyard / merge`. Local producers prove `unit:*` on compose (CI cannot reach loopback); hosted installs use [CI proofs](github.md#proofs-in-ci). **Verify:** `gy status GY-1` is `done`; `gh pr view N --json state` is `MERGED`; doctor shows `production.serving` at or past merge, `production.aheadBy` `0`, `production.incidents` `[]` ([observation](deployment.md#production-deployment-observation)); without a deploy job `production.latest` is `null`, ending at merged.
+Write an item like [work.json](../examples/work.json), one small criterion, `"policy":{"checks":["test"],"review":true}`, then `master create FILE`; the loop dispatches, reviews, proves; GitHub merges on green `Graphyard / merge`. Local producers prove `unit:*` on compose (CI cannot reach loopback); hosted installs use [CI proofs](github.md#proofs-in-ci). **Verify:** `gy status GY-1` is `done`; `gh pr view N --json state` is `MERGED`; doctor shows `production.serving` at or past merge, `production.aheadBy` `0`, `production.incidents` `[]` ([observation](deployment.md#production-deployment-observation)); without a deploy job `production.latest` is `null`, ending at merged.

@@ -66,7 +66,7 @@ export async function blockerStep(cycle: Cycle) {
   const probe = (item: Work, classification: BlockerClassification) => {
     const workspace = item.workspaces.find(entry => entry.epoch === item.epoch && entry.host === config.hostId);
     const launch = `${item.lease?.owner ?? item.lastAssignment?.owner ?? ''}:${workspace?.path ?? `item:${item.id}`}`;
-    const memo = classification.class === 'control-plane-error' || classification.class === 'outside-scope-test-failure' ? classification.class
+    const memo = classification.class === 'control-plane-error' || classification.class === 'outside-scope-test-failure' || classification.class === 'host-supervisor' ? classification.class
       : classification.class === 'worktree-mismatch' ? `${classification.class}:${item.id}` : `${classification.class}:${launch}:${classification.path ?? ''}`;
     if (!probes.has(memo)) {
       const running = effects.probeBlocker ? slots(() => effects.probeBlocker!(item, classification)) : Promise.resolve(null);

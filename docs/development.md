@@ -11,7 +11,7 @@ CLI in `src/cli/`, routes in `src/server/routes/`, rules in `src/model/`, tables
 npm ci && npm run build && npm test
 ```
 
-`npm test` hides `GRAPHYARD_*`/`HERDR_*`, reserves free Postgres ports; worktrees need [bubblewrap](install.md#preconditions). CI's `test` aggregates shards balanced by `tests/helpers/timing-baseline.json` (top-level `tests/*.test.ts`); pull requests run affected tests (`scripts/ci-tests.mjs`); long suites run on [release candidates](delivery.md#pre-merge-gate-and-release-candidate-validation). Trusted CI runs only protected source, refusing candidates whose base lacks contract: land its harness and `scripts/contracts.mjs` entry before requiring its proof.
+`npm test` hides `GRAPHYARD_*`/`HERDR_*`, reserves free Postgres ports; worktrees need [bubblewrap](install.md#preconditions). CI's `test` aggregates shards balanced by `tests/helpers/timing-baseline.json` (top-level `tests/*.test.ts`); PRs run affected tests (`scripts/ci-tests.mjs`); long suites run on [release candidates](delivery.md#pre-merge-gate-and-release-candidate-validation). Trusted CI runs only protected source, refusing candidates whose base lacks contract: land its harness and `scripts/contracts.mjs` entry before requiring its proof.
 
 ### Base failures
 
@@ -19,8 +19,8 @@ A required check failing on the base head too: no rework, no approver (waiting w
 
 ## Documentation
 
-`docs/README.md`, `docs/protocol.md`: generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; [`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files-never-conflict) exempts them from the regression guard. README.md and `docs/` keep `graphyard.json`'s `wordBudget` (12,000 words, 1,200 per page; `tests/docs-budget.test.ts`), one topic per page: a page over its cap fails CI, total only warns; at 97% the loop files one trim item (keeping every CLI command and HTTP route), never parking on the operator.
+`docs/README.md`, `docs/protocol.md`: generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; [`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files-never-conflict) exempts them from the regression guard. README.md and `docs/` keep `graphyard.json`'s `wordBudget` (12,000 words, 1,200 per page; `tests/docs-budget.test.ts`), one topic per page: a page over cap fails CI, total only warns; at 97% the loop files one trim item (keeping every CLI command and HTTP route), never parking on the operator.
 
 ### Documentation that rarely conflicts
 
-Conflicts only in `docs/**/*.md` get docs-sync, not rework: the base merges in keeping both sides; approval stays if non-docs diff is unchanged.
+Conflicts only in `docs/**/*.md` get docs-sync, not rework: the base merges in keeping both sides; approval stays if non-docs diff holds.
