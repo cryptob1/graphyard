@@ -54,6 +54,7 @@ import { doctorEffects, doctorSettings, type DoctorEffects } from './doctor.js';
 import { docsSyncEffects, type DocsSyncEffects } from '../docs-sync.js';
 import { diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
 import { acceptanceEffects, type AcceptanceEffects } from './acceptance.js';
+import { plannerEffects, type PlannerEffects } from './planner.js';
 import { diagnosticianSettings } from '../runner/payloads.js';
 import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
@@ -61,6 +62,7 @@ import type { TriageJudgement } from '../model/machine-backlog.js';
 import type { FlowResult, RemedyFlow, RemedyRecord } from '../stall-remedies.js';
 import { browserFlowChild } from './cycle-remedies.js';
 import { readMechanicalFixState, type MechanicalFixState } from '../mechanical-findings.js';
+export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null }
@@ -351,9 +353,9 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   doctor?: DoctorEffects;
   /** Clears an item's blocker as the operator-agent identity, bound to the revision the loop read (GY-711 remedy 2): only for a scope refusal plannedFiles already covers. */
   unblock?: (work: Work, reason: string) => Promise<Work>;
-  /** The diagnostician (GY-439), absent while `run.diagnostician.enabled` is false, and the acceptance role (GY-1417); each absent while either master identity is missing. */
-  diagnostician?: DiagnosticianEffects;
-  acceptance?: AcceptanceEffects;
+  diagnostician?: DiagnosticianEffects; // GY-439; absent while `run.diagnostician.enabled` is false or either master identity is missing
+  acceptance?: AcceptanceEffects; // the acceptance role (GY-1417); absent while either master identity is missing
+  planner?: PlannerEffects; // the planner (GY-1418); absent while either master identity is missing — each acts only through the two identities a two-party decision needs
   /** The recurrence rule; the environment's (GRAPHYARD_FAULT_CLASS_*) or the shipped default when absent. */
   faultClassPolicy?: FaultClassPolicy;
   /**
@@ -427,8 +429,6 @@ export async function preserveInterruptedAttempt(state: DaemonState, effects: Da
     return performed[performed.push(await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'failed', detail: `${item.key} attempt ${epoch} ${observed}, but its partial work could not be put on the record: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist)) - 1];
   }
 }
-
-export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
 export function daemonEffects(root: string, source: MasterConfig | (() => MasterConfig), deps: {
@@ -766,9 +766,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       // A required check red on the clock is named as master status names it, after buildMasterStatus.
       return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
     },
-    // The diagnostician (GY-439) and the acceptance role (GY-1417) act only through the two identities a two-party decision needs.
     get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnostician(config) : undefined; },
     get acceptance() { const config = current(); return config.operatorAgent && config.approver ? acceptanceEffects(config, root, { run, fetcher, asCoordinator, asOperatorAgent }) : undefined; },
+    get planner() { const config = current(); return config.operatorAgent && config.approver ? plannerEffects(config, root, { fetcher, asCoordinator, asOperatorAgent }) : undefined; },
     get fileFaultClass() { return current().operatorAgent ? (input: LoopFiledItem, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     get unblock() { return current().operatorAgent ? (work: Work, reason: string) => asOperatorAgent('POST', `work/${work.id}/unblock`, { reason, expectedRevision: work.revision }) as Promise<Work> : undefined; },
     get doctor() { const config = current(); return config.operatorAgent && doctorSettings(config.run).enabled ? doctorEffects(config, root, asOperatorAgent) : undefined; },
