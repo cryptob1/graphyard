@@ -54,6 +54,63 @@ export interface ControlPlaneEffects {
   observeDeployment: (delivered: Work[]) => Promise<DeploymentObservation>;
   /** Records a launched session's durable handle on the item (AC-8). */
   recordSession?: (work: Work, handle: SessionHandleInput) => Promise<unknown>;
+  /** The clock and the wait a fenced worker start retries on (GY-1431); real time when absent. */
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * The 2-minute bound a worker launch is acknowledged within (the engine's launch fence, GY-1431):
+ * a fence that lapses inside it is waited out and the launch retried, one that outlasts it is a
+ * fault naming the fence rather than a launch left silently unacknowledged.
+ */
+export const workerStartFenceBoundMs = 120_000;
+/** The engine's refusal of a start the previous attempt's supervisor still fences (src/engine.ts rework). */
+export const workerStartFencedRefusal = /Worker startup for epoch \S+ remains fenced/;
+
+export interface WorkerStartFence { key: string; owner: string; epoch: number; until: string; leaseExpiresAt: string | null; launchExpiresAt: string | null }
+/**
+ * What still fences a new worker start on an item (GY-1431): the previous attempt's containment
+ * quarantine while either its lease or its launch authority is unexpired. A stale supervisor or a
+ * dead executor slot leaves exactly this behind; it comes down by itself at `until`.
+ */
+export function workerStartFence(work: Work, now: number): WorkerStartFence | null {
+  const quarantine = work.containmentQuarantine;
+  if (!quarantine) return null;
+  const leaseExpiresAt = work.lease && work.lease.epoch === quarantine.epoch ? work.lease.expiresAt : quarantine.leaseExpiresAt ?? null;
+  const launchExpiresAt = quarantine.launchExpiresAt ?? null;
+  const deadlines = [leaseExpiresAt, launchExpiresAt].map(value => value ? Date.parse(value) : NaN).filter(Number.isFinite);
+  const until = deadlines.length ? Math.max(...deadlines) : NaN;
+  if (!Number.isFinite(until) || until <= now) return null;
+  return { key: work.key, owner: quarantine.owner, epoch: quarantine.epoch, until: new Date(until).toISOString(), leaseExpiresAt, launchExpiresAt };
+}
+/** The fault a fence past the launch bound raises: it names the fence, what holds it and when it lapses. */
+export const workerStartFenceFault = (fence: WorkerStartFence, now: number) =>
+  `${fence.key}'s worker start is fenced by ${fence.owner}'s epoch ${fence.epoch} supervisor until ${fence.until} (lease ${fence.leaseExpiresAt ?? 'none'}, launch authority ${fence.launchExpiresAt ?? 'none'}), ${Math.ceil((Date.parse(fence.until) - now) / 1000)}s past the ${workerStartFenceBoundMs / 60_000}-minute launch bound; stop that supervisor or settle its containment (graphyard master settle-containment ${fence.key} REASON), and the dispatcher retries the launch once the fence lapses`;
+
+/**
+ * An executor unit's restart policy (GY-1431): a crashed slot comes back only under Restart=always
+ * with a bounded RestartSec, so `graphyard-executor.mjs --install` reports it and refuses a unit
+ * without it. The last assignment of a key wins, as systemd reads it; comments are ignored.
+ */
+export const executorRestartSecBound = 60;
+export interface UnitRestartPolicy { restart: string | null; restartSec: number | null; startLimitIntervalSec: string | null; ok: boolean; reason: string | null }
+export function unitRestartPolicy(unit: string): UnitRestartPolicy {
+  const value = (key: string) => {
+    let found: string | null = null;
+    for (const line of unit.split('\n')) { const match = new RegExp(`^\\s*${key}\\s*=\\s*(.*?)\\s*$`).exec(line); if (match) found = match[1]; }
+    return found;
+  };
+  const restart = value('Restart'), rawSec = value('RestartSec'), startLimitIntervalSec = value('StartLimitIntervalSec');
+  const seconds = (raw: string) => { const match = /^(\d+(?:\.\d+)?)\s*(ms|s|sec|min|m)?$/.exec(raw); if (!match) return null; const n = Number(match[1]); return match[2] === 'ms' ? n / 1000 : match[2] === 'min' || match[2] === 'm' ? n * 60 : n; };
+  // The delay is named, not left to systemd's default, so the install output states the bound it runs under.
+  const restartSec = rawSec === null ? null : seconds(rawSec);
+  const reason = restart !== 'always' ? `Restart=${restart ?? '(unset)'}; a crashed slot stays down until somebody starts it, so the unit needs Restart=always`
+    : rawSec === null ? `RestartSec is unset; the unit names the delay a crashed slot restarts after, at most ${executorRestartSecBound}s`
+    : restartSec === null ? `RestartSec=${rawSec} is not a duration systemd reads`
+    : restartSec > executorRestartSecBound ? `RestartSec=${rawSec} leaves a crashed slot down past the ${executorRestartSecBound}s bound`
+    : null;
+  return { restart, restartSec, startLimitIntervalSec, ok: reason === null, reason };
 }
 
 /**
@@ -195,6 +252,39 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     return `launched producer ${usable[0].name} for ${proofs.join(', ')} on ${request.sha.slice(0, 12)}`;
   };
 
+  const clock = effects.now ?? Date.now;
+  const sleep = effects.sleep ?? ((ms: number) => new Promise<void>(done => setTimeout(done, ms)));
+  /**
+   * A worker start a stale supervisor or a dead slot still fences (GY-1431): the fence lapses by
+   * itself once the previous attempt's lease and launch authority expire, so inside the 2-minute
+   * launch bound the dispatcher waits it out and launches again, saying so in the row's
+   * resolution; past the bound it fails naming the fence, which the row's history and backoff carry.
+   */
+  const launchPastFence = async (action: ActionRow, work: Work, all: Work[], observedAt: string): Promise<string> => {
+    let current = { work, all, observedAt };
+    const waitOut = async (fence: WorkerStartFence) => {
+      const now = clock(), wait = Date.parse(fence.until) - now;
+      if (wait > workerStartFenceBoundMs) throw new Error(workerStartFenceFault(fence, now));
+      await sleep(wait + 1_000);
+      current = await find(action);
+      return `retried after ${fence.owner}'s epoch ${fence.epoch} fence lapsed at ${fence.until}`;
+    };
+    let retried: string | null = null;
+    const standing = workerStartFence(current.work, clock());
+    if (standing) retried = await waitOut(standing);
+    try {
+      const result = await launchWorker(action, current.work, current.all, current.observedAt);
+      return retried ? `${result}; ${retried}` : result;
+    } catch (error) {
+      if (retried || !workerStartFencedRefusal.test(error instanceof Error ? error.message : String(error))) throw error;
+      // Refused for a fence this snapshot did not show yet: read it now and wait it out once.
+      const fence = workerStartFence(current.work, clock()) ?? workerStartFence((await find(action)).work, clock());
+      if (!fence) throw error;
+      retried = await waitOut(fence);
+      return `${await launchWorker(action, current.work, current.all, current.observedAt)}; ${retried}`;
+    }
+  };
+
   const launchWorker = async (action: ActionRow, work: Work, all: Work[], observedAt: string) => {
     const agents = await herdr();
     const workers = config().workers;
@@ -231,7 +321,7 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
     dispatch: async action => {
       const { work, all, observedAt } = await find(action);
       if (action.inputs.kind !== 'dispatch') throw new Error('unreachable');
-      return action.inputs.target === 'proof' ? launchProof(action, work, observedAt) : launchWorker(action, work, all, observedAt);
+      return action.inputs.target === 'proof' ? launchProof(action, work, observedAt) : launchPastFence(action, work, all, observedAt);
     },
     'request-review': async action => {
       const { work, observedAt } = await find(action);

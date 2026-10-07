@@ -7,7 +7,7 @@
 
 ### 2. AI agent
 
-A runtime model holding only its credential's authority. **Canonical usage:** name role.
+A model holding only its credential's authority. **Canonical usage:** name role.
 
 ### 3. Agent session (Herdr-managed session or runtime)
 

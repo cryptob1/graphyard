@@ -13,7 +13,7 @@ Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit
 
 ## Review gate: verdicts, not threads
 
-Exact-head approval plus required CI land; threads are inputs, each (thread/comment ID) marked resolved, follow-up (answered nit, never filed; fixes are `BLOCKING`, on that PR) or overridden, else approval withdraws. After two rework rounds bot threads are advisory; past round cap (default 3) only `BLOCKING:` holds, escalating, its rework put to an independent approver (not risk lane); capped requests without one are re-reviewed. Required conversation resolution is drift: `master protection --apply`.
+Exact-head approval plus required CI land; threads are inputs, each (thread/comment ID) marked resolved, follow-up (answered nit, never filed; fixes are `BLOCKING`, on that PR) or overridden, else approval withdraws. After two rework rounds bot threads are advisory; past round cap (default 3) only `BLOCKING:` holds, escalating, its rework put to an independent approver (not risk lane); capped requests without one are withdrawn, re-reviewed. Required conversation resolution is drift: `master protection --apply`.
 
 `Nit: PATH:LINE — FINDING` ends `(mechanical: typo|docs-placement|formatting|naming)` or `(substantive: behavior|criteria|scope)`; behaviour/criterion/scope signs or no path mean substantive. Mechanical findings: gate refuses (unless head is bot commit); loop requests a bot `rework`, one commit (or approval-carrying refresh) on the approved head touching only those files. `Rejected bot commit: SHA — reason` with REQUEST_CHANGES records `misclassified-finding` ([intervention](dashboard.md)). Unchanged resubmission or 60 idle minutes: plain nits (`src/mechanical-findings.ts`).
 

@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-`master status` → `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Log: `journalctl --user -u graphyard-master`.
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Log: `journalctl --user -u graphyard-master`.
 
 ### Perpetual master loop
 
@@ -23,15 +23,15 @@ Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; the nex
 
 ## Retro synthesis
 
-A minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables, `master status` then flags crossed patterns as configuration faults) files an item per crossed pattern, drafting `retro.drafted` changes (wording, check, producer method, fault-catalogue entry) per recurring refusal or rework cause; non-drafting operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses each. Approved: [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete`.
+A minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables, `master status` then flags crossed patterns as configuration faults) files an item per crossed pattern, drafting `retro.drafted` changes (wording, check, producer method, fault-catalogue entry) per recurring refusal or rework cause; non-drafting AI operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses each. Approved: [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete`.
 
 ## Flaky CI check
 
-[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables).
+[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); a pass clears it.
 
 ## Accepted evidence turns out to be wrong
 
-`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes gate; that head's required checks fail.
+`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes gate; that head's required checks no longer pass.
 
 ## GitHub request budget
 
@@ -86,11 +86,11 @@ Receipts answer retries day; compaction deletes past `GRAPHYARD_LEDGER_RETENTION
 
 ## Delivered with a failed smoke proof
 
-Stays Done, **delivered with failure**; revert via new item, never backfill.
+Stays Done, **delivered with failure**; revert via a new item.
 
 ## Merge bypass
 
-Ungated merges are permanent violations: repair access, file follow-up, never backfill. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
+Ungated merges are permanent violations (never backfilled): repair access, file follow-up. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Credentials
 

@@ -79,7 +79,7 @@ Sizing: 3 GB/agent, 2 GB/verification slot, 2 GB base, max(10%, 4 GB) spare (`--
 
 ## Agent execution contract
 
-Run steps 1–5, report verifications; never weaken gates.
+Run steps 1–5, reporting verifications; never weaken gates.
 
 ## Manual fallback (unsupported platforms)
 

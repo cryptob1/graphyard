@@ -3,7 +3,7 @@
 
 ## Where a new feature goes
 
-CLI in `src/cli/`, routes in `src/server/routes/`, rules in `src/model/`, tables in `src/store/tables/`, views in `web/pages/`, `AGENTS.md` text in `src/repository-setup.ts`, protocol topics in `docs/protocol/`; `tests/hotspots.test.ts` holds each assembler to size budget.
+CLI `src/cli/`, routes `src/server/routes/`, rules `src/model/`, tables `src/store/tables/`, views `web/pages/`, `AGENTS.md` text `src/repository-setup.ts`, protocol topics `docs/protocol/`; `tests/hotspots.test.ts` holds each assembler to size budget.
 
 ## Validate a change
 

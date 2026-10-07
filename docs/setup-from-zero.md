@@ -17,7 +17,7 @@ herdr --version
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true
 ```
 
-**Verify:** `gh repo view OWNER/REPO --json viewerPermission -q .viewerPermission` prints `ADMIN`; `install --plan` checks scopes. **HUMAN:** `gh auth login` as admin; failing `bwrap` needs user namespaces allowed; free-plan private repositories go public or upgrade (preflight `Branch protection`).
+**Verify:** every command exits 0; `gh repo view OWNER/REPO --json viewerPermission -q .viewerPermission` prints `ADMIN`; `install --plan` checks scopes. **HUMAN:** `gh auth login` as admin; failing `bwrap` needs user namespaces allowed; free-plan private repositories go public or upgrade (preflight `Branch protection`).
 
 ## 2. Graphyard and the repository
 
@@ -45,7 +45,7 @@ Providers differ only in `--provider` ([install](install.md); Herdr: `--herdr-re
 
 ## 5. Reviewer and revert-approver Apps
 
-`--reviewer NAME` registers the reviewer App every review needs (**HUMAN:** confirm) and makes it the main guard's revert approver (`GRAPHYARD_REVERT_APPROVER_*`; each `--apply` resets hand-set values); on compose key mounts as file (`_PRIVATE_KEY_FILE`; `server.env` takes no multi-line PEM). **Verify:** `reviewer-app`; readiness `revert-approver` `ready`. Otherwise `gy master reviewer setup` (HTTPS or loopback origin, checked before the page opens); `gy master setup --apply` sets its [variables](deployment.md#variables).
+`--reviewer NAME` registers the reviewer App every review needs (**HUMAN:** confirm, same page) and makes it the main guard's revert approver, reverting a broken `main` unaided (`GRAPHYARD_REVERT_APPROVER_*`; each `--apply` resets hand-set values); on compose key mounts as file (`_PRIVATE_KEY_FILE`; `server.env` takes no multi-line PEM). **Verify:** `reviewer-app`; readiness `revert-approver` `ready`. Otherwise `gy master reviewer setup` (HTTPS or loopback origin, checked before the page opens); `gy master setup --apply` sets its [variables](deployment.md#variables).
 
 ## 6. Onboard the checkout
 

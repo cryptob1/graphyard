@@ -1,7 +1,7 @@
 <!-- page: Build integrations | 4 | release API. -->
 # Releases and delivery
 
-Records each environment's intended release, verified by service-scoped observers only ([rollback](recovery.md#rollback)): `admin` sets policy, approves; `builder` producers build; `admin`/`promoter` select; `observer` producers lease (`POST /api/delivery/lease`), observe.
+Records each environment's intended release, verified only by service-scoped observers ([rollback](recovery.md#rollback)): `admin` sets policy, approves; `builder` producers build; `admin`/`promoter` select; `observer` producers lease (`POST /api/delivery/lease`), observe.
 
 ## Release candidates
 

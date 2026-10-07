@@ -19,11 +19,13 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 | `installation-accept` | Accept pending requests
 | `protection` | Reconcile branch protection
 
-Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` `record.json`, `ledger.json`. Approving *Confirm access* GitHub Mobile code on device is human-only; the master never stores profile cookies, uses merge bypass, pushes code or reads a worker credential. On classifier refusals `master harness claude --apply` (or `master harness codex`) writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`; `gh api` `pulls/N/merge`, `repos/R/merges`, `merge-upstream`, `pulls/N/reviews`, `access_tokens`, `PUT`/`POST`/`DELETE`; `gh api graphql` with `mutation` or `=@`/`--input`. Missing/retired rules (`gh api *merge*`, `gh api graphql*`): `harness` drift, repaired by `master status`.
+Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` `record.json`, `ledger.json`. Approving *Confirm access* GitHub Mobile code on device is human-only; the master never stores profile cookies, uses merge bypass, pushes code or reads a worker credential. On classifier refusals `master harness claude --apply` (or `master harness codex`) writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`; `gh api` `pulls/N/merge`, `repos/R/merges`, `merge-upstream`, `pulls/N/reviews`, `access_tokens`, `PUT`/`POST`/`DELETE`; `gh api graphql` with `mutation` or `=@`/`--input`. Missing/retired rules (`gh api *merge*`, `gh api graphql*`): `harness` drift; `master status` reapplies, reporting only unrepaired.
 
 ## Typed actions and executors
 
-`nextAction` (one per item): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`; judgements (`escalate`, `request-rework`): `actions.needsHuman`. `graphyard init` starts `graphyard-executor@N` user units (own credentials), moved to a release by `master executors restart` or a verified deployment (clean checkouts to base tip, then loop; dirty: `upgrade` attention). Fenced (`POST /api/actions/presence`) or claim-renewing executors live (never `Nothing can run KIND`); polls, renewals upsert `executor_presence` (no event; read at once after restarts); an empty fleet needs evidence (a poll; rows, or an empty table recording since its first read's marker, older than 120s), not process age. `resync` (`POST /api/work/:id/resync` `{ since }`) completes only on an observation newer than its claim. `dispatch`/`request-review` complete on a session already answering the head; standing verdicts block second reviewers until dismissed; busy/reserved profiles stall after 30 minutes. Three failures with an unchanged reason mark a row stalled, not retried (a fleet that looks idle): in no count or list, only `actions.stalled` and the item's card; backoff never outlives it; eight escalate. Ticks requeue ownerless items (`liveness.violations`).
+`nextAction` (one per item): `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`; judgements (`escalate`, `request-rework`): `actions.needsHuman`. `graphyard init` starts `graphyard-executor@N` user units (own credentials), moved to a release by `master executors restart` or a verified deployment (clean checkouts to base tip, then loop; dirty: `upgrade` attention). Fenced (`POST /api/actions/presence`) or claim-renewing executors live (never `Nothing can run KIND`); polls, renewals upsert `executor_presence` (no event; read at once after restarts); an empty fleet needs evidence (a poll, or rows older than 120s), not process age. `resync` (`POST /api/work/:id/resync` `{ since }`) completes only on an observation newer than its claim. `dispatch`/`request-review` complete on a session already answering the head; standing verdicts block second reviewers until dismissed; busy/reserved profiles stall after 30 minutes. Three failures with an unchanged reason stall a row (not retried; fleet looks idle): only in `actions.stalled` and the item's card; backoff never outlives it; eight escalate. Ticks requeue ownerless items (`liveness.violations`).
+
+A declared slot not `active` (systemd, else `PRINCIPAL@HOST/N` presence): `resources` fault naming `journalctl --user -u graphyard-executor@N.service` (unserved lines: slots down, not saturated). `graphyard-executor.mjs --install` needs `Restart=always`, `RestartSec` ≤ 60 s. Worker starts fenced <2 minutes retry after it lapses; longer fail naming it.
 
 ## Recovery
 
@@ -31,7 +33,7 @@ A dead supervisor fences its item; `containment` lists survivors' pid, cmdline a
 
 ### Producer-runtime faults
 
-Unacted producer requests (never started, launch refused, exited at launch) relaunch on an untried profile, requesting no rework.
+Unacted producer requests (never started, launch refused, exited at launch) relaunch on an untried profile, no rework.
 
 ## Fault classes
 
@@ -39,6 +41,6 @@ Unacted producer requests (never started, launch refused, exited at launch) rela
 
 ## Pipeline speed
 
-Target (ten-plus deliveries): submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
+Target (10+ deliveries): submit→merge p50 ≤30 min, p90 ≤60 min. Row `speed`: `executionMs`, `waitMs`, `reworkRounds`, `interventions`; verdict `speed.submitToMerge`; `node scripts/measure-pipeline-speed.mjs` records what `manual:speed-target-met` reads.
 
-The loop's decisions step stays within 10 s a cycle at ~90 open items: one `decision.*` ledger read names moved items, rereading only those; a history whose ledger has not moved is kept, not read. Widenings refused by 5xx or stale revision, and decisions or withdrawals whose history read times out, retry next cycle (two running: fault); moot ones (delivered, request answered, lease ended, head moved) count none.
+The loop's decisions step stays within 10 s a cycle at ~90 open items: one `decision.*` ledger read names moved items, rereading only those; a history whose ledger has not moved is kept, not read. Loop widenings refused by 5xx or stale revision, and decisions or withdrawals whose history read times out, retry next cycle (two in a row: fault); moot ones (delivered, request answered, lease ended, head moved) count none.

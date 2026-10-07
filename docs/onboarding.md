@@ -29,7 +29,7 @@ Login homes (`~/.coding_agents`: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HO
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account** (key or login) writes and smoke-tests a 0600 auth file (**Pi (z.ai key)**: Pi's `auth.json` in a `pi-<letter>` home).
+Settings › **Agents** › **Connect an account** (key or login) writes, smoke-tests a 0600 auth file (**Pi (z.ai key)**: Pi's `auth.json` in a `pi-<letter>` home).
 
 ### Configure the fleet
 

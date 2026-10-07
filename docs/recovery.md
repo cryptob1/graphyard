@@ -37,4 +37,4 @@ Executor claims (`POST /api/delivery/rollback-claim`; retries return the same op
 {"rollbackId":"6c2f0e2e-5c3a-4c65-9d2b-1f1c8a3f9e01","operationId":"b8c9d0e1-2f3a-4b5c-8d6e-7f8091a2b3c4","outcome":"applied","reason":"provider-shows-applied","evidence":"https://railway.app/project/example/deployments/01J8Q5"}
 ```
 
-`"automaticRollback": true` rolls degraded generation back when fenced automatic executors cover every service, else `automaticRollbackRefusal`.
+`"automaticRollback": true` rolls degraded generations back when fenced automatic executors cover every service, else `automaticRollbackRefusal`.

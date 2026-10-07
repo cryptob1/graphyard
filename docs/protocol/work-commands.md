@@ -25,7 +25,7 @@ Before first dispatch, items over `run.decomposition` bounds (4 criteria, 2 root
 
 ## Other commands and routes
 
-`graphyard help` lists all, also `handoff GY-N`, `human-requests`, `rereview GY-N [EPOCH]`, `scenarios`, `master guide|autonomy|decisions|withdraw|close|context|refuse|principals`, `db status|backup|verify|restore`, `grants history`, `delivery observations`, `operator-agent list|setup|configure|rotate|revoke`, `runner account-digest|adapters`.
+`graphyard help` lists all, including `handoff GY-N`, `human-requests`, `rereview GY-N [EPOCH]`, `scenarios`, `master guide|autonomy|decisions|withdraw|close|context|refuse|principals`, `db status|backup|verify|restore`, `grants history`, `delivery observations`, `operator-agent list|setup|configure|rotate|revoke`, `runner account-digest|adapters`.
 
 Routes: executor `/api/actions`, `/api/actions/claim`; worker `/api/assignments/claim`; fleet `/api/agent-registry`, `/api/agent-registry/apply|select|document|history|connect|connect/host-key|connect/hosts|connect/providers|connect/requests`; validation `/api/validation/analytics|capacity|definitions|artifacts|artifacts/migrate|replay|replays|reuse|collection-authority|collection-heartbeat|cancel|settle|retry`; delivery `/api/delivery/observations|select|sweep`; direct merges `/api/direct-merges`, `/api/direct-merges/on|off`; `/api/events/stats`, `/api/human-requests`, `/api/intake`, `/api/interventions/patterns`, `/api/judgements`, `/api/operator-agents`, `/api/principals`, `/api/production-environment`, `/api/scenarios`.
 
