@@ -157,7 +157,7 @@ test('unit:overlong-attempt-ended', async t => {
     const { directory, master } = await setup();
     try {
       const item = { current: [held()] };
-      item.current = [{ ...held(), sessions: [{ ...held().sessions![0], startedAt: iso(-2 * 3_600_000) }] } as Work];
+      item.current = [{ ...held(), lastAssignment: { ...held().lastAssignment!, claimedAt: iso(-90 * 60_000) }, sessions: [{ ...held().sessions![0], startedAt: iso(-90 * 60_000) }] } as Work];
       const agent: HerdrAgent = { name: 'agent-alpha', pane_id: 'w1:p1', agent_status: 'working', agent: 'claude' };
       const { log, effects, at } = harness(item, [agent]);
       const state = emptyDaemonState(master);
