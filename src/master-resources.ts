@@ -9,6 +9,7 @@ import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './p
 import { describeTmpReclaim, hostTmpRoots, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
 import { alignKey, upgradeTouchesCode } from './daemon/upgrade.js';
 import type { UpgradeStall } from './daemon/state.js';
+import { workerReclaimBoundMs, workerSubmissionBoundMs } from './model/attempt-bound.js';
 import { describePromotion, promotionHolds, promotionWait, type PromotionWait } from './master/release-lag.js';
 import type { LoopState } from './daemon/liveness.js';
 import type { Work } from './model.js';
@@ -319,7 +320,7 @@ export const resourceRegistry: ResourceDefinition[] = [
     id: 'session-slots', title: 'Session slots', unit: 'sessions',
     bound: 'the summed concurrency of the role\'s launch profiles in .graphyard/master.json',
     usage: 'pending reviewer and producer ledger records, and live worker leases held by launch-profile principals', owner: 'the master loop and its dispatcher (src/master-daemon.ts, src/auto-dispatch.ts)',
-    reclaim: `a session settles when its request is answered or superseded; the reclaim pass fails a pending session finished or blocked on a prompt for ${stuckSessionMs / 60_000} minutes, or absent from Herdr on every pass for ${stuckSessionMs / 60_000} minutes, which releases its slot`,
+    reclaim: `a session settles when its request is answered or superseded; the reclaim pass fails a pending session finished or blocked on a prompt for ${stuckSessionMs / 60_000} minutes, or absent from Herdr on every pass for ${stuckSessionMs / 60_000} minutes, which releases its slot; a worker lease held past the ${workerSubmissionBoundMs / 60_000}-minute worker bound without a submission is a stalled-gate fault however it renews, and past ${workerReclaimBoundMs / 60_000} minutes with no submission progress the loop ends the attempt and stops its supervisor, which returns its slot`,
     remedy: 'raise concurrency on a profile of the role, or add a profile on another account, in .graphyard/master.json',
     warnBelow: () => 1, symptoms: [/every (?:reviewer|independent producer) profile is busy/, /is at its concurrency limit/],
     read: input => (['worker', 'reviewer', 'producer'] as const).map(role => {
