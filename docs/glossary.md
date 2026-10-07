@@ -67,4 +67,4 @@ The master applies non-weakening intent directly; two-party decisions (`graphyar
 
 ## Diagram legend
 
-Amber: human operator; green: agent session; blue: control plane; violet: Herdr; grey: GitHub and external facts; dashed chip: credential, epoch or worktree; solid arrow: command; dashed arrow: observation.
+Amber human operator, green agent session, blue control plane, violet Herdr, grey GitHub; dashed chip credential, epoch or worktree; solid arrow command, dashed arrow observation.

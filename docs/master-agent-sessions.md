@@ -41,11 +41,11 @@ GY=/path/to/checkout/.graphyard/launch/NAME; claude … --settings /path/to/repo
 
 #### The start bound reads the pane
 
-The runtime is **ready** when Herdr reports it active with no prompt or its banner shows (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) starts; one still starting gets **120 seconds** (`started.extended`). Refusals quote the case and the pane's last non-empty line, never Herdr's own `agent_not_found`: `the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`; retried as `Automatic producer launch for GY-N refused 1 time(s)`.
+The runtime is **ready** when Herdr reports it active with no prompt or its banner shows. Ready within **60 seconds** (`run.launchStartSeconds`) starts; one still starting gets **120 seconds** (`started.extended`). A refusal quotes the case and the pane's last line, never Herdr's own `agent_not_found`, and is retried.
 
 #### First-run consent prompts
 
-On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; anything else (e.g. **credential**, **payment**) escalates; workspace-trust prompts fail the launch. A trust record dropped before start refuses the launch. Held: `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops it; the item is dispatchable.
+On a first-run prompt: **`awaiting consent`**; the launcher answers only `hooks-continue-untrusted` (**Continue without trusting**) and `telemetry-decline`, never one that grants hook execution or a sandbox escape; anything else (**credential**, **payment**) escalates, and workspace-trust prompts fail the launch. Held: `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops it, and the item is dispatchable.
 
 Reviewers and producers are `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once if quiet past `run.acknowledgementSeconds` (default 90); settling resultless is **`never started`**: relaunched a minute later, three at most (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
 
@@ -57,8 +57,4 @@ Ending a session closes its pane; each cycle closes ≤12 more stale panes on th
 
 ### The dispatcher's own state
 
-- **The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis.
-- **A cursor failing its schema is repaired, not fatal**, logged once with the path that failed.
-- **A tick failure is attributed and surfaced.** `dispatch.lastFailure` names it. Three consecutive failures raise one attention item: no reviewer or producer session is being launched for any item. `graphyard master restart` repairs the cursor.
-
-**A session that exits at launch is classified from its pane.** `herdr agent get` answers only `agent_not_found` for one that exits **at launch**, so the dispatcher uses `herdr pane read`: a **provider limit notice** fails over exactly as a mid-session exhaustion does; any other cause is refused with the pane's last words and retried.
+**The dispatcher bounds its own state where it composes it**, each cut marked with an ellipsis; a cursor failing its schema is repaired, not fatal, logged once with the path that failed. A tick failure is attributed and surfaced (`dispatch.lastFailure`). Three consecutive failures raise one attention item: no reviewer or producer session is being launched for any item; `graphyard master restart` repairs the cursor. **A session that exits at launch is classified from its pane**: `herdr agent get` answers only `agent_not_found` for one that exits **at launch**, so the dispatcher uses `herdr pane read`, and a **provider limit notice** fails over exactly as a mid-session exhaustion does while any other cause is refused with the pane's last words and retried.

@@ -23,7 +23,7 @@ Unscoped `worker` credential: `graphyard runner attempt runner.json`:
 
 ### The acknowledgement is retried, never repeated
 
-Every send carries request key `ATTEMPT_ID-ack` and an identical body; an already-acknowledged answer is success, other 2xx refuse. A confirmed refusal is a decision, never retried; transport failures, timeouts, 408, 429 and 5xx are. At most **5 sends**, paused 1, 2, 4 and 8 seconds apart; no send starts more than **60 seconds** after the first. No heartbeat is sent and the attestor is not told to proceed until the acknowledgement is confirmed.
+Every send carries request key `ATTEMPT_ID-ack` and an identical body; an already-acknowledged answer is success. A confirmed refusal is a decision, never retried; transport failures and 408/429/5xx are: At most **5 sends**, paused 1, 2, 4 and 8 seconds apart; no send starts more than **60 seconds** after the first. No heartbeat is sent and the attestor is not told to proceed until the acknowledgement is confirmed.
 
 ### Attempt boundary
 

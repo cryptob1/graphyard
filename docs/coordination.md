@@ -11,7 +11,7 @@ Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit
 
 ## Review gate: verdicts, not threads
 
-Reviewer approval of the exact head plus required CI gates landing; threads are inputs. Approvals mark each listed thread resolved, follow-up (a nit, never filed; anything worth fixing is `BLOCKING` and fixed on that PR) or overridden; a missed thread withdraws the approval. Past the review-round cap (default 3) only a `BLOCKING:` finding holds a head. Required conversation resolution is drift: `master protection --apply`. Each nit is a `Nit: PATH:LINE — FINDING` line classed `(mechanical: typo|docs-placement|formatting|naming)` or `(substantive: behavior|criteria|scope)`; an approval raising mechanical findings is held while the loop requests a bot `rework` touching only those files (`src/mechanical-findings.ts`).
+Reviewer approval of the exact head plus required CI gates landing; threads are inputs. Approvals mark each listed thread resolved, follow-up (a nit, never filed; anything worth fixing is `BLOCKING` and fixed on that PR) or overridden; a missed thread withdraws the approval. Past the review-round cap (default 3) only a `BLOCKING:` finding holds a head. Each nit is a `Nit: PATH:LINE — FINDING` line classed `(mechanical: typo|docs-placement|formatting|naming)` or `(substantive: behavior|criteria|scope)`; an approval raising mechanical findings is held while the loop requests a bot `rework` touching only those files (`src/mechanical-findings.ts`).
 
 ## Refuse candidates that revert shipped code outside their scope
 

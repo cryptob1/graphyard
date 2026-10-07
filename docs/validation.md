@@ -23,4 +23,4 @@ A failing candidate files one hold per failed outcome (an item tagged `rc-hold/O
 
 ## Candidates, requests, reports
 
-`kind: bundle` pins `scenario`, `scenarioRevision`, `scenarioHash`, `digest`, `runnerImageDigest` and `reportFormat` (`graphyard-playwright-v1` or `junit-xml-v1`; `graphyard runner verify-report junit-xml-v1 inventory.json report.xml` previews). Runners `ack` within 30 s and heartbeat every 20 s; a pass needs a `matched` target, verified artifacts and a settled run; recover with `cancel`, `settle` or `retry`, and `graphyard validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics) stalls.
+`kind: bundle` pins the scenario revision, bundle and runner digests and `reportFormat` (`graphyard-playwright-v1` or `junit-xml-v1`; `graphyard runner verify-report junit-xml-v1 inventory.json report.xml` previews). Runners `ack` within 30 s and heartbeat every 20 s; a pass needs a `matched` target, verified artifacts and a settled run; recover with `cancel`, `settle` or `retry`, and `graphyard validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics) stalls.

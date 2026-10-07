@@ -66,7 +66,7 @@ node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --reset
 
 ### Add a role
 
-Preferred account first; `--concurrency` counts settled sessions:
+Preferred account first:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry role set worker claude-b,claude-c,codex-a --concurrency 4 --reason "Overflow"

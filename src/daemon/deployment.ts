@@ -36,7 +36,7 @@ export const maxDeploymentRequests = deploymentListingPages * 2;
  * this merge" actually asks. The base branch is fetched once, lazily: an observation that answers
  * every delivery from the retained containment fetches nothing at all.
  */
-function localAncestry(root: string, baseBranch: string, run: ChildRun) {
+export function localAncestry(root: string, baseBranch: string, run: ChildRun) {
   let fetched: string | null | undefined;
   const git = (...args: string[]) => run('git', ['-C', root, ...args]);
   const fetchBase = async () => {

@@ -31,7 +31,7 @@ Installers derive the limits; an unset one is `delegationLimits` drift.
 
 ### Production deployment observation
 
-A merge unserved five minutes after a new `GRAPHYARD_BUILD_SHA` is a `delivery.deployment-incident` (until then `production` reports `rollingOut: true`); with `release/production` (or `GRAPHYARD_PRODUCTION_BRANCH`) production is measured against that branch. Deployments come from Railway's API (`RAILWAY_API_TOKEN`), else from GitHub deployments to `GRAPHYARD_PRODUCTION_ENVIRONMENT`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`.
+A merge unserved five minutes after a new `GRAPHYARD_BUILD_SHA` is a `delivery.deployment-incident` (until then `production` reports `rollingOut: true`); with `release/production` (or `GRAPHYARD_PRODUCTION_BRANCH`) production is measured against that branch. Deployments come from Railway's API (`RAILWAY_API_TOKEN`), else from GitHub deployments to `GRAPHYARD_PRODUCTION_ENVIRONMENT`. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. After verifying a deployment the loop records the throughput claim once per served release under `.graphyard/measurements/throughput` (`scripts/measure-throughput.mjs --record` by hand); `master status` reports it verified or names the shortfall.
 
 ## Backup, upgrade, rollback
 
@@ -44,4 +44,4 @@ Otherwise set the variables table by hand, then `node "$GRAPHYARD_CLI" github-se
 - Compose: `cp .env.example .env`, replace secrets, `docker compose --profile full up -d`.
 - Kubernetes: `helm install graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials`.
 - Railway: `railway init`, `railway add --database postgres`, set variables, `railway up`.
-- Railway revert approver: `node scripts/provision-railway.mjs` sets `GRAPHYARD_REVERT_APPROVER_*` from `.graphyard/revert-approver.json` (0600; `appId`, `installationId`, `privateKey` or `privateKeyFile`) or `--revert-approver-stdin`, printing no key; `--verify` (with `GRAPHYARD_URL`) exits 0 once the live guard names that App.
+- Railway revert approver: `node scripts/provision-railway.mjs` sets `GRAPHYARD_REVERT_APPROVER_*` from `.graphyard/revert-approver.json` (0600; `appId`, `installationId`, `privateKey` or `privateKeyFile`) or `--revert-approver-stdin`, printing no key; `--revert-approver-only` sets just those three on a running control plane (then `railway redeploy --service graphyard -y`), and `--verify` (with `GRAPHYARD_URL`) exits 0 once the live guard names that App.

@@ -11,7 +11,8 @@
 //     [--since ISO] [--until ISO] [--claim GY-87] [--repository PATH] [--record DIR] [--json]
 //
 // `--record DIR` appends the report as one timestamped JSON file, which is what `master status`
-// reads to say whether the claim is verified against the release now serving. The arithmetic and
+// reads to say whether the claim is verified against the release now serving. The loop records
+// one itself after each verified deployment (GY-1385); this script is the by-hand run. The arithmetic and
 // the population rule are the module master status uses (src/throughput.ts), loaded through tsx,
 // so the measurement and the report can never disagree.
 import { spawnSync } from 'node:child_process';
@@ -75,9 +76,10 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
   // The release identity comes from the deployment itself, never from the checkout this runs in:
   // what is serving is the thing under measurement.
   const status = await read('/api/status', 'control-plane status');
-  // Admission reads each delivery's action rows and sessions, which the default snapshot leaves out
-  // of a settled delivery's summary (GY-422): this periodic measurement reads the whole documents.
-  const snapshot = await read('/api/work-snapshot?view=full', 'work snapshot');
+  // The bounded read (GY-1385): the default snapshot carries each settled delivery's summary, which
+  // is enough to choose the window; only the deliveries inside it are then read whole, for the
+  // action rows and sessions admission judges. The full snapshot of every item is never asked for.
+  const snapshot = await read('/api/work-snapshot', 'work snapshot');
   const now = Date.parse(snapshot.now ?? status.now ?? new Date().toISOString());
   const claim = snapshot.work.find(item => item.key === options.claim);
   // A build that never stamped a release revision still names its commit in the build identity
@@ -87,8 +89,9 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
   const containment = claimContainment({ revision, mergeSha: claim?.delivery?.mergeSha ?? null, claim: options.claim, repository: options.repository }, deps.run);
   const deployed = { revision, revisionSource: source, version: status.release?.version ?? null, origin: new URL(base).origin,
     observedAt: status.now ?? new Date(now).toISOString(), containsClaim: containment.contains, reason: containment.reason };
-  const verify = deps.verify ?? await verifier();
-  const report = verify(snapshot.work, now, { deployed, since: options.since, until: options.until, claimKey: options.claim });
+  const measure = deps.measure ?? (await module_()).measureThroughput;
+  const readItem = id => read(`/api/work/${encodeURIComponent(id)}`, `work item ${id}`);
+  const { report } = await measure(snapshot.work, readItem, now, { deployed, since: options.since, until: options.until, claimKey: options.claim });
   if (options.record) {
     await mkdir(options.record, { recursive: true });
     const file = join(options.record, `${report.measuredAt.replace(/[:.]/g, '-')}.json`);
@@ -105,6 +108,5 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
 
 /** The verification module is TypeScript; tsx is a runtime dependency of the CLI already. */
 const module_ = async () => { const { tsImport } = await import('tsx/esm/api'); return tsImport('../src/throughput.ts', import.meta.url); };
-export async function verifier() { return (await module_()).verifyThroughput; }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch(error => { console.error(error.message); process.exitCode = 1; });

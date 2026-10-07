@@ -321,7 +321,7 @@ test('integration:launch-refusal-names-the-screen — a producer launch refused 
 test('manual:launch-delivery-docs-review — docs/master-agent.md states how a request reaches its runtime, the start bound and its extension, and what a start refusal means', async () => {
   const guide = await readMasterGuide();
   for (const fragment of ['#### How the request reaches the runtime', '.graphyard/launch/NAME.request', 'mode 0600', 'removed with the checkout', '--append-system-prompt-file "$GY.role"', '"$(cat "$GY.request")"', 'bounded at **512 bytes** whatever the request is',
-    '#### The start bound reads the pane', '**60 seconds**', 'run.launchStartSeconds', '**120 seconds**', 'started.extended', 'the claude runtime is on screen while Herdr reports it unknown', 'is blocked before it is ready', 'command still echoing', 'pane\'s last non-empty line', 'never Herdr\'s own `agent_not_found`', 'the claude runtime never started within 60 s', 'was still starting after 120 s', 'Automatic producer launch for GY-N refused']) {
+    '#### The start bound reads the pane', '**60 seconds**', 'run.launchStartSeconds', '**120 seconds**', 'started.extended', 'pane\'s last line', 'never Herdr\'s own `agent_not_found`']) {
     assert.ok(guide.includes(fragment), `docs/master-agent.md states ${fragment}`);
   }
 });

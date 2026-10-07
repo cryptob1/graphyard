@@ -15,14 +15,7 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 ### Session liveness is reconciled, not trusted
 
-**The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most). A handle closes at the second consecutive sweep that misses it; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to that host's loop. Closures (`dispatch.sessionReconcile`):
-
-- **Vanished**: missing from two listings running.
-- **Ended**: agentless pane or terminal state. `idle`, `done` and `blocked` are deliberately not terminal.
-- **Superseded**: a review or proof session for a head the item moved past; a delivered item is closed the same way as any other.
-- **Duplicate**: the older session for one role and head.
-
-A closure decides no gate, ends no lease, and stops no process. A profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) is flagged, not closed.
+**The control plane reconciles session liveness; closing sessions is not the master's manual duty.** A sweep runs every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most); a handle closes at the second consecutive sweep that misses it, and an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to that host's loop. Closures: **Vanished** (missing from two listings running), **Ended** (agentless pane or terminal state; `idle`, `done` and `blocked` are deliberately not terminal), **Superseded** (a review or proof session for a head the item moved past; a delivered item is closed the same way as any other), **Duplicate** (the older session for one role and head). A closure decides no gate, ends no lease, and stops no process; a profile's concurrency is counted against live sessions only, and a name is busy only while a live session has it. A session past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) is flagged, not closed.
 
 **So what an operator or a master does instead of closing sessions by hand:** nothing, for a session that finished or died (`graphyard master run --once` sweeps); for an overlong one, attach to it with the command on the handle. Never mark another session's handle finished to free a slot.
 
@@ -36,7 +29,7 @@ The loop's [doctor](onboarding.md#the-pipeline-doctor-on-by-default) fixes stuck
 
 ## Research and diagnosis
 
-Recurring and `invariant:` faults get a read-only diagnostician (`run.diagnostician`); quota refusals wait in `daemon.diagnoses`. Stale decisions are re-requested, then escalated; [plane-wide](operations.md#incident-decision-tree) failures retry faultlessly.
+Recurring and `invariant:` faults get a read-only diagnostician (`run.diagnostician`), whose quota refusals wait; stale decisions are re-requested, then escalated; [plane-wide](operations.md#incident-decision-tree) failures retry faultlessly.
 
 ## Machine-filed backlog
 
@@ -48,7 +41,7 @@ Past the build gate (`autoDispatch`): a producer request per proof group (`manua
 
 - **Concurrency is per role**: `concurrency` (above 1, each session takes a name unique to its request) applies without a restart (`run.reviewerProfile` and producer profiles default to 4 sessions); lowering it drains first (`longestWaitMs`); starved minutes count in `counts.concurrencyStarved`.
 - Requests always settle: `pane_not_found` panes close. No request outlives its own token (`expired`; `dispatch.sessionReconcile.stuck`).
-- **Every role fails over on spent quota** or waits as one `capacity` line.
+- **Every role fails over on spent quota.**
 
 The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` after relaunching stops.
 

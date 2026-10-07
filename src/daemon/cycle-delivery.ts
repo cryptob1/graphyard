@@ -2,7 +2,7 @@
 import { reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, deploySmokeRequired, deliveryState, rollbackGuidance } from '../model.js';
 import { type Work } from '../model.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
-import { boundDeployment, deploymentObservationSchema, maxProofAttempts, message, retainedActions } from './state.js';
+import { boundDeployment, type DaemonAction, deploymentObservationSchema, maxProofAttempts, message, retainedActions } from './state.js';
 import { candidateKey } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
 import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, githubPause, observationWakeDue, standingVerdict } from './decisions.js';
@@ -153,6 +153,32 @@ export async function deploymentStep(cycle: Cycle) {
     }
   }
 
+  // 7a'''. GY-1385: GY-87's throughput claim is measured, not asserted. After a verified deployment
+  //        the loop records one measurement for the release the control plane serves, at most once
+  //        per release, with its own coordinator credential, reading only the window's deliveries
+  //        whole; master status reads it back as verified or with its shortfall. One action per
+  //        observed release: a plane that does not serve it yet answers `waiting`, asked again on
+  //        the failure backoff (one status read per ask, never one per cycle) until it serves or a
+  //        newer observation supersedes the key; a failure backs off the same way. It follows a
+  //        verification: a cycle whose observation is still in flight (cut by the budget) starts
+  //        no measurement, so the step never holds two reads in flight.
+  const verified = observed !== stillVerifying && observed.ok ? state.deployment : null, measure = effects.measureThroughput;
+  if (measure && verified && verified.source !== 'unavailable' && verified.sha) {
+    const key = `throughput:${verified.sha}`, previous = state.actions[key];
+    if (throughputAskDue(previous, state.cycle)) {
+      const measured = await withinDeploymentBudget(state, 'throughput', () => measure(snapshot.work, verified.sha!), deadline, now);
+      if (measured === stillVerifying) deferred.push('the throughput measurement');
+      else {
+        const outcome = measured.ok ? measured.value : null;
+        const detail = outcome ? outcome.detail : `GY-87's throughput measurement could not be recorded for ${verified.sha.slice(0, 12)}: ${message((measured as { error: unknown }).error)}`;
+        const entryState = !outcome ? 'failed' : outcome.outcome === 'waiting' ? 'waiting' : 'done';
+        // Every ask is recorded, so the backoff counts them; a wait whose reason stands is not reported again.
+        const entry = await record(state, key, { kind: 'deployment', work: null, principal: null, state: entryState, detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
+        if (entryState !== 'waiting' || detailChanged(previous, detail)) performed.push(entry);
+      }
+    }
+  }
+
   // 7b. The second confidence layer. For each delivery whose policy asks for a smoke proof: record
   //     the observation on Graphyard once the release serves its merge, ask the provider to run the
   //     trusted smoke workflow against exactly that commit, and escalate a failed verdict with
@@ -202,6 +228,16 @@ export async function deploymentStep(cycle: Cycle) {
   });
   if (smokeDeferred) deferred.push(`${smokeDeferred} deliveries' deployment records and smoke requests`);
   await noteDeploymentBudget(cycle, budgetMs, deferred);
+}
+
+/**
+ * When the throughput measurement for an observed release is asked again: a release never asked
+ * is asked now, a measured one (`done`) never again, and a wait on the plane or a failure on the
+ * failure backoff (`readyToRetry`, doubling per ask up to its cap), so a plane that lags the
+ * deployment record costs one status read per ask rather than per cycle.
+ */
+export function throughputAskDue(previous: DaemonAction | undefined, cycle: number) {
+  return readyToRetry(previous?.state === 'waiting' ? { ...previous, state: 'failed' } : previous, cycle);
 }
 
 /** Record a budget-cut step, so the journal and `master status` say verification is in flight rather than blind; a full step supersedes the last cut once. */

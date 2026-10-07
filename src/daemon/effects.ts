@@ -24,7 +24,7 @@ import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson, readCredentialFile, type ControlPlaneStatus } from '../master.js';
+import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, readEnvironmentLog, selectionKey, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, reclaimWorktrees, removeReclaimableWorktrees, writeWorktreeInventoryCache, reclaimIdleMs, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, type ControlPlaneStatus } from '../master.js';
 import { readControlPlaneClock, type ContainmentObservation, type ControlPlaneClock } from '../master/containment.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { listHerdrPanes } from '../master/herdr.js';
@@ -37,11 +37,11 @@ import { type OrphanSupervisor, readyToRetry, stopWatchSupervisor } from './sess
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
 import { decisionEventKinds } from './decision-reads.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
-import { withRoleDefaults } from '../master.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
+import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
@@ -79,7 +79,7 @@ export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => age
 
 /** An item the loop files as the operator-agent: a fault-class item, or the docs trim item (GY-574), which names no class. */
 export type LoopFiledItem = Omit<ReturnType<typeof faultClassItem>, 'origin'> & Partial<Pick<ReturnType<typeof faultClassItem>, 'origin'>>;
-export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffects> {
+export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffects>, ThroughputEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   requestProof: (work: Work) => void | Promise<void>;
@@ -714,6 +714,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('merge-queue', config);
       publishedMergeQueue = published;
     },
+    ...throughputEffects(root, current, run, asCoordinator),
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
