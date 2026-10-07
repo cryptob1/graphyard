@@ -11,7 +11,9 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { HumanSignIn, maxSignInLinks, maxSignInSessions, signInLinkTtlMs, signInSessionTtlMs } from '../src/server/auth.js';
 import { hostSealKey, loginCommand, parkArgs, parkCommand, unsealOnHost } from '../src/cli/session-commands.js';
-import { defaultChoices, requestChoices, resolveHumanAnswer, type HumanRequestRow } from '../src/model/human-request.js';
+import { defaultChoices, recommendationIssues, recommendedChoice, requestChoices, type HumanRequestRow } from '../src/model/human-request.js';
+import { resolveHumanAnswer } from '../src/model/human-answer.js';
+import { RequestCard } from '../web/pages/human-requests.js';
 import type { Principal, Work } from '../src/model.js';
 import HumanRequestsPage, { signInAction } from '../web/pages/human-requests.js';
 import { redeemSignIn, signInCode } from '../web/pages/login.js';
@@ -77,10 +79,20 @@ async function claimed() {
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   return engine.execute(worker, 'claim', work.id, {}, randomUUID());
 }
+/**
+ * Advice for the parks whose recommendation a test does not read (GY-1410): a request with buttons
+ * names its first one by label; a value request advises in its own words.
+ */
+const advise = (args: string[]) => {
+  const choice = args.indexOf('--choice');
+  const recommend = choice >= 0 ? args[choice + 1] : args[0] === 'goals-and-priorities' ? 'Go ahead as asked' : 'The smallest plan that does it';
+  return ['--recommend', recommend, '--why', 'It costs least and can be cancelled after the proofs.'];
+};
+const advised = (args: string[]) => args.includes('--recommend') ? args : [...args.slice(0, args.indexOf('--')), ...advise(args).slice(0, args.includes('--why') ? 2 : 4), ...args.slice(args.indexOf('--'))];
 /** The worker's own `park` command, run under its own credential on a host whose Graphyard home is `sealHome`. */
 async function park(work: Work, args: string[]) {
   const previous = process.env.GRAPHYARD_CONFIG_HOME; process.env.GRAPHYARD_CONFIG_HOME = sealHome;
-  try { await parkCommand.run({ args: ['1', ...args], print: () => {}, api: (path: string, data?: unknown) => ok(token(worker), path, data), individualHostId: () => 'worker-host' } as any, work); }
+  try { await parkCommand.run({ args: ['1', ...advised(args)], print: () => {}, api: (path: string, data?: unknown) => ok(token(worker), path, data), individualHostId: () => 'worker-host' } as any, work); }
   finally { if (previous === undefined) delete process.env.GRAPHYARD_CONFIG_HOME; else process.env.GRAPHYARD_CONFIG_HOME = previous; }
   return reload(work.id);
 }
@@ -314,4 +326,70 @@ test('unit:operator-principal-declared-human — the install plan declares its o
     }
     await assert.doesNotReject(roster(deployed.map(principal => ({ ...principal, sessionKind: undefined }))), 'an absent declaration stays allowed: the preview reports it');
   } finally { await fixture.cleanup(); }
+});
+
+test('unit:human-request-recommendation-required — every park carries a recommendation: the choice the requester recommends, or the safest way to obtain a value, and one sentence of why; park refuses a request without one, naming the missing field (GY-1410)', async () => {
+  // The model names each missing field; a recommendation naming a choice resolves to that choice, one naming none is the safest way to get the value.
+  assert.deepEqual(recommendationIssues({}).map(issue => issue.match(/\(field (\w+)\)/)![1]), ['recommendation', 'why']);
+  assert.deepEqual(recommendationIssues({ recommendation: 'Go ahead as asked', why: 'The beta is ready.' }), []);
+  const { recommendation, why } = parkArgs(['A', 'plan', '--choice', 'Approve up to €50/month', '--recommend', 'Approve up to €50/month', '--why', 'It is the cheapest plan that runs the proofs.']);
+  assert.deepEqual({ recommendation, why }, { recommendation: 'Approve up to €50/month', why: 'It is the cheapest plan that runs the proofs.' });
+  assert.equal(recommendedChoice({ kind: 'money-or-accounts', choices: [{ id: 'choice-1', label: 'Approve up to €50/month', outcome: 'provided', input: 'none' }], recommendation: 'approve up to €50/month' }), 'choice-1');
+  const safest = 'A fine-grained token scoped to cryptob1/graphyard-install-proof, expiring in 7 days, with only Administration: read and write';
+  assert.equal(recommendedChoice({ kind: 'credentials-for-people', sealTo: 'key', recommendation: safest }), null, 'the safest way to get a value names no button');
+
+  // The command refuses before it sends anything, naming the flag; the server refuses the bare API call, naming the field.
+  const bare = await claimed();
+  const run = (args: string[]) => parkCommand.run({ args: ['1', ...args], print: () => {}, api: () => { throw new Error('nothing is sent'); }, individualHostId: () => 'worker-host' } as any, bare);
+  const ask = ['--ask', 'Decide whether to ship the beta'];
+  await assert.rejects(run(['goals-and-priorities', 'Ship', 'the', 'beta', ...ask, '--why', 'It is ready.', '--', 'Priorities']), /RECOMMEND \(field recommendation\)/);
+  await assert.rejects(run(['goals-and-priorities', 'Ship', 'the', 'beta', ...ask, '--recommend', 'Go ahead as asked', '--', 'Priorities']), /WHY \(field why\)/);
+  for (const [body, field] of [[{ why: 'It is ready.' }, 'recommendation'], [{ recommendation: 'Go ahead as asked' }, 'why']] as const) {
+    const refused = await call(token(worker), `work/${bare.id}/park`, { epoch: 1, kind: 'goals-and-priorities', needed: 'Ship the beta', reason: 'Priorities', ask: 'Decide whether to ship the beta', ...body });
+    assert.equal(refused.status, 422, JSON.stringify(refused.body));
+    assert.match(JSON.stringify(refused.body), new RegExp(`field ${field}`), 'the refusal names the missing field');
+  }
+  // A request with buttons names one by its label, so the card can preselect it; the refusal lists the labels to copy.
+  await assert.rejects(run(['goals-and-priorities', 'Ship', 'the', 'beta', ...ask, '--recommend', 'Ship it next week', '--why', 'It is ready.', '--', 'Priorities']), /field recommendation\) to name one by its label: "Go ahead as asked", "Go ahead differently…", "Decline"/);
+  await assert.rejects(run(['money-or-accounts', 'A', 'plan', ...ask, '--choice', 'Approve up to €20/month', '--choice', 'Approve up to €50/month', '--recommend', 'the bigger plan', '--why', 'It runs the proofs.', '--', 'Staging']), /"Approve up to €20\/month", "Approve up to €50\/month", "Decline"/);
+  const unnamed = await call(token(worker), `work/${bare.id}/park`, { epoch: 1, kind: 'goals-and-priorities', needed: 'Ship the beta', reason: 'Priorities', ask: 'Decide whether to ship the beta', recommendation: 'Ship it next week', why: 'It is ready.' });
+  assert.equal(unnamed.status, 422, JSON.stringify(unnamed.body)); assert.match(JSON.stringify(unnamed.body), /name one by its label/);
+  assert.deepEqual(recommendationIssues({ kind: 'money-or-accounts', recommendation: 'A project with a €20 monthly spending cap', why: 'It is cheapest.' }), [], 'every default money choice asks for words: a value request advises in its own words');
+  const kept = await reload(bare.id);
+  assert.equal(kept.humanRequest ?? null, null); assert.equal(kept.lease?.epoch, 1, 'a refused park ends nothing');
+
+  // Recorded on the request; the listing marks the choice it names and puts it first.
+  const parked = await park(bare, ['goals-and-priorities', 'Ship', 'the', 'beta', ...ask, '--recommend', 'Go ahead as asked', '--why', 'The beta is ready and nothing else waits on it.', '--', 'Priorities']);
+  assert.equal(parked.humanRequest!.recommendation, 'Go ahead as asked'); assert.equal(parked.humanRequest!.why, 'The beta is ready and nothing else waits on it.');
+  const row = ((await ok(token(operator), 'human-requests')).requests as HumanRequestRow[]).find(entry => entry.id === parked.id)!;
+  assert.equal(row.request.recommendation, 'Go ahead as asked');
+  assert.deepEqual(row.choices!.map(choice => [choice.label, !!choice.recommended]), [['Go ahead as asked', true], ['Go ahead differently…', false], ['Decline', false]]);
+});
+
+test('unit:human-request-recommendation-render — the Needs-you card shows the recommendation first, labelled Recommended: the recommended choice first and preselected, and a value request\'s safest way above its input (GY-1410)', async () => {
+  const work = await park(await claimed(), ['money-or-accounts', 'A', 'hosting', 'plan', '--ask', 'Approve a hosting plan for staging', '--choice', 'Approve up to €20/month', '--choice', 'Approve up to €50/month', '--choice-text', 'Approve with a different cap…',
+    '--recommend', 'Approve up to €50/month', '--why', 'The €20 plan cannot run the install proofs.', '--', 'Staging', 'needs', 'a', 'paid', 'plan']);
+  const row = ((await ok(token(operator), 'human-requests')).requests as HumanRequestRow[]).find(entry => entry.id === work.id)!;
+  const card = (target: HumanRequestRow) => renderToStaticMarkup(createElement(RequestCard, { row: target, refusal: null, busy: false, open: () => {}, answer: async () => {}, send: async () => {} }));
+  const markup = card(row);
+  const choiceRow = markup.slice(markup.indexOf('human-choices'), markup.indexOf('</div>', markup.indexOf('human-choices')));
+  const choiceButtons = [...choiceRow.matchAll(/<button[^>]*>(.*?)<\/button>/g)];
+  assert.equal(choiceButtons.length, 4, markup);
+  assert.equal(choiceButtons[0][1], '<strong>Recommended: </strong>Approve up to €50/month', 'the recommended choice is first and labelled');
+  assert.match(choiceButtons[0][0], /type="submit"/, 'it is the form\'s default: Enter takes it');
+  assert.match(choiceButtons[0][0], /data-preselected="true"/); assert.match(choiceButtons[0][0], /aria-pressed="true"/);
+  for (const other of choiceButtons.slice(1)) { assert.doesNotMatch(other[0], /data-preselected|aria-pressed/, other[1]); assert.doesNotMatch(other[1], /Recommended/); }
+  const shown = markup.indexOf('<strong>Recommended:</strong> Approve up to €50/month');
+  assert.ok(shown > markup.indexOf('Approve a hosting plan for staging') && shown < markup.indexOf('<form'), 'the recommendation follows the ask, before the choices');
+  assert.ok(markup.includes('The €20 plan cannot run the install proofs.'), 'with its one sentence of why');
+
+  // A value request: the safest way to obtain it, shown above the input it is typed into.
+  const safest = 'A fine-grained token scoped to this one repository, expiring in 7 days, with only Contents: read';
+  const value = await park(await claimed(), ['credentials-for-people', 'A', 'GitHub', 'token', 'for', 'the', 'staging', 'repository', '--ask', 'Provide a GitHub token for the staging repository', '--recommend', safest, '--why', 'It reaches nothing else and lapses on its own.', '--', 'The', 'deploy', 'needs', 'it']);
+  const valueRow = ((await ok(token(operator), 'human-requests')).requests as HumanRequestRow[]).find(entry => entry.id === value.id)!;
+  const valueMarkup = card(valueRow);
+  const advice = valueMarkup.indexOf(`<strong>Recommended:</strong> ${safest}`);
+  assert.ok(advice > 0, valueMarkup);
+  assert.ok(valueMarkup.includes('type="password"') && advice < valueMarkup.indexOf('type="password"'), 'the safest way is shown above the input');
+  assert.ok(valueMarkup.includes('It reaches nothing else and lapses on its own.'));
 });
