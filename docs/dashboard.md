@@ -9,7 +9,7 @@ Open items by group (tiles count, filter): **Needs you** (yours alone), **Blocke
 
 ## Needs you
 
-Cards show ask, numbered steps, one-line why, then choices; agent detail folds under **Details for agents** (older requests: their need's first sentence). `graphyard login`: single-use sign-in link; **Provide now** seals credentials for `unseal GY-N`; operator approvals offer **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`), answered only from human admin sessions.
+Cards show ask, its **Recommended** choice (or safest way) with one-line why, numbered steps, then choices, the recommended one first and preselected; agent detail folds under **Details for agents** (older requests: their need's first sentence). `graphyard login`: single-use sign-in link; **Provide now** seals credentials for `unseal GY-N`; operator approvals offer **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`), answered only from human admin sessions.
 
 ## Workers
 

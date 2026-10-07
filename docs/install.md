@@ -11,11 +11,11 @@ Ask only: **Which provider**; **Provider login**; **the GitHub App confirmation 
 - **One principal per role** (`--workers N`); never share a worker credential.
 - **Workers never receive an admin, coordinator, or producer credential.**
 - **Proof producers get explicit grants only** (`--producer-proof NAME`).
-- Credentials only in `~/.config/graphyard/<install>/` (directory `0700`, files `0600`).
+- Credentials only under `$GRAPHYARD_CONFIG_HOME` (default `~/.config/graphyard`): the plan's `installDirectory`, and `workers/` from `init --apply` (directories `0700`, files `0600`).
 
 ## Preconditions
 
-Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`, admin `gh auth status` (`repo,admin:repo_hook`); worker and non-Actions unit-proof hosts pass the [`bwrap` probe](setup-from-zero.md#1-machine-prerequisites).
+Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`, admin `gh auth status` with scope `repo` (and `admin:repo_hook`, except compose; preflight checks); worker and non-Actions unit-proof hosts pass the [`bwrap` probe](setup-from-zero.md#1-machine-prerequisites).
 
 ### Providers
 
@@ -42,7 +42,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; [protects](gi
 
 ## Step 3: App confirmation
 
-Human installs the App at `http://127.0.0.1:4311`; **Verify** *App registered and installation verified*.
+`--apply` serves and prints `http://127.0.0.1:4311` (no browser opened); the human installs the App there; **Verify** *App registered and installation verified*.
 
 ## Step 4: summary
 

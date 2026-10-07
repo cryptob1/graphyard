@@ -1,7 +1,7 @@
 <!-- page: Start here | 1 | lifecycle, authority. -->
 # How Graphyard works
 
-Graphyard decides whether work advances; runtimes (Herdr) run sessions, each starting with a role-scoped digest (≤500 words) of decisions, recurring faults and recent merges from applied records (`.graphyard/project-memory.json`; `projectMemory` in `master status`).
+Graphyard decides whether work advances; runtimes (Herdr) run sessions, each starting with a role-scoped ≤500-word digest of decisions, recurring faults and recent merges from applied records (`.graphyard/project-memory.json`; `projectMemory` in `master status`).
 
 ## One trip from setup to Done
 
@@ -36,6 +36,6 @@ Text equivalent: operator makes human-only decisions; Herdr hosts master (`coord
 
 ![Control plane: callers, engine, Postgres, reconciliation worker, GitHub.](diagrams/control-plane-components.svg)
 
-Text equivalent: mutations apply with events in locked Postgres transactions; reconciliation syncs GitHub, which merges passing heads; webhooks wake jobs.
+Text equivalent: mutations and events commit in locked Postgres transactions; reconciliation syncs GitHub, which merges passing heads; webhooks wake jobs.
 
 Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`; claims bump epoch; latest trusted proof wins; merge is not [delivery](delivery.md).

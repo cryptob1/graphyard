@@ -10,7 +10,7 @@ An `e2e:` proof passes from a pinned candidate, bundle and separate [collector](
 - `http`: `method`, `path`, optional `body`, expected `status`; `expect` checks dotted JSON `path` (`equals`, `exists`, `type`, `includes`); `save` keeps values.
 - `browser` (Playwright Chromium): `open` a `path`, `fill` a `label` with `value`, `click`/`expectText` a `text`, optionally by `role`; `exact: false` matches substrings.
 
-Values: `{{token}}`, `{{run}}`, `{{case}}`, saved ones. `graphyard e2e list` refuses malformed cases by file and field. Add: write, run, PR. `graphyard e2e sync` (`admin`) registers scenario revisions; edits make new ones, proofs keep theirs. `graphyard e2e run CASE|--tag T|--target uat|--all --url URL`: `GRAPHYARD_TOKEN` or `--token-file`, never token argument; `--step-timeout` (30 s); `--retries N` (default none); prints failing steps, reasons; `--report` JSON; non-zero on failure; records base URL, served SHA, duration, outcome, failing step unless `--no-record`. **Tests**: last outcome, SHA, environment, 20-run pass rate, flaky flag, failed steps, required/optional.
+Values: `{{token}}`, `{{run}}`, `{{case}}`, saved ones. `graphyard e2e list` refuses malformed cases by file, field. Add: write, run, PR. `graphyard e2e sync` (`admin`) registers scenario revisions; edits make new ones, proofs keep theirs. `graphyard e2e run CASE|--tag T|--target uat|--all --url URL`: `GRAPHYARD_TOKEN` or `--token-file`, never token argument; `--step-timeout` (30 s); `--retries N` (default none); prints failing steps, reasons; `--report` JSON; non-zero on failure; records base URL, served SHA, duration, outcome, failing step unless `--no-record`. **Tests**: last outcome, SHA, environment, 20-run pass rate, flaky flag, failed steps, required/optional.
 
 **Every release candidate runs `uat` cases**, in id order, as [`release validate`](delivery.md#release-candidates)'s `e2e` suite (`GRAPHYARD_UAT_URL`, `GRAPHYARD_UAT_TOKEN`; a `--suite` command's detail is what it writes to `GRAPHYARD_SUITE_DETAIL`); `graphyard e2e record REPORT` records every attempt.
 
@@ -24,7 +24,7 @@ Flaky required cases block promotion until an `evidence` decision (`{"case": ID,
 
 ## Release holds
 
-One hold per failed outcome, never per suite or case: item listing failed/flaky cases, failing steps, unmet criteria, tagged `rc-hold/OUTCOME/CANDIDATE`. Later failures attach to open hold; it clears when every attached case passes on a newer candidate UAT serves at its exact SHA (`graphyard release holds`). Folding: two-party `fold` decision (`{"outcome": A, "into": B}`), then `release fold A --decision ID`. Process/infrastructure incidents (freeze breaches, attestation delays, runner outages, deployment or container suites) file ordinary follow-ups.
+One hold per failed outcome, never per suite or case: item listing failed/flaky cases, failing steps, unmet criteria, tagged `rc-hold/OUTCOME/CANDIDATE`. Later failures attach to open hold; it clears when every attached case passes on a newer candidate UAT serves at its exact SHA (`graphyard release holds`). Folding: two-party `fold` decision (`{"outcome": A, "into": B}`), then `release fold A --decision ID`. Process/infrastructure incidents (freeze breaches, attestation delays, runner outages, deployment/container suites) file ordinary follow-ups.
 
 ## Candidates, requests, reports
 

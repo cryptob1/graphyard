@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { accessSync, constants as fsConstants } from 'node:fs';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { z } from 'zod';
+import { configHome } from './install/secrets.js';
 import { sessionNameField, suffixedSessionName } from './session-name.js';
 import { defaultCandidateSchedule, deliveryPolicySchema, generatedWorkflowFiles, type DeliveryMode, type DeliveryPolicy, type GateCheck } from './model/delivery-policy.js';
 
@@ -35,8 +35,15 @@ export async function discover(root: string) {
   try { pkg = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8')); } catch { /* non-Node repository */ }
   let workflows: string[] = [];
   try { workflows = (await readdir(resolve(root, '.github/workflows'))).filter(f => /\.ya?ml$/.test(f)); } catch { /* no CI */ }
-  const dependencies = { ...pkg.dependencies, ...pkg.devDependencies };
-  const frameworks = ['vitest', 'jest', '@playwright/test', 'cypress'].filter(name => dependencies[name]);
+  // The same detector `init --scan` uses (GY-1412), fed the top-level manifests it reads: the
+  // frameworks doctor reports are the ones the proposal records.
+  const top = await readdir(root, { withFileTypes: true }).catch(() => []);
+  const files = top.filter(entry => entry.isFile()).map(entry => entry.name), contents: Record<string, string> = {};
+  for (const name of files) if (scanInteresting.some(pattern => pattern.test(name))) {
+    const bytes = await readFile(resolve(root, name)).catch(() => null);
+    if (bytes && bytes.length <= scanLimits.bytes) contents[name] = bytes.toString('utf8');
+  }
+  const frameworks = detectStack({ files, contents }).frameworks;
   return { repository, scripts: Object.keys(pkg.scripts ?? {}), frameworks, workflows,
     proposedChecks: ['test', 'typecheck'].filter(name => pkg.scripts?.[name]),
     lifecycle: ['ready', 'build', 'review', 'test', 'acceptance', 'merge', 'done'] };
@@ -299,7 +306,9 @@ export function proposeDelivery(input: ScanInput, deploy: DeployDetection, stack
   if (parsed.success) committed = parsed.data;
   const mergeGate = committed?.mergeGate ?? classifyChecks(input, stack);
   return deliveryPolicySchema.parse({
-    mode: overrides.mode ?? committed?.mode ?? 'release-candidate',
+    // A repository with no deploy target has no UAT or production to promote a candidate to, so
+    // each pull request is its own delivery and merged is its end state (setup-from-zero step 12).
+    mode: overrides.mode ?? committed?.mode ?? (deploy.target === 'none' ? 'per-pr' : 'release-candidate'),
     mergeGate,
     candidateSchedule: overrides.candidateSchedule !== undefined ? overrides.candidateSchedule : committed ? committed.candidateSchedule : defaultCandidateSchedule,
     deploy: committed?.deploy ?? { adapter: deploy.target === 'railway' ? 'railway' : 'command', project: null, uat: null, production: null },
@@ -391,7 +400,8 @@ export function buildProposal(input: ScanInput, options: { repository?: string |
   const repository = options.repository ?? 'unknown';
   const repoSlug = repository.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'repository';
   const runtimes = (options.runtimes ?? []).filter(kind => (agentRuntimes as readonly string[]).includes(kind));
-  const credentialDirectory = options.credentialDirectory ?? resolve(homedir(), '.config/graphyard/workers');
+  // Worker credentials sit beside the installation's own, under GRAPHYARD_CONFIG_HOME when set (GY-1412).
+  const credentialDirectory = options.credentialDirectory ?? resolve(configHome(), 'workers');
   const workers = runtimes.slice(0, 2).map((kind, index) => proposedWorkerProfileSchema.parse({
     name: `${kind}-primary`, principal: `worker-${index + 1}`, agentName: suffixedSessionName(repoSlug, kind, String(index + 1)),
     mode: 'launch', kind, credentialFile: resolve(credentialDirectory, `${kind}-primary.token`), agentArgs: [], environment: {},

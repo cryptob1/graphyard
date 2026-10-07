@@ -107,9 +107,12 @@ next renewal is refused and the supervisor stops the session; that is the attemp
 ending, not lease loss. CI, trusted evidence, independent review, and Graphyard's
 merge gate decide progression. Report blockers explicitly.
 Park a decision only a human may make with \`park GY-N EPOCH KIND NEEDED... --ask ASK
-[--step STEP]... [--why WHY] -- REASON\`. Write ASK, STEP and WHY for a non-technical
-reader: ASK is one sentence naming the action they take, each STEP one plain instruction,
-WHY one plain sentence. Put branches, commit shas, file paths and resume commands only in
+[--step STEP]... --recommend TEXT --why WHY -- REASON\`. Write ASK, STEP, TEXT and WHY for a
+non-technical reader: ASK is one sentence naming the action they take, each STEP one plain
+instruction, TEXT the choice you recommend (its exact label when the request offers
+buttons) or the safest way to get a value asked for (such as a token scoped to one
+repository, short-lived, with only the permissions needed), WHY one plain sentence of why.
+Put branches, commit shas, file paths and resume commands only in
 NEEDED and REASON, the detail for the next agent.
 Never use an operator/producer token for implementation or weaken proof requirements.
 Herdr runs sessions; Graphyard remains the source of ownership truth.
@@ -312,6 +315,8 @@ export interface ApplyDependencies {
   token?: () => string;
   /** Runs `gh` for the merge-mode step; without it onboarding leaves GitHub's merge settings to `master protection --apply`. */
   github?: ProtectionRun;
+  /** Write each worker profile's credential file (GY-1412). Explicit, never implied: only `init --apply` passes it. */
+  writeCredentials?: boolean;
 }
 
 /**
@@ -390,6 +395,15 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
     else drift.push(`${name} profile differs from the proposal; the local file was kept`);
   };
   for (const profile of proposal.profiles.workers) await writeProfile(profile.name, profile);
+  // Each profile's credential file is written from the registry when absent (GY-1412), outside the
+  // repository with mode 0600, so no profile names a credential that does not exist.
+  if (dependencies.writeCredentials) for (const profile of proposal.profiles.workers) {
+    const file = resolve(profile.credentialFile), token = merged.find(entry => entry.id === profile.principal)?.token;
+    if (!token || file === resolve(root) || file.startsWith(`${resolve(root)}/`)) continue;
+    await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+    try { await writeFile(file, `${token}\n`, { mode: 0o600, flag: 'wx' }); applied.push(`${profile.name} credential file`); }
+    catch (error: any) { if (error.code !== 'EEXIST') throw error; unchanged.push(`${profile.name} credential file`); }
+  }
   await writeProfile('reviewer', { provider: proposal.policy.reviewProvider, note: proposal.profiles.reviewer.note });
 
   const previousState = await loadAppliedSetup(root);
@@ -421,7 +435,7 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   else { await atomicWrite(appliedPath, JSON.stringify(state, null, 2), 0o600); applied.push('applied setup record'); }
 
   const workerStep = workerPrincipals.length
-    ? 'place each worker credential at its profile credentialFile path, then claim work'
+    ? `${dependencies.writeCredentials ? 'each worker credential is at its profile credentialFile path' : 'place each worker credential at its profile credentialFile path'}, then claim work`
     : 'no agent runtime was detected on this machine, so the proposal declared no worker profile and no worker principal was registered; install an agent CLI and rerun init --scan --apply to add one';
   const documentationLine = documentationAssignment(documentation.policy).line;
   return { server, applied, unchanged, drift, githubApp, generatedFiles: generatedFiles?.line ?? null, documentation: { file: repositoryConfigFile, policy: documentation.policy, line: documentationLine },

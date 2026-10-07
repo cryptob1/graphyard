@@ -3,21 +3,21 @@
 
 > set up Graphyard for OWNER/REPO following docs/setup-from-zero.md
 
-Run each step, then **Verify**; ask a human only for **HUMAN** steps. [Hard rules](install.md#hard-rules) apply.
+Bare repository to a first item merged and deployed: run each step, then **Verify** before the next; ask a human only for **HUMAN** steps. The agent acts as the **master** `install --apply` records; the operator credential stays with the human. [Hard rules](install.md#hard-rules): never print a credential.
 
-`graphyard doctor` prints `setupFromZero.lines`: `PASS`/`FAIL` per prerequisite (`control-plane`, `credentials-file`, `github-app`, `reviewer-app`, `branch-protection`, `agent-environment:NAME`, `worker-sandbox`), each `FAIL` naming its step; `next` names the first gap (readiness `recovery`, then `FAIL`). Generated `AGENTS.md` links here. `GRAPHYARD_CONFIG_HOME` relocates credentials, `GRAPHYARD_AGENT_ENVIRONMENTS` (`~/.coding_agents`) agent environments.
+`graphyard doctor` prints `setupFromZero.lines`: `PASS`/`FAIL` per prerequisite (`control-plane`, `credentials-file`, `github-app`, `reviewer-app`, `branch-protection`, `agent-environment:NAME`, `worker-sandbox`), each `FAIL` naming its step; `next` names the first gap (step 3's `control-plane` line while it fails, else readiness `recovery`, then `FAIL`). Generated `AGENTS.md` links here. A second install per host sets `GRAPHYARD_CONFIG_HOME` (credentials), `GRAPHYARD_DATA_HOME` (worktrees), `GRAPHYARD_AGENT_ENVIRONMENTS` (`~/.coding_agents`).
 
 ## 1. Machine prerequisites
 
 ```sh
 node --version          # v24 or later
-gh auth status          # scopes repo, admin:repo_hook
+gh auth status          # scope repo; non-compose providers also admin:repo_hook
 docker compose version
 herdr --version
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true
 ```
 
-**Verify:** `gh repo view OWNER/REPO --json viewerPermission -q .viewerPermission` prints `ADMIN`. **HUMAN:** `gh auth login` as admin; failing `bwrap` needs user namespaces allowed.
+**Verify:** `gh repo view OWNER/REPO --json viewerPermission -q .viewerPermission` prints `ADMIN`; `install --plan` checks scopes. **HUMAN:** `gh auth login` as admin; failing `bwrap` needs user namespaces allowed.
 
 ## 2. Graphyard and the repository
 
@@ -28,7 +28,7 @@ gy() { node "$GRAPHYARD_CLI" "$@"; }
 cd /path/to/REPO && gy init --scan
 ```
 
-A repository (even fresh from `git init`) needs a GitHub `origin` with default branch, tests and a `pull_request` workflow whose job is the required check; `node:test` is detected as `junit-xml-v1` (`--test-reporter=junit`). **Verify:** readiness `repository`, `required-checks`, `test-formats` are `ready`.
+A repository (even fresh from `git init`) needs a GitHub `origin` with default branch, tests and a `pull_request` workflow (its job: the required check); `node:test` is detected as `junit-xml-v1` (`--test-reporter=junit`). **Verify:** readiness `repository`, `required-checks`, `test-formats` are `ready` (`recovery` names fixes). npm 11's esbuild install-script warning is harmless (no `npm install-scripts approve esbuild` needed). No deploy target: the scan proposes `--delivery per-pr`, ending at merged.
 
 ## 3. Install the control plane
 
@@ -37,18 +37,11 @@ gy install --provider compose --repo OWNER/REPO --reviewer claude --plan
 gy install --provider compose --repo OWNER/REPO --reviewer claude --apply
 ```
 
-Providers differ only in `--provider` ([install](install.md)). **HUMAN:** approve the plan. **Verify:** `preflight[].ok`, `secretsRedacted` `true`; `curl -s http://127.0.0.1:4310/healthz` is `{"ok":true,…}`. `--apply` connects as worker; use human's operator credential:
-
-```sh
-export GRAPHYARD_URL=http://127.0.0.1:4310
-export GRAPHYARD_TOKEN_FILE=~/.config/graphyard/OWNER-REPO/tokens/OWNER-REPO-operator.token
-```
-
-**Verify:** `control-plane`, `credentials-file` (or `.graphyard/connection.json`; mode `0600`).
+Providers differ only in `--provider` ([install](install.md)). **HUMAN:** approve the plan. **Verify:** `preflight[].ok`, `secretsRedacted` `true`; `curl -s http://127.0.0.1:4310/healthz` is `{"ok":true,…}`. Once the App exists (step 4), `--apply` records the master connection `.graphyard/master.json`, its `0600` credential under the plan's `installDirectory`; with no `GRAPHYARD_TOKEN`, `gy doctor` reads as it. **Verify:** `control-plane`, `credentials-file` (`reachable, credential missing`: step 4 unfinished).
 
 ## 4. Register the GitHub App
 
-`--apply` opens `http://127.0.0.1:4311` (loopback `http://` accepted, webhook off: compose polls). **HUMAN:** **Create GitHub App**, install on OWNER/REPO only, approve any *Confirm access* (sudo) Mobile code. **Verify:** `github-app`; listed `missing permissions` (e.g. `deployments: read`) → `gy github-setup --update-permissions --wait 600`, accept on the installation page ([permissions](github.md#app-permissions)).
+`--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser (loopback `http://` accepted, webhook off: compose polls). **HUMAN:** open it, **Create GitHub App**, install on OWNER/REPO only, approve any *Confirm access* (sudo) Mobile code. **Verify:** `github-app`; listed `missing permissions` (e.g. `deployments: read`) → `gy github-setup --update-permissions --wait 600`, accept on the installation page ([permissions](github.md#app-permissions)).
 
 ## 5. Reviewer and revert-approver Apps
 
@@ -84,9 +77,11 @@ The second `--apply` records `skipDangerousModePermissionPrompt`; launches write
 
 ## 10. Start the master
 
+[Start the master](onboarding.md#3-start-the-master) with the master credential step 3 recorded:
+
 ```sh
-gy master init --url http://127.0.0.1:4310 --herdr-workspace HERDR_WORKSPACE_ID --browser-profile Default \
-  --token-stdin < ~/.config/graphyard/OWNER-REPO/tokens/OWNER-REPO-master.token
+gy master init --herdr-workspace HERDR_WORKSPACE_ID --browser-profile Default \
+  --token-stdin < "$(node -p "require('./.graphyard/master.json').credentialFile")"
 gy init --url http://127.0.0.1:4310   # each executor checkout
 gy master start claude                # or codex
 ```
@@ -95,8 +90,8 @@ ID: `herdr workspace list`; **HUMAN:** `--browser-profile` is a Chrome profile s
 
 ## 11. Hosted variables (Railway only)
 
-`RAILWAY_API_TOKEN` (**HUMAN:** account owner) and `GRAPHYARD_DATABASE_POOL_SIZE` ([limits](operations-reference.md)). **Verify:** doctor `production` lacks `error`.
+Compose skips this. `RAILWAY_API_TOKEN` (**HUMAN:** account owner) and `GRAPHYARD_DATABASE_POOL_SIZE` ([limits](operations-reference.md)). **Verify:** doctor `production` lacks `error`.
 
 ## 12. First item end to end
 
-Write an item like [work.json](../examples/work.json) (`"policy":{"checks":["test"],"review":true}`), then `master create FILE`. Local producers prove `unit:*` on compose (CI cannot reach loopback); hosted installs use [CI proofs](github.md#proofs-in-ci). **Verify:** `gy status GY-1` is `done`; `gh pr view N --json state` is `MERGED`; doctor shows `production.serving` at or past merge, `production.aheadBy` `0`, `production.incidents` `[]` ([observation](deployment.md#production-deployment-observation)); without a deploy job `production.latest` is `null`.
+Write an item like [work.json](../examples/work.json) with one small criterion and `"policy":{"checks":["test"],"review":true}`, then `master create FILE`; the loop dispatches, reviews, proves; GitHub merges on green `Graphyard / merge`. Local producers prove `unit:*` on compose (CI cannot reach loopback); hosted installs use [CI proofs](github.md#proofs-in-ci). **Verify:** `gy status GY-1` is `done`; `gh pr view N --json state` is `MERGED`; doctor shows `production.serving` at or past merge, `production.aheadBy` `0`, `production.incidents` `[]` ([observation](deployment.md#production-deployment-observation)); without a deploy job `production.latest` is `null`, ending at merged.

@@ -1,7 +1,7 @@
 <!-- page: Agent protocol | 3 | leases, `watch`. -->
 # Leases and supervision
 
-Claims last 120 s, renewed every ≤30 s; owner mutations carry epoch, expired ones refused. Before submitting, register branch, path, host (`graphyard register GY-1 workspace.json`): branches (`graphyard/…`) globally unique, paths unique per host; `graphyard worktree` [frees the branch](../coordination.md#dispatch-optimistically-smallest-scope-first) first.
+Claims last 120 s, renewed every ≤30 s; owner mutations carry epoch, expired ones refused. Before submitting, register branch, path, host (`graphyard register GY-1 workspace.json`): branches (`graphyard/…`) unique, paths unique per host; `graphyard worktree` [frees the branch](../coordination.md#dispatch-optimistically-smallest-scope-first) first.
 
 ## `watch`
 
@@ -9,7 +9,7 @@ Claims last 120 s, renewed every ≤30 s; owner mutations carry epoch, expired o
 
 ### Push credential
 
-Workers never use host `gh` logins: launchers mint into `worker-sessions/GY-N-EPOCH` (0700), set `GH_CONFIG_DIR`. `POST /api/work/UUID/push-credential` `{"epoch": N}` (`graphyard push-credential GY-N EPOCH DIR`) mints unstored App token (`contents`, `pull_requests`, `workflows` write) expiring by claim + 4h; refused for lapsed/submitted epochs or base queue allowing App bypass; `watch` re-mints near expiry, revokes at exit. A GitHub credential failure: attempt `blocked`, branch kept, relaunched with backoff once `github-credential` clears; third consecutive one holds the item for an approver.
+Workers never use host `gh` logins: launchers mint into `worker-sessions/GY-N-EPOCH` (0700), set `GH_CONFIG_DIR`. `POST /api/work/UUID/push-credential` `{"epoch": N}` (`graphyard push-credential GY-N EPOCH DIR`) mints unstored App token (`contents`, `pull_requests`, `workflows` write) expiring by claim + 4h; refused for lapsed/submitted epochs or base queue allowing App bypass; `watch` re-mints near expiry, revokes at exit. GitHub credential failures block the attempt (branch kept), relaunching with backoff once `github-credential` clears; a third in a row holds the item for an approver.
 
 ## How a lease ends
 
@@ -20,4 +20,4 @@ Workers never use host `gh` logins: launchers mint into `worker-sessions/GY-N-EP
 
 ## Blocked work unblocks itself
 
-`blocked GY-N EPOCH REASON` commits uncommitted work (`WIP: GY-N attempt N blocked`), releases, carries `blocked on epoch N: REASON` to the next attempt. Each cycle (`blockers` step) the loop classes standing blockers (`src/model/blocker-class.ts`), probing routine [classes](../master-agent.md#session-liveness-is-reconciled-not-trusted) in the next worker's confinement (`needs-decision`: approver); pass (`POST /api/work/KEY/blocker-probe`) emits `blocker.cleared`. A fourth clear without submission stays in `master status`. A scope blocker naming files but no commit is `planned-file-scope` (blocked attempt's kept head). Coordinator widenings of untouched backlog/ready items (unclaimed or only empty lapsed launches; unasked, unblocked) are planning, not `scope-widening` interventions, until an attempt releases, submits or is reworked.
+`blocked GY-N EPOCH REASON` commits uncommitted work (`WIP: GY-N attempt N blocked`), releases, carries `blocked on epoch N: REASON` to the next attempt. Each cycle (`blockers` step) the loop classes standing blockers (`src/model/blocker-class.ts`), probing routine [classes](../master-agent.md#session-liveness-is-reconciled-not-trusted) in the next worker's confinement (`needs-decision`: approver); pass (`POST /api/work/KEY/blocker-probe`) emits `blocker.cleared`. A fourth clear without submission stays in `master status`. A scope blocker naming files but no commit is `planned-file-scope` (blocked attempt's kept head). Coordinator widenings of untouched backlog/ready items (unclaimed or only empty lapsed launches; unasked, unblocked) are planning, not `scope-widening`, until an attempt releases, submits or is reworked.

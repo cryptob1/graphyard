@@ -91,7 +91,7 @@ test('integration:scope-park-refused — a park whose decision is a plannedFiles
   // Files already planned are no scope ask; neither is a decision with no scope words.
   assert.deepEqual(scopeAskPaths('widen plannedFiles to include src/a.ts', ['src/a.ts']), []);
   assert.deepEqual(scopeAskPaths('a Railway team seat for src/deploy.ts', ['src/a.ts']), []);
-  const parked = await post(worker, `work/${work.key}/park`, { epoch: work.epoch, kind: 'money-or-accounts', needed: 'a Railway team seat', reason: 'The deploy needs a second seat' });
+  const parked = await post(worker, `work/${work.key}/park`, { epoch: work.epoch, kind: 'money-or-accounts', needed: 'a Railway team seat', reason: 'The deploy needs a second seat', recommendation: 'Approve', why: 'One seat is the cheapest way to deploy.' });
   assert.equal(parked.status, 200, JSON.stringify(parked.body));
   assert.equal(parked.body.lease, null);
 });
