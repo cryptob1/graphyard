@@ -72,8 +72,9 @@ export const installCommands = defineCommands([
       '                                --agent runs every step non-interactively (JSON events on stderr), Apps in',
       '                                the given or master\'s browser profile (none: exit 2), handing off only device',
       '                                approvals: Confirm access lists the page\'s methods, re-checked every 10 s',
-      '                                (confirm in your Chrome, or --sudo-code a 6-digit authenticator/email code;',
-      '                                email: GitHub sends one); --github-mobile: Mobile first, password link after',
+      '                                (--sudo-code a 6-digit authenticator/email code, typed within 2 s; email:',
+      '                                GitHub sends one; or click the local App page in your own browser: the drive',
+      '                                runs on a profile copy); --github-mobile: Mobile first, password link after',
       '                                60 s. --reuse-app passes to install. Exit 0 green, 1 failed, 2 prereq, 3 waiting.',
     ],
     // `up` installs the control plane and records the connection; it never reads a stale one.
