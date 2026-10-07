@@ -253,8 +253,8 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
         // The loop's own re-plan onto the successors of files the base split or renamed (GY-1397) is
         // the control plane doing its job, as an approved autoscope is: nobody stepped in, so neither
         // it nor an ask it covers is a signal. Rows written before the rule was recorded carry the
-        // re-plan's own wording (successorStep).
-        if (widened && (details.intent?.rule === 'successor' || /^Re-planned \S+ onto the successors of the files it plans/.test(reason))) {
+        // re-plan's own wording (successorStep). Only an operator agent's row carries `intent`.
+        if (widened && isObject(details.intent) && (details.intent.rule === 'successor' || /^Re-planned \S+ onto the successors of the files it plans/.test(reason))) {
           entry.asks = entry.asks.filter(ask => !(ask.kind === 'scope-request' && ask.paths.length > 0 && ask.paths.every(covers)));
           break;
         }

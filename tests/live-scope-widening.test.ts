@@ -499,8 +499,11 @@ test('integration:successor-replan-not-intervention — the loop\'s successor re
   assert.deepEqual(counted.map(entry => [entry.trigger, entry.resolution]), [['operator-widening', 'Widened by hand']], 'only the hand widening is counted');
 
   // Rows written before the rule was recorded carry the re-plan's own wording, and are read the same way.
+  // An admin's row (no operator-agent `intent`) using the same words is still counted.
   const id = randomUUID(), at = '2026-10-05T09:41:02.672Z';
-  const legacy = foldInterventions([{ seq: 1, workId: id, actor: master.id, kind: 'requirements', at, stageBefore: 'test', work: { key: 'GY-528', stage: 'test', plannedFiles: ['src/daemon/cycle-decisions.ts', 'src/daemon/cycle-approvers.ts'] },
-    details: { before: { plannedFiles: ['src/daemon/cycle-decisions.ts'] }, reason: 'Re-planned GY-528 onto the successors of the files it plans, which the base branch split or renamed; nothing is removed: src/daemon/cycle-approvers.ts (successor of src/daemon/cycle-decisions.ts via 58d8ab79364b)', liveScopeWidening: true } }], [], at);
-  assert.deepEqual(legacy.interventions, []);
+  const legacyReason = 'Re-planned GY-528 onto the successors of the files it plans, which the base branch split or renamed; nothing is removed: src/daemon/cycle-approvers.ts (successor of src/daemon/cycle-decisions.ts via 58d8ab79364b)';
+  const legacyRow = (details: Record<string, unknown>) => ({ seq: 1, workId: id, actor: master.id, kind: 'requirements', at, stageBefore: 'test', work: { key: 'GY-528', stage: 'test', plannedFiles: ['src/daemon/cycle-decisions.ts', 'src/daemon/cycle-approvers.ts'] },
+    details: { before: { plannedFiles: ['src/daemon/cycle-decisions.ts'] }, reason: legacyReason, liveScopeWidening: true, ...details } });
+  assert.deepEqual(foldInterventions([legacyRow({ intent: { reason: legacyReason } })], [], at).interventions, []);
+  assert.deepEqual(foldInterventions([legacyRow({})], [], at).interventions.map(entry => entry.kind), ['scope-widening']);
 });
