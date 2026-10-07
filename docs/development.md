@@ -23,4 +23,4 @@ A required check failing on the base head too: no rework, no approver (waiting w
 
 ### Documentation that rarely conflicts
 
-Conflicts only in `docs/**/*.md` get docs-sync, not rework: the base merges in keeping both sides; approval stays if non-docs diff holds. A docs-sync session already in Herdr is adopted, never relaunched; one whose runtime stops 3 minutes without pushing returns the conflict to a worker then, not at its 30-minute bound.
+Conflicts only in `docs/**/*.md` get docs-sync, not rework: the base merges in keeping both sides; approval stays if non-docs diff holds. A Claude docs-sync session loads only user settings plus its role file (`.graphyard/harness/docs-sync-*.json`, removed when it settles), never the master's push deny: it pushes its merge only as `git push origin HEAD:refs/heads/BRANCH`. One already in Herdr is adopted, never relaunched; one whose runtime stops 3 minutes without pushing returns the conflict to a worker then, not at its 30-minute bound.

@@ -7,6 +7,7 @@ import InterventionsPage from './interventions';
 import GuidePage from './guide';
 import AutomationPage from './automation';
 import FleetPage from './fleet';
+import SetupPage from './setup';
 import WorkersPage from './workers';
 import ScenarioLibrary from '../scenarios';
 import ValidationView from '../validation';
@@ -77,7 +78,10 @@ export const views: readonly View[] = [
   { id: 'automation', icon: '◇', label: 'Operator automation', section: 'settings', adminOnly: true, visible: dashboard => configured(dashboard.features.automation), render: dashboard => <AutomationPage operatorAgents={dashboard.operatorAgents} operatorAgentsError={dashboard.operatorAgentsError} setView={dashboard.setView}/> },
   // The agent registry: a Settings page for the identities that may read it, since it names hosts and login homes.
   // Every agent's runtime, account, role and launch policy is configured and shown here (GY-170).
-  { id: 'agents', icon: '⛭', label: 'Agents', section: 'settings', visible: dashboard => ['admin', 'coordinator', 'reader', 'slice-lead'].includes(role(dashboard)), render: dashboard => <FleetPage api={dashboard.api} status={dashboard.status} observedAt={dashboard.observedAt}/> },
+  { id: 'agents', icon: '⛭', label: 'Agents', section: 'settings', visible: dashboard => ['admin', 'coordinator', 'reader', 'slice-lead'].includes(role(dashboard)), render: dashboard => <FleetPage api={dashboard.api} status={dashboard.status} observedAt={dashboard.observedAt} onOpenSetup={role(dashboard) === 'admin' ? () => dashboard.setView('setup') : undefined}/> },
+  // The first-run checklist (GY-1419), for the admin who sets Graphyard up: the sign-in link `graphyard up` prints opens it,
+  // and Settings → Agents links to it, so it is not a navigation entry of its own.
+  { id: 'setup', icon: '✔', label: 'Setup', adminOnly: true, render: dashboard => <SetupPage status={dashboard.status} api={dashboard.api} setView={dashboard.setView}/> },
   { id: 'guide', icon: '?', label: 'How Graphyard works', render: () => <GuidePage/> },
 ];
 

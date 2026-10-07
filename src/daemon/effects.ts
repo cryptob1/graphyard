@@ -14,6 +14,7 @@ import { successorWidening } from '../model/successors.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type HostMemoryReading, type ResourceReclaimReport, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
+import { healUserSupervision, type UserSupervisionAllowance, type UserSupervisionHeal } from '../user-manager.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
@@ -177,6 +178,8 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   planeHealth?: () => Promise<string | null>;
   /** This host's memory (GY-612): below its floor, new launches are deferred. A loop wired without it never defers. */
   hostMemory?: () => Promise<HostMemoryReading | null>;
+  /** GY-1428: revive this host's silent user manager and start its declared slots found down, as the step allows (user-manager.ts). */
+  healHostSupervision?: (allow: UserSupervisionAllowance) => Promise<UserSupervisionHeal>;
   /** GY-1008: probe a blocker's cause as the next attempt meets it (blocker-probes.ts), and record it as the coordinator; a pass clears it. */ probeBlocker?: (work: Work, classification: BlockerClassification) => Promise<BlockerProbeResult | null>; recordBlockerProbe?: (work: Work, body: BlockerProbeRecord) => Promise<Work>;
   /**
    * Requests one routine decision with the master's own operator-agent identity and returns it.
@@ -655,7 +658,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     closeSession: pane => closeHerdrPane(pane, run),
     reclaimResources: (work, agents) => reclaimResources(root, withRoleDefaults(current()), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
     planeHealth: () => dispatchRefusal(current().url, fetcher),
-    hostMemory: readHostMemory,
+    hostMemory: readHostMemory, healHostSupervision: allow => healUserSupervision(root, {}, allow),
     probeBlocker: (work, classification) => loopBlockerProbe(current(), root, run, () => dispatchRefusal(current().url, fetcher))(work, classification), recordBlockerProbe: (work, body) => mutate(`work/${work.id}/blocker-probe`, body) as Promise<Work>,
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
@@ -744,7 +747,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // two commands, instead of a request that fails on every retry; provisioning the identity brings them back on the next reload, with no restart.
     get decide() { return current().operatorAgent ? decide : undefined; },
     get approver() { return current().operatorAgent ? approver : undefined; },
-    get docsSync() { return current().operatorAgent ? docsSyncing.docsSync : undefined; }, conflictPaths: docsSyncing.conflictPaths,
+    get docsSync() { return current().operatorAgent ? docsSyncing.docsSync : undefined; }, conflictPaths: docsSyncing.conflictPaths, docsSyncSettled: docsSyncing.docsSyncSettled,
     get withdraw() { return current().operatorAgent ? withdraw : undefined; },
     get resume() { return current().operatorAgent ? resume : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },

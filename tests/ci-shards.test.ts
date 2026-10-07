@@ -19,13 +19,13 @@ const workflowJob = (text: string, id: string) => {
   return end < 0 ? rest : rest.slice(0, end + 1);
 };
 
-test('unit:ci-sharded — the required test check aggregates a matrix of five duration-balanced shards that finish within 20% of each other, and passes only when every shard passes', async () => {
+test('unit:ci-sharded — the required test check aggregates a matrix of six duration-balanced shards that finish within 20% of each other, and passes only when every shard passes', async () => {
   const ci = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
   // Branch protection is unchanged: the check it names is still the job `test`, now an aggregate.
   const jobs = readWorkflow(ci).jobs.map(job => job.id);
   for (const id of ['test', 'test-shard', 'test-browser']) assert.ok(jobs.includes(id), `ci.yml defines ${id}`);
   const shard = workflowJob(ci, 'test-shard'), aggregate = workflowJob(ci, 'test');
-  assert.match(shard, /matrix:\n\s+shard: \[1, 2, 3, 4, 5\]/, 'five shards by default');
+  assert.match(shard, /matrix:\n\s+shard: \[1, 2, 3, 4, 5, 6\]/, 'six shards by default');
   assert.match(shard, /fail-fast: false/, 'one failing shard does not hide the others');
   assert.match(shard, /SHARD: \$\{\{ matrix\.shard \}\}\/\$\{\{ strategy\.job-total \}\}/, 'each shard knows its index and the matrix size');
   assert.match(shard, /node scripts\/ci-tests\.mjs select --out "\$RUNNER_TEMP\/selected-tests\.txt"/);
@@ -36,12 +36,12 @@ test('unit:ci-sharded — the required test check aggregates a matrix of five du
   assert.match(aggregate, /test "\$SHARDS" = success && test "\$BROWSER" = success/, 'passes only when every shard and the browser suite passed');
   assert.match(aggregate, /timing-report\.ts "\$RUNNER_TEMP\/graphyard-timing\.jsonl" "\$RUNNER_TEMP"\/timing\/test-\*\.log/, 'timing annotations still land on the required check');
 
-  // The recorded durations cover the suite, and the five shards they give finish within 20%.
+  // The recorded durations cover the suite, and the six shards they give finish within 20%.
   const tests = listTestFiles(), durations = readDurations();
   const recorded = tests.filter(file => Number.isFinite(durations[file]));
   assert.ok(recorded.length >= tests.length * 0.9, `tests/helpers/timing-baseline.json records ${recorded.length} of ${tests.length} test files; refresh it with node scripts/ci-tests.mjs durations`);
-  const shards = shardFiles(tests, durations, 5);
-  assert.equal(shards.length, 5);
+  const shards = shardFiles(tests, durations, 6);
+  assert.equal(shards.length, 6);
   assert.deepEqual(shards.flatMap(entry => entry.files).sort(), tests, 'every test file runs on exactly one shard');
   assert.ok(shardImbalance(shards) <= 0.2, `shards finish within 20% of each other: ${shards.map(entry => Math.round(entry.durationMs / 1000)).join('s, ')}s`);
 
