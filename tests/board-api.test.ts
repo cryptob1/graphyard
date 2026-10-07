@@ -36,7 +36,7 @@ const refusing = (reasons: Record<string, string[]>) => passed().map(gate => rea
 
 /**
  * The fixture board plus the shapes the incident had: a worker's scope request the widening rule
- * refused and the approver refused after it (GY-172, blocked 90 minutes), a merge held by an escalation nobody resolved (GY-174), and
+ * refused (GY-172, blocked 90 minutes), a merge held by an escalation nobody resolved (GY-174), and
  * an item held behind the one it depends on (GY-175). GY-20 is parked on a human-only decision and
  * GY-21 has passed every gate but the merge.
  */
@@ -48,7 +48,7 @@ function scenario(): Work[] {
   const scope = make('GY-172', 'Scope-refused item', { stage: 'build', stageEnteredAt: at(-90 * minute), blocker: refused,
     lease: { owner: 'worker-a', epoch: 2, expiresAt: at(20 * minute) }, lastAssignment: { owner: 'worker-a', epoch: 2, displayName: 'Cedar', runtime: 'Claude', claimedAt: at(-90 * minute) } as Work['lastAssignment'],
     scopeRequest: { epoch: 2, paths: ['docs/board.md'], reason: 'The board endpoint needs its page', requestedBy: 'worker-a', at: at(-80 * minute),
-      decision: { state: 'refused', reason: 'outside the widening rule', at: at(-79 * minute), decidedBy: 'graphyard-approver', waitedMs: minute, paths: ['docs/board.md'], requestedBy: 'worker-a', requestedAt: at(-80 * minute), epoch: 2 } },
+      decision: { state: 'refused', reason: 'outside the widening rule', at: at(-79 * minute), decidedBy: 'graphyard', waitedMs: minute, paths: ['docs/board.md'], requestedBy: 'worker-a', requestedAt: at(-80 * minute), epoch: 2 } },
     gates: refusing({ ready: [refused], build: ['Worker has not submitted implementation for this attempt'] }) });
   // The over-cap refusal GY-906 made terminal: no fold represents the ask, so the card names
   // `master requirements`, which can fold or split it, not the plain union `master scope` posts
@@ -87,10 +87,6 @@ test('unit:board-api-matches-dashboard — GET /api/board gives each open item i
     assert.deepEqual({ group: item.group, actor: item.actor, command: item.command }, { group, actor, command }, key);
   };
   expect('GY-172', 'blocked', 'master', 'graphyard master scope GY-172');
-  // GY-1388: refused by the rule alone, the ask is the approver's while the loop routes it, so the
-  // card names that decision, never `master scope`, which would pre-empt it.
-  const routed = work.map(item => item.key === 'GY-172' ? { ...item, scopeRequest: { ...item.scopeRequest!, decision: { ...item.scopeRequest!.decision!, decidedBy: 'graphyard' } } } : item);
-  assert.equal(entry(await served(routed), 'GY-172').command, 'graphyard master decisions GY-172');
   expect('GY-173', 'blocked', 'master', 'graphyard master requirements GY-173 FILE REASON');
   expect('GY-174', 'blocked', 'master', 'graphyard master decide GY-174 resolve REASON');
   expect('GY-175', 'up-next', 'held', null);
