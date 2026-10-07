@@ -50,12 +50,12 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
   const markRework = (work: string, head: string, base: string) => {
     state.conflicts = state.conflicts.map(entry => entry.work === work && entry.head === head && entry.base === base ? { ...entry, route: 'rework' } : entry);
   };
-  /** Close a docs-sync session's tab, if Herdr still lists it, give its registry session back, and remove its role file (GY-1433). */
   /** Close a docs-sync session's tab, if Herdr still lists it. */
   const stop = async (watch: DocsSyncWatch) => {
     const listed = watch.agentName ? (await sessions()).agents.find(agent => agent.name === watch.agentName) : undefined;
     if (listed?.pane_id) { try { await effects.closeSession(listed.pane_id); } catch { /* the session report closes it once the pane is gone */ } inventorySpent(); }
   };
+  /** Close a docs-sync session's tab, if Herdr still lists it, give its registry session back, and remove its role file (GY-1433). */
   const settle = async (item: Work | undefined, watch: DocsSyncWatch, why: string) => {
     await stop(watch);
     if (watch.session && effects.endRegistrySession) { await effects.endRegistrySession(watch.session, why.slice(0, 500)).catch(() => undefined); watch.session = null; }
