@@ -29,6 +29,8 @@ import { carriedDecision } from '../model/concerns.js';
 import { masterTurnWaitBoundMs } from './decisions.js';
 import { blockedAttemptMarker } from '../model/capacity.js';
 import { credentialBlockedMarker } from '../worker-credential.js';
+import { baseConflictWaitBoundMs } from '../cli/actorless-submissions.js';
+export { baseConflictWaitBoundMs };
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
 export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[];
@@ -185,8 +187,6 @@ export function owedContainmentLine(work: Work | undefined, text: string): boole
 }
 /** Whether the item still holds a fence the loop is not settling: standing and past containmentInMotion's bound. */
 const standingFence = (work: Work | undefined, now: number) => !!work?.containmentQuarantine && !containmentInMotion(work, now);
-import { baseConflictWaitBoundMs } from '../cli/actorless-submissions.js';
-export { baseConflictWaitBoundMs };
 /**
  * GY-1269. Whether an owed line names the item's rework decision: its open action is `request-rework`
  * and the line carries that action's own owed decision (`needsHuman.decision`), the phrase
