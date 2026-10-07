@@ -26,7 +26,7 @@ All lanes require `e2e:` proofs; low/medium reworks need no approver (approved b
 
 ![Bootstrap: one supervised worker; normal operation: a fleet.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: bootstrap, the operator supervises one worker; later the master dispatches many.
+Text equivalent: in bootstrap the human operator supervises one worker; later the master dispatches many, each with own credential.
 
 ![Authority of operator, Graphyard, Herdr sessions, reviewer, producer.](diagrams/roles-and-authority.svg)
 
@@ -38,4 +38,4 @@ Text equivalent: operator makes human-only decisions; Herdr hosts master (`coord
 
 Text equivalent: mutations, events commit in locked Postgres transactions; reconciliation syncs GitHub, which merges passing heads; webhooks wake jobs.
 
-Gates deterministically check one candidate, `(PR, head SHA, base SHA)`; claims bump epoch; latest trusted proof wins; merge isn't [delivery](delivery.md).
+Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`; claims bump the epoch; latest trusted proof wins; merge is not [delivery](delivery.md).
