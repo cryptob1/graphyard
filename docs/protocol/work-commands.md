@@ -14,7 +14,7 @@ All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#th
 - `claim` `{}`; `heartbeat`, `release` `{"epoch":1}`; `release` may carry `"cause"` or `"failure":{"message":…}` (`workspace.failed`; an untouched claim keeps its epoch); `blocked` `{"epoch":1,"reason":…,"partialWork":…}` (a reason releases; null clears); `blocker-probe` (coordinator; a `pass` clears a routine [blocker](leases.md#blocked-work-unblocks-itself)); `workspace` `{"epoch":1,"host":…,"path":…,"branch":"graphyard/gy-1-1"}`, optional `preserved` (`workspace.preserved`).
 - `submit`: `{"epoch":1,"pr":123}`; `409` if a non-`plannedFiles` file [regresses shipped code](../coordination.md#refuse-candidates-that-revert-shipped-code-outside-their-scope) or an applied retro check fails.
 - `deployment`: `{"sha":…, "mergeSha":…, "source":"endpoint", "observedAt":…}`; coordinator/admin, delivered work, once.
-- `triage` `{judgement}` (coordinator): [backlog](../master-agent.md#machine-filed-backlog); review follow-ups are never filed.
+- `triage` `{judgement}` (coordinator): [backlog](../master-agent.md#machine-filed-backlog); review follow-ups are never filed. An approver-refused closure returns to triage with its reason; the same closure on an unchanged item is dropped unrecorded.
 - `POST /api/retro/synthesize` (coordinator/admin) drafts [retro artefacts](../operations-reference.md#retro-synthesis) as caller; `POST /api/retro/ID/approve|refuse` `{reason}` by its rules (`403`; `409` once judged).
 
 No endpoint sets lifecycle state.

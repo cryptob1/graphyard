@@ -112,3 +112,73 @@ test('unit:triage-concurrency-setting — run.research.triageConcurrency sets ho
   await triageSettled();
   assert.throws(() => researchSettings({ research: { triageConcurrency: 0 } }));
 });
+
+// GY-1448: an approver refused triage's closure of GY-1447, and every later triage pass proposed the
+// same closure with a fresh judgement time, binding a new close decision and another approver session.
+const refusedAt = hours(1);
+const refusedClosure = (overrides: Partial<Work> = {}) => item('GY-1447', 'Recurring action:dispatch faults: 4 in 24 hours', hours(48), { type: 'bug', updatedAt: refusedAt,
+  triage: { judgement: { outcome: 'close', ref: 'GY-1427', reason: 'GY-1427 fixed it' }, state: 'refused', by: 'graphyard', at: refusedAt, decision: 'd-1', refusal: 'GY-1427 fixed only the dispatch half; rescope this item to the rest' }, ...overrides } as Partial<Work>);
+
+test('unit:triage-refused-closure-not-reproposed — the closure an approver refused, proposed again on unchanged evidence, is never recorded, so no close decision is requested across repeated triage passes', async t => {
+  t.after(clearTriageRuns);
+  const work = refusedClosure();
+  const recorded: TriageJudgement[] = [];
+  const { runner, starts } = fakeRunner(() => ({ outcome: 'close', ref: 'GY-1427', reason: 'GY-1427 fixed it, again' }));
+  const step = (items: Work[], clock = NOW) => triageStep({ work: items, clock, settings: researchSettings({ research: {} }), config: { repository: 'owner/project' }, cwd: process.cwd(), runner, record: async (_, body) => { recorded.push(body.judgement); } });
+  assert.equal(neededDecision(work, { autoMerge: true }), null, 'a refused closure needs no decision');
+  assert.deepEqual(step([work]).map(action => action.state), ['started']);
+  await triageSettled();
+  assert.equal(recorded.length, 0, 'the repeated closure is dropped unrecorded, so the item never carries a proposed closure');
+  for (const clock of [NOW + 6 * 60_000, NOW + 12 * 60_000, NOW + 3_600_000]) {
+    const actions = step([work], clock);
+    assert.deepEqual(actions.map(action => action.state), ['held'], 'later passes start no session for it');
+    assert.match(actions[0]!.detail, /proposed again the closure \(superseded of GY-1427\) the approver refused .*requests no close decision/);
+    await triageSettled();
+  }
+  assert.equal(starts.length, 1);
+  assert.equal(recorded.length, 0);
+  assert.equal(neededDecision(work, { autoMerge: true }), null);
+  // A merge into the refused ref is the same closure (duplicate of GY-1427) only when the refusal was of a merge.
+  const merged = refusedClosure({ triage: { judgement: { outcome: 'merge', into: 'GY-1427', reason: 'same' }, state: 'refused', by: 'graphyard', at: refusedAt, refusal: 'no' } } as Partial<Work>);
+  clearTriageRuns(); starts.length = 0;
+  const mergeAgain = fakeRunner(() => ({ outcome: 'merge', into: 'GY-1427', reason: 'same again' }));
+  triageStep({ work: [merged], clock: NOW, settings: researchSettings({ research: {} }), config: { repository: 'owner/project' }, cwd: process.cwd(), runner: mergeAgain.runner, record: async (_, body) => { recorded.push(body.judgement); } });
+  await triageSettled();
+  assert.equal(recorded.length, 0);
+  // Once the item's evidence changes after the refusal, triage judges it again and a closure it proposes is recorded.
+  clearTriageRuns();
+  const changed = refusedClosure({ updatedAt: hours(0.5), description: 'Amended: the dispatch half is fixed by GY-1427, and so is the rest' });
+  assert.deepEqual(step([changed]).map(action => action.state), ['started']);
+  await triageSettled();
+  assert.deepEqual(recorded.map(judgement => judgement.outcome), ['close']);
+});
+
+test('unit:triage-sees-closure-refusal — triage judging an item whose closure was refused is told the refusal, and its release or a closure on new evidence is recorded', async t => {
+  t.after(clearTriageRuns);
+  const recorded: TriageJudgement[] = [];
+  const run = (answer: TriageJudgement) => {
+    clearTriageRuns();
+    const { runner, starts } = fakeRunner(() => answer);
+    triageStep({ work: [refusedClosure()], clock: NOW, settings: researchSettings({ research: {} }), config: { repository: 'owner/project' }, cwd: process.cwd(), runner, record: async (_, body) => { recorded.push(body.judgement); } });
+    return starts;
+  };
+  const starts = run({ outcome: 'release', priority: 2, reason: 'rescoped to the half GY-1427 left' });
+  const prompt = starts[0]!.prompt;
+  assert.match(prompt, /No judgement of it stands/);
+  assert.match(prompt, /proposed closing it \(superseded of GY-1427\) and the independent approver refused that closure at \S+: "GY-1427 fixed only the dispatch half; rescope this item to the rest"\./);
+  assert.match(prompt, /Do not propose that closure \(superseded of GY-1427\) again/);
+  assert.match(prompt, /release it with a priority, rescoped to the work it still names, or close or merge it on a different ref the refusal did not weigh/);
+  await triageSettled();
+  assert.deepEqual(recorded, [{ outcome: 'release', priority: 2, reason: 'rescoped to the half GY-1427 left' }], 'a release follows the refusal');
+  run({ outcome: 'close', ref: 'GY-1440', reason: 'GY-1440 fixed the rest, delivered after the refusal' });
+  await triageSettled();
+  assert.deepEqual(recorded.at(-1), { outcome: 'close', ref: 'GY-1440', reason: 'GY-1440 fixed the rest, delivered after the refusal' }, 'a closure naming new evidence is recorded');
+  const proposed = refusedClosure({ triage: { judgement: recorded.at(-1)!, state: 'proposed', by: 'graphyard', at: NOW.toString() } } as Partial<Work>);
+  assert.equal(neededDecision(proposed, { autoMerge: true })?.input?.ref, 'GY-1440');
+  // A judgement never refused carries no refusal into the prompt.
+  clearTriageRuns();
+  const fresh = fakeRunner(() => null);
+  triageStep({ work: [stale], clock: NOW, settings: researchSettings({ research: {} }), config: { repository: 'owner/project' }, cwd: process.cwd(), runner: fresh.runner, record: async () => {} });
+  assert.doesNotMatch(fresh.starts[0]!.prompt, /approver refused/);
+  await triageSettled();
+});
