@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { deploymentObservationSchema, emptyDaemonState, readDaemonState, runDaemon, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { performSelfUpgrade, recoverMovedHead } from '../src/daemon/upgrade.js';
-import { awaitLoopPredecessor, loopPredecessorVariable, reexecuteUnsupervised, type UnsupervisedReexecution } from '../src/daemon/reexec.js';
+import type { UnsupervisedReexecution } from '../src/daemon/reexec.js';
 import { readRelease } from '../src/executor-fleet.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -25,6 +25,9 @@ const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url))
 const clock = Date.parse('2030-01-01T12:00:00.000Z');
 const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 const hex = (letter: string) => letter.repeat(40);
+// Loaded inside each test, so a checkout without the re-execution fails its proofs as test cases.
+const reexecution = () => import('../src/daemon/reexec.js');
+const loopPredecessorVariable = 'GRAPHYARD_LOOP_PREDECESSOR';
 const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, '-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@example.com', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 async function fixture() {
@@ -76,6 +79,8 @@ function recordedReexecution(root: string, onKill: (pid: number, signal: NodeJS.
 }
 
 test('unit:master-loop-supervised-restart — a loop no supervisor unit runs re-executes itself onto the checkout: it starts its successor detached and stops by its own SIGTERM, and the successor waits for it to exit', async () => {
+  const { awaitLoopPredecessor, reexecuteUnsupervised } = await reexecution();
+  assert.equal((await reexecution()).loopPredecessorVariable, loopPredecessorVariable);
   const { root, master } = await fixture();
   // The successor is `master run` from the coordinator checkout, detached, told which loop it replaces.
   const recorded = recordedReexecution(root);
@@ -116,6 +121,7 @@ test('unit:master-loop-supervised-restart — a loop no supervisor unit runs re-
 });
 
 test('unit:loop-self-upgrade-after-verified-deployment — once a delivery is verified deployed, an unsupervised loop checks out the base tip, re-executes onto it between cycles and releases its lock, and its successor loads that tip', async () => {
+  const { reexecuteUnsupervised } = await reexecution();
   const { master } = await fixture();
   const repo = await temporaryDirectory('loop-reexec-repo');
   await writeFile(join(repo, 'README.md'), 'first\n');
