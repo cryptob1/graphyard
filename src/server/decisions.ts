@@ -305,7 +305,7 @@ export async function applyThroughEngine(services: Services, decision: DecisionR
       // path; a diagnostician's closure (GY-439) closes the item directly, with the approval's own
       // composed reason, ending a worker's live lease (GY-1463).
       if (input.triageAt !== undefined) return applyTriageClosure(services, actor, decision.workId, input, decision.id, key);
-      const work = await closeWork(services, actor, decision.workId, { kind: input.kind, reason, ref: input.ref ?? null }, key, { decided: true });
+      const work = await closeWork(services, actor, decision.workId, { kind: input.kind, reason, ref: input.ref ?? null }, key, { decided: { expectedRevision: input.expectedRevision } });
       return `Closed ${work.key} as ${input.kind}${input.ref ? ` of ${input.ref}` : ''}`;
     }
     case 'grant': { const grant = await services.proofGrants.grant(actor, input.principal, { patterns: input.patterns, reason, ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }) }, key); return `Granted ${input.patterns.join(', ')} to ${input.principal} (grant revision ${grant.revision})`; }

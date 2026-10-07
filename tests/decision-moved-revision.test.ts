@@ -10,6 +10,9 @@ import { Store } from '../src/store.js';
 import type { Principal } from '../src/model.js';
 import type { Work } from '../src/model/work.js';
 import { approvalConflict } from '../src/model/approval.js';
+import * as decisionsModule from '../src/server/decisions.js';
+import type { DecisionRecord } from '../src/server/decision-ledger.js';
+import type { Services } from '../src/server/routes.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1463: a requested decision binds the item revision it was requested at, and a worker's lease
@@ -75,11 +78,12 @@ async function start() {
     const read = await current(work);
     return call(master.token, `work/${work.key}/decide`, { action: 'close', input: { kind: 'duplicate', ref: of.key, expectedRevision: read.revision }, reason: `${work.key} duplicates ${of.key}` });
   };
-  return { engine, store, operator, implementer, master, approver, credentials, send, call, decision, current, create, leased, renew, session, requestClose };
+  const services = { engine, github: null, repository } as unknown as Services;
+  return { engine, store, services, operator, implementer, master, approver, credentials, send, call, decision, current, create, leased, renew, session, requestClose };
 }
 
 test('integration:decision-survives-lease-renewal — a close requested on a leased item applies after the lease renewed many times, and settles stale naming a new submission', { timeout: 180_000 }, async () => {
-  const { approver, send, decision, current, create, leased, renew, session, requestClose, engine, implementer } = await plane();
+  const { approver, send, decision, current, create, leased, renew, session, requestClose, engine, implementer, services } = await plane();
   const original = await create('original');
 
   // Lease renewals and session records between the request and the approval cannot affect a close's grounds.
@@ -110,6 +114,21 @@ test('integration:decision-survives-lease-renewal — a close requested on a lea
   assert.equal(stale.state, 'stale');
   assert.match(stale.outcome, /^A new submission \(pull request #1463/);
   assert.equal((await current(submitting)).stage, 'build', 'nothing was closed');
+
+  // A replacement claim between the approval's transaction and the close's own: the approval judged
+  // the first epoch's lease, so the close refuses to end the second's, naming the epoch change.
+  const reclaimed = await leased('reclaimed');
+  const third = await requestClose(reclaimed, original);
+  await renew(reclaimed, 2);
+  const judged = { ...third, input: { ...third.input, expectedRevision: (await current(reclaimed)).revision } } as DecisionRecord;
+  await engine.execute(implementer, 'release', reclaimed.id, { epoch: reclaimed.epoch }, randomUUID());
+  const replacement = await engine.execute(implementer, 'claim', reclaimed.id, {}, randomUUID());
+  assert.ok(replacement.lease && replacement.lease.epoch > reclaimed.epoch, 'a replacement claimed the item');
+  const applyThroughEngine: typeof decisionsModule.applyThroughEngine = (...args) => decisionsModule.applyThroughEngine(...args);
+  await assert.rejects(applyThroughEngine(services, judged, { id: approver.id, role: 'operator-agent' } as Principal, 'Both items build the same change'),
+    (error: Error) => /^A lease epoch change \(epoch \d+ to epoch \d+\) since approved revision \d+ moved the decision's grounds; the close was not applied$/.test(error.message));
+  const kept = await current(reclaimed);
+  assert.deepEqual([kept.stage, kept.lease?.epoch], ['build', replacement.lease!.epoch], 'the replacement epoch is neither closed nor ended');
 });
 
 test('integration:decision-moved-revision-independence — on a moved revision the requester, an implementer and an evidence producer are still refused, and an approval binds the input it judged', { timeout: 180_000 }, async () => {
@@ -165,4 +184,8 @@ test('unit:decision-grounds-change — renewals, liveness, observations and sess
   assert.match(decisionGroundsChange(base, { ...renewed, epoch: 2, lease: { owner: 'other', epoch: 2, expiresAt: 'x' } }) ?? '', /^a lease epoch change \(epoch 1 to epoch 2\)$/);
   assert.match(decisionGroundsChange(base, { ...renewed, lease: null }) ?? '', /^a lease epoch change \(epoch 1 to no lease\)$/);
   assert.equal(decisionGroundsChange(base, { ...renewed, blocker: { reason: 'stuck' } } as unknown as Work), 'a change to its blocker');
+  // An unpinned resolve rests on the escalation it names: a replaced escalation moves its grounds, nobody else's.
+  const raised = { ...renewed, escalations: [{ trigger: 'lease-lost', at: 'later' }] } as unknown as Work;
+  assert.equal(decisionGroundsChange(base, raised), null);
+  assert.equal(decisionGroundsChange(base, raised, { escalations: true }), 'a change to its escalations');
 });

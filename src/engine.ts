@@ -376,12 +376,14 @@ export const decisionGroundsLookback = 1000;
  * bookkeeping (`sameBesideBookkeeping`), a lease renewal (the lease's expiry and the quarantine's
  * copy of it), the liveness of the launch, a GitHub observation and the sessions and workspaces
  * an attempt records cannot; a new submission or head, a stage move, a requirements or policy
- * revision, a lease epoch change or any other change to the item can.
+ * revision, a lease epoch change or any other change to the item can. A resolve judged without a
+ * pin rests on the escalation it names, so for it (`escalations`) a change to the standing
+ * escalations moves its grounds too.
  */
-export function decisionGroundsChange(read: Work, current: Work): string | null {
+export function decisionGroundsChange(read: Work, current: Work, options: { escalations?: boolean } = {}): string | null {
   const lease = (work: Work) => work.lease ? { owner: work.lease.owner, epoch: work.lease.epoch } : null;
   const quarantine = (work: Work) => {
-    if (!work.containmentQuarantine) return work.containmentQuarantine ?? null;
+    if (!work.containmentQuarantine) return null;
     const { leaseExpiresAt: _lease, launchExpiresAt: _launch, launchAcknowledgedAt: _acknowledged, ...fence } = work.containmentQuarantine;
     return fence;
   };
@@ -391,6 +393,7 @@ export function decisionGroundsChange(read: Work, current: Work): string | null 
   if (changed(work => [work.stage, work.ready])) return `a stage move (${read.stage} to ${current.stage}${current.ready === read.ready ? '' : current.ready ? ', released' : ', unreleased'})`;
   if (changed(work => [work.policyRevision, work.policy, work.criteria, work.plannedFiles]))
     return `a requirements or policy revision (policy revision ${read.policyRevision} to ${current.policyRevision})`;
+  if (options.escalations && changed(work => [work.escalation, work.escalations])) return 'a change to its escalations';
   if (changed(work => [work.epoch, lease(work)])) return `a lease epoch change (${lease(read) ? `epoch ${read.lease!.epoch}` : 'no lease'} to ${lease(current) ? `epoch ${current.lease!.epoch}` : 'no lease'})`;
   const rest = (work: Work) => {
     const { actionQueue: _queue, revision: _revision, updatedAt: _updated, nextAction: _next, gates: _gates, lane: _lane, speedTarget: _target, sessions: _sessions,
@@ -406,10 +409,10 @@ export function decisionGroundsChange(read: Work, current: Work): string | null 
  * What moved a decision's grounds since `revision`, read from the ledger (`decisionGroundsChange`),
  * or null when nothing that could affect them did. A revision past the lookback cannot be re-checked.
  */
-export async function decisionGroundsMovedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number): Promise<string | null> {
+export async function decisionGroundsMovedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number, options: { escalations?: boolean } = {}): Promise<string | null> {
   if (revision === work.revision) return null;
   const read = await revisionAt(db, work, revision, decisionGroundsLookback);
-  return read ? decisionGroundsChange(read, work) : `more saves than its grounds can be re-checked across (revision ${revision}, now ${work.revision})`;
+  return read ? decisionGroundsChange(read, work, options) : `more saves than its grounds can be re-checked across (revision ${revision}, now ${work.revision})`;
 }
 
 /**
@@ -425,7 +428,7 @@ export async function revisionRebase<D extends Pick<Decision, 'id' | 'action' | 
   const revisionPinned = decision.action === 'release' || decision.action === 'unblock' || (decision.action === 'resolve' && !decision.pin)
     || (decision.action === 'close' && decision.input.triageAt === undefined && decision.input.expectedRevision !== undefined);
   if (!revisionPinned || decision.input.expectedRevision === work.revision) return { judged: decision, change: null };
-  const change = await decisionAppliedSince(db, work, decision.id) ?? await decisionGroundsMovedSince(db, work, decision.input.expectedRevision);
+  const change = await decisionAppliedSince(db, work, decision.id) ?? await decisionGroundsMovedSince(db, work, decision.input.expectedRevision, { escalations: decision.action === 'resolve' });
   return change ? { judged: decision, change } : { judged: { ...decision, input: { ...decision.input, expectedRevision: work.revision } }, change: null };
 }
 /** Another decision on the item applied after this one was requested, named, or null. */
