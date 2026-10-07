@@ -14,7 +14,7 @@ cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --repo OWNER/REPO   # 
 
 A new Hetzner server waits (exit 3) for operator price approval: rerun with `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`, passed to `install`.
 
-`up` runs every machine step in order: preflight, control plane, host supervisor and Herdr, onboarding, accounts, harness, master loop. Onboarding opens a `graphyard/onboarding` pull request with its files; goals wait for its merge. `.graphyard/up.json` records finished steps; a rerun skips them. A Herdr plugin bound to another server is never repointed (`--no-herdr`). A preflight failure (exit 2) names the [prerequisite](#1-machine-prerequisites) to fix.
+`up` runs every machine step in order: preflight, control plane, host supervisor and Herdr, onboarding, accounts, harness, master loop. Onboarding opens a `graphyard/onboarding` pull request with its files; goals wait for its merge. `.graphyard/up.json` records finished steps; a rerun skips them, reusing its `--repo`/`--provider` (conflicting ones are refused). Ctrl-C also stops the install child. A Herdr plugin bound to another server is never repointed (`--no-herdr`). A preflight failure (exit 2) names the [prerequisite](#1-machine-prerequisites) to fix.
 
 ## The Setup page
 
@@ -30,7 +30,7 @@ When all are green, **Describe what you want built** records a goal, like `graph
 
 ## Agent setup: graphyard up --agent
 
-Agents run `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary on stdout, exit `0` green, `1` failed, `2` prerequisite, `3` waiting. It creates the Apps in a Chrome profile signed in to GitHub (passed, else the master's; with neither, and no `--reuse-app` for both Apps, it exits `2`), recorded under `.graphyard/master-actions/`; connects host accounts; sets deployment variables from saved credentials; records FILE as a goal once. Only a device step becomes a `handoff` event: a subscription login's approval, or *Confirm access*, listing the page's methods: confirm once in your Chrome on the named sudo-protected page (re-checked every 10 s), or pass an authenticator or email code via the App page or `up --sudo-code CODE` (`email`: GitHub sends one; never recorded); GitHub Mobile only with `--github-mobile` (60 s unapproved adds the password link).
+Agents run `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-profile PROFILE]`: JSON events on stderr, summary on stdout, exit `0` green, `1` failed, `2` prerequisite, `3` waiting. It creates the Apps in a Chrome profile signed in to GitHub (passed, else the master's; with neither, and no `--reuse-app` for both Apps, it exits `2`), recorded under `.graphyard/master-actions/`; connects host accounts; sets deployment variables from saved credentials; records FILE as a goal once. Only a device step becomes a `handoff` event: a subscription login's approval, or *Confirm access*, listing the page's methods: confirm once in your Chrome on the named sudo-protected page (re-checked every 10 s), or pass an authenticator or email code via the App page or `up --sudo-code CODE` (`email`: GitHub sends one; never recorded); GitHub Mobile only with `--github-mobile` (60 s unapproved adds the password link). A drive that gives up hands off the still-served App page.
 
 ## Troubleshooting: the manual steps
 

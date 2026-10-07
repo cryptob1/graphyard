@@ -16,7 +16,7 @@ import { readSecretFromStdin } from './context.js';
 import { documentationDrift } from '../model/documentation.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
-import { describeUpEvent, runUp, upDependencies, upRequestFromArgs, upSudoCode } from '../up.js';
+import { upCommand } from '../up.js';
 
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
   const setup = await startGithubSetup(root, repository, deployment);
@@ -64,7 +64,8 @@ export const installCommands = defineCommands([
       '  up --sudo-code CODE|email',
       '                                First-run setup in one command: preflight, control plane,',
       '                                host supervisor and Herdr, onboarding, agent accounts,',
-      '                                harness and master loop, resumable (.graphyard/up.json).',
+      '                                harness and master loop, resumable (.graphyard/up.json; a',
+      '                                rerun reuses its --repo/--provider). Ctrl-C stops the install too.',
       '                                Onboarding files are published as a pull request; the goal',
       '                                waits for it to merge. Price and SSH flags pass to install.',
       '                                A step that needs a person prints one one-time link that signs',
@@ -74,19 +75,15 @@ export const installCommands = defineCommands([
       '                                approvals: Confirm access lists the page\'s methods, re-checked every 10 s',
       '                                (confirm in your Chrome, or --sudo-code a 6-digit authenticator/email code;',
       '                                email: GitHub sends one); --github-mobile: Mobile first, password link after',
-      '                                60 s. --reuse-app passes to install. Exit 0 green, 1 failed, 2 prereq, 3 waiting.',
+      '                                60 s; a drive that gives up hands off the still-served App page. --reuse-app',
+      '                                passes to install. Exit 0 green, 1 failed, 2 prereq, 3 waiting.',
     ],
     // `up` installs the control plane and records the connection; it never reads a stale one.
     readsConnection: () => false,
     async run(context) {
-      const args = [context.id, ...context.args].filter((value): value is string => value !== undefined);
-      const handed = await upSudoCode(context.repositoryRoot(), args);
-      if (handed) return context.print(handed);
-      const request = upRequestFromArgs(args);
-      const emit = (event: Parameters<typeof describeUpEvent>[0]) => console.error(request.agent ? JSON.stringify(event) : describeUpEvent(event));
-      const result = await runUp(request, upDependencies(context.repositoryRoot(), await context.activeCliPath(), request, emit));
+      const result = await upCommand(context.repositoryRoot(), () => context.activeCliPath(), [context.id, ...context.args].filter((value): value is string => value !== undefined));
       context.print(result);
-      process.exitCode = result.exitCode;
+      if ('exitCode' in result) process.exitCode = result.exitCode;
     },
   },
   {
