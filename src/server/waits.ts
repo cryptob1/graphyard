@@ -2,7 +2,7 @@ import { createCipheriv, createHash, publicEncrypt, randomBytes, randomUUID, con
 import type pg from 'pg';
 import { activeLease, demand, operatorScopeIncludes, type Principal, type Work } from '../model.js';
 import { capacityEventSchema, capacityRetryAt, capacitySignature, retainedExhaustions, type CapacityState, type ExhaustionRecord } from '../model/capacity.js';
-import { describeHumanRequest, humanAnswerSchema, humanDecisionLabel, humanOnlyReadsDecisions, humanOnlyRefusal, humanRequestBlocker, humanRequestSchema, openHumanOnly, parkRule, resolveHumanAnswer, retainedHumanRequests, type HumanOnlySubject, type HumanRequest } from '../model/human-request.js';
+import { describeHumanRequest, humanAnswerSchema, humanDecisionLabel, humanOnlyReadsDecisions, humanOnlyRefusal, humanRequestBlocker, humanRequestSchema, openHumanOnly, parkRefusal, parkRule, resolveHumanAnswer, retainedHumanRequests, type HumanOnlySubject, type HumanRequest } from '../model/human-request.js';
 import { decisionsByWork } from './decision-ledger.js';
 import { endAttempt, recordIntervention } from '../pipeline-speed.js';
 import { save } from '../store.js';
@@ -61,6 +61,8 @@ async function blockerRecordedBy(db: Db, workId: string, epoch: number, owner: s
  */
 export async function requestHumanDecision(services: Services, actor: Principal, id: string, body: unknown, key: string) {
   const data = humanRequestSchema.parse(body);
+  const misdirected = parkRefusal(data);
+  demand(!misdirected, misdirected!, 422);
   const fingerprint = digest({ id, park: data });
   return services.engine.store.transaction(async (db, now) => {
     const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
