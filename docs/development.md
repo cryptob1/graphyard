@@ -29,7 +29,7 @@ A required check failure the base branch head fails too is a base failure: the l
 
 ### Documentation that rarely conflicts
 
-Candidates conflicting only in `docs/**/*.md` get docs-sync, not rework: base merges in keeping both sides, and approval stays if the non-docs diff is unchanged.
+Candidates conflicting only in `docs/**/*.md` get docs-sync, not rework: base merges in keeping both sides, and approval stays if the non-docs diff is unchanged. A docs-sync session already running in Herdr is adopted, never relaunched; one whose runtime stops for 3 minutes without pushing returns the conflict to a worker then, not at its 30-minute bound.
 
 ## Trusted contracts
 
