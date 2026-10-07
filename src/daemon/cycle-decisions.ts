@@ -9,7 +9,7 @@ import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonAct
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
 import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
-import { decisionReads, lateDecisionRead, resumedApplication } from './decision-reads.js';
+import { decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication } from './decision-reads.js';
 import { record } from './effects.js';
 import type { FaultKind } from '../model/fault-classes.js';
 import type { Cycle } from './cycle.js';
@@ -247,9 +247,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     } catch (error) {
       // A history read that only missed the step's deadline judged nothing (GY-1293): one alone is
       // no decision fault, and its request is asked again next cycle; the second in a row counts.
+      // An item delivered after the snapshot needs no decision (GY-1405): the refusal is no fault.
       const detail = `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`;
-      const late = lateDecisionRead(detail) && !(previous?.state === 'failed' && lateDecisionRead(previous.detail));
-      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, late ? null : undefined));
+      const moot = deliveredMeanwhile(detail), late = lateDecisionRead(detail) && !(previous?.state === 'failed' && lateDecisionRead(previous.detail));
+      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: moot ? `${detail}; ${item.key} was delivered after this cycle's snapshot, so it needs no ${decision.action} decision` : detail, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, late || moot ? null : undefined));
     }
   };
   /**
@@ -481,7 +482,13 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         }
       } catch (error) {
         withdrawn = false; watch.closeAttempts += 1;
-        await note(`approver:${watch.decision}:withdrawn`, item, 'decision', 'failed', `Could not withdraw ${watch.action} decision ${watch.decision}, which ${watch.work} no longer needs: ${message(error)}`);
+        // GY-1405: a history read that only missed the step's deadline judged nothing, as on the
+        // request path (GY-1293): one alone is no fault, and the withdrawal is tried next cycle; the
+        // second in a row counts. A withdrawal refused on an item delivered meanwhile is moot.
+        const withdrawKey = `approver:${watch.decision}:withdrawn`, prior = state.actions[withdrawKey];
+        const detail = `Could not withdraw ${watch.action} decision ${watch.decision}, which ${watch.work} no longer needs: ${message(error)}`;
+        const late = lateDecisionRead(detail) && !(prior?.state === 'failed' && lateDecisionRead(prior.detail));
+        await note(withdrawKey, item, 'decision', 'failed', detail, now(), late || deliveredMeanwhile(detail) ? null : undefined);
       }
     }
     // An item no longer open has no pane to close, but its registry session still holds a slot.

@@ -346,6 +346,8 @@ export interface ApplyDependencies {
    * a second principals registry and never opens an App page of its own.
    */
   installed?: { directory: string; githubApp: { appId: number; slug: string } };
+  /** Write each worker profile's credential file (GY-1412). Explicit, never implied: only `init --apply` passes it. */
+  writeCredentials?: boolean;
 }
 
 /**
@@ -397,7 +399,7 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   ];
   const principalsPath = resolve(directory, 'principals.json');
   if (dependencies.installed) unchanged.push(`principal and grant registry (managed by graphyard install in ${dependencies.installed.directory}; not written here)`);
-  else await writePrincipals();
+  const merged = dependencies.installed ? null : await writePrincipals();
   async function writePrincipals() {
     let previous: unknown = null;
     try {
@@ -413,6 +415,7 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
     if (previous && canonicalJson(previous) === canonicalJson(document)) unchanged.push('principal and grant registry');
     else { await atomicWrite(principalsPath, JSON.stringify(document, null, 2), 0o600); applied.push(`principal and grant registry (${merged.map(entry => `${entry.id}:${entry.role}`).join(', ')})`); }
     principalsDocumentSchema.parse(document);
+    return merged;
   }
 
   const profilesDirectory = resolve(directory, 'profiles');
@@ -429,6 +432,15 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   };
   // An install registered its own worker profiles against its own principals; the proposal's would name identities that do not exist.
   if (!dependencies.installed) for (const profile of proposal.profiles.workers) await writeProfile(profile.name, profile);
+  // Each profile's credential file is written from the registry when absent (GY-1412), outside the
+  // repository with mode 0600, so no profile names a credential that does not exist.
+  if (dependencies.writeCredentials && merged) for (const profile of proposal.profiles.workers) {
+    const file = resolve(profile.credentialFile), token = merged.find(entry => entry.id === profile.principal)?.token;
+    if (!token || file === resolve(root) || file.startsWith(`${resolve(root)}/`)) continue;
+    await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+    try { await writeFile(file, `${token}\n`, { mode: 0o600, flag: 'wx' }); applied.push(`${profile.name} credential file`); }
+    catch (error: any) { if (error.code !== 'EEXIST') throw error; unchanged.push(`${profile.name} credential file`); }
+  }
   await writeProfile('reviewer', { provider: proposal.policy.reviewProvider, note: proposal.profiles.reviewer.note });
 
   const previousState = await loadAppliedSetup(root);
@@ -460,7 +472,7 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   else { await atomicWrite(appliedPath, JSON.stringify(state, null, 2), 0o600); applied.push('applied setup record'); }
 
   const workerStep = workerPrincipals.length
-    ? 'place each worker credential at its profile credentialFile path, then claim work'
+    ? `${dependencies.writeCredentials ? 'each worker credential is at its profile credentialFile path' : 'place each worker credential at its profile credentialFile path'}, then claim work`
     : 'no agent runtime was detected on this machine, so the proposal declared no worker profile and no worker principal was registered; install an agent CLI and rerun init --scan --apply to add one';
   const documentationLine = documentationAssignment(documentation.policy).line;
   return { server, applied, unchanged, drift, githubApp, generatedFiles: generatedFiles?.line ?? null, documentation: { file: repositoryConfigFile, policy: documentation.policy, line: documentationLine },

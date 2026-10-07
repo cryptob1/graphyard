@@ -1,6 +1,8 @@
 import { agentOwner, herdrWorkspaceHealth, humanOwner, type AttentionItem, type MasterConfig } from '../master.js';
 import { reviewerBindingHealth } from '../reviewer.js';
-import { loopSupervision, loopSupervisionAttention, type LoopSupervisorHost } from '../supervisor.js';
+import { loopSupervision, loopSupervisionAttention, type LoopSupervisorEvidence, type LoopSupervisorHost } from '../supervisor.js';
+import { readDaemonState } from '../master-daemon.js';
+import { detectLoopSupervisorUnit } from '../daemon/upgrade.js';
 import type { MainGuardReadiness } from '../main-guard.js';
 
 /**
@@ -17,10 +19,22 @@ import type { MainGuardReadiness } from '../main-guard.js';
  */
 export const browserProfileMissing = 'No browser profile is configured: App permission updates, installation acceptance, and page-only protection changes cannot run through master browser until the operator lends the master a signed-in Chrome profile';
 export const browserProfileNext = (cliPath: string) => `node ${cliPath} master init --token-stdin --browser-profile PROFILE`;
-export async function setupHealth(root: string, master: MasterConfig, supervisorHost?: LoopSupervisorHost, coordinator?: { mainGuard?: MainGuardReadiness | null } | null) {
+/**
+ * What the loop's cursor records of its own supervision (GY-1400), for a probe that could not reach
+ * the user manager: the unit the reading process runs under, when it is the loop or its child, and
+ * whether the loop's last self-upgrade re-executed it through its unit.
+ */
+export async function loopSupervisorEvidence(root: string, master: MasterConfig, unit = detectLoopSupervisorUnit()): Promise<LoopSupervisorEvidence> {
+  const state = await readDaemonState(root, master).catch(() => null);
+  return { unit, reexecuted: state?.upgrade?.last?.self === true };
+}
+
+export async function setupHealth(root: string, master: MasterConfig, supervisorHost?: LoopSupervisorHost, coordinator?: { mainGuard?: MainGuardReadiness | null } | null,
+  evidence: (root: string, master: MasterConfig) => Promise<LoopSupervisorEvidence | null> = loopSupervisorEvidence) {
   const reviewer = await reviewerBindingHealth(master);
   const supervisor = await loopSupervision({ root, cliPath: master.cliPath }, supervisorHost);
-  const supervisorAttention = loopSupervisionAttention(supervisor);
+  // The cursor is read only when this vantage could not reach the user manager.
+  const supervisorAttention = loopSupervisionAttention(supervisor, supervisor.unreachable ? await evidence(root, master).catch(() => null) : null);
   const herdrWorkspace = await herdrWorkspaceHealth(master);
   const mainGuard = coordinator?.mainGuard ?? null, revertApprover = mainGuard?.attention ?? null;
   const setup = { reviewer, supervisor, herdrWorkspace, mainGuard,

@@ -11,11 +11,11 @@ Ask only: **Which provider**; **Provider login**; **the GitHub App confirmation 
 - **One principal per role:** `--workers N`; never share a worker credential.
 - **Workers never receive an admin, coordinator, or producer credential.**
 - **Proof producers get explicit grants only** (`--producer-proof NAME`).
-- Credentials only in `~/.config/graphyard/<install>/` (directory `0700`, files `0600`).
+- Credentials only under `$GRAPHYARD_CONFIG_HOME` (default `~/.config/graphyard`): the plan's `installDirectory`, and `workers/` from `init --apply` (directories `0700`, files `0600`).
 
 ## Preconditions
 
-Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`, `gh auth status` as repository admin (`repo,admin:repo_hook`). Worker and non-Actions unit-proof hosts pass Graphyard's probe `bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true`.
+Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/graphyard.mjs`, `gh auth status` as repository admin with scope `repo` (and `admin:repo_hook`, except compose); preflight checks. Worker and non-Actions unit-proof hosts pass Graphyard's probe `bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true`.
 
 ### Providers
 
@@ -42,7 +42,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; [protects](gi
 
 ## Step 3: App confirmation
 
-Human installs the App at the printed `http://127.0.0.1:4311`; **Verify** *App registered and installation verified*. `--apply` keeps serving the page for 900 s. The master configuration and profiles are written before it, so `master environments` and `master harness` already work. Unconfirmed, it exits 1 and prints a JSON summary: `completed`, `github.app` `pending` (credentials saved only when GitHub returned them), `stack.stop` and `resume`, the exact rerun that keeps everything before the App step.
+`--apply` serves and prints `http://127.0.0.1:4311`, opening no browser; the human installs the App there; **Verify** *App registered and installation verified*. The page is served for 900 s. The master configuration and profiles are written before it, so `master environments` and `master harness` already work. Unconfirmed, it exits 1 and prints a JSON summary: `completed`, `github.app` `pending` (credentials saved only when GitHub returned them), `stack.stop` and `resume`, the exact rerun that keeps everything before the App step.
 
 ## Step 4: summary
 

@@ -16,7 +16,7 @@ import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
 import { documentationDrift } from '../model/documentation.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
-import { setupFromZeroChecks, setupLine } from '../setup-from-zero.js';
+import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
 
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
   const setup = await startGithubSetup(root, repository, deployment);
@@ -189,7 +189,7 @@ export const installCommands = defineCommands([
           const roster = await readRoster(resolve(root, '.graphyard/principals.json'));
           // The App page init would open needs port 4311; a busy one refuses here, before any write.
           if (!(await loadAppliedSetup(root))?.artifacts.githubApp && !await readFile(resolve(root, '.graphyard/github-app.json')).then(() => true, () => false) && !await appPagePortFree()) throw appPageBusy(4311);
-          const result = await applyProposal(root, stored.proposal, { url, githubSetup: interactiveGithubSetup(root), github: protectionRun });
+          const result = await applyProposal(root, stored.proposal, { url, githubSetup: interactiveGithubSetup(root), github: protectionRun, writeCredentials: true });
           if (!result.principalsFile) throw new Error('applyProposal wrote no principals registry');
           const ciProofs = await registerCiProducer(result.principalsFile, roster);
           return print({ proposal: stored.file, ...result, ciProofs: { ...ciProofs, next: ciProducerProvisioningSteps(stored.proposal.repository, url) },
@@ -224,8 +224,11 @@ export const installCommands = defineCommands([
       '                                readiness checklist for a completion profile',
     ],
     async run(context) {
-      const { base, api } = context;
+      const { base } = context;
       const root = context.repositoryRoot();
+      // With no GRAPHYARD_TOKEN(_FILE), doctor reads as the master identity install --apply recorded (GY-1412).
+      const master = await masterCredential(root, base);
+      const api = master ? planeRequest(base, master.token) : context.api;
       const discovered = await discover(root);
       const { values } = parseArgs({ args: context.rest, options: { profile: { type: 'string' } }, allowPositionals: false });
       const profile = (values.profile ?? 'through-merge') as CompletionProfile;
@@ -255,12 +258,12 @@ export const installCommands = defineCommands([
         validation: definitions ? summarizeDefinitions(definitions) : null,
       });
       // The machine-local prerequisites docs/setup-from-zero.md depends on (GY-1352), each naming its step.
-      const checks = await setupFromZeroChecks({ root, status: live, failure, environments: agentEnvironmentRoot() });
+      const checks = await setupFromZeroChecks({ root, status: live, failure, reachable: !!live || await planeAnswers(base), masterCredential: master?.file, environments: agentEnvironmentRoot() });
       const setupFromZero = { ready: checks.every(check => check.status === 'pass'), lines: checks.map(setupLine) };
       // A ready checklist still deploys nothing: once every item is ready, capacity drift and
       // an undeployed merge are the next actions; until then the checklist's own gap comes first.
       const firstFailed = checks.find(check => check.status === 'fail');
-      const next = !readiness.ready ? readiness.next
+      const next = !readiness.ready ? setupNext(readiness, checks)
         : firstFailed ? setupLine(firstFailed)
         : delegationLimits?.drift?.length ? `Set ${delegationLimits.drift.map((entry: any) => `${entry.variable}=${entry.required}`).join(' ')} on the deployment: ${delegationLimits.drift[0].reason}`
         : documentation.drift ? documentation.drift

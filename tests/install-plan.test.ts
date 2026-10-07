@@ -30,9 +30,8 @@ test('--plan produces a complete ordered plan and redacts every value that is a 
       'local.credentials', 'provider.provision.project', 'provider.provision.database', 'provider.provision.app',
       'provider.env.core', 'provider.deploy', 'provider.url', 'verify.health',
       'github.app', 'github.env', 'github.webhook', 'github.ci-app-ids', 'github.protection',
-      // The release-candidate pipeline (GY-1102): free wiring, then the command adapter's
-      // environments, since this fixture names no Railway deploy target.
-      'release.branches', 'release.github-environments', 'release.command.uat', 'release.command.production',
+      // No release-candidate pipeline: this fixture has no deploy target, so its default delivery
+      // is per-pr and merged is its end state (GY-1412; docs/setup-from-zero.md step 12).
       'verify.status', 'verify.webhook', 'local.profiles', 'local.herdr',
     ]);
 
@@ -49,8 +48,9 @@ test('--plan produces a complete ordered plan and redacts every value that is a 
     assert.equal(values.find(value => value.name === 'GITHUB_REPOSITORY')!.value, 'owner/project');
 
     // The plan states the exact human inputs and nothing else is required of a person.
-    assert.equal(plan.humanSteps.length, 4);
-    assert.match(plan.humanSteps.at(-1)!, /--create-environments/);
+    // Per-pr delivery has no UAT or production environments to create, so no --create-environments step.
+    assert.equal(plan.humanSteps.length, 3);
+    assert.doesNotMatch(plan.humanSteps.join(' '), /--create-environments/);
     assert.match(plan.humanSteps.join(' '), /provider CLI and GitHub CLI/);
     assert.match(plan.actions.find(action => action.id === 'github.app')!.human!, /One browser confirmation/);
 

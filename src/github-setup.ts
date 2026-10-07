@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { readFile, writeFile, rename } from 'node:fs/promises';
+import { readFile, writeFile, rename, link, unlink } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { GitHub, appJwt, installationSettingsUrl } from './github.js';
 import { localDirectory } from './onboarding.js';
@@ -182,12 +182,12 @@ export async function startGithubSetup(root: string, repository: string, deploym
     if (repo.full_name?.toLowerCase() !== repository.toLowerCase()) throw new Error('Installation cannot access the expected repository');
   });
   async function persist(value: AppCredentials, initial = false) {
-    if (initial) await writeFile(file, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx' });
-    else {
-      const temporary = `${file}.${randomBytes(8).toString('hex')}.tmp`;
-      await writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx' });
-      await rename(temporary, file);
-    }
+    // Both writes are atomic: the manifest flow polls this file and must never read it half-written.
+    const temporary = `${file}.${randomBytes(8).toString('hex')}.tmp`;
+    await writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx' });
+    if (!initial) return rename(temporary, file);
+    // link() refuses an existing file, keeping the initial write's exclusive-create guarantee.
+    try { await link(temporary, file); } finally { await unlink(temporary); }
   }
   const http = createServer(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store'); res.setHeader('Referrer-Policy', 'no-referrer');
@@ -210,7 +210,7 @@ export async function startGithubSetup(root: string, repository: string, deploym
         const manifest = reviewer ? reviewerAppManifest(reviewer, repository, deployment, `http://${address}`) : appManifest(repository, deployment, `http://${address}`);
         return html(200, reviewer
           ? `<p>Register a private reviewer App named <strong>${escape(reviewer)}</strong> for <strong>${escape(repository)}</strong>. Its runtime signs in as this App to post review verdicts.</p><p>The reviewer App reads code and writes pull request comments. It cannot publish Graphyard's gate check, change branch protection, or write source code. Use a GitHub account that is not the pull request author.</p><form method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register reviewer App →</button></form>`
-          : `<p>Register a private App for <strong>${escape(repository)}</strong>. GitHub will ask you to sign in, name the App, and choose the repository.</p><p>The App reads code and branch protection, publishes its gate check, writes PR review requests, and publishes merge-queue tips, which is why it holds Contents: read and write. It never writes an agent's code: the only commits it creates are merges of already-validated candidates onto the base they were validated against. Credentials return directly to this machine; no key copying is needed.</p><form method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register Graphyard App →</button></form>`);
+          : `<p>Register a private App for <strong>${escape(repository)}</strong>. GitHub will ask you to sign in, name the App, and choose the repository.</p><p>The App reads code and branch protection, publishes its gate check and the graphyard/landable status, writes PR review requests, and moves release and revert branches, which is why it holds Contents: read and write. It never writes an agent's code and never merges a pull request: GitHub merges it once branch protection's required checks pass. Credentials return directly to this machine; no key copying is needed.</p><form method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register Graphyard App →</button></form>`);
       }
       if (url.pathname === '/created') {
         const received = Buffer.from(url.searchParams.get('state') ?? ''), expected = Buffer.from(state);
