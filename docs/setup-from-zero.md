@@ -62,7 +62,7 @@ The repository needs `origin` on GitHub and a GitHub Actions workflow running it
 
 ## 5. Reviewer and revert-approver Apps
 
-`--reviewer claude` registers the reviewer App on the same page, also the main guard's revert approver (`GRAPHYARD_REVERT_APPROVER_*`); every `--apply` resets hand-set values to it. **Verify:** `reviewer-app` passes and readiness `revert-approver` is `ready`; outside `install`, `gy master reviewer setup` and the [variables](deployment.md#variables).
+`--reviewer claude` registers the reviewer App on the same page, also the revert approver (`GRAPHYARD_REVERT_APPROVER_*`, reset by every `--apply`). **Verify:** `reviewer-app` and readiness `revert-approver` pass; outside `install`, `gy master reviewer setup` and [variables](deployment.md#variables).
 
 ## 6. Onboard the checkout
 
