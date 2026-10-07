@@ -33,10 +33,11 @@ export const tmpReclaimMinAgeMs = 6 * 3_600_000;
 export const testTempPatterns: readonly RegExp[] = [/^graphyard-/, /^gy-/, /^landing-merge-result/, /^native-/, /^pg-password/, /^playwright_chromiumdev_profile/];
 /** How old a test temp entry — file or directory — must be before the loop's pass removes it. */
 export const testTempMinAgeMs = 2 * 3_600_000;
-/** The most directories one pass removes: reclaim is bounded per cycle, whatever the backlog. */
-export const tmpReclaimLimitPerCycle = 100;
-/** The most wall-clock time one pass spends removing, so a cycle is never stalled by a backlog of large directories. */
-export const tmpReclaimWorkMsPerCycle = 150;
+/** The most directories one pass removes, and the most wall-clock time it spends removing: reclaim is bounded per cycle, whatever the backlog. */
+export const tmpReclaimLimitPerCycle = 100, tmpReclaimWorkMsPerCycle = 150;
+/** How long one entry's removal retries a tree that refills or is still being released (ENOTEMPTY, EBUSY) before the pass reports it and the next retries it (GY-1401). */
+export const tmpReclaimRetryMs = 2_000;
+const retryable = new Set(['ENOTEMPTY', 'EBUSY', 'EPERM', 'EMFILE', 'ENFILE']), unfinishedRemovals = new Set<string>();
 /** The marker naming a directory's owner is a sibling file, `<directory>.owner`, not a file inside it: the dominant use of these directories is an embedded Postgres data dir, and `initdb` refuses any directory that holds so much as a dot file. */
 export const tempOwnerMarker = (directory: string) => `${directory}.owner`;
 
@@ -194,6 +195,8 @@ export interface TmpReclaimOptions {
   workMs?: number;
   /** The live-holder set, when the caller has one; a fresh /proc scan runs when omitted. */
   held?: Set<string>;
+  /** Entries an earlier pass failed to finish removing, retried ahead of their age bound (this process's own set by default), and how long one removal retries. */
+  unfinished?: Set<string>; retryMs?: number;
 }
 /** The age an entry of this name must reach before the default pass removes it, or null when the name is not the pass's. */
 const defaultMinAge = (name: string) => testTempPatterns.some(pattern => pattern.test(name)) ? testTempMinAgeMs : /^tsx-\d+$/.test(name) ? tmpReclaimMinAgeMs : null;
@@ -219,12 +222,23 @@ export async function reclaimTmpDirectories(options: TmpReclaimOptions = {}): Pr
   // long a cycle spends taking directories back. It bounds removing only, so its clock starts at the
   // pass's first removal: scanning a backlogged /tmp and /proc never spends it before anything goes.
   const pass: PassState = { now, minAge, limit: options.limit ?? tmpReclaimLimitPerCycle, uid: process.getuid?.(), held: options.held ?? null,
-    workMs: options.workMs ?? Number.POSITIVE_INFINITY, deadline: null };
+    workMs: options.workMs ?? Number.POSITIVE_INFINITY, deadline: null, unfinished: options.unfinished ?? unfinishedRemovals, retryMs: options.retryMs ?? tmpReclaimRetryMs };
+  for (const path of pass.unfinished) if (!existsSync(path)) pass.unfinished.delete(path);
   for (const { path, real } of roots) await reclaimRoot(path, real, pass, report);
   return report;
 }
 
-interface PassState { now: number; minAge: (name: string) => number | null; limit: number; uid: number | undefined; held: Set<string> | null; workMs: number; deadline: number | null }
+interface PassState { now: number; minAge: (name: string) => number | null; limit: number; uid: number | undefined; held: Set<string> | null; workMs: number; deadline: number | null; unfinished: Set<string>; retryMs: number }
+/** Remove `path` recursively, retrying while its tree refills or is still being released, for at most `retryMs`. */
+async function removeTree(path: string, retryMs: number) {
+  const until = Date.now() + retryMs;
+  for (;;) {
+    try { return await rm(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 }); } catch (error) {
+      if (!retryable.has((error as NodeJS.ErrnoException).code ?? '') || Date.now() >= until) throw error;
+      await new Promise(done => setTimeout(done, 10));
+    }
+  }
+}
 /** One root's share of a pass: scanned within what the pass's bounds have left, its outcome added to `report`. */
 async function reclaimRoot(root: string, real: string, pass: PassState, report: TmpReclaimReport) {
   const { now, minAge, uid } = pass, limit = Math.max(0, pass.limit - report.removed.length), scannedBefore = report.scanned;
@@ -258,7 +272,8 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
     else {
       const maxAgeMs = minAge(entry.name)!;
       // A directory's entries are read only once the directory itself is old: a young one is kept on one stat.
-      const written = now - info.mtimeMs < maxAgeMs || !entry.isDirectory() ? info.mtimeMs : await lastWritten(path, info.mtimeMs);
+      // An entry an earlier pass began removing is due at once: its half-finished removal is what made it look young (GY-1401).
+      const written = pass.unfinished.has(path) ? 0 : now - info.mtimeMs < maxAgeMs || !entry.isDirectory() ? info.mtimeMs : await lastWritten(path, info.mtimeMs);
       if (now - written < maxAgeMs) { report.kept++; continue; }
       // Only holders under the scanned root can hold a candidate, and on a host with a backlog the
       // raw scan holds thousands of paths elsewhere: reduce it once to the root's entries, then
@@ -283,11 +298,12 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
     if (at > pass.deadline) break;
     try {
       const bytes = await sizeOf(path);
-      await rm(path, { recursive: true, force: true });
+      await removeTree(path, pass.retryMs);
       await rm(tempOwnerMarker(path), { force: true });
+      pass.unfinished.delete(path);
       report.removed.push({ path, bytes });
       report.bytes += bytes;
-    } catch (error) { report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
+    } catch (error) { pass.unfinished.add(path); report.errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`); }
   }
   report.kept += Math.max(0, removable.length - (report.removed.length - removedBefore));
 }
