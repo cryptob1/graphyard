@@ -3,7 +3,7 @@
 
 > set up Graphyard for OWNER/REPO following docs/setup-from-zero.md
 
-One command, then the page it prints. The setup agent acts as the **master** identity `install --apply` records; the operator credential stays with the human, never given to an agent. The [install hard rules](install.md#hard-rules) apply: never print a credential.
+The setup agent acts as the **master** identity `install --apply` records; the operator credential stays with the human, never given to an agent. The [install hard rules](install.md#hard-rules) apply.
 
 ## One command: graphyard up
 
@@ -14,16 +14,16 @@ cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --repo OWNER/REPO   # 
 
 A new Hetzner server waits (exit 3) for operator price approval: rerun with `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`, passed to `install`.
 
-`up` runs every machine step in order: preflight, control plane, host supervisor and Herdr, onboarding, accounts, harness, master loop. Onboarding opens a `graphyard/onboarding` pull request with its files; goals wait for its merge. `.graphyard/up.json` records finished steps; a rerun skips them. A Herdr plugin bound to another server is left alone (`--no-herdr`), never repointed. A preflight failure (exit 2) names the [prerequisite](#1-machine-prerequisites) to fix.
+`up` runs every machine step in order: preflight, control plane, host supervisor and Herdr, onboarding, accounts, harness, master loop. Onboarding opens a `graphyard/onboarding` pull request with its files; goals wait for its merge. `.graphyard/up.json` records finished steps; a rerun skips them. A Herdr plugin bound to another server is never repointed (`--no-herdr`). A preflight failure (exit 2) names the [prerequisite](#1-machine-prerequisites) to fix.
 
 ## The Setup page
 
-When a step needs a person, `up` prints one link and waits until it is green. The link (`SERVER/#sign-in=CODE&setup` from the operator credential, or a host install's `#claim=CODE&setup`) signs you in once, within 10 minutes, and opens the Setup page (also linked from Settings → Agents). Each live item has one sentence and one button:
+When a step needs a person, `up` prints one link and waits until green. The link (`SERVER/#sign-in=CODE&setup` from the operator credential, or a host install's `#claim=CODE&setup`) signs you in once, within 10 minutes, and opens the Setup page (also linked from Settings → Agents). Each live item has one sentence and one button:
 
 | Item | Button
 | --- | ---
-| GitHub App, reviewer App | **Create the GitHub App** opens `up`'s App page; create it, install it on OWNER/REPO only
-| An account that writes code, one that reviews | **Connect an account**: Settings → Agents → Connect (an API key, or a subscription sign-in)
+| GitHub App, reviewer App | **Create the GitHub App** opens `up`'s App page
+| An account that writes code, one that reviews | **Connect an account** (an API key, or a subscription sign-in)
 | Branch protection, coordinator running | none: Graphyard does these
 
 When all are green, **Describe what you want built** records a goal, like `graphyard goal`. Once the first pull request reports `Graphyard / merge`, rerun `up` to require it.
@@ -34,7 +34,7 @@ Agents run `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-prof
 
 ## Troubleshooting: the manual steps
 
-What `up` runs, for when a step fails; **HUMAN** marks what agents cannot do. `graphyard doctor` prints `setupFromZero.lines`: one `PASS`/`FAIL` line per prerequisite, each failure naming its step below; `next` names the first gap.
+What `up` runs, if a step fails; **HUMAN** marks what agents cannot do. `graphyard doctor` prints `setupFromZero.lines`: one `PASS`/`FAIL` line per prerequisite, each failure naming its step below; `next` names the first gap.
 
 ## 1. Machine prerequisites
 
@@ -74,7 +74,7 @@ The repository needs `origin` on GitHub and a GitHub Actions workflow testing on
 
 ## 8. Agent environments
 
-Connect each account in Settings → Agents → Connect ([dashboard](dashboard.md#settings-agents)); accounts logged in on the host register with `gy master registry propose --apply`. **Verify:** one `agent-environment:NAME` line passes per environment; then [roles](onboarding.md#configure-the-fleet).
+Connect each account in Settings → Agents → Connect ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`. **Verify:** one `agent-environment:NAME` line passes per environment; then [roles](onboarding.md#configure-the-fleet).
 
 ## 9. Worker sandbox and harness rules
 

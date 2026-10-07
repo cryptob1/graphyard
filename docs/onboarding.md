@@ -29,7 +29,7 @@ Login homes (`~/.coding_agents`: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HO
 
 ### Connect an account
 
-Settings › **Agents** › **Connect an account** (key or login) writes, smoke-tests a 0600 auth file (**Pi (z.ai key)**: `auth.json` in a `pi-<letter>` home).
+Settings › **Agents** › **Connect an account** (key or login) writes, smoke-tests 0600 auth file (**Pi (z.ai key)**: `auth.json` in `pi-<letter>` home).
 
 ### Configure the fleet
 
@@ -59,7 +59,7 @@ node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --mo
 node "$GRAPHYARD_CLI" master registry account quota opencode-a exhausted --resets-at 2026-09-22T00:00:00Z --reason "Exhausted"
 ```
 
-`--plan NAME` groups accounts under one provider quota (`none` clears; inferred from host+home or Z.AI keys; `auth.json`-only logins need it); `--key-file zai.key --key-variable ZAI_API_KEY` exports a 0600 key file per run; pasted keys refused.
+`--plan NAME` groups accounts under one provider quota (`none` clears; inferred from host+home or Z.AI keys; `auth.json`-only logins need it); `--key-file zai.key --key-variable ZAI_API_KEY` exports 0600 key file per run; pasted keys refused.
 
 ### Add a role
 
@@ -76,17 +76,17 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W/2⌉` review an
 
 ## 3. Start the master
 
-`master init`, executor `init`, `master start` ([setup](setup-from-zero.md#10-start-the-master)) as an OS user whose GitHub credentials workers can't read; `--browser-profile`: Chrome as GitHub admin (`master browser`); App confirmation and GitHub Mobile *Confirm access* stay human-only. Reviewer: `master reviewer setup` or `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); `master review GY-N` relaunches one.
+`master init`, executor `init`, `master start` ([setup](setup-from-zero.md#10-start-the-master)) as OS user whose GitHub credentials workers can't read; `--browser-profile`: Chrome as GitHub admin (`master browser`); App confirmation and GitHub Mobile *Confirm access* stay human-only. Reviewer: `master reviewer setup` or `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); `master review GY-N` relaunches one.
 
 ### The loop must be supervised
 
 `master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master-OWNER-NAME.service`, runs `systemctl --user enable --now`, `loginctl enable-linger` (restart on crash, reboot, hang); never a side effect (worker checkouts, temp directories refused). Move: `master init --token-stdin --replace-supervisor` from new checkout. `master status`: `setup.supervisor`.
 
-Installs share hosts: units named per repository (`graphyard-executor-OWNER-NAME@N.service` too, plus a short hash where names collide) in `.graphyard/units.json` (fails closed unreadable); a host whose `graphyard-master.service` runs this checkout keeps legacy names as recorded alias. With no record, a legacy unit running another checkout makes every unit-name read refuse, naming unit and checkout, until `master init` records this install's own. Setup refuses, naming the checkout, to overwrite or restart another checkout's unit; the master harness restarts only its loop unit. Each install needs its own `--herdr-workspace`: sweeps (idle-pane close, reclaim, liveness, tab cleanup) act only on its panes.
+Installs share hosts: units named per repository (`graphyard-executor-OWNER-NAME@N.service` too; short-hashed where names collide) in `.graphyard/units.json` (fails closed unreadable); a host whose `graphyard-master.service` runs this checkout keeps legacy names as recorded alias. With no record, legacy unit running another checkout makes every unit-name read refuse, naming unit and checkout, until `master init` records this install's own. Setup refuses, naming checkout, to overwrite or restart another checkout's unit; master harness restarts only its loop unit. Each install needs its own `--herdr-workspace`: sweeps (idle-pane close, reclaim, liveness, tab cleanup) act only on its panes.
 
 ### The pipeline doctor (on by default)
 
-Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck, overdue work via `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release` (never merging, dispatching or evidencing); posts findings, summary (`master status` `doctor`); escalates the rest or files fault items, deduplicated against open ones at settle (proof IDs normalised; create refusals escalate, control-plane ones retry). Reportless (models died, loop stopped) or restart-lost runs record failed, no `loop` fault; the next re-covers. The loop settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck, overdue work via `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release` (never merging, dispatching or evidencing); posts findings, summary (`master status` `doctor`); escalates the rest or files fault items, deduplicated against open ones at settle (proof IDs normalised; create refusals escalate, control-plane ones retry). Reportless (models died, loop stopped) or restart-lost runs record failed, no `loop` fault; the next re-covers. Loop settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
 
 ## 4. Prove the first PR
 

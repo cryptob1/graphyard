@@ -27,7 +27,7 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 
 ## Flaky CI check
 
-[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); a pass clears it.
+[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); pass clears it.
 
 ## Accepted evidence turns out to be wrong
 
@@ -68,11 +68,11 @@ A `403`/`429` pause stops requests; gates read the last observation until it lif
 
 ### Webhook liveness
 
-A silent webhook hour: `master status` cites `https://github.com/settings/apps/APP-SLUG`.
+Silent webhook hour: `master status` cites `https://github.com/settings/apps/APP-SLUG`.
 
 ## Control-plane resources
 
-`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes`, free `TMPDIR`/`/tmp`; `loaded-revision` counts code moves. No fault while remedy acts: owed restart retried within bound, pane unowned <10min, loop's own lag, `/tmp` >10% free after pass within 30min.
+`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes`, free `TMPDIR`/`/tmp`; `loaded-revision` counts code moves. No fault while remedy acts: owed restart retried within bound, pane unowned <10min, loop's lag, `/tmp` >10% free after pass within 30min.
 
 Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`; managed root's `.verification-slots`); CI unbounded. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; item `memory` names top consumers; one `memory-pressure` fault per dip) until 1GB above.
 
@@ -90,7 +90,7 @@ Stays Done, **delivered with failure**; revert via new item.
 
 ## Merge bypass
 
-Ungated merges are permanent violations (never backfilled): repair access, file follow-up. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
+Ungated merges: permanent violations (never backfilled): repair access, file follow-up. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Credentials
 
@@ -111,8 +111,8 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥2× workers) pace per token, merge path first (`observationThroughput`). Heartbeat, claim, `complete`, `blocked` own the lease pool (`leaseHealth`). Reconcile evaluates moved rows, all every `GRAPHYARD_RECONCILE_FULL_MS` (2000..300000ms, default 10000). Until startup validation ends, `/healthz` reports `readiness: false`, `/healthz?ready` 503.
+`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥2× workers) pace per token, merge path first (`observationThroughput`). Heartbeat, claim, `complete`, `blocked` own lease pool (`leaseHealth`). Reconcile evaluates moved rows, all every `GRAPHYARD_RECONCILE_FULL_MS` (2000..300000ms, default 10000). Until startup validation ends, `/healthz` reports `readiness: false`, `/healthz?ready` 503.
 
 ### Concurrent reconciliation
 
-A 2s tick over 5s logs `reconciliation tick took N ms` (writes, longest lock wait). It opens briefly under coordination lock (row versions, direct-merge sweep); batches evaluate ≤250ms lock-free, planning ≤8 writes, each one transaction: coordination lock (≤500ms wait, no row held), item row (`FOR NO KEY UPDATE`), commit; moved read re-evaluates first; job wakes follow in work-id order. Three expired lock waits defer unwritten items tick. Writes read whole only their item, overlaps, dependencies (<500ms at 1,000 items); heartbeats lock only their item. Reconciliation yields to pending requests before each evaluation and write: renewal waits ≤1 evaluation (≤1s). Stale observation snapshots retry after 2s.
+A 2s tick over 5s logs `reconciliation tick took N ms` (writes, longest lock wait). It opens briefly under coordination lock (row versions, direct-merge sweep); batches evaluate ≤250ms lock-free, planning ≤8 writes, each one transaction: coordination lock (≤500ms wait, no row held), item row (`FOR NO KEY UPDATE`), commit; moved read re-evaluates first; job wakes follow work-id order. Three expired lock waits defer unwritten items tick. Writes read whole only their item, overlaps, dependencies (<500ms at 1,000 items); heartbeats lock only their item. Reconciliation yields to pending requests before each evaluation and write: renewal waits ≤1 evaluation (≤1s). Stale observation snapshots retry after 2s.

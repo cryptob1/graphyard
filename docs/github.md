@@ -30,7 +30,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 ## Reusing an App without sudo
 
-GitHub returns an App's private key once, so `--reuse-app SLUG` needs a key saved on this host. For an App created elsewhere, generate a key on its settings page, then `graphyard app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo OWNER/NAME]`: an App JWT proves the key; the App is saved `0600` as `imported-app-SLUG.json` in the install directory; the key is never printed. Refused: a control-plane App whose webhook serves another install. A reused `revert-approver` replaces the reviewer as revert approver. `graphyard app list` reads saved Apps by their own JWTs, plus organization installations via `gh` (never `/user/installations`), naming each App's reusable roles or why not.
+GitHub returns an App's private key once: `--reuse-app SLUG` needs a key saved locally. An App created elsewhere: generate a key on its settings page, then `graphyard app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo OWNER/NAME]`: an App JWT proves the key; the App saved `0600` as `imported-app-SLUG.json` in the install directory, never printing the key. Refused: control-plane Apps whose webhook serves another install. A reused `revert-approver` replaces the reviewer as revert approver. `graphyard app list` reads saved Apps by their JWTs, plus organization installations via `gh` (never `/user/installations`), naming each App's reusable roles or why not.
 
 Refused workflow syncs: `sync GY-N --push-via-control-plane COMMIT` (`POST /api/work/:id/sync-push`) pushes COMMIT, fast-forwarding and merging `origin/BASE` (`sync.workflow-push`).
 
@@ -40,7 +40,7 @@ Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md
 
 ## Failed checks
 
-No merge queue (`master tip-cleanup --apply` deletes leftover `refs/graphyard/queue/*`). A failed required check reruns once on unchanged head after its run completes (owed meanwhile); second fails test gate (rework). A 403 quotes GitHub (or, no permission missing, preflight's reading). Tests (`graphyard-failed-tests:`) old base broke, fixed on tip, refresh (`baseBreak`), not rework.
+No merge queue (`master tip-cleanup --apply` deletes leftover `refs/graphyard/queue/*`). Failed required checks rerun once on unchanged head after their run completes (owed meanwhile); second fails test gate (rework). A 403 quotes GitHub (or, no permission missing, preflight's reading). Tests (`graphyard-failed-tests:`) old base broke, fixed on tip, refresh (`baseBreak`), not rework.
 
 ### Bindings and carry
 

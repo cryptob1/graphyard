@@ -19,9 +19,9 @@ Non-master launches get own checkouts, coordinator's unwritable (Codex `--sandbo
 
 #### Worker sandbox
 
-Codex `--add-dir` roots: `.git/worktrees/NAME` (index, HEAD, `FETCH_HEAD`), `objects`, `refs/remotes`, `refs/heads/graphyard`, `logs/`; never `.git` (read-only `.git/.git` mount kills every command). A failed (bubblewrap) write probe fails launch, naming path.
+Codex `--add-dir` roots: `.git/worktrees/NAME` (index, HEAD, `FETCH_HEAD`), `objects`, `refs/remotes`, `refs/heads/graphyard`, `logs/`; never `.git` (read-only `.git/.git` mount kills every command). Failed (bubblewrap) write probes fail launch, naming path.
 
-Profile `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless registry defines role. Launches take first account under `run.quotaCeilingPercent`, else (or failed start) **fail over** (`dispatch.accounts`). A runtime limit notice (never agent text; mid-session only beside `[retrying in 4s]`; agy `Individual quota reached`) commits unpushed `WIP:`, sets `capacity.exhausted`, relaunches elsewhere/after reset. Reviewers/producers use only profile `kind` (others skipped `cross-runtime`; profile waits).
+Profile `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) unless registry defines role. Launches take first account under `run.quotaCeilingPercent`, else (or failed start) **fail over** (`dispatch.accounts`). Runtime limit notices (never agent text; mid-session only beside `[retrying in 4s]`; agy `Individual quota reached`) commit unpushed `WIP:`, set `capacity.exhausted`, relaunch elsewhere/after reset. Reviewers/producers use only profile `kind` (others skipped `cross-runtime`; profile waits).
 
 ## The loop's own master session
 
@@ -41,7 +41,7 @@ GY=…/.graphyard/launch/NAME; claude … --settings …/.graphyard/harness/prod
 
 #### The start bound reads the pane
 
-**Ready**: Herdr active with no prompt, or banner shown (`the claude runtime is on screen while Herdr reports it unknown`; OpenCode 1.18 `Ask anything…`/`tab agents`, [fixture](../tests/fixtures/opencode-1.18-start-screen.txt)). Ready within **60 seconds** (`run.launchStartSeconds`) starts; still starting gets **120 seconds** (`started.extended`); supervisor first prints `graphyard: establishing containment for GY-N epoch E`. Refusals quote case and pane's last non-empty line, never Herdr's own `agent_not_found` (`the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`), retry as `Automatic producer launch for GY-N refused 1 time(s)`, releasing pane, supervisor, claim.
+**Ready**: Herdr active with no prompt, or banner shown (`the claude runtime is on screen while Herdr reports it unknown`; OpenCode 1.18 `Ask anything…`/`tab agents`, [fixture](../tests/fixtures/opencode-1.18-start-screen.txt)). Ready within **60 seconds** (`run.launchStartSeconds`) starts; still starting gets **120 seconds** (`started.extended`); supervisor first prints `graphyard: establishing containment for GY-N epoch E`. Refusals quote case and pane's last non-empty line, never Herdr's `agent_not_found` (`the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`), retry as `Automatic producer launch for GY-N refused 1 time(s)`, releasing pane, supervisor, claim.
 
 #### First-run consent prompts
 
@@ -57,4 +57,4 @@ Ended sessions' panes close; each cycle closes ≤12 more, never a live lease's:
 
 ### The dispatcher's own state
 
-The dispatcher bounds its own state where it composes it, marking each cut with an ellipsis; a schema-failing cursor is repaired, not fatal, logged once with the failing path. Tick failures are attributed (`dispatch.lastFailure`); three in a row raise one attention item (no reviewer or producer session launches for any item); `graphyard master restart` repairs it. A session exiting **at launch** is classified by `herdr pane read` (`herdr agent get` answers only `agent_not_found`): a **provider limit notice** fails over like a mid-session exhaustion; others refused with the pane's last words and retried.
+Dispatcher bounds its own state where it composes it, marking each cut with an ellipsis; schema-failing cursor is repaired, not fatal, logged once with the failing path. Tick failures are attributed (`dispatch.lastFailure`); three in a row raise one attention item (no reviewer or producer session launches for any item); `graphyard master restart` repairs it. A session exiting **at launch** is classified by `herdr pane read` (`herdr agent get` answers only `agent_not_found`): a **provider limit notice** fails over like a mid-session exhaustion; others refused with the pane's last words and retried.

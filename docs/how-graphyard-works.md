@@ -14,7 +14,7 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions, each sta
 
 ## From goal to work items
 
-Goal passes intake, acceptance, approval, planning, approval and delivery. `graphyard goal FILE` records it; acceptance role writes outcomes and required `uat` cases ([validation](validation.md)), non-author-approved. Once merged, `planner` role writes architecture note (at most 400 words) and items, each naming outcomes served, cases to pass, `plannedFiles` and predecessors. A plan leaving an outcome uncovered, letting parallel items share a file (`dir/**` included), naming a criterion twice or touching a required case is refused with the reason; three refused rounds (before or at approval) hand goal to master. A role at its registry concurrency defers, never starting a fallback. Another identity approves the plan (`goal plan-approve`); loop then creates and releases items (`planned`, then `delivering`), dispatching none before its dependencies are delivered. Goal is `delivered` once every item is done and production serves it: a loop-recorded deployment covering its merge, plus a passing smoke proof where policy asks.
+Goal passes intake, acceptance, approval, planning, approval and delivery. `graphyard goal FILE` records it; acceptance role writes outcomes and required `uat` cases ([validation](validation.md)), non-author-approved. Once merged, `planner` role writes architecture note (at most 400 words) and items, each naming outcomes served, cases to pass, `plannedFiles` and predecessors. A plan leaving outcome uncovered, letting parallel items share file (`dir/**` included), naming a criterion twice or touching a required case is refused with the reason; three refused rounds (before or at approval) hand goal to master. A role at its registry concurrency defers, never starting fallback. Another identity approves the plan (`goal plan-approve`); loop creates and releases items (`planned`, then `delivering`), dispatching none before its dependencies are delivered. Goal is `delivered` once every item is done and production serves it: loop-recorded deployment covering its merge, plus passing smoke proof where policy asks.
 
 ## Risk lanes
 
@@ -24,13 +24,13 @@ Goal passes intake, acceptance, approval, planning, approval and delivery. `grap
 - **Medium** (60 min): remainder; adds producer-run `unit:`/`integration:`.
 - **Low** (30 min): test-only, docs-only, single-module. Required CI and one approval only.
 
-All lanes require `e2e:` proofs; low/medium reworks need no approver (approved by `graphyard-risk-lane`), nor does any lane's rework whose ground the record shows on the exact head: a trusted proof failed on it, an approver refused its `manual:` attestation (loop then requests that rework itself), or control plane's own test merge onto moved base conflicted, not GitHub's reading alone (`src/model/rework-ground.ts`). A head already returned to worker has spent its ground (a later retry-cap rework waits). Grounded reworks are no [intervention](dashboard.md).
+All lanes require `e2e:` proofs; low/medium reworks need no approver (approved by `graphyard-risk-lane`), nor does any lane's rework whose ground the record shows on the exact head: trusted proof failed on it, approver refused its `manual:` attestation (loop then requests that rework itself), or control plane's own test merge onto moved base conflicted, not GitHub's reading alone (`src/model/rework-ground.ts`). A head already returned to worker has spent its ground (a later retry-cap rework waits). Grounded reworks are no [intervention](dashboard.md).
 
 ## Who holds which authority
 
 ![Bootstrap: one supervised worker; normal operation: a fleet.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: in bootstrap the human operator supervises one worker; later master dispatches many, each with own credential.
+Text equivalent: in bootstrap human operator supervises one worker; later master dispatches many, each with own credential.
 
 ![Authority of operator, Graphyard, Herdr sessions, reviewer, producer.](diagrams/roles-and-authority.svg)
 
