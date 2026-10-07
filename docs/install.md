@@ -30,7 +30,7 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 ```
 
-Options: `--workers N`, `--producer-proof NAME`, `--required-check NAME` ([`init --scan`](operations-reference.md#setup-proposals-and-drift)); `delivery`, `release.*` plan the [candidate pipeline](delivery.md#managed-repositories). **Verify** `secretsRedacted` and every `preflight[].ok` are `true` (else run its `fix`); human approves plan and `drift`.
+Options: `--workers N`, `--producer-proof NAME`, `--required-check NAME` ([`init --scan`](operations-reference.md#setup-proposals-and-drift)); `delivery`, `release.*` plan the [candidate pipeline](delivery.md#managed-repositories). **Verify** `secretsRedacted` and every `preflight[].ok` are `true` (else run its `fix`; a `fix` starting `HUMAN:` is the human's); human approves plan and `drift`. `Branch protection` fails on GitHub's 403 *Upgrade to GitHub Pro*: a private repository on a free plan can never require `Graphyard / merge`, so the human makes it public or upgrades; any other failed protection read (SSO, admin rights, 5xx) fails it with GitHub's answer, never as "not protected yet". `local.herdr` shows what happens to Herdr's `graphyard` plugin; one bound to another server, or with an unreadable `config.json`, fails `Herdr plugin` until `--herdr-rebind` (repoint it) or `--no-herdr` (leave it).
 
 ## Step 2: apply
 
@@ -42,7 +42,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; [protects](gi
 
 ## Step 3: App confirmation
 
-`--apply` serves and prints `http://127.0.0.1:4311`, opening no browser; the human installs the App there; **Verify** *App registered and installation verified*.
+`--apply` serves and prints `http://127.0.0.1:4311`, opening no browser; the human installs the App there; **Verify** *App registered and installation verified*. The page is served for 900 s. The master configuration and profiles are written before it, so `master environments` and `master harness` already work. Unconfirmed, it exits 1 and prints a JSON summary: `completed`, `github.app` `pending` (credentials saved only when GitHub returned them), `credentials.principals` (on a self-contained target, the host's token directory), `stack.stop` and `resume`, the exact rerun with every flag given, which keeps everything before the App step.
 
 ## Step 4: summary
 
@@ -74,7 +74,8 @@ Dispatch a [small item](onboarding.md#4-prove-the-first-pr); once `Graphyard / m
 | `Railway workspace` `false` | pass a listed `--workspace` |
 | `... must be able to read ...github-private-key.pem` | connect as `root` or run printed `chown 1000:1000` |
 | `did not become healthy` | `install --provider PROVIDER --repo OWNER/REPO --logs` |
-| `The GitHub App confirmation did not complete in time` | rerun `--apply` (resumes) |
+| `was not confirmed within 900 s` | run the summary's `resume` once confirmed |
+| `already serves a GitHub App setup page` | finish the App on that page, or stop its process |
 | `webhook.delivered` `false`, 401 | rerun `--apply` (rewrites secrets) |
 | `Branch protection could not be applied` | admin `gh auth login`, rerun |
 | worktree dependencies `failed` | [bubblewrap](#preconditions) |
