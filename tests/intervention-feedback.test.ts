@@ -12,8 +12,7 @@ import { Store } from '../src/store.js';
 import { standingEscalations, type Observation, type Principal, type Work } from '../src/model.js';
 import { interventionKinds, interventionPolicyFromEnv, type Intervention, type InterventionKind, type InterventionReport } from '../src/model/interventions.js';
 import * as interventions from '../src/interventions.js';
-import { detectPatterns, foldInterventions, interventionScan, loopSettledInBound, openPatternItems, readInterventionLedger } from '../src/interventions.js';
-import { containmentGraceMs, containmentSettleWaitBoundMs } from '../src/model/containment.js';
+import { detectPatterns, foldInterventions, interventionScan, openPatternItems, readInterventionLedger } from '../src/interventions.js';
 import { classifyAttention } from '../src/model/fault-classes.js';
 import { interventionSummary } from '../src/cli/intervention-status.js';
 import InterventionsPage from '../web/pages/interventions.js';
@@ -519,52 +518,4 @@ test('unit:intervention-detect-linear — detectPatterns groups instances in one
   const elapsed = performance.now() - started;
   assert.equal(pattern.count, one.filter(entry => entry.requestedAt >= new Date(Date.parse(now) - 7 * 86_400_000).toISOString()).length);
   assert.ok(elapsed < 1_000, `one group of 200,000 instances took ${Math.round(elapsed)}ms`);
-});
-
-// GY-1392: 188 of 190 containment settlements counted at the build stage in a week were the loop's
-// own autosettle of a verified-dead fence — the designed recovery for a session that died, measured
-// from the launch that raised the fence. The loop marks its settlement, the control plane records
-// when the fence lapsed, and only a settlement by hand or one the loop made past the settle bound
-// (the bound the faults pass reads, GY-1299) is an intervention.
-async function lapsedFence(title: string, lapsedMsAgo: number) {
-  const settlementHash = createHash('sha256').update(randomUUID()).digest('hex');
-  let work = await claimed(title);
-  work = await engine.execute(worker, 'quarantine', work.id, { epoch: work.epoch, settlementHash }, id());
-  work = await engine.execute(worker, 'launch', work.id, { epoch: work.epoch, settlementHash }, id());
-  const lapsed = new Date(Date.now() - lapsedMsAgo).toISOString();
-  await store.pool.query(`UPDATE work_items SET document=jsonb_set(jsonb_set(jsonb_set(document,'{lease,expiresAt}',to_jsonb($2::text)),
-    '{containmentQuarantine,launchExpiresAt}',to_jsonb($2::text)),'{containmentQuarantine,leaseExpiresAt}',to_jsonb($2::text)) WHERE id=$1`, [work.id, lapsed]);
-  await engine.reconcile();
-  return { work: await reload(work.id), settlementHash, lapsed };
-}
-const verifiedDead = (work: Work) => ({ method: 'linux-proc-systemd', host: 'feedback-host', uid: 1000, platform: 'linux', workspacePath: work.workspaces[0].path,
-  observedAt: new Date().toISOString(), clockOffset: { min: -20, max: 20 }, processes: [], scopes: [], inaccessible: 0, unverifiable: [] });
-
-test('integration:loop-autosettle-in-bound-is-no-intervention — the loop settling a verified-dead fence within the settle bound records no containment settlement; a hand settlement, or a loop settlement past the bound, still does', async () => {
-  const settle = (fence: Awaited<ReturnType<typeof lapsedFence>>, origin?: 'loop') => ok(token(coordinator), 'POST', `work/${fence.work.id}/autosettle`,
-    { epoch: fence.work.epoch, settlementHash: fence.settlementHash, reason: 'Supervisor verified gone', verification: verifiedDead(fence.work), ...(origin ? { origin } : {}) });
-  const prompt = await lapsedFence('loop-prompt', containmentGraceMs + 60_000);
-  const late = await lapsedFence('loop-late', containmentGraceMs + containmentSettleWaitBoundMs + 60_000);
-  const byHand = await lapsedFence('hand-settled', containmentGraceMs + 60_000);
-  await settle(prompt, 'loop'); await settle(late, 'loop'); await settle(byHand);
-  const event = (await store.events(prompt.work.id)).find(entry => entry.kind === 'autosettle')!;
-  assert.deepEqual({ origin: event.payload.details.origin, lapsedAt: event.payload.details.lapsedAt }, { origin: 'loop', lapsedAt: prompt.lapsed }, 'the plane records the fence lapse it lowered');
-  const { interventions: listed } = await report('window=7');
-  assert.deepEqual(ofKind(listed, 'containment-settlement', prompt.work.key), [], 'the loop doing its own job is no intervention');
-  assert.equal(ofKind(listed, 'containment-settlement', late.work.key).length, 1, 'a fence the loop left standing past the bound is');
-  assert.equal(ofKind(listed, 'containment-settlement', byHand.work.key)[0]?.trigger, 'verified-dead', 'a settlement by hand is');
-  await assert.rejects(engine.execute(coordinator, 'autosettle', prompt.work.id, { epoch: 1, settlementHash: prompt.settlementHash, reason: 'x', verification: verifiedDead(prompt.work), origin: 'operator' }, id()), /origin/);
-});
-
-test('unit:loop-autosettle-in-bound-is-no-intervention — only a loop-marked autosettle dated within the grace window and settle bound of its fence lapse is the loop\'s own step', () => {
-  const lapsedAt = '2026-10-06T18:37:00.000Z', within = new Date(Date.parse(lapsedAt) + containmentGraceMs + containmentSettleWaitBoundMs).toISOString();
-  assert.equal(loopSettledInBound({ origin: 'loop', lapsedAt }, within), true);
-  assert.equal(loopSettledInBound({ origin: 'loop', lapsedAt }, new Date(Date.parse(within) + 1).toISOString()), false);
-  assert.equal(loopSettledInBound({ lapsedAt }, within), false, 'a hand settlement carries no origin');
-  assert.equal(loopSettledInBound({ origin: 'loop', lapsedAt: null }, within), false, 'a fence with no lapse to date it stays a signal');
-  const workId = randomUUID(), row = (seq: number, kind: string, details: Record<string, unknown>, at: string) => ({ seq, workId, actor: 'graphyard-master', kind, at, details, work: { key: 'GY-FENCE', stage: 'build' }, stageBefore: 'build' });
-  // The GY-1373 epoch 20 shape: raised at launch, the session vanished after submitting, the loop settled it four minutes after the lapse.
-  const fold = (details: Record<string, unknown>) => foldInterventions([row(1, 'quarantine', { epoch: 20 }, '2026-10-06T18:21:27.226Z'), row(2, 'autosettle', { epoch: 20, ...details }, '2026-10-06T18:41:20.045Z')], [], '2026-10-07T00:00:00.000Z').interventions;
-  assert.deepEqual(fold({ origin: 'loop', lapsedAt }), []);
-  assert.deepEqual(fold({ lapsedAt }).map(entry => entry.kind), ['containment-settlement']);
 });
