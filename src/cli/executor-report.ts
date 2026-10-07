@@ -68,7 +68,7 @@ export interface SlotObservation {
  * is no upgrade in passage.
  */
 export const slotUpgradeBoundMs = executorRestartTimeoutMs;
-/** How long ago the unit last left `active`, from systemd; null when it never was or the reading fails. */
+/** How long ago the unit last left `active`, from systemd, against `now` read from this host's clock; null when it never was or the reading fails. */
 export function slotDownMs(run: SystemctlRunner, unit: string, now: number): number | null {
   try {
     const value = run(['show', unit, '-p', 'ActiveExitTimestamp', '--value', '--timestamp=unix']).trim();
@@ -119,8 +119,10 @@ export async function executorFleet(root: string, masterApi: (path: string) => P
   } catch (error) { presence = { available: false, reason: `GET /api/actions failed: ${error instanceof Error ? error.message : String(error)}`, live: [], served: [], unserved: [], liveMs: executorLiveMs }; }
   const unserved = describeUnserved(presence);
   const slots = executorSlots(supervision, presence, hostId !== undefined ? hostId : await loadMasterConfig(root).then(config => config.hostId ?? null, () => null));
-  const now = Date.parse(snapshot.now) || Date.now();
-  for (const entry of slots) if (entry.seenBy === 'systemd' && entry.active === 'inactive') entry.downMs = slotDownMs(run ?? defaultSystemctl, entry.unit, now);
+  // systemd dates the stop by this host's clock, so its age is read against the same clock, never
+  // the control plane's `snapshot.now`: a skew between the two would page mid-upgrade or hide a slot down.
+  const hostNow = Date.now();
+  for (const entry of slots) if (entry.seenBy === 'systemd' && entry.active === 'inactive') entry.downMs = slotDownMs(run ?? defaultSystemctl, entry.unit, hostNow);
   // Only slots down past the upgrade bound are down here: one inside it is mid-upgrade (GY-1432).
   const down = slots.filter(entry => slotDown(entry.active) && slotPaged(entry));
   const restarting = slots.some(entry => slotDown(entry.active)) && !down.length;

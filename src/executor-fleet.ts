@@ -357,9 +357,13 @@ export interface ExecutorRestartResult {
   /** Slots left running because they already run the coordinator's release (`skipCurrent`). */
   current?: { name: string; unit: string | null; commit: string }[];
 }
-/** A record whose live, running process already loaded the coordinator's commit: restarting it changes nothing it runs. */
+/**
+ * A record whose live, running process already loaded the coordinator's commit from a clean
+ * checkout: restarting it changes nothing it runs. One loaded from a dirty checkout refuses every
+ * claim until a restart after the checkout is cleaned (GY-857), so it is never current.
+ */
 export const runsRelease = (registration: ExecutorRegistration, commit: string | null, alive: (pid: number) => boolean) =>
-  !!commit && registration.state === 'running' && registration.release.commit === commit && alive(registration.pid);
+  !!commit && registration.state === 'running' && registration.release.commit === commit && registration.release.dirty === false && alive(registration.pid);
 export const executorRestartTimeoutMs = 120_000;
 export const executorClaimWaitMs = 30_000;
 

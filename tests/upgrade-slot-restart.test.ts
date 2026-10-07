@@ -110,6 +110,18 @@ test('unit:fleet-restart-skips-current-release — master executors restart leav
     // A dead process on the target commit is no running slot: it is not skipped as current.
     const onTarget = record(master, 1, target);
     assert.deepEqual([runsRelease(onTarget, target, () => true), runsRelease(onTarget, target, () => false), runsRelease({ ...onTarget, state: 'standing-down' }, target, () => true), runsRelease(onTarget, null, () => true)], [true, false, false, false]);
+
+    // A slot loaded from a dirty checkout on the target commit refuses every claim until restarted
+    // after the checkout is cleaned (GY-857): it is not current, and the default restart restarts it.
+    assert.equal(runsRelease({ ...onTarget, release: { commit: target, dirty: true } }, target, () => true), false);
+    assert.equal(runsRelease({ ...onTarget, release: { commit: target, dirty: null } }, target, () => true), false);
+    await writeExecutorRegistration(master, record(master, 1, target, { release: { commit: target, dirty: true } }));
+    await writeExecutorRegistration(master, record(master, 2, target));
+    stub.calls.length = 0;
+    const dirty = await executorsCommand(master, ['restart', '--timeout', '5'], { actions: idle, coordinatorCommit: target, run: stub.run, sleep: quick.sleep, alive: () => true }) as ExecutorRestartResult;
+    assert.equal(dirty.result, 'restarted', dirty.reason ?? '');
+    assert.deepEqual(stub.calls, [['systemctl', '--user', 'restart', unit(1)]], 'the dirty-loaded slot is restarted; the clean current one is left running');
+    assert.deepEqual(dirty.current?.map(entry => entry.unit), [unit(2)]);
   } finally { process.exitCode = exitCode; await dispose(); }
 });
 
@@ -177,7 +189,7 @@ test('integration:upgrade-slots-claim-within-poll — across a code-moving upgra
 });
 
 /** A coordinator host that declared two slots, each in `states`, down since `downFor` ms before now. */
-async function declaredHost(states: [string, string], downFor: number | null, now: number) {
+async function declaredHost(states: [string, string], downFor: number | null) {
   const root = await temporaryDirectory('upgrade-slot-host');
   execFileSync('git', ['init', '-q', root]);
   await mkdir(join(root, '.graphyard'), { recursive: true, mode: 0o700 });
@@ -185,7 +197,8 @@ async function declaredHost(states: [string, string], downFor: number | null, no
   const run: SystemctlRunner = args => {
     const slot = Number(/@(\d+)/.exec(args[1] ?? '')?.[1] ?? 0);
     if (args[0] === 'is-active') { const state = states[slot - 1]; if (state === 'active') return 'active'; throw Object.assign(new Error(state), { stdout: `${state}\n` }); }
-    if (args[0] === 'show') return downFor === null ? '' : `@${((now - downFor) / 1000).toFixed(6)}`;
+    // systemd dates the stop by this host's clock, whatever the control plane's `now` reads.
+    if (args[0] === 'show') return downFor === null ? '' : `@${((Date.now() - downFor) / 1000).toFixed(6)}`;
     return '';
   };
   return { root, run };
@@ -200,7 +213,7 @@ test('unit:slots-down-distinct-from-no-capacity — the fleet report names slots
   const report = executorReport(work, new ExecutorRegistry(new Date(now - 3_600_000)), new Date(now));
   assert.equal(report.unserved[0]?.kind, 'dispatch');
   const fleet = async (states: [string, string], downFor: number | null) => {
-    const { root, run } = await declaredHost(states, downFor, now);
+    const { root, run } = await declaredHost(states, downFor);
     try { return await executorFleet(root, async () => ({ executors: report }), { work, now: new Date(now).toISOString() }, run, async () => null); }
     finally { await rm(root, { recursive: true, force: true }); }
   };
@@ -223,7 +236,8 @@ test('unit:slots-down-distinct-from-no-capacity — the fleet report names slots
   const restarting = await fleet(['inactive', 'inactive'], 8_000);
   assert.equal(restarting.capacity, 'restarting');
   assert.deepEqual(restarting.attention, [], 'a slot inside its restart is neither slots down nor no capacity');
-  assert.deepEqual(restarting.slots.map(slot => ({ unit: slot.unit, downMs: slot.downMs, paged: slotPaged(slot) })), [{ unit: unit(1), downMs: 8_000, paged: false }, { unit: unit(2), downMs: 8_000, paged: false }]);
+  assert.deepEqual(restarting.slots.map(slot => ({ unit: slot.unit, paged: slotPaged(slot) })), [{ unit: unit(1), paged: false }, { unit: unit(2), paged: false }]);
+  for (const slot of restarting.slots) assert.ok(slot.downMs! >= 8_000 && slot.downMs! < 9_000, `${slot.unit} down ${slot.downMs}ms by the host clock`);
 });
 
 test('unit:slot-down-past-bound-pages-operator — a declared slot inactive past the upgrade bound raises the start attention naming its unit; inside the bound, and while stopping, it raises nothing', async () => {
@@ -231,9 +245,9 @@ test('unit:slot-down-past-bound-pages-operator — a declared slot inactive past
   const registry = new ExecutorRegistry(new Date(now - 3_600_000));
   registry.observe({ executor: 'graphyard-master@vishrog/2', host: 'vishrog', principal: 'graphyard-master', kinds: ['dispatch'] }, new Date(now));
   const report = executorReport([], registry, new Date(now));
-  const slotLines = async (states: [string, string], downFor: number | null) => {
-    const { root, run } = await declaredHost(states, downFor, now);
-    try { return (await executorFleet(root, async () => ({ executors: report }), { work: [], now: new Date(now).toISOString() }, run, async () => null)).attention.filter(item => /^Executor slot \d is /.test(item.text)); }
+  const slotLines = async (states: [string, string], downFor: number | null, snapshotNow = now) => {
+    const { root, run } = await declaredHost(states, downFor);
+    try { return (await executorFleet(root, async () => ({ executors: report }), { work: [], now: new Date(snapshotNow).toISOString() }, run, async () => null)).attention.filter(item => /^Executor slot \d is /.test(item.text)); }
     finally { await rm(root, { recursive: true, force: true }); }
   };
   const past = await slotLines(['inactive', 'active'], slotUpgradeBoundMs() + 1_000);
@@ -246,4 +260,10 @@ test('unit:slot-down-past-bound-pages-operator — a declared slot inactive past
   // A failed slot, or one systemd cannot date, is no upgrade: it is named at once.
   assert.equal((await slotLines(['failed', 'active'], 1_000)).length, 1);
   assert.equal((await slotLines(['inactive', 'active'], null)).length, 1);
+  // The control plane's clock skewed five minutes either way from the host's moves neither verdict:
+  // the bound is measured on the host clock systemd dated the stop with.
+  for (const skew of [5 * 60_000, -5 * 60_000]) {
+    assert.deepEqual(await slotLines(['inactive', 'active'], 8_000, Date.now() + skew), [], `a mid-upgrade slot raises nothing with the control plane ${skew}ms off`);
+    assert.equal((await slotLines(['inactive', 'active'], slotUpgradeBoundMs() + 1_000, Date.now() + skew)).length, 1, `a slot past the bound pages with the control plane ${skew}ms off`);
+  }
 });
