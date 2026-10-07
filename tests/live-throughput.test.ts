@@ -703,5 +703,20 @@ test('unit:throughput-same-millisecond-records — measurements recorded in the 
       assert.equal(JSON.parse(await readFile(second.recorded, 'utf8')).reason, 'by hand 2');
       assert.equal((await readThroughputMeasurement(root))!.report.reason, 'by hand 2');
     } finally { console.log = log; process.exitCode = exitCode; }
+    // Retention and the read consider only names this recorder writes: another JSON file sharing
+    // the record directory (a shared reports directory) survives retention and is never read as newest.
+    const foreign = ['delivery-causes.json', 'pipeline-speed.json', '0000-report.json', '9999-12-31T23-59-59-999Z.backup.json'];
+    for (const name of foreign) await writeFile(join(directory, name), JSON.stringify({ reason: `foreign ${name}` }));
+    await recordThroughputMeasurement(root, report('2026-10-07T04:40:49.000Z', 200), undefined, 1);
+    assert.deepEqual((await readdir(directory)).sort(), [...foreign, '2026-10-07T04-40-49-000Z.json'].sort(), 'only the recorder\'s own files are retired');
+    assert.equal((await readThroughputMeasurement(root))!.report.reason, 'record 200');
+    // Past retention in one millisecond, a later record still takes a suffix above every one recorded,
+    // so it orders newest and survives instead of reusing the retired unsuffixed name.
+    const crowded = '2026-10-07T04:40:50.000Z';
+    for (let index = 0; index < 4; index++) await recordThroughputMeasurement(root, report(crowded, 300 + index), undefined, 2);
+    assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('2026-10-07T04-40-50')).sort(), ['2026-10-07T04-40-50-000Z_2.json', '2026-10-07T04-40-50-000Z_3.json']);
+    const next = await recordThroughputMeasurement(root, report(crowded, 304), undefined, 2);
+    assert.equal(next, join(throughputMeasurementDirectory, '2026-10-07T04-40-50-000Z_4.json'));
+    assert.equal((await readThroughputMeasurement(root))!.report.reason, 'record 304');
   } finally { await rm(root, { recursive: true, force: true }); }
 });

@@ -11,7 +11,7 @@
 //     [--since ISO] [--until ISO] [--claim GY-87] [--repository PATH] [--record DIR] [--json]
 //
 // `--record DIR` appends the report as one timestamped JSON file (never overwriting one recorded in
-// the same millisecond, and keeping the newest 30), which is what `master status` reads to say
+// the same millisecond, and keeping the newest 30 of its own records; other files in DIR are left alone), which is what `master status` reads to say
 // whether the claim is verified against the release now serving. The loop records one itself after
 // each verified deployment (GY-1385); this script is the by-hand run. The arithmetic, the population
 // rule and the recorder are the module master status uses (src/throughput.ts), loaded through tsx,

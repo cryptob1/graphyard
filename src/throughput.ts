@@ -459,14 +459,17 @@ export async function measureThroughput(summaries: Work[], readItem: (id: string
 /** How many recorded measurements the directory keeps: one per release, so a long-lived loop's record stays bounded. */
 export const throughputMeasurementRetention = 30;
 
+/** The names this recorder writes: the `measuredAt` stem, then the `_N` a later record in the same millisecond takes. */
+const measurementName = /^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)(?:_(\d+))?\.json$/;
+
 /**
  * Measurement files in recorded order: by the `measuredAt` stem, then by the `_N` sequence a
- * later record in the same millisecond takes (GY-1414), the unsuffixed first.
+ * later record in the same millisecond takes (GY-1414), the unsuffixed first. Only names this
+ * recorder writes count, so retention and the read never touch another file in the directory.
  */
 function measurementOrder(names: string[]): string[] {
-  // Every name reaching `key` ends in `.json` (filtered below), so the pattern always matches.
-  const key = (name: string) => { const match = /^(.*?)(?:_(\d+))?\.json$/.exec(name)!; return { stem: match[1]!, sequence: Number(match[2] ?? 0) }; };
-  return names.filter(name => name.endsWith('.json')).sort((a, b) => {
+  const key = (name: string) => { const match = measurementName.exec(name)!; return { stem: match[1]!, sequence: Number(match[2] ?? 0) }; };
+  return names.filter(name => measurementName.test(name)).sort((a, b) => {
     const left = key(a), right = key(b);
     return left.stem < right.stem ? -1 : left.stem > right.stem ? 1 : left.sequence - right.sequence;
   });
@@ -474,15 +477,17 @@ function measurementOrder(names: string[]): string[] {
 
 /**
  * Writes one report as a timestamped JSON file under `directory`, returning the path relative to
- * `root`, and retires the oldest files past `retention`: `master status` reads only the newest.
- * A file is never overwritten: a second record in the same millisecond takes the next `_N` suffix.
+ * `root`, and retires the oldest recorded files past `retention`: `master status` reads only the newest.
+ * A file is never overwritten: a second record in the same millisecond takes a suffix above every
+ * `_N` already recorded for it, so it always orders newest even after retention retired the first.
  */
 export async function recordThroughputMeasurement(root: string, report: ThroughputReport, directory = throughputMeasurementDirectory, retention = throughputMeasurementRetention): Promise<string> {
   await mkdir(join(root, directory), { recursive: true });
   const stem = report.measuredAt.replace(/[:.]/g, '-');
   const body = JSON.stringify(report, null, 2) + '\n';
+  const taken = (await readdir(join(root, directory))).map(name => measurementName.exec(name)).filter(match => match?.[1] === stem);
   let file = '';
-  for (let sequence = 0; ; sequence++) {
+  for (let sequence = taken.length ? Math.max(...taken.map(match => Number(match![2] ?? 0))) + 1 : 0; ; sequence++) {
     file = join(directory, `${stem}${sequence ? `_${sequence}` : ''}.json`);
     try { await writeFile(join(root, file), body, { flag: 'wx' }); break; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
