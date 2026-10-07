@@ -187,7 +187,7 @@ test('unit:provision-names-missing-revert-approver — with the guard armed and 
 
 // GY-1365: the running control plane's principal set outgrows credentials.json, so the approver
 // step must set its three variables alone, and a full run must refuse to drop deployed principals.
-test('unit:provision-revert-approver-only — the approver-only run sets exactly the three variables with the key over stdin, and a full run refuses to narrow the deployed principal set', async () => {
+test('unit:provision-revert-approver-only — the approver-only run sets exactly the three variables with the key over stdin, and a full run refuses to narrow the deployed principal set or to overwrite it while Railway\'s variable list is unreadable', async () => {
   const calls: { args: string[]; input: string | undefined }[] = [];
   const approver = await revertApproverAssignment({ appId: 200, installationId: 300, privateKey: pem }, armedLive(null));
   setRevertApproverVariables(['@railway/cli'], approver, ((_: string, args: string[], options: { input?: string }) => { calls.push({ args, input: options.input }); }) as never);
@@ -202,7 +202,8 @@ test('unit:provision-revert-approver-only — the approver-only run sets exactly
   assert.match(refusal, /holds 2 principals that \.graphyard\/credentials\.json does not \(graphyard-master, graphyard-claude-1\); a full run would drop them and nothing was set/);
   assert.match(refusal, /--revert-approver-only/); assert.doesNotMatch(refusal, /secret-token/);
   assert.equal(principalNarrowing(local, { GRAPHYARD_PRINCIPALS: JSON.stringify(local) }), null);
-  assert.equal(principalNarrowing(local, {}), null); assert.equal(principalNarrowing(local, null), null); assert.equal(principalNarrowing(local, { GRAPHYARD_PRINCIPALS: 'not json' }), null);
+  assert.equal(principalNarrowing(local, {}), null, 'a service with no variables yet drops nothing'); assert.equal(principalNarrowing(local, { GRAPHYARD_PRINCIPALS: 'not json' }), null, 'an unparsable value holds no principal that runs');
+  assert.match(principalNarrowing(local, null)!, /did not answer `variable list`.*cannot be compared.*nothing was set/, 'an unreadable list refuses instead of overwriting the set blind');
   // The script: the approver-only run writes no credentials file and sets nothing but the approver; the full run refuses before its first variable set.
   const adapter = await readFile(new URL('../scripts/provision-railway.mjs', import.meta.url), 'utf8');
   assert.match(adapter, /const approverOnly = args\.includes\('--revert-approver-only'\)/);

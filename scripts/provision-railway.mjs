@@ -57,9 +57,12 @@ export function verifyRevertApprover(live, appId) {
 /**
  * The principals the deployment runs with that `principals` (credentials.json) lacks: a full run
  * would replace GRAPHYARD_PRINCIPALS with the file and drop them, so it refuses naming their ids
- * (never a token). Null when nothing would be dropped, or when the deployed value is unreadable.
+ * (never a token). Null when nothing would be dropped: an empty service or an unparsable value
+ * holds no principal that runs. When Railway's variable list itself could not be read (null) the
+ * comparison cannot be made, so the full run refuses rather than overwrite the set blind.
  */
 export function principalNarrowing(principals, deployed) {
+  if (deployed === null || deployed === undefined) return `Railway did not answer \`variable list\` for the service, so the deployment's GRAPHYARD_PRINCIPALS cannot be compared with .graphyard/credentials.json; a full run would overwrite it blind and nothing was set. Check \`railway status\` and the login, then rerun.`;
   let running;
   try { running = JSON.parse(deployed?.GRAPHYARD_PRINCIPALS ?? '[]'); } catch { return null; }
   if (!Array.isArray(running)) return null;
