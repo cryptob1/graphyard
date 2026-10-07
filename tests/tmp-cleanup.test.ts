@@ -239,7 +239,7 @@ const staleTree = async (root: string, name: string) => {
   return { entry, deepest };
 };
 
-test('unit:tmp-reclaim-nonempty-entry-removed: a stale entry whose nested verify tree gains files while it is removed is removed, not abandoned', async () => {
+test('unit:tmp-reclaim-nonempty-entry-removed — a stale entry whose nested verify tree gains files while it is removed is removed, not abandoned', async () => {
   const root = await temporaryDirectory('reclaim-nonempty');
   const { entry, deepest } = await staleTree(root, 'graphyard-filling');
   // A writer that keeps adding files to the nested tree while the removal walks it, for longer than one rm attempt. It
@@ -261,7 +261,7 @@ test('unit:tmp-reclaim-nonempty-entry-removed: a stale entry whose nested verify
   } finally { writing = false; clearTimeout(stop); }
 });
 
-test('unit:tmp-reclaim-error-isolated: one entry\'s removal failure leaves the rest of the pass reclaimed, names only that entry, and the next pass takes it', { skip: process.getuid?.() === 0 && 'root removes a read-only directory\'s entries' }, async t => {
+test('unit:tmp-reclaim-error-isolated — one entry\'s removal failure leaves the rest of the pass reclaimed, names only that entry, and the next pass takes it', { skip: process.getuid?.() === 0 && 'root removes a read-only directory\'s entries' }, async t => {
   const root = await temporaryDirectory('reclaim-isolated');
   const { entry: stuck, deepest } = await staleTree(root, 'graphyard-stuck');
   const { entry: other } = await staleTree(root, 'graphyard-other');
