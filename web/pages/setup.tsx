@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { checklistGreen, goalLimits, goalWorkItem, setupChecklist, type SetupItem } from '../../src/model/setup-checklist';
+import { checklistGreen, goalLimits, goalWorkItem, requestedView, setupChecklist, type SetupItem } from '../../src/model/setup-checklist';
 import { PageHeader, PageSection } from '../components/page-layout';
 import type { Dashboard } from './dashboard';
 
@@ -10,6 +10,19 @@ import type { Dashboard } from './dashboard';
  * a command, a sha or a file: the person reading it may never open a terminal. Once every item is
  * green it asks what to build and submits that as the first work item.
  */
+
+let opened: string | undefined;
+/**
+ * The page the address asks for, read once before anything renders (web/main.tsx): `graphyard up`
+ * prints a sign-in link ending `&setup`, which opens this page once the person is signed in. The
+ * marker leaves the address bar so the sign-in page redeems the exact link fragment it knows.
+ */
+export function initialView(): string {
+  if (opened !== undefined) return opened;
+  const requested = requestedView(location.hash);
+  if (requested.hash !== location.hash) history.replaceState(null, '', `${location.pathname}${location.search}${requested.hash}`);
+  return opened = requested.view ?? 'work';
+}
 
 function ItemAction({ item, onConnect }: { item: SetupItem; onConnect: () => void }) {
   const action = item.action;
