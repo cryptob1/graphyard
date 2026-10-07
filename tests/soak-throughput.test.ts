@@ -7,6 +7,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { loopThroughputMeasurement, openThroughputOwner, throughputMeasurementDirectory, throughputMeasurementRetention, throughputRemeasureMs, throughputStallBound } from '../src/throughput.js';
 import { throughputLedgerFile } from '../src/throughput-ledger.js';
+import { standingThroughputStall } from '../src/daemon/throughput-effect.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -25,7 +26,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * - one whose every delivery carries a coordinator fingerprint (a blocked report), so past the bound
  *   the population cannot accumulate: the needs-decision is raised once on the one owner, and while
  *   it stands unanswered the loop re-measures hourly (GY-1458) but raises nothing more, however the
- *   finding grows; once it is answered the loop closes the owner and files no second one for the release.
+ *   finding grows; once it is answered the loop closes the owner and, while the newest measurement
+ *   still shows the needs-decision, files one successor in the next cycle and raises it there once
+ *   (GY-1465: never masterless); once deliveries are made session-free again and its answer closes
+ *   that one too, nothing stands and no further owner is filed.
  */
 const minute = 60_000, hour = 60 * minute, day = 24 * hour, start = Date.parse('2026-10-07T00:00:00.000Z');
 const sha = (label: string) => createHash('sha1').update(label).digest('hex');
@@ -42,7 +46,8 @@ function delivery(index: number, at: number, blocked: boolean): Work {
 }
 
 /** One simulated world: a release serving all day, the loop on a one-minute cycle, a delivery merging every five minutes. */
-async function world(root: string, blocked: boolean) {
+async function world(root: string, initiallyBlocked: boolean) {
+  let blocked = initiallyBlocked;
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(root, 'coordinator.token'), cliPath: 'graphyard', repository: 'owner/project', baseBranch: 'main',
     githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], run: { intervalSeconds: 60, deploymentReuseMinutes: 0 } }) as MasterConfig;
   const state = emptyDaemonState(config);
@@ -59,6 +64,8 @@ async function world(root: string, blocked: boolean) {
     snapshot: async () => ({ work: work.map(item => ({ ...item })), now: new Date(now).toISOString() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async delivered => ({ source: 'endpoint', sha: serving, at: new Date(now).toISOString(), reason: null, deployed: delivered.map(item => item.key), pending: [], requests: 0 }) as never,
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    // The production read (`throughputEffects`): the needs-decision standing on the newest measurement recorded under `root`.
+    standingThroughputStall: standingThroughputStall(root),
     measureThroughput: async (snapshot, observedSha) => {
       const outcome = await loopThroughputMeasurement(root, { work: snapshot, observedSha, now: () => now, origin: 'https://graphyard.example', claimKey: claim.key,
         status: async () => { counts.statusReads++; return { now: new Date(now).toISOString(), release: { version: '0.9.1', revision: serving } }; },
@@ -88,7 +95,8 @@ async function world(root: string, blocked: boolean) {
   };
   const throughputActions = () => Object.keys(state.actions).filter(key => key.includes('throughput'));
   const escalations = () => Object.entries(state.actions).filter(([key]) => key.startsWith('escalation:throughput:'));
-  return { state, work, asks, filed, closed, counts, cycles, throughputActions, escalations };
+  const unblock = () => { blocked = false; };
+  return { state, work, asks, filed, closed, counts, cycles, throughputActions, escalations, unblock };
 }
 
 test('unit:soak-throughput-remeasure — over a simulated day of one unverified release whose population may yet accumulate, re-measures stay spaced and bounded, one owner item is filed and stays open, and nothing escalates', { timeout: 300_000 }, async () => {
@@ -134,13 +142,30 @@ test('unit:soak-throughput-stall — over a simulated day whose every delivery c
     for (let index = 1; index < remeasured.length; index++) assert.equal(remeasured[index].at - remeasured[index - 1].at, throughputRemeasureMs, 'each re-measure in the cycle that finds the hour passed');
     assert.deepEqual(closed, [], 'still open: neither verified nor answered');
 
-    // The answer: an approved requirements revision applied to the owner. The loop closes it and files no second one for this release.
+    // The answer: an approved requirements revision applied to the owner. The loop closes it; the newest
+    // measurement still shows the needs-decision, so the next cycle files one successor and raises it there once.
     owner.policyRevision = 2;
     await stalled.cycles(start + day + 4 * hour);
     assert.deepEqual(closed, [owner.key]);
-    assert.deepEqual(filed, [owner.key], 'no second owner for a release whose owner closed on an answered decision');
-    assert.equal(stalled.escalations().length, 1, 'escalations stay bounded: one per owner');
-    assert.ok(stalled.throughputActions().length <= 3, `the loop's throughput records stay bounded: ${stalled.throughputActions().join(', ')}`);
+    const successor = openThroughputOwner(work)!;
+    assert.ok(successor && successor.key !== owner.key);
+    assert.deepEqual(filed, [owner.key, successor.key], 'one successor for the closure, while the needs-decision stands');
+    const succeeded = Object.values(stalled.state.actions).filter(action => action.detail.startsWith(`Filed ${successor.key} `));
+    assert.equal(succeeded.length, 1);
+    // The answer closes the owner in the first cycle past the day (+1 min); the successor is filed in the next.
+    assert.equal(Date.parse(succeeded[0].at), start + day + 2 * minute, 'filed within one cycle of the closure');
+    assert.deepEqual(stalled.escalations().map(([, action]) => action.work), [owner.key, successor.key], 'escalations stay bounded: one per owner');
+
+    // Deliveries become session-free again; the hourly re-measure finds nothing standing, and the successor's answer closes it with no third owner.
+    stalled.unblock();
+    await stalled.cycles(start + day + 8 * hour);
+    successor.policyRevision = 2;
+    await stalled.cycles(start + day + 12 * hour);
+    assert.deepEqual(closed, [owner.key, successor.key]);
+    assert.deepEqual(filed, [owner.key, successor.key], 'nothing stands, so no further owner is filed');
+    assert.equal(openThroughputOwner(work), null);
+    assert.equal(stalled.escalations().length, 2, 'one escalation per owner');
+    assert.ok(stalled.throughputActions().length <= 4, `the loop's throughput records stay bounded: ${stalled.throughputActions().join(', ')}`);
     assert.equal(counts.statusReads, asks.length, 'one status read per ask');
     assert.ok((await readdir(join(root, throughputMeasurementDirectory))).filter(name => name !== throughputLedgerFile).length <= throughputMeasurementRetention, 'the measurement directory stays within its retention');
   } finally { await rm(root, { recursive: true, force: true }); }
