@@ -1,7 +1,7 @@
 <!-- page: Agent protocol | 5 | webhook, dispatch. -->
 # GitHub webhook
 
-`POST /api/github/webhook` verifies GitHub's HMAC, deduplicates deliveries and wakes durable jobs for [observation](#reads-that-are-not-repeated); payloads never pass gates.
+`POST /api/github/webhook` verifies GitHub's HMAC, deduplicates deliveries, wakes durable jobs for [observation](#reads-that-are-not-repeated); payloads never pass gates.
 
 `POST /api/work/:id/reviewpolicy` (`admin`; operator agents with `policy:review-provider`): `{"provider":"codex"|"github"|"agent", "expectedPolicyRevision":1, "reason":…}`, bumping the policy revision; `agent` needs ordered `reviewerProfiles` (`name`, `runtime`, `reviewerApp`; optional `mention`, `timeoutSeconds`).
 
@@ -11,7 +11,7 @@ Commits and exact-SHA compares cache once (`github_cache`); a SHA pair's questio
 
 ## Prioritized wakes
 
-`POST /api/work/:id/resync` with `prioritized: true` is claimed like webhook wake; loop wakes add `wait: false`, answering without a reconcile tick. A rework decision on a stale observation sends one and decides from what it brings (any age; candidate head; no GitHub pause); meanwhile-saved bookkeeping (sessions, next action, gates, escalations) doesn't refuse it; decisions the candidate moved past are withdrawn. A rework dispatch refused with `Submitted PR branch changed` releases its claim with a prioritized wake, restarting from new head.
+`POST /api/work/:id/resync` with `prioritized: true` is claimed like webhook wake; loop wakes add `wait: false`, answering without a reconcile tick. A rework decision on a stale observation sends one, deciding from what it brings (any age; candidate head; no GitHub pause); meanwhile-saved bookkeeping (sessions, next action, gates, escalations) doesn't refuse it; decisions the candidate moved past are withdrawn. A rework dispatch refused with `Submitted PR branch changed` releases its claim with a prioritized wake, restarting from new head.
 
 Decisions step budget: two fifths of `run.intervalSeconds`, ≥30 s; unreached items keep standing decisions, request nothing, show in `decisions:deferred` until reached. Both passes (rework; routine decisions, then attestations) resume deferred work next cycle, always reaching first item even past budget.
 

@@ -9,7 +9,7 @@ Open items by group (tiles count, filter): **Needs you** (yours alone), **Blocke
 
 ## Needs you
 
-Cards show ask, its **Recommended** choice (or safest way) with one-line why, numbered steps, choices (recommended first, preselected); agent detail folds under **Details for agents** (older requests: their need's first sentence). `graphyard login`: single-use sign-in link; **Provide now** seals credentials for `unseal GY-N`; operator approvals offer **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`), answered only from human admin sessions.
+Cards show ask, **Recommended** choice (or safest way) with one-line why, numbered steps, choices (recommended first, preselected); agent detail folds under **Details for agents** (older requests: need's first sentence). `graphyard login`: single-use sign-in link; **Provide now** seals credentials for `unseal GY-N`; operator approvals offer **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`), answered only from human admin sessions.
 
 ## Workers
 
@@ -17,7 +17,7 @@ Cards show ask, its **Recommended** choice (or safest way) with one-line why, nu
 
 **Copy local** (launching host): `herdr agent attach w1V:pJD`; **Copy remote**: `herdr --help` documents `herdr --machine <label-or-id> <command>` and `herdr --remote <ssh-target>`; interactive attachment is not forwarded, so focus, then attach: `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
 
-Settings › **Agents**: **Can launch now?** role chips (titles name next account); blocked roles' reason, earliest time. **Accounts** rows (working, idle, out of work): state chip (Disabled, No role, Spent, Launch failing, Unavailable, Working, Idle), **Usage** (bar, percent, hover reset; — unreported), **Why** (live work or refusal); shared plans get header; same-day spent collapse (*4 spent until Oct 8*). **Roles (N)**: preference, launch policy.
+Settings › **Agents**: **Can launch now?** role chips (titles name next account; blocked roles: reason, earliest time). **Accounts** rows (working, idle, out of work): state chip (Disabled, No role, Spent, Launch failing, Unavailable, Working, Idle), **Usage** (bar, percent, hover reset; — unreported), **Why** (live work or refusal); shared plans head groups; same-day spent collapse (*4 spent until Oct 8*). **Roles (N)**: preference, launch policy.
 
 ## The status sentence
 

@@ -32,7 +32,7 @@ Never attest a stop you have not confirmed; merged work changes only via follow-
 
 ## Worker host keyring proxy
 
-Confined masters, approvers, proof producers read their GitHub login (`gh auth git-credential`) via keyring-only D-Bus proxy; workers, reviewers use their own. Per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service`, `graphyard-secrets-bus-filter.service` to `~/.config/systemd/user/`, disable earlier-enabled `graphyard-secrets-bus.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-secrets-bus.socket`. Listening at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` (or `GRAPHYARD_SECRETS_BUS`); absent, the bus is masked, sessions push with `GH_TOKEN`. Keyring items aren't filtered: keep other secrets out, or use `GH_TOKEN`.
+Confined masters, approvers, proof producers read their GitHub login (`gh auth git-credential`) via keyring-only D-Bus proxy; workers, reviewers use their own. Per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service`, `graphyard-secrets-bus-filter.service` to `~/.config/systemd/user/`, disable earlier-enabled `graphyard-secrets-bus.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-secrets-bus.socket`. Listening at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` (or `GRAPHYARD_SECRETS_BUS`); absent, the bus is masked, sessions push with `GH_TOKEN`. Keyring items aren't filtered: keep other secrets out or use `GH_TOKEN`.
 
 ## Safety facts that never change
 

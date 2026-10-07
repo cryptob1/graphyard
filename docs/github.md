@@ -32,11 +32,11 @@ Refused workflow syncs: `sync GY-N --push-via-control-plane COMMIT` (`POST /api/
 
 ## Require the check
 
-Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md)) from the control-plane App: `strict` **off**, admin-enforced, no force push/deletion (`master protection --apply`, `master browser protection`). GitHub merges only mergeable non-draft PRs with an approved head green on `GITHUB_CI_APP_IDS` and required checks ([one delivery path](delivery.md#one-delivery-path)); restrict other merge identities (lease-less workers still push).
+Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md)) from the control-plane App: `strict` **off**, admin-enforced, no force push/deletion (`master protection --apply`, `master browser protection`). GitHub merges only mergeable non-draft PRs whose approved head is green on `GITHUB_CI_APP_IDS` and required checks ([one delivery path](delivery.md#one-delivery-path)); restrict other merge identities (lease-less workers still push).
 
 ## Failed checks
 
-No merge queue (`master tip-cleanup --apply` deletes leftover `refs/graphyard/queue/*`). A failed required check reruns once on the unchanged head after its run completes (owed meanwhile); second fails test gate. A 403 quotes GitHub (or, no permission missing, preflight's reading). Tests (`graphyard-failed-tests:`) old base broke, fixed on tip, refresh (`baseBreak`), not rework.
+No merge queue (`master tip-cleanup --apply` deletes leftover `refs/graphyard/queue/*`). A failed required check reruns once on the unchanged head after its run completes (owed meanwhile); second fails test gate (rework). A 403 quotes GitHub (or, no permission missing, preflight's reading). Tests (`graphyard-failed-tests:`) old base broke, fixed on tip, refresh (`baseBreak`), not rework.
 
 ### Bindings and carry
 

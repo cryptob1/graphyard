@@ -15,7 +15,7 @@
 
 ### The coordinator checkout is confined at the OS level
 
-Non-master launches get own checkouts, the coordinator's unwritable (Codex `--sandbox workspace-write`, others bubblewrap, session bus a [keyring-only proxy](operations.md#worker-host-keyring-proxy)); unconfinable ones are refused; the loop refuses dirty/moved checkouts ([details](master-agent.md#operate)).
+Non-master launches get own checkouts, coordinator's unwritable (Codex `--sandbox workspace-write`, others bubblewrap, session bus a [keyring-only proxy](operations.md#worker-host-keyring-proxy)); unconfinable ones are refused; the loop refuses dirty/moved checkouts ([details](master-agent.md#operate)).
 
 #### Worker sandbox
 
@@ -53,7 +53,7 @@ Reviewers/producers are `awaiting acknowledgement` until 30 s active (`counts.di
 
 ### Panes are closed and reclaimed
 
-Ended sessions' panes close; each cycle closes ≤12 more here, never a live lease's: agentless shells in `.graphyard/worktrees` after **120 s** (never elsewhere), agents named for ended sessions after **60 s**. Over 20 agentless: `daemon.escalations` attention.
+Ended sessions' panes close; each cycle closes ≤12 more, never a live lease's: agentless shells in `.graphyard/worktrees` after **120 s** (never elsewhere), agents named for ended sessions after **60 s**. Over 20 agentless: `daemon.escalations` attention.
 
 ### The dispatcher's own state
 

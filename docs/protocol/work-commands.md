@@ -21,7 +21,7 @@ No endpoint sets lifecycle state.
 
 ## Splitting an item
 
-Before first dispatch, items over `run.decomposition` bounds (4 criteria, 2 root directories, 12 paths, ~1,500 lines) get read-only Pi session (`run.research`; `concurrency` 4, `timeoutMinutes` 10) proposing 2–10 children; `"split": false`, keep-whole answers, refused splits, failed runs dispatch unchanged; `"split": true` forces it. `master status`: `split` on rows, `splits` list. Each parent criterion (text, proofs) goes atomically to one child, whose `plannedFiles` sit strictly inside parent's; `after` orders children, inheriting release, dependencies, `exclusiveResources`, policy, documentation criterion. The unclaimed parent refuses requirements revisions; children add criteria, never rewriting or retiring inherited ones; last child's delivery delivers it (`decomposition.parent-delivered`).
+Before first dispatch, items over `run.decomposition` bounds (4 criteria, 2 root directories, 12 paths, ~1,500 lines) get read-only Pi session (`run.research`; `concurrency` 4, `timeoutMinutes` 10) proposing 2–10 children; `"split": false`, keep-whole answers, refused splits, failed runs dispatch unchanged; `"split": true` forces it (`master status`: rows' `split`, `splits`). Each parent criterion (text, proofs) goes atomically to one child, `plannedFiles` strictly inside parent's; `after` orders children, which inherit release, dependencies, `exclusiveResources`, policy, documentation criterion. The unclaimed parent refuses requirements revisions; children add criteria, never rewrite or retire inherited ones; the last child's delivery delivers it (`decomposition.parent-delivered`).
 
 ## Other commands and routes
 

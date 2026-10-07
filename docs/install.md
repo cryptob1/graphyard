@@ -42,7 +42,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; [protects](gi
 
 ## Step 3: App confirmation
 
-`--apply` serves and prints `http://127.0.0.1:4311` (no browser) for 900 s; the human installs the App; **Verify** *App registered and installation verified*. Master configuration, profiles come first (`master environments`, `master harness` work). Unconfirmed: exit 1, JSON summary `completed`, `github.app` `pending` (credentials saved only if GitHub returned them), `credentials.principals` (self-contained: host token directory), `stack.stop`, `resume` (exact rerun, every flag, keeping pre-App steps).
+`--apply` serves and prints `http://127.0.0.1:4311` (no browser) for 900 s; the human installs the App; **Verify** *App registered and installation verified*. Master configuration, profiles precede it (`master environments`, `master harness` work). Unconfirmed: exit 1, JSON summary `completed`, `github.app` `pending` (credentials saved only if GitHub returned them), `credentials.principals` (self-contained: host token directory), `stack.stop`, `resume` (exact rerun, every flag, keeping pre-App steps).
 
 ## Step 4: summary
 

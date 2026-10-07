@@ -16,19 +16,19 @@ Values: `{{token}}`, `{{run}}`, `{{case}}`, saved ones. `graphyard e2e list` ref
 
 ## Release verdicts
 
-One retry: **passed**; **failed** (both); **flaky** (retry passed at the same served SHA; `RUN:attempt-1`, `RUN:attempt-2` recorded); **unrun** (stopped by a failed required case, which report names; listed apart, never counted). Only required failed or unaccepted flaky cases block; optional ones are marked on **Tests**. At an unreported commit, pass-after-failure is failed.
+One retry: **passed**; **failed** (both); **flaky** (retry passed at the same served SHA; `RUN:attempt-1`, `RUN:attempt-2` recorded); **unrun** (stopped by a failed required case, which report names; listed apart, never counted). Only failed or unaccepted flaky required cases block; optional ones are marked on **Tests**. At an unreported commit, pass-after-failure is failed.
 
-Flaky required cases block promotion until an `evidence` decision (`{"case": ID, "runId": RUN, "sha": FULL_SHA}` on the hold item; another agent approves) accepts; refused unless both attempts recorded at that SHA. `release promote` reads only that run's and SHA's applied decisions. The workflow's `release promote ID` (`GRAPHYARD_URL`, `GRAPHYARD_TOKEN`) promotes only passing UATs.
+Flaky required cases block promotion until an `evidence` decision (`{"case": ID, "runId": RUN, "sha": FULL_SHA}` on the hold item, another agent approving) accepts; refused unless both attempts were recorded at that SHA. `release promote` reads only that run's and SHA's applied decisions. The workflow's `release promote ID` (`GRAPHYARD_URL`, `GRAPHYARD_TOKEN`) promotes only passing UATs.
 
 `e2e/contract.json` lists required customer outcomes: `id`, `title`, optional `criteria`, proving `cases` (several outcomes allowed). Pre-cut `graphyard release contract` refuses `release cut`, naming outcome, case, when a bound case is missing, invalid, not `uat`-targeted or optional, or a required case proves nothing.
 
 ## Goals and acceptance
 
-`graphyard goal FILE` records a goal (`statement`, `users`, `constraints`, `deployTarget`); `master status` lists open goals. With both master identities, the loop's `acceptance` role (`run.diagnostician` models; a full registry role defers it) drafts outcomes, one required `uat` case each, and contract bindings in one pull request, judged by the approver identity, never its author, and redrafted when refused (three drafts at most). Graphyard merges it at the approved head once CI passes (`goal land`), else redrafts it. Then `complete` and later heads refuse changes to a protected case or `e2e/contract.json` without that item's `goal case-change`, approved by neither requester nor implementer. `goal deliver GOAL-N GY-N...` needs those items merged.
+`graphyard goal FILE` records a goal (`statement`, `users`, `constraints`, `deployTarget`); `master status` lists open goals. With both master identities, the loop's `acceptance` role (`run.diagnostician` models; a full registry role defers it) drafts outcomes, one required `uat` case each, and contract bindings in one pull request, judged by the approver identity (never its author), redrafted when refused (≤3 drafts). Graphyard merges it at the approved head once CI passes (`goal land`), else redrafts. Then `complete` and later heads refuse changes to a protected case or `e2e/contract.json` lacking that item's `goal case-change`, approved by neither requester nor implementer. `goal deliver GOAL-N GY-N...` needs those items merged.
 
 ## Release holds
 
-One hold per failed outcome, never per suite or case: item listing failed/flaky cases, failing steps, unmet criteria, tagged `rc-hold/OUTCOME/CANDIDATE`. Later failures attach to the open hold, clearing once every attached case passes on a newer candidate UAT serves at its exact SHA (`graphyard release holds`). Folding: two-party `fold` decision (`{"outcome": A, "into": B}`), then `release fold A --decision ID`. Process/infrastructure incidents (freeze breaches, attestation delays, runner outages, deployment/container suites) file follow-ups.
+One hold per failed outcome (not suite or case): an item listing failed/flaky cases, failing steps, unmet criteria, tagged `rc-hold/OUTCOME/CANDIDATE`. Later failures attach to the open hold, clearing once every attached case passes on a newer candidate UAT serves at its exact SHA (`graphyard release holds`). Folding: two-party `fold` decision (`{"outcome": A, "into": B}`), then `release fold A --decision ID`. Process/infrastructure incidents (freeze breaches, attestation delays, runner outages, deployment/container suites) file follow-ups.
 
 ## Candidates, requests, reports
 

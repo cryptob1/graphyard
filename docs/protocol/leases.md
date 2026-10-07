@@ -5,7 +5,7 @@ Claims last 120 s, renewed every ≤30 s; owner mutations carry epoch (expired r
 
 ## `watch`
 
-`graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials; lease loss sends process group SIGTERM, then SIGKILL. Contained launches' quarantine names systemd scope unit. A dead supervisor fences the item until an attested stop or `POST /api/work/UUID/autosettle` (`coordinator`/`admin`) proves authority expired 120+ s ago, nothing alive; loop-ended attempts (exhaustion, closed submitted session), supervisor verified gone, settle in ending action. Unsettled, supervisors record why; 5xx/stale-verification refusals retry next cycle. Loop settlements send `origin: "loop"` (server records `lapsedAt`); [interventions](../dashboard.md) count them only past grace plus 10 minutes, hand ones always.
+`graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials; lease loss sends process group SIGTERM, then SIGKILL. Contained launches' quarantine names systemd scope unit. A dead supervisor fences the item until an attested stop or `POST /api/work/UUID/autosettle` (`coordinator`/`admin`) proves authority expired 120+ s ago, nothing alive; loop-ended attempts (exhaustion, closed submitted session), supervisor verified gone, settle in ending action. Unsettled: supervisors record why; 5xx/stale-verification refusals retry next cycle. Loop settlements send `origin: "loop"` (server records `lapsedAt`); [interventions](../dashboard.md) count them only past grace plus 10 minutes, hand ones always.
 
 ### Push credential
 

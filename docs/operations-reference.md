@@ -23,11 +23,11 @@ Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; the nex
 
 ## Retro synthesis
 
-A minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables, `master status` then flagging crossed patterns as configuration faults) files an item per crossed pattern, drafting `retro.drafted` changes (wording, check, producer method, fault-catalogue entry) per recurring refusal or rework cause; non-drafting operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses each. Approved: [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete`.
+A minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables, `master status` then flags crossed patterns as configuration faults) files an item per crossed pattern, drafting `retro.drafted` changes (wording, check, producer method, fault-catalogue entry) per recurring refusal or rework cause; non-drafting operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses each. Approved: [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete`.
 
 ## Flaky CI check
 
-A failing check [reruns](github.md#failed-checks) once (`mergeQueue.rerunFailedChecks`, 0 disables); passing clears, failing again means rework.
+[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables).
 
 ## Accepted evidence turns out to be wrong
 
