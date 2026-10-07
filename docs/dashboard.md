@@ -33,4 +33,4 @@ Rows: **Build, Validate, Test, Review, Prove, Merge, Deploy**, then *Merged*, *L
 
 ## Insights
 
-**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats are filed as `bug` items unless `GRAPHYARD_INTERVENTION_PATTERNS=0`), **Validation**, **Releases**.
+**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats are filed as `bug` items unless `GRAPHYARD_INTERVENTION_PATTERNS=0`); a rework round answering a ground the loop acts on by itself (base conflict, failed required check, change request, merge refusal, failed proof) is not an intervention, whoever requested it, **Validation**, **Releases**.

@@ -7,6 +7,7 @@ import type { Store } from './store.js';
 import { boundedSnapshot } from './store/bounded-snapshot.js';
 import { applyWorkDelta, type DeltaOp } from './store/snapshot-delta.js';
 import { workIdByRef } from './store/locked-read.js';
+import { reworkGroundFields, routineReworkGround, type ReworkGroundsWork } from './rework-grounds.js';
 
 /**
  * Interventions read from the ledger (GY-98; see model/interventions.ts for the concept).
@@ -41,6 +42,8 @@ export interface InterventionLedgerRow {
   details: any; payload?: any;
   /** The stage the item's latest earlier row recorded: the stage the item was in when this row's command ran. */
   stageBefore?: string | null;
+  /** On a `rework` row only: the document fields its grounds are read from (`routineReworkGround`, GY-1386). */
+  grounds?: ReworkGroundsWork | null;
   work?: { key?: string | null; stage?: string | null; title?: string | null; epoch?: number | null; blocker?: string | null; plannedFiles?: string[] | null; quarantine?: unknown; escalations?: { trigger: string; at: string; reason: string; actor: string }[] | null; candidate?: { sha: string; pr: number } | null; submission?: { epoch: number; pr: number } | null } | null;
 }
 type Db = { query: pg.Pool['query'] };
@@ -56,6 +59,14 @@ const isObject = (value: unknown): value is Record<string, any> => !!value && ty
 /** The row's `work` as the fold reads it, from the projected document (null fields where the document has none). */
 const workOf = (document: Record<string, any> | null): InterventionLedgerRow['work'] =>
   Object.fromEntries(workFields.map(([name, field]) => [name, document?.[field] ?? null])) as InterventionLedgerRow['work'];
+/**
+ * A `rework` row's grounds fields, from its whole document or its delta resolved in SQL
+ * (`graphyard_event_work`); the observation keeps only what the grounds read, so a few hundred
+ * rework rows a week cost no review bodies or threads.
+ */
+const groundsOf = (document: string) => `jsonb_build_object(${reworkGroundFields.filter(field => field !== 'observation').map(field => `'${field}', ${document}->'${field}'`).join(', ')},
+  'observation', CASE WHEN jsonb_typeof(${document}->'observation')='object' THEN jsonb_build_object(${['candidate', 'baseTip', 'conflicting', 'merged', 'checks', 'requiredChecks', 'agentReview'].map(field => `'${field}', ${document}->'observation'->'${field}'`).join(', ')},
+    'reviews', COALESCE((SELECT jsonb_agg(jsonb_build_object('sha', review->'sha', 'state', review->'state')) FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${document}->'observation'->'reviews')='array' THEN ${document}->'observation'->'reviews' ELSE '[]'::jsonb END) review), '[]'::jsonb)) END)`;
 
 /**
  * The newest `limit` rows of the kinds the fold reads, in ledger order; with `since`, only those
@@ -80,7 +91,8 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
   const limit = options.limit ?? interventionLedgerLimit;
   const columns = `seq, work_id, actor, kind, created_at, payload->'details' AS details,
       CASE WHEN kind LIKE 'decision.%' OR kind IN ('intervention.recorded','judgement.recorded') THEN payload ELSE NULL END AS top,
-      payload ? 'work' AS whole, ${projectedWork("payload->'work'")} AS work, CASE WHEN payload ? 'work' THEN NULL ELSE payload->'delta' END AS delta`;
+      payload ? 'work' AS whole, ${projectedWork("payload->'work'")} AS work, CASE WHEN payload ? 'work' THEN NULL ELSE payload->'delta' END AS delta,
+      CASE WHEN kind = 'rework' AND work_id IS NOT NULL THEN (SELECT ${groundsOf('document.work')} FROM (SELECT graphyard_event_work(work_id, payload) AS work) document) END AS grounds`;
   // A window is read kind by kind through the (kind, created_at) index, then ordered (GY-1381).
   // As one `kind = ANY` filter, or as `kind = k AND created_at >= since`, the planner walked the
   // primary key or the created_at index through every routine row the window holds — a busy
@@ -143,7 +155,7 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
     // timestamps use (`updatedAt`); a raw row has only its insertion instant.
     const updatedAt = document?.updatedAt == null ? null : typeof document.updatedAt === 'string' ? document.updatedAt : JSON.stringify(document.updatedAt);
     return { seq, workId: row.work_id, actor: row.actor, kind: row.kind, at: instant(updatedAt, new Date(row.created_at).toISOString()), details: row.details, payload: row.top ?? undefined,
-      work: row.whole || document ? workOf(document) : null, stageBefore };
+      work: row.whole || document ? workOf(document) : null, stageBefore, ...(row.kind === 'rework' ? { grounds: row.grounds ?? null } : {}) };
   });
   return { rows, truncated };
 }
@@ -152,7 +164,7 @@ interface Ask { seq: number; at: string; stage: Stage | null; kind: 'scope-reque
 interface WorkState {
   key: string | null; title: string | null; stage: Stage | null; plannedFiles: string[] | null;
   asks: Ask[];
-  reworkDecision: { seq: number; at: string; id: string; stage: Stage | null } | null;
+  reworkDecision: { seq: number; at: string; id: string; stage: Stage | null; binding: string | null } | null;
   bypass: { seq: number; at: string; mergeSha: string; blocked: string; stage: Stage | null } | null;
   quarantine: { seq: number; at: string; epoch: number; concernAt: string | null; stage: Stage | null } | null;
   escalations: Map<string, { seq: number; at: string; reason: string; actor: string; stage: Stage | null }>;
@@ -266,7 +278,7 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
         break;
       }
       case 'decision.requested': {
-        if (row.payload?.action === 'rework') entry.reworkDecision = { seq: row.seq, at: row.at, id: row.payload.id, stage };
+        if (row.payload?.action === 'rework') entry.reworkDecision = { seq: row.seq, at: row.at, id: row.payload.id, stage, binding: typeof row.payload.input?.binding === 'string' ? row.payload.input.binding : null };
         break;
       }
       case 'decision.failed': case 'decision.withdrawn': case 'decision.stale': {
@@ -274,12 +286,17 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
         break;
       }
       case 'rework': {
-        const sources = [...entry.asks.flatMap(ask => ask.sources), ...(entry.reworkDecision ? [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] : []), source];
-        const opened = [entry.reworkDecision?.at, ...entry.asks.map(ask => ask.at)].filter((at): at is string => !!at).sort()[0] ?? row.at;
-        const candidate = row.work?.candidate, submission = row.work?.submission;
-        const blocked = candidate ? `candidate ${candidate.sha.slice(0, 12)} (PR #${candidate.pr})` : submission ? `PR #${submission.pr}` : `attempt ${row.work?.epoch ?? '?'}`;
-        emit(row, 'rework', { id: entry.reworkDecision ? `rework:${row.workId}:${entry.reworkDecision.id}` : undefined, requestedAt: opened, blocked, stage: entry.asks[0]?.stage ?? entry.reworkDecision?.stage ?? stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: text(details.reason ?? details.intent?.reason, 'rework authorized'), trigger: entry.asks[0]?.kind ?? (entry.reworkDecision ? 'decision' : 'direct'), sources });
-        entry.asks = []; entry.reworkDecision = null;
+        // A round answering a ground the loop's own rule acts on needed nobody (GY-1386, rework-grounds.ts):
+        // whoever asked for it first, the product handled it, and the asks it ended went with it.
+        if (routineReworkGround(row.grounds ?? null, entry.reworkDecision?.binding)) { entry.asks = []; entry.reworkDecision = null;
+        } else {
+          const sources = [...entry.asks.flatMap(ask => ask.sources), ...(entry.reworkDecision ? [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] : []), source];
+          const opened = [entry.reworkDecision?.at, ...entry.asks.map(ask => ask.at)].filter((at): at is string => !!at).sort()[0] ?? row.at;
+          const candidate = row.work?.candidate, submission = row.work?.submission;
+          const blocked = candidate ? `candidate ${candidate.sha.slice(0, 12)} (PR #${candidate.pr})` : submission ? `PR #${submission.pr}` : `attempt ${row.work?.epoch ?? '?'}`;
+          emit(row, 'rework', { id: entry.reworkDecision ? `rework:${row.workId}:${entry.reworkDecision.id}` : undefined, requestedAt: opened, blocked, stage: entry.asks[0]?.stage ?? entry.reworkDecision?.stage ?? stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: text(details.reason ?? details.intent?.reason, 'rework authorized'), trigger: entry.asks[0]?.kind ?? (entry.reworkDecision ? 'decision' : 'direct'), sources });
+          entry.asks = []; entry.reworkDecision = null;
+        }
         if (entry.quarantine && row.work && !row.work.quarantine) {
           emit(row, 'containment-settlement', { requestedAt: entry.quarantine.concernAt ?? entry.quarantine.at, blocked: `containment fence of epoch ${entry.quarantine.epoch}`, stage: entry.quarantine.stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: 'fence discarded by rework', trigger: 'rework', sources: [{ seq: entry.quarantine.seq, kind: 'quarantine' }, source] });
           entry.quarantine = null;
@@ -349,7 +366,7 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
       if (ask.kind === 'scope-request' && !ask.trigger) continue;
       open(ask.kind === 'scope-request' ? 'scope-widening' : 'escalation', { requestedAt: ask.at, blocked: ask.blocked, stage: ask.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: ask.trigger ?? ask.kind, sources: ask.sources });
     }
-    if (entry.reworkDecision) open('rework', { id: `rework:${id}:${entry.reworkDecision.id}`, requestedAt: entry.reworkDecision.at, blocked: item.candidate ? `candidate ${item.candidate.sha.slice(0, 12)} (PR #${item.candidate.pr})` : `attempt ${item.epoch}`, stage: entry.reworkDecision.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'decision', sources: [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] });
+    if (entry.reworkDecision && !routineReworkGround(item, entry.reworkDecision.binding)) open('rework', { id: `rework:${id}:${entry.reworkDecision.id}`, requestedAt: entry.reworkDecision.at, blocked: item.candidate ? `candidate ${item.candidate.sha.slice(0, 12)} (PR #${item.candidate.pr})` : `attempt ${item.epoch}`, stage: entry.reworkDecision.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'decision', sources: [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] });
     if (entry.bypass) open('bypass', { requestedAt: entry.bypass.at, blocked: entry.bypass.blocked, stage: entry.bypass.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'refused-reconciliation', sources: [{ seq: entry.bypass.seq, kind: 'merge.reconciliation.refused' }] });
     if (entry.quarantine?.concernAt && item.containmentQuarantine) open('containment-settlement', { requestedAt: entry.quarantine.concernAt, blocked: `containment fence of epoch ${entry.quarantine.epoch}`, stage: entry.quarantine.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'unsettled', sources: [{ seq: entry.quarantine.seq, kind: 'quarantine' }] });
     for (const escalation of standingEscalations(item)) {
