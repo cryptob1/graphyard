@@ -132,6 +132,9 @@ test('unit:throughput-attention-names-owner — the needs-decision attention nam
   // The owner the loop files for that path carries the settled AC-1 with its manual proof.
   const criterion = await ownerCriterion();
   assert.match(criterion ?? '', settledFamily);
+  // Like the settled rule, an approver's coordination session never excludes; one recording no role does.
+  assert.match(populationRule, /an approver session never exclude/);
+  assert.match(criterion ?? '', /no coordination session other than an approver's recorded on it \(one recording no role excludes\)/);
   assert.deepEqual(throughputOwnerItem(revision, 0).criteria, [{ id: 'AC-1', text: criterion, proofs: ['manual:throughput-claim-verified'] }]);
 });
 
@@ -232,6 +235,27 @@ test('integration:throughput-owner-filed-when-masterless — a needs-decision st
     assert.equal(ordinary.key, `GY-${7400 + 3}`);
     assert.equal(state.actions[`throughput:owner:${revision}`]!.work, ordinary.key);
     assert.equal(Object.keys(state.actions).filter(key => key.startsWith('escalation:throughput:')).length, 3, 'nothing stands, so nothing is escalated');
+
+    // The re-measure fails in the cycle the open owner closes, while the recorded measurement still
+    // shows the needs-decision: the failed ask names no verdict, yet the owner is filed that cycle.
+    Object.assign(ordinary, { stage: 'done', closure: { kind: 'obsolete', reason: 'answered', ref: null, by: 'operator-agent', at: new Date().toISOString(), from: 'backlog' } });
+    effects.standingThroughputStall = async served => served === revision ? stall : null;
+    effects.measureThroughput = async () => { throw new Error('the plane answered 502'); };
+    delete state.actions[`throughput:${revision}`];
+    await runCycle(master, state, effects, () => Date.now());
+    assert.equal(state.actions[`throughput:${revision}`]!.state, 'failed', 'the re-measure failed');
+    const despiteFailure = openThroughputOwner(work)!;
+    assert.ok(despiteFailure && despiteFailure.key !== ordinary.key, 'a failed re-measure leaves no standing needs-decision masterless past its cycle');
+    assert.equal(filed.length, 5);
+    assert.equal(filed[4]!.key.startsWith(`throughput-owner:${revision}:${ordinary.key}:`), true, 'filed as the successor of the closed owner');
+    assert.equal(state.actions[`escalation:throughput:${despiteFailure.key}:1`]?.work, despiteFailure.key, 'the decision is asked on it');
+
+    // A failed ask with nothing standing files nothing.
+    Object.assign(despiteFailure, { stage: 'done', closure: { kind: 'obsolete', reason: 'answered', ref: null, by: 'operator-agent', at: new Date().toISOString(), from: 'backlog' } });
+    effects.standingThroughputStall = async () => null;
+    for (let cycle = 0; cycle < 3; cycle++) await runCycle(master, state, effects, () => Date.now());
+    assert.equal(filed.length, 5, 'without an unverified answer only a standing decision files an owner');
+    assert.equal(openThroughputOwner(work), null);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

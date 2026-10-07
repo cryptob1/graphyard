@@ -296,7 +296,7 @@ export function throughputEscalatedAt(actions: Record<string, DaemonAction>, own
  * needs-decision was answered (`throughputOwnerClosure`), and never otherwise. With none open, an
  * unverified answer files one, once per release: a release whose owner was closed (on an answered
  * decision, or by anyone) is not given a second unless a needs-decision still stands on its newest
- * measurement (GY-1465), and the next release files afresh. A measurement showing the
+ * measurement (GY-1465), which files one even when the latest ask failed, and the next release files afresh. A measurement showing the
  * population cannot accumulate raises the typed needs-decision on the owner once per owner: it
  * stands until answered, so a re-measure that finds the same — or more of the same — never raises
  * it again. Filing and closing go through the operator-agent; a failure backs off on the action.
@@ -316,11 +316,14 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
       } catch (error) { performed.push(await note(owner.key, 'failed', `Could not close ${owner.key}: ${message(error)}`)); }
       return;
     }
-  } else if (verdict === 'unverified' && effects.fileThroughputOwner) {
+  } else if (verdict !== 'verified' && effects.fileThroughputOwner) {
     // GY-1465: with no owner open, a needs-decision that still stands on the newest measurement
-    // files one within the cycle, whether or not the record of an earlier owner was retained, so
-    // the attention is never left with no item to decide on.
+    // files one within the cycle, whether or not the record of an earlier owner was retained and
+    // whatever the latest ask answered — a failed re-measure or a wait on the plane leaves the
+    // recorded measurement, and its needs-decision, standing — so the attention is never left with
+    // no item to decide on. Without an unverified answer only a standing decision files one.
     stall ??= await effects.standingThroughputStall?.(revision).catch(() => null) ?? null;
+    if (verdict !== 'unverified' && !stall) return;
     if (ownerAction?.state === 'done' ? !stall : !readyToRetry(ownerAction, state.cycle)) return;
     // The key binds the owner it succeeds, the measurement the decision stands on and the exact
     // input, so a retry after a lost reply returns the item already filed, while a later filing for
