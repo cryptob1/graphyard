@@ -164,8 +164,9 @@ export function groupFaults(items: readonly { subject: string; kind: FaultKind; 
   return [...groups.values()].sort((a, b) => b.count - a.count || faultClasses.indexOf(a.faultClass) - faultClasses.indexOf(b.faultClass));
 }
 
-// The worker no-submission bound (GY-1462) is declared once, beside the lease-lapse causes it
-// explains (escalation.ts); the loop's fault and the doctor's checklist read it from here.
+// The worker no-submission bound (GY-1462) is declared once in escalation.ts, beside the lease-lapse
+// causes it explains; this re-export is where the loop's fault, the doctor's checklist and the
+// server's renewal refusal import it from.
 export { workerNoSubmissionBoundMs, workerNoSubmissionRefusalMs, workerNoSubmissionRenewalBounds };
 /**
  * The live attempt `work` holds without a submission for its epoch, and for how long, or null: no

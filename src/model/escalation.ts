@@ -36,9 +36,9 @@ export type LeaseLapse = 'expired' | 'lost';
 export type LeaseLapseCause = 'submitted' | 'blocked-awaiting-operator' | 'stopped-by-attestation' | 'exhausted-capacity' | 'no-submission-bound';
 /**
  * The worker no-submission bound (GY-1462): how long an attempt may hold its lease with no
- * submission for its epoch. It is declared here once; the doctor's checklist (doctorBounds), the
- * loop's `unsubmitted-attempt` fault, the server's renewal refusal and the lapse it causes all read
- * it. Renewal and session activity are no motion against it: at one bound the attempt is a
+ * submission for its epoch. It is declared here once, and fault-classes.ts re-exports it with the
+ * readers built on it; the doctor's checklist (doctorBounds), the loop's `unsubmitted-attempt`
+ * fault, the server's renewal refusal and the lapse it causes all read it. Renewal and session activity are no motion against it: at one bound the attempt is a
  * stalled-gate fault, at two the loop ends it through its reclaim path (its work kept on its
  * branch, the item dispatched again), and a little past that the server refuses its renewals, so
  * with no loop to end it the lease lapses into containment and reclaim.

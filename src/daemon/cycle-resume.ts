@@ -256,7 +256,10 @@ export async function resumeStep(cycle: Cycle, failedOver: Set<string>, listingL
       const attempts = (previous?.attempts ?? 0) + 1;
       await entry(key, 'started', `${profile.agentName} on ${item.key} ${reason}; ending the attempt`, attempts);
       try {
-        const next = await endWorkerAttempt(cycle, item, profile, epoch, pane, reason, reason);
+        // Only a pane that is still this attempt's is closed: the agent name a handle with no pane
+        // recorded falls back to may belong to another item's session now (GY-940).
+        const closePane = checkPaneStillBelongs(item, handleId, pane ?? undefined) ? null : pane;
+        const next = await endWorkerAttempt(cycle, item, profile, epoch, closePane, reason, reason);
         performed.push(await entry(key, 'done', `${profile.agentName} on ${item.key} ${reason}; ${next}, keeping the attempt's branch`, attempts));
         await drop(keys.blocker, keys.scope, keys.idle);
       } catch (error) {

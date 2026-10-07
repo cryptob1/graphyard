@@ -1,6 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFile } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -8,14 +8,15 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
-import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
+import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { cycleFaults, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { faultClassOf, workFaults } from '../src/model/fault-classes.js';
 import { leaseLapseCause } from '../src/model/escalation.js';
 import { doctorBounds, doctorPrompt } from '../src/daemon/doctor.js';
 import { preserveInterruptedAttempt } from '../src/daemon/effects.js';
 import { preservePartialWork } from '../src/master/launch.js';
 import { childRunner } from '../src/child-runner.js';
+import type { SessionHandle } from '../src/model/sessions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1462: the 60-minute worker no-submission bound, enforced. An attempt that holds its lease past
@@ -128,6 +129,50 @@ test('unit:doctor-worker-bound-matches-product — the doctor\'s worker bound is
   assert.equal(doctorBounds.workerMinutes * minute, workerNoSubmissionBoundMs);
   const prompt = doctorPrompt({ repository: 'owner/project', cliPath: launcher }, { items: [], faults: [] });
   assert.ok(prompt.includes(`more than ${workerNoSubmissionBoundMs / minute} min without a submission`), 'the doctor checklist names the product bound');
+});
+
+test('unit:nosubmission-end-closes-own-pane-only — the loop\'s end at two bounds closes the pane the attempt\'s own handle records, never one its reused agent name resolves to (GY-940)', async () => {
+  await bound();
+  const { noSubmissionKey } = await import('../src/daemon/cycle-resume.js');
+  const directory = await temporaryDirectory('unsubmitted-pane');
+  const credentialFile = join(directory, 'coordinator.token'), token = join(directory, 'worker.token');
+  await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  await writeFile(token, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  const profile = { name: 'claude-1', principal: 'graphyard-claude-1', agentName: 'graphyard-claude-1', mode: 'launch', kind: 'claude', credentialFile: token, agentArgs: [], environment: {} } as unknown as WorkerProfile;
+  const master = masterConfigSchema.parse({ ...config(), credentialFile, herdrWorkspace: 'w1', workers: [profile] });
+  const handle = (pane: string | null) => ({ id: 'graphyard-claude-1:1', kind: 'implementation', principal: 'graphyard-claude-1', epoch: null, runtime: 'claude', host: 'machine-a',
+    workspace: 'w1', tab: null, pane, agentName: 'graphyard-claude-1', role: null, head: null, attach: null, transcript: null, subject: 'GY-1457',
+    startedAt: iso(-121 * minute), updatedAt: iso(-minute), endedAt: null, state: 'running', outcome: null }) as SessionHandle;
+  async function end(recorded: string | null, listing: HerdrAgent[]) {
+    let items = [held(121 * minute, { sessions: [handle(recorded)] } as Partial<Work>)];
+    const closed: string[] = [];
+    const effects: DaemonEffects = {
+      agents: () => listing, herdr: () => ({ agents: listing, available: true }),
+      credentials: async profiles => Object.fromEntries(profiles.map(entry => [entry.name, { available: true, reason: null }])),
+      snapshot: async () => ({ work: items, now: iso(0) }), closeSession: pane => { closed.push(pane); },
+      dispatch: async () => {}, requestProof: () => {}, requestSmoke: () => {}, recordDeployment: async () => {}, persist: async () => {},
+      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
+      promptSession: () => {}, recordSession: async () => {},
+      reportCapacity: async work => { items = items.map(entry => entry.id === work.id ? { ...entry, lease: null } as Work : entry); return items[0]; },
+      preserveWork: async () => ({ state: 'committed', commit: 'b'.repeat(40), branch: 'graphyard/gy-1457-1', detail: 'kept as WIP' }),
+    };
+    const state = emptyDaemonState(master);
+    await runCycle(master, state, effects, () => clock);
+    const ended = state.actions[noSubmissionKey(items[0]!, 1)];
+    assert.equal(ended?.state, 'done', `the attempt is ended at two bounds: ${JSON.stringify(ended)}`);
+    return { closed, detail: ended!.detail };
+  }
+  try {
+    // The handle records no pane yet: the name resolves to another item's session, which is left alone.
+    const foreign = await end(null, [{ name: 'graphyard-claude-1', pane_id: 'w1:pForeign', agent_status: 'working', agent: 'claude' }]);
+    assert.deepEqual(foreign.closed, [], 'the name-resolved pane is not closed');
+    assert.match(foreign.detail, /no pane was left to close/);
+    // The handle records its own pane: that pane is closed.
+    const own = await end('w1:pOwn', [{ name: 'graphyard-claude-1', pane_id: 'w1:pOwn', agent_status: 'working', agent: 'claude' }]);
+    assert.deepEqual(own.closed, ['w1:pOwn']);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 // The server side: renewal refused, lapse, reclaim, branch kept.
