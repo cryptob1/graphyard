@@ -291,8 +291,6 @@ export const approvalWatchSchema = z.object({
   reportedExhaustion: z.string().max(200).nullable().default(null),
   /** The decision and launch whose spent-account hold alone is written (GY-489): a capacity report that failed after it is retried without writing the hold again. */
   heldExhaustion: z.string().max(200).nullable().default(null),
-  /** GY-1394. An attest decision's refusal and the head it bound: the loop returns that head to a worker on it, with no approver. */
-  refusal: z.object({ approver: z.string().max(200), reason: z.string().max(1200), at: z.string(), proof: z.string().max(200), sha: z.string().max(64), baseSha: z.string().max(64), policyRevision: z.number().int().min(0) }).strict().nullable().default(null),
 }).strict();
 export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
 /**
