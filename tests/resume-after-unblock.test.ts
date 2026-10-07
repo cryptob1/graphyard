@@ -39,7 +39,7 @@ function held(overrides: Partial<Work> = {}): Work {
     policy: { checks: ['test'], review: true }, plannedFiles: ['src/a.ts'], stage: 'build', revision: 3, policyRevision: 1,
     createdAt: iso(-minutes(600)), updatedAt: iso(0), stageEnteredAt: iso(-minutes(300)), ready: true, epoch: 1,
     lease: { owner: 'alpha-principal', epoch: 1, expiresAt: iso(minutes(600)) },
-    lastAssignment: { owner: 'alpha-principal', epoch: 1, claimedAt: iso(-minutes(300)) },
+    lastAssignment: { owner: 'alpha-principal', epoch: 1, claimedAt: iso(-minutes(20)) },
     workspaces: [{ host: 'machine-a', path: '/srv/worktrees/GY-252-1', epoch: 1, owner: 'alpha-principal', branch: 'graphyard/gy-252-1' }],
     candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }], violations: [],
