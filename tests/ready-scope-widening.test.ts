@@ -76,8 +76,12 @@ test('integration:interrupted-attempt-lifts-its-scope-refusal — an attempt the
 
 test('integration:scope-park-refused — a park whose decision is a plannedFiles widening is refused with the scope-request command that the loop and the approver answer, and the attempt keeps its lease; a human-only park still parks (GY-1113)', async () => {
   const work = await claimed('park');
-  const needed = 'master scope to widen plannedFiles to include src/master/profiles.ts, src/master.ts, tests/role-concurrency.test.ts';
-  const refused = await post(worker, `work/${work.key}/park`, { epoch: work.epoch, kind: 'goals-and-priorities', needed, reason: 'AC-1 requires removing the shared cause, which lives in these files' });
+  // GY-1113's own words are refused by their wording alone (GY-1395 `parkRefusal`); a scope ask in
+  // other words, here carried by the reason, is still refused by the files it names.
+  const worded = await post(worker, `work/${work.key}/park`, { epoch: work.epoch, kind: 'goals-and-priorities', needed: 'master scope to widen plannedFiles to include src/master/profiles.ts', reason: 'AC-1' });
+  assert.equal(worded.status, 422, JSON.stringify(worded.body));
+  const needed = 'operator approval to edit src/master/profiles.ts, src/master.ts, tests/role-concurrency.test.ts';
+  const refused = await post(worker, `work/${work.key}/park`, { epoch: work.epoch, kind: 'goals-and-priorities', needed, reason: 'AC-1 requires removing the shared cause, which lives in these files outside the scope of the item' });
   assert.equal(refused.status, 409, JSON.stringify(refused.body));
   assert.match(refused.body.error, /not a human-only decision/);
   assert.match(refused.body.error, new RegExp(`graphyard scope-request ${work.key} ${work.epoch} src/master/profiles\\.ts src/master\\.ts tests/role-concurrency\\.test\\.ts -- REASON`));
