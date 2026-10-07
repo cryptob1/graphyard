@@ -34,7 +34,8 @@ export function listTestFiles(root = repositoryRoot) {
 
 /** The soak (GY-404): every tests/soak*.test.ts file, one suite per concern since GY-1363. */
 export const soakSuite = /^tests\/soak(?:-[\w-]+)?\.test\.ts$/;
-const timingBudgetTests = ['tests/work-snapshot-latency.test.ts', 'tests/cycle-latency.test.ts', 'tests/server-scale.test.ts', 'tests/healthz-bounded.test.ts', 'tests/interventions-scale.test.ts'];
+// tests/plane-load.test.ts holds the plane under ten minutes of several users at once (GY-1383).
+const timingBudgetTests = ['tests/work-snapshot-latency.test.ts', 'tests/cycle-latency.test.ts', 'tests/server-scale.test.ts', 'tests/healthz-bounded.test.ts', 'tests/interventions-scale.test.ts', 'tests/plane-load.test.ts'];
 /** A test file's release-candidate suite, `soak` or `timing-budget`, or null for a pre-merge file. */
 export const releaseCandidateKind = file => soakSuite.test(file) ? 'soak' : timingBudgetTests.includes(file) ? 'timing-budget' : null;
 export const isReleaseCandidateTest = file => releaseCandidateKind(file) !== null;

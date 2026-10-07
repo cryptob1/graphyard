@@ -329,6 +329,13 @@ export interface FlowQuery {
    * instant its carried state is read at. The steps drill-down reads from its key's instant.
    */
   since?: string | null;
+  /**
+   * A drill-down's read (GY-1383): its items come from the work index's rows, chosen by the type
+   * and slices their newest fact records, and no work_items document is scanned. Only the steps
+   * drill-down (`exits`) reads more: the record of each delivered item it shows, whose exit from
+   * Deploy its moves end with — the work index's summary, or a merge not yet settled by its id.
+   */
+  drilldown?: { exits: boolean } | null;
 }
 export interface FlowDataset {
   observedAt: string; from: string; to: string; days: FlowWindow;
@@ -513,6 +520,38 @@ function rowToFact(row: any): FlowFact {
   return { id: Number(row.id), workId: row.work_id, workKey: row.work_key, kind: row.kind, observedAt: iso(row.observed_at), recordedAt: iso(row.recorded_at), source: row.source, sourceEvent: Number(row.source_event), stage: row.stage, workType: row.work_type, slices: row.slices ?? [], details: row.details ?? {}, dedupe: row.dedupe };
 }
 
+/**
+ * The items a drill-down shows (GY-1383): the work index's rows, the first `flowLimits.work` by
+ * number as the report's read keeps them, narrowed to its type and slice filters by what each
+ * item's newest fact up to `to` records, so the read returns the selected items' rows alone. Each
+ * is the record the drill-down draws on — id, key, stage, type and pull request — and never its
+ * document: on 2026-10-06 a dashboard's 200 drill-downs per ten minutes each read every open
+ * document, and with whole-fleet reads beside them pushed production into 502s.
+ */
+async function drilldownWork(store: Store, query: FlowQuery, to: string): Promise<{ work: Work[]; truncated: boolean }> {
+  const rows = (await store.reportPool.query(
+    `SELECT i.id, i.key, i.stage, i.pr, i.truncated, f.work_type, f.slices FROM
+       (SELECT id, key, stage, pr, number, count(*) OVER () > $1 AS truncated FROM work_index ORDER BY number LIMIT $1) i
+       CROSS JOIN LATERAL (SELECT work_type, slices FROM flow_facts WHERE work_id=i.id AND observed_at<=$2 ORDER BY observed_at DESC,id DESC LIMIT 1) f
+      WHERE ($3::text IS NULL OR f.work_type=$3) AND ($4::text IS NULL OR $4=ANY(f.slices)) ORDER BY i.number`,
+    [flowLimits.work, to, query.type ?? null, query.slice ?? null])).rows;
+  const work = rows.map(row => ({ id: row.id, key: row.key, stage: row.stage, type: row.work_type, candidate: row.pr === null ? null : { pr: Number(row.pr) } }) as unknown as Work);
+  const truncated = rows.length ? rows[0].truncated === true
+    : Number((await store.reportPool.query('SELECT count(*)::int AS items FROM (SELECT 1 FROM work_index LIMIT $1) probe', [flowLimits.work + 1])).rows[0].items) > flowLimits.work;
+  return { work, truncated };
+}
+/**
+ * Delivered items' records by id, for when they left Deploy: the work index's summary of a settled
+ * delivery, or — for a merge not yet settled — that one item's document, read by its id.
+ */
+async function deliveredRecords(store: Store, ids: string[]): Promise<Map<string, Work>> {
+  if (!ids.length) return new Map();
+  const settled = (await store.reportPool.query('SELECT id, summary AS document FROM work_index WHERE id=ANY($1::uuid[]) AND settled', [ids])).rows;
+  const unsettled = ids.filter(id => !settled.some(row => row.id === id));
+  const merged = unsettled.length ? (await store.reportPool.query('SELECT id, document FROM work_items WHERE id=ANY($1::uuid[])', [unsettled])).rows : [];
+  return new Map([...settled, ...merged].filter(row => row.document).map(row => [row.id, row.document as Work]));
+}
+
 // Bounded, indexed reads on the report pool (GY-491). Every query is limited by window, by the
 // selected work items, and by an explicit row cap whose exhaustion is reported rather than hidden.
 export async function readFlow(store: Store, query: FlowQuery): Promise<FlowDataset> {
@@ -531,13 +570,16 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   // exhausted bound is reported as partial coverage instead of silently dropping the
   // newest records.
   // Open items whole and each settled delivery as the work index's summary (GY-1376): the report
-  // and every drill-down read no finished item's document, only the decision state it draws from.
-  const workRows: Work[] = await store.fleet({ limit: flowLimits.work + 1, reports: true });
-  const workTruncated = workRows.length > flowLimits.work;
-  const work: Work[] = workRows.slice(0, flowLimits.work);
-  const included = work.filter(item => (!query.type || item.type === query.type) && (!query.slice || workSlices(item).slices.includes(query.slice)));
+  // reads no finished item's document, only the decision state it draws from. A drill-down
+  // (`drilldownWork`) reads the index's rows of the items its filters select and no document.
+  const fleet = query.drilldown ? null : await store.fleet({ limit: flowLimits.work + 1, reports: true });
+  const narrowed = fleet ? null : await drilldownWork(store, query, to);
+  const workTruncated = narrowed ? narrowed.truncated : fleet!.length > flowLimits.work;
+  let work: Work[] = narrowed ? narrowed.work : fleet!.slice(0, flowLimits.work);
+  let included = narrowed ? work : work.filter(item => (!query.type || item.type === query.type) && (!query.slice || workSlices(item).slices.includes(query.slice)));
   const ids = included.map(item => item.id);
-  const stateIds = work.map(item => item.id);
+  // The report reads every item's latest state, so a dependency outside its filters still reads as delivered; a drill-down shows only its own items.
+  const stateIds = (query.drilldown ? included : work).map(item => item.id);
   const empty = { observedAt, from, to, days: query.days, work, included, facts: [], latest: [], carryIn: [], deployments: [], mergedForDeployments: [], scanned: 0, truncated: false, workTruncated, deploymentsTruncated: false, deploymentMergesTruncated: false, covered: fullyCovered(from, to), production };
   const projectionRow = (await store.reportPool.query('SELECT last_event,updated_at FROM flow_projection WHERE id=1')).rows[0];
   const lastEvent = Number(projectionRow?.last_event ?? 0);
@@ -615,6 +657,15 @@ export async function readFlow(store: Store, query: FlowQuery): Promise<FlowData
   const deploymentMergesTruncated = mergeRows.length > flowLimits.deploymentMerges;
   const mergedForDeployments = mergeRows.slice(0, flowLimits.deploymentMerges).map(rowToFact);
   const scanEnd = truncated && lastFact ? { observedAt: lastFact.observedAt, id: lastFact.id! } : undefined;
+  if (query.drilldown?.exits) {
+    // The steps drill-down ends a delivered item's moves at its exit from Deploy (`flowExitAt`),
+    // which only its record says: read for the delivered items this read reached, by id.
+    const shown = new Set([...facts, ...carryIn].map(fact => fact.workId));
+    const exits = await deliveredRecords(store, included.filter(item => item.stage === 'done' && shown.has(item.id)).map(item => item.id));
+    const record = (item: Work) => exits.get(item.id) ?? item;
+    work = work.map(record); included = included.map(record);
+  }
+  if (query.drilldown) return { observedAt, from, to, days: query.days, work, included, facts, latest, carryIn, deployments, mergedForDeployments, scanned, truncated, workTruncated, deploymentsTruncated, deploymentMergesTruncated, covered, kindCovered, scanEnd, production, stepEntries: stepEntries(carryIn, entryFacts), projection, conflicts: [] };
   // The conflict hotspots (GY-566) read the last day of confirmed conflicts and docs-sync refreshes,
   // through the report pool like every other report read (GY-491).
   const conflictRows = (await store.reportPool.query(`SELECT w.document->>'key' AS key, e.kind, e.created_at, e.payload->'details' AS details FROM events e JOIN work_items w ON w.id=e.work_id
@@ -670,20 +721,35 @@ export async function pooledFlowReport(store: Store, query: FlowQuery): Promise<
  * (`stage-dwell`, `evidence`, `review`, `blockers`) past the shared scan cutoff — so it states its
  * own reach in `coverage` and is not guaranteed to count the report's facts. These reads are
  * pooled apart from the reports, on the same freshness rules, keyed by their kinds and start.
+ * A narrowed read draws its items from the work index, never a document (`drilldownWork`).
  */
 export async function pooledFlowDrilldown(store: Store, query: FlowQuery, request: DrilldownRequest) {
   const kinds = drilldownKinds[request.metric];
   if (!kinds) { const { dataset, report } = await pooledFlowReport(store, query); return flowDrilldown(dataset, report, request); }
   const since = request.metric === 'steps' ? stepsKey(request.key ?? null).instant : null;
-  const narrow = { ...query, kinds, since };
-  const { dataset } = await pooled(drilldownPools, store, JSON.stringify([flowReportKey(query), kinds, since]), () => readFlow(store, narrow).then(dataset => ({ dataset, report: null })));
+  const narrow = { ...query, kinds, since, drilldown: { exits: request.metric === 'steps' } };
+  const { dataset } = await pooled(drilldownPools, store, JSON.stringify([flowReportKey(query), kinds, since, narrow.drilldown.exits]), () => readFlow(store, narrow).then(dataset => ({ dataset, report: null })));
   return flowDrilldown(dataset, { filters: { type: query.type ?? null, stage: query.stage ?? null, slice: query.slice ?? null }, productionEnvironment: query.productionEnvironment ?? defaultProductionEnvironment }, request);
 }
 const drilldownPools = new WeakMap<Store, Map<string, PoolEntry<{ dataset: FlowDataset; report: null }>>>();
-async function pooled<T>(pools: WeakMap<Store, Map<string, PoolEntry<T>>>, store: Store, key: string, read: () => Promise<T>): Promise<T> {
+/**
+ * The reads in flight per pool and key (GY-1383): identical requests arriving together — three
+ * dashboards polling the same drill-down — share one catch-up, one freshness probe and one read,
+ * and the next request after it settles decides afresh.
+ */
+const inFlight = new WeakMap<Map<string, PoolEntry<any>>, Map<string, Promise<unknown>>>();
+function pooled<T>(pools: WeakMap<Store, Map<string, PoolEntry<T>>>, store: Store, key: string, read: () => Promise<T>): Promise<T> {
+  const pool = pools.get(store) ?? pools.set(store, new Map()).get(store)!;
+  const flights = inFlight.get(pool) ?? inFlight.set(pool, new Map()).get(pool)!;
+  const joined = flights.get(key);
+  if (joined) return joined as Promise<T>;
+  const flight = refreshed(pool, store, key, read).finally(() => { if (flights.get(key) === flight) flights.delete(key); });
+  flights.set(key, flight);
+  return flight;
+}
+async function refreshed<T>(pool: Map<string, PoolEntry<T>>, store: Store, key: string, read: () => Promise<T>): Promise<T> {
   await projectFlow(store, { batches: 3, pool: store.reportPool });
   const lastFact = Number((await store.reportPool.query('SELECT COALESCE(max(id),0) AS id FROM flow_facts')).rows[0].id);
-  const pool = pools.get(store) ?? pools.set(store, new Map()).get(store)!;
   const hit = pool.get(key);
   if (hit && (hit.pending || (Date.now() - hit.at < flowReportFreshMs &&
     (hit.lastFact === lastFact || Date.now() - hit.at < flowReportCoalesceMs)))) return hit.read;
