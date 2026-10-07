@@ -7,7 +7,7 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import type { Principal, Work } from '../src/model.js';
 import { docsHeadroom, docsTrimItem, docsWordBudgetOf, type DocsWordCount } from '../src/model/documentation.js';
-import { humanOnlyRefusal, openHumanRequests, parkRule, parkedOnHuman, type HumanDecisionKind } from '../src/model/human-request.js';
+import { humanOnlyRefusal, openHumanRequests, parkRefusal, parkRule, parkedOnHuman, type HumanDecisionKind } from '../src/model/human-request.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1366 names this file for its proof: manual:fault-class-human-decision. The master loop filed 3
@@ -21,12 +21,13 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 //     trim item now carries that answer in its own criterion, so it never asks again.
 //   - GY-1313, money-or-accounts: NECESSARY. Every criterion needed production to hold a Railway
 //     account token; opening an account and issuing its token is the operator's alone.
-//   - GY-1365, money-or-accounts: NECESSARY. The code side shipped with GY-1353; what remained is
-//     registering a GitHub App, installing it and handing its private key to production.
+//   - GY-1365, money-or-accounts: judged NECESSARY then, HOST-DOABLE since GY-1416. What remained was
+//     the revert approver variables, and install derives them from the reviewer App registration
+//     saved on the host: the master sets them (`master setup --apply`), so its park is refused.
 //
-// The necessary two stay human: the second test parks each exactly as recorded and shows every agent
+// The necessary one stays human: the second test parks it exactly as recorded and shows every agent
 // identity the control plane runs is refused the answer, and only the operator's declared human
-// session answers it.
+// session answers it. GY-1365's park, replayed, is refused with the master's route.
 
 const instances = [
   { id: 'human-request|GY-1292|2026-10-05T13:45:14.659Z', subject: 'GY-1292', kind: 'goals-and-priorities', verdict: 'avoidable',
@@ -34,13 +35,13 @@ const instances = [
   { id: 'human-request|GY-1313|2026-10-05T20:04:06.126Z', subject: 'GY-1313', kind: 'money-or-accounts', verdict: 'necessary',
     reason: 'a Railway account API token on the production service: an account and its credential only the operator holds',
     needed: 'A Railway account or team API token with deployment read on the cryptob1/graphyard production service, set as RAILWAY_API_TOKEN in the graphyard production environment\'s variables (Railway dashboard, or railway variables --service graphyard --set RAILWAY_API_TOKEN=...)' },
-  { id: 'human-request|GY-1365|2026-10-06T10:05:59.816Z', subject: 'GY-1365', kind: 'money-or-accounts', verdict: 'necessary',
-    reason: 'registering and installing a GitHub App and handing its private key to production: a third-party account action only the operator may take',
+  { id: 'human-request|GY-1365|2026-10-06T10:05:59.816Z', subject: 'GY-1365', kind: 'money-or-accounts', verdict: 'host-doable',
+    reason: 'the revert approver variables are derived from the reviewer App registration saved on the host, so the master sets them with master setup --apply (GY-1416)',
     needed: 'Register or choose the revert approver GitHub App (the reviewer App serves; it must differ from the control-plane App), install it on the repository, set GRAPHYARD_REVERT_APPROVER_APP_ID, GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID and GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY (or _PRIVATE_KEY_FILE) on the production control plane via scripts/provision-railway.mjs operator input, and redeploy' },
 ] as const;
 
 test('manual:fault-class-human-decision — GY-1292: the docs-trim item the loop files carries the operator\'s answer to the question its worker parked on, so it is not asked again', () => {
-  assert.deepEqual(instances.map(instance => instance.verdict), ['avoidable', 'necessary', 'necessary'], 'each instance is judged, with its reason');
+  assert.deepEqual(instances.map(instance => instance.verdict), ['avoidable', 'necessary', 'host-doable'], 'each instance is judged, with its reason');
   // The set GY-1292 was filed for: 11,712 of 12,000 words on origin/main, largest pages as its description named them.
   const budget = docsWordBudgetOf({ paths: ['docs/', 'README.md'], wordBudget: { total: 12_000, perPage: 1_200 } })!;
   const count: DocsWordCount = { 'docs/master-agent.md': 959, 'docs/master-agent-reference.md': 841, 'docs/operations-reference.md': 815, 'docs/master-agent-sessions.md': 804, 'docs/onboarding.md': 804, 'README.md': 7_489 };
@@ -95,7 +96,7 @@ async function call(credential: string, method: 'GET' | 'POST', path: string, bo
 }
 const reload = async (workId: string) => (await store.list()).find(item => item.id === workId)!;
 
-test('manual:fault-class-human-decision — GY-1313 and GY-1365: each necessary decision, parked as recorded, is refused to every agent identity and answered only in the operator\'s own human session', async () => {
+test('manual:fault-class-human-decision — GY-1313 and GY-1365: the necessary decision, parked as recorded, is refused to every agent identity and answered only in the operator\'s own human session', async () => {
   const agents = [
     { label: 'worker', credential: token(worker), actor: worker },
     { label: 'master loop', credential: token(coordinator), actor: coordinator },
@@ -105,11 +106,23 @@ test('manual:fault-class-human-decision — GY-1313 and GY-1365: each necessary 
     { label: 'master agent', credential: masterAgent.token, actor: { id: masterAgent.id, role: 'operator-agent', sessionKind: 'ai' } },
     { label: 'approver agent', credential: approverAgent.token, actor: { id: approverAgent.id, role: 'operator-agent', sessionKind: 'ai' } },
   ];
+  // GY-1416: the host-doable one is refused before it reaches the human, naming the master's route; the attempt keeps its lease.
+  for (const instance of instances.filter(entry => entry.verdict === 'host-doable')) {
+    let work: Work = await engine.execute(operator, 'create', null, { title: `${instance.subject} replay`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
+    work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
+    work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
+    const refused = await call(token(worker), 'POST', `work/${work.key}/park`, { epoch: work.epoch, kind: instance.kind satisfies HumanDecisionKind, needed: instance.needed, reason: instance.reason }, 422);
+    assert.equal(refused.error, parkRefusal({ needed: instance.needed! }));
+    assert.match(refused.error, /graphyard master setup --apply/);
+    work = await reload(work.id);
+    assert.equal(parkedOnHuman(work), false, `${instance.subject} never reaches the human`);
+    assert.equal(work.lease?.owner, worker.id);
+  }
   for (const instance of instances.filter(entry => entry.verdict === 'necessary')) {
     let work: Work = await engine.execute(operator, 'create', null, { title: `${instance.subject} replay`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
     work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
     work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
-    await call(token(worker), 'POST', `work/${work.key}/park`, { epoch: work.epoch, kind: instance.kind satisfies HumanDecisionKind, needed: instance.needed, reason: instance.reason }, 200);
+    await call(token(worker), 'POST', `work/${work.key}/park`, { recommendation: 'Approve', why: 'Nothing else unblocks the item.', epoch: work.epoch, kind: instance.kind satisfies HumanDecisionKind, needed: instance.needed, reason: instance.reason }, 200);
     work = await reload(work.id);
     assert.ok(parkedOnHuman(work), `${instance.subject} is parked`);
     assert.equal(work.lease, null, 'the park ends the attempt\'s lease');

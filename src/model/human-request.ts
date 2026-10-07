@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { operatorCredentialRefusal, operatorOnlyDecision, refusedReconciliations, type Decision } from './approval.js';
-import { demand } from './refusal.js';
 import { shortAskIssues } from './human-ask.js';
+import type { HumanAnswer } from './human-answer.js';
 import type { Work } from './work.js';
 
 // ---------------------------------------------------------------------------
@@ -63,6 +63,8 @@ export const humanRequestSchema = z.object({
   /** The short note the human reads (GY-1408): one sentence naming their action, a few plain steps, one plain why. NEEDED and REASON are the agents' detail. */
   ask: z.string().trim().min(1).optional(),
   steps: z.array(z.string().trim().min(1)).min(1).optional(), why: z.string().trim().min(1).optional(),
+  /** What the requester recommends (GY-1410), shown first: a choice it offers, or the safest way to get a value. `recommendationIssues` requires it and WHY. */
+  recommendation: z.string().trim().min(1).max(600).optional(),
   /** The buttons the card offers, chosen by the requester; the kind's defaults when omitted. */
   choices: z.array(humanChoiceSchema).min(1).max(6).refine(choices => new Set(choices.map(choice => choice.id)).size === choices.length, 'Choice ids must be distinct').optional(),
   /** The requesting host's public key (PEM): a `secret` choice's value is sealed to it. */
@@ -70,59 +72,67 @@ export const humanRequestSchema = z.object({
 }).strict().refine(data => data.sealTo || !data.choices?.some(choice => choice.input === 'secret'), 'A secret choice needs sealTo, the requesting host\'s public key')
   .superRefine((data, context) => { for (const message of shortAskIssues(data)) context.addIssue({ code: 'custom', message }); });
 /**
- * Why a park is refused before it reaches the human, or null when it may park (GY-1395). Two of
- * the build stage's human-only decisions were not the human's to make, or not the whole ask:
- * - a scope widening (GY-1113 parked "master scope to widen plannedFiles…"): `scope-request`
- *   puts that to an approver, and only a refused widening reaches the master's `master scope`;
- * - a request that defers human steps to later parks (GY-1384: "will each park once more, one at
- *   a time"): every park is one more wait, so NEEDED names every human step the item still needs.
+ * What a request's recommendation misses (GY-1410), naming the field; empty when it has one. Every
+ * request tells the human what its requester advises: the choice it recommends or, for a value to
+ * provide, the safest way to obtain it (a fine-grained token scoped to one repository, with a short
+ * expiry and only the permissions needed), plus WHY, one plain sentence of why. A request with
+ * choices to press names one by its label, so the card can preselect it; a value request (a secret
+ * choice, or every choice but Decline asking for the human's words) may advise in its own words.
+ */
+export function recommendationIssues(data: { kind?: HumanDecisionKind; choices?: HumanChoice[] | null; sealTo?: string | null; recommendation?: string; why?: string }): string[] {
+  const choices = data.kind ? requestChoices({ kind: data.kind, choices: data.choices, sealTo: data.sealTo }) : [];
+  const valueRequest = choices.some(choice => choice.input === 'secret') || choices.every(choice => choice.outcome === 'declined' || choice.input !== 'none');
+  const unnamed = data.kind && data.recommendation?.trim() && !valueRequest && !recommendedChoice({ ...data, kind: data.kind });
+  return [
+    ...(data.recommendation?.trim() ? [] : ['A park needs RECOMMEND (field recommendation): the choice you recommend, or the safest way to obtain the value asked for']),
+    ...(unnamed ? [`A park with choices needs RECOMMEND (field recommendation) to name one by its label: ${choices.map(choice => `"${choice.label}"`).join(', ')}`] : []),
+    ...(data.why?.trim() ? [] : ['A park needs WHY (field why): one plain sentence of why you recommend it']),
+  ];
+}
+/** The id of the choice a request's recommendation names, by label or id, or null when it names none. */
+export function recommendedChoice(request: { kind: HumanDecisionKind; choices?: HumanChoice[] | null; sealTo?: string | null; recommendation?: string | null }): string | null {
+  const key = (words: string) => words.trim().replace(/[….:]+$/, '').toLowerCase();
+  const advice = request.recommendation ? key(request.recommendation) : null;
+  return advice ? requestChoices(request).find(choice => key(choice.id) === advice || key(choice.label) === advice)?.id ?? null : null;
+}
+/**
+ * Why a park is refused before it reaches the human, or null when it may park (GY-1395): a scope
+ * widening (GY-1113) is `scope-request`'s, and NEEDED names every human step, never deferring one.
+ * GY-1416: work an agent identity on the host can do is never the human's (`hostDoableAsk`) — a
+ * repository the host's gh login creates or administers (GY-1384), a deployment variable derived
+ * from saved credentials (GY-1365) or a credential the host already holds. Goals and priorities,
+ * money or paid accounts, and credentials issued to people still park.
  */
 const scopeWideningAsk = /\bplanned ?files\b|\bscope[- ]request\b|\bmaster scope\b|\bwiden(?:s|ed|ing)?\b[^.]{0,60}\bscope\b/i;
 const deferredAsk = /\bone at a time\b|\bpark (?:once )?(?:again|more)\b|\bpark (?:it )?later\b/i;
-export function parkRefusal(data: { needed: string }): string | null {
+export interface HostDoableAsk { class: 'repository' | 'deployment-variable' | 'host-credential'; what: string; route: string; command: string }
+const hostDoable: (HostDoableAsk & { test: RegExp })[] = [
+  { class: 'deployment-variable', what: 'a deployment variable derived from credentials saved on this host', test: /\b(?:GRAPHYARD_REVERT_APPROVER_[A-Z_]+|GITHUB_(?:APP_ID|INSTALLATION_ID|PRIVATE_KEY(?:_FILE)?|WEBHOOK_SECRET|CI_APP_IDS)|GRAPHYARD_(?:PRINCIPALS|REVIEWER_APPS))\b|\bprovision-railway\b|\b[Ss]et\b[^.;]{0,80}\b(?:[Dd]eployment|[Ee]nvironment|[Rr]ailway|[Cc]ontrol[- ]plane) variables?\b/,
+    route: 'the master derives it from the saved App registrations and sets it through the provider adapter, secrets piped and never printed', command: 'graphyard master setup --apply' },
+  { class: 'repository', what: 'a repository the host\'s gh login can create or administer', test: /\b(?:create|make|configure|administer|set up)\b[^.;]{0,80}\brepositor(?:y|ies)\b|\brepositor(?:y|ies)\b[^.;]{0,60}\b(?:reachable|admin)|\bgh login\b[^.;]{0,60}\badmin/i,
+    route: 'the master does it under the host\'s own gh login, outside the worker sandbox', command: 'gh repo create OWNER/NAME (or gh api repos/OWNER/NAME) as the host\'s gh login, then graphyard master unblock GY-N REASON' },
+  { class: 'host-credential', what: 'a credential the host already holds for this purpose', test: /\b(?:paste|provide|give|send|share|supply)\b[^.;]{0,80}\b(?:github|gh|admin|app|railway)\b[^.;]{0,40}\b(?:token|private key|pem|credential)s?\b/i,
+    route: 'the master supplies it from the host: the gh login (gh auth token), the App registration saved under the install directory, or the provider CLI\'s own login', command: 'gh auth token (or the saved App registration) in the master\'s session, then graphyard master unblock GY-N REASON' },
+];
+/** Who a credential is issued to, when it is a person: that stays the human's (`credentials-for-people`). */
+const personRecipient = /\b(?:teammate|contractor|colleague|employee|engineer|person|people|developer|new hire)s?\b/i;
+/** A credential asked under `credentials-for-people` is the host's only when an agent's work is its stated purpose. */
+const agentPurpose = /\b(?:pilot|worker|agent|master|loop|host|install(?:er|ation)?|deployment|control plane|CI|webhooks?)\b/i;
+/** A step only the human takes, which a host-doable step beside it never hides: money, opening any third-party account (free or paid), a goal. */
+const humanStep = /\b(?:paid|pay|purchase|buy|billing|subscription|budget|spend|invoice|goals?|priorit(?:y|ies|ize))\b|\b(?:open|create|register|sign(?:ing)? up for)\b[^.;]{0,40}\baccounts?\b|\bsign(?:ing)?[- ]?up\b|[€$]\s?\d|\b\d+(?:\.\d+)?\s?(?:EUR|USD)\b|\/month\b|\ba month\b/i;
+export function hostDoableAsk(needed: string, kind?: string): HostDoableAsk | null {
+  if (humanStep.test(needed)) return null;
+  const found = hostDoable.find(entry => entry.test.test(needed) && !(entry.class === 'host-credential' && (personRecipient.test(needed) || (kind === 'credentials-for-people' && !agentPurpose.test(needed)))));
+  return found ? { class: found.class, what: found.what, route: found.route, command: found.command } : null;
+}
+export const hostDoableRefusal = (ask: HostDoableAsk) => `Not a human-only decision: NEEDED asks for ${ask.what}, which an agent identity on the host can do; it is the master's owed action, not the human's. Agent route: ${ask.route} — ${ask.command}`;
+export function parkRefusal(data: { needed: string; kind?: string }): string | null {
   if (scopeWideningAsk.test(data.needed)) return 'A scope widening is not a human-only decision: ask for it with graphyard scope-request GY-N EPOCH PATH… -- REASON, which an approver decides';
   if (deferredAsk.test(data.needed)) return 'Ask for every human step the item still needs in this one request: NEEDED may not leave steps to later parks';
-  return null;
+  const doable = hostDoableAsk(data.needed, data.kind);
+  return doable ? hostDoableRefusal(doable) : null;
 }
 
-export const humanAnswerSchema = z.object({
-  request: z.string().uuid(),
-  /** `provided`: the thing asked for now exists, so the item resumes. `declined`: it will not, and the item stays parked with the answer as its blocker. A choice sets it. */
-  outcome: z.enum(['provided', 'declined']).default('provided'),
-  /** Free words, for a request answered without a choice. */
-  answer: z.string().trim().min(1).max(4000).optional(),
-  /** The id of the button pressed, and the operator's optional note beside it. */
-  choice: z.string().min(1).max(40).optional(),
-  note: z.string().trim().max(4000).optional(),
-  /** A `secret` choice's value: sealed before anything is written, never stored as given. */
-  secret: z.string().min(1).max(8000).optional(),
-}).strict().refine(data => data.answer || data.choice, 'Give a choice or an answer');
-export type HumanAnswerInput = z.infer<typeof humanAnswerSchema>;
-/**
- * What an answer records: the outcome, the words the next worker reads, and the choice pressed.
- * A choice that asks for words needs them; a secret goes only to a secret choice.
- */
-export function resolveHumanAnswer(request: Pick<HumanRequest, 'kind' | 'choices' | 'sealTo'>, data: HumanAnswerInput) {
-  if (!data.choice) {
-    demand(!data.secret, 'A secret is sent only with the choice that asks for it', 422);
-    return { outcome: data.outcome, text: data.answer!, choice: null, note: null, secret: false };
-  }
-  const choice = requestChoices(request).find(entry => entry.id === data.choice);
-  demand(choice, `No choice ${data.choice} on this request; reload before answering`, 422);
-  const note = data.note || data.answer || null;
-  demand(choice!.input !== 'text' || note, `${choice!.label} needs your words in the note`, 422);
-  demand(choice!.input === 'secret' ? !!data.secret : !data.secret, choice!.input === 'secret' ? `${choice!.label} needs the value to seal` : 'A secret is sent only with the choice that asks for it', 422);
-  return { outcome: choice!.outcome, text: note ? `${choice!.label}: ${note}` : choice!.label, choice: { id: choice!.id, label: choice!.label }, note, secret: choice!.input === 'secret' };
-}
-
-/** `withdrawn`: nobody answered; the item was closed and the question no longer stands (model/closure.ts). */
-export interface HumanAnswer {
-  by: string; at: string; outcome: 'provided' | 'declined' | 'withdrawn'; text: string; waitedMs: number;
-  /** The button pressed and the note beside it (GY-738); absent on a free-text answer. */
-  choice?: { id: string; label: string } | null; note?: string | null;
-  /** A secret choice's value, sealed to the requesting host's key (server/waits.ts `sealToHost`). */
-  sealed?: string | null;
-}
 /**
  * The fields every request only a human may answer carries, whatever raised it: the exact thing
  * needed, why, who asked, and when. A `park` request is one; an approval the server will take
@@ -134,6 +144,8 @@ export interface HumanOnlyRequest {
   requestedBy: string; epoch: number; at: string;
   /** The short note the card leads with (GY-1408); absent on older requests, which lead with `needed`'s first sentence (`humanAsk`). */
   ask?: string | null; steps?: string[] | null; why?: string | null;
+  /** What the requester recommends (GY-1410), shown first with `why`; absent only on requests recorded before it was required. */
+  recommendation?: string | null;
 }
 export interface HumanRequest extends HumanOnlyRequest {
   kind: HumanDecisionKind;
@@ -152,25 +164,16 @@ export const parkedOnHuman = (work: { humanRequest?: HumanRequest | null }) => !
 export const answerCommand = (key: string, request: Pick<HumanRequest, 'id'>) => `graphyard answer ${key} ${request.id} ANSWER`;
 export const declineCommand = (key: string, request: Pick<HumanRequest, 'id'>) => `graphyard answer ${key} ${request.id} --decline REASON`;
 
+/** One button on a card (GY-738): the whole body it posts, whether it asks for words or a secret, and the field an optional note goes in (null when it takes none). */
+export interface HumanOnlyChoice { label: string; input: HumanChoice['input']; declines: boolean; body: Record<string, unknown>; note: string | null; recommended?: boolean }
+/** The choices with the recommended one first (GY-1410). */
+export const recommendedFirst = (choices: readonly HumanOnlyChoice[]) => [...choices.filter(choice => choice.recommended), ...choices.filter(choice => !choice.recommended)];
 /**
- * How the operator answers one request from the page, in their own authenticated session: the
- * work command it posts to, the fields that body always carries, and the field their own words
- * go in. A rule with a refusing answer carries that too. The command lines beside the form are
- * the equivalent, never the way to answer: handling a credential on a command line is the defect
- * this surface exists to remove (GY-102).
+ * How the operator answers one request from the page, in their own session: the work command it posts to, the fields
+ * that body always carries, the field their words go in, and a refusing answer. The command lines beside the form are
+ * the equivalent, never the way to answer: a credential on a command line is the defect this surface removes (GY-102).
  */
-/**
- * One button on a card (GY-738): the whole body it posts, whether it asks for words or a secret,
- * and the field an optional note goes in (null when the button takes none).
- */
-export interface HumanOnlyChoice { label: string; input: HumanChoice['input']; declines: boolean; body: Record<string, unknown>; note: string | null }
-export interface HumanOnlyPost {
-  command: string;
-  body: Record<string, unknown>;
-  field: string;
-  submit: string;
-  decline: { body: Record<string, unknown>; submit: string } | null;
-}
+export interface HumanOnlyPost { command: string; body: Record<string, unknown>; field: string; submit: string; decline: { body: Record<string, unknown>; submit: string } | null }
 export interface HumanRequestRow {
   /** The rule that raised it (`humanOnlyRules`); the page asks that rule whether this session may answer. */
   rule: string;
@@ -184,18 +187,18 @@ export interface HumanRequestRow {
 }
 /** A row as `master status` reports it: what is needed, why, who asked, how long, and where it is answered. */
 export function humanOnlyStatusRow(row: HumanRequestRow) {
-  return { work: row.work, rule: row.rule, decision: row.decision, needed: row.request.needed, reason: row.request.reason,
+  return { work: row.work, rule: row.rule, decision: row.decision, needed: row.request.needed, reason: row.request.reason, recommendation: row.request.recommendation ?? null,
     requestedBy: row.request.requestedBy, requestedAt: row.request.at, waitedMs: row.waitedMs, answerOn: row.answer.dashboard, refusesAgents: row.refusal };
 }
 /** Every open human-only request, longest wait first: the human-facing list. */
 export function openHumanRequests(work: readonly { id: string; key: string; title: string; stage: string; humanRequest?: HumanRequest | null }[], now: number): HumanRequestRow[] {
   return work.filter(item => item.stage !== 'done' && parkedOnHuman(item)).map(item => {
-    const request = item.humanRequest!;
+    const request = item.humanRequest!, recommended = recommendedChoice(request);
     return {
       rule: parkRule.kind, work: item.key, id: item.id, title: item.title, request,
       waitedMs: Math.max(0, now - Date.parse(request.at)), decision: humanDecisionLabel[request.kind],
       refusal: parkRule.refuse({ id: 'an agent identity', role: 'operator-agent', sessionKind: 'ai' })!,
-      choices: requestChoices(request).map(choice => ({ label: choice.label, input: choice.input, declines: choice.outcome === 'declined', body: { request: request.id, choice: choice.id }, note: 'note' })),
+      choices: recommendedFirst(requestChoices(request).map(choice => ({ label: choice.label, input: choice.input, declines: choice.outcome === 'declined', body: { request: request.id, choice: choice.id }, note: 'note', recommended: choice.id === recommended }))),
       answer: { cli: answerCommand(item.key, request), decline: declineCommand(item.key, request), dashboard: 'Work → Needs you → Answer', api: `POST /api/work/${item.key}/answer {"request":"${request.id}","answer":"…"}`,
         post: { command: 'answer', body: { request: request.id, outcome: 'provided' }, field: 'answer', submit: `Answer and resume ${item.key}`,
           decline: { body: { request: request.id, outcome: 'declined' }, submit: 'Decline' } } },
@@ -203,17 +206,10 @@ export function openHumanRequests(work: readonly { id: string; key: string; titl
   }).sort((a, b) => b.waitedMs - a.waitedMs);
 }
 
-// ---------------------------------------------------------------------------
-// The human surface (GY-102).
-//
-// `park` is not the only thing the server takes from the operator's own credential. An approval
-// whose decision no agent identity can complete is another, and before this table it reached the
-// operator as a sentence in `master status` telling them to put an admin token on a command
-// line. Every such action is a rule here: what the server refuses an agent identity, and how to
-// find the open instances of it. The page, the CLI list and `GET /api/human-requests` render
-// this table and nothing else, so a rule added here is listed for the human without a second
-// change anywhere, and a human-only action can never be silently absent from the surface.
-// ---------------------------------------------------------------------------
+// The human surface (GY-102). `park` is not the only thing the server takes from the operator's own credential: an
+// approval no agent identity can complete is another. Every such action is a rule here — what the server refuses an agent
+// identity, and how to find its open instances. The page, the CLI list and `GET /api/human-requests` render this table and
+// nothing else, so a rule added here is listed for the human without a second change, and none is silently absent.
 
 /** A session as a rule judges it: the identity, the role it holds, and the kind of session it declared. */
 export interface HumanOnlyActor { id?: string; role?: string | null; sessionKind?: string | null }
@@ -272,15 +268,17 @@ export const operatorApprovalRule: HumanOnlyRule = {
     return (subject.decisions ?? []).filter(decision => decision.state === 'requested').flatMap(decision => {
       const operatorOnly = operatorOnlyDecision(decision, work);
       if (!operatorOnly) return [];
+      // The requester asked for this decision, so approving it is what it recommends (GY-1410).
       const request: HumanOnlyRequest = { id: decision.id, kind: operatorApprovalRule.kind, needed: operatorOnly.needed, reason: decision.reason,
-        requestedBy: decision.requestedBy, epoch: work.epoch, at: decision.requestedAt };
+        requestedBy: decision.requestedBy, epoch: work.epoch, at: decision.requestedAt,
+        recommendation: 'Approve', why: `${decision.requestedBy} asked for this decision, and only a human admin may approve it.` };
       return [{
         rule: operatorApprovalRule.kind, work: work.key, id: work.id, title: work.title, request,
         waitedMs: Math.max(0, now - Date.parse(decision.requestedAt)), decision: operatorApprovalLabel,
         refusal: operatorCredentialRefusal({ id: 'an agent identity', role: 'operator-agent' })!,
         // Declining is the operator's considered refusal on the same route (`{ action: 'refuse' }`,
         // server/decision-refusal.ts): terminal, with their reason, as Decline is on a park request.
-        choices: [{ label: `Approve and deliver ${work.key}`, input: 'none', declines: false, body: { decision: decision.id, reason: 'Approved by the operator' }, note: 'reason' },
+        choices: [{ label: `Approve and deliver ${work.key}`, input: 'none', declines: false, body: { decision: decision.id, reason: 'Approved by the operator' }, note: 'reason', recommended: true },
           { label: 'Decline', input: 'none', declines: true, body: { action: 'refuse', decision: decision.id, reason: 'Declined by the operator' }, note: 'reason' }],
         answer: {
           cli: `GRAPHYARD_TOKEN_FILE=ADMIN_TOKEN_FILE graphyard master approve ${work.key} ${decision.id} REASON`,

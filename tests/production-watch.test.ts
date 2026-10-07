@@ -512,3 +512,70 @@ test('unit:production-live-release-observation — without proof of the exact SH
   assert.equal(productionWatch.liveEndpointRelease(observed, [success(T0 + 1_000)], success(T0 + 1_000), sha(2), T0 + 60_000), null);
   assert.equal(productionWatch.liveEndpointRelease(observed, [], undefined, sha(3), T0 + 60_000), null, 'the release tip moved past the observed SHA');
 });
+
+/** GY-1421: release/production promoted to sha(2), the provider (GitHub's deployment record) still on sha(1), and the plane's own /healthz build identity serving `served`. */
+async function servedIdentityWatch(served: string | null) {
+  const work = [{ id: 'work-2', key: 'GY-2', stage: 'done', delivery: { mergedAt: new Date(T0).toISOString(), mergeSha: sha(2), authorizationRevision: 1 } }] as unknown as Work[];
+  const { store, events } = memoryStore(work);
+  const request = async (path: string) => {
+    if (path.startsWith('/branches/')) return { commit: { sha: sha(2) } };
+    const [, from, to] = path.match(/^\/compare\/([0-9a-f]{40})\.\.\.([^?]+)/)!;
+    const a = parseInt(from, 16), b = to === 'main' ? 3 : parseInt(decodeURIComponent(to), 16);
+    return { status: b > a ? 'ahead' : b === a ? 'identical' : 'behind', ahead_by: Math.max(0, b - a) };
+  };
+  const compare = (base: string, head: string) => request(`/compare/${base}...${head}`) as Promise<{ status: string; ahead_by: number }>;
+  const github = { request, contains: async (base: string, head: string) => ['ahead', 'identical'].includes((await compare(base, head)).status), aheadBy: async (base: string, head: string) => (await compare(base, head)).ahead_by };
+  const provider = { name: 'github', description: 'stub', list: async () => [
+    { id: 'd-stale', status: 'success' as const, providerStatus: 'SUCCESS', commit: sha(1), branch: null, createdAt: new Date(T0 - 3_600_000).toISOString(), updatedAt: null, url: null }] };
+  let clock = T0;
+  const watch = new ProductionWatch(store, { provider, github, build: buildIdentity(served ? { GRAPHYARD_BUILD_SHA: served } : {}), baseBranch: 'main', releaseBranch: 'release/production', now: () => clock });
+  return { watch, events, at: (ms: number) => { clock = T0 + ms; } };
+}
+
+test('unit:production-watch-served-identity-wins — a /healthz commit that equals or contains the promoted release is served though GitHub\'s deployment record lags: no missing incident, the delivery verified, an open incident closed by the served identity', async () => {
+  for (const served of [sha(2), sha(3)]) {
+    const { watch, events, at } = await servedIdentityWatch(served);
+    await watch.tick(true);
+    at(DEPLOYMENT_GRACE_MS + 60_000);
+    const report = await watch.tick(true);
+    assert.equal(report.serving, served, 'the served identity outranks the lagging deployment record');
+    assert.equal(report.servingSource, 'build');
+    assert.deepEqual(report.deployed, ['GY-2']); assert.deepEqual(report.pending, []);
+    assert.deepEqual(report.incidents, []);
+    assert.equal(events.filter(event => event.kind === 'delivery.deployment-incident').length, 0);
+    assert.equal(events.filter(event => event.kind === CONTAINED_EVENT).length, 1, 'the delivery is recorded deployed');
+    assert.equal(report.release?.unservedSince, null); assert.equal(report.release?.overdue, false);
+    assert.deepEqual(report.attention, []);
+  }
+  // An open missing incident (raised before this fix, kept in the ledger) is closed, recording that the served identity verified it.
+  const { watch, events, at } = await servedIdentityWatch(sha(2));
+  const incident = { id: 'i-1', workId: 'work-2', key: 'GY-2', mergeSha: sha(2), status: 'missing', provider: 'github', deploymentId: null, serving: sha(1), reason: 'no github deployment', since: new Date(T0).toISOString(), at: new Date(T0).toISOString() };
+  events.push({ seq: 1, work_id: 'work-2', kind: 'delivery.deployment-incident', payload: { incident, at: incident.at } });
+  at(DEPLOYMENT_GRACE_MS + 60_000);
+  const report = await watch.tick(true);
+  assert.deepEqual(report.incidents, []);
+  const recovered = events.filter(event => event.kind === 'delivery.deployment-recovered');
+  assert.equal(recovered.length, 1);
+  assert.equal(recovered[0].payload.incidentId, 'i-1');
+  assert.equal(recovered[0].payload.serving, sha(2));
+  assert.equal(recovered[0].payload.verifiedBy, 'served-identity');
+});
+
+test('unit:production-watch-missing-only-when-unserved — a missing incident is raised only when the served identity does not hold the promoted release past the grace, naming the served commit and what the provider reported', async () => {
+  const { watch, at } = await servedIdentityWatch(sha(1));
+  await watch.tick(true);
+  at(DEPLOYMENT_GRACE_MS - 60_000);
+  assert.deepEqual((await watch.tick(true)).incidents, [], 'inside the grace nothing is raised');
+  at(DEPLOYMENT_GRACE_MS + 60_000);
+  const report = await watch.tick(true);
+  assert.equal(report.serving, sha(1));
+  assert.deepEqual(report.incidents.map(incident => [incident.key, incident.status]), [['GY-2', 'missing']]);
+  assert.equal(report.incidents[0].reason, `no github deployment of ${sha(2).slice(0, 12)} was observed within 5 minutes of its promotion to release/production (${sha(2).slice(0, 12)}); production serves ${sha(1).slice(0, 12)}, which does not contain it (/healthz serves ${sha(1).slice(0, 12)}; github reported its newest successful deployment is of ${sha(1).slice(0, 12)})`);
+  // A build that reports no commit proves nothing: the provider's record stands and the text says so.
+  const unknown = await servedIdentityWatch(null);
+  await unknown.watch.tick(true);
+  unknown.at(DEPLOYMENT_GRACE_MS + 60_000);
+  const missing = await unknown.watch.tick(true);
+  assert.equal(missing.incidents[0].status, 'missing');
+  assert.match(missing.incidents[0].reason, /\(\/healthz serves no commit; github reported its newest successful deployment is of 000000000000\)$/);
+});

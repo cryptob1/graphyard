@@ -224,7 +224,7 @@ test('integration:answer-is-evidence-not-approval — an answer cannot satisfy a
 
   // 2. A human-only decision. The worker parks the item on one; no answer resumes it.
   const parked = await claimed('human-only decision');
-  await ok(token(implementer), 'POST', `work/${parked.key}/park`, { epoch: parked.epoch, kind: 'money-or-accounts', reason: 'The proof needs a paid sandbox account', needed: 'A sandbox account for the payment provider' });
+  await ok(token(implementer), 'POST', `work/${parked.key}/park`, { recommendation: 'Approve', why: 'Nothing else unblocks the item.', epoch: parked.epoch, kind: 'money-or-accounts', reason: 'The proof needs a paid sandbox account', needed: 'A sandbox account for the payment provider' });
   const human = await judge(coordinator, parked, 'integration:flag-declared');
   assert.equal(human.status, 409);
   assert.match(human.body.error, /waits on a human-only decision \(money-or-accounts\); an answer never stands in for one/);

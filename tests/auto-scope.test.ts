@@ -432,7 +432,8 @@ test('integration:scope-from-review-finding — a refused request for a file a r
 
   // What a finding grounds is widened at once, and only that (GY-438): the rest of the request
   // stays refused, for the approver. A path a prefix planned since covers is then not outstanding:
-  // an operator planning src/queue/ answers what is left of the request.
+  // the approver's routed decision planning src/queue/ answers what is left of the request (a hand
+  // widening of it would pre-empt that decision, and is refused: GY-1388).
   let partial = await claimed('prefix covers part of the request');
   await request(partial, { paths: ['src/queue/entry.ts', 'src/cli/queue-status.ts'], reason: 'The reviewer finding names src/cli/queue-status.ts:12' });
   const partialFindings = [{ ground: 'review thread PRRT_partial03', text: 'src/cli/queue-status.ts:12 still prints the stale count' }];
@@ -447,7 +448,8 @@ test('integration:scope-from-review-finding — a refused request for a file a r
   assert.equal(widened.length, partly, 'a path already widened is not outstanding, and the rest is still ungrounded');
   partial = await reload(partial.id);
   await ok(master.token, 'POST', `work/${partial.id}/requirements`, { expectedPolicyRevision: partial.policyRevision, criteria: partial.criteria, dependencies: partial.dependencies,
-    plannedFiles: [...partial.plannedFiles, 'src/queue/'], exclusiveResources: partial.exclusiveResources ?? [], producerProofs: partial.producerProofs ?? [], reason: 'The item owns the queue module' });
+    plannedFiles: [...partial.plannedFiles, 'src/queue/'], exclusiveResources: partial.exclusiveResources ?? [], producerProofs: partial.producerProofs ?? [], reason: 'The item owns the queue module',
+    answers: { epoch: partial.scopeRequest!.epoch, at: partial.scopeRequest!.at } });
   partial = await reload(partial.id);
   assert.equal(partial.scopeRequest, null, 'the revision covering the rest answers the request');
 

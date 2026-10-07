@@ -21,11 +21,11 @@ import type { Work } from './work.js';
 // ---------------------------------------------------------------------------
 
 export const blockerClasses = ['github-credential', 'control-plane-error', 'sandbox-path', 'worktree-mismatch', 'outside-scope-test-failure',
-  'dispatch-failure', 'planned-file-scope', 'needs-decision', 'human-only', 'genuine'] as const;
+  'dispatch-failure', 'host-supervisor', 'planned-file-scope', 'needs-decision', 'human-only', 'genuine'] as const;
 export type BlockerClass = typeof blockerClasses[number];
 
 /** The classes whose cause lies outside the item: the loop probes each, every cycle, and clears the blocker once its probe passes. */
-export const environmentalBlockerClasses: readonly BlockerClass[] = ['github-credential', 'control-plane-error', 'sandbox-path', 'worktree-mismatch', 'outside-scope-test-failure', 'dispatch-failure'];
+export const environmentalBlockerClasses: readonly BlockerClass[] = ['github-credential', 'control-plane-error', 'sandbox-path', 'worktree-mismatch', 'outside-scope-test-failure', 'dispatch-failure', 'host-supervisor'];
 /** Only these need a person (the master, or the human for a human-only decision); every other class is resolved by the loop. */
 export const needsSomeone = (blockerClass: BlockerClass) => blockerClass === 'genuine' || blockerClass === 'human-only';
 /** How many times in a row the loop clears an item's blocker before it stops and leaves it to the master: a cause that keeps coming back is not routine. */
@@ -39,6 +39,7 @@ export const blockerClassMeaning: Record<BlockerClass, string> = {
   'worktree-mismatch': "the session ran in another item's worktree or the wrong checkout; cleared once the attempt has ended, since the next one gets its own worktree",
   'outside-scope-test-failure': "a suite failed in files outside the item's plannedFiles; cleared once the base branch has moved past the tip it failed on",
   'dispatch-failure': "the master loop stopped redispatching the item after repeated launches no worker profile could take; cleared once a profile can take a launch again",
+  'host-supervisor': "a host check failed only from the worker's sandbox, where the systemd user bus is masked; cleared once the loop, on the host, reaches the user manager and finds its own unit active",
   'planned-file-scope': 'the change needs named files outside plannedFiles; becomes an additive widening decision for the independent approver, cleared once plannedFiles cover them',
   'needs-decision': 'the item waits on a requested two-party decision; its approver is launched, and the blocker is cleared once the decision is judged',
   'human-only': 'one of the three decisions only a human may make',
@@ -109,6 +110,9 @@ export function itemSpecificPlaneError(text: string | null | undefined) {
 const readOnlyFileSystem = /Read-only file system|\bEROFS\b/i;
 const fileRefusal = /\bEACCES\b|\bEPERM\b|Operation not permitted|Permission denied|unable to (?:append|create|write|unlink)|cannot write/i;
 const worktree = /\bworktree\b[^.]*\b(?:another|other|different|wrong|mismatch|belongs to|not (?:this|the) item|instead of)\b|\b(?:another|other|different|wrong) (?:item's )?(?:worktree|checkout)\b|attached to (?:the )?\S+ worktree|worktree mismatch/i;
+// GY-1406: what a worker meets when it asks the host's systemd user manager from inside its sandbox
+// (bwrap masks /run/user/UID/bus): the host's state cannot be read there, so the loop reads it.
+const hostSupervisor = /Failed to connect to (?:the )?(?:user scope )?bus\b|\bsystemctl --user\b[^.\n]*\b(?:fail\w*|refused)\b|\buser (?:scope )?bus\b[^.\n]*\bmask\w*|\bmask\w*[^.\n]*\/run\/user\/\d+\/bus\b/i;
 const suiteFailure = /\b(?:tests?|suites?|specs?|checks?|typecheck)\b[^.]*\b(?:fail\w*|red|broken)\b|\b(?:fail\w*|red|broken)\b[^.]*\b(?:tests?|suites?|specs?)\b/i;
 const outsideScope = /\boutside (?:(?:the|its|this item's|my) )?(?:plannedFiles|planned files|scope|item)|\bnot in (?:the |its )?(?:plannedFiles|planned files|scope)|\bunrelated\b|\bon (?:main|the base(?: branch)?)\b|\bpre-?existing\b/i;
 const scopeWords = /SCOPE NEEDED|\bplannedFiles\b|\bplanned[- ]files?\b|\bneeds? (?:the )?(?:file|files|scope)\b|\bscope (?:widening|request)\b|\boutside (?:the |its )?scope\b/i;
@@ -155,6 +159,7 @@ export function classifyBlocker(text: string | null | undefined, context: { huma
   if (dispatchFailureBlocker.test(blocker) && fleetIdleCause(blocker)) return { class: 'dispatch-failure', ...none };
   if (githubCredential(blocker)) return { class: 'github-credential', ...none };
   if (worktree.test(blocker)) return { class: 'worktree-mismatch', ...none };
+  if (hostSupervisor.test(blocker)) return { class: 'host-supervisor', ...none };
   // A suite that fails outside the item is that, whatever its output says about servers or permissions.
   if (suiteFailure.test(blocker) && outsideScope.test(blocker)) return { class: 'outside-scope-test-failure', ...none };
   if (controlPlane.test(blocker)) return { class: 'control-plane-error', ...none };

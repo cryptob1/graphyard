@@ -228,8 +228,8 @@ export class ProductionWatch {
   private releaseSeen: { tip: string; at: number } | null = null;
   /** Commit counts between two exact SHAs, which never change: each pair is asked of GitHub once (GY-1256). */
   private aheadMemo = new Map<string, number>();
-  /** Whether the serving commit holds the release tip, for the last pair asked: a decided answer never changes for that pair. */
-  private servedMemo: { tip: string; serving: string; served: boolean } | null = null;
+  /** Whether a serving commit holds the release tip, per `tip:serving` pair asked: a decided answer never changes for that pair. */
+  private servedMemo = new Map<string, boolean>();
   private report: ProductionReport;
   constructor(private store: Store, private options: ProductionWatchOptions) {
     this.report = { provider: options.provider?.name ?? null, providerDescription: options.provider?.description ?? null, observedAt: null, error: null, running: options.build.commit, serving: null, servingSource: null, latest: null, ahead: null, aheadError: null, release: null, deployed: [], pending: [], incidents: [], attention: [] };
@@ -295,6 +295,17 @@ export class ProductionWatch {
     const comparison = await github.request(`/compare/${serving}...${encodeURIComponent(base)}`);
     if (typeof comparison?.ahead_by !== 'number') throw new Error('GitHub did not report ahead_by');
     return comparison.ahead_by;
+  }
+  /** Whether `serving` holds the release `tip`, memoized per decided pair so an unmoved pair costs no compare. */
+  private async holdsRelease(tip: string, serving: string): Promise<boolean | null> {
+    const key = `${tip}:${serving}`;
+    if (this.servedMemo.has(key)) return this.servedMemo.get(key)!;
+    const served = await this.contains(tip, serving);
+    if (served !== null) {
+      this.servedMemo.set(key, served);
+      if (this.servedMemo.size > 16) this.servedMemo.delete(this.servedMemo.keys().next().value!);
+    }
+    return served;
   }
   /** `aheadBy` memoized when both sides are exact SHAs: the answer for a pair never changes, so an unmoved pair costs no request. */
   private async aheadBetween(base: string, head: string): Promise<number> {
@@ -368,16 +379,22 @@ export class ProductionWatch {
     const delivered = (await this.store.fleet()).filter(item => item.stage === 'done' && item.delivery && now - Date.parse(item.delivery.mergedAt) <= (this.options.windowMs ?? DEPLOYMENT_WINDOW_MS))
       .sort((a, b) => Date.parse(a.delivery!.mergedAt) - Date.parse(b.delivery!.mergedAt));
     const live = liveEndpointRelease(delivered, deployments, newestSuccess, tip, now);
-    report.serving = live ?? newestSuccess?.commit ?? this.options.build.commit;
-    report.servingSource = live ? 'endpoint' : newestSuccess?.commit ? 'provider' : this.options.build.commit ? 'build' : null;
+    // The served build identity — the commit this deployment publishes as its own /healthz commit —
+    // is the ground truth for what production serves (GY-1421). When it holds the promoted release,
+    // the release is served whatever the provider's list says: GitHub's deployment record can lag a
+    // release that is already live, and a provider list only explains why a deploy failed or is in
+    // flight; it never overrides a served commit that already matches.
+    const built = this.options.build.commit?.toLowerCase() ?? null;
+    const identity = !live && !!tip && !!built && newestSuccess?.commit?.toLowerCase() !== built && await this.holdsRelease(tip, built) === true;
+    report.serving = live ?? (identity ? built : newestSuccess?.commit ?? this.options.build.commit);
+    report.servingSource = live ? 'endpoint' : identity ? 'build' : newestSuccess?.commit ? 'provider' : this.options.build.commit ? 'build' : null;
     if (tip) {
       if (this.releaseSeen?.tip !== tip) {
         this.releaseSeen = { tip, at: now };
         await this.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', RELEASE_SEEN_EVENT, JSON.stringify({ branch: this.options.releaseBranch, tip, at })]);
       }
-      const serving = report.serving?.toLowerCase() ?? null, memo = this.servedMemo;
-      const served = !serving ? null : memo?.tip === tip && memo.serving === serving ? memo.served : await this.contains(tip, serving);
-      if (serving && served !== null) this.servedMemo = { tip, serving, served };
+      const serving = report.serving?.toLowerCase() ?? null;
+      const served = !serving ? null : await this.holdsRelease(tip, serving);
       if (served === true) this.releaseSeen.at = now;
       let unreleased: number | null = null;
       try { unreleased = this.options.github ? await this.unreleased(tip) : null; } catch { unreleased = null; }
@@ -429,7 +446,7 @@ export class ProductionWatch {
       // Unknown containment (no serving commit, or GitHub could not compare) is not evidence
       // of a miss; only a serving commit known not to contain the merge is.
       if (now - since < this.grace || contained === null) { report.pending.push(item.key); continue; }
-      await this.raise(item, report, at, 'missing', null, `no ${this.options.provider ? `${this.options.provider.name} deployment` : 'deployment'} of ${mergeSha.slice(0, 12)} was observed within ${Math.round(this.grace / 60_000)} minutes of ${tip ? `its promotion to ${this.options.releaseBranch} (${tip.slice(0, 12)})` : 'the merge'}; production serves ${report.serving!.slice(0, 12)}, which does not contain it${this.options.provider ? '' : '. Configure RAILWAY_API_TOKEN (or RAILWAY_TOKEN) or the GitHub App: either one reads a deployment list (Railway\'s, or the GitHub deployments Railway reports) that names the failing deployment'}`);
+      await this.raise(item, report, at, 'missing', null, `no ${this.options.provider ? `${this.options.provider.name} deployment` : 'deployment'} of ${mergeSha.slice(0, 12)} was observed within ${Math.round(this.grace / 60_000)} minutes of ${tip ? `its promotion to ${this.options.releaseBranch} (${tip.slice(0, 12)})` : 'the merge'}; production serves ${report.serving!.slice(0, 12)}, which does not contain it${this.options.provider ? ` (${this.providerSaid(built, newestSuccess, report.latest)})` : '. Configure RAILWAY_API_TOKEN (or RAILWAY_TOKEN) or the GitHub App: either one reads a deployment list (Railway\'s, or the GitHub deployments Railway reports) that names the failing deployment'}`);
       report.pending.push(item.key);
     }
     if (report.serving) await this.recordPending(report.serving, at);
@@ -494,7 +511,16 @@ export class ProductionWatch {
     const open = this.incidents.get(item.id);
     if (!open) return;
     this.incidents.delete(item.id);
-    await this.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [item.id, 'graphyard', RECOVERY_EVENT, JSON.stringify({ incidentId: open.id, key: item.key, mergeSha: open.mergeSha, serving: report.serving, since: open.since, at })]);
+    // What verified the delivery: the served build identity (/healthz commit) when it decided, the provider's list or an endpoint observation otherwise.
+    const verifiedBy = report.servingSource === 'build' ? 'served-identity' : report.servingSource;
+    await this.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [item.id, 'graphyard', RECOVERY_EVENT, JSON.stringify({ incidentId: open.id, key: item.key, mergeSha: open.mergeSha, serving: report.serving, verifiedBy, since: open.since, at })]);
+  }
+  /** Both sides of a missing deployment: the served build identity (/healthz commit) and what the provider's list reported. */
+  private providerSaid(built: string | null, newestSuccess: ProviderDeployment | undefined, latest: ProviderDeployment | null) {
+    const name = this.options.provider!.name;
+    const reported = newestSuccess?.commit ? `its newest successful deployment is of ${newestSuccess.commit.slice(0, 12)}`
+      : latest ? `its newest deployment ${latest.id}${latest.commit ? ` of ${latest.commit.slice(0, 12)}` : ''} is ${latest.providerStatus}` : 'it lists no deployment';
+    return `/healthz serves ${built ? built.slice(0, 12) : 'no commit'}; ${name} reported ${reported}`;
   }
 }
 

@@ -11,9 +11,9 @@ import { Engine, unauthorizedMergeViolation } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { humanRequestsCommand } from '../src/cli/session-commands.js';
 import { operatorCredentialRefusal, operatorOnlyDecision } from '../src/model/approval.js';
-import { humanOnlyRefusal, humanOnlyRules, humanRequestSchema, openHumanOnly, operatorApprovalRule, parkRule, type HumanOnlyRule, type HumanRequestRow } from '../src/model/human-request.js';
+import { hostDoableAsk, humanOnlyRefusal, humanOnlyRules, humanRequestSchema, openHumanOnly, operatorApprovalRule, parkRefusal, parkRule, type HumanOnlyRule, type HumanRequestRow } from '../src/model/human-request.js';
 import { humanAsk, shortAskIssues } from '../src/model/human-ask.js';
-import { parkArgs, parkCommand } from '../src/cli/session-commands.js';
+import { parkArgs, parkCommand, routedParkCommand, sessionCommands } from '../src/cli/session-commands.js';
 import { nextActor } from '../src/model/board.js';
 import { plainLines } from '../web/item-page.js';
 import WorkCard from '../web/components/work-card.js';
@@ -276,13 +276,15 @@ test('unit:human-surface-derived-from-refusals — a human-only refusal added to
   }
 });
 
+/** The recommendation every park carries (GY-1410), for the parks whose advice a test does not read. */
+const advice = { recommendation: 'Approve', why: 'Nothing else unblocks the item.' };
 /** A worker's item, claimed at epoch 1 and parked with `body` through the real route. */
 async function parked(body: Record<string, unknown>) {
   const n = ++serial;
   let work = await engine.execute(operator, 'create', null, { title: `Short ask ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:behaves'] }] }, id());
   work = await engine.execute(operator, 'ready', work.id, {}, id());
   work = await engine.execute(worker, 'claim', work.id, {}, id());
-  await post(token(worker), `work/${work.id}/park`, { epoch: 1, kind: 'money-or-accounts', ...body });
+  await post(token(worker), `work/${work.id}/park`, { epoch: 1, kind: 'money-or-accounts', ...advice, ...body });
   return reload(work.id);
 }
 /**
@@ -297,7 +299,7 @@ const occurrences = (text: string, part: string) => text.split(part).length - 1;
 const agentNote = Array.from({ length: 15 }, (_, index) => `Resume graphyard/gy-1384-${index} at 5bc497ab7c62 then graphyard unseal GY-1384 under GH_CONFIG_DIR.`).join(' ');
 
 test('unit:human-request-short-ask — a park carries a short human ask apart from its agent detail: ASK, STEPS and WHY are bounded and refuse agent shorthand naming it, and a request without them leads with the first sentence of NEEDED', async () => {
-  const ok = { epoch: 1, kind: 'money-or-accounts', needed: 'A repository and an admin token', reason: 'The pilot needs both' };
+  const ok = { epoch: 1, kind: 'money-or-accounts', needed: 'A repository and an admin token', reason: 'The pilot needs both', ...advice };
   const refused = (extra: Record<string, unknown>) => { const parsed = humanRequestSchema.safeParse({ ...ok, ...extra }); assert.equal(parsed.success, false, JSON.stringify(extra)); return parsed.error!.issues.map(issue => issue.message).join(' | '); };
   // The limits: one sentence of at most 140 characters, at most 5 steps of at most 160, a why of at most 200.
   assert.match(refused({ ask: `Create ${'a'.repeat(140)}` }), /ASK is 147 characters; keep it to 140/);
@@ -333,13 +335,13 @@ test('unit:human-request-short-ask — a park carries a short human ask apart fr
   assert.equal((await request(token(worker), 'POST', `work/${(await parked({ needed: 'x', reason: 'y' })).id}/park`, { ...ok, ask: 'Open 5bc497ab7c62' })).status, 400, 'the route refuses shorthand too');
 
   // Fallback: an open request recorded before asks existed leads with the first sentence of NEEDED.
-  const legacy = await parked({ needed: 'Create the install-proof repository. Then resume graphyard/gy-1384-2 at 5bc497ab7c62 with graphyard unseal GY-1384.', reason: agentNote });
+  const legacy = await parked({ needed: 'Approve the paid GitHub Team plan. Then resume graphyard/gy-1384-2 at 5bc497ab7c62 with graphyard unseal GY-1384.', reason: agentNote });
   assert.equal(legacy.humanRequest!.ask, undefined);
-  assert.equal(humanAsk(legacy.humanRequest!), 'Create the install-proof repository.');
-  assert.equal(nextActor(legacy, 'needs-you', Date.now()).does, 'Create the install-proof repository.');
+  assert.equal(humanAsk(legacy.humanRequest!), 'Approve the paid GitHub Team plan.');
+  assert.equal(nextActor(legacy, 'needs-you', Date.now()).does, 'Approve the paid GitHub Team plan.');
   const row = openHumanOnly([{ work: legacy }], Date.now())[0];
   const card = renderToStaticMarkup(createElement(RequestCard, { row, refusal: null, busy: false, open: () => {}, answer: async () => {} }));
-  assert.match(card, /<h3>Create the install-proof repository\.<\/h3>/);
+  assert.match(card, /<h3>Approve the paid GitHub Team plan\.<\/h3>/);
   assert.ok(!visibleText(card).includes('graphyard unseal'), 'the rest of NEEDED is detail for agents');
 });
 
@@ -356,7 +358,7 @@ test('unit:human-request-card-render — each human request renders once per sur
   const seen = visibleText(card);
   assert.ok(seen.split(' ').length < 80, `${seen.split(' ').length} visible words: ${seen}`);
   assert.equal(occurrences(seen, note.ask), 1, 'the ask once');
-  assert.match(card, new RegExp(`<h3>${note.ask}</h3><ol class="human-steps"><li>${note.steps[0]}</li><li>${note.steps[1]}</li></ol><p class="human-why">${note.why}</p>`), 'heading, numbered steps, then why');
+  assert.match(card, new RegExp(`<h3>${note.ask}</h3><p class="human-why human-recommendation"><strong>Recommended:</strong> ${advice.recommendation}<span class="muted"> ${note.why}</span></p><ol class="human-steps"><li>${note.steps[0]}</li><li>${note.steps[1]}</li></ol>`), 'heading, the recommendation with why (GY-1410), then numbered steps');
   assert.ok(card.indexOf(note.why) < card.indexOf(row.choices![0].label), 'the choices follow');
   assert.ok(!seen.includes('graphyard unseal') && !seen.includes('5bc497ab') && !seen.includes('Who acts next'), 'no agent detail and no restatement in view');
   assert.match(card, /<details class="agent-details"><summary class="muted">Details for agents<\/summary>/, 'the detail is collapsed, closed by default');
@@ -372,4 +374,73 @@ test('unit:human-request-card-render — each human request renders once per sur
   const ready = work.gates.find(gate => gate.name === 'ready')!;
   assert.ok(ready.reasons.some(reason => reason.includes('graphyard unseal')), 'the blocker keeps the detail for agents');
   assert.deepEqual(plainLines(ready).filter(line => line.includes('graphyard unseal')), []);
+});
+
+// GY-1416: two parks this week asked the human for what the host could do — GY-1365 the revert
+// approver variables install derives from the reviewer App saved here, GY-1384 a repository the
+// host's own gh login administers. Their NEEDED texts, as the ledger records them, are replayed.
+const hostDoableReplays = {
+  'GY-1365': 'Register or choose the revert approver GitHub App (the reviewer App serves; it must differ from the control-plane App), install it on the repository, set GRAPHYARD_REVERT_APPROVER_APP_ID, GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID and GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY (or _PRIVATE_KEY_FILE) on the production control plane via scripts/provision-railway.mjs operator input, and redeploy',
+  'GY-1384': 'Operator-run pilot access for cryptob1/graphyard-install-proof: (1) make the repository reachable (it returns 404 to the public API and to this worker\'s repo-scoped App token) and run the pilot under a gh login with ADMIN viewerPermission on it (setup-from-zero step 1 HUMAN); (2) create and install the Graphyard GitHub App and the reviewer App on that repository, approving any GitHub Mobile Confirm access prompt (steps 4-5 HUMAN); (3) finish /login for the fresh Claude/Codex agent environments (step 8 HUMAN). Alternatively, re-scope AC-1 to a walk an agent identity can complete.',
+} as const;
+
+test('unit:park-refuses-host-doable — park refuses a NEEDED an agent identity on the host can do (a repository its gh login administers, a deployment variable derived from saved credentials, a credential the host holds), naming the master\'s route, and records it as the master\'s owed action; the three human-only decisions still park', async () => {
+  const refused = [
+    ['GY-1365 replay', 'money-or-accounts', hostDoableReplays['GY-1365'], 'deployment-variable', 'graphyard master setup --apply'],
+    ['GY-1384 replay', 'money-or-accounts', hostDoableReplays['GY-1384'], 'repository', 'gh repo create OWNER/NAME'],
+    ['a repository to create', 'money-or-accounts', 'Create the repository owner/install-proof on GitHub, empty, private', 'repository', 'gh repo create OWNER/NAME'],
+    ['a credential the host holds', 'credentials-for-people', 'Paste a GitHub token with repo and admin:repo_hook scopes so the pilot can configure webhooks', 'host-credential', 'gh auth token'],
+    ['a derived variable by phrase', 'money-or-accounts', 'Set the deployment variables for the reviewer App on Railway and redeploy', 'deployment-variable', 'graphyard master setup --apply'],
+  ] as const;
+  for (const [label, kind, needed, cls, command] of refused) {
+    const ask = hostDoableAsk(needed, kind);
+    assert.equal(ask?.class, cls, label);
+    const refusal = parkRefusal({ needed, kind })!;
+    assert.match(refusal, /^Not a human-only decision: .*the master's owed action, not the human's\. Agent route: /, label);
+    assert.ok(refusal.includes(command), `${label}: the refusal names ${command}`);
+    // The server refuses it, and the item never reaches the human: the worker keeps its lease.
+    const n = ++serial;
+    let work = await engine.execute(operator, 'create', null, { title: `Host-doable ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:behaves'] }] }, id());
+    work = await engine.execute(operator, 'ready', work.id, {}, id());
+    work = await engine.execute(worker, 'claim', work.id, {}, id());
+    const response = await request(token(worker), 'POST', `work/${work.id}/park`, { epoch: 1, kind, needed, reason: 'as recorded', ask: 'Do the thing' });
+    assert.deepEqual([response.status, response.body.error], [422, refusal], label);
+    assert.equal((await reload(work.id)).humanRequest ?? null, null, `${label} never parks`);
+    // The CLI records the same ask as the master's owed action, a blocker naming the route, instead of a park.
+    const posted: { path: string; data: any }[] = [], printed: any[] = [];
+    // A malformed park is refused before anything is recorded: no --ask.
+    await assert.rejects(routedParkCommand.run({ args: ['1', kind, ...needed.split(' '), '--', 'as recorded'], print: () => {}, api: async (path: string) => { throw new Error(`posted ${path}`); }, individualHostId: () => 'host' } as any, { id: work.id, key: work.key, revision: work.revision } as any), /^Error: Use park GY-N EPOCH KIND/, `${label}: validated first`);
+    await routedParkCommand.run({ args: ['1', kind, ...needed.split(' '), '--ask', 'Do the thing', '--recommend', 'Approve', '--why', 'Only the operator decides it.', '--', 'as recorded'], print: (value: unknown) => { printed.push(value); }, api: async (path: string, data?: unknown) => { posted.push({ path, data }); return {}; }, individualHostId: () => 'host' } as any, { id: work.id, key: work.key, revision: work.revision } as any);
+    assert.deepEqual(posted.map(entry => entry.path), [`work/${work.id}/blocked`], `${label}: recorded, not parked`);
+    assert.equal(posted[0].data.epoch, 1);
+    assert.match(posted[0].data.reason, /^Owed master action \(a park refused as host-doable, GY-1416\): /);
+    assert.ok(posted[0].data.reason.includes(command) && posted[0].data.reason.includes(needed.slice(0, 40)), `${label}: the owed action names its command and the ask`);
+    assert.deepEqual([printed[0].parked, printed[0].refusal, printed[0].owedAction.owner, printed[0].owedAction.class], [false, refusal, 'master', cls]);
+  }
+  assert.ok(sessionCommands.includes(routedParkCommand) && !sessionCommands.includes(parkCommand), 'graphyard park is the routed command');
+
+  // Still the human's: goals and priorities, money or paid accounts, credentials issued to people.
+  const accepted = [
+    ['goals-and-priorities', 'Decide whether the legacy importer is still a goal before GY-12 removes it'],
+    ['money-or-accounts', 'Approve a Hetzner cx22 server at 4.51 EUR a month for the live-install proof'],
+    ['money-or-accounts', 'Open a paid Railway team plan for the staging environment'],
+    ['credentials-for-people', 'Issue a dashboard sign-in for the new teammate who reviews releases'],
+    ['credentials-for-people', 'Give the new contractor a GitHub token scoped to the docs repository'],
+    // A credential issued to a named person stays the human's, whoever the recipient is.
+    ['credentials-for-people', 'Provide Alice a GitHub token'],
+    // A human-only step beside a host-doable one keeps the whole request the human's.
+    ['money-or-accounts', 'Open a paid Railway account, then set the deployment variables'],
+    // Opening any third-party account is the human's, free or trial as much as paid.
+    ['money-or-accounts', 'Open a Railway account, then set the deployment variables'],
+    ['money-or-accounts', 'Sign up for a free Fly.io trial and set the control-plane variables there'],
+  ] as const;
+  for (const [kind, needed] of accepted) {
+    assert.equal(parkRefusal({ needed, kind }), null, needed);
+    const work = await parked({ kind, needed, reason: 'a decision only the operator makes', ...(kind === 'goals-and-priorities' ? { recommendation: 'Go ahead as asked' } : {}) });
+    assert.equal(work.humanRequest?.kind, kind, `${needed} parks`);
+    // The CLI passes it straight to park.
+    const posted: string[] = [];
+    await routedParkCommand.run({ args: ['1', kind, ...needed.split(' '), '--ask', 'Decide it', '--recommend', kind === 'goals-and-priorities' ? 'Go ahead as asked' : 'Approve', '--why', 'Only the operator decides it.', '--', 'why'], print: () => {}, api: async (path: string) => { posted.push(path); return {}; }, individualHostId: () => 'host' } as any, { id: 'w', key: 'GY-1', revision: 1 } as any);
+    assert.deepEqual(posted, ['work/w/park'], needed);
+  }
 });
