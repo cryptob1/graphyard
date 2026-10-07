@@ -296,8 +296,9 @@ export function throughputEscalatedAt(actions: Record<string, DaemonAction>, own
  * needs-decision was answered (`throughputOwnerClosure`), and never otherwise. With none open, an
  * unverified answer files one, once per release: a release whose owner was closed (on an answered
  * decision, or by anyone) is not given a second unless a needs-decision still stands on its newest
- * measurement (GY-1465), which files one even when the latest ask failed, and the next release files afresh. A measurement showing the
- * population cannot accumulate raises the typed needs-decision on the owner once per owner: it
+ * measurement (GY-1465), which files one even when the latest ask failed, and the next release
+ * files afresh. A measurement showing the population cannot accumulate raises the typed
+ * needs-decision on the owner once per owner: it
  * stands until answered, so a re-measure that finds the same — or more of the same — never raises
  * it again. Filing and closing go through the operator-agent; a failure backs off on the action.
  */
