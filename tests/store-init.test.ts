@@ -241,13 +241,12 @@ test('integration:migration-deadlock-retried a live writer queued behind the mig
 
 test('unit:startup-lock-documented operations.md states how a release migrates under live traffic', async () => {
   const page = await readFile(new URL('../docs/operations.md', import.meta.url), 'utf8');
-  assert.match(page, /up-to-date release starts without taking coordination locks/);
+  assert.match(page, /up-to-date release takes no coordination locks/);
   assert.match(page, /migrating release fails fast/);
   assert.match(page, /health check/);
   // GY-773: only changed tables are touched, the lock budget, the retry.
-  assert.match(page, /touches only the tables whose DDL changed since it recorded a digest per table/);
-  assert.match(page, /unchanged tables are skipped without any lock/);
+  assert.match(page, /touching only tables whose DDL changed since its per-table digest/);
   assert.match(page, /30-second lock budget/);
-  assert.match(page, /retries a deadlock or expired lock wait with backoff/);
-  assert.match(page, /each attempt waits at most 3 seconds for a lock, so live writes never queue behind it longer/);
+  assert.match(page, /retrying deadlocks and expired lock waits with backoff/);
+  assert.match(page, /each attempt waiting ≤3 s per lock so live writes never queue longer/);
 });

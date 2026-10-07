@@ -700,9 +700,9 @@ test('integration:instant-exit-classified — a session Herdr cannot find second
 
 test('manual:dispatcher-state-docs-review — the master guide states that the dispatcher bounds and repairs its own state, how a persist failure is surfaced, and how a session that exits at launch is classified', async () => {
   const guide = await readMasterGuide();
-  for (const fragment of ["### The dispatcher's own state", 'bounds its own state where it composes it', 'marked with an ellipsis', 'repaired, not fatal', 'logged once with the', 'path that failed',
-    'A tick failure is attributed and surfaced', 'dispatch.lastFailure', 'Three consecutive failures raise one attention item', 'no reviewer or producer session is being launched for any item',
-    'A session that exits at launch is classified from its pane', 'agent_not_found', 'herdr pane read', 'provider limit notice', 'fails over exactly as a mid-session', "the pane's last words", 'exits **at launch**']) assert.ok(guide.includes(fragment), `docs/master-agent.md must state: ${fragment}`);
+  for (const fragment of ["### The dispatcher's own state", 'bounds its own state where it composes it', 'marking each cut with an ellipsis', 'repaired, not fatal', 'logged once with the failing path',
+    'Tick failures are attributed', 'dispatch.lastFailure', 'three in a row raise one attention item', 'no reviewer or producer session launches for any item',
+    'A session exiting **at launch** is classified by `herdr pane read`', 'agent_not_found', 'provider limit notice', 'fails over like a mid-session', "the pane's last words"]) assert.ok(guide.includes(fragment), `docs/master-agent.md must state: ${fragment}`);
 });
 
 test('unit:review-waits-for-bot-reviewers — a reviewer launch waits, bounded, for the configured bot reviewers to review the head, launches once they have, and never waits when the bound is 0', async () => {

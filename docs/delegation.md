@@ -1,29 +1,26 @@
-<!-- page: Operate Graphyard | 11 | leads and escalations. -->
+<!-- page: Operate Graphyard | 11 | leads, escalations. -->
 # Slice-lead delegation
 
 ## Authority boundaries
 
-An AI `slice-lead` leads an optional slice (`product`, `infrastructure`, `docs-experience`): rules on plans, sends back, escalates; never implements, reviews, proves or merges (`lead.action.refused`). `reject-plan`/`send-back` hold the merge gate (**lead hold**) until that lead's `approve-plan` with `"supersedes": "RULING-ID"` / `rework`.
-
-Producers ever assigned the item or in its slice: `evidence.producer.refused`. Limits: [deployment variables](deployment.md#variables).
+An AI `slice-lead` leads slice (`product`, `infrastructure`, `docs-experience`): rules on plans, sends back, escalates; never implements, reviews, proves, merges (`lead.action.refused`). `reject-plan`/`send-back` hold merging (**lead hold**) until that lead's `approve-plan` with `"supersedes": "RULING-ID"` or `rework`. Producers ever assigned item or in its slice: `evidence.producer.refused`. Limits: [deployment variables](deployment.md#variables).
 
 ## Escalation
 
-| Trigger | Raised when |
-| --- | --- |
-| `lease-loss` | A lapse with no submission, no carried `blocked` report, no stopped-worker attestation, no provider-exhaustion record |
-| `evidence-policy-conflict` | Trusted evidence for another policy revision |
-| `security-concern` | A lead's `escalate` ruling |
-| `requirement-weakening` | A revision retires a criterion or narrows proofs |
+| Trigger | Raised when
+| --- | ---
+| `lease-loss` | A lapse with no submission, no carried `blocked` report, no stopped-worker attestation, no provider exhaustion
+| `evidence-policy-conflict` | Trusted evidence for another policy revision
+| `security-concern` | A lead's `escalate` ruling
+| `requirement-weakening` | A revision retires a criterion, narrows proofs
 
-Unresolved triggers refuse the merge gate. A `requirement-weakening` raised by applying an approved two-party decision records that decision's id, is resolved by that same approval and is no `scope` fault: the approver already judged the weakening. Explained lapses are `lease.expired` with a [cause](protocol/leases.md#how-a-lease-ends) (`submitted`, `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`); later-explained `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`), and so does one a newer attempt superseded (`auto-settled: superseded — epoch M is held by OWNER, so nothing from epoch N can act or merge`) or, after 5 min, one whose attempts have all ended. Meanwhile a replacement may claim; delivery waits.
+Unresolved triggers refuse merging; replacements may claim, delivery waits. Explained lapses: `lease.expired` with a [cause](protocol/leases.md#how-a-lease-ends) (`submitted`, `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`); later-explained or superseded `lease-loss` auto-settles (`escalation.auto-settled`: `auto-settled: blocked report for epoch N explains the lapse`, `auto-settled: stopped-worker attestation for epoch N explains the lapse`, `auto-settled: superseded — epoch M is held by OWNER, …`).
 
 ### Who may settle what
 
-Resolutions record `escalation.resolved`.
+`escalation.resolved` records each:
 
 - Explained `lease-loss`: reconciliation, or `admin` `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"`.
-- `lease-loss` of a superseded epoch (the latest attempt holds its lease or submitted, no fence of the lost epoch stands): reconciliation, no decision.
-- Control-plane `lease-loss` whose attempts have all ended (no lease, no containment fence): reconciliation after 5 min standing (`auto-settled: ended — …`), no decision.
-- `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, or a lead-raised `lease-loss`: master-requested two-party decision, or a declared human session (`admin`, `sessionKind: "human"`; settles any).
-- `requirement-weakening` raised by applying an approved `requirements` decision: that approval, citing the decision and approver.
+- Superseded-epoch `lease-loss` (latest attempt leased or submitted, no lost-epoch fence): reconciliation; control-plane `lease-loss` whose attempts all ended (no lease, no containment fence): after 5 min (`auto-settled: ended — …`).
+- `security-concern`, `requirement-weakening`, `evidence-policy-conflict`, lead-raised `lease-loss`: master-requested two-party decision or declared human session (`admin`, `sessionKind: "human"`; settles any).
+- `requirement-weakening` from approved `requirements` decision: records id, settled by that approval (citing approver); no `scope` fault.

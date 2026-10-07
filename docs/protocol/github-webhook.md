@@ -1,22 +1,20 @@
-<!-- page: Agent protocol | 5 | webhook and dispatch records. -->
-# GitHub webhook and review providers
+<!-- page: Agent protocol | 5 | webhook, dispatch. -->
+# GitHub webhook
 
-`POST /api/github/webhook` verifies GitHub's HMAC, deduplicates deliveries and wakes durable jobs for [observation](#reads-that-are-not-repeated); payloads never pass gates.
+`POST /api/github/webhook` verifies HMAC, deduplicates deliveries, wakes durable jobs for [observation](#reads-that-are-not-repeated); payloads never pass gates.
 
-`POST /api/work/:id/reviewpolicy` (`admin`; operator agent with `policy:review-provider`): `{"provider":"codex"|"github"|"agent", "expectedPolicyRevision":1, "reason":…}`, bumping the policy revision; `agent` needs ordered `reviewerProfiles` (`name`, `runtime`, `reviewerApp`; optional `mention`, `timeoutSeconds`).
+`POST /api/work/:id/reviewpolicy` (`admin`; operator agents with `policy:review-provider`): `{"provider":"codex"|"github"|"agent","expectedPolicyRevision":1,"reason":…}`, bumping policy revision; `agent` needs ordered `reviewerProfiles` (`name`, `runtime`, `reviewerApp`; optional `mention`, `timeoutSeconds`).
 
 ## Reads that are not repeated
 
-Commits and exact-SHA compares are cached once (`github_cache`), and every question about one SHA pair (ancestry, commit list, landing diff, changed files) reads its one first page (`?per_page=100&page=1`), so a base move costs each open candidate one compare; the base ref is read once per 15 s per replica, protection and rulesets every 5 min or on their events. `pull_request`, `pull_request_review`, `check_run`, `check_suite` and `push` webhooks claim items first; a poll they cover is skipped (`poll skipped: a webhook refreshed this item`).
-
-A base push wakes only open items whose files overlap it or whose last `mergeable_state` was not `CLEAN`/`UNSTABLE` (all when the payload names no files; `unit:merge-burst-request-budget`).
+Commits and exact-SHA compares cache once (`github_cache`); a SHA pair's questions (ancestry, commits, landing diff, changed files) read one first page (`?per_page=100&page=1`): base move: one compare per open candidate. Base ref: once per 15 s per replica; protection, rulesets: 5-minutely or on events. `pull_request`, `pull_request_review`, `check_run`, `check_suite`, `push` webhooks claim items first; polls they cover skip (`poll skipped: a webhook refreshed this item`). A base push wakes only open items overlapping its files or with last `mergeable_state` not `CLEAN`/`UNSTABLE` (all, if payload names no files; `unit:merge-burst-request-budget`).
 
 ## Prioritized wakes
 
-`POST /api/work/:id/resync` with `prioritized: true` is claimed like a webhook wake. A rework decision waiting on a stale observation sends one such wake and decides from the observation it brought in, whatever its age, provided it reads the candidate head and no GitHub pause stands; a decision the candidate moved past is withdrawn. Loop bookkeeping saved meanwhile (sessions, next action, gates, escalations) does not refuse that observation. The loop's wakes add `wait: false`, so the route answers without waiting for a reconcile tick. A rework dispatch refused because its PR branch moved (`Submitted PR branch changed`) releases its claim with a prioritized wake, so the next dispatch starts from the new head.
+`POST /api/work/:id/resync` with `prioritized: true` is claimed like webhook wake; loop wakes add `wait: false`, answering without a reconcile tick. A rework decision on a stale observation sends one, deciding from its result (any age; candidate head; no GitHub pause); meanwhile-saved bookkeeping (sessions, next action, gates, escalations) doesn't refuse it; decisions the candidate moved past are withdrawn. A rework dispatch refused with `Submitted PR branch changed` releases its claim via one, restarting from new head.
 
-The loop's decisions step has a budget: two fifths of `run.intervalSeconds`, at least 30 s. Items not reached keep their standing decisions but make no request that cycle; `decisions:deferred` names them (and is superseded once a cycle reaches every item). Both of the step's passes, rework and routine decisions then attestations, start the next cycle with what they put off and always reach their first item, so the oldest deferred item is requested even past the budget.
+Decisions step budget: two fifths of `run.intervalSeconds`, ≥30 s; unreached items keep standing decisions, request nothing, show in `decisions:deferred`; both passes (rework; routine decisions, then attestations) resume them next cycle, always reaching first item even past budget.
 
 ## Automatic dispatch records
 
-`autoDispatch` holds each [automatic dispatch](../master-agent.md#automatic-dispatch-at-submit) request bound to its candidate; transitions append `dispatch.requested`, `dispatch.satisfied` (approval or trusted evidence) or `dispatch.cancelled` (candidate changed); no gate moves.
+`autoDispatch` holds each [automatic dispatch](../master-agent.md#automatic-dispatch-at-submit) request, candidate-bound; transitions append `dispatch.requested`, `dispatch.satisfied` (approval or trusted evidence) or `dispatch.cancelled` (candidate changed); no gate moves.

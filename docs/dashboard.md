@@ -5,32 +5,26 @@ Sidebar: **Work**, **Workers**, **Shipped**, **Tests**, **Insights**, **Settings
 
 ## Work
 
-One group per open item (a tile counts and filters it): **Needs you** (yours alone), **Blocked**, **Moving**, **Up next**, **Backlog**. `GET /api/board` items carry `group`, `stage`, `owner`, `actor`, `command`, `since`, `overdue` (Moving/Blocked past `overdueAfterMs`, default 30 minutes). `master status` lists the master's as `board.owed`.
+Open items by group (tiles count, filter): **Needs you** (yours alone), **Blocked**, **Moving**, **Up next**, **Backlog**. `GET /api/board` items carry `group`, `stage`, `owner`, `actor`, `command`, `since`, `overdue` (Moving/Blocked past `overdueAfterMs`, 30 min); master-owed: `master status` `board.owed`.
 
 ## Needs you
 
-Each card leads with the request's ask, then its **Recommended** choice or safest way with one line of why, its numbered steps, then the choices, the recommended one first and preselected; the worker's needed/reason detail is folded under **Details for agents** (older requests lead with the first sentence of what they need). `graphyard login` prints the operator's single-use sign-in link. Requests offer choices; **Provide now** seals credentials for `unseal GY-N`.
-
-An operator approval offers **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`), answered only from a human admin's sign-in session.
+Cards: ask, **Recommended** choice (or safest way), one-line why, numbered steps, choices (recommended first, preselected); agent detail folds under **Details for agents** (older requests: need's first sentence). `graphyard login`: single-use sign-in link; **Provide now** seals credentials for `unseal GY-N`; operator approvals offer **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`), answered only from human admin sessions.
 
 ## Workers
 
-**Workers** is its own sidebar entry, registered beside Shipped and Insights in `web/pages/index.tsx`. A row is one [session handle](master-agent-sessions.md#session-handles), from the item, not from Herdr. A running handle last observed over **15 minutes** by default, `sessionStaleThresholdMs` (`web/workers-view.ts`), reads *not seen for <time since that observation>*, never as running, and is not counted among the open sessions; the loop's [session report](master-agent.md#session-liveness-is-reconciled-not-trusted) is what ends a dead handle.
+**Workers** (sidebar, beside Shipped and Insights; `web/pages/index.tsx`): a row is one [session handle](master-agent-sessions.md#session-handles) from the item, not from Herdr. A running handle unobserved over **15 minutes** by default (`sessionStaleThresholdMs`, `web/workers-view.ts`) reads *not seen for <time since that observation>*, never as running, and isn't counted open; the loop's [session report](master-agent.md#session-liveness-is-reconciled-not-trusted) ends a dead handle.
 
-Running rows: **Copy local** (launching host) `herdr agent attach w1V:pJD`; **Copy remote**: `herdr --help` documents `herdr --machine <label-or-id> <command>` and `herdr --remote <ssh-target>`; interactive attachment is not forwarded, so focus, then attach: `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
+**Copy local** (launching host): `herdr agent attach w1V:pJD`; **Copy remote** (`herdr --machine <label-or-id> <command>`, `herdr --remote <ssh-target>` per `herdr --help`; attachment isn't forwarded: focus, then attach): `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
 
 ## Settings › Agents
 
-**Can launch now?** is one line of role chips (each chip's title names its next account), plus one line per role that cannot launch, with its reason and earliest time. **Accounts** is one row per account, ordered working, idle, then out of work, each with one state chip (Disabled, No role, Spent, Launch failing, Unavailable, Working, Idle) and a **Usage** column (bar and percent, reset on hover; a muted — when unreported). Only a plan shared by two or more accounts keeps a header row. **Why** shows live work or a refusal, never what Roles, Back or Usage already say. Spent accounts back on the same day collapse into one *4 spent until Oct 8* row that opens on click. Preference order and launch policy sit behind **Roles (N)**.
+**Can launch now?** role chips (titles name next account; blocked roles: reason, earliest time). **Accounts** rows (working, idle, out of work): state chip (Disabled, No role, Spent, Launch failing, Unavailable, Working, Idle), **Usage** (bar, percent, hover reset; — unreported), **Why** (live work or refusal); shared plans head groups; same-day spent collapse (*4 spent until Oct 8*). **Roles (N)**: preference, launch policy.
 
 ## The status sentence
 
-Rows: **Build, Validate, Test, Review, Prove, Merge, Deploy**, then *Merged*, *Live* once served.
-
-## An item page
-
-**What is left**; **Requirements** (✓/○); **Pull request** with **Merge danger** (low/medium/high); **Test cases**; **Activity**; **Technical details** (gates, sessions, evidence, overlaps).
+**Build, Validate, Test, Review, Prove, Merge, Deploy**, then *Merged*, *Live* once served. Item page: **What is left**, **Requirements** (✓/○), **Pull request** (**Merge danger** low/medium/high), **Test cases**, **Activity**, **Technical details** (gates, sessions, evidence, overlaps).
 
 ## Insights
 
-**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats are filed as `bug` items unless `GRAPHYARD_INTERVENTION_PATTERNS=0`), **Validation**, **Releases**. A rework round answering a ground the loop acts on by itself (base conflict, failed required check, change request, merge refusal, failed proof) is not an intervention, whoever requested it; once an approver declines that request, a rework of the head is counted again. Nor is a round the loop's operator-agent identity requested on recorded grounds (including a capped change request it puts to its approver) that the risk lane or an operator agent applied; one approved or applied by hand still counts, and a decision before the window counts only for an outcome inside it that names it.
+**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats filed `bug` unless `GRAPHYARD_INTERVENTION_PATTERNS=0`), **Validation**, **Releases**. Reworks on loop-handled ground (base conflict, failed required check, change request, merge refusal, failed proof) aren't interventions, whoever asked, until approver declines one; nor are loop operator agent's recorded-ground rounds (capped change requests to its approver included) applied by risk lane or operator agent; hand-approved or hand-applied ones count; pre-window decision counts only for in-window outcome naming it.
