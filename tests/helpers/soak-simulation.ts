@@ -924,7 +924,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   };
 
   // ---- Docs-sync sessions (GY-566): launched by the loop for a docs-only conflict, each merges the base in and pushes. ----
-  const docsSyncRuns: { plan: DocsSyncPlan; agentName: string; pane: string; pushAt: number; outcome: 'working' | 'pushed' | 'gave up'; roleFile: string | null }[] = [];
+  const docsSyncRuns: { plan: DocsSyncPlan; agentName: string; pane: string; pushAt: number; outcome: 'working' | 'pushed' | 'gave up' | 'stopped'; roleFile: string | null }[] = [];
   // GY-1433: the launcher writes each Claude session's role file under a root that carries the
   // master's project settings, and the loop's settle of the session removes it (docsSyncSettled).
   const docsSyncRoot = await temporaryDirectory('soak-docs-sync');
@@ -939,7 +939,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     return { agentName, pane, account: 'claude-reviewer', runtime: 'claude', session: null };
   };
   const docsSyncTick = (now: number) => {
-    for (const run of docsSyncRuns.filter(entry => entry.outcome === 'working' && now >= entry.pushAt)) {
+    for (const run of docsSyncRuns.filter(entry => entry.outcome === 'working')) {
+      // A session the loop closed pushes nothing more, as a stopped runtime does (GY-1434).
+      if (herdr.closed.includes(run.pane)) { run.outcome = 'stopped'; continue; }
+      if (now < run.pushAt) continue;
       run.outcome = github.docsSync(run.plan.key, run.plan.head, run.plan.base) ? 'pushed' : 'gave up';
       herdr.status(run.pane, 'done');
     }
