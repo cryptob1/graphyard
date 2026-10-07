@@ -4,6 +4,13 @@ import { loopSupervision, loopSupervisionAttention, type LoopSupervisorEvidence,
 import { readDaemonState } from '../master-daemon.js';
 import { detectLoopSupervisorUnit } from '../daemon/upgrade.js';
 import type { MainGuardReadiness } from '../main-guard.js';
+import { appendFile, mkdir } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { parseArgs } from 'node:util';
+import type { CliContext } from './context.js';
+import { deploymentTarget, derivedFrom, derivedVariables, installIdFor, prepareInstall, providers, revertApproverFromFile, selfProvision, type DerivedVariable, type Provider, type SelfProvisionAudit } from '../install/index.js';
+import type { AdapterContext, ProviderAdapter } from '../install/adapters.js';
+import { installDirectory, readInstallRecord } from '../install/secrets.js';
 
 /**
  * The `setup` section of master status: installation state that silently stops every launch or
@@ -18,6 +25,12 @@ import type { MainGuardReadiness } from '../main-guard.js';
  * rule, so it is raised before a merge breaks main, not after.
  */
 export const browserProfileMissing = 'No browser profile is configured: App permission updates, installation acceptance, and page-only protection changes cannot run through master browser until the operator lends the master a signed-in Chrome profile';
+/**
+ * A deployment variable the install plan derives from a credential saved on this host is the
+ * master's, never the human's (GY-1416): `master setup --apply` sets it, and the loop runs that
+ * itself whenever the provider adapter can apply variables in place.
+ */
+export const setupApplyNext = 'graphyard master setup --apply: sets GRAPHYARD_REVERT_APPROVER_APP_ID, GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID and GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY from the reviewer App registration saved on this host, and every other derived deployment variable the deployment lacks, through the provider adapter, then redeploys; the loop runs it itself when the adapter can apply variables. graphyard doctor then shows revert-approver ready';
 export const browserProfileNext = (cliPath: string) => `node ${cliPath} master init --token-stdin --browser-profile PROFILE`;
 /**
  * What the loop's cursor records of its own supervision (GY-1400), for a probe that could not reach
@@ -31,19 +44,91 @@ export async function loopSupervisorEvidence(root: string, master: MasterConfig,
 
 export async function setupHealth(root: string, master: MasterConfig, supervisorHost?: LoopSupervisorHost, coordinator?: { mainGuard?: MainGuardReadiness | null } | null,
   evidence: (root: string, master: MasterConfig) => Promise<LoopSupervisorEvidence | null> = loopSupervisorEvidence) {
+  // What the loop's own setup step last did, when this is the loop reading its own section; null in a status read.
+  const selfProvisioned = lastLoopSelfProvision(root);
   const reviewer = await reviewerBindingHealth(master);
   const supervisor = await loopSupervision({ root, cliPath: master.cliPath }, supervisorHost);
   // The cursor is read only when this vantage could not reach the user manager.
   const supervisorAttention = loopSupervisionAttention(supervisor, supervisor.unreachable ? await evidence(root, master).catch(() => null) : null);
   const herdrWorkspace = await herdrWorkspaceHealth(master);
   const mainGuard = coordinator?.mainGuard ?? null, revertApprover = mainGuard?.attention ?? null;
-  const setup = { reviewer, supervisor, herdrWorkspace, mainGuard,
+  const setup = { reviewer, supervisor, herdrWorkspace, mainGuard, selfProvision: selfProvisioned,
     attention: [...reviewer.attention, ...supervisorAttention.map(item => item.text), ...(herdrWorkspace.exists === false ? [herdrWorkspace.reason!] : []), ...(revertApprover ? [revertApprover] : [])] };
   // An unsupervised loop stays stopped; each supervisor state names its own repair.
   const attention: AttentionItem[] = supervisorAttention.map(item => ({ subject: 'setup', text: item.text, ...agentOwner('master', item.next) }));
   for (const text of reviewer.attention) attention.push({ subject: 'setup', text, ...agentOwner('master', 'graphyard master reviewer setup (or graphyard master reviewer bind FILE --key-stdin) to bind the reviewer App') });
   if (herdrWorkspace.exists === false) attention.push({ subject: 'setup', text: herdrWorkspace.reason!, ...agentOwner('master', 'Set herdrWorkspace in .graphyard/master.json to a workspace herdr workspace list shows; master run adopts it on its next tick') });
-  if (revertApprover) attention.push({ subject: 'setup', text: revertApprover, ...agentOwner('master', 'Set GRAPHYARD_REVERT_APPROVER_APP_ID, GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID and GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY (or _FILE) on the control-plane deployment to an App installed on the repository other than the control-plane App (the reviewer App serves), redeploy, then rerun graphyard doctor') });
+  if (revertApprover) attention.push({ subject: 'setup', text: revertApprover, ...agentOwner('master', setupApplyNext) });
   if (!master.browser) attention.push({ subject: 'setup', text: browserProfileMissing, ...humanOwner('issuing credentials to people', browserProfileNext(master.cliPath)) });
   return { setup, attention };
+}
+
+/** The loop's latest own run of `master setup --apply`: when it started and what it did (`running` until it settles). */
+export interface LoopSelfProvision { at: string; outcome: string }
+const loopProvisionIntervalMs = 3_600_000;
+const loopProvisionRuns = new Map<string, { at: number; running: boolean; outcome: string }>();
+/**
+ * The loop's setup step (GY-1416 AC-2, src/daemon/cycle.ts): `master setup --apply` runs beside
+ * the cycle at most once an hour. It sets variables only where the provider adapter applies them in
+ * place; elsewhere it plans, and the setup attention keeps naming the command. A `master status`
+ * read never runs it.
+ */
+export function loopSelfProvision(root: string, master: Pick<MasterConfig, 'repository' | 'reviewer'>, options: { now?: number; setup?: typeof masterSetup } = {}): LoopSelfProvision {
+  const now = options.now ?? Date.now(), last = loopProvisionRuns.get(root);
+  if (!last || (!last.running && now - last.at >= loopProvisionIntervalMs)) {
+    const entry = { at: now, running: true, outcome: 'running' };
+    loopProvisionRuns.set(root, entry);
+    void (options.setup ?? masterSetup)(root, master, { apply: true })
+      .then(report => { entry.outcome = report.set.length ? `set ${report.set.join(', ')}` : report.next ?? 'every derived variable is present'; },
+        error => { entry.outcome = `failed: ${error instanceof Error ? error.message : String(error)}`; })
+      .finally(() => { entry.running = false; });
+  }
+  return lastLoopSelfProvision(root)!;
+}
+export function lastLoopSelfProvision(root: string): LoopSelfProvision | null {
+  const current = loopProvisionRuns.get(root);
+  return current ? { at: new Date(current.at).toISOString(), outcome: current.outcome } : null;
+}
+
+/** Where `master setup --apply` appends one audit line per variable it set: name, source and fingerprint, never a value. */
+export const setupAuditFile = (root: string) => resolve(root, '.graphyard', 'setup-audit.jsonl');
+export interface MasterSetupOptions { apply: boolean; provider?: Provider; service?: string; linkDirectory?: string; workspace?: string }
+export interface MasterSetupDependencies {
+  /** The deployment and the variables its install record derives; the install record's by default (`recordedDeployment`). */
+  locate?: (root: string, master: Pick<MasterConfig, 'repository'>, options: MasterSetupOptions) => Promise<{ adapter: ProviderAdapter; context: AdapterContext; derived: DerivedVariable[] } | null>;
+  now?: () => number;
+}
+
+/**
+ * The deployment this host installed, from its install record (`graphyard install`), or the one
+ * named by --provider, --service and --link-dir. Null when neither names one.
+ */
+export async function recordedDeployment(root: string, master: Pick<MasterConfig, 'repository'>, options: MasterSetupOptions) {
+  if (options.provider) return { ...deploymentTarget({ provider: options.provider, repository: master.repository, service: options.service ?? 'graphyard', linkDirectory: resolve(options.linkDirectory ?? root), workspace: options.workspace ?? null }), derived: [] as DerivedVariable[] };
+  const record = await readInstallRecord(installDirectory(installIdFor(master.repository)));
+  if (!record) return null;
+  const session = await prepareInstall(root, { repository: record.repository, provider: record.provider, baseBranch: record.baseBranch, reviewPolicy: record.reviewPolicy, ...(record.domain ? { domain: record.domain } : {}),
+    workers: record.principals.filter(principal => principal.role === 'worker').length || undefined, producerProofs: record.principals.flatMap(principal => principal.proofs ?? []), ...(record.selfContained ? { selfContained: true } : {}) }, {}, 'plan');
+  return { adapter: session.adapter, context: session.context, derived: await derivedVariables(session) };
+}
+
+/**
+ * `master setup [--apply]` (GY-1416): every deployment variable derived from credentials saved on
+ * this host that the running deployment lacks — the install record's, and the revert approver from
+ * the reviewer App bound in .graphyard/master.json — planned, or set with --apply through the
+ * provider adapter with one audit entry each. Nothing is printed but names and fingerprints.
+ */
+export async function masterSetup(root: string, master: Pick<MasterConfig, 'repository' | 'reviewer'>, options: MasterSetupOptions, deps: MasterSetupDependencies = {}) {
+  const located = await (deps.locate ?? recordedDeployment)(root, master, options);
+  if (!located) return { mode: options.apply ? 'apply' as const : 'plan' as const, target: null, observed: false, canApply: false, missing: [], set: [], audit: [],
+    next: `No deployment is recorded for ${master.repository} on this host (no graphyard install record): name it with graphyard master setup --provider railway --service NAME --link-dir DIR${options.apply ? ' --apply' : ''}` };
+  const reviewer = master.reviewer ? derivedFrom(await revertApproverFromFile(master.reviewer.credentialFile), `the reviewer App ${master.reviewer.slug} registration ${master.reviewer.credentialFile}`) : [];
+  const audit = async (entry: SelfProvisionAudit) => { await mkdir(resolve(root, '.graphyard'), { recursive: true }); await appendFile(setupAuditFile(root), `${JSON.stringify(entry)}\n`, { mode: 0o600 }); };
+  return { target: { provider: located.context.provider, service: located.context.service }, ...await selfProvision(located, [...located.derived, ...reviewer], { apply: options.apply, audit, now: deps.now }) };
+}
+
+export async function masterSetupCommand(context: CliContext, root: string, master: Pick<MasterConfig, 'repository' | 'reviewer'>) {
+  const { values } = parseArgs({ args: context.args, options: { apply: { type: 'boolean' }, provider: { type: 'string' }, service: { type: 'string' }, 'link-dir': { type: 'string' }, workspace: { type: 'string' } }, allowPositionals: false });
+  if (values.provider && !providers.includes(values.provider as Provider)) throw new Error(`--provider is one of ${providers.join(', ')}`);
+  return context.print(await masterSetup(root, master, { apply: !!values.apply, ...(values.provider ? { provider: values.provider as Provider } : {}), ...(values.service ? { service: values.service } : {}), ...(values['link-dir'] ? { linkDirectory: values['link-dir'] } : {}), ...(values.workspace ? { workspace: values.workspace } : {}) }));
 }

@@ -70,6 +70,12 @@ export interface ProviderAdapter {
   plan(ctx: AdapterContext, observation: AdapterObservation): PlanAction[];
   provision(ctx: AdapterContext, observation: AdapterObservation): Promise<void>;
   setEnv(ctx: AdapterContext, values: EnvValue[]): Promise<void>;
+  /**
+   * Sets only `values` on the running deployment, keeping every other variable, and redeploys it
+   * (GY-1416 `master setup --apply`). Absent on an adapter whose `setEnv` rewrites the whole
+   * environment (a Compose bundle): there a missing variable is applied by `install --apply`.
+   */
+  applyVariables?(ctx: AdapterContext, values: EnvValue[]): Promise<void>;
   deploy(ctx: AdapterContext): Promise<void>;
   url(ctx: AdapterContext): Promise<string>;
   health(ctx: AdapterContext, url: string): Promise<boolean>;
@@ -618,6 +624,11 @@ export const railwayAdapter: ProviderAdapter = {
     if (plain.length) await runRailway(ctx, ['variables', '--service', ctx.service, '--skip-deploys', ...plain.flatMap(value => ['--set', `${value.name}=${value.value}`])], { timeout: 300_000 });
     // Secrets go over standard input: a process argument is visible to every local process.
     for (const secret of values.filter(value => value.secret)) await runRailway(ctx, ['variable', 'set', '--service', ctx.service, '--skip-deploys', '--stdin', secret.name], { input: secret.value, timeout: 300_000 });
+  },
+  async applyVariables(ctx, values) {
+    // Railway sets variables one by one and keeps the rest; the running build restarts once with them all.
+    await railwayAdapter.setEnv(ctx, values);
+    await runRailway(ctx, ['redeploy', '--service', ctx.service, '--yes'], { timeout: 600_000 });
   },
   async deploy(ctx) {
     // The source is the Graphyard checkout the CLI runs from — never the process cwd, which

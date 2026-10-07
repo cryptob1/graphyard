@@ -139,6 +139,11 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * reconfiguration applies before the next observation.
    */
   publishMergeSettings?: () => Promise<unknown>;
+  /**
+   * GY-1416: the loop's setup step, `master setup --apply` beside the cycle at most hourly; it sets
+   * derived deployment variables only where the provider adapter applies them in place.
+   */
+  selfProvision?: () => Promise<unknown>;
   /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
   requestSmoke: (work: Work) => void | Promise<void>;
   /**
@@ -707,6 +712,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('production-environment', { environment });
       publishedEnvironment = environment;
     },
+    // Imported when first run: master-setup reads the install modules, which the loop needs only here.
+    selfProvision: async () => (await import('../cli/master-setup.js')).loopSelfProvision(root, current()),
     publishMergeSettings: async () => {
       const config = { rerunFailedChecks: rerunFailedChecks(current()) };
       const published = JSON.stringify(config);

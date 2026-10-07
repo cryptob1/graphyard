@@ -52,7 +52,7 @@ export GRAPHYARD_TOKEN_FILE=~/.config/graphyard/OWNER-REPO/tokens/OWNER-REPO-ope
 
 ## 5. Reviewer and revert-approver Apps
 
-`--reviewer claude` registers a second App, the independent reviewer (**HUMAN:** one more confirmation, same page). No review gate passes without it. The same `--apply` makes that App the main guard's revert approver (`GRAPHYARD_REVERT_APPROVER_*`; compose mounts its key as a file), so the guard reverts a broken `main` unaided; every `--apply` resets hand-set values to that App. **Verify:** `reviewer-app` passes, and readiness `revert-approver` is `ready`. An installation bound outside `install` uses `gy master reviewer setup` (loopback `http://` is accepted on compose) and sets the [variables](deployment.md#variables) itself.
+`--reviewer claude` registers a second App, the independent reviewer (**HUMAN:** one more confirmation). No review gate passes without it. The same `--apply` makes that App the main guard's revert approver (`GRAPHYARD_REVERT_APPROVER_*`; compose mounts its key as a file), so the guard reverts a broken `main` unaided; every `--apply` resets hand-set values to that App. **Verify:** `reviewer-app` passes, and readiness `revert-approver` is `ready`. An installation bound outside `install` uses `gy master reviewer setup` (loopback `http://` accepted on compose); `gy master setup --apply` sets its [variables](deployment.md#variables).
 
 ## 6. Onboard the checkout
 

@@ -22,7 +22,9 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 //   - GY-1384 (6097f31f) and GY-1365 (b9b064b3), money-or-accounts: necessary account actions, each
 //     answered within seconds with the bare default "Approve", which recorded "provided" while
 //     nothing had been set up. GY-1384's resumed worker found the repository still 404 and asked
-//     again. The default Approve now takes the operator's words, so a press says what exists.
+//     again. The default Approve now takes the operator's words, so a press says what exists. Since
+//     GY-1416 neither parks: the host's gh login administers the repository, and install derives the
+//     revert approver variables from the reviewer App saved on the host (`master setup --apply`).
 //   - GY-1384 (601f62a1), money-or-accounts: that second ask, which said the later human steps "will
 //     each park once more, one at a time". A park that defers steps is refused: one request names them all.
 
@@ -40,11 +42,13 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1070 and GY-1
   assert.doesNotMatch(item.criteria[0].text, /every behaviour, command, configuration and API documented before the change is still documented/);
 });
 
-test('manual:intervention-pattern-human-only-decision-build — each request is judged: a scope widening and a deferred ask are refused, the account actions may park', () => {
+test('manual:intervention-pattern-human-only-decision-build — each request is judged: a scope widening and a deferred ask are refused, and (GY-1416) so are the account actions the host could do itself', () => {
   assert.match(parkRefusal({ needed: asked['GY-1113'] })!, /scope widening is not a human-only decision: ask for it with graphyard scope-request/);
   assert.match(parkRefusal({ needed: asked['GY-1384-2'] })!, /every human step the item still needs in this one request/);
-  assert.equal(parkRefusal({ needed: asked['GY-1384-1'] }), null, 're-scoping a criterion is not a scope widening');
-  assert.equal(parkRefusal({ needed: asked['GY-1365'] }), null);
+  // GY-1416: re-scoping a criterion is no scope widening, but the repository is the host's gh login's to make reachable,
+  // and the revert approver variables are derived from the reviewer App saved on the host: both are the master's.
+  assert.match(parkRefusal({ needed: asked['GY-1384-1'] })!, /a repository the host's gh login can create or administer.*the master's owed action/);
+  assert.match(parkRefusal({ needed: asked['GY-1365'] })!, /a deployment variable derived from credentials saved on this host.*graphyard master setup --apply/);
   assert.deepEqual(defaultChoices('money-or-accounts')[0], { id: 'approve', label: 'Approve, saying what you approved or set up…', outcome: 'provided', input: 'text' });
 });
 
@@ -91,8 +95,10 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1113 and GY-1
   }
 });
 
+// GY-1384 (6097f31f) and GY-1365 are no longer parks at all (GY-1416, above); the bare Approve that resumed
+// them is still refused for every account action that does park, such as a paid server.
 test('manual:intervention-pattern-human-only-decision-build — GY-1384 (6097f31f) and GY-1365: the bare Approve that resumed them with nothing set up is refused; the operator\'s words resume them', async () => {
-  for (const [subject, needed] of [['GY-1384', asked['GY-1384-1']], ['GY-1365', asked['GY-1365']]] as const) {
+  for (const [subject, needed] of [['GY-1384', 'Approve a Hetzner cx22 server at 4.51 EUR a month for the install proof'], ['GY-1365', 'Open a paid Railway team plan for the production control plane']] as const) {
     const work = await claimed(subject);
     await call(token(worker), `work/${work.key}/park`, { epoch: work.epoch, kind: 'money-or-accounts', needed, reason: 'an account action only the operator may take' }, 200);
     const request = (await reload(work.id)).humanRequest!;
