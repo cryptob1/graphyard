@@ -259,7 +259,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       // the checkout by itself, the executor restart still owed on the cursor for the process that
       // starts. A loop already running the checkout's revision has nothing to re-execute.
       const waited = now() - Date.parse(state.upgrade.stalled?.since ?? at());
-      if (!deps.restartSelf || sameCommit(state.release?.commit, pending.to) || !(waited >= fleetWaitMs)) return { outcome: 'pending', reason, to: pending.to };
+      if (!deps.restartSelf || sameCommit(state.release?.commit, pending.to) || waited < fleetWaitMs) return { outcome: 'pending', reason, to: pending.to };
       await alignUnit();
       try { await deps.restartSelf(); }
       catch (error) {
