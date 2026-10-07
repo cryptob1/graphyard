@@ -7,7 +7,7 @@ import { agentOwner, atomicPrivateWrite, closeHerdrPane, diskThresholdBytes, isP
 import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedgerFullError, sessionLedgerRefusal, terminalSessionStates, updateReviewLedger, type ReviewRecord } from './reviewer.js';
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
 import { describeTmpReclaim, hostTmpRoots, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
-import { upgradeTouchesCode } from './daemon/upgrade.js';
+import { alignKey, upgradeTouchesCode } from './daemon/upgrade.js';
 import type { UpgradeStall } from './daemon/state.js';
 import { describePromotion, promotionOnSchedule, promotionWait, type PromotionWait } from './master/release-lag.js';
 import type { LoopState } from './daemon/liveness.js';
@@ -789,14 +789,15 @@ export async function readReclaimReports(root: string): Promise<ResourceReclaimR
 export async function readReclaimState(root: string): Promise<{ reports: ResourceReclaimReport[]; seen: Record<string, string> }> { const file = await readReclaimFile(root); return { reports: file.reports, seen: file.seen }; }
 /**
  * The restart the loop's self-upgrade owes, from the daemon cursor (GY-1198): its pending move and
- * the latest attempt the upgrade recorded (its `upgrade:<release>` action), or null when none is owed.
+ * the latest attempt the upgrade recorded (its `upgrade:<release>` action; a failure before any
+ * restart, on `upgrade:align`, is no attempt), or null when none is owed.
  */
 export function owedUpgrade(state: { upgrade?: { pending: { from: string | null; to: string; code: boolean } | null; alignedRelease?: string | null; stalled?: UpgradeStall | null } | null; actions?: Record<string, { at: string }> } & Parameters<typeof promotionWait>[0] | null): ResourceInputs['upgrade'] {
   const pending = state?.upgrade?.pending;
   // The promotion wait and the named stall ride along (GY-1400, GY-1445): the loaded-revision reading needs them with no restart owed.
   const promotion = promotionWait(state), stalled = state?.upgrade?.stalled ?? null;
   if (!pending) return promotion || stalled ? { from: null, to: null, code: false, attemptedAt: null, ...(promotion ? { promotion } : {}), ...(stalled ? { stalled } : {}) } : null;
-  const attempts = Object.entries(state!.actions ?? {}).filter(([key]) => key.startsWith('upgrade:') && key !== 'upgrade:refused' && key !== 'upgrade:unit')
+  const attempts = Object.entries(state!.actions ?? {}).filter(([key]) => key.startsWith('upgrade:') && key !== 'upgrade:refused' && key !== 'upgrade:unit' && key !== alignKey)
     .map(([, action]) => Date.parse(action.at)).filter(Number.isFinite);
   return { from: pending.from, to: pending.to, code: pending.code, attemptedAt: attempts.length ? Math.max(...attempts) : null, ...(promotion ? { promotion } : {}), ...(stalled ? { stalled } : {}) };
 }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { emptyDaemonState, type DaemonState } from '../src/master-daemon.js';
-import { performSelfUpgrade, type SelfUpgradeDeps } from '../src/daemon/upgrade.js';
+import { performSelfUpgrade, upgradeTouchesCode, type SelfUpgradeDeps } from '../src/daemon/upgrade.js';
 import { coordinatorCheckoutGuard } from '../src/daemon/run.js';
 import { owedUpgrade, readResources, resourceAttention, type ResourceInputs } from '../src/master-resources.js';
 import type { ExecutorRestartResult } from '../src/executor-fleet.js';
@@ -22,6 +22,8 @@ const loaded = full('2cca02cd2424'), checkout = full('02ba2078f1ce'), tip = full
 const faultAt = Date.parse('2026-10-07T09:28:59.761Z');
 const minute = 60_000, hour = 60 * minute;
 const iso = (at: number) => new Date(at).toISOString();
+/** Where a failure before any restart attempt is recorded (`alignKey` in src/daemon/upgrade.ts). */
+const alignKey = 'upgrade:align';
 
 const master: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/nonexistent/coordinator.token', cliPath: '/nonexistent/bin/graphyard.mjs',
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'host-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
@@ -31,6 +33,8 @@ class FakeGit {
   dirty = '';
   checkouts: string[] = [];
   fetches = 0;
+  /** While set, every fetch fails with it: origin unreachable. */
+  fetchFails: string | null = null;
   constructor(public head: string, public originTip: string, public diffPaths = ['src/daemon/run.ts']) {}
   run = async (command: string, args: string[]): Promise<string> => {
     assert.equal(command, 'git');
@@ -38,7 +42,7 @@ class FakeGit {
     if (op === 'rev-parse') return `${operands[0] === 'HEAD' ? this.head : this.originTip}\n`;
     if (op === 'symbolic-ref') throw Object.assign(new Error('fatal: not a symbolic ref'), { status: 1 });
     if (op === 'status') return this.dirty;
-    if (op === 'fetch') { this.fetches += 1; return ''; }
+    if (op === 'fetch') { this.fetches += 1; if (this.fetchFails) throw new Error(this.fetchFails); return ''; }
     if (op === 'diff') return `${this.diffPaths.join('\n')}\n`;
     if (op === 'checkout') { this.head = operands[2]; this.checkouts.push(operands[2]); return ''; }
     throw new Error(`fake git cannot answer: git ${args.slice(2).join(' ')}`);
@@ -262,4 +266,188 @@ test('unit:loaded-revision-exception-rules — the promotion grace counts nothin
   assert.equal(reading({ from: loaded, to: checkout, code: false, attemptedAt: now - 5 * minute }).used, 81);
   // Nothing owed and nothing proven: the fault reads exactly as it did, 81 commits behind.
   assert.equal(reading(owedUpgrade(cursor({ deployment: null }))).used, 81);
+});
+
+test('unit:loaded-revision-fetch-failure-is-no-restart-attempt — an origin outage never refreshes the owed restart\'s attempt clock: a restart owed onto the commit the checkout holds is still attempted, and one that cannot be attempted counts once the bound passes', async () => {
+  const revision = { behind: 81, loaded, checkout, movedAt: faultAt - 3 * hour };
+
+  // Owed onto the commit the checkout holds: every failing fetch still attempts the restart, and it completes when the claims settle.
+  const state = faultState(), fake = new FakeGit(checkout, tip), clock = { now: faultAt };
+  const fleet = { held: true, self: 0, executors: [] as string[] };
+  fake.fetchFails = 'fatal: unable to access \'https://github.com/owner/project/\': Could not resolve host: github.com';
+  for (let step = 0; step < 4; step++) {
+    clock.now = faultAt + step * 10 * minute;
+    assert.equal((await performSelfUpgrade(master, state, deps(fake, clock, fleet))).outcome, 'pending', `cycle ${step + 1} attempts the restart`);
+    assert.equal(state.actions['upgrade:none']?.at, iso(clock.now), 'the attempt is the restart\'s');
+    assert.equal(loadedRevision(state, revision, clock.now).used, 0);
+  }
+  assert.equal(fleet.executors.length, 4, 'every cycle of the outage attempted the executor restart');
+  assert.equal(state.upgrade.stalled?.cause, 'executors-refused', 'the stall names what holds the restart, not the outage');
+  assert.equal(state.actions[alignKey], undefined);
+  fleet.held = false;
+  clock.now = faultAt + 40 * minute;
+  assert.equal((await performSelfUpgrade(master, state, deps(fake, clock, fleet))).outcome, 'upgraded', 'the restart completes with origin still unreachable');
+  assert.equal(fleet.self, 1);
+  assert.deepEqual(fake.checkouts, [], 'nothing was checked out without a fetch');
+
+  // Owed onto a commit the checkout does not hold: no restart can be attempted, so the outage is
+  // recorded apart from the release's attempts, and once the bound passes the resource counts.
+  const stranded = faultState(), away = new FakeGit(checkout, tip), held = { held: false, self: 0, executors: [] as string[] };
+  stranded.upgrade.pending = { from: loaded, to: tip, code: true };
+  stranded.actions['upgrade:none'] = { ...stranded.actions[`upgrade:${loaded}`] };
+  delete stranded.actions[`upgrade:${loaded}`];
+  const attempted = faultAt - 5 * minute;
+  stranded.actions['upgrade:none'].at = iso(attempted);
+  away.fetchFails = fake.fetchFails;
+  const strandedRevision = { ...revision, checkout: tip };
+  for (let step = 0; step < 5; step++) {
+    clock.now = faultAt + step * 10 * minute;
+    const outcome = await performSelfUpgrade(master, stranded, deps(away, clock, held));
+    assert.equal(outcome.outcome, 'failed');
+    assert.match(outcome.outcome === 'failed' ? outcome.reason : '', /base branch could not be fetched/);
+  }
+  assert.deepEqual(held.executors, [], 'no restart was attempted');
+  assert.equal(stranded.actions['upgrade:none']?.at, iso(attempted), 'the release\'s attempt clock never moved');
+  assert.deepEqual({ state: stranded.actions[alignKey]?.state, attempts: stranded.actions[alignKey]?.attempts }, { state: 'failed', attempts: 5 });
+  assert.deepEqual({ cause: stranded.upgrade.stalled?.cause, since: stranded.upgrade.stalled?.since, at: stranded.upgrade.stalled?.at }, { cause: 'fetch-failed', since: iso(faultAt), at: iso(clock.now) });
+  const counted = loadedRevision(stranded, strandedRevision, clock.now);
+  assert.equal(counted.used, 81, 'forty minutes of failing fetches past the last attempt: the commits behind count');
+  assert.match(counted.detail!, /owes a restart onto it, last attempted 2026-10-07T09:23:59\.761Z.*stalled on fetch-failed since 2026-10-07T09:28:59\.761Z/);
+  assert.match(resourceAttention([counted])[0].text, /stalled on fetch-failed/);
+});
+
+test('unit:self-upgrade-observed-production-keeps-promotion-wait — production observed serving none of the awaited deliveries is not unverified: the checkout ahead of the loop waits on the promotion, with no fetch and no restart', async () => {
+  const state = faultState({ owed: false }), fake = new FakeGit(checkout, tip), fleet = { held: false, self: 0, executors: [] as string[] };
+  state.deployment = { source: 'endpoint', sha: loaded, at: iso(faultAt), reason: null, deployed: [], pending: ['GY-1436', 'GY-1437'] };
+  assert.deepEqual(await performSelfUpgrade(master, state, deps(fake, { now: faultAt }, fleet)), { outcome: 'skipped', reason: 'no delivered item is verified deployed yet' });
+  assert.deepEqual({ fetches: fake.fetches, checkouts: fake.checkouts, executors: fleet.executors, self: fleet.self }, { fetches: 0, checkouts: [], executors: [], self: 0 });
+  // The same cursor with production unobservable is the gap GY-1445 closes.
+  state.deployment = { source: 'unavailable', sha: null, at: iso(faultAt), reason: 'the production endpoint did not answer', deployed: [], pending: ['GY-1436', 'GY-1437'] };
+  assert.equal((await performSelfUpgrade(master, state, deps(fake, { now: faultAt }, fleet))).outcome, 'upgraded');
+  assert.equal(fleet.self, 1);
+});
+
+test('unit:self-upgrade-processed-gap-keys-on-loaded — a docs-only pass counts as processed only when it diffed from what the loop loaded: one taken from a later commit leaves the loaded code gap owed', async () => {
+  const state = faultState({ owed: false }), fake = new FakeGit(checkout, checkout), fleet = { held: false, self: 0, executors: [] as string[] };
+  const between = full('5eedba5e0001');
+  // A failed re-execution left the loop on 2cca02cd2424, then a verified docs-only release moved the checkout from a later commit.
+  state.upgrade.last = { at: iso(faultAt - hour), from: between, to: checkout, code: false, executors: null, self: false };
+  const upgraded = await performSelfUpgrade(master, state, deps(fake, { now: faultAt }, fleet));
+  assert.equal(upgraded.outcome, 'upgraded', 'the code between the loaded commit and the checkout is still owed');
+  assert.equal(fleet.self, 1);
+  // Processed from the loaded commit, the same gap is idle.
+  const idle = faultState({ owed: false }), page = new FakeGit(checkout, checkout, ['docs/master-agent-reference.md']);
+  idle.upgrade.last = { at: iso(faultAt - hour), from: loaded, to: checkout, code: false, executors: null, self: false };
+  assert.equal((await performSelfUpgrade(master, idle, deps(page, { now: faultAt }, fleet))).outcome, 'skipped');
+  assert.equal(page.fetches, 0);
+});
+
+test('unit:soak-self-upgrade-unverified-production — a day of between-cycles passes through the real checkout guard and self-upgrade while production comes and goes: each code move the loop has not loaded is restarted onto once within the bound, claims held and an origin outage included; fetches happen only on passes with work, a docs-only gap stays idle, one stall stands with a fixed since and retires on the restart, and loaded-revision never pins', async () => {
+  const cycleMs = 2 * minute, dayMs = 8 * hour, start = faultAt;
+  // The base branch: a linear history of merges, each one commit with the paths it changed.
+  const history: { sha: string; files: string[]; at: number }[] = [{ sha: full('c0c0c0c0c0c0'), files: [], at: start - hour }];
+  const merge = (label: string, at: number, files: string[]) => ({ sha: full(label), files, at });
+  const merges = [
+    merge('c1c1c1c1c1c1', 40 * minute, ['src/daemon/run.ts']), merge('c2c2c2c2c2c2', 90 * minute, ['docs/delivery.md']),
+    merge('c3c3c3c3c3c3', 150 * minute, ['docs/master-agent-reference.md']), merge('c4c4c4c4c4c4', 4 * hour, ['src/master-resources.ts']),
+    merge('c5c5c5c5c5c5', 6 * hour, ['docs/glossary.md']),
+  ];
+  const [c0] = history, [c1, , c3, c4] = merges;
+  const index = (sha: string) => history.findIndex(commit => commit.sha === sha);
+  const between = (from: string, to: string) => history.slice(index(from) + 1, index(to) + 1);
+  // Production: a deploy observed at each listed offset, unobservable inside each window.
+  const deploys = [{ at: 50 * minute, sha: c1.sha }, { at: 3 * hour, sha: c3.sha }, { at: 5 * hour, sha: c4.sha }];
+  const dark = [{ from: 54 * minute, to: 3 * hour }, { from: 3 * hour + 10 * minute, to: 5 * hour }, { from: 5 * hour + 4 * minute, to: dayMs }];
+  const heldClaims = [{ from: 50 * minute, to: 60 * minute }, { from: 5 * hour, to: 5 * hour + 20 * minute }];
+  const outage = { from: 5 * hour + 6 * minute, to: 5 * hour + 40 * minute };
+  const within = (windows: { from: number; to: number }[], elapsed: number) => windows.some(window => elapsed >= window.from && elapsed < window.to);
+
+  const state = emptyDaemonState(master);
+  state.release = { commit: c0.sha, dirty: false };
+  state.upgrade.alignedRelease = c0.sha;
+  const clock = { now: start };
+  const fake = new FakeGit(c0.sha, c0.sha);
+  const base = fake.run;
+  fake.run = async (command, args) => {
+    const [op, ...operands] = args.slice(2);
+    if (op === 'fetch') { fake.fetches += 1; if (fake.fetchFails) throw new Error(fake.fetchFails); fake.originTip = history.at(-1)!.sha; return ''; }
+    if (op === 'diff') { const [from, to] = operands[1].split('..'); return `${between(from, to).flatMap(commit => commit.files).join('\n')}\n`; }
+    if (op === 'checkout') { moves.push({ at: clock.now - start, to: operands[2] }); }
+    return base(command, args);
+  };
+  const moves: { at: number; to: string }[] = [];
+  const restarts: { at: number; onto: string; movedAt: number }[] = [];
+  const attempts: number[] = [];
+  const upgradeDeps: SelfUpgradeDeps = {
+    root: '/coordinator', run: (command, args) => fake.run(command, args), now: () => clock.now,
+    restartExecutors: async to => { attempts.push(clock.now - start); return within(heldClaims, clock.now - start) ? refusedExecutors(to) : restartedExecutors(to); },
+    // The supervisor starts a new process that loads the checkout's commit.
+    restartSelf: async () => { restarts.push({ at: clock.now - start, onto: fake.head, movedAt: moves.at(-1)!.at }); state.release = { commit: fake.head, dirty: false }; },
+  };
+  const guard = coordinatorCheckoutGuard({
+    state: () => state, read: async () => ({ root: '/coordinator', commit: fake.head, modified: [], untracked: [] }),
+    agents: async () => [], snapshot: async () => ({ work: [] as Work[], now: iso(clock.now) }), persist: async () => {}, now: () => clock.now, log: () => {}, applies: () => true,
+  });
+  assert.equal(await guard.start(c0.sha), null);
+
+  const fetchCycles: { at: number; reason: string }[] = [];
+  const stalls: { cause: string; since: string }[] = [];
+  let deployed = 0, cycles = 0;
+  for (let elapsed = 0; elapsed < dayMs; elapsed += cycleMs) {
+    clock.now = start + elapsed;
+    cycles += 1;
+    while (merges.length && merges[0].at <= elapsed) history.push(merges.shift()!);
+    while (deployed < deploys.length && deploys[deployed].at <= elapsed) deployed += 1;
+    const serving = deployed ? deploys[deployed - 1].sha : c0.sha;
+    state.deployment = within(dark, elapsed)
+      ? { source: 'unavailable', sha: null, at: iso(clock.now), reason: 'the production endpoint did not answer', deployed: [], pending: ['GY-1'] }
+      : { source: 'endpoint', sha: serving, at: iso(clock.now), reason: null, deployed: ['GY-1'], pending: [] };
+    fake.fetchFails = within([outage], elapsed) ? 'fatal: unable to access \'https://github.com/owner/project/\': Could not resolve host: github.com' : null;
+
+    // What makes this pass worth a fetch: a restart owed, a release newly verified, or an unverified checkout holding code the loop never loaded.
+    const loadedNow = state.release!.commit!, owedBefore = !!state.upgrade.pending;
+    const verifiedNew = state.deployment.source === 'endpoint' && state.upgrade.alignedRelease !== state.deployment.sha;
+    const unloadedCode = state.deployment.source === 'unavailable' && upgradeTouchesCode(between(loadedNow, fake.head).flatMap(commit => commit.files));
+    const fetchesBefore = fake.fetches;
+    const { refusal, upgraded } = await guard.betweenCycles(current => performSelfUpgrade(master, current, upgradeDeps));
+    assert.equal(refusal, null, `+${elapsed / minute} min: the loop's own moves are never drift`);
+    if (fake.fetches > fetchesBefore) {
+      assert.equal(fake.fetches, fetchesBefore + 1, 'one fetch per pass at most');
+      assert.ok(owedBefore || verifiedNew || unloadedCode, `+${elapsed / minute} min: fetched on a pass with no work (${upgraded?.outcome})`);
+      fetchCycles.push({ at: elapsed, reason: owedBefore ? 'owed' : verifiedNew ? 'verified' : 'unloaded' });
+    }
+
+    // The named stall: one at a time, its since fixed while its cause stands.
+    const stalled = state.upgrade.stalled;
+    if (stalled) {
+      const prior = stalls.at(-1);
+      if (prior?.cause === stalled.cause && prior.since !== '') assert.equal(stalled.since, prior.since, `+${elapsed / minute} min: the stall keeps its since`);
+      else stalls.push({ cause: stalled.cause, since: stalled.since });
+    } else if (stalls.at(-1)?.since) stalls.push({ cause: 'retired', since: '' });
+
+    // loaded-revision, as master status reads it: never pinned at the bound.
+    const head = fake.head, loadedAfter = state.release!.commit!;
+    const behind = between(loadedAfter, head).filter(commit => upgradeTouchesCode(commit.files)).length;
+    const movedAt = moves.length ? start + moves.at(-1)!.at : start;
+    const reading = loadedRevision(state, { behind, loaded: loadedAfter, checkout: head, movedAt }, clock.now);
+    assert.equal(reading.used, 0, `+${elapsed / minute} min: loaded-revision pinned: ${reading.detail}`);
+  }
+
+  // Each code move restarted onto once, within the bound of the checkout's move; the docs-only move restarted nothing.
+  assert.deepEqual(restarts.map(restart => ({ at: restart.at / minute, onto: restart.onto })), [{ at: 60, onto: c1.sha }, { at: 320, onto: c4.sha }]);
+  for (const restart of restarts) assert.ok(restart.at - restart.movedAt < 30 * minute, `the restart onto ${restart.onto.slice(0, 12)} came ${(restart.at - restart.movedAt) / minute} min after the move`);
+  assert.deepEqual(moves.map(move => ({ at: move.at / minute, to: move.to })), [{ at: 50, to: c1.sha }, { at: 180, to: c3.sha }, { at: 300, to: c4.sha }]);
+  assert.equal(state.release?.commit, c4.sha);
+  // Every cycle a claim held the restart was an attempt, inside the outage too.
+  assert.deepEqual(attempts.map(at => at / minute), [50, 52, 54, 56, 58, 60, 300, 302, 304, 306, 308, 310, 312, 314, 316, 318, 320]);
+  // Fetches: the verified passes, the owed retries — no idle pass fetched, the docs-only gap included.
+  assert.deepEqual(fetchCycles.map(entry => `${entry.at / minute}:${entry.reason}`), ['50:verified', '52:owed', '54:owed', '56:owed', '58:owed', '60:owed', '180:verified', '300:verified',
+    '302:owed', '304:owed', '306:owed', '308:owed', '310:owed', '312:owed', '314:owed', '316:owed', '318:owed', '320:owed']);
+  assert.ok(fake.fetches <= 18 && fake.fetches < cycles / 10, `${fake.fetches} fetches over ${cycles} cycles`);
+  // The stall: one row per held stretch, retired by the restart that completed it.
+  assert.deepEqual(stalls, [{ cause: 'executors-refused', since: iso(start + 50 * minute) }, { cause: 'retired', since: '' }, { cause: 'executors-refused', since: iso(start + 300 * minute) }, { cause: 'retired', since: '' }]);
+  assert.equal(state.upgrade.stalled, undefined);
+  assert.equal(state.actions[alignKey], undefined, 'no failure before a restart was ever recorded: the outage only met owed restarts');
+  const keys = Object.keys(state.actions).filter(key => key.startsWith('upgrade:'));
+  assert.ok(keys.length <= deploys.length + 1, `the cursor holds one upgrade action per release and one unverified: ${keys.join(', ')}`);
 });
