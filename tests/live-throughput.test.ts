@@ -684,5 +684,24 @@ test('unit:throughput-same-millisecond-records — measurements recorded in the 
     assert.deepEqual((await readdir(join(root, throughputMeasurementDirectory))).sort(),
       ['2026-10-07T04-40-48-867Z_10.json', '2026-10-07T04-40-48-867Z_11.json', '2026-10-07T04-40-48-868Z.json', '2026-10-07T04-40-48-868Z_1.json']);
     assert.equal((await readThroughputMeasurement(root))!.report.reason, 'record 100');
+    // The by-hand run (`scripts/measure-throughput.mjs --record DIR`) records through the same
+    // recorder: a report in a millisecond already on disk takes the next suffix, never the file.
+    const directory = join(root, throughputMeasurementDirectory);
+    const reply = (body: unknown) => ({ ok: true, json: async () => body });
+    const byHand = (reason: string) => measureMain(['--record', directory], { GRAPHYARD_URL: 'http://127.0.0.1:1', GRAPHYARD_TOKEN: 'reader-token' }, {
+      fetcher: async (url: URL) => reply(url.pathname === '/api/status' ? {} : { now: '2026-10-07T04:40:49.000Z', work: [] }),
+      deployedRevision: () => ({ revision: null, source: null }), run: () => ({ status: 0, stderr: '' }),
+      measure: async () => ({ report: { ...report('2026-10-07T04:40:48.868Z', 0), reason } }), render: () => '',
+    }) as Promise<ThroughputReport & { recorded: string }>;
+    const log = console.log, exitCode = process.exitCode;
+    try {
+      console.log = () => {};
+      const first = await byHand('by hand 1'), second = await byHand('by hand 2');
+      assert.equal(first.recorded, join(directory, '2026-10-07T04-40-48-868Z_2.json'));
+      assert.equal(second.recorded, join(directory, '2026-10-07T04-40-48-868Z_3.json'));
+      assert.equal(JSON.parse(await readFile(join(directory, '2026-10-07T04-40-48-868Z_1.json'), 'utf8')).reason, 'record 100', 'the loop\'s record survives');
+      assert.equal(JSON.parse(await readFile(second.recorded, 'utf8')).reason, 'by hand 2');
+      assert.equal((await readThroughputMeasurement(root))!.report.reason, 'by hand 2');
+    } finally { console.log = log; process.exitCode = exitCode; }
   } finally { await rm(root, { recursive: true, force: true }); }
 });

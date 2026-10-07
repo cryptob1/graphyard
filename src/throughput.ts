@@ -464,6 +464,7 @@ export const throughputMeasurementRetention = 30;
  * later record in the same millisecond takes (GY-1414), the unsuffixed first.
  */
 function measurementOrder(names: string[]): string[] {
+  // Every name reaching `key` ends in `.json` (filtered below), so the pattern always matches.
   const key = (name: string) => { const match = /^(.*?)(?:_(\d+))?\.json$/.exec(name)!; return { stem: match[1]!, sequence: Number(match[2] ?? 0) }; };
   return names.filter(name => name.endsWith('.json')).sort((a, b) => {
     const left = key(a), right = key(b);
