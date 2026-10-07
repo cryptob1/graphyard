@@ -10,7 +10,7 @@ import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
 import { mainGuardAttention } from '../main-guard.js';
-import { openThroughputOwner, throughputOwnerAnswered, throughputOwnerClosure, throughputOwnerItem, throughputStallText, type ThroughputStall } from '../throughput.js';
+import { openThroughputOwner, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureAt, throughputStallText, type ThroughputStall } from '../throughput.js';
 
 /**
  * GY-710. Wake the item's observation job for a step refused on a stale observation — a rework —
@@ -168,15 +168,15 @@ export async function deploymentStep(cycle: Cycle) {
   //        observation is still in flight (cut by the budget) starts no measurement, so the step
   //        never holds two reads in flight. GY-1437/GY-1438: the verification is owned and live — an
   //        unverified answer is not settled, so it is asked again on the same backoff and the
-  //        measurement is re-taken once its record is throughputRemeasureMs old, except while the
-  //        owner's needs-decision stands unanswered; throughputOwnerStep files and closes the owner
-  //        item and raises that decision.
+  //        measurement is re-taken once its record is throughputRemeasureMs old; throughputOwnerStep
+  //        files and closes the owner item and raises that decision. GY-1458: the re-measure is
+  //        asked in the cycle that finds it due, whatever the backoff has grown to, and a standing
+  //        needs-decision no longer holds it back, so the measurement never stands past that bound.
   const verified = observed !== stillVerifying && observed.ok ? state.deployment : null, measure = effects.measureThroughput;
   if (measure && verified && verified.source !== 'unavailable' && verified.sha) {
     const key = `throughput:${verified.sha}`, previous = state.actions[key], owner = openThroughputOwner(snapshot.work);
-    const standing = owner && throughputOwnerStanding(state.actions, owner);
     let stall: ThroughputStall | null = null;
-    if (throughputAskDue(previous, state.cycle) && !(standing && answeredVerdict(previous) === 'unverified')) {
+    if (throughputAskDue(previous, state.cycle, now())) {
       const measured = await withinDeploymentBudget(state, 'throughput', () => measure(snapshot.work, verified.sha!), deadline, now);
       if (measured === stillVerifying) deferred.push('the throughput measurement');
       else {
@@ -252,9 +252,13 @@ export async function deploymentStep(cycle: Cycle) {
  * is asked now, a settled one (`done`, verified) never again, and a wait on the plane, an
  * unverified measurement still accumulating its population (GY-1437), or a failure on the
  * failure backoff (`readyToRetry`, doubling per ask up to its cap), so a plane that lags the
- * deployment record costs one status read per ask rather than per cycle.
+ * deployment record costs one status read per ask rather than per cycle. GY-1458: an unverified
+ * answer naming its re-measure time (`throughputRemeasureAt`) is asked as soon as that time comes,
+ * whatever the backoff has grown to: thirty cycles of backoff outlast the hour the loop promises.
  */
-export function throughputAskDue(previous: DaemonAction | undefined, cycle: number) {
+export function throughputAskDue(previous: DaemonAction | undefined, cycle: number, now: number) {
+  const remeasureAt = previous?.state === 'waiting' && answeredVerdict(previous) === 'unverified' ? throughputRemeasureAt(previous.detail) : null;
+  if (remeasureAt !== null && now >= remeasureAt) return true;
   return readyToRetry(previous?.state === 'waiting' ? { ...previous, state: 'failed' } : previous, cycle);
 }
 
@@ -281,11 +285,6 @@ export function throughputEscalatedAt(actions: Record<string, DaemonAction>, own
   const raised = Object.entries(actions).filter(([key, action]) => key.startsWith(prefix) && action.state === 'done' && action.work === owner.key)
     .map(([key]) => Number(key.slice(prefix.length))).filter(Number.isInteger);
   return raised.length ? Math.min(...raised) : null;
-}
-/** The owner's needs-decision was raised and is not answered yet: no further escalation, and no re-measure, until it is. */
-export function throughputOwnerStanding(actions: Record<string, DaemonAction>, owner: Pick<Work, 'key' | 'policyRevision'>) {
-  const raisedAt = throughputEscalatedAt(actions, owner);
-  return raisedAt !== null && !throughputOwnerAnswered(owner, raisedAt);
 }
 
 /**
