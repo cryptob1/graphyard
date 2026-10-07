@@ -10,6 +10,7 @@ import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
 import { mainGuardAttention } from '../main-guard.js';
+import { throughputRemeasureMs } from '../throughput.js';
 
 /**
  * GY-710. Wake the item's observation job for a step refused on a stale observation — a rework —
@@ -158,18 +159,22 @@ export async function deploymentStep(cycle: Cycle) {
   }
 
   // 7a'''. GY-1385: GY-87's throughput claim is measured, not asserted. After a verified deployment
-  //        the loop records one measurement for the release the control plane serves, at most once
-  //        per release, with its own coordinator credential, reading only the window's deliveries
+  //        the loop records a measurement for the release the control plane serves, once per
+  //        release while it verifies, with its own coordinator credential, reading only the window's deliveries
   //        whole; master status reads it back as verified or with its shortfall. One action per
   //        observed release: a plane that does not serve it yet answers `waiting`, asked again on
   //        the failure backoff (one status read per ask, never one per cycle) until it serves or a
   //        newer observation supersedes the key; a failure backs off the same way. It follows a
   //        verification: a cycle whose observation is still in flight (cut by the budget) starts
-  //        no measurement, so the step never holds two reads in flight.
+  //        no measurement, so the step never holds two reads in flight. GY-1438: a measurement that
+  //        left the claim unverified is asked again once a delivery merged after it and
+  //        throughputRemeasureMs have passed (`throughputRemeasureAsk`), so the serving release's
+  //        record refreshes as deliveries accumulate; one whose population cannot accumulate raises
+  //        the typed needs-decision once per changed finding.
   const verified = observed !== stillVerifying && observed.ok ? state.deployment : null, measure = effects.measureThroughput;
   if (measure && verified && verified.source !== 'unavailable' && verified.sha) {
     const key = `throughput:${verified.sha}`, previous = state.actions[key];
-    if (throughputAskDue(previous, state.cycle)) {
+    if (throughputAskDue(previous, state.cycle) || throughputRemeasureAsk(previous, delivered, now())) {
       const measured = await withinDeploymentBudget(state, 'throughput', () => measure(snapshot.work, verified.sha!), deadline, now);
       if (measured === stillVerifying) deferred.push('the throughput measurement');
       else {
@@ -179,6 +184,11 @@ export async function deploymentStep(cycle: Cycle) {
         // Every ask is recorded, so the backoff counts them; a wait whose reason stands is not reported again.
         const entry = await record(state, key, { kind: 'deployment', work: null, principal: null, state: entryState, detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
         if (entryState !== 'waiting' || detailChanged(previous, detail)) performed.push(entry);
+        const stall = outcome?.stall;
+        if (stall) {
+          const escalationKey = `escalation:throughput:${stall.revision ?? verified.sha}`;
+          if (detailChanged(state.actions[escalationKey], stall.text)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: stall.owner, principal: null, state: 'done', detail: stall.text, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        }
       }
     }
   }
@@ -242,6 +252,18 @@ export async function deploymentStep(cycle: Cycle) {
  */
 export function throughputAskDue(previous: DaemonAction | undefined, cycle: number) {
   return readyToRetry(previous?.state === 'waiting' ? { ...previous, state: 'failed' } : previous, cycle);
+}
+
+/**
+ * GY-1438: whether a release measured unverified is asked again. Its recorded answer (`done`)
+ * names the verdict; one that says unverified is re-asked once a delivery merged after the
+ * answer and `throughputRemeasureMs` have passed since it, so the re-measure costs one bounded
+ * read per spacing rather than one per merge or per cycle. A verified answer is final.
+ */
+export function throughputRemeasureAsk(previous: DaemonAction | undefined, delivered: Work[], now: number) {
+  if (previous?.state !== 'done' || !/\bunverified\b/.test(previous.detail)) return false;
+  const answered = Date.parse(previous.at), newest = Date.parse(delivered.at(-1)?.delivery?.mergedAt ?? '');
+  return Number.isFinite(answered) && now - answered >= throughputRemeasureMs && Number.isFinite(newest) && newest > answered;
 }
 
 /** Record a budget-cut step, so the journal and `master status` say verification is in flight rather than blind; a full step supersedes the last cut once. */

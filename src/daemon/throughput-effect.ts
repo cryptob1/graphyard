@@ -8,8 +8,9 @@ import { loopThroughputMeasurement, type LoopThroughputOutcome } from '../throug
 export interface ThroughputEffects {
   /**
    * After a verified deployment of `observedSha`, records GY-87's throughput measurement for the
-   * release the control plane serves, at most once per release, with the loop's own coordinator
-   * credential; reads only the window's deliveries whole. Absent, nothing is measured.
+   * release the control plane serves, with the loop's own coordinator credential; reads only the
+   * window's deliveries whole. A release is measured again only while its newest measurement is
+   * unverified and deliveries merged since (GY-1438). Absent, nothing is measured.
    */
   measureThroughput?: (work: Work[], observedSha: string) => Promise<LoopThroughputOutcome>;
 }
