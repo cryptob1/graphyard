@@ -224,6 +224,7 @@ img.mark{width:26px;height:26px}
 .more-details h3{margin:var(--space-5) 0 var(--space-2)}.overlap-line{font-size:var(--type-small)}
 .human-request{border:1px solid color-mix(in srgb,var(--needs-you) 45%,var(--bg));border-radius:var(--radius);padding:var(--space-4);background:var(--surface)}
 .human-request textarea{margin:var(--space-2) 0}
+.human-request h3{margin-bottom:var(--space-2)}.human-steps{margin:0 0 var(--space-2);padding-left:var(--space-4);font-size:13px;line-height:1.6}.human-why{margin:0 0 var(--space-2);font-size:13px}.human-kind{margin-bottom:var(--space-2)}.agent-details{margin-top:var(--space-3)}.agent-details dl{font-size:11px;color:var(--text-2);overflow-wrap:anywhere}.agent-details dt{font-weight:600;margin-top:var(--space-2)}.agent-details dd{margin:0}
 
 /* Insights: headline numbers, the Flow panel, the charts, one Show details toggle (GY-168). */
 .insight-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--space-4)}

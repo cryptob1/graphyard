@@ -7,6 +7,7 @@ import type { Store } from './store.js';
 import { boundedSnapshot } from './store/bounded-snapshot.js';
 import { applyWorkDelta, type DeltaOp } from './store/snapshot-delta.js';
 import { workIdByRef } from './store/locked-read.js';
+import { reworkGroundFields, routineReworkGround, type ReworkGroundsWork } from './rework-grounds.js';
 import { containmentGraceMs, containmentSettleWaitBoundMs } from './model/containment.js';
 
 /**
@@ -58,13 +59,15 @@ export const interventionLedgerSince = (kind: string, since: string) =>
 
 /**
  * The rows a window starting at `since` folds, in ledger order: every row inside it, and a decision
- * row of the reach before it only when a row inside names the same decision or a rework inside may
- * apply it (GY-1389). One that only waited, or settled, before the window opened is no signal of it.
+ * row of the reach before it only when a row inside names the same decision — the `decision.applied`
+ * an in-window rework is recorded with, or its approval or settlement (GY-1389). One that only
+ * waited, or whose rework settled before the window opened, is no signal of it, and is never
+ * associated with a later rework of the same item.
  */
 export function windowOutcomes<R extends { created_at: string | Date; kind: string; work_id: string | null; top?: { id?: unknown } | null }>(rows: R[], since: string): R[] {
   const opened = Date.parse(since), inside = (row: R) => new Date(row.created_at).getTime() >= opened;
-  const linked = new Set(rows.filter(inside).flatMap(row => row.kind === 'rework' ? [`${row.work_id}:*`] : row.kind.startsWith('decision.') ? [`${row.work_id}:${row.top?.id}`] : []));
-  return rows.filter(row => inside(row) || linked.has(`${row.work_id}:${row.top?.id}`) || linked.has(`${row.work_id}:*`));
+  const linked = new Set(rows.filter(row => inside(row) && row.kind.startsWith('decision.')).map(row => `${row.work_id}:${row.top?.id}`));
+  return rows.filter(row => inside(row) || linked.has(`${row.work_id}:${row.top?.id}`));
 }
 
 /** One ledger row as the fold reads it: the typed details, and the few document paths the row embeds. */
@@ -73,6 +76,8 @@ export interface InterventionLedgerRow {
   details: any; payload?: any;
   /** The stage the item's latest earlier row recorded: the stage the item was in when this row's command ran. */
   stageBefore?: string | null;
+  /** On a `rework` row only: the document fields its grounds are read from (`routineReworkGround`, GY-1386). */
+  grounds?: ReworkGroundsWork | null;
   work?: { key?: string | null; stage?: string | null; title?: string | null; epoch?: number | null; blocker?: string | null; plannedFiles?: string[] | null; quarantine?: unknown; escalations?: { trigger: string; at: string; reason: string; actor: string }[] | null; candidate?: { sha: string; pr: number } | null; submission?: { epoch: number; pr: number } | null } | null;
 }
 type Db = { query: pg.Pool['query'] };
@@ -88,6 +93,14 @@ const isObject = (value: unknown): value is Record<string, any> => !!value && ty
 /** The row's `work` as the fold reads it, from the projected document (null fields where the document has none). */
 const workOf = (document: Record<string, any> | null): InterventionLedgerRow['work'] =>
   Object.fromEntries(workFields.map(([name, field]) => [name, document?.[field] ?? null])) as InterventionLedgerRow['work'];
+/**
+ * A `rework` row's grounds fields (GY-1386), projected from a whole document like `projectedWork`;
+ * a delta row's are its base's, extended by the delta's ops on them. The observation keeps only
+ * what the grounds read, so a few hundred rework rows a week cost no review bodies or threads.
+ */
+export const reworkGroundsSql = (document: string) => `jsonb_build_object(${reworkGroundFields.filter(field => field !== 'observation').map(field => `'${field}', ${document}->'${field}'`).join(', ')},
+  'observation', CASE WHEN jsonb_typeof(${document}->'observation')='object' THEN jsonb_build_object(${['candidate', 'baseTip', 'conflicting', 'merged', 'checks', 'requiredChecks', 'agentReview'].map(field => `'${field}', ${document}->'observation'->'${field}'`).join(', ')},
+    'reviews', COALESCE((SELECT jsonb_agg(jsonb_build_object('sha', review->'sha', 'state', review->'state')) FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${document}->'observation'->'reviews')='array' THEN ${document}->'observation'->'reviews' ELSE '[]'::jsonb END) review), '[]'::jsonb)) END)`;
 
 /**
  * The newest `limit` rows of the kinds the fold reads, in ledger order; with `since`, only those
@@ -112,7 +125,8 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
   const limit = options.limit ?? interventionLedgerLimit;
   const columns = `seq, work_id, actor, kind, created_at, payload->'details' AS details,
       CASE WHEN kind LIKE 'decision.%' OR kind IN ('intervention.recorded','judgement.recorded') THEN payload ELSE NULL END AS top,
-      payload ? 'work' AS whole, ${projectedWork("payload->'work'")} AS work, CASE WHEN payload ? 'work' THEN NULL ELSE payload->'delta' END AS delta`;
+      payload ? 'work' AS whole, ${projectedWork("payload->'work'")} AS work, CASE WHEN payload ? 'work' THEN NULL ELSE payload->'delta' END AS delta,
+      CASE WHEN kind = 'rework' AND payload ? 'work' THEN ${reworkGroundsSql("payload->'work'")} END AS grounds`;
   // A window is read kind by kind through the (kind, created_at) index, then ordered (GY-1381).
   // As one `kind = ANY` filter, or as `kind = k AND created_at >= since`, the planner walked the
   // primary key or the created_at index through every routine row the window holds — a busy
@@ -145,10 +159,12 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
   }
 
   // The full snapshots the window's deltas extend, once each.
-  const bases = new Map<number, { workId: string | null; work: Record<string, any> | null }>();
+  const bases = new Map<number, { workId: string | null; work: Record<string, any> | null; grounds: Record<string, any> | null }>();
   const baseSeqs = [...new Set(window.flatMap(row => row.work_id && isObject(row.delta) && Number.isSafeInteger(Number(row.delta.base)) ? [Number(row.delta.base)] : []))];
-  if (baseSeqs.length) for (const row of (await db.query(`SELECT seq, work_id, ${projectedWork("payload->'work'")} AS work FROM events WHERE seq = ANY($1::bigint[])`, [baseSeqs])).rows)
-    bases.set(Number(row.seq), { workId: row.work_id, work: row.work });
+  // A rework delta's base also yields its grounds fields (GY-1386), extended by the delta's ops on them.
+  const groundBases = new Set(window.flatMap(row => row.kind === 'rework' && isObject(row.delta) ? [Number(row.delta.base)] : []));
+  if (baseSeqs.length) for (const row of (await db.query(`SELECT seq, work_id, ${projectedWork("payload->'work'")} AS work, CASE WHEN seq = ANY($2::bigint[]) THEN ${reworkGroundsSql("payload->'work'")} END AS grounds FROM events WHERE seq = ANY($1::bigint[])`, [baseSeqs, [...groundBases]])).rows)
+    bases.set(Number(row.seq), { workId: row.work_id, work: row.work, grounds: row.grounds ?? null });
 
   // Each item's stage timeline over its span of the window, and the whole row before that span.
   const spans = new Map<string, { from: number; to: number }>();
@@ -170,13 +186,17 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
   const cursors = new Map<string, number>();
   const rows = window.map((row): InterventionLedgerRow => {
     const seq = Number(row.seq);
-    let document: Record<string, any> | null = null;
+    let document: Record<string, any> | null = null, grounds: Record<string, any> | null = row.grounds ?? null;
     if (row.whole) document = row.work ?? null;
     else if (row.work_id && isObject(row.delta)) {
       const base = bases.get(Number(row.delta.base));
       if (base && base.workId === row.work_id && isObject(base.work)) {
         const delta = Array.isArray(row.delta.ops) ? { ...row.delta, ops: row.delta.ops.filter((op: DeltaOp) => projectedFields.has(op[0]?.[0])) } : row.delta;
         document = applyWorkDelta(base.work as Work, delta) as unknown as Record<string, any>;
+      }
+      if (row.kind === 'rework' && base && base.workId === row.work_id && isObject(base.grounds)) {
+        const fields = new Set<unknown>(reworkGroundFields);
+        grounds = applyWorkDelta(base.grounds as Work, Array.isArray(row.delta.ops) ? { ...row.delta, ops: row.delta.ops.filter((op: DeltaOp) => fields.has(op[0]?.[0])) } : row.delta) as unknown as Record<string, any>;
       }
     }
     let stageBefore: string | null = null;
@@ -191,16 +211,20 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
     // timestamps use (`updatedAt`); a raw row has only its insertion instant.
     const updatedAt = document?.updatedAt == null ? null : typeof document.updatedAt === 'string' ? document.updatedAt : JSON.stringify(document.updatedAt);
     return { seq, workId: row.work_id, actor: row.actor, kind: row.kind, at: instant(updatedAt, new Date(row.created_at).toISOString()), details: row.details, payload: row.top ?? undefined,
-      work: row.whole || document ? workOf(document) : null, stageBefore };
+      work: row.whole || document ? workOf(document) : null, stageBefore, ...(row.kind === 'rework' ? { grounds: grounds as ReworkGroundsWork | null } : {}) };
   });
   return { rows, truncated };
 }
 
 interface Ask { seq: number; at: string; stage: Stage | null; kind: 'scope-request' | 'blocked-report'; blocked: string; paths: string[]; trigger?: string; sources: { seq: number; kind: string }[] }
+/** A rework decision the fold has seen requested and not yet settled. */
+interface ReworkDecision { seq: number; at: string; id: string; stage: Stage | null; binding: string | null; loopRequested: boolean; approvedBy: string | null }
 interface WorkState {
   key: string | null; title: string | null; stage: Stage | null; plannedFiles: string[] | null;
+  /** The blocker as the previous row left it; undefined until a row with a document is seen. */
+  blocker?: string | null;
   asks: Ask[];
-  reworkDecision: { seq: number; at: string; id: string; stage: Stage | null; binding: string | null; approvedBy: string | null } | null;
+  reworkDecision: ReworkDecision | null;
   bypass: { seq: number; at: string; mergeSha: string; blocked: string; stage: Stage | null } | null;
   quarantine: { seq: number; at: string; epoch: number; concernAt: string | null; stage: Stage | null } | null;
   escalations: Map<string, { seq: number; at: string; reason: string; actor: string; stage: Stage | null }>;
@@ -217,10 +241,30 @@ const text = (value: unknown, fallback = '') => typeof value === 'string' && val
  * a scope widening the implication rule approved; nobody stepped in, so it is no signal. A rework
  * a master asked for by hand, on any grounds, still is.
  */
+/** The loop's own grounded round (GY-1389): its operator-agent identity requested it on recorded grounds, and its own approver applied it. */
+const loopRound = (decision: ReworkDecision | null) => !!decision?.binding && decision.loopRequested && !!decision.approvedBy;
 const failedCheckRound = (binding: string | null, candidate: { sha: string } | null | undefined) => {
   const match = binding ? /^([a-f0-9]{40}):ci:.+$/.exec(binding) : null;
   return !!match && match[1] === candidate?.sha;
 };
+
+/**
+ * Whether a requirements revision re-plans work no attempt has started (GY-1396), judged from the
+ * item as the revision found it. An operator agent's row records that whole document as `before`:
+ * the item is unstarted when it was never claimed, or when every attempt lapsed leaving nothing on
+ * the record (no submission, candidate, scope ask or decision, human request, kept commit). Any
+ * other row records only the planned files, so only an item never claimed (epoch 0) is unstarted.
+ * A blocker standing before the revision is always something the revision answers.
+ */
+function unstarted(before: unknown, epochAfter: number | null | undefined, blockerBefore: string | null | undefined): boolean {
+  if (!isObject(before) || !('epoch' in before)) return epochAfter === 0 && !blockerBefore;
+  if (before.blocker) return false;
+  if (!before.epoch) return true;
+  const attempts = before.pipeline?.attempts, exhaustions = before.capacity?.exhaustions;
+  return !before.submission && !before.candidate && !before.scopeRequest && !before.scopeDecision && !before.humanRequest
+    && Array.isArray(attempts) && attempts.every((attempt: { end?: unknown }) => attempt?.end === 'expired')
+    && !(Array.isArray(exhaustions) && exhaustions.some((entry: { role?: unknown; partialWork?: { commit?: unknown } }) => entry?.role === 'worker' && entry.partialWork?.commit));
+}
 
 /**
  * Fold the ledger rows into interventions and judgements. `work` is the current snapshot: it
@@ -269,6 +313,8 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
     // The planned scope as the previous row left it, so a revision is judged against what it changed.
     const plannedBefore = entry.plannedFiles;
     if (Array.isArray(row.work?.plannedFiles)) entry.plannedFiles = row.work!.plannedFiles!;
+    const blockerBefore = entry.blocker;
+    if (row.work) entry.blocker = row.work.blocker ?? null;
     const source = { seq: row.seq, kind: row.kind };
     // Standing escalations, as every embedded document shows them: a trigger not seen before was
     // raised since the last row; one that vanished without a resolution row was auto-settled.
@@ -319,13 +365,21 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
           break;
         }
         const cleared = row.work ? !row.work.blocker : true;
+        // An item at backlog or ready that no attempt has worked on, that nobody asked about and that
+        // nothing blocked is being planned, not rescued: its coordinator revising the scope of work no
+        // worker has started waited on no one, so it is no intervention (GY-1396). A blocker it
+        // answers, or an item an attempt holds, released, submitted or was reworked from, still is.
+        // `liveScopeWidening` says only that the revision is additive, not that a lease was live,
+        // so the item as the revision found it decides.
+        const replanned = (stage === 'backlog' || stage === 'ready') && !!row.work
+          && unstarted(details.before, row.work.epoch, blockerBefore === undefined ? row.work.blocker : blockerBefore);
         if (entry.asks.length && (widened || cleared)) {
           // A widening answers the scope request; a blocker it clears beside one was an escalation of its own.
           const scopeAsked = entry.asks.some(ask => ask.kind === 'scope-request');
           const widens = (ask: Ask) => widened && (ask.kind === 'scope-request' || !scopeAsked);
           for (const ask of entry.asks) if (widens(ask) || cleared) emit(row, widens(ask) ? 'scope-widening' : 'escalation', { requestedAt: ask.at, blocked: ask.blocked, stage: ask.stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: reason, trigger: widens(ask) ? ask.trigger ?? ask.kind : ask.kind, sources: [...ask.sources, source] });
           entry.asks = entry.asks.filter(ask => !widens(ask) && !cleared);
-        } else if (widened) emit(row, 'scope-widening', { requestedAt: row.at, blocked: `files outside plannedFiles: ${(after ?? []).filter((path: string) => !(before ?? []).includes(path)).join(', ')}`, stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: reason, trigger: 'operator-widening', sources: [source] });
+        } else if (widened && !replanned) emit(row, 'scope-widening', { requestedAt: row.at, blocked: `files outside plannedFiles: ${(after ?? []).filter((path: string) => !(before ?? []).includes(path)).join(', ')}`, stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: reason, trigger: 'operator-widening', sources: [source] });
         break;
       }
       case 'unblock': {
@@ -334,23 +388,20 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
         break;
       }
       case 'decision.requested': {
-        // A request carrying a grounds binding is the loop's own (GY-407): it names the recorded fact —
-        // a standing change request, a failed check, a base conflict, a mechanical finding — it rests on.
-        // Only the loop's operator-agent identity requests on grounds: a binding a person's credential
-        // sent (the requester the decide route records) is not the loop's provenance, and stays counted.
+        // A request carrying a grounds binding names the recorded fact it rests on (GY-407): a standing
+        // change request, a failed check, a base conflict, a mechanical finding, a capped change request.
+        // Only the loop's operator-agent identity sends one as its own round: a binding a person's
+        // credential sent (the requester the decide route records) is not the loop's provenance.
         // A row with no recorded requester predates the provenance field, when only the loop sent bindings.
         const loopRequested = !row.payload?.requester || row.payload.requester.role === 'operator-agent';
-        if (row.payload?.action === 'rework') entry.reworkDecision = { seq: row.seq, at: row.at, id: row.payload.id, stage, binding: loopRequested && typeof row.payload.input?.binding === 'string' && row.payload.input.binding ? row.payload.input.binding : null, approvedBy: null };
+        if (row.payload?.action === 'rework') entry.reworkDecision = { seq: row.seq, at: row.at, id: row.payload.id, stage, binding: typeof row.payload.input?.binding === 'string' && row.payload.input.binding ? row.payload.input.binding : null, loopRequested, approvedBy: null };
         break;
       }
       case 'decision.approved': {
         // The product's own approvers: the risk lane (GY-883) and an operator agent the loop launched.
+        // A person approving the loop's request did the approver's job, and leaves it unset.
         const approver = row.payload?.approver ?? {};
-        // A person approving the loop's request did the approver's job: the round is theirs, CI's or not.
-        if (entry.reworkDecision?.id === row.payload?.id) {
-          if (approver.role === 'risk-lane' || approver.role === 'operator-agent') entry.reworkDecision!.approvedBy = row.actor;
-          else entry.reworkDecision!.binding = null;
-        }
+        if (entry.reworkDecision?.id === row.payload?.id && (approver.role === 'risk-lane' || approver.role === 'operator-agent')) entry.reworkDecision!.approvedBy = row.actor;
         break;
       }
       case 'decision.applied': case 'decision.failed': case 'decision.withdrawn': case 'decision.stale': case 'decision.declined': case 'decision.superseded': {
@@ -358,11 +409,14 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
         break;
       }
       case 'rework': {
-        // GY-1389. A rework the loop requested on its recorded grounds and its own approver applied is
-        // the review round working as designed — the reviewer asked for changes, CI failed, the base
-        // moved — not somebody stepping in. It is no signal, as an autoscope approval is none.
+        // A round answering a ground the loop's own rule acts on needed nobody (GY-1386, rework-grounds.ts),
+        // nor did the loop's own round for checks that failed on the head it returns (GY-1387): whoever asked
+        // for it first, the product handled it, and the asks it ended went with it. Nor did a round the loop
+        // requested on its recorded grounds that its own approver applied (GY-1389): the reviewer asked for
+        // changes, CI failed, the base moved, the review cap put a finding to the approver — nobody stepped in.
         const candidate = row.work?.candidate, submission = row.work?.submission;
-        const routine = !entry.asks.length && (!!entry.reworkDecision?.binding && !!entry.reworkDecision.approvedBy || failedCheckRound(entry.reworkDecision?.binding ?? null, candidate));
+        const routine = !!routineReworkGround(row.grounds ?? null, entry.reworkDecision?.binding)
+          || (!entry.asks.length && (failedCheckRound(entry.reworkDecision?.binding ?? null, candidate) || loopRound(entry.reworkDecision)));
         if (!routine) {
           const sources = [...entry.asks.flatMap(ask => ask.sources), ...(entry.reworkDecision ? [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] : []), source];
           const opened = [entry.reworkDecision?.at, ...entry.asks.map(ask => ask.at)].filter((at): at is string => !!at).sort()[0] ?? row.at;
@@ -444,7 +498,7 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
       open(ask.kind === 'scope-request' ? 'scope-widening' : 'escalation', { requestedAt: ask.at, blocked: ask.blocked, stage: ask.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: ask.trigger ?? ask.kind, sources: ask.sources });
     }
     // The loop's own grounded request waits on its own approver; a stalled one is a decision fault, not an intervention.
-    if (entry.reworkDecision && !entry.reworkDecision.binding) open('rework', { id: `rework:${id}:${entry.reworkDecision.id}`, requestedAt: entry.reworkDecision.at, blocked: item.candidate ? `candidate ${item.candidate.sha.slice(0, 12)} (PR #${item.candidate.pr})` : `attempt ${item.epoch}`, stage: entry.reworkDecision.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'decision', sources: [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] });
+    if (entry.reworkDecision && !routineReworkGround(item, entry.reworkDecision.binding) && !failedCheckRound(entry.reworkDecision.binding, item.candidate) && !(entry.reworkDecision.binding && entry.reworkDecision.loopRequested)) open('rework', { id: `rework:${id}:${entry.reworkDecision.id}`, requestedAt: entry.reworkDecision.at, blocked: item.candidate ? `candidate ${item.candidate.sha.slice(0, 12)} (PR #${item.candidate.pr})` : `attempt ${item.epoch}`, stage: entry.reworkDecision.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'decision', sources: [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] });
     if (entry.bypass) open('bypass', { requestedAt: entry.bypass.at, blocked: entry.bypass.blocked, stage: entry.bypass.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'refused-reconciliation', sources: [{ seq: entry.bypass.seq, kind: 'merge.reconciliation.refused' }] });
     if (entry.quarantine?.concernAt && item.containmentQuarantine) open('containment-settlement', { requestedAt: entry.quarantine.concernAt, blocked: `containment fence of epoch ${entry.quarantine.epoch}`, stage: entry.quarantine.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'unsettled', sources: [{ seq: entry.quarantine.seq, kind: 'quarantine' }] });
     for (const escalation of standingEscalations(item)) {

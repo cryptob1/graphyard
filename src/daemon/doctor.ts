@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import type { Work } from '../model.js';
 import { createSchema } from '../model.js';
 import { isClosed } from '../model/closure.js';
+import { planeWideRefusal } from '../model/blocker-class.js';
 import { openFaultClassItem } from '../model/fault-classes.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
@@ -352,9 +353,13 @@ export async function postRun(cycle: Pick<Cycle, 'state' | 'effects'>, effects: 
   try {
     await effects.recordRun(run);
     pending.delete(run.at);
+    // A post accepted after a refusal ends the refusal's fault instance, whatever kind it opened as.
+    if (state.actions[`doctor:post:${run.at}`]?.state === 'failed') await record(state, `doctor:post:${run.at}`, { kind: 'fault', work: null, principal: null, state: 'done', detail: `The control plane accepted the doctor run of ${run.at}`, attempts: state.actions[`doctor:post:${run.at}`]!.attempts, cycle: state.cycle }, now(), cycle.effects.persist);
   } catch (error) {
     pending.add(run.at);
-    await record(state, `doctor:post:${run.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `The control plane did not accept the doctor run of ${run.at}; it is posted again next cycle: ${message(error)}`.slice(0, 2000), attempts: (state.actions[`doctor:post:${run.at}`]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), cycle.effects.persist);
+    // GY-1404: a plane-wide refusal (a timeout, a 502) is the control plane not answering, not the doctor's step failing.
+    await record(state, `doctor:post:${run.at}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `The control plane did not accept the doctor run of ${run.at}; it is posted again next cycle: ${message(error)}`.slice(0, 2000), attempts: (state.actions[`doctor:post:${run.at}`]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), cycle.effects.persist,
+      planeWideRefusal(error) ? 'plane-unavailable' : undefined);
   }
   state.doctor.unposted = [...pending].filter(at => state.doctor.runs.some(entry => entry.at === at)).slice(-40);
 }

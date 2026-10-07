@@ -13,7 +13,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import * as interventions from '../src/interventions.js';
-import { interventionLedgerKinds, interventionLedgerLimit, interventionLedgerSince, openPatternItems, readInterventionLedger, windowOutcomes, type InterventionLedgerRow } from '../src/interventions.js';
+import { interventionLedgerKinds, interventionLedgerLimit, interventionLedgerSince, openPatternItems, readInterventionLedger, reworkGroundsSql, windowOutcomes, type InterventionLedgerRow } from '../src/interventions.js';
 import { interventionPolicyDefaults } from '../src/model/interventions.js';
 
 /**
@@ -152,6 +152,7 @@ const perRowColumns = `seq, work_id, actor, kind, created_at, doc->>'updatedAt' 
   CASE WHEN kind LIKE 'decision.%' OR kind IN ('intervention.recorded','judgement.recorded') THEN payload ELSE NULL END AS top,
   CASE WHEN doc IS NOT NULL THEN jsonb_build_object('key', doc->'key', 'stage', doc->'stage', 'title', doc->'title', 'epoch', doc->'epoch', 'blocker', doc->'blocker',
     'plannedFiles', doc->'plannedFiles', 'quarantine', doc->'containmentQuarantine', 'escalations', doc->'escalations', 'candidate', doc->'candidate', 'submission', doc->'submission') ELSE NULL END AS work,
+  CASE WHEN kind = 'rework' AND doc IS NOT NULL THEN ${reworkGroundsSql('doc')} END AS grounds,
   CASE WHEN work_id IS NULL THEN NULL ELSE (SELECT graphyard_event_work(earlier.work_id, earlier.payload)->>'stage' FROM events earlier WHERE earlier.work_id=ledger.work_id AND earlier.seq<ledger.seq AND (earlier.payload ? 'work' OR earlier.payload ? 'delta') ORDER BY earlier.seq DESC LIMIT 1) END AS stage_before`;
 async function perRowLedger(since: string, limit = interventionLedgerLimit): Promise<{ rows: InterventionLedgerRow[]; truncated: boolean }> {
   const client = await store.pool.connect();
@@ -159,7 +160,7 @@ async function perRowLedger(since: string, limit = interventionLedgerLimit): Pro
     await client.query('SET statement_timeout = 0');
     const result = await client.query(`SELECT ${perRowColumns} FROM (SELECT *, graphyard_event_work(work_id, payload) AS doc FROM (SELECT * FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) AND created_at >= (SELECT reach FROM unnest($1::text[], $4::timestamptz[]) AS wanted(kind, reach) WHERE wanted.kind = events.kind) ORDER BY seq DESC LIMIT $2) newest) ledger ORDER BY seq DESC`, [[...interventionLedgerKinds], limit + 1, null, interventionLedgerKinds.map(kind => interventionLedgerSince(kind, since))]);
     const instant = (value: unknown, fallback: string) => { const parsed = typeof value === 'string' ? Date.parse(value) : Number.NaN; return Number.isFinite(parsed) ? new Date(parsed).toISOString() : fallback; };
-    return { truncated: result.rows.length > limit, rows: windowOutcomes(result.rows.slice(0, limit).reverse(), since).map(row => ({ seq: Number(row.seq), workId: row.work_id, actor: row.actor, kind: row.kind, at: instant(row.updated_at, new Date(row.created_at).toISOString()), details: row.details, payload: row.top ?? undefined, work: row.work ?? null, stageBefore: row.stage_before ?? null })) };
+    return { truncated: result.rows.length > limit, rows: windowOutcomes(result.rows.slice(0, limit).reverse(), since).map(row => ({ seq: Number(row.seq), workId: row.work_id, actor: row.actor, kind: row.kind, at: instant(row.updated_at, new Date(row.created_at).toISOString()), details: row.details, payload: row.top ?? undefined, work: row.work ?? null, stageBefore: row.stage_before ?? null, ...(row.kind === 'rework' ? { grounds: row.grounds ?? null } : {}) })) };
   } finally { await client.query('SET statement_timeout = DEFAULT').catch(() => {}); client.release(); }
 }
 

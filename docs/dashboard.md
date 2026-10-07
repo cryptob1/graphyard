@@ -9,7 +9,7 @@ One group per open item (a tile counts and filters it): **Needs you** (yours alo
 
 ## Needs you
 
-`graphyard login` prints the operator's single-use sign-in link. Requests offer choices; **Provide now** seals credentials for `unseal GY-N`.
+Each card leads with the request's ask, its numbered steps and one line of why, then the choices; the worker's needed/reason detail is folded under **Details for agents** (older requests lead with the first sentence of what they need). `graphyard login` prints the operator's single-use sign-in link. Requests offer choices; **Provide now** seals credentials for `unseal GY-N`.
 
 An operator approval offers **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`), answered only from a human admin's sign-in session.
 
@@ -33,4 +33,4 @@ Rows: **Build, Validate, Test, Review, Prove, Merge, Deploy**, then *Merged*, *L
 
 ## Insights
 
-**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats are filed as `bug` items unless `GRAPHYARD_INTERVENTION_PATTERNS=0`; a rework the loop's operator-agent identity requested on recorded grounds — a change request, failed check, conflict, mechanical finding or capped change request — that the risk lane or an operator agent applied is a review round, not an intervention; one requested (even with grounds, from a person's credential), approved or applied by hand still counts, and a decision before the window counts only for an outcome inside it), **Validation**, **Releases**.
+**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats are filed as `bug` items unless `GRAPHYARD_INTERVENTION_PATTERNS=0`), **Validation**, **Releases**. A rework round answering a ground the loop acts on by itself (base conflict, failed required check, change request, merge refusal, failed proof) is not an intervention, whoever requested it; once an approver declines that request, a rework of the head is counted again. Nor is a round the loop's operator-agent identity requested on recorded grounds (including a capped change request it puts to its approver) that the risk lane or an operator agent applied; one approved or applied by hand still counts, and a decision before the window counts only for an outcome inside it that names it.

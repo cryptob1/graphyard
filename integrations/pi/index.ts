@@ -34,6 +34,8 @@ export type JsonSchema = { type: 'object' | 'string' | 'boolean' | 'integer' | '
 const text = (maxLength: number, description: string): JsonSchema => ({ type: 'string', minLength: 1, maxLength, description });
 const sha = (description: string): JsonSchema => ({ type: 'string', pattern: '^[0-9a-fA-F]{40}$', description });
 const count = (description: string): JsonSchema => ({ type: 'integer', minimum: 0, description });
+// GY-1402: the proof form `master create` accepts (src/model/proof.ts proofSchema), checked at the call so the agent corrects it in its run.
+const proof: JsonSchema = { type: 'string', minLength: 1, maxLength: 200, pattern: '^(unit|integration|e2e|manual):[a-zA-Z0-9._/-]+$', description: 'A proof id: unit:, integration:, e2e: or manual: then letters, digits and ._/- only, such as unit:fault-class-loop' };
 
 export const decideParameters: JsonSchema = {
   type: 'object', additionalProperties: false, required: ['decision', 'approve', 'reason'],
@@ -109,7 +111,7 @@ export const doctorReportParameters: JsonSchema = {
           title: text(200, 'The fault item title'), description: text(20000, 'What is wrong, the evidence, and what should change'),
           priority: { type: 'integer', minimum: 0, description: '0 (P0) or 1 (P1): a fault the doctor files is urgent, never lower' },
           criteria: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', additionalProperties: false, required: ['id', 'text', 'proofs'],
-            properties: { id: { type: 'string', pattern: '^[A-Z]+-\\d+$', description: 'AC-1, AC-2, ...' }, text: text(4000, 'A testable criterion'), proofs: { type: 'array', minItems: 1, maxItems: 10, items: text(200, 'A proof such as unit:name') } } } },
+            properties: { id: { type: 'string', pattern: '^[A-Z]+-\\d+$', description: 'AC-1, AC-2, ...' }, text: text(4000, 'A testable criterion'), proofs: { type: 'array', minItems: 1, maxItems: 10, items: proof } } } },
           plannedFiles: { type: 'array', minItems: 1, maxItems: 100, items: text(500, 'A file or directory the fix changes') },
         } } },
   },
@@ -132,7 +134,7 @@ export const diagnoseParameters: JsonSchema = {
         title: text(200, 'The fix item title'), description: text(20000, 'The cause, the evidence and what to change'),
         type: { type: 'string', enum: ['feature', 'bug', 'chore'] }, priority: { type: 'integer', minimum: 0, description: 'The priority to release it at, 0 (highest) to 4' },
         criteria: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', additionalProperties: false, required: ['id', 'text', 'proofs'],
-          properties: { id: { type: 'string', pattern: '^[A-Z]+-\\d+$', description: 'AC-1, AC-2, ...' }, text: text(4000, 'A testable criterion'), proofs: { type: 'array', minItems: 1, maxItems: 10, items: text(200, 'A proof such as unit:name') } } } },
+          properties: { id: { type: 'string', pattern: '^[A-Z]+-\\d+$', description: 'AC-1, AC-2, ...' }, text: text(4000, 'A testable criterion'), proofs: { type: 'array', minItems: 1, maxItems: 10, items: proof } } } },
         plannedFiles: { type: 'array', minItems: 1, maxItems: 100, items: text(500, 'A file or directory the fix changes; name files, not the repository root') },
       } },
   },

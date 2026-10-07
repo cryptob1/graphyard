@@ -262,6 +262,11 @@ export function requiredDecisionCapabilities(action: DecisionAction, input: any,
   return capabilities;
 }
 
+/** The head a situated rework binding names (`${sha}:${grounds}`, as the loop's routine rule writes it), or null. */
+export const reworkBoundHead = (input: unknown): string | null => {
+  const binding = (input as { binding?: unknown } | null)?.binding;
+  return typeof binding === 'string' ? /^([0-9a-f]{40}):/.exec(binding)?.[1] ?? null : null;
+};
 /** The item must still be in the state the decision was requested against. */
 export function decisionPrecondition(action: DecisionAction, input: any, work: Work): string | null {
   if (action === 'recover') return work.stage === 'done' && work.containmentQuarantine ? null : 'Containment recovery applies to delivered work that is still quarantined';
@@ -277,6 +282,10 @@ export function decisionPrecondition(action: DecisionAction, input: any, work: W
       return `The decision names ${String(input.sha).slice(0, 12)} but the current candidate is ${work.candidate?.sha.slice(0, 12) ?? 'none'} at policy revision ${work.policyRevision}`;
   }
   if (action === 'rework' && !work.submission) return 'Rework applies to submitted work';
+  // GY-1386: a rework situated on a head (its binding, GY-407) answers grounds read from that head; once the
+  // candidate moved on — a base refresh carried it cleanly onto the tip — those grounds no longer describe it.
+  const bound = action === 'rework' ? reworkBoundHead(input) : null;
+  if (bound && work.candidate?.sha !== bound) return `The rework is bound to ${bound.slice(0, 12)} but the current candidate is ${work.candidate?.sha.slice(0, 12) ?? 'none'}; its grounds no longer describe the item`;
   if (action === 'close' && input.triageAt !== undefined && (work.triage?.state !== 'proposed' || work.triage.at !== input.triageAt)) return `${work.key} has no proposed triage closure from ${input.triageAt}; its triage is ${work.triage ? `${work.triage.state} from ${work.triage.at}` : 'not recorded'}`;
   return null;
 }
