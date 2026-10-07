@@ -23,7 +23,7 @@ Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next wo
 
 ## Retro synthesis
 
-The scan (`GRAPHYARD_INTERVENTION_PATTERNS=0` disables; `GET /api/interventions` reports `scan`) opens an item per crossed pattern each minute and drafts changes per recurring refusal or rework cause (`retro.drafted`: wording, check, producer method, fault-catalogue entry), each [approved](protocol/work-commands.md) or refused by a non-drafting operator agent (`decision:approve`). Approved requirements show as [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse a failing `complete`. Off, `master status` flags crossed patterns as configuration faults.
+Beside the tick, the scan (`GRAPHYARD_INTERVENTION_PATTERNS=0` disables; `GET /api/interventions` reports `scan`) opens an item per crossed pattern each minute and drafts changes per recurring refusal or rework cause (`retro.drafted`: wording, check, producer method, fault-catalogue entry), each [approved](protocol/work-commands.md) or refused by a non-drafting AI operator agent (`decision:approve`). Approved requirements show as [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse a failing `complete`. Off, `master status` flags crossed patterns as configuration faults.
 
 ## Flaky CI check
 
@@ -31,7 +31,7 @@ A failing check is [rerun](github.md#failed-checks) once (`mergeQueue.rerunFaile
 
 ## Accepted evidence turns out to be wrong
 
-`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes the gate, so that head's required checks no longer pass on GitHub.
+`graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes the gate, so GitHub's required checks no longer pass on that head.
 
 ## GitHub request budget
 
@@ -73,8 +73,6 @@ A silent hour: `master status` points to `https://github.com/settings/apps/APP-S
 ## Control-plane resources
 
 Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default 10 GiB); `tmp-inodes`, free `/tmp` (TMPDIR, `/tmp`); `loaded-revision` counts code moves. No reading faults while its remedy acts: an owed restart retried within bound, a pane unowned under 10 minutes, the loop's own lag, `/tmp` above a tenth free after a pass within 30 minutes.
-
-Merges awaiting a due-later or validating [promotion](delivery.md) owe no restart: `releaseLag` and `loaded-revision` skip them (never on an unavailable observation). Sandboxed `systemctl --user` probes read unverified given the cursor's unit.
 
 ## Storage retention
 
@@ -123,10 +121,10 @@ Only `admin` grants or revokes, to `producer` principals: exact name, `kind:*` o
 
 ### Concurrent reconciliation
 
-Ticks run every 2 s (target ≤5 s); slower ones log `reconciliation tick took N ms` with writes and longest lock wait. Locks, in order:
+A tick runs every 2 s and should finish within 5 s; slower ticks log `reconciliation tick took N ms` with writes and longest lock wait. Locks, in order:
 
 1. Opening: the coordination lock, briefly, reading row versions and sweeping direct merges.
-2. Each batch evaluates ≤250 ms lock-free, planning ≤8 writes.
-3. Each write is its own transaction: the coordination lock (≤500 ms wait, holding no row), the item's row (`FOR NO KEY UPDATE`), then commit. A moved read re-evaluates first. Job wakes follow commit in work-id order.
+2. Each batch evaluates up to 250 ms lock-free, planning at most 8 writes.
+3. Each write is its own transaction: the coordination lock (waiting at most 500 ms, holding no row), then the item's row (`FOR NO KEY UPDATE`), then commit. If anything it read moved, the item is re-evaluated first. Job wakes follow at commit, in work-id order.
 
-Three expired lock waits defer unwritten items a tick. A renewal takes only its item's lock. Before each evaluation and write, reconciliation yields to pending requests and waits ≤1 s for renewals (each waits on ≤1 evaluation). Stale observation snapshots retry after 2 s.
+Three expired lock waits defer unwritten items a tick. A renewal takes only its item's lock. Before each evaluation and write, reconciliation yields to pending requests and waits up to 1 s for renewals: a renewal waits on at most one evaluation. Stale observation snapshots retry after 2 s.
