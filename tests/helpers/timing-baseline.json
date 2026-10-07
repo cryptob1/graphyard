@@ -591,7 +591,7 @@
     "tests/soak-day.test.ts": 112848,
     "tests/soak-decisions.test.ts": 227396,
     "tests/soak-dispatch.test.ts": 23662,
-    "tests/soak-main-guard.test.ts": 16435,
+    "tests/soak-main-guard.test.ts": 24000,
     "tests/soak-review.test.ts": 35617,
     "tests/soak-sessions.test.ts": 156501,
     "tests/stable-json.test.ts": 217,

@@ -26,6 +26,16 @@
 // cycle until main's failing required check passes again (cycle-delivery.ts reads main's check runs).
 // A merge already reverted or abandoned is never tried again, so the next red main is judged afresh.
 //
+// A cancelled run is not a failing test (GY-1468): a run whose only non-success conclusions are
+// cancelled or timed-out jobs — an infrastructure step stalled past the job timeout, say, and the
+// aggregate `test` job failing because its shards were cancelled — names no culprit. Main is
+// pending while the guard reruns that run's failed jobs, at most `mainCancelledRerunLimit` times, and
+// only a concluded rerun's real failure is reverted. A run still cancelled past the bound is
+// recorded on the merge's item as an infrastructure fault naming the run (cause `cancelled`), which
+// the loop raises to the master once; it is never reverted. A timed-out job counts as cancelled
+// too, so a merge that hangs a test is escalated with the step it stopped in rather than reverted,
+// and while main stays pending no later merge is judged.
+//
 // The judgement and the reopen are pure; the GitHub job loop runs the guard with the App's client
 // (`guardGitHubMain` in github.ts) and the loop raises the attention (cycle-delivery.ts).
 import type { Work } from './model/work.js';
@@ -59,34 +69,56 @@ export interface MainGuardRevert {
   refusals?: string[];
   /** Abandoned while main's required check fails: its attention line is raised every cycle until that check passes on main again. */
   red?: boolean;
+  /** Cause `cancelled` (GY-1468): the workflow run that stayed cancelled past the rerun bound, and its last attempt. */
+  run?: { id: number; attempt: number | null };
 }
 /**
  * Why a revert was abandoned: GitHub's approval rule or the approver App refused its approval or
  * merge (`approval-refused`), its own checks failed or did not conclude, it conflicts or could not be
  * opened, it is not the exact inverse, or it was closed or moved under the guard.
  */
-export type MainGuardAbandonCause = 'approval-refused' | 'checks-failed' | 'timeout' | 'conflict' | 'not-inverse' | 'closed' | 'head-moved' | 'unopened';
+export type MainGuardAbandonCause = 'approval-refused' | 'checks-failed' | 'timeout' | 'conflict' | 'not-inverse' | 'closed' | 'head-moved' | 'unopened' | 'cancelled';
 /** How many approve-then-merge attempts a revert gets before a mechanical refusal abandons it: the first and two retries. */
 export const revertLandingAttempts = 3;
 
 export interface CheckRun { name: string; result: string; appId: number; id?: number }
-export type CommitVerdict = { verdict: 'pass' } | { verdict: 'fail'; failing: string[] } | { verdict: 'pending' };
-const failedConclusions = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure', 'stale']);
+/**
+ * `cancelled` (GY-1468): required checks failed, but every job of the run that did not succeed was
+ * cancelled or timed out, so nothing names a failing test; `checkRun` is one cancelled job to rerun
+ * the run's failed jobs from (absent when GitHub gave it no id).
+ */
+export type CommitVerdict = { verdict: 'pass' } | { verdict: 'fail'; failing: string[] } | { verdict: 'pending' } | { verdict: 'cancelled'; failing: string[]; checkRun?: number };
+const cancelledConclusions = new Set(['timed_out', 'cancelled']);
+const failedConclusions = new Set(['failure', ...cancelledConclusions, 'action_required', 'startup_failure', 'stale']);
+const concluded = new Set(['success', 'skipped', 'neutral', ...failedConclusions]);
 
 /**
  * The required checks on one commit, from the CI apps only: `fail` names each required check whose
- * latest run concluded unsuccessfully, `pending` is any required check not concluded yet.
+ * latest run concluded unsuccessfully, `pending` is any required check not concluded yet. A failure
+ * is `cancelled` instead when the commit's CI jobs hold a cancelled or timed-out one and no job
+ * other than a required check failed outright: a required aggregate whose needs were cancelled
+ * fails without any test having failed, and a required check failing on its own fails again on the
+ * rerun, which then concludes with nothing cancelled. While any CI job has not concluded, the
+ * failure is not judged yet.
  */
 export function commitVerdict(checks: CheckRun[], required: readonly string[], ciAppIds: readonly number[]): CommitVerdict {
+  const latest = new Map<string, CheckRun>();
+  for (const check of checks) if (ciAppIds.includes(check.appId) && (check.id ?? 0) >= (latest.get(check.name)?.id ?? -1)) latest.set(check.name, check);
   const failing: string[] = []; let pending = !required.length;
   for (const name of required) {
-    const latest = checks.filter(check => check.name === name && ciAppIds.includes(check.appId))
-      .reduce<CheckRun | undefined>((best, check) => !best || (check.id ?? 0) >= (best.id ?? 0) ? check : best, undefined);
-    if (!latest || !['success', 'skipped', ...failedConclusions].includes(latest.result)) pending = true;
-    else if (failedConclusions.has(latest.result)) failing.push(name);
+    const run = latest.get(name);
+    if (!run || !['success', 'skipped', ...failedConclusions].includes(run.result)) pending = true;
+    else if (failedConclusions.has(run.result)) failing.push(name);
   }
-  return failing.length ? { verdict: 'fail', failing } : pending ? { verdict: 'pending' } : { verdict: 'pass' };
+  if (!failing.length) return pending ? { verdict: 'pending' } : { verdict: 'pass' };
+  const jobs = [...latest.values()], cancelled = jobs.filter(job => cancelledConclusions.has(job.result));
+  if (!cancelled.length || jobs.some(job => !required.includes(job.name) && failedConclusions.has(job.result) && !cancelledConclusions.has(job.result))) return { verdict: 'fail', failing };
+  if (pending || jobs.some(job => !concluded.has(job.result))) return { verdict: 'pending' };
+  const checkRun = cancelled.find(job => job.id !== undefined)?.id;
+  return { verdict: 'cancelled', failing, ...(checkRun !== undefined ? { checkRun } : {}) };
 }
+/** How many times the guard reruns a cancelled run's failed jobs on main before it reports it as an infrastructure fault (as GY-1109's cancelledRerunLimit). */
+export const mainCancelledRerunLimit = 3;
 
 /** One commit of main's first-parent history, newest first. */
 export interface MainCommit { sha: string; parent: string | null }
@@ -95,15 +127,17 @@ export interface MainCommit { sha: string; parent: string | null }
  * - `green`: the tip passed;
  * - `broken`: `culprit` failed `failing` while its parent passed, and nothing after it passed;
  * - `pending`: the commit after the last green one has not concluded, so no culprit can be named;
+ *   `cancelled` when its run concluded only cancelled (GY-1468), naming the checks and a job to rerun;
  * - `unknown`: no commit in the history read passed.
  */
-export type MainState = { state: 'green' } | { state: 'broken'; culprit: string; parent: string; failing: string[] } | { state: 'pending'; probe: string } | { state: 'unknown' };
+export type MainState = { state: 'green' } | { state: 'broken'; culprit: string; parent: string; failing: string[] } | { state: 'pending'; probe: string; cancelled?: { failing: string[]; checkRun?: number } } | { state: 'unknown' };
 export async function readMain(history: MainCommit[], verdict: (sha: string) => Promise<CommitVerdict>): Promise<MainState> {
   for (let index = 0; index < history.length; index++) {
     if ((await verdict(history[index].sha)).verdict !== 'pass') continue;
     if (index === 0) return { state: 'green' };
     const child = history[index - 1], judged = await verdict(child.sha);
-    return judged.verdict === 'fail' ? { state: 'broken', culprit: child.sha, parent: history[index].sha, failing: judged.failing } : { state: 'pending', probe: child.sha };
+    if (judged.verdict === 'fail') return { state: 'broken', culprit: child.sha, parent: history[index].sha, failing: judged.failing };
+    return judged.verdict === 'cancelled' ? { state: 'pending', probe: child.sha, cancelled: { failing: judged.failing, ...(judged.checkRun !== undefined ? { checkRun: judged.checkRun } : {}) } } : { state: 'pending', probe: child.sha };
   }
   return { state: 'unknown' };
 }
@@ -207,6 +241,13 @@ export interface MainGuardPorts {
   /** Merges the revert as the App, bound to `head`; the merge commit, or null when GitHub has not merged it yet. */
   mergeRevert(work: Work, revert: { pr: number; head: string; failing: string[] }): Promise<string | null>;
   closeRevert(pr: number, reason: string): Promise<void>;
+  /**
+   * The workflow run of the cancelled job `checkRun` and that job's attempt (GY-1468); absent where
+   * the adapter cannot rerun, and a cancelled main then stays pending.
+   */
+  cancelledRun?(checkRun: number): Promise<{ id: number; attempt: number | null; step?: string | null }>;
+  /** Reruns that run's failed and cancelled jobs; `waiting` while GitHub still runs it. */
+  rerunCancelled?(checkRun: number, run: { id: number; attempt: number | null }): Promise<'requested' | 'waiting'>;
   /** Saves the revert step onto the item (`applyMainGuardRevert`), evaluating it when it reopened. */
   record(work: Work, revert: MainGuardRevert): Promise<void>;
 }
@@ -222,6 +263,8 @@ export interface MainGuardOptions {
    * nor approves it again; a moved head is abandoned before this is consulted.
    */
   approved?: Set<string>;
+  /** The cancelled check runs (`sha@checkRun`) already rerun or reported, kept across ticks so each is acted on once. */
+  cancelled?: Set<string>;
 }
 /** A revert whose own checks have not concluded in this long is closed: the guard never waits on one indefinitely. */
 export const revertChecksTimeoutMs = 60 * 60_000;
@@ -243,7 +286,8 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
     const known = verdicts.get(sha) ?? pending.get(sha);
     if (known) return known;
     const read = commitVerdict(await ports.checks(sha), options.required, options.ciAppIds);
-    (read.verdict === 'pending' ? pending : verdicts).set(sha, read);
+    // A cancelled verdict is not concluded either: the guard reruns it, and the rerun is judged afresh.
+    (read.verdict === 'pending' || read.verdict === 'cancelled' ? pending : verdicts).set(sha, read);
     return read;
   };
   const write = async (work: Work, revert: MainGuardRevert) => {
@@ -268,7 +312,7 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
       if (pull.mergeable === false) { await abandon(work, revert, 'conflict', `revert PR #${pr} conflicts with main`); continue; }
       if (pull.head !== head) { await abandon(work, revert, 'head-moved', `revert PR #${pr}'s head moved from ${head.slice(0, 12)} to ${pull.head.slice(0, 12)}`); continue; }
       const own = commitVerdict(await ports.checks(head), options.required, options.ciAppIds);
-      if (own.verdict === 'fail') { await abandon(work, revert, 'checks-failed', `revert PR #${pr}'s own required checks failed: ${own.failing.join(', ')}`); continue; }
+      if (own.verdict === 'fail' || own.verdict === 'cancelled') { await abandon(work, revert, 'checks-failed', `revert PR #${pr}'s own required checks ${own.verdict === 'fail' ? 'failed' : 'were cancelled'}: ${own.failing.join(', ')}`); continue; }
       if (own.verdict === 'pending') {
         if (now.getTime() - Date.parse(revert.at) > (options.checksTimeoutMs ?? revertChecksTimeoutMs)) await abandon(work, revert, 'timeout', `revert PR #${pr}'s required checks did not conclude within ${Math.round((options.checksTimeoutMs ?? revertChecksTimeoutMs) / 60_000)} minutes`);
         continue;
@@ -311,12 +355,14 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
   try {
     tick.main = await readMain(await ports.history(), verdict);
   } catch (error) { tick.errors.push(`reading main: ${message(error)}`); return tick; }
+  if (tick.main.state === 'pending' && tick.main.cancelled) { await rerunCancelled(ports, tick, tick.main.probe, tick.main.cancelled, options.cancelled ?? new Set(), at); return tick; }
   if (tick.main.state !== 'broken') return tick;
   const broken = tick.main;
   let work: Work | null;
   try { work = await ports.culprit(broken.culprit); } catch (error) { tick.errors.push(`finding the item of ${broken.culprit.slice(0, 12)}: ${message(error)}`); return tick; }
   // A merge already reverted or abandoned is never tried again; a commit no item delivered is not the guard's to revert.
-  if (!work || work.mainGuardReverts?.some(entry => entry.mergeSha === broken.culprit) || work.stage !== 'done' || work.delivery?.mergeSha !== broken.culprit) return tick;
+  // A cancelled run reported as an infrastructure fault reverted nothing, so a real failure after it still is.
+  if (!work || work.mainGuardReverts?.some(entry => entry.mergeSha === broken.culprit && entry.cause !== 'cancelled') || work.stage !== 'done' || work.delivery?.mergeSha !== broken.culprit) return tick;
   const base: MainGuardRevert = { mergeSha: broken.culprit, pr: work.submission?.pr ?? null, failing: broken.failing, revert: null, state: 'opened', at, settledAt: null, revertSha: null, reason: null };
   try {
     const opened = await ports.openRevert(work, broken.culprit, `${work.key}'s merge ${broken.culprit.slice(0, 12)} broke main: ${broken.failing.join(', ')} failed on it while its parent ${broken.parent.slice(0, 12)} passed. Graphyard's main guard reverts it so main is green again; ${work.key} is reopened for a rework round.`);
@@ -330,6 +376,37 @@ export async function runMainGuard(ports: MainGuardPorts, options: MainGuardOpti
 }
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
+/**
+ * Main's commit `sha` concluded only cancelled (GY-1468): its run's failed jobs are rerun while the
+ * cancelled job's attempt is within `mainCancelledRerunLimit` reruns; past it, the run is recorded
+ * on the merge's item as an infrastructure fault naming the run and the step its job stopped in
+ * (or, with no item, reported in the tick's errors). Nothing is reverted. Each cancelled check run
+ * is acted on once: `seen` is keyed on it before GitHub is asked anything, so a reported run costs
+ * no request on later ticks, and it is marked only once its rerun was requested or its fault durably
+ * recorded, so a failed record is retried on the next tick.
+ */
+async function rerunCancelled(ports: MainGuardPorts, tick: MainGuardTick, sha: string, cancelled: { failing: string[]; checkRun?: number }, seen: Set<string>, at: string) {
+  if (cancelled.checkRun === undefined || !ports.cancelledRun || !ports.rerunCancelled) return;
+  const seenKey = `${sha}@${cancelled.checkRun}`;
+  if (seen.has(seenKey)) return;
+  try {
+    const run = await ports.cancelledRun(cancelled.checkRun);
+    const reruns = Math.max(0, (run.attempt ?? 1) - 1);
+    if (reruns < mainCancelledRerunLimit) {
+      if (await ports.rerunCancelled(cancelled.checkRun, run) === 'requested') seen.add(seenKey);
+      return;
+    }
+    const reason = `infrastructure fault: CI run ${run.id} on main's merge ${sha.slice(0, 12)} concluded ${cancelled.failing.join(', ')} only through cancelled or timed-out jobs on attempt ${run.attempt ?? '?'}${run.step ? `, stopped in step "${run.step}"` : ''}, after ${reruns} rerun${reruns === 1 ? '' : 's'}; no test failed, so the merge is not reverted`;
+    const work = await ports.culprit(sha);
+    if (!work || work.delivery?.mergeSha !== sha) tick.errors.push(`main guard: ${reason}`);
+    else if (!work.mainGuardReverts?.some(entry => entry.mergeSha === sha)) {
+      await ports.record(work, { mergeSha: sha, pr: work.submission?.pr ?? null, failing: cancelled.failing, revert: null, state: 'abandoned', at, settledAt: at, revertSha: null, reason, cause: 'cancelled', run: { id: run.id, attempt: run.attempt } });
+      tick.steps.push({ key: work.key, mergeSha: sha, state: 'abandoned', reason });
+    }
+    seen.add(seenKey);
+  } catch (error) { tick.errors.push(`rerunning main's cancelled run on ${sha.slice(0, 12)}: ${message(error)}`); }
+}
+
 /** What main still owes after a revert is abandoned: its failing checks stay red until the next merge to main re-runs CI. */
 const staysRed = (failing: readonly string[]) => `main's required check${failing.length === 1 ? '' : 's'} ${failing.join(', ') || 'that failed'} ${failing.length === 1 ? 'stays' : 'stay'} red until the next merge to main re-runs CI`;
 /** The abandonment reason of a revert GitHub's approval rule or the approver App refused every attempt to land (GY-1332). */
@@ -338,7 +415,7 @@ export function approvalRefusedReason(revert: Pick<MainGuardRevert, 'revert' | '
 }
 const causeText: Record<MainGuardAbandonCause, string> = {
   'approval-refused': 'approval-rule refusal', 'checks-failed': 'its checks failed', timeout: 'its checks timed out', conflict: 'conflict',
-  'not-inverse': 'not the exact inverse', closed: 'closed', 'head-moved': 'head moved', unopened: 'could not be opened',
+  'not-inverse': 'not the exact inverse', closed: 'closed', 'head-moved': 'head moved', unopened: 'could not be opened', cancelled: 'cancelled run',
 };
 
 /**
@@ -360,6 +437,8 @@ const causeText: Record<MainGuardAbandonCause, string> = {
  */
 export function mainGuardAttention(all: Pick<Work, 'key' | 'mainGuardReverts'>[], since = -Infinity, held: (key: string) => boolean = () => false): { key: string; work: string; text: string; red: string[]; recovered: string }[] {
   return all.flatMap(work => (work.mainGuardReverts ?? []).filter(revert => revert.state === 'abandoned' && (held(`escalation:main-guard:${revert.mergeSha}`) || !(Date.parse(revert.settledAt ?? revert.at) <= since))).map(revert => {
+    // A cancelled run (GY-1468) broke nothing: the line is the infrastructure fault, raised once.
+    if (revert.cause === 'cancelled') return { key: `escalation:main-guard:${revert.mergeSha}`, work: work.key, red: [], text: `Main guard: ${work.key}'s merge ${revert.mergeSha.slice(0, 12)}${revert.pr ? ` (PR #${revert.pr})` : ''} — ${revert.reason ?? 'its CI run stayed cancelled'}. Fix the CI infrastructure and rerun run ${revert.run?.id ?? '?'}: until a rerun concludes, main stays pending and no later merge is judged; a real failure on that rerun is still reverted.`, recovered: '' };
     const head = `Main guard: ${work.key}'s merge ${revert.mergeSha.slice(0, 12)}${revert.pr ? ` (PR #${revert.pr})` : ''} broke main (${revert.failing.join(', ') || 'required checks failed'}) and could not be reverted automatically${revert.cause ? ` [${causeText[revert.cause]}]` : ''}: ${revert.revert ? `revert PR #${revert.revert.pr}` : 'no revert PR'} — ${revert.reason ?? 'abandoned'}.`;
     const red = revert.red ? revert.failing : [];
     return {
