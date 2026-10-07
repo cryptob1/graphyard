@@ -22,9 +22,9 @@ import { boardFromStatus } from '../../model/board.js';
 import { routedScopeDecisions } from '../scope-holds.js';
 import { boundedSnapshot, workDocument } from '../../store/bounded-snapshot.js';
 import { doctorRoute, doctorRunEvent } from '../doctor-route.js';
+import { snapshotPage } from '../../store/paged-snapshot.js';
 // The doctor's ledger kinds, read from here as they always were (GY-711).
 export { doctorFindingEvent, doctorRunEvent } from '../doctor-route.js';
-import { snapshotPage } from '../../store/paged-snapshot.js';
 
 /** The first-run protection state (GY-1419): what the Setup page's branch-protection item reads. */
 async function setupProtection(github: { branchProtection?: (requireNativeReview?: boolean, shared?: boolean) => Promise<{ protected: boolean; requiredChecks: unknown[] }> } | null): Promise<'complete' | 'checks' | 'off'> {
