@@ -8,10 +8,11 @@ import { sessionName } from '../session-name.js';
 import { discover, assertRepository, localDirectory, saveDiscovery } from '../onboarding.js';
 import { serverOrigin, loadConnection, managedInstructions } from '../repository-setup.js';
 import { launchPlan } from '../harness.js';
-import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSupervisor, loopUnitName, unsupervisedInstruction, loopSupervisionAttention } from '../supervisor.js';
+import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSupervisor, loopUnitOf, unsupervisedInstruction, loopSupervisionAttention } from '../supervisor.js';
 import { type FilesystemProbe, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { APP_PENDING, type AgentEnvironment, type MasterBrowser, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withReviewerDefaults, withRoleDefaults } from './profiles.js';
 import { managedMasterInstructions } from './instructions.js';
+import { scopeHerdr } from './herdr.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
 import { controlPlaneAttention } from './attention.js';
 import { writeFailure } from './worktrees.js';
@@ -84,6 +85,8 @@ export async function loadStoredMasterConfig(root: string): Promise<MasterConfig
   await externalCredential(root, config.credentialFile, 'Master');
   if (!isAbsolute(config.cliPath)) throw new Error('Master CLI path must be absolute');
   try { if (!(await lstat(config.cliPath)).isFile()) throw new Error(); } catch { throw new Error('Configured Graphyard CLI launcher is unavailable'); }
+  // Every Herdr sweep this process runs acts only within the install's own workspace (GY-1441).
+  scopeHerdr(config.herdrWorkspace);
   return config;
 }
 /**
@@ -222,7 +225,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
    */
   const supervisor: LoopSupervisorInstallation | null = input.installSupervisor === true ? await installLoopSupervisor(
     { root, cliPath: config.cliPath, repository: config.repository, intervalSeconds: config.run.intervalSeconds }, dependencies.supervisorHost ?? {}, { replace: input.replaceSupervisor === true },
-  ).catch(error => ({ supported: false, unit: loopUnitName, unitPath: null, installed: false, enabled: null, active: null, linger: null, wrote: 'none' as const, refused: null, performed: [],
+  ).catch(error => ({ supported: false, unit: loopUnitOf(root), unitPath: null, installed: false, enabled: null, active: null, linger: null, wrote: 'none' as const, refused: null, performed: [],
     reason: `Installing the loop's supervisor failed: ${error instanceof Error ? error.message : String(error)}`,
     instruction: unsupervisedInstruction({ root, cliPath: config.cliPath }) })) : null;
   // A permission the installed App lacks is announced here with its exact migration steps, not
@@ -421,12 +424,16 @@ export function liveMasterConfig(root: string, initial: MasterConfig, load: (roo
     current: initial,
     async reload(): Promise<ConfigReload> {
       const at = new Date(clock()).toISOString();
+      // A refused reload keeps every loaded setting, the Herdr scope included: loading applies the
+      // file's workspace, so the scope the loop runs under is put back whenever the reload is refused (GY-1441).
+      const keep = (refused: string): ConfigReload => { scopeHerdr(live.current.herdrWorkspace); return { config: live.current, changed: [], at, refused }; };
       let next: MasterConfig;
       try { next = await load(root); }
-      catch (error) { return { config: live.current, changed: [], at, refused: `.graphyard/master.json could not be reloaded (${error instanceof Error ? error.message : String(error)}); the loop keeps the settings it last loaded` }; }
+      catch (error) { return keep(`.graphyard/master.json could not be reloaded (${error instanceof Error ? error.message : String(error)}); the loop keeps the settings it last loaded`); }
       const { changed, bound } = masterConfigChanges(live.current, next);
-      if (bound.length) return { config: live.current, changed: [], at, refused: `.graphyard/master.json changes ${bound.join(', ')}, which a running master loop is bound to; restart master run to adopt ${bound.length === 1 ? 'it' : 'them'}. Until then the loop keeps its loaded settings, including every other change` };
+      if (bound.length) return keep(`.graphyard/master.json changes ${bound.join(', ')}, which a running master loop is bound to; restart master run to adopt ${bound.length === 1 ? 'it' : 'them'}. Until then the loop keeps its loaded settings, including every other change`);
       live.current = next;
+      scopeHerdr(next.herdrWorkspace);
       return { config: next, changed, refused: null, at };
     },
   };

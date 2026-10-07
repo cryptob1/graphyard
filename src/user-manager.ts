@@ -4,7 +4,7 @@ import { statSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { executorSupervisionStatus, systemctl, systemdUserManager, type SystemctlRunner } from './repository-setup.js';
 import { slotDown } from './cli/executor-report.js';
-import { loopUnitName } from './supervisor.js';
+import { loopUnitOf } from './supervisor.js';
 
 /**
  * Whether this process sees the user bus masked: the socket path exists but is not a socket. A
@@ -36,6 +36,8 @@ export interface UserSupervisionHeal {
   /** Declared slots found active: a slot the loop gave up on is cleared once it is seen running again. */
   up: string[];
   down: DownSlot[];
+  /** The name of the loop's own unit: the one this install recorded (GY-1441). */
+  loopUnit?: string;
   /** The loop's own unit as systemd reports it, once the manager answers. */
   loop: string | null;
 }
@@ -81,5 +83,5 @@ export async function healUserSupervision(root: string, deps: UserSupervisionDep
     try { run(['enable', '--now', ...units]); heal.performed.push(`systemctl --user enable --now ${units.join(' ')} (${heal.down.filter(slot => slot.outcome === 'started').map(slot => `slot ${slot.slot} was ${slot.active}`).join(', ')})`); }
     catch (error) { for (const slot of heal.down) if (slot.outcome === 'started') slot.outcome = 'withheld'; return { ...heal, reason: `systemctl --user enable --now ${units.join(' ')} failed: ${firstLine(error)}` }; }
   }
-  return { ...heal, loop: answer(run, ['is-active', loopUnitName]) };
+  return { ...heal, loop: answer(run, ['is-active', loopUnitOf(root)]), loopUnit: loopUnitOf(root) };
 }

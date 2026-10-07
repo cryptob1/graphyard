@@ -7,6 +7,7 @@ import { isAbsolute, join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { clearConsentHold, consentHoldSuffix, consentHoldVerdict, detectConsentPrompt, readConsentHolds, reclassifyConsentHold, writeConsentHold, type ConsentAnswer } from './consent-prompt.js';
 import { unknownWorkCode } from './model/refusal.js';
+import { legacyLoopUnit, readInstallUnits, resolveInstallUnits } from './install/units.js';
 
 interface Renewal { lease: { epoch: number; expiresAt: string } | null; updatedAt: string }
 
@@ -705,8 +706,14 @@ export function probeSupervisorAbsence(target: SupervisorProbeTarget, deps: Supe
 // What follows installs that supervisor, verifies it, and — where no supervisor can be installed —
 // says so instead of leaving the promise unkept.
 
-/** The one unit Graphyard installs for the loop; the master's harness rules name it exactly. */
-export const loopUnitName = 'graphyard-master.service';
+/**
+ * The loop's legacy unit name: what an install written before GY-1441 runs, kept as its recorded
+ * alias. A new install names its loop for itself (`graphyard-master-OWNER-NAME.service`,
+ * install/units.ts), and `loopUnitOf` reads the name a checkout recorded.
+ */
+export const loopUnitName = legacyLoopUnit;
+/** The loop unit the install at ROOT owns: its recorded name, or the legacy alias. */
+export const loopUnitOf = (root: string) => readInstallUnits(root).master;
 /** Long enough for the cycle's own bounded external calls to return before SIGKILL. */
 export const loopStopTimeoutSeconds = 120;
 export const loopRestartSeconds = 10;
@@ -728,6 +735,8 @@ export interface LoopUnitInput {
   repository: string;
   intervalSeconds: number;
   execPath?: string;
+  /** The unit name; the install's recorded one (install/units.ts) when omitted. */
+  unit?: string;
 }
 export interface LoopSupervisorHost {
   platform?: NodeJS.Platform;
@@ -959,9 +968,9 @@ export function unsupervisedInstruction(input: Pick<LoopUnitInput, 'root' | 'cli
 const supervisedUser = () => String(process.getuid?.() ?? userInfo().username);
 
 /** Read back what the supervisor reports about the unit, without changing anything. */
-function observeUnit(run: (command: string, args: string[]) => string) {
-  const enabled = supervisorState(run, ['--user', 'is-enabled', loopUnitName]);
-  const active = supervisorState(run, ['--user', 'is-active', loopUnitName]);
+function observeUnit(run: (command: string, args: string[]) => string, unit: string) {
+  const enabled = supervisorState(run, ['--user', 'is-enabled', unit]);
+  const active = supervisorState(run, ['--user', 'is-active', unit]);
   return {
     enabledState: enabled, activeState: active,
     enabled: enabled === null ? null : ['enabled', 'enabled-runtime', 'static', 'indirect', 'alias'].includes(enabled),
@@ -985,8 +994,9 @@ function observeUnit(run: (command: string, args: string[]) => string) {
 export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupervisorHost = {}, options: LoopSupervisorInstallOptions = {}): Promise<LoopSupervisorInstallation> {
   const support = supervisorSupport(host);
   const unitDirectory = loopUnitDirectory(host);
-  const unitPath = join(unitDirectory, loopUnitName);
-  if (!support.supported) return { supported: false, unit: loopUnitName, unitPath: null, installed: false, enabled: null, active: null, linger: null,
+  let loopUnit = input.unit ?? loopUnitOf(input.root);
+  let unitPath = join(unitDirectory, loopUnit);
+  if (!support.supported) return { supported: false, unit: loopUnit, unitPath: null, installed: false, enabled: null, active: null, linger: null,
     wrote: 'none', refused: null, performed: [], reason: support.reason, instruction: unsupervisedInstruction(input) };
   const run = supervisorRun(host);
   const text = loopUnitText(input);
@@ -996,20 +1006,23 @@ export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupe
     // Nothing was written; what is there is reported as observed, so setup never claims a state. A
     // refusal raised before the unit was read still reports the unit that exists, not `installed: false`.
     const present = existing !== null || existsSync(unitPath);
-    const observed = observeUnit(run);
-    return { supported: true, unit: loopUnitName, unitPath, installed: present, enabled: present ? observed.enabled : false, active: present ? observed.active : false,
+    const observed = observeUnit(run, loopUnit);
+    return { supported: true, unit: loopUnit, unitPath, installed: present, enabled: present ? observed.enabled : false, active: present ? observed.active : false,
       linger: null, wrote: 'refused', refused: refusal.message, performed: [], reason: `Installing the loop's supervisor was refused: ${refusal.message}`, instruction: refusal.instruction };
   };
   try {
     testSuiteHomeGuard(unitDirectory);
     assertCoordinatorCheckout(input.root, host);
   } catch (error) { if (error instanceof LoopSupervisorRefusal) return refused(error); throw error; }
+  // The install's own name, decided once and recorded beside its configuration (GY-1441): a second
+  // install on this host writes its own unit and never this one's.
+  const home = host.home ?? ((host.env ?? process.env).HOME?.trim() || homedir());
+  if (!input.unit) { loopUnit = (await resolveInstallUnits(input.root, input.repository, unitDirectory, home)).master; unitPath = join(unitDirectory, loopUnit); }
   try { existing = await readFile(unitPath, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   // A unit that runs another loop — a different checkout or launcher — is somebody's installation,
   // and a re-run of setup from elsewhere must not take it over silently. A unit for this loop whose
   // other settings changed (the watchdog window follows the interval) is rewritten as before.
   if (existing !== null && !options.replace) {
-    const home = host.home ?? ((host.env ?? process.env).HOME?.trim() || homedir());
     const differs = (['WorkingDirectory', 'ExecStart'] as const).filter(key => unitSetting(existing!, key, home) !== unitSetting(text, key, home));
     if (differs.length) return refused(new LoopSupervisorRefusal(
       `${unitPath} already runs a different loop (${differs.map(key => `${key}=${unitSetting(existing!, key, home) ?? '(missing)'}`).join(', ')}), not this checkout's (${differs.map(key => `${key}=${unitSetting(text, key, home)}`).join(', ')})`,
@@ -1027,21 +1040,21 @@ export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupe
     performed.push('systemctl --user daemon-reload');
   }
   // `enable --now` is the whole restart policy: enabled for every boot, started for this one.
-  run('systemctl', ['--user', 'enable', '--now', loopUnitName]);
-  performed.push(`systemctl --user enable --now ${loopUnitName}`);
+  run('systemctl', ['--user', 'enable', '--now', loopUnit]);
+  performed.push(`systemctl --user enable --now ${loopUnit}`);
   // A rewritten unit takes effect only when the service starts from it: `enable --now` leaves a
   // running loop on the old ExecStart and watchdog window, so it is restarted, and resumes from
   // the cursors it persists before and after every action.
-  if (wrote === 'updated' && options.restart !== false) { run('systemctl', ['--user', 'restart', loopUnitName]); performed.push(`systemctl --user restart ${loopUnitName}`); }
+  if (wrote === 'updated' && options.restart !== false) { run('systemctl', ['--user', 'restart', loopUnit]); performed.push(`systemctl --user restart ${loopUnit}`); }
   // An enabled unit still never runs if this user's manager stops at logout and does not start at
   // boot, so lingering is part of "comes back after a reboot". A host that refuses it is reported
   // rather than left looking supervised.
   let linger: boolean | null = null, lingerReason: string | null = null;
   try { run('loginctl', ['enable-linger']); linger = true; performed.push('loginctl enable-linger'); }
   catch (error) { linger = false; lingerReason = `the unit is enabled, but user lingering could not be turned on, so this user's systemd manager may not start at boot: ${detail(error)}`; }
-  const observed = observeUnit(run);
+  const observed = observeUnit(run, loopUnit);
   const unreadable = [observed.enabled === null ? 'enabled' : null, observed.active === null ? 'active' : null].filter(Boolean).join(' and ');
-  return { supported: true, unit: loopUnitName, unitPath, installed: true, enabled: observed.enabled, active: observed.active, linger,
+  return { supported: true, unit: loopUnit, unitPath, installed: true, enabled: observed.enabled, active: observed.active, linger,
     wrote, refused: null, performed, instruction: null,
     reason: [unreadable ? `systemd did not report whether the unit is ${unreadable}` : null, lingerReason].filter(Boolean).join('; ') || null };
 }
@@ -1057,7 +1070,7 @@ export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupe
  * that is not installed is left to `master init`; one that already matches is not touched.
  */
 export async function alignLoopUnit(input: LoopUnitInput, host: LoopSupervisorHost = {}): Promise<{ wrote: LoopSupervisorInstallation['wrote']; reason: string | null; unitPath: string }> {
-  const unitPath = join(loopUnitDirectory(host), loopUnitName);
+  const unitPath = join(loopUnitDirectory(host), input.unit ?? loopUnitOf(input.root));
   let existing: string | null = null;
   try { existing = await readFile(unitPath, 'utf8'); } catch { existing = null; }
   if (existing === null) return { wrote: 'none', reason: `${unitPath} is not installed; graphyard master init installs it`, unitPath };
@@ -1069,15 +1082,16 @@ export async function alignLoopUnit(input: LoopUnitInput, host: LoopSupervisorHo
 /** The same facts, observed rather than installed: what `master status` reports about supervision. */
 export async function loopSupervision(input: Pick<LoopUnitInput, 'root' | 'cliPath'>, host: LoopSupervisorHost = {}): Promise<LoopSupervision> {
   const support = supervisorSupport(host);
-  const unitPath = join(loopUnitDirectory(host), loopUnitName);
-  if (!support.supported) return { supported: false, unit: loopUnitName, unitPath: null, installed: false, enabled: null, active: null, linger: null,
+  const loopUnit = loopUnitOf(input.root);
+  const unitPath = join(loopUnitDirectory(host), loopUnit);
+  if (!support.supported) return { supported: false, unit: loopUnit, unitPath: null, installed: false, enabled: null, active: null, linger: null,
     reason: support.reason, instruction: unsupervisedInstruction(input), ...(support.unreachable ? { unreachable: true } : {}) };
   const run = supervisorRun(host);
   // Reading supervision must never be able to fail a report: an unreadable unit file is one signal
   // missing, and systemd's own answer below still decides whether a unit is installed.
   let installed = false;
   try { await readFile(unitPath, 'utf8'); installed = true; } catch { installed = false; }
-  const observed = observeUnit(run);
+  const observed = observeUnit(run, loopUnit);
   // A unit systemd knows by another path (a packaged or hand-placed one) is installed too.
   installed ||= observed.enabledState !== null && observed.enabledState !== 'not-found';
   const unreadable = [observed.enabled === null ? 'enabled' : null, observed.active === null ? 'active' : null].filter(Boolean).join(' and ');
@@ -1086,7 +1100,7 @@ export async function loopSupervision(input: Pick<LoopUnitInput, 'root' | 'cliPa
   // property and answers nothing, and the reboot half of the restart policy went unverified.
   let linger: boolean | null = null;
   try { const answer = run('loginctl', ['show-user', supervisedUser(), '--property=Linger', '--value']).trim().toLowerCase(); linger = answer === 'yes' ? true : answer === 'no' ? false : null; } catch { linger = null; }
-  return { supported: true, unit: loopUnitName, unitPath, installed, enabled: installed ? observed.enabled : false, active: installed ? observed.active : false, linger,
+  return { supported: true, unit: loopUnit, unitPath, installed, enabled: installed ? observed.enabled : false, active: installed ? observed.active : false, linger,
     instruction: null, reason: unreadable ? `systemd did not report whether the unit is ${unreadable}` : null };
 }
 

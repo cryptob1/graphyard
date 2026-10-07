@@ -1,11 +1,12 @@
 // Concern: session and worker harness permissions, and starting the master session.
 import { lstat, mkdir } from 'node:fs/promises';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readdirSync } from 'node:fs';
 import { dirname, resolve, basename } from 'node:path';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { nameForLaunch } from '../session-name.js';
-import { launchAuthorization } from '../repository-setup.js';
-import { type HarnessPlan, type HarnessRule, writeHarnessPermissions, masterHarnessPlan, harnessDecision, claudeRuleProblem } from '../harness.js';
+import { executorUnitDirectory, launchAuthorization } from '../repository-setup.js';
+import { type HarnessPlan, type HarnessRule, writeHarnessPermissions, masterHarnessPlan, harnessDecision, claudeRuleProblem, bashRuleMatches } from '../harness.js';
+import { executorInstance, legacyLoopUnit, readInstallUnits } from '../install/units.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { coordinatorCheckoutRoot, workerConfinementRefusal } from './profiles.js';
@@ -25,19 +26,14 @@ import { verificationEnvironment, verificationSlotsDirectory } from './verificat
  * deployment it verifies, and re-running CI for a candidate. None of these reaches a merge, a
  * verdict, evidence, or a credential; the enforced boundaries are unchanged.
  */
-function withMasterOwnedRules(plan: HarnessPlan, config: MasterConfig): HarnessPlan {
+function withMasterOwnedRules(plan: HarnessPlan, config: MasterConfig, root: string, unitDirectory: string): HarnessPlan {
   if (plan.harness === 'codex') return { ...plan, manual: `${plan.manual}# The master's own commands reach GitHub, Graphyard, the deployment and its private state beside\n# its credential, so start it with its broadest approval mode (master start codex adds these):\n#   --ask-for-approval never --sandbox workspace-write -c sandbox_workspace_write.network_access=true --add-dir ${JSON.stringify(dirname(config.credentialFile))}\n` };
   if (plan.harness !== 'claude') return plan;
   const workflows = [config.run.proofWorkflow, config.run.smokeWorkflow].filter((name): name is string => !!name);
+  const units = installUnitRules(root, unitDirectory);
   const owned: HarnessRule[] = [
     { rule: 'Read(./.graphyard/master.json)', why: 'Read the master configuration the loop runs from: profiles, agent environments, run settings. It holds paths to credentials, never their values. Changing it goes through master config, which writes only the fields the master owns.' },
-    { rule: 'Bash(systemctl --user restart graphyard-master.service)', why: 'Restart the durable loop after a configuration or CLI change; it resumes from its persisted cursors. The unit is exact, so no other unit can be named.' },
-    { rule: 'Bash(systemctl --user start graphyard-master.service)', why: 'Start the durable loop when master status reports it is not running.' },
-    { rule: 'Bash(systemctl --user enable --now graphyard-master.service)', why: 'Re-enable and start the loop\'s own supervisor when master status reports the unit installed but disabled; without it nothing restarts the loop after a crash or a reboot. The unit is exact, so no other unit can be enabled.' },
-    { rule: 'Bash(systemctl --user stop graphyard-master.service)', why: 'Stop the durable loop before an upgrade; nothing is lost, its cursors are persisted before every action.' },
-    { rule: 'Bash(systemctl --user status graphyard-master.service)', why: 'Read whether the durable loop is running.' },
-    { rule: 'Bash(systemctl --user daemon-reload)', why: 'Reload the loop\'s user unit after it is edited.' },
-    { rule: 'Bash(journalctl --user -u graphyard-master.service:*)', why: 'Read the loop\'s launch, failover and refusal log; the unit is pinned to the loop\'s own.' },
+    ...units.allow,
     { rule: 'Bash(railway status:*)', why: 'Read which release the deployment serves while verifying a delivery.' },
     { rule: 'Bash(railway logs:*)', why: 'Read deployment logs when a release does not serve a delivery.' },
     { rule: 'Bash(railway deployment:*)', why: 'List deployments and their commits to find the exact release to verify or redeploy.' },
@@ -48,7 +44,44 @@ function withMasterOwnedRules(plan: HarnessPlan, config: MasterConfig): HarnessP
     { rule: 'Bash(gh run rerun:*)', why: 'Re-run a flaky or infrastructure-failed run on the same commit; the check still has to pass on that exact head.' },
     ...workflows.map(name => ({ rule: `Bash(gh workflow run ${name}:*)`, why: `Request the configured ${name} workflow by hand, as master run does; the provider runs it with its own trusted secret.` })),
   ];
-  return { ...plan, allow: [...plan.allow, ...owned.filter(entry => !plan.allow.some(existing => existing.rule === entry.rule))] };
+  return { ...plan, allow: [...plan.allow, ...owned.filter(entry => !plan.allow.some(existing => existing.rule === entry.rule))],
+    deny: [...plan.deny, ...units.deny.filter(entry => !plan.deny.some(existing => existing.rule === entry.rule))] };
+}
+
+/**
+ * The master's unit rules (GY-1441): every systemctl command it may run names this install's own
+ * loop unit exactly, and every other Graphyard unit on the host is denied, so a master started from
+ * a second install can never restart another install's loop or executors. A glob cannot say "every
+ * graphyard-* unit but mine", so the denies are the shapes that can never be this install's (the
+ * legacy names for a per-install unit, the per-install names for a legacy alias) plus every other
+ * install's unit found installed beside it; a deny that would match one of the install's own
+ * commands is dropped, since in Claude Code a deny beats the allow.
+ */
+export function installUnitRules(root: string, unitDirectory: string): { allow: HarnessRule[]; deny: HarnessRule[] } {
+  const units = readInstallUnits(root), master = units.master;
+  const allow: HarnessRule[] = [
+    { rule: `Bash(systemctl --user restart ${master})`, why: 'Restart the durable loop after a configuration or CLI change; it resumes from its persisted cursors. The unit is this install\'s own, exact, so no other unit can be named.' },
+    { rule: `Bash(systemctl --user start ${master})`, why: 'Start the durable loop when master status reports it is not running.' },
+    { rule: `Bash(systemctl --user enable --now ${master})`, why: 'Re-enable and start the loop\'s own supervisor when master status reports the unit installed but disabled; without it nothing restarts the loop after a crash or a reboot. The unit is exact, so no other unit can be enabled.' },
+    { rule: `Bash(systemctl --user stop ${master})`, why: 'Stop the durable loop before an upgrade; nothing is lost, its cursors are persisted before every action.' },
+    { rule: `Bash(systemctl --user status ${master})`, why: 'Read whether the durable loop is running.' },
+    { rule: 'Bash(systemctl --user daemon-reload)', why: 'Reload the loop\'s user unit after it is edited.' },
+    { rule: `Bash(journalctl --user -u ${master}:*)`, why: 'Read the loop\'s launch, failover and refusal log; the unit is pinned to the loop\'s own.' },
+  ];
+  const why = 'Another Graphyard installation on this host owns this unit; restarting, stopping or enabling it would disrupt that install\'s loop or executors (GY-1441).';
+  const shapes = units.alias ? ['graphyard-master-*', 'graphyard-executor-*'] : [`${legacyLoopUnit}*`, 'graphyard-master', 'graphyard-executor@*'];
+  const others: string[] = [];
+  try {
+    for (const name of readdirSync(unitDirectory)) {
+      if (name === master || name === units.executorTemplate) continue;
+      if (/^graphyard-master[A-Za-z0-9._-]*\.service$/.test(name)) others.push(name, `${name} *`, name.replace(/\.service$/, ''));
+      else if (/^graphyard-executor[A-Za-z0-9._-]*@\.service$/.test(name)) others.push(name.replace('@.service', '@*'));
+    }
+  } catch { /* no unit directory: only the structural shapes apply */ }
+  const own = [...allow.map(entry => /^Bash\((.*)\)$/.exec(entry.rule)![1].replace(/:\*$/, '')), ...[1, 2, 32].map(slot => `systemctl --user restart ${executorInstance(units, slot)}`)];
+  const deny = [...new Set([...shapes, ...others])].map(target => ({ rule: `Bash(systemctl --user * ${target})`, why }))
+    .filter(entry => !claudeRuleProblem(entry.rule) && !own.some(command => bashRuleMatches(entry.rule, command)));
+  return { allow, deny };
 }
 
 /**
@@ -314,9 +347,9 @@ const autonomyDeny = (credentialHome: string): HarnessRule[] => [
   { rule: 'Bash(*GRAPHYARD_APPROVER=*)', why: 'Only a launched approver session carries the approver marker; the master never claims it.' },
   { rule: `Edit(//${credentialHome}/**)`, why: 'Agent credentials are issued by onboarding and rotated through the API, never edited in place.' },
 ];
-export function masterHarness(root: string, config: MasterConfig, harness: string) {
+export function masterHarness(root: string, config: MasterConfig, harness: string, options: { unitDirectory?: string } = {}) {
   const credentialHome = dirname(dirname(config.credentialFile));
-  const plan = withMasterOwnedRules(masterHarnessPlan({ harness, root, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome }), config);
+  const plan = withMasterOwnedRules(masterHarnessPlan({ harness, root, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome }), config, root, options.unitDirectory ?? executorUnitDirectory());
   return plan.file ? { ...plan, deny: [...plan.deny, ...autonomyDeny(credentialHome)] } : plan;
 }
 

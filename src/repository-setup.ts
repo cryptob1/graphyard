@@ -12,6 +12,7 @@ import { documentationAssignment, documentationPolicySchema, parseRepositoryConf
 import { executorRunnableKinds, type NextActionKind } from './model/action-kinds.js';
 import { deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy } from './model/delivery-policy.js';
 import { renderReleasePipeline } from './install/release-pipeline.js';
+import { assertUnitOwned, executorGlob, executorInstance, executorInstancePattern, legacyExecutorTemplate, legacyInstallUnits, readInstallUnits, resolveInstallUnits, type InstallUnits } from './install/units.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
 
 export const hostIdSchema = z.string().trim().min(1).max(200);
@@ -620,9 +621,19 @@ export const executorDeclarationSchema = z.object({
 export type ExecutorDeclaration = z.infer<typeof executorDeclarationSchema>;
 export const defaultExecutorDeclaration: ExecutorDeclaration = { version: 1, count: 1, kinds: null, intervalSeconds: 5 };
 
-/** The template unit Graphyard ships, its installed name, and the instance one slot runs as. */
-export const executorUnitTemplate = 'graphyard-executor@.service';
-export const executorUnit = (slot: number) => `graphyard-executor@${slot}.service`;
+/**
+ * The template unit Graphyard ships, and the instance one slot runs as. The template is installed
+ * under the install's own name (`graphyard-executor-OWNER-NAME@.service`, GY-1441), or the legacy
+ * name an older install recorded as its alias; `units` says which, and defaults to the legacy one.
+ */
+export const executorUnitTemplate = legacyExecutorTemplate;
+export const executorUnit = (slot: number, units: Pick<InstallUnits, 'executorTemplate'> = legacyInstallUnits) => executorInstance(units, slot);
+/** The units the install at ROOT owns: recorded by `master init` or the first executor install. */
+async function executorInstallUnits(root: string, unitDirectory: string): Promise<InstallUnits> {
+  let repository: string | null = null;
+  try { const parsed = JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8')); repository = typeof parsed?.repository === 'string' ? parsed.repository : null; } catch { repository = null; }
+  return repository ? resolveInstallUnits(root, repository, unitDirectory) : readInstallUnits(root);
+}
 /** An executor started for a slot the declaration does not have exits with this status; the unit does not restart it. */
 export const executorSlotUndeclaredExit = 78;
 
@@ -713,30 +724,35 @@ export async function installExecutorSupervision(root: string, options: { count?
   const written = await writeExecutorDeclaration(primary, declaration);
   const run = options.run ?? systemctl;
   const manager = systemdUserManager(run);
-  const byHand = `copy examples/master/${executorUnitTemplate} to ~/.config/systemd/user/, edit WorkingDirectory and ExecStart to ${primary}, then systemctl --user daemon-reload && systemctl --user enable --now ${Array.from({ length: declaration.count }, (_, index) => executorUnit(index + 1)).join(' ') || '(no slot is declared)'}`;
+  const unitDirectory = options.unitDirectory ?? executorUnitDirectory();
+  const units = await executorInstallUnits(primary, unitDirectory);
+  const byHand = `copy examples/master/${executorUnitTemplate} to ~/.config/systemd/user/${units.executorTemplate}, edit WorkingDirectory and ExecStart to ${primary}, then systemctl --user daemon-reload && systemctl --user enable --now ${Array.from({ length: declaration.count }, (_, index) => executorUnit(index + 1, units)).join(' ') || '(no slot is declared)'}`;
   if (!manager.available) return { declaration, declarationFile: written.file, installed: false, reason: manager.reason, unitFile: null, units: [], disabled: [], merger, next: `Executors are not supervised on this host: ${manager.reason}. ${byHand}` };
   const template = options.template ?? await readFile(resolve(primary, 'examples/master', executorUnitTemplate), 'utf8');
-  const unitFile = resolve(options.unitDirectory ?? executorUnitDirectory(), executorUnitTemplate);
+  const unitFile = resolve(unitDirectory, units.executorTemplate);
+  // A template another checkout runs is that install's, and is never rewritten or restarted from here (GY-1441).
+  assertUnitOwned(unitFile, primary);
   const rendered = renderExecutorUnit(template, { root: primary, node: options.node ?? process.execPath });
   let current: string | null = null;
   try { current = await readFile(unitFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   if (current !== rendered) { await mkdir(dirname(unitFile), { recursive: true }); await atomicWrite(unitFile, rendered, 0o644); }
   run(['daemon-reload']);
-  const wanted = Array.from({ length: declaration.count }, (_, index) => executorUnit(index + 1));
+  const wanted = Array.from({ length: declaration.count }, (_, index) => executorUnit(index + 1, units));
   if (wanted.length) run(['enable', '--now', ...wanted]);
-  // Every instance the manager knows beyond the count: enabled earlier under a larger declaration.
+  // Every instance of this install's template the manager knows beyond the count: enabled earlier
+  // under a larger declaration. Another install's instances never match the install's own glob.
   const known = new Set<string>();
-  for (const listing of [['list-units', '--all', '--plain', '--no-legend', 'graphyard-executor@*.service'], ['list-unit-files', '--plain', '--no-legend', 'graphyard-executor@*.service']]) {
-    try { for (const match of run(listing).matchAll(/graphyard-executor@(\d+)\.service/g)) known.add(match[0]); } catch { /* an older systemctl without the glob; nothing to disable */ }
+  for (const listing of [['list-units', '--all', '--plain', '--no-legend', executorGlob(units)], ['list-unit-files', '--plain', '--no-legend', executorGlob(units)]]) {
+    try { for (const match of run(listing).matchAll(executorInstancePattern(units))) known.add(match[0]); } catch { /* an older systemctl without the glob; nothing to disable */ }
   }
   const disabled = [...known].filter(unit => !wanted.includes(unit)).sort();
   if (disabled.length) run(['disable', '--now', ...disabled]);
   // A slot reads its kinds once, at start: a changed kind list reaches the running slots only by a restart.
   const kindsChanged = JSON.stringify(existing?.kinds ?? null) !== JSON.stringify(declaration.kinds);
   if ((current !== rendered || kindsChanged) && wanted.length) run(['restart', ...wanted]);
-  const units = wanted.map((unit, index) => ({ slot: index + 1, unit, active: activeState(run, unit) }));
-  return { declaration, declarationFile: written.file, installed: true, reason: null, unitFile, units, disabled, merger,
-    next: declaration.count ? `${declaration.count} executor slot(s) run under systemd; journalctl --user -u 'graphyard-executor@*' -f follows them, and node scripts/graphyard-executor.mjs --install --count N changes the count` : 'No executor slot is declared, so no action of any kind runs on this host; node scripts/graphyard-executor.mjs --install --count 1 declares one' };
+  const slots = wanted.map((unit, index) => ({ slot: index + 1, unit, active: activeState(run, unit) }));
+  return { declaration, declarationFile: written.file, installed: true, reason: null, unitFile, units: slots, disabled, merger,
+    next: declaration.count ? `${declaration.count} executor slot(s) run under systemd; journalctl --user -u '${executorGlob(units)}' -f follows them, and node scripts/graphyard-executor.mjs --install --count N changes the count` : 'No executor slot is declared, so no action of any kind runs on this host; node scripts/graphyard-executor.mjs --install --count 1 declares one' };
 }
 
 function activeState(run: SystemctlRunner, unit: string) {
@@ -753,7 +769,11 @@ export async function executorSupervisionStatus(root: string, run: SystemctlRunn
   let declaration: ExecutorDeclaration | null = null, error: string | null = null;
   try { declaration = await readExecutorDeclaration(root); } catch (failure) { error = failure instanceof Error ? failure.message : String(failure); }
   let manager = systemdUserManager(run);
-  let units = declaration && manager.available ? Array.from({ length: declaration.count }, (_, index) => ({ slot: index + 1, unit: executorUnit(index + 1), active: activeState(run, executorUnit(index + 1)) })) : [];
+  let unitsRoot = root, owned: InstallUnits | null = null;
+  try { unitsRoot = connectionRoots(root)[0]; } catch { /* a checkout with no connection reads its own record */ }
+  // An unreadable record names no slot rather than guessing another install's units (GY-1441).
+  try { owned = readInstallUnits(unitsRoot); } catch (failure) { error ??= failure instanceof Error ? failure.message : String(failure); }
+  let units = declaration && manager.available && owned ? Array.from({ length: declaration.count }, (_, index) => ({ slot: index + 1, unit: executorUnit(index + 1, owned!), active: activeState(run, executorUnit(index + 1, owned!)) })) : [];
   // A manager that stopped answering between the two reads is no manager: its slots are unknown, not down (GY-1428).
   const lost = units.find(entry => entry.active === 'unreachable');
   if (lost) { manager = { available: false, reason: `no systemd user manager answers on this host (systemctl --user is-active ${lost.unit} could not reach it)` }; units = []; }

@@ -63,7 +63,7 @@ export async function hostSupervisionStep(cycle: Cycle) {
     else if (row && since(key) >= slotWindowMs) { delete actions[key]; await effects.persist(state); }
   }
   if (heal.loop && heal.loop !== 'active') {
-    const detail = `The systemd user manager answers, but the loop's unit is ${heal.loop}: this loop runs outside it, so the host stays unsupervised until the loop is stopped and its unit started (systemctl --user enable --now ${loopUnitName}); the loop never starts it under itself, which would run a second loop`;
+    const detail = `The systemd user manager answers, but the loop's unit is ${heal.loop}: this loop runs outside it, so the host stays unsupervised until the loop is stopped and its unit started (systemctl --user enable --now ${heal.loopUnit ?? loopUnitName}); the loop never starts it under itself, which would run a second loop`;
     if (detailChanged(actions[hostLoopUnitKey], detail)) await note(hostLoopUnitKey, 'waiting', detail, 1);
   } else if (heal.loop && actions[hostLoopUnitKey]) { delete actions[hostLoopUnitKey]; await effects.persist(state); }
 }

@@ -124,7 +124,7 @@ async function installed() {
   const root = await temporaryDirectory('runtime-screens'), credentials = await temporaryDirectory('runtime-screens-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
-  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'w1V' }, coordinatorStatus as typeof fetch);
   const homes = await temporaryDirectory('runtime-screens-homes');
   const opencodeHome = join(homes, 'opencode-a');
   await mkdir(join(opencodeHome, 'opencode'), { recursive: true });

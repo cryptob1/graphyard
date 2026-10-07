@@ -100,7 +100,7 @@ async function installed() {
   const root = await temporaryDirectory('consent'), credentials = await temporaryDirectory('consent-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
-  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'w1V' }, coordinatorStatus as typeof fetch);
   const token = async (name: string) => { const file = join(credentials, `${name}.token`); await writeFile(file, `${name}-token-`.padEnd(40, 'x'), { mode: 0o600 }); return file; };
   return { root, token, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); } };
 }
@@ -186,7 +186,7 @@ test('unit:consent-prompt-detected — a launched session stopped on a first-run
       assert.equal(dispatched.started, 'awaiting consent');
       assert.equal(dispatched.consent.awaiting!.prompt, held.awaiting!.prompt);
       assert.equal(dispatched.consent.awaiting!.pane, 'w1V:pC1');
-      assert.equal(dispatched.consent.awaiting!.attach, 'herdr pane attach w1V:pC1 --workspace wE');
+      assert.equal(dispatched.consent.awaiting!.attach, 'herdr pane attach w1V:pC1 --workspace w1V');
     } finally { await cleanup(); }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
@@ -270,7 +270,7 @@ test('integration:known-consent-answered-unknown-escalated — the launcher answ
     const items = consentHoldItems([assigned, join(root, 'elsewhere')], { work: [leased], now: new Date().toISOString() });
     assert.equal(items.length, 1);
     assert.equal(items[0].subject, 'GY-130');
-    for (const fragment of ['GY-130 epoch 1', 'pane w1V:pC1', 'is awaiting consent', 'Sign in with ChatGPT', 'herdr pane attach w1V:pC1 --workspace wE', 'credential prompt is outside it']) assert.ok(items[0].text.includes(fragment), fragment);
+    for (const fragment of ['GY-130 epoch 1', 'pane w1V:pC1', 'is awaiting consent', 'Sign in with ChatGPT', 'herdr pane attach w1V:pC1 --workspace w1V', 'credential prompt is outside it']) assert.ok(items[0].text.includes(fragment), fragment);
     assert.equal(items[0].role, 'human'); assert.equal(items[0].humanOnly, 'issuing credentials to people');
     assert.equal(items[0].text, dispatched.consent.awaiting!.attention);
     // Once the lease no longer holds that epoch the hold raises nothing.
