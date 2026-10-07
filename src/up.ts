@@ -2,12 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { hostname } from 'node:os';
 import { dirname, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { goalSubmission, setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
 import { actionsDirectory, agentBrowserPage, browserProfileMode, passSudo, recordingPage, submitSudoCode, sudoInstruction, sudoProtectedPage, sudoStateSchema, takeSudoCode, type BrowserPage, type BrowserProfileMode, type RecordedStep, type SudoOptions, type SudoState } from './master-browser.js';
 import { appImportRoute } from './github-setup.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
+import { fileOnboardingWork, onboardingChecks } from './onboarding.js';
+import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
 
 /**
  * `graphyard up` (GY-1419): every machine step of a first installation, in order — preflight,
@@ -71,6 +74,8 @@ export type UpEvent =
   | { kind: 'step'; step: UpStep; state: 'start' | 'done' | 'skipped'; detail?: string }
   | { kind: 'waiting'; setupUrl: string; waitingFor: SetupItemId[]; sentence: string }
   | { kind: 'handoff'; step: UpStep; sentence: string; url: string | null; code: string | null }
+  /** GY-1478: the onboarding pull request is the current setup step: its URL, what it waits for and how long it has waited. */
+  | { kind: 'onboarding'; wait: OnboardingWait }
   | { kind: 'note'; text: string };
 
 /** What a device step hands to a person, or that it completed. */
@@ -105,6 +110,15 @@ export interface UpDependencies {
   publishOnboarding(): Promise<{ pullRequest: string } | null>;
   /** Whether the onboarding pull request at URL has merged, so the base branch carries the delivery workflows. */
   onboardingMerged(url: string): Promise<boolean>;
+  /**
+   * File the onboarding pull request at URL as a work item the loop owns (GY-1478), with the
+   * operator's admin credential in OPERATOR_TOKEN_FILE and request id REQUESTID (fixed across
+   * reruns, so it is filed once): the loop's reviewer reviews it and the control plane merges it
+   * under the normal gates. Null when no admin credential is on this machine.
+   */
+  fileOnboarding?(url: string, operatorTokenFile: string | null, requestId: string): Promise<{ key: string } | null>;
+  /** The control plane's work items, as the master identity reads them; null while none answers. */
+  work?(): Promise<any[] | null>;
   /** Agent mode: drive the App manifest page at URL in the master's browser profile, recorded as a master browser flow. */
   driveApp?(url: string, handoff: Handoff): Promise<DriveOutcome>;
   pollMs?: number;
@@ -124,6 +138,8 @@ export interface UpResult {
   prompts: number;
   handoffs: { step: UpStep; sentence: string; url: string | null; code: string | null }[];
   checklist: { id: SetupItemId; done: boolean; line: string }[];
+  /** The onboarding pull request's work item as last read while up waited on it (GY-1478), or null. */
+  onboarding: OnboardingWait | null;
   goal: string | null;
   next: string;
 }
@@ -143,6 +159,9 @@ interface UpState {
   goalRequest?: string | null;
   /** The pull request that publishes the onboarding files, until it merges. */
   onboardingPullRequest?: string | null;
+  /** The work item that pull request is filed as (GY-1478), and the request id that files it once. */
+  onboardingWork?: string | null;
+  onboardingRequest?: string | null;
 }
 export const upStateFile = (root: string) => resolve(root, '.graphyard/up.json');
 
@@ -191,7 +210,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   const pollMs = deps.pollMs ?? 5_000;
   const humanWaitMs = deps.humanWaitMs ?? upWaitMs(request);
   const machineWaitMs = deps.machineWaitMs ?? 600_000;
-  let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null), claim: string | null = null;
+  let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null), claim: string | null = null, onboarding: OnboardingWait | null = null;
   const handoffs: UpResult['handoffs'] = [];
   const handedOff = new Set<string>();
   const handoff = (step: UpStep): Handoff => (sentence, link) => {
@@ -366,7 +385,15 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // delivered, so they are published as a pull request (the base is protected, never pushed to).
       const published = await deps.publishOnboarding().catch((error: any) => { throw new UpStop(`onboarding: publishing the onboarding files failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard up to retry`, upExitCodes.failed); });
       state.onboardingPullRequest = published?.pullRequest ?? null;
-      return published ? `delivery workflow applied and published in ${published.pullRequest}` : 'delivery workflow applied; the base branch already holds it';
+      if (!published) return 'delivery workflow applied; the base branch already holds it';
+      // GY-1478: the pull request is filed as a work item the loop owns, so its reviewer reviews it,
+      // the checks run and it merges under the normal gates; branch protection never waits on a person.
+      if (!state.onboardingWork) {
+        if (!state.onboardingRequest) { state.onboardingRequest = randomUUID(); await writeState(deps.root, state); }
+        const filed = await (deps.fileOnboarding?.(published.pullRequest, state.operatorTokenFile ?? null, state.onboardingRequest) ?? Promise.resolve(null)).catch((error: any) => { throw new UpStop(`onboarding: filing ${published.pullRequest} as a work item failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard up to retry`, upExitCodes.failed); });
+        state.onboardingWork = filed?.key ?? null;
+      }
+      return `delivery workflow applied and published in ${published.pullRequest}${state.onboardingWork ? `, filed as ${state.onboardingWork} for the loop to review and merge` : ''}`;
     });
 
     await step('accounts', async () => {
@@ -393,11 +420,20 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     if (state.onboardingPullRequest) {
       const pullRequest = state.onboardingPullRequest;
       const deadline = deps.now() + humanWaitMs;
+      let shown = '';
       for (let polls = 0; !(await deps.onboardingMerged(pullRequest)); polls++) {
-        if (polls === 0) deps.emit({ kind: 'note', text: `Waiting for the onboarding pull request ${pullRequest} to merge: it adds Graphyard's delivery workflows to the base branch.` });
-        if (deps.now() >= deadline) throw new UpStop(`Still waiting for the onboarding pull request ${pullRequest} to merge; rerun ${rerun()} to resume`, upExitCodes.waiting);
+        if (polls === 0) deps.emit({ kind: 'note', text: `Waiting for the onboarding pull request ${pullRequest} to merge: it adds Graphyard's delivery workflows to the base branch.${state.onboardingWork ? ` The loop reviews and merges it as ${state.onboardingWork}.` : ''}` });
+        // The current setup step (GY-1478 AC-2): the item's URL, what it waits for, how long; shown again whenever what it waits for changes.
+        const work = state.onboardingWork ? findOnboardingWork(await deps.work?.().catch(() => null), state.onboardingWork) : null;
+        if (work) {
+          onboarding = onboardingWait(work, deps.now(), request.repository);
+          if (onboarding.waitingFor.join() !== shown) { shown = onboarding.waitingFor.join(); deps.emit({ kind: 'onboarding', wait: onboarding }); }
+          if (onboarding.closed) throw new UpStop(`onboarding: ${onboarding.key} (${pullRequest}) was closed without merging, so the base branch lacks Graphyard's delivery workflows; reopen and merge it, or publish them again, then rerun ${rerun()}`, upExitCodes.failed);
+        }
+        if (deps.now() >= deadline) throw new UpStop(`Still waiting for the onboarding pull request ${pullRequest} to merge${onboarding ? ` (${onboarding.key} waits for ${onboarding.waitingFor.join(' and ')}, ${waitedFor(onboarding.waitedMs)} so far)` : ''}; rerun ${rerun()} to resume`, upExitCodes.waiting);
         await deps.sleep(pollMs);
       }
+      if (onboarding) onboarding = { ...onboarding, waitingFor: [], merged: true };
       state.onboardingPullRequest = null; await writeState(deps.root, state);
     }
     if (request.goalFile) {
@@ -420,7 +456,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   }
 
   function result(ok: boolean, exitCode: number, next: string): UpResult {
-    return { ok, exitCode, setupUrl, completed: [...state.completed], prompts, handoffs, checklist: last.map(({ id, done, line }) => ({ id, done, line })), goal: state.goal, next };
+    return { ok, exitCode, setupUrl, completed: [...state.completed], prompts, handoffs, checklist: last.map(({ id, done, line }) => ({ id, done, line })), onboarding, goal: state.goal, next };
   }
 }
 
@@ -678,7 +714,7 @@ export async function mintSignIn(server: string, file: string | null, fetcher: t
 
 /** What `init --scan --apply` writes and the manual flow commits (docs/setup-from-zero.md, step 6). */
 export const onboardingFiles = ['AGENTS.md', '.gitignore', 'graphyard.json', '.github/workflows'] as const;
-export const onboardingBranch = 'graphyard/onboarding';
+export { onboardingBranch };
 
 /**
  * Publish the onboarding files as one commit on the base branch's tip, on `graphyard/onboarding`,
@@ -746,6 +782,17 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     root, emit, serverUrl, masterToken, children,
     publishOnboarding: () => publishOnboarding(root, request.repository, (program, args, env) => execFileSync(program, args, { cwd: root, encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env: { ...process.env, ...env } } : {}) })),
     onboardingMerged: async url => execFileSync('gh', ['pr', 'view', url, '--json', 'state', '--jq', '.state'], { encoding: 'utf8', timeout: 60_000 }).trim() === 'MERGED',
+    fileOnboarding: async (url, operatorTokenFile, requestId) => {
+      const server = await serverUrl();
+      let token = '';
+      try { token = operatorTokenFile ? (await readFile(operatorTokenFile, 'utf8')).trim() : ''; } catch { /* no credential on this machine */ }
+      if (!server || token.length < 32) return null;
+      return fileOnboardingWork({ server, token, url, checks: await onboardingChecks(root), host: hostname(), path: resolve(root, '.graphyard', 'onboarding'), requestId });
+    },
+    work: async () => {
+      const url = await serverUrl(), token = await masterToken();
+      return url && token ? (await planeRequest(url, token)('work-snapshot'))?.work ?? null : null;
+    },
     signIn: async file => { const url = await serverUrl(); return url ? mintSignIn(url, file) : null; },
     operatorToken: async file => { if (!file) return null; try { const token = (await readFile(file, 'utf8')).trim(); return token.length >= 32 ? token : null; } catch { return null; } },
     sleep: ms => new Promise(accept => setTimeout(accept, ms)), now: () => Date.now(),
@@ -777,6 +824,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
 export function describeUpEvent(event: UpEvent) {
   if (event.kind === 'step') return event.state === 'start' ? `→ ${event.step}` : `${event.state === 'done' ? '✓' : '·'} ${event.step}${event.detail ? `: ${event.detail}` : ''}`;
   if (event.kind === 'waiting') return `\n${event.sentence}\n`;
+  if (event.kind === 'onboarding') return !event.wait.waitingFor.length ? `· onboarding: ${event.wait.key}: ${event.wait.line}` : `· onboarding: ${event.wait.key} (${event.wait.url ?? 'its pull request'}) waits for ${event.wait.waitingFor.join(' and ')}, ${waitedFor(event.wait.waitedMs)} so far; the loop reviews and merges it`;
   if (event.kind === 'handoff') return `NEEDS YOU: ${event.sentence}${event.code ? ` (code ${event.code})` : ''}${event.url ? ` — ${event.url}` : ''}`;
   return event.text;
 }
