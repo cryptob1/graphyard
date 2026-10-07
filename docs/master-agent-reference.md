@@ -3,7 +3,7 @@
 
 ## Items, scope and human waits
 
-Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (flags before `--` refused). Auto-granted if grounded: docs; files criteria or follow-ups name; `web/`/`browser-tests/` for `docs/`-planning items; files review findings name; tests pinning planned text; symbol definitions; successors; companions (docs-budget gate, timing baseline, importing tests, planned modules' imports and importers). An `approve-scope` executor or the loop decides; standing decisions replay; else an approver judges (a partial grant's rest: same cycle). `master scope GY-N [--allow-broad-scope] REASON` applies refused requests (needs reason) save one the approver holds (routed, or refused <15 min ago: `master decisions`); leases stay (`--wait` reads outcome). Ending attempts (submit, release, lapse, rework, requirements) close open/refused requests as `attempt ended`; `master unblock GY-N` closes stale ones. Human decisions: `park GY-N EPOCH KIND NEEDED [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you), answered via `graphyard answer GY-N …`).
+Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (flags before `--` refused). Auto-granted if grounded: docs; files criteria or follow-ups name; `web/`/`browser-tests/` for `docs/`-planning items; files review findings name; tests pinning planned text; symbol definitions; successors; companions (docs-budget gate, timing baseline, importing tests, planned modules' imports and importers). An `approve-scope` executor or the loop decides (standing decisions replay), else approvers judge (a partial grant's rest: same cycle). `master scope GY-N [--allow-broad-scope] REASON` applies refused requests save one the approver holds (routed, or refused <15 min ago: `master decisions`); leases stay (`--wait` reads it). Ending attempts (submit, release, lapse, rework, requirements) close open/refused requests (`attempt ended`); `master unblock GY-N` closes stale ones. Human decisions: `park GY-N EPOCH KIND NEEDED --ask ASK [--step STEP]… [--why WHY] [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you), `graphyard answer GY-N …`).
 
 ## Conflict avoidance
 
@@ -19,7 +19,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 ## GitHub administration through the browser
 
-`master protection --apply` reconciles protection; where only a page exists, `master browser FLOW` drives the `master init --browser-profile` profile  (`master browser app-permissions`, `master browser installation-accept`, `master browser protection`):
+`master protection --apply` reconciles protection; where only a page exists, `master browser FLOW` drives the `master init --browser-profile` profile (`master browser app-permissions`, `master browser installation-accept`, `master browser protection`):
 
 | Flow | Effect
 | --- | ---
@@ -37,7 +37,7 @@ Missing/retired rules (`gh api *merge*`, `gh api graphql*`) are `harness` drift;
 
 ## Typed actions and executors
 
-One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units, claiming rows under their own credential; `master executors restart` moves them to the current release. Verified deployments move clean checkouts to the base tip, restart executors, then the loop (`upgrade` attention if dirty). A fenced executor (`POST /api/actions/presence`) or one renewing a claim still counts as alive, so it never reads as `Nothing can run KIND`. Every poll and renewal upserts the executor's row in `executor_presence` (never an event), so a redeployed control plane reads the fleet at once; an empty fleet is judged only on evidence — a poll heard, or rows in that table older than the 120s window (an empty table counts once recording that long, per a marker its first read writes) — never by process age.
+One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units, claiming rows under their own credential; `master executors restart` moves them to the current release. Verified deployments move clean checkouts to the base tip, restart executors, then the loop (`upgrade` attention if dirty). A fenced executor (`POST /api/actions/presence`) or one renewing a claim still counts as alive, never reading as `Nothing can run KIND`. Every poll and renewal upserts the executor's row in `executor_presence` (never an event), so a redeployed control plane reads the fleet at once; an empty fleet is judged only on evidence — a poll heard, or rows in that table older than the 120s window (an empty table counts once recording that long, per its first read's marker) — never by process age.
 
 A `resync` (`POST /api/work/:id/resync` `{ since }`) completes only on an observation newer than its claim.
 
