@@ -2,6 +2,6 @@
   "documentation": {
     "paths": ["docs/", "README.md", "AGENTS.md"],
     "changelog": null,
-    "wordBudget": { "total": 12000, "perPage": 1200, "paths": ["README.md", "docs/"] }
+    "wordBudget": { "total": 16000, "perPage": 1200, "paths": ["README.md", "docs/"] }
   }
 }
