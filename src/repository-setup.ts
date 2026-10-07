@@ -653,7 +653,7 @@ export function renderExecutorUnit(template: string, binding: { root: string; no
 }
 
 export type SystemctlRunner = (args: string[]) => string;
-const systemctl: SystemctlRunner = args => execFileSync('systemctl', ['--user', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 }).trim();
+export const systemctl: SystemctlRunner = args => execFileSync('systemctl', ['--user', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 }).trim();
 /** Whether this host has a systemd user manager to supervise with; the reason when it does not. */
 export function systemdUserManager(run: SystemctlRunner = systemctl): { available: boolean; reason: string | null } {
   if (process.platform !== 'linux') return { available: false, reason: `systemd user units are Linux-only; this host is ${process.platform}` };
@@ -741,7 +741,8 @@ export async function installExecutorSupervision(root: string, options: { count?
 
 function activeState(run: SystemctlRunner, unit: string) {
   try { return run(['is-active', unit]) || 'unknown'; }
-  catch (error) { const output = (error as { stdout?: string })?.stdout?.toString().trim(); return output || 'inactive'; }
+  // systemctl prints the state whenever it can ask; a failure that prints none never reached the manager (GY-1428).
+  catch (error) { const output = (error as { stdout?: string })?.stdout?.toString().trim(); return output || 'unreachable'; }
 }
 
 /**
@@ -751,8 +752,11 @@ function activeState(run: SystemctlRunner, unit: string) {
 export async function executorSupervisionStatus(root: string, run: SystemctlRunner = systemctl) {
   let declaration: ExecutorDeclaration | null = null, error: string | null = null;
   try { declaration = await readExecutorDeclaration(root); } catch (failure) { error = failure instanceof Error ? failure.message : String(failure); }
-  const manager = systemdUserManager(run);
-  const units = declaration && manager.available ? Array.from({ length: declaration.count }, (_, index) => ({ slot: index + 1, unit: executorUnit(index + 1), active: activeState(run, executorUnit(index + 1)) })) : [];
+  let manager = systemdUserManager(run);
+  let units = declaration && manager.available ? Array.from({ length: declaration.count }, (_, index) => ({ slot: index + 1, unit: executorUnit(index + 1), active: activeState(run, executorUnit(index + 1)) })) : [];
+  // A manager that stopped answering between the two reads is no manager: its slots are unknown, not down (GY-1428).
+  const lost = units.find(entry => entry.active === 'unreachable');
+  if (lost) { manager = { available: false, reason: `no systemd user manager answers on this host (systemctl --user is-active ${lost.unit} could not reach it)` }; units = []; }
   const down = units.filter(entry => entry.active !== 'active');
   const start = !declaration ? 'node scripts/graphyard-executor.mjs --install --count 1 declares and starts a supervised executor on this host'
     : !manager.available ? `node scripts/graphyard-executor.mjs --slot 1 (this host has no systemd user manager: ${manager.reason})`

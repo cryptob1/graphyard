@@ -1,4 +1,5 @@
 import { humanRequestBlocker } from './human-request.js';
+import { userBusRefusal } from './user-bus.js';
 import { RefusedResponse, planeUnavailable } from './refusal.js';
 import { blockedAttemptMarker } from './capacity.js';
 import { namedPaths, pathScopeContains, scopeRefusalBlocker, unplannedPaths } from './scope.js';
@@ -110,9 +111,6 @@ export function itemSpecificPlaneError(text: string | null | undefined) {
 const readOnlyFileSystem = /Read-only file system|\bEROFS\b/i;
 const fileRefusal = /\bEACCES\b|\bEPERM\b|Operation not permitted|Permission denied|unable to (?:append|create|write|unlink)|cannot write/i;
 const worktree = /\bworktree\b[^.]*\b(?:another|other|different|wrong|mismatch|belongs to|not (?:this|the) item|instead of)\b|\b(?:another|other|different|wrong) (?:item's )?(?:worktree|checkout)\b|attached to (?:the )?\S+ worktree|worktree mismatch/i;
-// GY-1406: what a worker meets when it asks the host's systemd user manager from inside its sandbox
-// (bwrap masks /run/user/UID/bus): the host's state cannot be read there, so the loop reads it.
-const hostSupervisor = /Failed to connect to (?:the )?(?:user scope )?bus\b|\bsystemctl --user\b[^.\n]*\b(?:fail\w*|refused)\b|\buser (?:scope )?bus\b[^.\n]*\bmask\w*|\bmask\w*[^.\n]*\/run\/user\/\d+\/bus\b/i;
 const suiteFailure = /\b(?:tests?|suites?|specs?|checks?|typecheck)\b[^.]*\b(?:fail\w*|red|broken)\b|\b(?:fail\w*|red|broken)\b[^.]*\b(?:tests?|suites?|specs?)\b/i;
 const outsideScope = /\boutside (?:(?:the|its|this item's|my) )?(?:plannedFiles|planned files|scope|item)|\bnot in (?:the |its )?(?:plannedFiles|planned files|scope)|\bunrelated\b|\bon (?:main|the base(?: branch)?)\b|\bpre-?existing\b/i;
 const scopeWords = /SCOPE NEEDED|\bplannedFiles\b|\bplanned[- ]files?\b|\bneeds? (?:the )?(?:file|files|scope)\b|\bscope (?:widening|request)\b|\boutside (?:the |its )?scope\b/i;
@@ -159,7 +157,7 @@ export function classifyBlocker(text: string | null | undefined, context: { huma
   if (dispatchFailureBlocker.test(blocker) && fleetIdleCause(blocker)) return { class: 'dispatch-failure', ...none };
   if (githubCredential(blocker)) return { class: 'github-credential', ...none };
   if (worktree.test(blocker)) return { class: 'worktree-mismatch', ...none };
-  if (hostSupervisor.test(blocker)) return { class: 'host-supervisor', ...none };
+  if (userBusRefusal.test(blocker)) return { class: 'host-supervisor', ...none };
   // A suite that fails outside the item is that, whatever its output says about servers or permissions.
   if (suiteFailure.test(blocker) && outsideScope.test(blocker)) return { class: 'outside-scope-test-failure', ...none };
   if (controlPlane.test(blocker)) return { class: 'control-plane-error', ...none };
