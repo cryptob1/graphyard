@@ -10,7 +10,7 @@ import { describeTmpReclaim, hostTmpRoots, reclaimTmpDirectories, testTempMinAge
 import { alignKey, upgradeTouchesCode } from './daemon/upgrade.js';
 import type { UpgradeStall } from './daemon/state.js';
 import { workerReclaimBoundMs, workerSubmissionBoundMs } from './model/attempt-bound.js';
-import { describePromotion, promotionOnSchedule, promotionWait, type PromotionWait } from './master/release-lag.js';
+import { describePromotion, promotionHolds, promotionWait, type PromotionWait } from './master/release-lag.js';
 import type { LoopState } from './daemon/liveness.js';
 import type { Work } from './model.js';
 import { runChild } from './child-runner.js';
@@ -392,7 +392,7 @@ export const resourceRegistry: ResourceDefinition[] = [
       // verified release serves yet (GY-1400): while the promotion that would serve them is on
       // schedule, the loop could not have loaded them, and a restart would reload the same release.
       const wait = input.upgrade?.promotion ?? null;
-      const promoting = !pending && !restarting && revision.behind > 0 && !!wait && wait.pending.length > 0 && sameCommit(revision.loaded, wait.deployedSha) && promotionOnSchedule(wait, input.now);
+      const promoting = !pending && !restarting && revision.behind > 0 && promotionHolds(wait, revision.loaded, input.now);
       // Why the owed restart cannot complete, beside the two revisions (GY-1445): a named cause and
       // its latest attempt, never a silent pin at the bound.
       const stalled = revision.behind > 0 ? input.upgrade?.stalled ?? null : null;
