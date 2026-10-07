@@ -10,6 +10,7 @@ import { workIdByRef } from './store/locked-read.js';
 import { reworkGroundFields, routineReworkGround, type ReworkGroundsWork } from './rework-grounds.js';
 import { containmentGraceMs, containmentSettleWaitBoundMs } from './model/containment.js';
 import { laneApprover } from './model/rework-ground.js';
+import { routedWideningDecision, wideningSettlement } from './model/scope-provenance.js';
 
 /**
  * Interventions read from the ledger (GY-98; see model/interventions.ts for the concept).
@@ -190,6 +191,8 @@ interface WorkState {
   quarantine: { seq: number; at: string; epoch: number; concernAt: string | null; stage: Stage | null } | null;
   escalations: Map<string, { seq: number; at: string; reason: string; actor: string; stage: Stage | null }>;
   human: { seq: number; at: string; id: string; kind: string; needed: string; stage: Stage | null } | null;
+  /** The reasons of the requirements decisions the loop routed to the approver (GY-1388), newest last. */
+  routed: string[];
 }
 const stageOf = (value: unknown): Stage | null => typeof value === 'string' ? value as Stage : null;
 const ms = (from: string, to: string) => Math.max(0, Date.parse(to) - Date.parse(from));
@@ -236,7 +239,7 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
   const states = new Map<string, WorkState>();
   const state = (id: string): WorkState => {
     let entry = states.get(id);
-    if (!entry) { const item = items.get(id); entry = { key: item?.key ?? null, title: item?.title ?? null, stage: null, plannedFiles: null, asks: [], reworkDecision: null, bypass: null, quarantine: null, escalations: new Map(), human: null }; states.set(id, entry); }
+    if (!entry) { const item = items.get(id); entry = { key: item?.key ?? null, title: item?.title ?? null, stage: null, plannedFiles: null, asks: [], reworkDecision: null, bypass: null, quarantine: null, escalations: new Map(), human: null, routed: [] }; states.set(id, entry); }
     return entry;
   };
   const interventions: Intervention[] = [], judgements: Judgement[] = [];
@@ -323,6 +326,15 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
           entry.asks = entry.asks.filter(ask => !(ask.kind === 'scope-request' && ask.paths.length > 0 && ask.paths.every(covers)));
           break;
         }
+        // A widening the control plane settled on its own — the loop's audited grounds, or the
+        // independent approver on an ask the loop routed (GY-1388) — is no signal, as an approved
+        // autoscope is not. It answers the asks it covers; a partly widened ask stays open, so the
+        // rest is one signal when somebody does step in, never a second one beside this.
+        const settled = widened ? wideningSettlement(details, entry.routed) : null;
+        if (settled) {
+          entry.asks = entry.asks.filter(ask => !(ask.kind === 'scope-request' && ask.paths.length > 0 && ask.paths.every(covers)) && !(settled === 'routed-approver' && ask.kind === 'blocked-report'));
+          break;
+        }
         const cleared = row.work ? !row.work.blocker : true;
         // An item at backlog or ready that no attempt has worked on, that nobody asked about and that
         // nothing blocked is being planned, not rescued: its coordinator revising the scope of work no
@@ -348,6 +360,7 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
       }
       case 'decision.requested': {
         if (row.payload?.action === 'rework') entry.reworkDecision = { seq: row.seq, at: row.at, id: row.payload.id, stage, binding: typeof row.payload.input?.binding === 'string' ? row.payload.input.binding : null };
+        if (routedWideningDecision(row.payload) && typeof row.payload.reason === 'string') entry.routed = [...entry.routed.slice(-4), row.payload.reason];
         break;
       }
       case 'decision.approved': {
