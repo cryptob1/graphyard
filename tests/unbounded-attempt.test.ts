@@ -141,36 +141,6 @@ test('unit:inside-bound-no-fault — no fault and no lease stop inside the bound
   assert.match(unsubmittedFaults(attempt(90, {}, now), now)[0].text, /past 120 minutes with no submission the loop stops renewing the lease$/);
 });
 
-test('unit:scope-wait-not-unbounded — an attempt waiting on its own scope request, undecided or refused by the widening rule, is not past the bound; once its request is answered, a refusal by the independent approver included, the bound runs from the answer (GY-1472)', async () => {
-  const { noSubmissionRenewalRefused, unsubmittedAttempt } = await bound();
-  const now = Date.now();
-  const claimed = iso(-150 * minute, now), asked = iso(-149 * minute, now);
-  const request = { epoch: 1, paths: ['newtop-18/next.ts'], reason: 'the file this change touches', requestedBy: 'worker-a', at: asked };
-  const refusal = { state: 'refused' as const, reason: 'no fold represents the ask', at: iso(-148 * minute, now), decidedBy: 'graphyard', waitedMs: minute, paths: request.paths, requestedBy: 'worker-a', requestedAt: asked };
-  // Undecided, and refused with the request left open: the attempt waits on that decision, and its renewal stands.
-  const undecided = attempt(150, { scopeRequest: request }, now);
-  assert.equal(unsubmittedAttempt(undecided, now), null);
-  assert.deepEqual(unsubmittedFaults(undecided, now), []);
-  const refused = attempt(150, { scopeRequest: { ...request, decision: refusal }, scopeDecision: refusal }, now);
-  assert.equal(unsubmittedAttempt(refused, now), null, 'a refused ask standing for the master is not a stalled worker');
-  assert.equal(noSubmissionRenewalRefused(refused, now), false, 'the server keeps renewing it');
-  // An independent approver's refusal is final even while it stays on the request: the bound runs from it, so a worker ignoring it is still reclaimed.
-  const final = (minutesAgo: number) => { const decision = { ...refusal, decidedBy: 'graphyard-approver', at: iso(-minutesAgo * minute, now) }; return attempt(150, { scopeRequest: { ...request, decision }, scopeDecision: decision }, now); };
-  assert.equal(unsubmittedAttempt(final(50), now), null, 'fifty minutes since the approver refused is inside the bound');
-  const ignored = unsubmittedAttempt(final(140), now);
-  assert.ok(ignored?.reclaim && ignored.boundFrom === iso(-140 * minute, now), 'a worker ignoring the final refusal is reclaimed from it');
-  assert.equal(noSubmissionRenewalRefused(final(140), now), true, 'and the server refuses its renewal');
-  // An earlier attempt's request does not cover this one.
-  assert.ok(unsubmittedAttempt(attempt(150, { scopeRequest: { ...request, epoch: 0 } }, now), now)?.reclaim);
-  // Answered after 100 minutes of waiting: the bound runs from the answer, not the claim.
-  const answeredAt = (minutesAgo: number) => attempt(150, { scopeDecision: { ...refusal, state: 'approved', at: iso(-minutesAgo * minute, now) } }, now);
-  assert.equal(unsubmittedAttempt(answeredAt(50), now), null, 'fifty minutes since the answer is inside the bound');
-  const past = unsubmittedAttempt(answeredAt(130), now);
-  assert.ok(past?.reclaim && past.boundFrom === iso(-130 * minute, now) && past.claimedAt === claimed, 'past both bounds from the answer');
-  // A decision on a request asked before this attempt's claim moves nothing.
-  assert.equal(unsubmittedAttempt(attempt(150, { scopeDecision: { ...refusal, state: 'approved', requestedAt: iso(-200 * minute, now), at: iso(-10 * minute, now) } }, now), now)?.boundFrom, claimed);
-});
-
 function cycleFor(state: DaemonState, config: MasterConfig, effects: Partial<DaemonEffects>, item: Work, now = Date.now()): Cycle {
   return { config, state, effects: effects as DaemonEffects, now: Date.now, snapshot: { work: [item], now: iso(0, now) }, clock: now, clockOffset: { min: 0, max: 0 },
     performed: [], isolate: async (_kind: string, _item: unknown, _key: string, fn: () => Promise<unknown>) => fn(), agents: [], open: [item] } as unknown as Cycle;

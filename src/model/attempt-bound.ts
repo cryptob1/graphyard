@@ -17,8 +17,6 @@ export const submissionProgressCadenceMs = 15 * 60_000;
 
 export interface UnsubmittedAttempt {
   key: string; epoch: number; owner: string; claimedAt: string;
-  /** Where the bound runs from: the claim, or the answer to the attempt's own scope request when that came later (GY-1472). */
-  boundFrom: string;
   /** How far past the worker bound the attempt is. */
   pastBoundMs: number;
   /** The lease's expiry as read: past the bound, the renewal evidence. */
@@ -36,20 +34,6 @@ function attemptClaimedAt(work: Work, epoch: number): string | null {
   const attempts = work.pipeline?.attempts ?? [];
   const claimed = (work.lastAssignment?.epoch === epoch ? work.lastAssignment.claimedAt : null) ?? attempts.find(attempt => attempt.epoch === epoch)?.claimedAt ?? null;
   return claimed && Number.isFinite(Date.parse(claimed)) ? claimed : null;
-}
-/**
- * GY-1472: an attempt waiting on its own scope request — undecided, or refused by the widening rule
- * (`decidedBy` graphyard) and so with the independent approver or left open for the master, its
- * escalation standing — is waiting on that decision, not stalled, so the bound does not run (null).
- * Ending it would only launch an attempt that asks the same paths again, deciding the one request
- * twice. An independent approver's refusal is the final answer the worker acts on, though it stays
- * on the request: like any answer, the bound runs from it. Otherwise from the claim.
- */
-function boundStartedAt(work: Work, epoch: number, claimedAt: string): string | null {
-  const own = work.scopeRequest?.epoch === epoch ? work.scopeRequest : null;
-  if (own && (!own.decision || own.decision.decidedBy === 'graphyard')) return null;
-  const answered = own?.decision ?? work.scopeDecision;
-  return answered && Date.parse(answered.requestedAt) >= Date.parse(claimedAt) && Date.parse(answered.at) > Date.parse(claimedAt) ? answered.at : claimedAt;
 }
 /**
  * When the loop first observed the candidate's current head (GY-1460): set by the observation
@@ -87,18 +71,17 @@ export function unsubmittedAttempt(work: Work, now: number): UnsubmittedAttempt 
   const lease = work.lease;
   if (!lease || work.stage === 'done' || isClosed(work) || work.submission?.epoch === lease.epoch) return null;
   const claimedAt = attemptClaimedAt(work, lease.epoch);
-  const boundFrom = claimedAt && boundStartedAt(work, lease.epoch, claimedAt);
-  if (!claimedAt || !boundFrom) return null;
-  const pastBoundMs = now - Date.parse(boundFrom) - workerSubmissionBoundMs;
+  if (!claimedAt) return null;
+  const pastBoundMs = now - Date.parse(claimedAt) - workerSubmissionBoundMs;
   if (pastBoundMs <= 0) return null;
   // A lease that lapsed inside the bound was never held past it: the lapse and containment path owns that attempt.
-  if (Date.parse(lease.expiresAt) - Date.parse(boundFrom) <= workerSubmissionBoundMs) return null;
+  if (Date.parse(lease.expiresAt) - Date.parse(claimedAt) <= workerSubmissionBoundMs) return null;
   const progressAt = submissionProgressAt(work, lease.epoch, lease.owner, claimedAt);
   if (progressAt && now - Date.parse(progressAt) <= submissionProgressCadenceMs) return null;
   const handle = (work.sessions ?? []).find(entry => entry.kind === 'implementation' && entry.id === `${lease.owner}:${lease.epoch}`);
   const observed = handle?.observed && handle.observedAt ? { state: handle.observed, at: handle.observedAt } : handle ? { state: handle.state, at: handle.updatedAt } : null;
-  return { key: work.key, epoch: lease.epoch, owner: lease.owner, claimedAt, boundFrom, pastBoundMs, leaseExpiresAt: lease.expiresAt, live: Date.parse(lease.expiresAt) > now,
-    session: observed, progressAt, reclaim: now - Date.parse(boundFrom) > workerReclaimBoundMs };
+  return { key: work.key, epoch: lease.epoch, owner: lease.owner, claimedAt, pastBoundMs, leaseExpiresAt: lease.expiresAt, live: Date.parse(lease.expiresAt) > now,
+    session: observed, progressAt, reclaim: now - Date.parse(claimedAt) > workerReclaimBoundMs };
 }
 /**
  * The server's backstop to the worker bound (GY-1462): the loop ends an attempt past
@@ -107,10 +90,10 @@ export function unsubmittedAttempt(work: Work, now: number): UnsubmittedAttempt 
  * containment and reclaim. Like every no-submission bound, it derives from `workerSubmissionBoundMs` here.
  */
 export const workerNoSubmissionRefusalMs = workerReclaimBoundMs + 10 * 60_000;
-/** Whether `work`'s attempt is past the renewal refusal: past the worker bound unsubmitted, with no fresh submission progress, held `workerNoSubmissionRefusalMs` since the bound started. */
+/** Whether `work`'s attempt is past the renewal refusal: past the worker bound unsubmitted, with no fresh submission progress, held `workerNoSubmissionRefusalMs` since its claim. */
 export function noSubmissionRenewalRefused(work: Work, now: number): boolean {
   const attempt = unsubmittedAttempt(work, now);
-  return !!attempt && now - Date.parse(attempt.boundFrom) >= workerNoSubmissionRefusalMs;
+  return !!attempt && now - Date.parse(attempt.claimedAt) >= workerNoSubmissionRefusalMs;
 }
 /**
  * Whether a lapsed `lease` ran to the no-submission refusal unsubmitted: its last renewal kept it
@@ -123,8 +106,7 @@ export function lapsedAtNoSubmissionBound(work: Pick<Work, 'submission'> & Parti
   const assignment = work.lastAssignment?.epoch === lease.epoch ? work.lastAssignment.claimedAt : null;
   const claimedAt = assignment ?? work.pipeline?.attempts?.find(attempt => attempt.epoch === lease.epoch)?.claimedAt ?? null;
   const expiresAt = Date.parse(lease.expiresAt);
-  const boundFrom = claimedAt && Number.isFinite(Date.parse(claimedAt)) ? boundStartedAt(work as Work, lease.epoch, claimedAt) : null;
-  if (!claimedAt || !boundFrom || expiresAt - Date.parse(boundFrom) < workerNoSubmissionRefusalMs) return false;
+  if (!claimedAt || !Number.isFinite(Date.parse(claimedAt)) || expiresAt - Date.parse(claimedAt) < workerNoSubmissionRefusalMs) return false;
   const progressAt = submissionProgressAt(work as Work, lease.epoch, lease.owner ?? '', claimedAt);
   return !progressAt || expiresAt - Date.parse(progressAt) > submissionProgressCadenceMs;
 }
