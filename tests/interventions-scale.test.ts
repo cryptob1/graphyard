@@ -2,6 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { readFile } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import EmbeddedPostgres from 'embedded-postgres';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -11,7 +12,9 @@ import { reportPoolConnections, reportStatementTimeoutMs } from '../src/store/re
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Observation, Principal, Work } from '../src/model.js';
-import { interventionLedgerKinds, interventionLedgerLimit, readInterventionLedger, type InterventionLedgerRow } from '../src/interventions.js';
+import * as interventions from '../src/interventions.js';
+import { interventionLedgerKinds, interventionLedgerLimit, openPatternItems, readInterventionLedger, type InterventionLedgerRow } from '../src/interventions.js';
+import { interventionPolicyDefaults } from '../src/model/interventions.js';
 
 /**
  * GY-491. GY-422 bounded the intervention report to its window, but every row of that window still
@@ -308,4 +311,86 @@ test('unit:report-pool-isolated — the report routes run on their own small poo
     await assert.rejects(strict.reportPool.query('SELECT pg_sleep(2)'), /statement timeout/);
     await strict.pool.query('SELECT pg_sleep(0.6)');
   } finally { await strict.close(); }
+});
+
+/**
+ * GY-1381. The pattern scan was turned off in production because its ledger read held the whole
+ * reconciliation tick (2026-09-23). The seeded store is topped up to the size the item names —
+ * 500,000 events and 5,000 items, the extra events the routine rows a busy week writes inside the
+ * window and the extra items settled deliveries — and one scan, run on its own timer beside the
+ * tick, reads the policy window through the (kind, created_at) index, finishes within 2 s, and a
+ * claim and a heartbeat started while it runs each finish within 500 ms.
+ */
+test('integration:intervention-scan-bounded — openPatternItems reads only the policy window through an index and runs beside the tick: over 500,000 events and 5,000 items one scan completes in under 2 s while a concurrent claim and heartbeat each complete in under 500 ms', async () => {
+  const TOTAL_EVENTS = 500_000, TOTAL_ITEMS = 5_000;
+  // The settled deliveries that make up the rest of the fleet.
+  const existingItems = (await store.pool.query('SELECT count(*)::int AS n FROM work_items')).rows[0].n as number;
+  const settled = Array.from({ length: TOTAL_ITEMS - existingItems }, (_, index) => {
+    const item = ITEMS + 1 + index, at = iso(seededAt - 60 * day + index * 1_000);
+    return { id: uuid(item), key: `GY-${item}`, title: `Delivered item GY-${item}`, description: 'Shipped. '.repeat(20), type: 'feature', priority: 2, dependencies: [],
+      criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:holds'] }], policy: { checks: ['test'], review: true }, plannedFiles: [`src/done-${item}.ts`], revision: 9, policyRevision: 1,
+      createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, stage: 'done', lease: null, blocker: null, escalations: [], candidate: null, submission: null,
+      delivery: { mergedAt: at }, evidence: [], sessions: [], gates: [], violations: [], observation: null, workspaces: [], pipeline: { attempts: [], submittedAt: null, reworkRounds: 0, interventions: { blocked: 0, requirements: 0 } } };
+  });
+  for (let from = 0; from < settled.length; from += 500)
+    await store.pool.query('INSERT INTO work_items(id, document) SELECT (d->>\'id\')::uuid, d FROM jsonb_array_elements($1::jsonb) AS d', [JSON.stringify(settled.slice(from, from + 500))]);
+  // The routine rows a busy window writes: heartbeats and observations, none of a kind the scan reads.
+  const existingEvents = (await store.pool.query('SELECT count(*)::int AS n FROM events')).rows[0].n as number;
+  const extra = TOTAL_EVENTS - existingEvents;
+  await store.pool.query(`INSERT INTO events(work_id, actor, kind, payload, created_at)
+    SELECT ('00000000-0000-4491-8000-' || lpad((1 + g % $2)::text, 12, '0'))::uuid, $3, CASE WHEN g % 2 = 0 THEN 'heartbeat' ELSE 'github.observed' END,
+      jsonb_build_object('details', jsonb_build_object('pass', g)), to_timestamp($4::double precision / 1000) - make_interval(secs => ($1 - g) * 0.5)
+    FROM generate_series(1, $1::int) AS g`, [extra, ITEMS, worker.id, seededAt]);
+  await store.pool.query('ANALYZE');
+  const sized = (await store.pool.query('SELECT (SELECT count(*)::int FROM events) AS events, (SELECT count(*)::int FROM work_items) AS items')).rows[0];
+  assert.ok(sized.events >= TOTAL_EVENTS, `${sized.events} events`); assert.equal(sized.items, TOTAL_ITEMS);
+
+  // The window read goes through the (kind, created_at) index and reads nothing older than the policy window.
+  const policy = interventionPolicyDefaults;
+  const statements: { text: string; values?: unknown[] }[] = [];
+  const db = { query: ((text: string, values?: unknown[]) => { statements.push({ text, values }); return store.reportPool.query(text, values); }) as pg.Pool['query'] };
+  const since = iso(seededAt - policy.windowDays * day);
+  const windowed = await readInterventionLedger(db, { since });
+  assert.ok(windowed.rows.length > 0 && windowed.rows.every(row => row.at >= iso(Date.parse(since) - 3_600_000)), 'every folded row lies inside the policy window');
+  const plan = JSON.stringify((await store.pool.query(`EXPLAIN (FORMAT JSON) ${statements[0].text}`, statements[0].values)).rows[0]);
+  assert.match(plan, /events_kind_created/, 'the window is read through the (kind, created_at) index');
+  assert.doesNotMatch(plan, /"Node Type": "Seq Scan"[^}]*"Relation Name": "events"/, 'the events table is never scanned whole');
+
+  // A claimable item, and a leased one to renew.
+  const key = () => randomUUID();
+  const ready = async (title: string) => engine.execute(operator, 'ready', (await engine.execute(operator, 'create', null, { title, plannedFiles: ['src/scan.ts'], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:holds'] }] }, key())).id, {}, key());
+  const claimable = await ready('Pattern scan beside the tick: claim');
+  const leased = await engine.execute(worker, 'claim', (await ready('Pattern scan beside the tick: heartbeat')).id, {}, key());
+
+  // The server runs the scan on its own timer and the reconciliation tick never awaits it.
+  const main = await readFile(new URL('../src/server/main.ts', import.meta.url), 'utf8');
+  const tick = main.slice(main.indexOf('startReconciliation(async step =>'), main.indexOf('}, 2000);'));
+  assert.ok(tick.length > 0 && !/openPatternItems|synthesizeRetro/.test(tick), 'the reconciliation tick does not run the pattern scan');
+  assert.match(main, /startPatternScan\(async \(\) => \{\s*for \(const work of \(await openPatternItems\(/, 'the server starts the pattern scan beside the tick');
+
+  // The scan on its own timer, as the server runs it; the test triggers the due run instead of waiting a minute.
+  let opened: Work[] = [], scanMs = 0;
+  // Read through the namespace so a base without the export fails as a test case, not at import.
+  assert.equal(typeof (interventions as Record<string, unknown>).startPatternScan, 'function', 'the server has a pattern scan of its own beside the tick');
+  const scanner = interventions.startPatternScan(async () => { const started = performance.now(); opened = (await openPatternItems(engine, policy)).opened; scanMs = performance.now() - started; }, { intervalMs: 3_600_000, env: {} });
+  try {
+    const scan = scanner.run();
+    assert.ok(scanner.running, 'the scan is running');
+    const timed = async <T>(run: () => Promise<T>) => { const started = performance.now(); const result = await run(); return { result, ms: performance.now() - started, during: scanner.running }; };
+    const [claim, heartbeat] = await Promise.all([
+      timed(() => engine.execute(worker, 'claim', claimable.id, {}, key())),
+      timed(() => engine.execute(worker, 'heartbeat', leased.id, { epoch: leased.epoch }, key())),
+    ]);
+    await scan;
+    assert.equal(claim.result.lease?.owner, worker.id, 'the claim took the lease');
+    assert.ok(heartbeat.result.revision > leased.revision, 'the heartbeat renewed the lease');
+    assert.ok(claim.during && heartbeat.during, 'the claim and the heartbeat ran while the scan did');
+    assert.ok(claim.ms < 500, `the claim took ${Math.round(claim.ms)}ms beside the scan`);
+    assert.ok(heartbeat.ms < 500, `the heartbeat took ${Math.round(heartbeat.ms)}ms beside the scan`);
+    assert.ok(scanMs > 0 && scanMs < 2_000, `one scan took ${Math.round(scanMs)}ms over ${sized.events} events and ${sized.items} items`);
+    assert.ok(opened.length > 0, 'the seeded window crosses a pattern and the scan opens its item');
+    // A second scan finds the item standing and opens nothing.
+    await scanner.run();
+    assert.deepEqual(opened, []);
+  } finally { await scanner.stop(); }
 });
