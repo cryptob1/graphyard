@@ -279,6 +279,22 @@ test('unit:lane-sets-required-gates — a low- or medium-lane rework is applied 
   assert.equal((await store.list()).find(item => item.id === high.id)!.reworkRequested, false);
 });
 
+// GY-1394: a high-lane rework whose ground the record shows on the exact head — here GitHub
+// reports the candidate conflicting with its base — is applied as it is requested too.
+test('unit:rework-ground-recorded — a high-lane rework the record grounds is applied with no approver decision', { timeout: 120_000 }, async () => {
+  const { engine, store, master, call, submitted } = await lanes();
+  const paths = ['src/server/routes/grounded.ts'];
+  const work = await submitted('grounded-rework', paths);
+  assert.equal(work.lane, 'high');
+  const observation = { ...observed(paths), candidate: { ...work.candidate! }, conflicting: true, prState: 'open' as const };
+  await engine.observe(work.id, (await store.list()).find(item => item.id === work.id)!.revision, observation);
+  const decision = await call(master.token, `work/${work.key}/decide`, { action: 'rework', input: { previousWorkerStopped: true }, reason: 'GitHub reports a conflict with the base' });
+  assert.equal(decision.state, 'applied', 'the record is the ground: no approver decision is needed');
+  assert.equal(decision.approvedBy, 'graphyard-risk-lane');
+  assert.match(decision.approvalReason, /GitHub reports candidate .* conflicting with its base, so the record is the rework's ground/);
+  assert.equal((await store.list()).find(item => item.id === work.id)!.reworkRequested, true);
+});
+
 // GY-1110 AC-1: a lane-approved rework whose application recorded no outcome is resumed by the
 // server on the next request for the item, without the original idempotency key, and lands applied.
 test('unit:lane-rework-interrupted-resumes — the next request for the item resumes an interrupted lane rework', { timeout: 120_000 }, async () => {
