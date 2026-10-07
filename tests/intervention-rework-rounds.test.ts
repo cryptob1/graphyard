@@ -40,7 +40,7 @@ function rowsOf(instance: Instance, workId = randomUUID()): InterventionLedgerRo
     if (approved) rows.push({ seq: approved.seq, workId, actor: approved.actor, kind: 'decision.approved', at: approved.at, details: undefined, stageBefore: 'review',
       payload: { id: instance.decision.id, action: 'rework', approver: { id: approved.actor, role: approved.role }, requestedBy: 'graphyard-master-graphyard-operator' } });
   }
-  rows.push({ seq: instance.rework.seq, workId, actor: instance.rework.actor, kind: 'rework', at: instance.rework.at, details: { reason: 'the loop returns the candidate to a worker', previousWorkerStopped: true }, stageBefore: 'review', work: { ...work, stage: 'build' } });
+  rows.push({ seq: instance.rework.seq, workId, actor: instance.rework.actor, kind: 'rework', at: instance.rework.at, details: { reason: 'the loop returns the candidate to a worker', previousWorkerStopped: true }, stageBefore: 'review', work: { ...work, stage: 'build' }, grounds: { candidate: work.candidate } as InterventionLedgerRow['grounds'] });
   return rows;
 }
 
@@ -70,16 +70,21 @@ test('unit:rework-by-hand-still-counted — a rework requested without grounds, 
   // A master's hand request (no grounds binding) is a coordinator stepping in, whoever approved it.
   const hand = reworks(rowsOf({ ...grounded, decision: { ...grounded.decision!, binding: null } }));
   assert.deepEqual(hand.map(entry => [entry.trigger, entry.stage, entry.blocked]), [['decision', 'review', `candidate ${'a'.repeat(12)} (PR #7)`]]);
-  // A person approving the loop's request did the approver's job.
-  assert.equal(reworks(rowsOf({ ...grounded, decision: { ...grounded.decision!, approved: { ...grounded.decision!.approved!, actor: 'human-operator', role: 'admin' } } })).length, 1);
-  // So did one approving the loop's failed-check round, which the fold otherwise reads as CI's own (GY-1387).
-  const ci = { ...grounded.decision!, binding: `${'a'.repeat(40)}:ci:test` };
-  assert.equal(reworks(rowsOf({ ...grounded, decision: ci })).length, 0);
-  assert.equal(reworks(rowsOf({ ...grounded, decision: { ...ci, approved: { ...ci.approved!, actor: 'human-operator', role: 'admin' } } })).length, 1);
+  // A round on a ground the loop acts on by itself, situated on the head it returns, is routine whoever approved it (GY-1386).
+  const byHand = { actor: 'human-operator', role: 'admin' };
+  assert.equal(reworks(rowsOf({ ...grounded, decision: { ...grounded.decision!, approved: { ...grounded.decision!.approved!, ...byHand } } })).length, 0);
+  // One whose binding no routine ground reads (an older head, an unsituated review binding) is the loop's round only when its own
+  // approver applied it: a person approving it did the approver's job.
+  const unsituated = { ...grounded.decision!, binding: `review:3:${'a'.repeat(12)}:${'b'.repeat(12)}:A new independent approval is required` };
+  assert.equal(reworks(rowsOf({ ...grounded, decision: unsituated })).length, 0);
+  assert.equal(reworks(rowsOf({ ...grounded, decision: { ...unsituated, approved: { ...unsituated.approved!, ...byHand } } })).length, 1);
+  const olderHead = { ...grounded.decision!, binding: `${'c'.repeat(40)}:verdict:graphyard-reviewer[bot]` };
+  assert.equal(reworks(rowsOf({ ...grounded, decision: olderHead })).length, 0);
+  assert.equal(reworks(rowsOf({ ...grounded, decision: { ...olderHead, approved: { ...olderHead.approved!, ...byHand } } })).length, 1);
   // A rework command with no decision behind it is an operator's by hand.
   assert.deepEqual(reworks(rowsOf({ ...grounded, decision: null })).map(entry => entry.trigger), ['direct']);
-  // A blocked report the rework answers is somebody stepping in, grounded request or not.
-  const workId = randomUUID(), rows = rowsOf(grounded, workId);
+  // A blocked report the rework answers is somebody stepping in, unless the round answers a ground the loop acts on by itself (GY-1386).
+  const workId = randomUUID(), rows = rowsOf({ ...grounded, decision: unsituated }, workId);
   rows.unshift({ seq: 5, workId, actor: 'implementer', kind: 'blocked', at: at(-10), details: { reason: 'the fixture needs an answer' }, stageBefore: 'review', work: { key: 'GY-HAND', stage: 'review', blocker: 'the fixture needs an answer' } });
   assert.deepEqual(reworks(rows).map(entry => entry.trigger), ['blocked-report']);
   // Waiting: a hand request still waiting is an open signal; the loop's grounded one waiting on its own approver is not.
@@ -89,12 +94,15 @@ test('unit:rework-by-hand-still-counted — a rework requested without grounds, 
   assert.deepEqual(waiting(null).map(entry => entry.resolvedAt), [null]);
 });
 
-test('unit:rework-reach-serves-window-outcomes — a decision row read from the reach before the window is folded only when a row inside the window names the same decision or a rework inside it may apply it; a request that only waited before the window is no signal of it', () => {
+test('unit:rework-reach-serves-window-outcomes — a decision row read from the reach before the window is folded only when a row inside the window names the same decision (the application an in-window rework is recorded with); a request that only waited before the window, or an earlier decision of an item reworked directly, is no signal of it', () => {
   const since = '2026-10-06T00:00:00.000Z', before = '2026-10-05T12:00:00.000Z', inside = '2026-10-06T06:00:00.000Z';
   const row = (seq: number, kind: string, work: string, at: string, id?: string) => ({ seq, kind, work_id: work, created_at: at, top: id ? { id } : null });
   const rows = [row(1, 'decision.requested', 'w1', before, 'd1'), row(2, 'decision.requested', 'w2', before, 'd2'), row(3, 'decision.requested', 'w3', before, 'd3'), row(4, 'decision.approved', 'w3', before, 'd3'),
-    row(5, 'rework', 'w1', inside), row(6, 'decision.withdrawn', 'w2', inside, 'd2'), row(7, 'decision.requested', 'w4', before, 'd4')];
-  assert.deepEqual(interventions.windowOutcomes(rows, since).map(entry => entry.seq), [1, 2, 5, 6], 'w3 settled and w4 only waited before the window opened');
+    row(5, 'rework', 'w1', inside), row(6, 'decision.applied', 'w1', inside, 'd1'), row(7, 'decision.withdrawn', 'w2', inside, 'd2'), row(8, 'decision.requested', 'w4', before, 'd4'),
+    row(9, 'decision.requested', 'w5', before, 'd5'), row(10, 'rework', 'w5', inside)];
+  assert.deepEqual(interventions.windowOutcomes(rows, since).map(entry => entry.seq), [1, 2, 5, 6, 7, 10], 'w3 settled and w4 only waited before the window opened');
+  // A rework inside the window is linked only to the decision its own application names: w5's earlier request is not its.
+  assert.ok(!interventions.windowOutcomes(rows, since).some(entry => entry.seq === 9), 'a direct rework is never associated with an earlier decision of the same item');
 });
 
 // The 26 linked instances a master requested by hand, each judged on the work document the ledger
@@ -212,15 +220,20 @@ async function ok(credential: string, method: 'GET' | 'POST', path: string, body
   return JSON.parse(text);
 }
 /** A submitted candidate observed touching two top-level areas: the medium lane, whose rework the risk lane applies. */
-async function submitted(title: string) {
+async function submitted(title: string, test: 'failure' | 'success' = 'failure', reviews: Observation['reviews'] = []) {
   const n = ++serial;
   let work = await engine.execute(operator, 'create', null, { title: `${title} ${n}`, plannedFiles: ['src/a.ts', 'docs/a.md'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }] }, id());
   work = await engine.execute(operator, 'ready', work.id, {}, id());
+  return attempt(work, 900 + n, test, reviews);
+}
+/** The next attempt on the item: claimed, submitted and observed on a fresh head. */
+async function attempt(work: Work, pr: number, test: 'failure' | 'success', reviews: Observation['reviews']) {
   work = await engine.execute(worker, 'claim', work.id, {}, id());
-  work = await engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'rounds-host', path: `/tmp/rounds/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-${work.epoch}` }, id());
-  work = await engine.execute(worker, 'submit', work.id, { epoch: work.epoch, pr: 900 + n }, id());
-  const observation: Observation = { clockOffset: { min: 0, max: 0 }, candidate: { sha: sha(work.key), baseSha: 'b'.repeat(40), pr: work.submission!.pr, branch: work.workspaces[0].branch, author: worker.id },
-    checks: [{ name: 'test', result: 'failure', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }], reviews: [], protected: true, mergeable: true, merged: false, mergeSha: null,
+  work = await engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'rounds-host', path: `/tmp/rounds/${work.id}/${work.epoch}`, branch: work.workspaces[0]?.branch ?? `graphyard/${work.key.toLowerCase()}-${work.epoch}` }, id());
+  work = await engine.execute(worker, 'submit', work.id, { epoch: work.epoch, pr: work.submission?.pr ?? pr }, id());
+  const head = sha(`${work.key}:${work.epoch}`);
+  const observation: Observation = { clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: 'b'.repeat(40), pr: work.submission!.pr, branch: work.workspaces.at(-1)!.branch, author: worker.id },
+    checks: [{ name: 'test', result: test, appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }], reviews: reviews.map(review => ({ ...review, sha: head })), protected: true, mergeable: true, merged: false, mergeSha: null,
     baseTip: 'b'.repeat(40), baseTree: '7e'.repeat(20), files: ['src/a.ts', 'docs/a.md'], at: new Date().toISOString() };
   return engine.observe(work.id, work.revision, observation);
 }
@@ -232,21 +245,33 @@ test('integration:rework-review-rounds-report — the loop\'s grounded rework ap
   const applied = await rework(loop, { binding: `${loop.candidate!.sha}:ci:test` });
   assert.equal(applied.state, 'applied', 'the medium lane applies a rework as it is requested');
   assert.equal(applied.approvedBy, 'graphyard-risk-lane');
-  const hand = await submitted('hand-round');
+  // Neither of these heads shows a ground the loop acts on by itself (GY-1386): its checks passed and nobody requested changes.
+  const hand = await submitted('hand-round', 'success');
   assert.equal((await rework(hand, {})).state, 'applied');
-  // A binding is the loop's provenance only from the loop's identity: a person sending one is still stepping in.
-  const forged = await submitted('forged-round');
-  assert.equal((await rework(forged, { binding: `${forged.candidate!.sha}:ci:test` }, token(operator))).state, 'applied');
+  // A binding no routine ground reads is the loop's provenance only from the loop's identity: a person sending one is still stepping in.
+  const forged = await submitted('forged-round', 'success');
+  assert.equal((await rework(forged, { binding: `review:3:${forged.candidate!.sha.slice(0, 12)}:A new independent approval is required` }, token(operator))).state, 'applied');
+  const unsituated = await submitted('unsituated-round', 'success');
+  assert.equal((await rework(unsituated, { binding: `review:3:${unsituated.candidate!.sha.slice(0, 12)}:A new independent approval is required` })).state, 'applied');
 
   const report = await ok(token(coordinator), 'GET', 'interventions?window=7') as InterventionReport;
   assert.deepEqual(reworksOf(report, loop.key), [], 'the loop\'s own review round is no signal');
   assert.deepEqual(reworksOf(report, hand.key).map(entry => entry.trigger), ['decision'], 'a coordinator\'s hand request is one');
   assert.deepEqual(reworksOf(report, forged.key).map(entry => entry.trigger), ['decision'], 'a binding from a person\'s credential is no loop provenance');
+  assert.deepEqual(reworksOf(report, unsituated.key), [], 'the loop\'s request on grounds no routine rule reads, applied by its risk lane, is its own round');
 
   // Past the review-round cap the loop's request is kept for its independent approver: no lane applies it (GY-1118).
-  const capped = await submitted('capped-round');
+  // The record must show what the binding names: here the reviewer's change request standing on the head, a round past the first.
+  const blocking: Observation['reviews'] = [{ reviewer: 'graphyard-reviewer[bot]', sha: '', state: 'CHANGES_REQUESTED', id: 77, body: 'BLOCKING: AC-1 is not met' }];
+  const first = await submitted('capped-round', 'success', blocking);
+  assert.equal((await rework(first, { binding: `${first.candidate!.sha}:verdict:graphyard-reviewer[bot]` })).state, 'applied');
+  const capped = await attempt((await store.list()).find(item => item.id === first.id)!, 990, 'success', blocking);
   const requested = await rework(capped, { binding: `${capped.candidate!.sha}:capped:graphyard-reviewer[bot]` });
   assert.deepEqual([requested.state, requested.approvedBy ?? null], ['requested', null], 'the risk lane does not apply a capped round');
+  // A capped binding the record does not bear out holds nothing: the lane applies the rework as it would any other.
+  const notCapped = await submitted('not-capped-round');
+  const laneApplied = await rework(notCapped, { binding: `${notCapped.candidate!.sha}:capped:graphyard-reviewer[bot]` });
+  assert.deepEqual([laneApplied.state, laneApplied.approvedBy], ['applied', 'graphyard-risk-lane'], 'a binding text alone does not stall a lane rework');
 
   // The boundary: request and approval a day and more before the window — beyond the reach — the rework inside it.
   const early = await submitted('early-round');

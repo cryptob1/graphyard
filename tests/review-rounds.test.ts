@@ -214,7 +214,13 @@ test('unit:review-rounds-capped — a change request past the cap is read for BL
   const round = neededDecision(changed(3, 'BLOCKING: AC-1 is not met'), config)!;
   assert.deepEqual([round.action, round.binding], ['rework', cappedReworkBinding(H, reviewer)]);
   assert.match(round.reason, /names a blocking finding on [0-9a-f]{12}: AC-1 is not met\. Past the review-round cap only an independent approver sends the head back/);
-  assert.ok(cappedRework({ binding: round.binding }) && !cappedRework({ binding: `${H}:verdict:${reviewer}` }), 'the server keeps it for the approver');
+  const standing = changed(3, 'BLOCKING: AC-1 is not met');
+  assert.ok(cappedRework({ binding: round.binding }, standing) && !cappedRework({ binding: `${H}:verdict:${reviewer}` }, standing), 'the server keeps it for the approver');
+  // The binding is the requester's text: it holds the round only while the record shows the capped change request it names.
+  assert.ok(!cappedRework({ binding: round.binding }, changed(0, 'BLOCKING: AC-1 is not met')), 'not past a review round');
+  assert.ok(!cappedRework({ binding: cappedReworkBinding(H, 'someone-else') }, standing), 'not the reviewer whose request stands');
+  assert.ok(!cappedRework({ binding: cappedReworkBinding('c'.repeat(40), reviewer) }, standing), 'not the current head');
+  assert.ok(!cappedRework({ binding: round.binding }, { ...standing, observation: { ...standing.observation!, reviews: [] } }), 'no change request stands');
   assert.equal(neededDecision({ ...changed(3, 'BLOCKING: AC-1 is not met'), reworkRequested: true }, config), null, 'once the round is applied the item needs a worker, not a second decision');
   // A loop without the decision effects still escalates it for a master to request.
   assert.match(cappedEscalation({ key: 'GY-64' }, blocking), /an independent approver decides whether the finding is blocking — graphyard master decide GY-64 rework REASON/);
