@@ -141,7 +141,29 @@ async function atomicWrite(file: string, content: string, mode: number) {
   const temporary = `${file}.${randomUUID()}.tmp`;
   await writeFile(temporary, content, { mode, flag: 'wx' }); await rename(temporary, file); await chmod(file, mode);
 }
-export async function setupRepository(root: string, input: Connection, options: { herdr?: boolean; runHerdr?: (args: string[]) => string; fetcher?: typeof fetch; executors?: false | { run?: SystemctlRunner; unitDirectory?: string; node?: string } } = {}) {
+/**
+ * The server Herdr's `graphyard` plugin is bound to on this machine, read from the config.json its
+ * config directory holds; null when the plugin has no configuration (never linked) or Herdr cannot
+ * say where it keeps one. A host already running a Graphyard install has one, and linking the
+ * plugin for another server would silently repoint it (GY-1413).
+ */
+export async function herdrPluginBinding(runHerdr: (args: string[]) => string | Promise<string>): Promise<{ configDirectory: string; url: string } | null> {
+  let configDirectory: string;
+  try { configDirectory = String(await runHerdr(['plugin', 'config-dir', 'graphyard'])).trim(); } catch { return null; }
+  if (!configDirectory || !isAbsolute(configDirectory) || /[\r\n\0]/.test(configDirectory)) return null;
+  let config: any;
+  try { config = JSON.parse(await readFile(resolve(configDirectory, 'config.json'), 'utf8')); } catch { return null; }
+  return typeof config?.url === 'string' && config.url ? { configDirectory, url: config.url } : null;
+}
+
+const urlOrigin = (value: string) => { try { return new URL(value).origin; } catch { return value; } };
+
+/** The refusal for a plugin bound to another server, shared by `init --herdr` and `install --apply`. */
+export function herdrRebindRefusal(bound: string, target: string, flag = '--herdr-rebind') {
+  return `Herdr's graphyard plugin on this machine is bound to ${bound}; linking it for ${target} would repoint every Herdr session there with a new worker token. Rerun with ${flag} to repoint it on purpose, or without Herdr to leave it bound where it is. Nothing was changed.`;
+}
+
+export async function setupRepository(root: string, input: Connection, options: { herdr?: boolean; herdrRebind?: boolean; runHerdr?: (args: string[]) => string; fetcher?: typeof fetch; executors?: false | { run?: SystemctlRunner; unitDirectory?: string; node?: string } } = {}) {
   const connection = connectionSchema.parse(input); connection.url = serverOrigin(connection.url);
   delete connection.principal; // Identity is established only by the authenticated server response.
   if (!isAbsolute(connection.cliPath) || !(await lstat(connection.cliPath)).isFile()) throw new Error('CLI path must be an existing absolute launcher path');
@@ -163,6 +185,10 @@ export async function setupRepository(root: string, input: Connection, options: 
     try { return execFileSync('herdr', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); } catch { throw new Error('Herdr setup command failed; check installation and rerun init. No credentials were printed.'); }
   });
   if (options.herdr) runHerdr(['plugin', '--help']);
+  // Refused before any write: a plugin another server owns is repointed only on purpose.
+  const herdrBound = options.herdr ? await herdrPluginBinding(runHerdr) : null;
+  const herdrRelink = herdrBound && urlOrigin(herdrBound.url) !== connection.url ? herdrBound.url : null;
+  if (herdrRelink && !options.herdrRebind) throw new Error(herdrRebindRefusal(herdrRelink, connection.url));
   const directory = await localDirectory(connectionRoots(root)[0]);
   await atomicWrite(resolve(directory, 'connection.json'), JSON.stringify(connection, null, 2), 0o600);
   let instructionsMode = 0o644; try { instructionsMode = (await lstat(instructionsFile)).mode & 0o777; } catch { /* new instructions */ }
@@ -187,7 +213,9 @@ export async function setupRepository(root: string, input: Connection, options: 
     catch (error) { const reason = error instanceof Error ? error.message : String(error); executors = { installed: false, reason, next: `Executor supervision could not be installed: ${reason}. Fix it and rerun init, or node scripts/graphyard-executor.mjs --install` }; }
   }
   return { discovery, server: connection.url, cliPath: connection.cliPath, principal: connection.principal ?? null, connected: !!connection.principal,
-    instructions: 'AGENTS.md', pluginConfigured, executors, next: connection.principal ? 'Use Herdr or the CLI to claim work, then handoff GY-N for the assigned workspace and supervisor command' : 'Supply an individual worker credential and rerun init to verify the connection' };
+    instructions: 'AGENTS.md', pluginConfigured,
+    herdr: options.herdr ? { previous: herdrBound?.url ?? null, bound: pluginConfigured ? connection.url : null, relinked: !!herdrRelink && pluginConfigured } : null,
+    executors, next: connection.principal ? 'Use Herdr or the CLI to claim work, then handoff GY-N for the assigned workspace and supervisor command' : 'Supply an individual worker credential and rerun init to verify the connection' };
 }
 /** Whether `master init` configured this checkout: the coordinator credential an executor needs lives there. */
 async function coordinatorConfigured(primary: string) {
@@ -312,6 +340,12 @@ export interface ApplyDependencies {
   token?: () => string;
   /** Runs `gh` for the merge-mode step; without it onboarding leaves GitHub's merge settings to `master protection --apply`. */
   github?: ProtectionRun;
+  /**
+   * The `graphyard install` that already owns this repository's identities (GY-1413): its install
+   * directory and its confirmed App. Apply then commits only the onboarding files — it never writes
+   * a second principals registry and never opens an App page of its own.
+   */
+  installed?: { directory: string; githubApp: { appId: number; slug: string } };
 }
 
 /**
@@ -361,21 +395,25 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
     ...workerPrincipals.map(id => ({ id, role: 'worker' as const })),
     { id: 'evidence', role: 'producer' as const, proofs: grants },
   ];
-  let previous: unknown = null;
   const principalsPath = resolve(directory, 'principals.json');
-  try {
-    const info = await lstat(principalsPath);
-    if (!info.isFile() || info.mode & 0o077) throw new Error('Saved principals must be a regular file with mode 0600');
-    previous = JSON.parse(await readFile(principalsPath, 'utf8'));
-  } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  const saved = (previous as any)?.principals ?? [];
-  const merged = desired.map(entry => ({ ...entry, token: saved.find((candidate: any) => candidate.id === entry.id)?.token ?? randomToken() }));
-  const document = { version: 1 as const, server, repository: proposal.repository,
-    note: 'Install this array as GRAPHYARD_PRINCIPALS on the Graphyard deployment before workers connect. One secret per principal. Never give implementation workers the producer or admin entries; the producer holds only the listed proof grants.',
-    principals: merged };
-  if (previous && canonicalJson(previous) === canonicalJson(document)) unchanged.push('principal and grant registry');
-  else { await atomicWrite(principalsPath, JSON.stringify(document, null, 2), 0o600); applied.push(`principal and grant registry (${merged.map(entry => `${entry.id}:${entry.role}`).join(', ')})`); }
-  principalsDocumentSchema.parse(document);
+  if (dependencies.installed) unchanged.push(`principal and grant registry (managed by graphyard install in ${dependencies.installed.directory}; not written here)`);
+  else await writePrincipals();
+  async function writePrincipals() {
+    let previous: unknown = null;
+    try {
+      const info = await lstat(principalsPath);
+      if (!info.isFile() || info.mode & 0o077) throw new Error('Saved principals must be a regular file with mode 0600');
+      previous = JSON.parse(await readFile(principalsPath, 'utf8'));
+    } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+    const saved = (previous as any)?.principals ?? [];
+    const merged = desired.map(entry => ({ ...entry, token: saved.find((candidate: any) => candidate.id === entry.id)?.token ?? randomToken() }));
+    const document = { version: 1 as const, server, repository: proposal.repository,
+      note: 'Install this array as GRAPHYARD_PRINCIPALS on the Graphyard deployment before workers connect. One secret per principal. Never give implementation workers the producer or admin entries; the producer holds only the listed proof grants.',
+      principals: merged };
+    if (previous && canonicalJson(previous) === canonicalJson(document)) unchanged.push('principal and grant registry');
+    else { await atomicWrite(principalsPath, JSON.stringify(document, null, 2), 0o600); applied.push(`principal and grant registry (${merged.map(entry => `${entry.id}:${entry.role}`).join(', ')})`); }
+    principalsDocumentSchema.parse(document);
+  }
 
   const profilesDirectory = resolve(directory, 'profiles');
   await mkdir(profilesDirectory, { recursive: true, mode: 0o700 });
@@ -389,12 +427,13 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
     else if (canonicalJson(JSON.parse(current)) === canonicalJson(value)) unchanged.push(`${name} profile`);
     else drift.push(`${name} profile differs from the proposal; the local file was kept`);
   };
-  for (const profile of proposal.profiles.workers) await writeProfile(profile.name, profile);
+  // An install registered its own worker profiles against its own principals; the proposal's would name identities that do not exist.
+  if (!dependencies.installed) for (const profile of proposal.profiles.workers) await writeProfile(profile.name, profile);
   await writeProfile('reviewer', { provider: proposal.policy.reviewProvider, note: proposal.profiles.reviewer.note });
 
   const previousState = await loadAppliedSetup(root);
   const savedApp = await readGithubApp(directory, proposal.repository);
-  let githubApp: { appId: number; slug: string } | null = savedApp ? { appId: savedApp.appId, slug: savedApp.slug } : previousState?.artifacts.githubApp ?? null;
+  let githubApp: { appId: number; slug: string } | null = dependencies.installed?.githubApp ?? (savedApp ? { appId: savedApp.appId, slug: savedApp.slug } : previousState?.artifacts.githubApp ?? null);
   if (!githubApp && dependencies.githubSetup) {
     const registration = await dependencies.githubSetup(proposal.repository, server);
     if (!Number.isSafeInteger(registration?.appId) || !registration?.slug) throw new Error('The GitHub App flow returned an incomplete registration');
@@ -414,7 +453,7 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
 
   const state = appliedStateSchema.parse({ version: 1, appliedAt: (dependencies.now ?? (() => new Date()))().toISOString(),
     proposalDigest: proposalDigest(proposal), server,
-    artifacts: { instructions: 'AGENTS.md', principals: '.graphyard/principals.json', profiles: profileNames, githubApp } });
+    artifacts: { instructions: 'AGENTS.md', principals: dependencies.installed ? resolve(dependencies.installed.directory, 'install.json') : '.graphyard/principals.json', profiles: profileNames, githubApp } });
   const appliedPath = resolve(directory, appliedFileName);
   const sameState = previousState && canonicalJson({ ...previousState, appliedAt: '' }) === canonicalJson({ ...state, appliedAt: '' });
   if (sameState) unchanged.push('applied setup record');
@@ -428,8 +467,10 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
     delivery: delivery ? { file: repositoryConfigFile, mode: delivery.policy.mode, requiredChecks: delivery.requiredChecks, workflows: delivery.workflows } : null,
     githubPending: !githubApp,
     workerPrincipals,
-    principalsFile: resolve(directory, 'principals.json'),
-    next: githubApp
+    principalsFile: dependencies.installed ? null : principalsPath,
+    next: dependencies.installed
+      ? `The principals are the ones graphyard install deployed from ${dependencies.installed.directory}; nothing needs installing as GRAPHYARD_PRINCIPALS. Commit the onboarding files`
+      : githubApp
       ? `Install the principals array as GRAPHYARD_PRINCIPALS on the Graphyard deployment${generatedFiles ? `, with ${generatedFiles.line} beside it` : ''}, ${workerStep}`
       : 'Run graphyard github-setup SERVER_URL to register the GitHub App, then rerun init --scan --apply to finish idempotently',
     documentationNext: `Commit ${repositoryConfigFile} with AGENTS.md${delivery?.workflows.length ? ` and ${delivery.workflows.join(', ')}` : ''}, and set ${documentationLine} on the Graphyard deployment so every item names these documentation paths` };

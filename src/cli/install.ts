@@ -3,10 +3,11 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { availableRuntimes, describeMergeGate, discover } from '../onboarding.js';
 import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
-import { startGithubSetup, updateAppPermissions } from '../github-setup.js';
+import { appPageBusy, appPagePortFree, startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, readDocumentationConfig, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { protectionRun } from '../protection.js';
-import { applyInstall, buildPlan, prepareInstall, providers, type InstallInputs } from '../install/index.js';
+import { applyInstall, buildPlan, InstallPaused, prepareInstall, providers, type InstallRequest } from '../install/index.js';
+import { installedOnboarding } from '../onboarding.js';
 import { runManifestFlow } from '../install/manifest.js';
 import { delegationLimitAssignments } from '../install/limits.js';
 import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../install/ci-proofs.js';
@@ -60,7 +61,7 @@ export const installCommands = defineCommands([
       '          [--plan|--apply] [--domain HOST] [--workers N] [--reviewer NAME]',
       '          [--producer-proof PROOF] [--ssh-host HOST] [--ssh-user USER]',
       '          [--ssh-key NAME] [--port N] [--workspace NAME-OR-ID] [--image REF]',
-      '          [--create-environments]',
+      '          [--create-environments] [--herdr-rebind | --no-herdr]',
       '                                Install or reconcile a complete control plane.',
       '  install --target host|hetzner --repo OWNER/NAME [--plan|--apply]',
       '          [--ssh-host HOST | --local] [--migrate] [--max-monthly N | --confirm-price X]',
@@ -74,7 +75,10 @@ export const installCommands = defineCommands([
       '                                --plan prints every action with secrets redacted and',
       '                                changes nothing; --apply executes the same plan. UAT and',
       '                                production resources that cost money are created only with',
-      '                                --create-environments.',
+      '                                --create-environments. A Herdr graphyard plugin bound to',
+      '                                another server is repointed only with --herdr-rebind.',
+      '                                An App step nobody confirms within 900 s exits 1 with a',
+      '                                JSON summary and the exact resume command.',
       '                                See docs/install.md for the agent-executable runbook.',
     ],
     // The installer creates the connection file; it must never read a stale one.
@@ -89,8 +93,9 @@ export const installCommands = defineCommands([
         'server-type': { type: 'string' }, location: { type: 'string' }, port: { type: 'string' }, logs: { type: 'boolean' },
         target: { type: 'string' }, local: { type: 'boolean' }, migrate: { type: 'boolean' }, 'max-monthly': { type: 'string' }, 'confirm-price': { type: 'string' },
         'github-app': { type: 'string' },
-        'create-environments': { type: 'boolean' },
+        'create-environments': { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' },
       }, allowPositionals: false });
+      if (values['herdr-rebind'] && values['no-herdr']) throw new Error('Choose either --herdr-rebind or --no-herdr');
       if (!values.repo) throw new Error('Use --repo OWNER/NAME');
       // --target names a self-contained install (GY-717): an existing machine, or a Hetzner server it creates.
       if (values.target && values.provider) throw new Error('Use either --target host|hetzner (a self-contained host) or --provider (a server-only install)');
@@ -104,7 +109,8 @@ export const installCommands = defineCommands([
       // A count that silently became NaN would install a control plane with no worker principal
       // or an unusable port, so a non-numeric value stops the command instead.
       const count = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`--${flag} takes a whole number`); return parsed; };
-      const inputs: InstallInputs = { repository: values.repo, provider: provider as InstallInputs['provider'],
+      const inputs: InstallRequest = { repository: values.repo,
+        ...(values['herdr-rebind'] ? { herdr: 'rebind' as const } : values['no-herdr'] ? { herdr: 'skip' as const } : {}), provider: provider as InstallRequest['provider'],
         ...(values.target || provider === 'host' ? { selfContained: true } : {}),
         ...(values.local ? { local: true } : {}), ...(values.migrate ? { migrate: true } : {}),
         ...(values['max-monthly'] ? { maxMonthly: money('max-monthly', values['max-monthly']) } : {}),
@@ -130,21 +136,29 @@ export const installCommands = defineCommands([
       if (values.logs) return console.log(await session.adapter.logs(session.context));
       const plan = await buildPlan(session);
       if (!values.apply) return context.print(plan);
-      return context.print(await applyInstall(session, plan));
+      try { return context.print(await applyInstall(session, plan)); }
+      catch (error) {
+        // An App step nobody confirmed is a pause (GY-1413): print what was completed and how to resume.
+        if (!(error instanceof InstallPaused)) throw error;
+        console.error(error.message);
+        context.print(error.summary);
+        process.exitCode = 1;
+      }
     },
   },
   {
     name: 'init',
     help: [
-      '  init [--scan] [--apply] [--url URL] [--herdr] [--token-stdin]',
+      '  init [--scan] [--apply] [--url URL] [--herdr [--herdr-rebind]] [--token-stdin]',
       '       [--delivery release-candidate|per-pr] [--candidate-cron CRON|off]',
       '                                Scan and propose the delivery workflow (--scan), or apply the reviewed proposal (--apply);',
-      '                                the scan shows the merge-gate split (pre-merge vs per-candidate checks) before anything is applied',
+      '                                the scan shows the merge-gate split (pre-merge vs per-candidate checks) before anything is applied;',
+      '                                after graphyard install, --apply reuses the install\'s identities and App and writes no principals file',
     ],
     async run(context) {
       const { base, connection, print } = context;
       const root = context.repositoryRoot();
-      const { values } = parseArgs({ args: context.rest, options: { url: { type: 'string' }, herdr: { type: 'boolean' }, 'token-stdin': { type: 'boolean' }, 'host-id': { type: 'string' }, 'cli-path': { type: 'string' }, scan: { type: 'boolean' }, apply: { type: 'boolean' },
+      const { values } = parseArgs({ args: context.rest, options: { url: { type: 'string' }, herdr: { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'token-stdin': { type: 'boolean' }, 'host-id': { type: 'string' }, 'cli-path': { type: 'string' }, scan: { type: 'boolean' }, apply: { type: 'boolean' },
         delivery: { type: 'string' }, 'candidate-cron': { type: 'string' } }, allowPositionals: false });
       if (values.delivery !== undefined && !(deliveryModes as readonly string[]).includes(values.delivery)) throw new Error(`Use --delivery ${deliveryModes.join(' or ')}`);
       if ((values.delivery !== undefined || values['candidate-cron'] !== undefined) && !values.scan) throw new Error('--delivery and --candidate-cron choose the proposal; pass them with init --scan');
@@ -163,10 +177,20 @@ export const installCommands = defineCommands([
           if (differences.length) throw new Error(`${differences.join('; ')}. Rerun init --scan, review the refreshed proposal, then apply it again. The stored proposal was left unchanged.`);
           const url = values.url ?? stored.proposal.server;
           if (!url) throw new Error('Applying requires the Graphyard server URL; pass --url');
+          // An install that owns this repository supplies the identities and the App (GY-1413);
+          // when it cannot yet — its App step is still waiting — this refuses before any write.
+          const installed = await installedOnboarding(root, stored.proposal.repository);
+          if (installed) {
+            const result = await applyProposal(root, stored.proposal, { url, installed, github: protectionRun });
+            return print({ proposal: stored.file, ...result, installed: installed.directory });
+          }
           // Apply rewrites the registry from the reviewed proposal; the CI producer's token is read
           // first so a re-run keeps the repository secret valid, then the entry is merged back in.
           const roster = await readRoster(resolve(root, '.graphyard/principals.json'));
+          // The App page init would open needs port 4311; a busy one refuses here, before any write.
+          if (!(await loadAppliedSetup(root))?.artifacts.githubApp && !await readFile(resolve(root, '.graphyard/github-app.json')).then(() => true, () => false) && !await appPagePortFree()) throw appPageBusy(4311);
           const result = await applyProposal(root, stored.proposal, { url, githubSetup: interactiveGithubSetup(root), github: protectionRun });
+          if (!result.principalsFile) throw new Error('applyProposal wrote no principals registry');
           const ciProofs = await registerCiProducer(result.principalsFile, roster);
           return print({ proposal: stored.file, ...result, ciProofs: { ...ciProofs, next: ciProducerProvisioningSteps(stored.proposal.repository, url) },
             capacity: await capacityForPrincipals(result.principalsFile, () => context.api('status')) });
@@ -189,7 +213,8 @@ export const installCommands = defineCommands([
       const selectedUrl = values.url ?? base;
       // Never silently send a saved credential to a newly selected server.
       if (values.url && connection && new URL(values.url).origin !== connection.url && !process.env.GRAPHYARD_TOKEN && !values['token-stdin']) workerToken = undefined;
-      return print(await setupRepository(root, { url: selectedUrl, cliPath: resolve(values['cli-path'] ?? await context.activeCliPath()), hostId: values['host-id'] ?? context.individualHostId(), ...(workerToken ? { token: workerToken } : {}) }, { herdr: values.herdr }));
+      if (values['herdr-rebind'] && !values.herdr) throw new Error('--herdr-rebind repoints the Herdr plugin; pass it with --herdr');
+      return print(await setupRepository(root, { url: selectedUrl, cliPath: resolve(values['cli-path'] ?? await context.activeCliPath()), hostId: values['host-id'] ?? context.individualHostId(), ...(workerToken ? { token: workerToken } : {}) }, { herdr: values.herdr, herdrRebind: values['herdr-rebind'] }));
     },
   },
   {

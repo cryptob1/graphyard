@@ -15,9 +15,10 @@ import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerPro
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
 import { assertOutsideRepository, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord } from './secrets.js';
-import { readAppFile, readSavedApp, type SavedApp } from './manifest.js';
+import { AppStepPending, readAppFile, readSavedApp, type SavedApp } from './manifest.js';
+import { herdrPluginBinding, herdrRebindRefusal } from '../repository-setup.js';
 import { localTransport, sshTransport, type Transport } from './transport.js';
-import { installIdFor, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PlannedPrincipal, type Provider } from './types.js';
+import { installIdFor, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PlannedPrincipal, type PreflightItem, type Provider } from './types.js';
 
 export * from './types.js';
 export { adapterFor, type ProviderAdapter } from './adapters.js';
@@ -57,13 +58,23 @@ export interface InstallDependencies {
 export interface ProfileRequest {
   root: string; url: string; cliPath: string; hostId: string; installDirectory: string;
   coordinatorToken: string; workerTokens: { principal: string; token: string }[];
-  runtimes: DetectedRuntime[]; herdr: HerdrState;
+  runtimes: DetectedRuntime[]; herdr: HerdrState; herdrRebind?: boolean;
+  /** True on the registration before the App step: the master is configured with the App still pending. */
+  appPending?: boolean;
   workers: WorkerProfileDraft[]; reviewers: ReviewerProfileDraft[]; masterKind: string | null;
   runHerdr?: (args: string[]) => string;
 }
 
+/**
+ * What the install does with Herdr's `graphyard` plugin when it is already bound to another server
+ * (GY-1413): `rebind` repoints it (`--herdr-rebind`), `skip` leaves Herdr untouched (`--no-herdr`).
+ * Without either, a plugin bound elsewhere fails preflight instead of being silently repointed.
+ */
+export interface HerdrChoice { herdr?: 'rebind' | 'skip' }
+export type InstallRequest = InstallInputs & HerdrChoice;
+
 export interface InstallSession {
-  root: string; inputs: Required<Pick<InstallInputs, 'repository' | 'provider' | 'baseBranch'>> & InstallInputs;
+  root: string; inputs: Required<Pick<InstallInputs, 'repository' | 'provider' | 'baseBranch'>> & InstallRequest;
   installId: string; directory: string; adapter: ProviderAdapter; context: AdapterContext;
   principals: PlannedPrincipal[]; tokens: Map<string, string>; vault: Vault;
   record: InstallRecord | null; reviewers: { name: string; appId: number; botUserId: number }[];
@@ -140,7 +151,7 @@ async function findSavedApp(root: string, directory: string, inputs: InstallInpu
   return { app: null, error: null };
 }
 
-export async function prepareInstall(cwd: string, rawInputs: InstallInputs, dependencies: InstallDependencies = {}, mode: 'plan' | 'apply' = 'apply'): Promise<InstallSession> {
+export async function prepareInstall(cwd: string, rawInputs: InstallRequest, dependencies: InstallDependencies = {}, mode: 'plan' | 'apply' = 'apply'): Promise<InstallSession> {
   const provider = rawInputs.provider;
   if (!provider) throw new Error('Use --provider railway|hetzner|docker-host|compose, or --target host|hetzner');
   // A self-contained install puts the whole of Graphyard on one machine: an existing one (host) or
@@ -370,6 +381,10 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   preflight.push(ghStatus.code === 0
     ? { name: 'GitHub CLI', ok: true, detail: 'authenticated for branch protection and CI discovery' }
     : { name: 'GitHub CLI', ok: false, detail: 'gh is missing or not authenticated', fix: `Install GitHub CLI and run: gh auth login --scopes repo,admin:repo_hook (the account must administer ${session.inputs.repository})` });
+  // Branch protection is what makes `Graphyard / merge` a gate; a repository that cannot have it
+  // fails here, before the App, the reviewer App and onboarding are done for nothing (GY-1413).
+  const protectionGate = ghStatus.code === 0 ? await protectionAvailability(gh, session.inputs.repository, session.inputs.baseBranch) : null;
+  if (protectionGate) preflight.push(protectionGate);
   // A declared manifest the installer cannot read would deploy a server whose regression guard
   // exempts nothing, so it blocks --apply like any other preflight until the script is fixed.
   preflight.push(session.generatedFiles.error
@@ -380,6 +395,12 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     : { name: 'GitHub App registration', ok: true, detail: `reusing app ${session.savedApp.app!.facts.appId} from ${session.savedApp.app!.file}` });
   const candidateModel = session.delivery.policy.mode === 'release-candidate';
   if (candidateModel) preflight.push(...await session.delivery.adapter.preflight(session.delivery.context));
+  // Herdr's graphyard plugin, read before anything is planned around it: one already bound to
+  // another server is repointed only with --herdr-rebind (GY-1413).
+  const herdr = context.host ? null : await observeHerdr(session);
+  const herdrTarget = record?.url ?? null;
+  const herdrRelink = herdr?.binding && session.inputs.herdr !== 'skip' && origin(herdr.binding.url) !== (herdrTarget && origin(herdrTarget)) ? herdr.binding.url : null;
+  if (herdrRelink && session.inputs.herdr !== 'rebind') preflight.push({ name: 'Herdr plugin', ok: false, detail: herdrRebindRefusal(herdrRelink, herdrTarget ?? 'this installation'), fix: 'Rerun with --herdr-rebind to repoint the plugin at this installation, or --no-herdr to leave Herdr untouched' });
   const observation = preflight.every(item => item.ok) ? await adapter.observe(context) : { installed: false, compute: false, database: false, app: false, url: null, variables: {}, detail: ['provider preflight is incomplete; the installation was not inspected'] } as AdapterObservation;
 
   const core = coreEnv(session);
@@ -434,7 +455,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     ? `${plannedReviews} approving review(s), the stricter count this branch already requires`
     : `at least ${session.reviewCount} approving review(s) for the ${session.reviewPolicy} review policy`;
   if (protection && !protectionOk) drift.push({ action: 'github.protection', field: 'branch protection', expected: `required checks ${[...session.requiredChecks, ...GRAPHYARD_CHECKS].join(', ')} with "up to date" off (a candidate merges on the base it was built on); at least ${session.reviewCount} approving review(s); admin enforcement; conversation resolution off (the reviewer's verdict is the review gate)`, observed: describeProtection(protection) });
-  actions.push({ id: 'github.protection', target: 'github', state: protectionOk ? 'satisfied' : protection ? 'update' : 'create', title: `Require status checks (${[...session.requiredChecks, ...GRAPHYARD_CHECKS].join(', ')}) with "require branches to be up to date" off, so a candidate merges on the base it was built on, ${reviewPhrase} and administrator enforcement, with conversation resolution off (the reviewer's verdict is the review gate), on ${session.inputs.baseBranch}` });
+  actions.push({ id: 'github.protection', target: 'github', state: protectionOk ? 'satisfied' : protection ? 'update' : 'create', ...(protectionGate && !protectionGate.ok ? { human: protectionGate.fix } : {}), title: `Require status checks (${[...session.requiredChecks, ...GRAPHYARD_CHECKS].join(', ')}) with "require branches to be up to date" off, so a candidate merges on the base it was built on, ${reviewPhrase} and administrator enforcement, with conversation resolution off (the reviewer's verdict is the review gate), on ${session.inputs.baseBranch}` });
   // The release-candidate pipeline's environments (GY-1102): free wiring, then every UAT and
   // production resource the deployment adapter would create, cost-bearing ones marked human.
   if (candidateModel) {
@@ -453,7 +474,8 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   actions.push({ id: 'verify.webhook', target: 'graphyard', state: 'update', title: `Publish one neutral check run and confirm GitHub delivered it to the server.${webhookExpectation}` });
   if (!host) {
     actions.push({ id: 'local.profiles', target: 'local', state: record?.profiles.length ? 'satisfied' : 'create', title: 'Register master, reviewer, and worker profiles for authenticated agent runtimes on this machine' });
-    actions.push({ id: 'local.herdr', target: 'local', state: 'update', title: 'Bind Herdr when it is installed: link and enable the Graphyard plugin for this repository' });
+    actions.push(herdrAction(session, herdr, herdrRelink, herdrTarget));
+    if (herdrRelink) drift.push({ action: 'local.herdr', field: 'Herdr graphyard plugin url', expected: herdrTarget ?? 'this installation', observed: herdrRelink });
   }
 
   // Moving an installation onto a host changes its provider on purpose; that is the migration, not drift.
@@ -478,7 +500,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     installDirectory: session.directory, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy,
     domain: context.domain, url: observation.url ?? record?.url ?? null, existing, secretsRedacted: true,
     preflight, principals: session.principals, actions, drift,
-    humanSteps: [CORE_HUMAN_STEPS[0], ...(saved && !appConfigured ? [] : [APP_HUMAN_STEP]), ...CORE_HUMAN_STEPS.slice(1), ...(session.inputs.reviewer ? [`Confirm the separate reviewer App "${session.inputs.reviewer}" in the browser.`] : []),
+    humanSteps: [...(protectionGate && !protectionGate.ok ? [protectionGate.fix!] : []), CORE_HUMAN_STEPS[0], ...(saved && !appConfigured ? [] : [APP_HUMAN_STEP]), ...CORE_HUMAN_STEPS.slice(1), ...(session.inputs.reviewer ? [`Confirm the separate reviewer App "${session.inputs.reviewer}" in the browser.`] : []),
       ...(host ? ['After install, sign in once with the printed link and connect each agent account on the dashboard Agents page; nobody logs into the host.'] : []),
       ...(candidateModel ? ['Approve any UAT or production resource the plan marks as costing money before rerunning with --apply --create-environments; without that flag none is created.'] : [])],
     ...(host ? { host: hostPlan(context) } : {}),
@@ -494,6 +516,43 @@ function deliverySummary(session: InstallSession): InstallPlan['delivery'] {
   const { policy, committed } = session.delivery;
   return { mode: policy.mode, committed, preMerge: requiredPullRequestChecks(policy),
     perCandidate: policy.mode === 'per-pr' ? [] : policy.mergeGate.perCandidate.map(entry => entry.check), adapter: policy.deploy.adapter };
+}
+
+const origin = (value: string) => { try { return new URL(value).origin; } catch { return value; } };
+
+/**
+ * GitHub's answer for the base branch's protection, read before anything is created (GY-1413).
+ * 404 (not protected yet) is fine: the plan creates it. 403 "Upgrade to GitHub Pro or make this
+ * repository public" means a private repository on a free plan, which can never have branch
+ * protection, so the merge gate is impossible — a human choice of public or paid, not an agent's.
+ */
+export async function protectionAvailability(gh: ReturnType<typeof githubCli>, repository: string, branch: string): Promise<PreflightItem> {
+  const result = await gh(['api', `repos/${repository}/branches/${branch}/protection`], { allowFailure: true });
+  if (result.code !== 0 && /upgrade to github pro|make this repository public/i.test(`${result.stderr}\n${result.stdout}`)) return {
+    name: 'Branch protection', ok: false,
+    detail: `GitHub answered 403 "Upgrade to GitHub Pro or make this repository public" for ${repository}@${branch}: a private repository on a free plan cannot have branch protection, so "${CHECK_NAME}" can never be required and the merge gate is impossible`,
+    fix: `HUMAN: make ${repository} public, or upgrade its GitHub plan (spending money is a human decision), then rerun the installer`,
+  };
+  return { name: 'Branch protection', ok: true, detail: result.code === 0 ? `${branch} is protected; the plan reconciles it` : `${branch} is not protected yet; the plan creates its protection` };
+}
+
+/** Herdr on this machine and the server its graphyard plugin is bound to, when it is. */
+async function observeHerdr(session: InstallSession) {
+  const { deps, context } = session;
+  const state = await (deps.detectHerdr ?? detectHerdr)(context.transport);
+  if (!state.available || session.inputs.herdr === 'skip') return { state, binding: null };
+  const run = deps.runHerdr ?? (async (args: string[]) => { const result = await context.transport.exec('herdr', args, { allowFailure: true, timeout: 30_000 }); return result.code === 0 ? result.stdout : ''; });
+  return { state, binding: await herdrPluginBinding(run) };
+}
+
+/** The plan line for Herdr: link, keep, relink (named, with the server it is bound to now), or leave alone. */
+function herdrAction(session: InstallSession, herdr: Awaited<ReturnType<typeof observeHerdr>> | null, relink: string | null, target: string | null): PlanAction {
+  const steps = 'herdr plugin link, write the plugin config.json {url, worker token}, herdr plugin enable';
+  if (session.inputs.herdr === 'skip') return { id: 'local.herdr', target: 'local', state: 'satisfied', title: 'Leave Herdr untouched (--no-herdr): the graphyard plugin is neither linked nor reconfigured' };
+  if (!herdr?.state.available) return { id: 'local.herdr', target: 'local', state: 'satisfied', title: 'Herdr is not installed on this machine; nothing to link, and workers start from the CLI' };
+  if (relink) return { id: 'local.herdr', target: 'local', state: 'update', title: `Relink Herdr's graphyard plugin, now bound to ${relink}, to ${target ?? 'this installation'} (${steps})${session.inputs.herdr === 'rebind' ? '; --herdr-rebind allows it' : '; refused without --herdr-rebind'}` };
+  if (herdr.binding) return { id: 'local.herdr', target: 'local', state: 'satisfied', title: `Herdr's graphyard plugin is already bound to ${herdr.binding.url}; it keeps that server` };
+  return { id: 'local.herdr', target: 'local', state: 'create', title: `Link and enable Herdr's graphyard plugin for this repository (${steps})` };
 }
 
 function describeProtection(protection: any) {
@@ -527,6 +586,7 @@ export interface InstallSummary {
 export async function applyInstall(session: InstallSession, plan: InstallPlan): Promise<InstallSummary> {
   try { return await performInstall(session, plan); }
   catch (error: any) {
+    if (error instanceof InstallPaused) throw error;
     const message = session.vault.scrub(String(error?.message ?? error));
     throw message === error?.message ? error : new Error(message);
   }
@@ -548,7 +608,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   // The gate comes before anything is written, so "changed nothing" is literally true: at this
   // point not even a credential file exists yet for a first install.
   const blocked = plan.preflight.filter(item => !item.ok);
-  if (blocked.length) throw new Error(`Preflight is incomplete; the installer changed nothing.\n${blocked.map(item => `- ${item.name}: ${item.detail}${item.fix ? `\n  Run: ${item.fix}` : ''}`).join('\n')}`);
+  if (blocked.length) throw new Error(`Preflight is incomplete; the installer changed nothing.\n${blocked.map(item => `- ${item.name}: ${item.detail}${item.fix ? `\n  ${item.fix.startsWith('HUMAN:') ? '' : 'Run: '}${item.fix}` : ''}`).join('\n')}`);
   await materializeInstall(session);
 
   const observation = await adapter.observe(context);
@@ -573,15 +633,28 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   record = { ...record, url, domain: context.domain, provider: context.provider, selfContained: !!context.host, migratedFrom, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, principals: session.principals.map(principal => ({ id: principal.id, role: principal.role, ...(principal.sessionKind ? { sessionKind: principal.sessionKind } : {}), ...(principal.proofs?.length ? { proofs: principal.proofs } : {}), fingerprint: fingerprint(session.tokens.get(principal.id)!) })), updatedAt: new Date(deps.now()).toISOString() };
   await writeInstallRecord(session.directory, record, vault);
 
+  // The master's local configuration and the profiles come before the App step (GY-1413), so
+  // `master environments` and `master harness` (setup-from-zero steps 8-9) run while a human
+  // confirms the App; the registration after it binds the confirmed App.
+  const early = !context.host && !record.github ? await registerProfiles(session, url, true) : null;
+
   // GitHub: the App manifest flow needs the live HTTPS origin, so it runs after the URL exists.
-  const facts = await resolveApp(session, url, record);
-  vault.add(facts.privateKey); vault.add(facts.webhookSecret);
-  if (session.inputs.reviewer && !session.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer)) {
-    const reviewerFacts = await deps.githubApp!({ root: session.root, repository: session.inputs.repository, origin: url, file: appCredentialFile(session, session.inputs.reviewer), reviewer: session.inputs.reviewer });
-    if (!reviewerFacts.botUserId) throw new Error('GitHub did not return the reviewer bot identity; rerun the reviewer registration');
-    if (reviewerFacts.appId === facts.appId) throw new Error('A reviewer App must be a different identity from the Graphyard control-plane App');
-    session.reviewers = [...session.reviewers, { name: session.inputs.reviewer, appId: reviewerFacts.appId, botUserId: reviewerFacts.botUserId }];
-    log(`Registered reviewer App ${session.inputs.reviewer} (app ${reviewerFacts.appId})`);
+  let facts: Awaited<ReturnType<typeof resolveApp>>;
+  try {
+    facts = await resolveApp(session, url, record);
+    vault.add(facts.privateKey); vault.add(facts.webhookSecret);
+    if (session.inputs.reviewer && !session.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer)) {
+      const reviewerFacts = await deps.githubApp!({ root: session.root, repository: session.inputs.repository, origin: url, file: appCredentialFile(session, session.inputs.reviewer), reviewer: session.inputs.reviewer });
+      if (!reviewerFacts.botUserId) throw new Error('GitHub did not return the reviewer bot identity; rerun the reviewer registration');
+      if (reviewerFacts.appId === facts.appId) throw new Error('A reviewer App must be a different identity from the Graphyard control-plane App');
+      session.reviewers = [...session.reviewers, { name: session.inputs.reviewer, appId: reviewerFacts.appId, botUserId: reviewerFacts.botUserId }];
+      log(`Registered reviewer App ${session.inputs.reviewer} (app ${reviewerFacts.appId})`);
+    }
+  } catch (error) {
+    if (!(error instanceof AppStepPending)) throw error;
+    const pending = await pausedSummary(session, plan, url, health, early, error);
+    vault.assertClean(JSON.stringify(pending), 'the paused installation summary');
+    throw new InstallPaused(vault.scrub(error.message), vault.scrub(pending));
   }
   const gh = githubCli(context.transport);
   const ciApps = await detectCiAppIds(gh, session.inputs.repository, session.inputs.baseBranch, facts.appId);
@@ -675,6 +748,69 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   return vault.scrub(summary);
 }
 
+/**
+ * What `install --apply` completed when its App step timed out (GY-1413): the control plane is up
+ * and healthy and stays running, the local profiles exist, and nothing GitHub-bound was written.
+ */
+export interface PausedInstall {
+  complete: false; repository: string; provider: Provider; installId: string; installDirectory: string;
+  url: string; health: boolean;
+  completed: string[];
+  github: { app: 'pending'; step: string; credentials: string };
+  credentials: { principals: string; githubApp: string };
+  stack: { running: true; detail: string; stop: string | null };
+  profiles: ProfileRegistration | null;
+  resume: string; nextSteps: string[];
+}
+
+/** The App step paused the install; `summary` is what it completed, printed as JSON before the exit. */
+export class InstallPaused extends Error {
+  constructor(message: string, readonly summary: PausedInstall) { super(message); }
+}
+
+/** The exact command that resumes this install: the same inputs, rerun with --apply. */
+export function resumeCommand(session: Pick<InstallSession, 'inputs' | 'context'>) {
+  const { inputs } = session;
+  const flag = (name: string, value: string | number | undefined | null) => value === undefined || value === null || value === '' ? [] : [`--${name}`, String(value)];
+  return ['graphyard', 'install',
+    ...(session.context.host ? ['--target', inputs.provider] : ['--provider', inputs.provider]),
+    '--repo', inputs.repository,
+    ...(inputs.baseBranch !== 'main' ? flag('base-branch', inputs.baseBranch) : []),
+    ...flag('domain', inputs.domain), ...flag('workers', inputs.workers), ...flag('port', inputs.port), ...flag('reviewer', inputs.reviewer),
+    ...(inputs.producerProofs ?? []).flatMap(proof => flag('producer-proof', proof)),
+    ...flag('review-policy', inputs.reviewPolicy), ...flag('review-count', inputs.reviewCount),
+    ...(inputs.requiredChecks ?? []).flatMap(check => flag('required-check', check)),
+    ...flag('ssh-host', inputs.sshHost), ...flag('workspace', inputs.workspace), ...flag('image', inputs.image),
+    ...flag('github-app', inputs.githubAppFile),
+    ...(inputs.local ? ['--local'] : []),
+    ...(inputs.herdr === 'rebind' ? ['--herdr-rebind'] : inputs.herdr === 'skip' ? ['--no-herdr'] : []),
+    '--apply'].join(' ');
+}
+
+async function pausedSummary(session: InstallSession, plan: InstallPlan, url: string, health: boolean, profiles: ProfileRegistration | null, pending: AppStepPending): Promise<PausedInstall> {
+  const { context } = session;
+  const before = plan.actions.slice(0, Math.max(0, plan.actions.findIndex(action => action.id === 'github.app'))).map(action => action.id);
+  const controlPlaneApp = !pending.reviewer;
+  const savedFile = controlPlaneApp ? pending.file : appCredentialFile(session);
+  const resume = resumeCommand(session);
+  const stop = context.provider === 'compose' ? `docker compose --project-directory ${context.workdir} down` : null;
+  return {
+    complete: false, repository: session.inputs.repository, provider: context.provider, installId: session.installId, installDirectory: session.directory,
+    url, health,
+    completed: [...before, ...(profiles ? ['local.profiles', 'local.herdr'] : []), ...(controlPlaneApp ? [] : ['github.app'])],
+    github: { app: 'pending', step: controlPlaneApp ? 'github.app' : 'github.reviewer', credentials: pending.saved ? `GitHub returned the ${controlPlaneApp ? 'App' : `reviewer App "${pending.reviewer}"`} registration to ${pending.file}; it is not installed on ${session.inputs.repository} yet` : `none saved: nobody confirmed the ${controlPlaneApp ? 'App' : `reviewer App "${pending.reviewer}"`}, so ${pending.file} was never written` },
+    credentials: { principals: `saved under ${session.directory} (mode 0600)`, githubApp: controlPlaneApp ? (pending.saved ? `registration saved in ${savedFile}, installation pending` : 'not saved') : `saved in ${savedFile}` },
+    stack: { running: true, detail: `the control plane keeps running at ${url}${stop ? ` (Compose project ${context.workdir})` : ''}`, stop },
+    profiles,
+    resume,
+    nextSteps: [
+      `A human confirms the ${controlPlaneApp ? 'Graphyard GitHub App' : `reviewer App "${pending.reviewer}"`} (docs/setup-from-zero.md step ${controlPlaneApp ? 4 : 5}), then run: ${resume}. It is idempotent and keeps everything above.`,
+      ...(profiles?.master.configured ? ['graphyard master environments and graphyard master harness already work in this checkout (steps 8-9).'] : []),
+      ...(stop ? [`To stop the control plane instead: ${stop}`] : []),
+    ],
+  };
+}
+
 function emptyRecord(session: InstallSession, url: string): InstallRecord {
   const at = new Date(session.deps.now()).toISOString();
   return installRecordSchema.parse({ version: 1, installId: session.installId, repository: session.inputs.repository, provider: session.context.provider, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, domain: session.context.domain, url, principals: [], github: null, reviewers: [], profiles: [], createdAt: at, updatedAt: at });
@@ -728,10 +864,10 @@ async function resolveApp(session: InstallSession, url: string, record: InstallR
   return facts;
 }
 
-async function registerProfiles(session: InstallSession, url: string): Promise<ProfileRegistration> {
+async function registerProfiles(session: InstallSession, url: string, appPending = false): Promise<ProfileRegistration> {
   const { context, deps } = session;
   const runtimes = await (deps.detectRuntimes ?? detectRuntimes)(context.transport);
-  const herdr = await (deps.detectHerdr ?? detectHerdr)(context.transport);
+  const herdr = session.inputs.herdr === 'skip' ? { available: false, version: null, reason: '--no-herdr: Herdr was left untouched' } : await (deps.detectHerdr ?? detectHerdr)(context.transport);
   const workerIds = workerPrincipals(session.principals).map(principal => principal.id);
   const workers = workerProfiles(session.installId, workerIds, runtimes, principal => tokenFile(session.directory, principal));
   const reviewers = reviewerProfiles(runtimes, session.inputs.reviewer ?? null);
@@ -742,6 +878,7 @@ async function registerProfiles(session: InstallSession, url: string): Promise<P
     coordinatorToken: session.tokens.get(principalOfRole(session.principals, 'coordinator').id)!,
     workerTokens: workerIds.map(principal => ({ principal, token: session.tokens.get(principal)! })),
     runtimes, herdr, workers, reviewers, masterKind: master?.kind ?? null,
+    herdrRebind: session.inputs.herdr === 'rebind', appPending,
     ...(deps.runHerdr ? { runHerdr: deps.runHerdr } : {}),
   };
   if (deps.registerProfiles) return deps.registerProfiles(request);

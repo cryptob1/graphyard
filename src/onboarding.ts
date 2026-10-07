@@ -5,6 +5,8 @@ import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import { sessionNameField, suffixedSessionName } from './session-name.js';
+import { installDirectory, readInstallRecord } from './install/secrets.js';
+import { installIdFor } from './install/types.js';
 import { defaultCandidateSchedule, deliveryPolicySchema, generatedWorkflowFiles, type DeliveryMode, type DeliveryPolicy, type GateCheck } from './model/delivery-policy.js';
 
 export function repositoryFromRemote(remote: string) {
@@ -416,4 +418,19 @@ export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (value && typeof value === 'object') return `{${Object.keys(value as object).sort().map(key => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`).join(',')}}`;
   return JSON.stringify(value);
+}
+
+/**
+ * The `graphyard install` that already owns this repository's identities, as `init --scan --apply`
+ * must reuse them (GY-1413): its install directory and confirmed App, or null when the repository
+ * has no install on this machine. An install still waiting at its App step is refused before
+ * anything is written — init would otherwise open a second App page and mint a second principal set
+ * that would replace the deployed one.
+ */
+export async function installedOnboarding(root: string, repository: string, configHome?: string) {
+  const directory = installDirectory(installIdFor(repository), configHome);
+  const record = await readInstallRecord(directory);
+  if (!record || record.repository.toLowerCase() !== repository.toLowerCase()) return null;
+  if (!record.github) throw new Error(`graphyard install --apply for ${repository} (${resolve(directory, 'install.json')}) has not finished its GitHub App step: finish step 4 on the App page it serves at http://127.0.0.1:4311, or rerun install --apply if it is no longer waiting (docs/setup-from-zero.md). init opens no App page of its own and mints no principals beside the install's; nothing was written in ${root}.`);
+  return { directory, githubApp: { appId: record.github.appId, slug: record.github.slug } };
 }
