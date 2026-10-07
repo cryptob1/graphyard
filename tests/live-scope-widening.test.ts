@@ -19,6 +19,7 @@ import type { Principal, ScopeFile, Work } from '../src/model.js';
 import { regressionRefusals } from '../src/regression-guard.js';
 import { approveScopeRequest, scopeRequestAttention } from '../src/cli/master-status.js';
 import { Store } from '../src/store.js';
+import { foldInterventions, readInterventionLedger } from '../src/interventions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-76: a purely additive plannedFiles widening applies to an item under an active lease
@@ -466,4 +467,40 @@ test('manual:fault-class-scope — GY-1335: a weakening an approved two-party de
   const forged = await rescope('Rescoped under a forged decision key', `decision:${randomUUID()}`);
   assert.deepEqual((forged.escalations ?? []).map(entry => [entry.trigger, entry.decision]), [['requirement-weakening', undefined]]);
   assert.deepEqual(workFaults(forged, Date.now()).filter(fault => fault.faultClass === 'scope').map(fault => fault.kind), ['escalation:requirement-weakening'], 'a forged decision key does not excuse the weakening');
+});
+
+// GY-1397: GY-528 and GY-793 were counted as scope-widening interventions at the test stage, but
+// each was the loop's own re-plan onto the successor of a planned file the base branch had split or
+// renamed — the control plane doing its job, as an approved autoscope is. The re-plan names its rule,
+// the control plane accepts that rule only from the operator agent on a purely additive widening, and
+// the intervention fold counts neither it nor a scope ask it answers; a hand widening still counts.
+test('integration:successor-replan-not-intervention — the loop\'s successor re-plan is recorded under its rule and is no scope-widening intervention; a hand widening still is', async () => {
+  let work = await claimed('successor re-plan');
+  const added = 'src/widget/Layout/view.tsx';
+  // The operator may not claim the loop's rule, and the rule never carries a narrowing.
+  const forged = await call(token(operator), 'POST', `work/${work.id}/requirements`, successorWidening(work, [added], 'Re-planned by hand'));
+  assert.equal(forged.status, 409, JSON.stringify(forged.body));
+  const narrowing = await call(master.token, 'POST', `work/${work.id}/requirements`, { ...successorWidening(work, [], 'Not a widening'), plannedFiles: ['src/widget/Other.tsx'] });
+  assert.notEqual(narrowing.status, 200, JSON.stringify(narrowing.body));
+
+  // A worker asked for the successor before the loop re-planned onto it: the re-plan answers the ask.
+  work = await engine.execute(implementer, 'scope', work.id, { epoch: work.epoch, paths: [added], reason: 'The base split Layout.tsx' }, randomUUID());
+  const reason = `Re-planned ${work.key} onto the successors of the files it plans, which the base branch split or renamed; nothing is removed: ${added} (successor of src/widget/Layout.tsx via 0123456789ab)`;
+  await ok(master.token, 'POST', `work/${work.id}/requirements`, successorWidening(await reload(work.id), [added], reason));
+  work = await reload(work.id);
+  assert.ok(work.plannedFiles.includes(added) && work.lease?.owner === implementer.id, 'the re-plan applies under the live lease');
+  const row = (await events(work)).filter(entry => entry.kind === 'requirements').at(-1)!;
+  assert.equal(row.payload.details.intent.rule, 'successor');
+
+  // A hand widening afterwards is still an intervention.
+  await ok(master.token, 'POST', `work/${work.id}/requirements`, { ...widen(work, ['src/widget/Extra.tsx']), reason: 'Widened by hand' });
+  const ledger = (await readInterventionLedger(store.pool, { workId: work.id })).rows;
+  const counted = foldInterventions(ledger, await store.list(), new Date().toISOString()).interventions.filter(entry => entry.work?.key === work.key && entry.kind === 'scope-widening');
+  assert.deepEqual(counted.map(entry => [entry.trigger, entry.resolution]), [['operator-widening', 'Widened by hand']], 'only the hand widening is counted');
+
+  // Rows written before the rule was recorded carry the re-plan's own wording, and are read the same way.
+  const id = randomUUID(), at = '2026-10-05T09:41:02.672Z';
+  const legacy = foldInterventions([{ seq: 1, workId: id, actor: master.id, kind: 'requirements', at, stageBefore: 'test', work: { key: 'GY-528', stage: 'test', plannedFiles: ['src/daemon/cycle-decisions.ts', 'src/daemon/cycle-approvers.ts'] },
+    details: { before: { plannedFiles: ['src/daemon/cycle-decisions.ts'] }, reason: 'Re-planned GY-528 onto the successors of the files it plans, which the base branch split or renamed; nothing is removed: src/daemon/cycle-approvers.ts (successor of src/daemon/cycle-decisions.ts via 58d8ab79364b)', liveScopeWidening: true } }], [], at);
+  assert.deepEqual(legacy.interventions, []);
 });

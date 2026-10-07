@@ -109,8 +109,34 @@ test('unit:timing-baseline-implied-companion — removing or altering lines of t
   assert.equal(build(item, seen).passed, false);
   // The recorded runs are not a test file's line either.
   assert.match(timingBaselineCompanion(baseline(shipped), baseline(shipped).replace('"durationMs": 100', '"durationMs": 5'), ['tests/new-thing.test.ts']).detail, /recorded runs/);
-  // A baseline with no test file of the change behind it implies nothing.
-  assert.equal(timingBaselineCompanion(baseline(shipped), baseline({ ...shipped, 'tests/new-thing.test.ts': 450 }), []).allowed, false);
+  // A baseline with no test file of the change behind it implies no change to a recorded line.
+  assert.equal(timingBaselineCompanion(baseline(shipped), baseline({ ...shipped, 'tests/a.test.ts': 450 }), []).allowed, false);
+});
+
+// GY-1397: GY-1040's candidate crossed ci-shards' 90% coverage floor because other changes' test
+// files had no line, and an operator widened its scope to record them. A line for a test file the
+// baseline does not record yet is nobody's line, so any change may add it without a widening.
+test('unit:timing-baseline-gap-fill — lines added for test files the baseline does not record are an implied companion; altering or removing a recorded line is not', async () => {
+  const filled = timingBaselineCompanion(baseline(shipped), baseline({ ...shipped, 'tests/unrecorded.test.ts': 300, 'tests/new-thing.test.ts': 450 }), ['tests/new-thing.test.ts']);
+  assert.equal(filled.allowed, true, filled.detail);
+  assert.match(filled.detail, /"tests\/unrecorded\.test\.ts" \(added\)/);
+  assert.equal(timingBaselineCompanion(baseline(shipped), baseline({ ...shipped, 'tests/unrecorded.test.ts': 300 }), []).allowed, true, 'no test file of the change is needed behind a gap fill');
+  for (const [files, line] of [[{ 'tests/a.test.ts': 1200, 'tests/b.test.ts': 1, 'tests/unrecorded.test.ts': 300 }, 'tests/b.test.ts'], [{ 'tests/a.test.ts': 1200, 'tests/unrecorded.test.ts': 300 }, 'tests/b.test.ts'], [{ ...shipped, 'tests/unrecorded.test.ts': -1 }, 'tests/unrecorded.test.ts'], [{ ...shipped, 'src/not-a-test.ts': 5 }, 'src/not-a-test.ts']] as const) {
+    const verdict = timingBaselineCompanion(baseline(shipped), baseline(files), []);
+    assert.equal(verdict.allowed, false, JSON.stringify(files));
+    assert.ok(verdict.detail.includes(`"${line}"`), verdict.detail);
+  }
+  // Through sync and the planned-files gate: a change adding no test file fills the gap without a widening.
+  const f = await fixture();
+  f.advanceMain({ 'tests/unrecorded.test.ts': 'u\n' });
+  f.candidate({ 'src/thing.ts': 'export const thing = 3;\n', [timingBaselinePath]: baseline({ ...shipped, 'tests/unrecorded.test.ts': 300 }) });
+  const local = (await f.sync()).find(finding => finding.path === timingBaselinePath)!;
+  assert.deepEqual({ kind: local.kind, refused: local.refused }, { kind: 'companion', refused: false }, local.detail);
+  const { item, seen } = await f.observe();
+  assert.equal(seen.scopeFiles!.find(file => file.path === timingBaselinePath)?.companion?.allowed, true);
+  assert.deepEqual(regressionRefusals(item, seen, []), []);
+  assert.equal(build(item, seen).reasons.some(reason => reason.includes(timingBaselinePath)), false, build(item, seen).reasons.join('; '));
+  assert.deepEqual(item.plannedFiles, ['src/thing.ts'], 'no planned-files widening');
 });
 
 test('unit:timing-baseline-scope-request-granted — scope-request for the baseline is granted without an operator when the change adds a test file', async () => {
