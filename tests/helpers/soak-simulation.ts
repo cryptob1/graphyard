@@ -46,7 +46,7 @@ import { docsTrimTitle } from '../../src/model/documentation.js';
 import { successorWidening } from '../../src/model/successors.js';
 import { type InvariantCheck } from '../../src/model/invariants.js';
 import { type ReviewRecord, judgeFreshReads, planMechanicalFixes, reviewRecordSchema } from '../../src/reviewer.js';
-import { type DocsSyncPlan, docsSyncSessionName } from '../../src/docs-sync.js';
+import { type DocsSyncPlan, docsSyncHarness, docsSyncSessionName, releaseDocsSyncHarness } from '../../src/docs-sync.js';
 import { type TmpReclaimReport, heldOpenPaths, reclaimTmpDirectories, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, writeTempOwner } from '../../src/tmp-reclaim.js';
 import { temporaryDirectory } from './temp-dirs.js';
 import { lostRunReason, sessionRetry } from '../../src/producer.js';
@@ -920,12 +920,18 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   };
 
   // ---- Docs-sync sessions (GY-566): launched by the loop for a docs-only conflict, each merges the base in and pushes. ----
-  const docsSyncRuns: { plan: DocsSyncPlan; agentName: string; pane: string; pushAt: number; outcome: 'working' | 'pushed' | 'gave up' }[] = [];
+  const docsSyncRuns: { plan: DocsSyncPlan; agentName: string; pane: string; pushAt: number; outcome: 'working' | 'pushed' | 'gave up'; roleFile: string | null }[] = [];
+  // GY-1433: the launcher writes each Claude session's role file under a root that carries the
+  // master's project settings, and the loop's settle of the session removes it (docsSyncSettled).
+  const docsSyncRoot = await temporaryDirectory('soak-docs-sync');
+  await mkdir(join(docsSyncRoot, '.claude'), { recursive: true });
+  await writeFile(join(docsSyncRoot, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { deny: ['Bash(git push:*)'] } }));
   const docsSync: DaemonEffects['docsSync'] = async (_work, docsPlan) => {
     const agentName = docsSyncSessionName(docsPlan);
     if (herdr.byName(agentName)) throw new Error(`Docs-sync session ${agentName} is already visible in Herdr; let it finish first`);
+    const { file: roleFile } = await docsSyncHarness(docsSyncRoot, config, docsPlan, 'claude');
     const pane = herdr.open(agentName);
-    docsSyncRuns.push({ plan: docsPlan, agentName, pane, pushAt: clock.now() + plan.docsConflict.syncMs, outcome: 'working' });
+    docsSyncRuns.push({ plan: docsPlan, agentName, pane, pushAt: clock.now() + plan.docsConflict.syncMs, outcome: 'working', roleFile });
     return { agentName, pane, account: 'claude-reviewer', runtime: 'claude', session: null };
   };
   const docsSyncTick = (now: number) => {
@@ -1317,7 +1323,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     panes: async () => ({ panes: herdr.paneList(), available: true }),
     recordSession,
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, accountHeld(`account-${profile.name}`) ? { available: false, reason: `account-${profile.name} is held until ${heldAccounts.get(`account-${profile.name}`)!.resetsAt}` } : { available: true, reason: null }])),
-    snapshot, dispatch, requestProof, approver, docsSync, doctor, containment, settleContainment, unblock,
+    snapshot, dispatch, requestProof, approver, docsSync, docsSyncSettled: synced => releaseDocsSyncHarness(docsSyncRoot, synced), doctor, containment, settleContainment, unblock,
     closeSession: async pane => {
       const name = herdr.agents.get(pane)?.name ?? '';
       if ((options.regression?.includes('approvers-left-open') && /approver/.test(name)) || (options.regression?.includes('docs-syncs-left-open') && /docs-sync/.test(name))) return;
@@ -2409,7 +2415,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
