@@ -372,6 +372,7 @@
     "tests/github-rate-budget.test.ts": 14551,
     "tests/github.test.ts": 968,
     "tests/goal-acceptance.test.ts": 2600,
+    "tests/graphyard-up.test.ts": 1200,
     "tests/gy-1050-review-followups.test.ts": 833,
     "tests/gy-1053-review-followups.test.ts": 789,
     "tests/gy-1158-review-followups.test.ts": 570,

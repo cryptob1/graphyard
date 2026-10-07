@@ -315,12 +315,13 @@ export function ConnectWizard({ providers, hosts, wizard, setWizard, onConnect, 
 }
 
 /** Settings › Agents: connect an account without a shell, and every agent the control plane launches (GY-409). */
-export default function FleetPage({ api, status, observedAt }: Pick<Dashboard, 'api' | 'status' | 'observedAt'>) {
+export default function FleetPage({ api, status, observedAt, onOpenSetup }: Pick<Dashboard, 'api' | 'status' | 'observedAt'> & { onOpenSetup?: () => void }) {
   const [fleet, setFleet] = useState<FleetView | null>(status?.fleet ?? null);
   const [connects, setConnects] = useState<ConnectView[]>(status?.connects ?? []);
   const [providers, setProviders] = useState<ConnectProviderView[]>([]);
   const [hosts, setHosts] = useState<ConnectHostView[]>([]);
-  const [wizard, setWizard] = useState<WizardState>(closedWizard);
+  // The Setup page's Connect button opens this page at #connect (GY-1419): the wizard starts open.
+  const [wizard, setWizard] = useState<WizardState>(() => typeof location !== 'undefined' && location.hash === '#connect' ? { ...closedWizard, open: true } : closedWizard);
   // A removed failed connect comes off this page for this browser (the ledger keeps the record):
   // the control plane holds no removal action for a finished connect, so the page keeps the ids here.
   const [removed, setRemoved] = useState<string[]>(() => { try { return JSON.parse(typeof localStorage === 'undefined' ? '[]' : localStorage.getItem('graphyard.removedConnects') ?? '[]') as string[]; } catch { return []; } });
@@ -402,7 +403,7 @@ export default function FleetPage({ api, status, observedAt }: Pick<Dashboard, '
     if (input) { const names = input.value.split(',').map(entry => entry.trim()).filter(Boolean); if (!names.includes(account)) input.value = [...names, account].join(', '); }
     document.getElementById('role-editor')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
-  return <><PageHeader crumbs={['Settings', 'Agents']} guide="/docs/onboarding#connect-an-account" eyebrow="EVERY AGENT IS CONFIGURED HERE" title="Agents">
+  return <><PageHeader crumbs={['Settings', 'Agents']} guide="/docs/onboarding#connect-an-account" eyebrow="EVERY AGENT IS CONFIGURED HERE" title="Agents" actions={onOpenSetup && <button data-open-setup onClick={onOpenSetup}>Open the first-run Setup checklist</button>}>
       Which agents can work right now, which are spent and until when, and why. Every launch picks the first eligible account of its role; a change here takes effect on the next action, with no restart and no file edit. A pasted key is sealed to your agent host in this browser and never readable by the server.
     </PageHeader>
     {loadError && <div role="alert" className="notice danger">{loadError} <button onClick={() => void load()}>Retry loading the agents</button></div>}

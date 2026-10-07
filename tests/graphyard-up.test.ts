@@ -1,0 +1,425 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import type { UpDependencies, UpEvent, UpRequest } from '../src/up.js';
+import type { BrowserPage, Located } from '../src/master-browser.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+/**
+ * GY-1419: first-run setup in one command and one page. Each test is named for the proof it
+ * produces: unit:graphyard-up-resumable, unit:graphyard-up-agent-mode and unit:setup-wizard-states.
+ *
+ * `graphyard up` runs against a simulated host: every child command it starts is answered by the
+ * world below, which changes the control plane's status the way the real command would — the
+ * install binds the Apps once a person (or the agent's browser) confirms them, the registry
+ * proposal connects the accounts, the restart starts the loop.
+ */
+// Loaded inside each test, so a tree without them fails as a test case, not at load.
+const up = () => import('../src/up.js');
+const checklistModule = () => import('../src/model/setup-checklist.js');
+
+const yieldTurn = () => new Promise<void>(accept => setImmediate(accept));
+const SERVER = 'http://127.0.0.1:4310';
+const CODE = 'c'.repeat(43);
+/** Where the simulated install saves the operator's admin credential: what mints the sign-in link. */
+const OPERATOR_TOKEN = '/install/acme-shop/tokens/acme-shop-operator.token';
+
+interface World {
+  calls: string[][]; installed: boolean; app: boolean; reviewer: boolean; accounts: boolean; loop: boolean;
+  /** A self-contained host install: its credentials stay on the host and its summary carries a one-time claim link. */
+  host: boolean;
+  /** Herdr's plugin is bound to another server. */
+  herdrElsewhere: boolean;
+  /** Commands that fail once, by their joined arguments' prefix. */
+  failOnce: Set<string>;
+  /** Called on each sleep: where a test plays the person acting on the Setup page. */
+  onSleep: (world: World, ticks: number) => void;
+  ticks: number;
+  /** The credential files the run minted a sign-in link from. */
+  signIns: (string | null)[];
+  /** The request id of each goal create. */
+  creates: (string | null)[];
+  /** The onboarding pull request once published, and whether it has merged. */
+  onboardingPullRequest: string | null; onboardingMerged: boolean;
+  /** The Hetzner server's monthly price is shown but not yet confirmed. */
+  priceUnconfirmed: boolean;
+}
+
+function world(overrides: Partial<World> = {}): World {
+  return { calls: [], installed: false, app: false, reviewer: false, accounts: false, loop: false, host: false, herdrElsewhere: false, failOnce: new Set(), onSleep: () => {}, ticks: 0, signIns: [], creates: [], onboardingPullRequest: null, onboardingMerged: false, priceUnconfirmed: false, ...overrides };
+}
+
+const status = (w: World) => w.installed ? {
+  github: w.app, githubRepository: 'acme/shop', appPermissions: { missing: [], installationUrl: 'https://github.com/settings/installations/7' },
+  reviewerApps: w.reviewer ? [{ id: 'claude', appId: 9 }] : [],
+  fleet: w.accounts ? { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] } : { roles: [], accounts: [] },
+  setup: { protection: w.app ? 'checks' : 'off', loop: w.loop },
+} : null;
+
+function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<UpDependencies> = {}): UpDependencies {
+  let clock = 0;
+  return {
+    root, pollMs: 1, emit: event => { events.push(event); },
+    now: () => clock, sleep: async ms => { clock += ms; w.ticks++; w.onSleep(w, w.ticks); await yieldTurn(); },
+    // A host install records the master's configuration only once it completes; a local one before its App step.
+    serverUrl: async () => w.installed && (!w.host || (w.app && w.reviewer)) ? SERVER : null,
+    masterToken: async () => w.installed ? 'm'.repeat(40) : null,
+    signIn: async file => { w.signIns.push(file); return file === OPERATOR_TOKEN ? `${SERVER}/#sign-in=${CODE}` : null; },
+    status: async () => status(w),
+    publishOnboarding: async () => { w.calls.push(['publish-onboarding']); w.onboardingPullRequest ??= 'https://github.com/acme/shop/pull/1'; return w.onboardingMerged ? null : { pullRequest: w.onboardingPullRequest }; },
+    // The person merges the onboarding pull request while up waits on it: the first read finds it open.
+    onboardingMerged: async url => { assert.equal(url, w.onboardingPullRequest); w.calls.push(['onboarding-merged?']); const merged = w.onboardingMerged; w.onboardingMerged = true; return merged; },
+    async cli(args, options = {}) {
+      w.calls.push(args);
+      const joined = args.join(' ');
+      if (args[0] === 'master' && args[1] === 'create') w.creates.push(options.env?.GRAPHYARD_REQUEST_ID ?? null);
+      for (const prefix of w.failOnce) if (joined.startsWith(prefix)) { w.failOnce.delete(prefix); return { code: 1, stdout: '{"error":"interrupted"}' }; }
+      if (args[0] === 'install' && args.includes('--plan')) {
+        return { code: 0, stdout: JSON.stringify({ installId: 'acme-shop', installDirectory: '/install/acme-shop', ...(w.host ? { host: { units: [] } } : {}), principals: [{ id: 'acme-shop-operator', role: 'admin', sessionKind: 'human' }, { id: 'acme-shop-master', role: 'coordinator', sessionKind: 'ai' }],
+          preflight: [{ name: 'GitHub CLI', ok: true }, ...(w.priceUnconfirmed && !args.includes('--confirm-price') ? [{ name: 'Monthly price', ok: false, detail: 'cx33 (8 GB) at fsn1: 6.49 EUR/month; not confirmed, so nothing will be created' }] : []), ...(w.herdrElsewhere && !args.includes('--no-herdr') ? [{ name: 'Herdr plugin', ok: false, detail: 'bound to https://other.example' }] : [])] }) };
+      }
+      if (args[0] === 'install' && args.includes('--apply')) {
+        w.installed = true;
+        options.onLine?.('Open http://127.0.0.1:4311 in a browser on this machine and confirm the Graphyard App');
+        for (let turns = 0; !(w.app && w.reviewer); turns++) { if (turns > 10_000) return { code: 1, stdout: JSON.stringify({ resume: 'graphyard install --apply' }) }; await yieldTurn(); }
+        return { code: 0, stdout: JSON.stringify(w.host ? { ok: true, principals: [{ id: 'acme-shop-operator', role: 'admin', tokenFile: '/var/lib/graphyard/tokens/acme-shop-operator.token' }], signIn: `${SERVER}/#claim=${CODE}` } : { ok: true }) };
+      }
+      if (joined === 'master registry propose --apply') { w.accounts = true; return { code: 0, stdout: '{}' }; }
+      if (joined === 'master restart') { w.loop = true; return { code: 0, stdout: '{}' }; }
+      if (args[0] === 'master' && args[1] === 'create') return { code: 0, stdout: JSON.stringify({ key: 'GY-1', title: 'goal' }) };
+      return { code: 0, stdout: '{}' };
+    },
+    ...extra,
+  };
+}
+
+const request = (extra: Partial<UpRequest> = {}): UpRequest => ({ repository: 'acme/shop', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', goalFile: null, browserProfile: null, ...extra });
+const installApplies = (w: World) => w.calls.filter(args => args[0] === 'install' && args.includes('--apply')).length;
+
+test('unit:graphyard-up-resumable — a fresh run walks every step in order; an interrupted run resumes without rerunning the install; a run blocked on the App step prints one Setup address and completes once the step turns green; Herdr is never repointed', async () => {
+  const { runUp } = await up();
+  // A fresh run: the person confirms the Apps and connects an account on the Setup page.
+  const root = await temporaryDirectory('graphyard-up-fresh');
+  const fresh = world({ onSleep: (w, ticks) => { if (ticks === 3) { w.app = true; w.reviewer = true; } if (ticks === 6) w.accounts = true; } });
+  const events: UpEvent[] = [];
+  const result = await runUp(request(), dependencies(fresh, root, events));
+  assert.equal(result.exitCode, 0, result.next);
+  assert.deepEqual(result.completed, ['preflight', 'control-plane', 'host-supervisor', 'onboarding', 'accounts', 'harness', 'master-loop']);
+  assert.deepEqual(fresh.calls.map(args => args.slice(0, 2).join(' ')), ['install --provider', 'install --provider', 'master init', 'init --scan', 'init --scan', 'publish-onboarding', 'master harness', 'master restart', 'onboarding-merged?', 'onboarding-merged?'], 'preflight, control plane, host supervisor, onboarding (applied, then published), harness, master loop, in order; then the onboarding pull request merges');
+  // Onboarding is done only once its files are published: init --scan --apply writes them to this checkout alone.
+  assert.ok(events.some(event => event.kind === 'step' && event.step === 'onboarding' && event.state === 'done' && /published in https:\/\/github\.com\/acme\/shop\/pull\/1/.test(event.detail ?? '')));
+  assert.ok(events.some(event => event.kind === 'note' && /onboarding pull request .* to merge/.test(event.text)), 'it says what it waits on');
+  assert.ok(result.checklist.every(item => item.done), 'the checklist is green');
+  const waits = events.filter(event => event.kind === 'waiting');
+  assert.equal(waits.length, 1, 'the Setup address is printed once for the whole run');
+  assert.equal(result.prompts, 1);
+  assert.equal(result.setupUrl, `${SERVER}/#setup`);
+  // The printed address signs the person in with a one-time link the operator's own credential mints,
+  // and lands on the Setup page: no token to paste, no command to run.
+  assert.deepEqual(fresh.signIns, [OPERATOR_TOKEN], 'one link, minted from the operator credential the install plan names');
+  const printed = `${SERVER}/#sign-in=${CODE}&setup`;
+  assert.equal((waits[0] as any).setupUrl, printed);
+  assert.match((waits[0] as any).sentence, new RegExp(`^Open ${printed.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')} to sign in to the Setup page`));
+  const { requestedView } = await checklistModule();
+  const { signInCode } = await import('../web/pages/login.js');
+  const opened = requestedView(new URL(printed).hash);
+  assert.deepEqual(opened, { view: 'setup', hash: `#sign-in=${CODE}` }, 'the dashboard opens the Setup page');
+  assert.equal(signInCode(opened.hash), CODE, 'and the sign-in page redeems the exact link fragment it knows');
+  assert.ok(!fresh.calls.flat().includes('--herdr-rebind'), 'never repoints Herdr');
+
+  // An interrupted run: onboarding fails once. The rerun skips everything recorded done, so the
+  // install (which registers the identities, Apps and variables) runs exactly once overall.
+  const interruptedRoot = await temporaryDirectory('graphyard-up-interrupted');
+  const interrupted = world({ app: true, reviewer: true, accounts: true, failOnce: new Set(['init --scan --apply']) });
+  const first = await runUp(request(), dependencies(interrupted, interruptedRoot, []));
+  assert.equal(first.exitCode, 1);
+  assert.match(first.next, /^onboarding: graphyard init exited 1/);
+  assert.deepEqual(first.completed, ['preflight', 'control-plane', 'host-supervisor']);
+  const resumedEvents: UpEvent[] = [];
+  const resumed = await runUp(request(), dependencies(interrupted, interruptedRoot, resumedEvents));
+  assert.equal(resumed.exitCode, 0, resumed.next);
+  assert.equal(installApplies(interrupted), 1, 'the resumed run does not install again');
+  assert.equal(interrupted.calls.filter(args => args.join(' ').startsWith('master init')).length, 1, 'nor register the supervisor again');
+  assert.deepEqual(resumedEvents.filter(event => event.kind === 'step' && event.state === 'skipped').map(event => (event as any).step), ['preflight', 'control-plane', 'host-supervisor']);
+
+  // Blocked on the App step: the run waits, without failing, until the App turns green.
+  const blockedRoot = await temporaryDirectory('graphyard-up-blocked');
+  let observedWaiting = false;
+  const blocked = world({ accounts: true, onSleep: w => { if (w.ticks === 40) { observedWaiting = blockedEvents.some(event => event.kind === 'waiting') && !w.app; w.app = true; w.reviewer = true; } } });
+  const blockedEvents: UpEvent[] = [];
+  const done = await runUp(request(), dependencies(blocked, blockedRoot, blockedEvents));
+  assert.ok(observedWaiting, 'the Setup address was printed while the App step waited');
+  assert.equal(done.exitCode, 0, done.next);
+  assert.deepEqual((blockedEvents.find(event => event.kind === 'waiting') as any).waitingFor, ['github-app', 'reviewer-app']);
+  assert.equal(installApplies(blocked), 1);
+
+  // A host install keeps its credentials on the host: the printed address is the install's own one-time
+  // claim link, carried to the Setup page, and no link is minted from a credential this machine lacks.
+  const hostRoot = await temporaryDirectory('graphyard-up-host');
+  const host = world({ host: true, onSleep: (w, ticks) => { if (ticks === 3) { w.app = true; w.reviewer = true; } if (ticks === 12) w.accounts = true; } });
+  const hostEvents: UpEvent[] = [];
+  assert.equal((await runUp(request({ provider: 'hetzner' }), dependencies(host, hostRoot, hostEvents))).exitCode, 0);
+  assert.deepEqual(hostEvents.filter(event => event.kind === 'waiting').map(event => (event as any).setupUrl), [`${SERVER}/#claim=${CODE}&setup`]);
+  assert.deepEqual(host.signIns, [], 'the claim is used; nothing is minted');
+  assert.deepEqual(requestedView(`#claim=${CODE}&setup`), { view: 'setup', hash: `#claim=${CODE}` });
+
+  // Herdr bound to another server: the install runs with --no-herdr and never with --herdr-rebind.
+  const herdrRoot = await temporaryDirectory('graphyard-up-herdr');
+  const herdr = world({ app: true, reviewer: true, accounts: true, herdrElsewhere: true });
+  const herdrEvents: UpEvent[] = [];
+  assert.equal((await runUp(request(), dependencies(herdr, herdrRoot, herdrEvents))).exitCode, 0);
+  assert.ok(herdr.calls.filter(args => args[0] === 'install' && args.includes('--apply')).every(args => args.includes('--no-herdr')));
+  assert.ok(!herdr.calls.flat().includes('--herdr-rebind'));
+  assert.ok(herdrEvents.some(event => event.kind === 'note' && /left as it is/.test(event.text)));
+
+  // A failed machine prerequisite stops before anything is installed, naming it.
+  const preflightRoot = await temporaryDirectory('graphyard-up-preflight');
+  const broken = world();
+  const refused = await runUp(request(), { ...dependencies(broken, preflightRoot, []), cli: async args => { broken.calls.push(args); return { code: 0, stdout: JSON.stringify({ preflight: [{ name: 'GitHub CLI', ok: false, detail: 'not logged in', fix: 'gh auth login' }] }) }; } });
+  assert.equal(refused.exitCode, 2);
+  assert.match(refused.next, /GitHub CLI: not logged in \(fix: gh auth login\)/);
+  assert.equal(broken.calls.length, 1, 'nothing past the preflight ran');
+
+  // A new Hetzner server's price is the operator's consent: unconfirmed, up waits on it (exit 3) and creates
+  // nothing; given --confirm-price and an SSH key, up passes both to every install run and carries on.
+  const { upRequestFromArgs } = await up();
+  const priceRoot = await temporaryDirectory('graphyard-up-price');
+  const priced = world({ app: true, reviewer: true, accounts: true, priceUnconfirmed: true });
+  const unconfirmed = await runUp(request({ provider: 'hetzner' }), dependencies(priced, priceRoot, []));
+  assert.equal(unconfirmed.exitCode, 3, unconfirmed.next);
+  assert.match(unconfirmed.next, /operator's consent to its price: cx33 .*6\.49 EUR\/month.*--confirm-price PRICE \(or --max-monthly N\); nothing has been created/);
+  assert.equal(installApplies(priced), 0);
+  const unconfirmedCalls = priced.calls.length;
+  const consented = upRequestFromArgs(['--repo', 'acme/shop', '--provider', 'hetzner', '--confirm-price', '6.49', '--ssh-key', 'laptop']);
+  assert.equal((await runUp(consented, dependencies(priced, priceRoot, []))).exitCode, 0);
+  for (const args of priced.calls.slice(unconfirmedCalls).filter(args => args[0] === 'install')) {
+    assert.deepEqual(args.slice(args.indexOf('--confirm-price'), args.indexOf('--confirm-price') + 2), ['--confirm-price', '6.49']);
+    assert.deepEqual(args.slice(args.indexOf('--ssh-key'), args.indexOf('--ssh-key') + 2), ['--ssh-key', 'laptop']);
+  }
+  assert.equal(installApplies(priced), 1);
+
+  // The onboarding files are published as one commit on the base branch's tip, on graphyard/onboarding,
+  // with a pull request; the operator's checkout is untouched, and a base that already holds them publishes nothing.
+  const { publishOnboarding } = await up();
+  const gitRoot = await temporaryDirectory('graphyard-up-publish');
+  const git = (cwd: string, args: string[], env: Record<string, string> = {}) => execFileSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com', ...env } });
+  const origin = join(gitRoot, 'origin.git'), checkout = join(gitRoot, 'checkout');
+  git(gitRoot, ['init', '--quiet', '--bare', '-b', 'main', origin]);
+  git(gitRoot, ['clone', '--quiet', origin, checkout]);
+  await writeFile(join(checkout, 'README.md'), 'shop\n');
+  git(checkout, ['add', 'README.md']); git(checkout, ['commit', '--quiet', '-m', 'first']); git(checkout, ['push', '--quiet', 'origin', 'HEAD:main']);
+  await mkdir(join(checkout, '.github/workflows'), { recursive: true });
+  await writeFile(join(checkout, '.github/workflows/graphyard.yml'), 'name: Graphyard\n');
+  await writeFile(join(checkout, 'AGENTS.md'), '# Agents\n');
+  await writeFile(join(checkout, 'graphyard.json'), '{}\n');
+  await writeFile(join(checkout, 'notes.txt'), 'not onboarding\n');
+  const gh: string[][] = [];
+  const runner = (opened: () => string) => (program: string, args: string[], env?: Record<string, string>) => {
+    if (program === 'git') return git(checkout, args, env);
+    gh.push(args);
+    if (args[0] === 'pr' && args[1] === 'list') return opened();
+    if (args[0] === 'repo') return 'main\n';
+    return 'https://github.com/acme/shop/pull/1\n';
+  };
+  assert.deepEqual(await publishOnboarding(checkout, 'acme/shop', runner(() => '\n')), { pullRequest: 'https://github.com/acme/shop/pull/1' });
+  assert.deepEqual(git(origin, ['ls-tree', '-r', '--name-only', 'graphyard/onboarding']).trim().split('\n'), ['.github/workflows/graphyard.yml', 'AGENTS.md', 'README.md', 'graphyard.json'], 'only the onboarding files, on the base tip');
+  assert.equal(git(origin, ['rev-parse', 'graphyard/onboarding^']).trim(), git(origin, ['rev-parse', 'main']).trim());
+  assert.deepEqual(gh.find(args => args[1] === 'create')!.slice(0, 8), ['pr', 'create', '--repo', 'acme/shop', '--base', 'main', '--head', 'graphyard/onboarding']);
+  assert.equal(git(checkout, ['status', '--porcelain', '--', 'AGENTS.md']).trim(), '?? AGENTS.md', 'the operator\'s index is untouched');
+  // Rerun with the pull request open: it is reused, nothing is pushed again.
+  const before = gh.length;
+  assert.deepEqual(await publishOnboarding(checkout, 'acme/shop', runner(() => 'https://github.com/acme/shop/pull/1\n')), { pullRequest: 'https://github.com/acme/shop/pull/1' });
+  assert.equal(gh.length, before + 1);
+  // Once merged into the base, there is nothing left to publish.
+  git(origin, ['update-ref', 'refs/heads/main', 'graphyard/onboarding']);
+  assert.equal(await publishOnboarding(checkout, 'acme/shop', runner(() => '')), null);
+});
+
+test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with zero prompts when no device approval is needed, hands off exactly one step when one is, and submits the goal from a file', async () => {
+  const { browserAppDriver, recordedAppDriver, runUp, upBrowserProfile, upRequestFromArgs } = await up();
+  assert.deepEqual(upRequestFromArgs(['--repo', 'acme/shop', '--agent', '--goal', 'goal.txt']), { repository: 'acme/shop', provider: 'compose', agent: true, reviewer: 'claude', master: 'claude', goalFile: 'goal.txt', browserProfile: null,
+    install: { confirmPrice: null, maxMonthly: null, sshKey: null, sshHost: null, sshUser: null } });
+  assert.throws(() => upRequestFromArgs(['--provider', 'compose']), /--repo OWNER\/NAME/);
+
+  // No device approval: the browser drive confirms both Apps, the registry proposal connects the accounts.
+  const root = await temporaryDirectory('graphyard-up-agent');
+  await writeFile(join(root, 'goal.txt'), 'A sign-up page that sends a welcome email\nIt should use the existing mailer.');
+  const quiet = world();
+  const events: UpEvent[] = [];
+  const result = await runUp(request({ agent: true, goalFile: 'goal.txt' }), dependencies(quiet, root, events, {
+    driveApp: async () => { quiet.app = true; quiet.reviewer = true; return { state: 'done' }; },
+  }));
+  assert.equal(result.exitCode, 0, result.next);
+  assert.ok(result.checklist.every(item => item.done), 'green checklist');
+  assert.equal(result.prompts, 0, 'agent mode never prints the Setup address and waits');
+  assert.deepEqual(result.handoffs, [], 'nothing is handed to a person');
+  assert.ok(quiet.calls.some(args => args.join(' ') === 'master registry propose --apply'), 'accounts come from login homes on the host');
+  const create = quiet.calls.find(args => args[0] === 'master' && args[1] === 'create')!;
+  assert.ok(create, 'the goal is submitted');
+  assert.equal(result.goal, 'GY-1');
+  assert.ok(quiet.calls.findIndex(args => args[0] === 'master' && args[1] === 'create') > quiet.calls.findLastIndex(args => args[0] === 'onboarding-merged?'), 'the goal is submitted only once the onboarding pull request has merged');
+  assert.ok(result.completed.includes('goal'));
+  assert.ok(events.every(event => JSON.parse(JSON.stringify(event)).kind), 'every event is JSON');
+
+  // A GitHub Mobile approval: exactly one handed-off step, as one sentence with its code; the run resumes on its own.
+  const deviceRoot = await temporaryDirectory('graphyard-up-device');
+  const device = world();
+  const deviceResult = await runUp(request({ agent: true }), dependencies(device, deviceRoot, [], {
+    driveApp: async (_url, handoff) => {
+      for (let poll = 0; poll < 3; poll++) { handoff('Approve the GitHub Mobile prompt on your phone and choose 42', { code: '42', url: 'https://github.com/sessions/sudo' }); await yieldTurn(); }
+      device.app = true; device.reviewer = true; return { state: 'done' };
+    },
+  }));
+  assert.equal(deviceResult.exitCode, 0, deviceResult.next);
+  assert.equal(deviceResult.handoffs.length, 1, 'exactly one handed-off step');
+  assert.deepEqual(deviceResult.handoffs[0], { step: 'control-plane', sentence: 'Approve the GitHub Mobile prompt on your phone and choose 42', url: 'https://github.com/sessions/sudo', code: '42' });
+
+  // No browser profile: agent mode stops before anything runs rather than hand App creation to a person.
+  const bareRoot = await temporaryDirectory('graphyard-up-agent-bare');
+  const bare = world();
+  const refusedAgent = await runUp(request({ agent: true }), dependencies(bare, bareRoot, []));
+  assert.equal(refusedAgent.exitCode, 2);
+  assert.match(refusedAgent.next, /--browser-profile PROFILE/);
+  assert.deepEqual(refusedAgent.handoffs, [], 'App creation is never handed to a person');
+  assert.deepEqual(bare.calls, [], 'nothing ran');
+  // The profile is the one passed, else the one the master recorded.
+  assert.equal(upBrowserProfile(bareRoot, request({ agent: true })), null);
+  await mkdir(join(bareRoot, '.graphyard'), { recursive: true });
+  await writeFile(join(bareRoot, '.graphyard/master.json'), JSON.stringify({ url: SERVER, browser: { profile: 'Default' } }));
+  assert.deepEqual(upBrowserProfile(bareRoot, request({ agent: true })), { profile: 'Default' });
+  assert.deepEqual(upBrowserProfile(bareRoot, request({ agent: true, browserProfile: 'Work' })), { profile: 'Work' });
+
+  // An interrupted goal submission replays the same request id, so the control plane creates the goal once.
+  const goalRoot = await temporaryDirectory('graphyard-up-goal');
+  await writeFile(join(goalRoot, 'goal.txt'), 'A sign-up page that sends a welcome email');
+  const goalWorld = world({ app: true, reviewer: true, accounts: true, failOnce: new Set(['master create']) });
+  const goalDeps = () => dependencies(goalWorld, goalRoot, [], { driveApp: async () => ({ state: 'done' }) });
+  assert.equal((await runUp(request({ agent: true, goalFile: 'goal.txt' }), goalDeps())).exitCode, 1);
+  assert.equal((await runUp(request({ agent: true, goalFile: 'goal.txt' }), goalDeps())).exitCode, 0);
+  assert.equal(goalWorld.creates.length, 2);
+  assert.ok(goalWorld.creates[0] && goalWorld.creates[0] === goalWorld.creates[1], 'both tries carry one request id');
+
+  // An onboarding pull request that never merges holds the goal back: the run stops resumable (exit 3) and submits nothing.
+  const unmergedRoot = await temporaryDirectory('graphyard-up-unmerged');
+  await writeFile(join(unmergedRoot, 'goal.txt'), 'A sign-up page that sends a welcome email');
+  const unmerged = world({ app: true, reviewer: true, accounts: true });
+  const held = await runUp(request({ agent: true, goalFile: 'goal.txt' }), dependencies(unmerged, unmergedRoot, [], { humanWaitMs: 10, driveApp: async () => ({ state: 'done' }), onboardingMerged: async () => false }));
+  assert.equal(held.exitCode, 3, held.next);
+  assert.match(held.next, /onboarding pull request https:\/\/github\.com\/acme\/shop\/pull\/1 to merge/);
+  assert.deepEqual(unmerged.creates, [], 'no goal while the base lacks the delivery workflows');
+
+  // The browser drive itself: a Confirm-access page is the one handoff, then the App installs on the repository alone.
+  const opened: string[] = [], clicked: string[] = [];
+  let sudoPolls = 0;
+  const controls: Record<string, Located> = {
+    'button:Register Graphyard App →': { selector: '#register', tag: 'button', checked: null, value: null, text: '' },
+    'button:Create GitHub App for acme': { selector: '#create', tag: 'button', checked: null, value: null, text: '' },
+    'link:Install GitHub App': { selector: '#install-link', tag: 'a', checked: null, value: null, text: '', href: 'https://github.com/apps/graphyard-acme-shop/installations/new' },
+    'button:Install': { selector: '#install', tag: 'button', checked: null, value: null, text: '' },
+  };
+  const page: BrowserPage = {
+    open: url => { opened.push(url); }, url: () => sudoPolls > 0 && sudoPolls < 3 ? 'https://github.com/sessions/sudo' : 'https://github.com/settings/apps',
+    text: () => sudoPolls > 0 && sudoPolls < 3 ? 'Confirm access\nUse GitHub Mobile\n42' : '', meta: () => null,
+    locate: (kind, text) => controls[`${kind}:${text}`] ?? null, click: selector => { clicked.push(selector); if (selector === '#create') sudoPolls = 1; },
+    setChecked: () => {}, select: () => {}, screenshot: () => {}, wait: () => {}, close: () => {},
+  };
+  const handed: string[] = [];
+  const drive = browserAppDriver({ page, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: async () => { if (sudoPolls) sudoPolls++; } });
+  assert.deepEqual(await drive('http://127.0.0.1:4311', sentence => { if (!handed.includes(sentence)) handed.push(sentence); }), { state: 'done' });
+  assert.deepEqual(handed, ['Approve the GitHub Mobile prompt on your phone and choose 42']);
+  assert.deepEqual(clicked, ['#register', '#create', '#install']);
+  assert.ok(opened.includes('https://github.com/apps/graphyard-acme-shop/installations/new/permissions?suggested_target_id=11&repository_ids[]=22'), 'installs on the one repository');
+
+  // GitHub's passkey-first Confirm-access page shows no code until "Use GitHub Mobile" is activated;
+  // the drive activates it (as every master browser flow does) and hands off only the code it shows.
+  let mobile = false, approved = false, polls = 0;
+  const passkey: BrowserPage = {
+    ...page, url: () => approved ? 'https://github.com/settings/apps' : 'https://github.com/sessions/sudo',
+    text: () => approved ? '' : mobile ? 'Confirm access\n37' : 'Confirm access\nUse your passkey\nHaving problems?\nUse GitHub Mobile',
+    locate: (kind, text) => kind === 'link' && text === 'Use GitHub Mobile' && !mobile ? { selector: '#mobile', tag: 'a', checked: null, value: null, text, href: 'https://github.com/sessions/sudo?mobile=1' } : controls[`${kind}:${text}`] ?? null,
+    click: selector => { if (selector === '#mobile') mobile = true; },
+  };
+  const passkeyHanded: { sentence: string; code: string | null }[] = [];
+  const passkeyDrive = browserAppDriver({ page: passkey, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: async () => { if (mobile && ++polls === 2) approved = true; } });
+  assert.deepEqual(await passkeyDrive('http://127.0.0.1:4311', (sentence, link) => { passkeyHanded.push({ sentence, code: link.code ?? null }); }), { state: 'done' });
+  assert.ok(mobile, 'GitHub Mobile was triggered');
+  assert.deepEqual(passkeyHanded, [{ sentence: 'Approve the GitHub Mobile prompt on your phone and choose 37', code: '37' }]);
+
+  // The drive is a recorded master browser flow: each step and a record.json under .graphyard/master-actions.
+  const recordRoot = await temporaryDirectory('graphyard-up-record');
+  const shots: string[] = [];
+  const recorded = recordedAppDriver(recordRoot, request({ agent: true }), { profile: 'Default' }, () => ({
+    ...page, url: () => 'https://github.com/settings/apps', text: () => '', locate: () => null, click: () => {}, screenshot: file => { shots.push(file); },
+  }));
+  assert.deepEqual(await recorded.drive('http://127.0.0.1:4311', () => {}), { state: 'done' });
+  assert.match(recorded.directory, /\.graphyard\/master-actions\/[^/]+-app-create-[0-9a-f]{8}$/);
+  assert.deepEqual(await readdir(join(recordRoot, '.graphyard/master-actions')), [recorded.directory.split('/').pop()]);
+  const record = JSON.parse(await readFile(join(recorded.directory, 'record.json'), 'utf8'));
+  assert.equal(record.flow, 'app-create');
+  assert.equal(record.outcome, 'applied');
+  assert.deepEqual(record.steps.filter((entry: any) => entry.action === 'open').map((entry: any) => entry.args[0]), ['http://127.0.0.1:4311', 'http://127.0.0.1:4311']);
+  assert.ok(shots.length >= 2, 'a screenshot after each navigation');
+});
+
+/** Visible text of rendered markup: what a person reads. */
+const visible = (markup: string) => markup.replace(/<[^>]+>/g, ' ').replace(/&#x27;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
+const render = async (state: any) => { const { SetupView } = await import('../web/pages/setup.js'); return renderToStaticMarkup(createElement(SetupView, { status: state, onConnect: () => {}, onSubmitGoal: () => {} })); };
+/** A command, a sha or a file path: what the Setup page never shows. */
+const JARGON: [string, RegExp][] = [
+  ['a command', /\b(graphyard|gy|gh|npm|node|git) [a-z-]+|(^|\s)--[a-z]/],
+  ['a sha', /\b[0-9a-f]{7,40}\b/],
+  ['a file path', /\.graphyard|~\/|\b[\w.-]+\/[\w.-]+\.(ts|tsx|js|mjs|json|md|toml|pem)\b|\/(home|etc|var|tmp)\//],
+];
+
+test('unit:setup-wizard-states — the Setup page shows each checklist state with its one action, offers the goal box only when every item is green, and shows no command, sha or file path', async () => {
+  const { goalWorkItem, setupChecklist } = await checklistModule();
+  const green = { github: true, githubRepository: 'acme/shop', appPermissions: { missing: [] }, reviewerApps: [{ id: 'claude', appId: 9 }],
+    fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] },
+    setup: { protection: 'complete', loop: true } };
+  const states: { name: string; status: any; item: string; action: RegExp | null }[] = [
+    { name: 'nothing installed yet', status: null, item: 'github-app', action: /<a [^>]*data-setup-action="github-app"[^>]*href="http:\/\/127\.0\.0\.1:4311"[^>]*>Create the GitHub App<\/a>/ },
+    { name: 'App missing permissions', status: { ...green, appPermissions: { missing: [{ permission: 'checks', required: 'write' }], installationUrl: 'https://github.com/settings/installations/7' } }, item: 'github-app', action: /data-setup-action="github-app"[^>]*href="https:\/\/github\.com\/settings\/installations\/7"[^>]*>Accept the new permissions</ },
+    { name: 'no reviewer App', status: { ...green, reviewerApps: [] }, item: 'reviewer-app', action: />Create the reviewer App</ },
+    { name: 'no account for writing code', status: { ...green, fleet: { roles: [], accounts: [] } }, item: 'account:worker', action: /<button[^>]*data-setup-action="account:worker"[^>]*>Connect an account<\/button>/ },
+    { name: 'a signed-out account', status: { ...green, fleet: { ...green.fleet, accounts: [{ name: 'claude-a', enabled: true, loggedIn: false }] } }, item: 'account:reviewer', action: />Connect an account</ },
+    { name: 'an account no session may use (quota spent, no model configured)', status: { ...green, fleet: { ...green.fleet, accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, eligible: false }] } }, item: 'account:worker', action: />Connect an account</ },
+    { name: 'branch unprotected', status: { ...green, setup: { protection: 'off', loop: true } }, item: 'branch-protection', action: /href="https:\/\/github\.com\/acme\/shop\/settings\/branches"[^>]*>Open branch settings</ },
+    { name: 'loop not running', status: { ...green, setup: { protection: 'checks', loop: false } }, item: 'master-loop', action: /data-setup-action="master-loop"[^>]*>Check again</ },
+    { name: 'every item green', status: green, item: '', action: null },
+  ];
+  for (const state of states) {
+    const markup = await render(state.status);
+    const items = setupChecklist(state.status);
+    if (state.action) {
+      assert.match(markup, new RegExp(`data-setup-item="${state.item.replace(':', '\\:')}" data-done="no"`), `${state.name}: ${state.item} is not done`);
+      assert.match(markup, state.action, `${state.name}: the action shown`);
+      assert.doesNotMatch(markup, /Describe what you want built/, `${state.name}: no goal box until every item is green`);
+    } else {
+      assert.ok(items.every(item => item.done));
+      assert.match(markup, /<form aria-label="Describe what you want built"/, 'the goal box once every item is green');
+      assert.doesNotMatch(markup, /data-setup-action=/, 'no action once every item is done');
+      assert.match(visible(markup), /Everything is ready\./);
+    }
+    // Every item carries one plain-language line and at most one action.
+    for (const item of items) assert.equal((markup.match(new RegExp(`data-setup-action="${item.id}"`, 'g')) ?? []).length, item.done ? 0 : 1, `${state.name}: ${item.id} has ${item.done ? 'no' : 'one'} action`);
+    const text = visible(markup);
+    for (const [what, pattern] of JARGON) assert.doesNotMatch(text, pattern, `${state.name}: the page shows ${what}: ${text.match(pattern)?.[0]}`);
+  }
+  // Settings → Agents opens the Setup page for the admin who signed in another way.
+  const { default: FleetPage } = await import('../web/pages/fleet.js');
+  const fleetPage = (onOpenSetup?: () => void) => renderToStaticMarkup(createElement(FleetPage, { api: async () => ({}), status: null, observedAt: 0, onOpenSetup }));
+  assert.match(fleetPage(() => {}), /<button data-open-setup="true">Open the first-run Setup checklist<\/button>/);
+  assert.doesNotMatch(fleetPage(), /data-open-setup/, 'only for the admin');
+  // Partially protected (the repository's checks only) is enough to start; the line says what follows.
+  assert.equal(setupChecklist({ ...green, setup: { protection: 'checks', loop: true } }).find(item => item.id === 'branch-protection')!.done, true);
+  // The goal becomes a first work item the master refines.
+  const goal = goalWorkItem('  A sign-up page that sends a welcome email\nUse the existing mailer.  ');
+  assert.equal(goal.title, 'A sign-up page that sends a welcome email');
+  assert.match(goal.description, /Use the existing mailer\.$/);
+  assert.deepEqual(goal.criteria.map(criterion => criterion.proofs), [['manual:goal-delivered']]);
+  assert.throws(() => goalWorkItem('short'), /at least 10 characters/);
+});
