@@ -4,7 +4,8 @@ import { execFileSync } from 'node:child_process';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { masterCredential, setupFromZeroChecks } from '../src/setup-from-zero.js';
+import * as setup from '../src/setup-from-zero.js';
+import { setupFromZeroChecks } from '../src/setup-from-zero.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -12,6 +13,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * the human operator's admin credential. Steps 3 and 10 use the master identity `install --apply`
  * records in .graphyard/master.json, and doctor reads as that identity when no token is set.
  */
+// A namespace import, so a test against code without it fails as a test case, not at load.
+const masterCredential: typeof setup.masterCredential = (...args) => setup.masterCredential(...args);
 const guide = await readFile(fileURLToPath(new URL('../docs/setup-from-zero.md', import.meta.url)), 'utf8');
 const step = (n: number) => guide.split(/^## /m).find(section => section.startsWith(`${n}. `)) ?? '';
 

@@ -6,10 +6,11 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { githubCliPreflight } from '../src/install/index.js';
+import * as install from '../src/install/index.js';
 import { buildProposal, collectScanInput, detectDeploy, detectStack, discover, proposeDelivery } from '../src/onboarding.js';
 import { applyProposal } from '../src/repository-setup.js';
-import { setupFromZeroChecks, setupNext, setupSteps } from '../src/setup-from-zero.js';
+import * as setup from '../src/setup-from-zero.js';
+import { setupFromZeroChecks, setupSteps } from '../src/setup-from-zero.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -19,6 +20,9 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * `init --scan` report frameworks from one detector.
  */
 const launcher = join(import.meta.dirname, '../bin/graphyard.mjs');
+// Namespace imports, so a test against code without these symbols fails as a test case, not at load.
+const githubCliPreflight: typeof install.githubCliPreflight = (...args) => install.githubCliPreflight(...args);
+const setupNext: typeof setup.setupNext = (...args) => setup.setupNext(...args);
 const signedIn = (scopes: string) => ({ code: 0, stdout: `github.com\n  ✓ Logged in to github.com account pilot (keyring)\n  - Token scopes: ${scopes}\n` });
 
 async function repository(files: Record<string, string>) {
