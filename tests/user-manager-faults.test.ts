@@ -115,7 +115,8 @@ test('manual:fault-class-configuration — GY-1428 executor instances: the loop 
     // A manager that came back without the slots (they died with it): the base raised one line per slot.
     const host = simulatedHost({ manager: true, slots: {} });
     const before = await executorFleet(checkout, noPresence, { work: [], now: iso(0) }, host.systemctl, null);
-    assert.deepEqual(slotLines(before), [1, 2].map(slot => `Executor slot ${slot} is inactive although this host declares 2 slot(s); journalctl --user -u ${executorUnit(slot)} says why`), 'the two instances the item lists');
+    // Compare up to the unit's journalctl pointer: the remedy wording after the unit is the executor report's, not this item's.
+    assert.deepEqual(slotLines(before).map(text => text.slice(0, text.indexOf('.service') + '.service'.length)), [1, 2].map(slot => `Executor slot ${slot} is inactive although this host declares 2 slot(s); journalctl --user -u ${executorUnit(slot)}`), 'the two instances the item lists');
     const { healUserSupervision } = await import('../src/user-manager.js');
     const heal = await healUserSupervision(checkout, { systemctl: host.systemctl, loginctl: host.loginctl, masked: () => false, wait: async () => {}, platform: 'linux' });
     assert.equal(heal.reason, null);
