@@ -19,7 +19,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 ## GitHub administration through the browser
 
-`master protection --apply` reconciles protection; where only a page exists, `master browser FLOW` drives the `master init --browser-profile` profile:
+`master protection --apply` reconciles protection; where only a page exists, `master browser FLOW` drives the `master init --browser-profile` profile (`master browser app-permissions`, `master browser installation-accept`, `master browser protection`):
 
 | Flow | Effect
 | --- | ---
@@ -37,13 +37,13 @@ Missing/retired rules (`gh api *merge*`, `gh api graphql*`) are `harness` drift;
 
 ## Typed actions and executors
 
-One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units (own credential); `master executors restart` moves them to the current release, skipping current slots unless `--all`. Verified deployments move clean checkouts to the base tip, restart stale executors then the loop (`upgrade` attention when dirty); unverified, owed restarts retry each cycle (`upgrade.stalled`: cause, last attempt, in `loaded-revision`). Fenced or claim-renewing executors count as alive. Polls and renewals upsert `executor_presence`; an empty fleet is judged on evidence (a poll heard, or rows older than the 120s window), never process age.
+One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units (own credential); `master executors restart` moves stale ones to the current release (`--all`: every slot). Verified deployments move clean checkouts to the base tip, restart stale executors then the loop (`upgrade` attention when dirty); unverified, owed restarts retry each cycle, stalls named in `loaded-revision`. Fenced or claim-renewing executors are alive. Polls and renewals upsert `executor_presence`; an empty fleet is judged on evidence (a poll heard, or rows past 120s).
 
 A declared slot not `active` (systemd, else `PRINCIPAL@HOST/N` presence) is a `resources` fault naming `journalctl --user -u graphyard-executor@N.service`, unless stopped under 2 minutes; unserved lines say slots are down, not saturated. `graphyard-executor.mjs --install` requires `Restart=always`, `RestartSec` ≤ 60 s. Worker starts fenced under 2 minutes retry once it lapses; longer fences fail naming it.
 
-A `resync` (`POST /api/work/:id/resync` `{ since }`) completes only on an observation newer than its claim.
+A `resync` (`POST /api/work/:id/resync` `{ since }`) completes only on observations newer than its claim.
 
-A `dispatch` or `request-review` finding a session already answering the head completes on it; standing verdicts block a second reviewer until dismissed; busy or reserved worker profiles wait 30 minutes before stalling. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): in no count and no list, but in `actions.stalled` and on the item's card; backoff never outlives it; eight escalate it. Ticks requeue ownerless items (`liveness.violations`).
+A `dispatch` or `request-review` finding a session already answering the head completes on it; standing verdicts block a second reviewer until dismissed; busy or reserved worker profiles wait 30 minutes before stalling. Three failures with an unchanged reason mark a row stalled rather than retrying (a fleet that looks idle): in no count and no list, but in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate it. Ticks requeue ownerless items (`liveness.violations`).
 
 ## Recovery
 

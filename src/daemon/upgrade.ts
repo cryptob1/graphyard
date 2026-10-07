@@ -6,9 +6,9 @@
 // checkout's commit; what was missing is the trigger. Between cycles — never mid-cycle — the loop
 // now aligns its checkout with the base branch once the deployment step has verified a delivery
 // is served — or, while production cannot be verified, once the checkout already holds code the
-// running loop has not loaded (GY-1445) — and when the diff touches code the loop or the executors load, it restarts the
-// fleet through `master executors restart` and then re-executes itself through the supervisor
-// unit it runs under. A checkout that is dirty or not detached is never touched: the refusal is
+// running loop has not loaded (GY-1445) — and when the diff touches code the loop or the
+// executors load, it restarts the fleet through `master executors restart` and then re-executes
+// itself through the supervisor unit it runs under. A checkout that is dirty or not detached is never touched: the refusal is
 // on the cursor, and `master status` names it until it clears.
 import { readFileSync } from 'node:fs';
 import type { ChildRun } from '../child-runner.js';
@@ -148,9 +148,10 @@ export interface SelfUpgradeDeps {
  * deployment is verified (GY-1445), a restart already owed — or a checkout that holds code the
  * running loop did not load — is still finished: the checkout is aligned with the base tip and
  * the owed restart attempted each pass, so a production observation that never arrives cannot pin
- * the loop to stale code. Each pass that cannot complete the restart records one named stall on
- * the cursor (`upgrade.stalled`: its cause and latest attempt); the pass that completes it removes it. A dirty or
- * non-detached checkout is refused before anything touches it. The executors are restarted
+ * the loop to stale code; a checkout an earlier pass already processed without loaded code is
+ * idle, never fetched again. Each pass that cannot complete the restart records one named stall
+ * on the cursor (`upgrade.stalled`: its cause and latest attempt); the pass that completes it
+ * removes it. A dirty or non-detached checkout is refused before anything touches it. The executors are restarted
  * first, through the shipped command whose refusals (a claim in flight, another restart's
  * fence) leave the owed restarts on the cursor for the next cycle to finish; the loop's own
  * re-execution is last, and everything the next process needs to know is on the cursor before
@@ -215,7 +216,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       await persist();
       return { outcome: 'upgraded', from: pending.from, to: pending.to, code: false, executors: null, self: false };
     }
-    if (!deps.restartExecutors) return failed('loaded code moved but this loop cannot restart the executors', 'executors-refused');
+    if (!deps.restartExecutors) return failed('loaded code moved but this loop cannot restart the executors', 'executors-unavailable');
     const executors = await deps.restartExecutors(pending.to).catch(error => ({ result: 'refused' as const, reason: message(error), coordinator: { commit: pending.to }, held: [], restarted: [], unsupervised: [], forgotten: [] }));
     if (executors.result === 'refused') {
       // The designed safety, not a fault (GY-916): a claim still held after the bounded wait. The
@@ -262,14 +263,17 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   // 1. The trigger: a delivery verified served by a release, from the deployment step's
   //    observation. This release already aligned is skipped, unless a restart it owes is pending.
   //    With no verified release (GY-1445) the pass still runs when a restart is owed or the
-  //    checkout holds code the running loop did not load; only an idle checkout is skipped.
+  //    checkout holds code the running loop did not load; only an idle checkout is skipped: one
+  //    holding what the loop loaded, or one a completed pass already moved to without loaded code
+  //    (a docs-only alignment restarts nothing, so the loaded commit never catches up with it).
   const observation = state.deployment;
   const release = observation && observation.source !== 'unavailable' && observation.sha && observation.deployed.length ? observation.sha : null;
   const loaded = state.release?.commit ?? null;
   if (!release) {
     if (!state.upgrade.pending) {
       const head = loaded ? (await checkoutState(deps.root, deps.run)).commit : null;
-      if (!head || head === loaded) return { outcome: 'skipped', reason: 'no delivered item is verified deployed yet' };
+      const processed = !!head && state.upgrade.last?.to === head && state.upgrade.last.code === false;
+      if (!head || head === loaded || processed) return { outcome: 'skipped', reason: 'no delivered item is verified deployed yet' };
     }
   } else if (state.upgrade.alignedRelease === release && !state.upgrade.pending)
     return { outcome: 'skipped', reason: `release ${shortCommit(release)} was already aligned` };

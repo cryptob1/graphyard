@@ -392,16 +392,16 @@ export type DoctorPendingFile = z.infer<typeof doctorPendingFileSchema>;
 export const loopReleaseSchema = z.object({ commit: z.string().regex(/^[0-9a-f]{40}$/).nullable(), dirty: z.boolean().nullable() }).strict();
 export type LoopRelease = z.infer<typeof loopReleaseSchema>;
 
+/** The causes an owed self-upgrade restart stalls on (GY-1445). */
+export const upgradeStallCauses = ['executors-refused', 'executors-unavailable', 'supervisor-unreachable', 'checkout-dirty', 'checkout-not-detached', 'fetch-failed', 'checkout-failed'] as const;
+export type UpgradeStallCause = typeof upgradeStallCauses[number];
+export const upgradeStallSchema = z.object({ cause: z.enum(upgradeStallCauses), reason: z.string().max(500), since: z.string(), at: z.string() }).strict();
+export type UpgradeStall = z.infer<typeof upgradeStallSchema>;
 /**
  * The between-cycles self-upgrade (GY-437), on the cursor so a restarted loop resumes it instead
  * of repeating it: which verified release the checkout was aligned with, what restarts a previous
  * alignment still owes, what the last one did, and why a checkout was left untouched.
  */
-/** The causes an owed self-upgrade restart stalls on (GY-1445). */
-export const upgradeStallCauses = ['executors-refused', 'supervisor-unreachable', 'checkout-dirty', 'checkout-not-detached', 'fetch-failed', 'checkout-failed'] as const;
-export type UpgradeStallCause = typeof upgradeStallCauses[number];
-export const upgradeStallSchema = z.object({ cause: z.enum(upgradeStallCauses), reason: z.string().max(500), since: z.string(), at: z.string() }).strict();
-export type UpgradeStall = z.infer<typeof upgradeStallSchema>;
 export const upgradeStateSchema = z.object({
   /** The verified deployed release the checkout was last aligned with: a new sha is a new trigger. */
   alignedRelease: z.string().regex(/^[0-9a-f]{7,40}$/).nullable().default(null),

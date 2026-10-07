@@ -30,6 +30,7 @@ const master: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https:
 class FakeGit {
   dirty = '';
   checkouts: string[] = [];
+  fetches = 0;
   constructor(public head: string, public originTip: string, public diffPaths = ['src/daemon/run.ts']) {}
   run = async (command: string, args: string[]): Promise<string> => {
     assert.equal(command, 'git');
@@ -37,7 +38,7 @@ class FakeGit {
     if (op === 'rev-parse') return `${operands[0] === 'HEAD' ? this.head : this.originTip}\n`;
     if (op === 'symbolic-ref') throw Object.assign(new Error('fatal: not a symbolic ref'), { status: 1 });
     if (op === 'status') return this.dirty;
-    if (op === 'fetch') return '';
+    if (op === 'fetch') { this.fetches += 1; return ''; }
     if (op === 'diff') return `${this.diffPaths.join('\n')}\n`;
     if (op === 'checkout') { this.head = operands[2]; this.checkouts.push(operands[2]); return ''; }
     throw new Error(`fake git cannot answer: git ${args.slice(2).join(' ')}`);
@@ -138,6 +139,37 @@ test('integration:self-upgrade-fires-without-verified-deployment — with produc
   const idle = faultState({ owed: false }), current = new FakeGit(loaded, tip);
   assert.deepEqual(await performSelfUpgrade(master, idle, deps(current, { now: faultAt }, { held: false, self: 0, executors: [] })), { outcome: 'skipped', reason: 'no delivered item is verified deployed yet' });
   assert.deepEqual(current.checkouts, []);
+
+  // A verified docs-only deploy moved the checkout past the loaded commit without a restart, then
+  // production went unobserved: the gap holds no loaded code, so the pass that already processed it
+  // leaves it idle — no fetch, no diff, no cursor write on any later cycle.
+  const docs = faultState({ owed: false }), page = new FakeGit(loaded, checkout, ['docs/master-agent-reference.md']), calm = { held: false, self: 0, executors: [] as string[] };
+  docs.deployment = { source: 'endpoint', sha: checkout, at: iso(faultAt), reason: null, deployed: ['GY-1436'], pending: [] };
+  let writes = 0;
+  const docsDeps = { ...deps(page, clock, calm), persist: async () => { writes += 1; } };
+  const verified = await performSelfUpgrade(master, docs, docsDeps);
+  assert.deepEqual(verified, { outcome: 'upgraded', from: loaded, to: checkout, code: false, executors: null, self: false });
+  assert.equal(docs.release?.commit, loaded, 'a docs-only move restarts nothing, so the loaded commit stays behind the checkout');
+  docs.deployment = null;
+  const [fetched, persisted, recorded] = [page.fetches, writes, docs.upgrade.last];
+  for (const step of [1, 2, 3]) {
+    clock.now = faultAt + 30 * minute + step * 10 * minute;
+    assert.deepEqual(await performSelfUpgrade(master, docs, docsDeps), { outcome: 'skipped', reason: 'no delivered item is verified deployed yet' }, `cycle ${step} is idle`);
+  }
+  assert.deepEqual({ fetches: page.fetches, writes, last: docs.upgrade.last }, { fetches: fetched, writes: persisted, last: recorded }, 'the docs-only gap is processed once, then stays idle');
+  assert.deepEqual({ executors: calm.executors, self: calm.self }, { executors: [], self: 0 });
+
+  // The same docs-only gap first met unverified: one pass processes it without restarting anything, then it stays idle.
+  const fresh = faultState({ owed: false }), gap = new FakeGit(checkout, checkout, ['docs/master-agent-reference.md']);
+  const once = await performSelfUpgrade(master, fresh, deps(gap, clock, calm));
+  assert.equal(once.outcome, 'upgraded');
+  assert.equal(gap.fetches, 1);
+  for (const step of [1, 2]) assert.equal((await performSelfUpgrade(master, fresh, deps(gap, clock, calm))).outcome, 'skipped', `unverified cycle ${step} is idle`);
+  assert.equal(gap.fetches, 1, 'no fetch repeats per cycle');
+  // A later move onto code the loop never loaded is new work again.
+  gap.head = tip; gap.originTip = tip; gap.diffPaths = ['src/daemon/run.ts'];
+  assert.equal((await performSelfUpgrade(master, fresh, deps(gap, clock, calm))).outcome, 'upgraded');
+  assert.equal(calm.self, 1);
 });
 
 test('unit:loaded-revision-names-last-restart-attempt — a restart owed that cannot complete records one named stall with its cause and latest attempt, shown beside the loaded and checkout revisions, and a later successful attempt retires it', async () => {
@@ -178,6 +210,12 @@ test('unit:loaded-revision-names-last-restart-attempt — a restart owed that ca
   reading = loadedRevision(state, { ...revision, checkout: tip }, clock.now);
   assert.equal(reading.used, 0);
   assert.match(reading.detail!, /under way.*stalled on executors-refused .*holds dispatch for GY-1439/);
+
+  // A loop built with no executor restart at all is not refused by anyone: the cause says it is unavailable.
+  const bare = faultState({ owed: false }), bareGit = new FakeGit(checkout, checkout);
+  const { restartExecutors: _omitted, ...withoutExecutors } = deps(bareGit, clock, fleet);
+  assert.equal((await performSelfUpgrade(master, bare, withoutExecutors)).outcome, 'failed');
+  assert.equal(bare.upgrade.stalled?.cause, 'executors-unavailable');
 
   // A later attempt that completes retires the stall, and the detail names none.
   fleet.held = false;
