@@ -7,7 +7,8 @@ import { configHome } from './install/secrets.js';
 import { sessionNameField, suffixedSessionName } from './session-name.js';
 import { installDirectory, readInstallRecord } from './install/secrets.js';
 import { installIdFor } from './install/types.js';
-import { defaultCandidateSchedule, deliveryPolicySchema, generatedWorkflowFiles, type DeliveryMode, type DeliveryPolicy, type GateCheck } from './model/delivery-policy.js';
+import { defaultCandidateSchedule, deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy, type GateCheck } from './model/delivery-policy.js';
+import { onboardingBranch, onboardingWorkRequest, pullRequestNumber } from './model/onboarding-work.js';
 
 export function repositoryFromRemote(remote: string) {
   const value = remote.trim();
@@ -448,4 +449,59 @@ export async function installedOnboarding(root: string, repository: string, url:
   const origin = (value: string) => { try { return new URL(value).origin; } catch { return value; } };
   if (url && (!record.url || origin(url) !== origin(record.url))) throw new Error(`graphyard install --apply owns ${repository}'s identities and App for ${record.url ?? 'its own server'} (${resolve(directory, 'install.json')}), not ${url}. Rerun init --scan --apply with --url ${record.url ?? 'that server'}; init mints no principals for another server beside the install's. Nothing was written in ${root}.`);
   return { directory, url: record.url, githubApp: { appId: record.github.appId, slug: record.github.slug } };
+}
+
+
+// --- Filing the onboarding pull request as a work item (GY-1478) -----------------------------------
+
+/**
+ * The checks the onboarding item waits for: the pull-request checks the delivery policy the
+ * onboarding wrote into graphyard.json requires (what branch protection requires too), or null
+ * when it names none, which leaves the control plane's default.
+ */
+export async function onboardingChecks(root: string): Promise<string[] | null> {
+  let delivery: unknown;
+  try { delivery = JSON.parse(await readFile(resolve(root, 'graphyard.json'), 'utf8'))?.delivery; } catch { return null; }
+  const policy = deliveryPolicySchema.safeParse(delivery);
+  const checks = policy.success ? [...new Set(requiredPullRequestChecks(policy.data))].slice(0, 30) : [];
+  return checks.length ? checks : null;
+}
+
+export interface OnboardingFiling {
+  /** The control plane's address and the operator's admin credential: only an operator may create, claim and submit for an item it files. */
+  server: string; token: string;
+  /** The onboarding pull request, and the checks its item requires (null: the control plane's default). */
+  url: string; checks: string[] | null;
+  /** Where the workspace is registered: this machine, and a path under the checkout no worktree uses. */
+  host: string; path: string;
+  /** Fixed before the first try: each step's idempotency key derives from it, so a rerun replays the filing instead of filing twice. */
+  requestId: string;
+}
+
+/**
+ * File the onboarding pull request as a work item (GY-1478 AC-1): create it, release it, claim it,
+ * register the onboarding branch as its workspace and submit the pull request, as a worker would.
+ * Submitted, it holds no lease and the loop owns it: the reviewer reviews it, the checks run and the
+ * control plane merges it under the normal gates.
+ */
+export async function fileOnboardingWork(filing: OnboardingFiling, fetcher: typeof fetch = fetch): Promise<{ key: string; id: string }> {
+  const pr = pullRequestNumber(filing.url);
+  if (!pr) throw new Error(`${filing.url} names no pull request`);
+  const post = async (path: string, step: string, body: unknown) => {
+    const response = await fetcher(`${filing.server.replace(/\/+$/, '')}/api/${path}`, { method: 'POST', body: JSON.stringify(body), signal: AbortSignal.timeout(60_000),
+      headers: { Authorization: `Bearer ${filing.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': `${filing.requestId}-${step}` } });
+    const answer = await response.json().catch(() => null) as any;
+    if (!response.ok) throw new Error(`the control plane refused the onboarding item's ${step}: ${String(answer?.error ?? answer?.message ?? response.status).slice(0, 300)}`);
+    return answer;
+  };
+  const created = await post('work', 'create', onboardingWorkRequest(filing.url, filing.checks));
+  const id = typeof created?.id === 'string' ? created.id : '', key = typeof created?.key === 'string' ? created.key : '';
+  if (!id || !key) throw new Error('the control plane named no work item for the onboarding pull request');
+  await post(`work/${id}/ready`, 'ready', {});
+  const claimed = await post(`work/${id}/claim`, 'claim', {});
+  const epoch = Number(claimed?.lease?.epoch ?? claimed?.epoch);
+  if (!Number.isSafeInteger(epoch) || epoch <= 0) throw new Error(`claiming ${key} named no epoch`);
+  await post(`work/${id}/workspace`, 'workspace', { epoch, host: filing.host, path: filing.path, branch: onboardingBranch });
+  await post(`work/${id}/submit`, 'submit', { epoch, pr });
+  return { key, id };
 }

@@ -586,3 +586,140 @@ const server = createServer((_, response) => response.end('App page')).listen(0,
     }
   }));
 });
+
+/**
+ * GY-1478: the onboarding pull request is filed as a work item the loop owns, so no person merges it.
+ * The stubbed loop below plays what the real one does once it runs: the repository's checks pass on
+ * its candidate, the reviewer approves it, the control plane merges it.
+ */
+function onboardingLoop(w: World) {
+  const filings: { url: string; operatorTokenFile: string | null; requestId: string }[] = [];
+  let item: any = null, polls = 0;
+  const gates = (test: boolean, review: boolean) => [{ name: 'build', passed: true }, { name: 'review', passed: review }, { name: 'test', passed: test }, { name: 'merge', passed: false }];
+  return {
+    filings, item: () => item,
+    fileOnboarding: async (url: string, operatorTokenFile: string | null, requestId: string) => {
+      filings.push({ url, operatorTokenFile, requestId });
+      item ??= { key: 'GY-7', title: 'Add Graphyard onboarding', description: `${url}\n\nFiled by graphyard up.`, createdAt: new Date(0).toISOString(), stage: 'build',
+        workspaces: [{ epoch: 1, branch: 'graphyard/onboarding' }], submission: { epoch: 1, pr: 1 }, gates: gates(false, false) };
+      return { key: item.key };
+    },
+    // Each read is one loop tick, and only once the loop runs: checks pass, then the review, then the merge.
+    work: async () => {
+      if (item && w.loop && item.stage !== 'done') {
+        polls++;
+        if (polls === 2) item.gates = gates(true, false);
+        if (polls === 3) item.gates = gates(true, true);
+        if (polls === 4) { item.stage = 'done'; w.onboardingMerged = true; }
+      }
+      return item ? [{ key: 'GY-3', title: 'Something else', workspaces: [] }, item] : [];
+    },
+    onboardingMerged: async (url: string) => { assert.equal(url, w.onboardingPullRequest); w.calls.push(['onboarding-merged?']); return w.onboardingMerged; },
+  };
+}
+
+test('unit:onboarding-pr-self-merges — up files the onboarding pull request as a loop-owned work item, the loop reviews and merges it, and up carries on with no operator action', async () => {
+  const { runUp } = await up();
+  const root = await temporaryDirectory('graphyard-up-onboarding-merge');
+  await writeFile(join(root, 'goal.txt'), 'A sign-up page that sends a welcome email to every new user.');
+  const w = world();
+  const loop = onboardingLoop(w);
+  const events: UpEvent[] = [];
+  const result = await runUp(request({ agent: true, goalFile: 'goal.txt' }), dependencies(w, root, events, {
+    driveApp: async () => { w.app = true; w.reviewer = true; return { state: 'done' }; },
+    fileOnboarding: loop.fileOnboarding, work: loop.work, onboardingMerged: loop.onboardingMerged,
+  }));
+  assert.equal(result.exitCode, 0, result.next);
+  assert.equal(result.goal, 'GOAL-1', 'the goal is submitted once the onboarding pull request merged');
+  assert.deepEqual(result.handoffs, [], 'nothing is handed to a person: no review, approval or merge by hand');
+  assert.equal(result.prompts, 0);
+  // Filed once, during onboarding, with the operator credential the install named and a request id fixed before the first try.
+  assert.equal(loop.filings.length, 1);
+  assert.equal(loop.filings[0].url, 'https://github.com/acme/shop/pull/1');
+  assert.equal(loop.filings[0].operatorTokenFile, OPERATOR_TOKEN);
+  const saved = JSON.parse(await readFile(join(root, '.graphyard/up.json'), 'utf8'));
+  assert.equal(saved.onboardingWork, 'GY-7');
+  assert.equal(saved.onboardingRequest, loop.filings[0].requestId);
+  assert.equal(saved.onboardingPullRequest, null, 'the wait ends once it merged');
+  assert.ok(events.some(event => event.kind === 'step' && event.step === 'onboarding' && event.state === 'done' && /filed as GY-7 for the loop to review and merge/.test(event.detail ?? '')));
+  // The stubbed loop reviewed it (checks, then review) and merged it; up showed each wait as it changed.
+  const waits = events.flatMap(event => event.kind === 'onboarding' ? [event.wait] : []);
+  assert.deepEqual(waits.map(wait => wait.waitingFor), [['checks', 'review'], ['review'], ['merge'], []]);
+  assert.equal(waits.at(-1)?.merged, true);
+  assert.equal(loop.item().stage, 'done');
+  assert.equal(result.onboarding?.merged, true);
+  assert.ok(w.calls.findIndex(args => args[0] === 'goal') > w.calls.findLastIndex(args => args[0] === 'onboarding-merged?'), 'the goal waits for the merge');
+
+  // A rerun after the run finished files nothing again.
+  const again = await runUp(request({ agent: true, goalFile: 'goal.txt' }), dependencies(w, root, [], { fileOnboarding: loop.fileOnboarding, work: loop.work, onboardingMerged: loop.onboardingMerged }));
+  assert.equal(again.exitCode, 0, again.next);
+  assert.equal(loop.filings.length, 1);
+
+  // The filing itself: the item requires independent review and the repository's own checks, and is
+  // created, released, claimed, given the onboarding branch and submitted under the operator's credential,
+  // each step with an idempotency key derived from the fixed request id.
+  const { fileOnboardingWork, onboardingChecks } = await import('../src/onboarding.js');
+  const checkout = await temporaryDirectory('graphyard-up-onboarding-checks');
+  assert.equal(await onboardingChecks(checkout), null, 'no graphyard.json: the control plane default');
+  await writeFile(join(checkout, 'graphyard.json'), JSON.stringify({ delivery: { mode: 'release-candidate', candidateSchedule: null, deploy: { adapter: 'command', project: null, uat: null, production: null },
+    mergeGate: { preMerge: [{ check: 'test', command: 'npm test', source: 'script', reason: 'fast unit tests' }, { check: 'lint', command: 'npm run lint', source: 'script', reason: 'static analysis' }],
+      perCandidate: [{ check: 'e2e', command: 'npm run e2e', source: 'script', reason: 'long suite' }] } } }));
+  const checks = await onboardingChecks(checkout);
+  const posted: { path: string; key: string | null; auth: string | null; body: any }[] = [];
+  const fetcher = (async (input: any, init: any) => {
+    const path = new URL(String(input)).pathname, headers = init.headers as Record<string, string>;
+    posted.push({ path, key: headers['Idempotency-Key'], auth: headers.Authorization, body: JSON.parse(init.body) });
+    const answer = path === '/api/work' ? { id: 'w-1', key: 'GY-7' } : path.endsWith('/claim') ? { id: 'w-1', key: 'GY-7', lease: { epoch: 1 } } : { id: 'w-1', key: 'GY-7' };
+    return new Response(JSON.stringify(answer), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }) as typeof fetch;
+  const token = 'a'.repeat(40);
+  const filed = await fileOnboardingWork({ server: SERVER, token, url: 'https://github.com/acme/shop/pull/1', checks, host: 'laptop', path: '/repo/.graphyard/onboarding', requestId: 'r-1' }, fetcher);
+  assert.deepEqual(filed, { key: 'GY-7', id: 'w-1' });
+  assert.deepEqual(posted.map(entry => entry.path), ['/api/work', '/api/work/w-1/ready', '/api/work/w-1/claim', '/api/work/w-1/workspace', '/api/work/w-1/submit']);
+  assert.deepEqual(posted.map(entry => entry.key), ['r-1-create', 'r-1-ready', 'r-1-claim', 'r-1-workspace', 'r-1-submit']);
+  assert.ok(posted.every(entry => entry.auth === `Bearer ${token}`));
+  const created = posted[0].body;
+  assert.equal(created.title, 'Add Graphyard onboarding');
+  assert.equal(created.type, 'chore', 'no documentation obligation: it changes no documented behaviour');
+  assert.deepEqual(created.policy, { checks: ['test', 'lint'], review: true }, 'independent review and the checks branch protection requires');
+  assert.match(created.description, /^https:\/\/github\.com\/acme\/shop\/pull\/1\n/);
+  assert.deepEqual(posted[3].body, { epoch: 1, host: 'laptop', path: '/repo/.graphyard/onboarding', branch: 'graphyard/onboarding' });
+  assert.deepEqual(posted[4].body, { epoch: 1, pr: 1 });
+  // The item is valid input to the control plane's create.
+  const { createSchema } = await import('../src/model/work.js');
+  assert.ok(createSchema.safeParse(created).success, JSON.stringify(createSchema.safeParse(created).error?.issues));
+});
+
+test('unit:onboarding-pr-visible — while the onboarding pull request is open, up and the Setup page show it as the current step with its URL, what it waits for and the time waited', async () => {
+  const { onboardingWait } = await import('../src/model/onboarding-work.js');
+  const { describeUpEvent } = await up();
+  const filed = Date.parse('2026-10-07T10:00:00Z'), now = filed + 12 * 60_000;
+  const item = { key: 'GY-7', title: 'Add Graphyard onboarding', description: 'https://github.com/acme/shop/pull/1\n\nFiled by graphyard up.', createdAt: new Date(filed).toISOString(), stage: 'review',
+    workspaces: [{ epoch: 1, branch: 'graphyard/onboarding' }], submission: { epoch: 1, pr: 1 }, gates: [{ name: 'review', passed: false }, { name: 'test', passed: true }] };
+  const wait = onboardingWait(item, now);
+  assert.deepEqual({ key: wait.key, url: wait.url, waitingFor: wait.waitingFor, merged: wait.merged, waitedMs: wait.waitedMs }, { key: 'GY-7', url: 'https://github.com/acme/shop/pull/1', waitingFor: ['review'], merged: false, waitedMs: 12 * 60_000 });
+  assert.equal(wait.line, 'The change that adds Graphyard\'s delivery workflows to your repository is waiting for an independent review. It has waited 12 min and merges by itself; nothing is needed from you.');
+  assert.deepEqual(onboardingWait({ ...item, gates: [] }, now).waitingFor, ['checks', 'review']);
+  // up's line: the item, its URL, what it waits for and how long.
+  assert.equal(describeUpEvent({ kind: 'onboarding', wait }), '· onboarding: GY-7 (https://github.com/acme/shop/pull/1) waits for review, 12 min so far; the loop reviews and merges it');
+
+  // The Setup page: every other item green, yet the page is not "ready" and offers no goal box while the change is open.
+  const green = { github: true, githubRepository: 'acme/shop', appPermissions: { missing: [] }, reviewerApps: [{ id: 'claude', appId: 9 }],
+    fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] },
+    setup: { protection: 'complete', loop: true } };
+  const { SetupView } = await import('../web/pages/setup.js');
+  const page = (work: any[]) => renderToStaticMarkup(createElement(SetupView, { status: green, work, now, onConnect: () => {}, onSubmitGoal: () => {} }));
+  const open = page([{ key: 'GY-3', title: 'Other', workspaces: [] }, item]);
+  assert.match(open, /<li data-setup-item="onboarding" data-done="no" data-waiting-for="review" aria-current="step">/);
+  assert.match(open, /<a [^>]*data-setup-action="onboarding"[^>]*href="https:\/\/github\.com\/acme\/shop\/pull\/1"[^>]*>Open the change<\/a>/);
+  const text = visible(open);
+  assert.ok(text.includes(wait.line), 'the checklist line names what it waits for and the time waited');
+  assert.match(text, /1 of 7 steps left/);
+  assert.doesNotMatch(open, /Describe what you want built/, 'the goal waits for the merge, as up does');
+  for (const [what, pattern] of JARGON) assert.doesNotMatch(text, pattern, `the onboarding step shows no ${what}`);
+  // Merged: the step is done and the goal box is offered.
+  const merged = page([{ ...item, stage: 'done' }]);
+  assert.match(merged, /data-setup-item="onboarding" data-done="yes"/);
+  assert.match(merged, /<form aria-label="Describe what you want built"/);
+  assert.match(visible(merged), /Everything is ready\./);
+});
