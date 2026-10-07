@@ -141,7 +141,7 @@ test('unit:inside-bound-no-fault — no fault and no lease stop inside the bound
   assert.match(unsubmittedFaults(attempt(90, {}, now), now)[0].text, /past 120 minutes with no submission the loop stops renewing the lease$/);
 });
 
-test('unit:scope-wait-not-unbounded — an attempt waiting on its own scope request, undecided or refused and left open for the master, is not past the bound; once its request is answered the bound runs from the answer (GY-1472)', async () => {
+test('unit:scope-wait-not-unbounded — an attempt waiting on its own scope request, undecided or refused by the widening rule, is not past the bound; once its request is answered, a refusal by the independent approver included, the bound runs from the answer (GY-1472)', async () => {
   const { noSubmissionRenewalRefused, unsubmittedAttempt } = await bound();
   const now = Date.now();
   const claimed = iso(-150 * minute, now), asked = iso(-149 * minute, now);
@@ -154,6 +154,12 @@ test('unit:scope-wait-not-unbounded — an attempt waiting on its own scope requ
   const refused = attempt(150, { scopeRequest: { ...request, decision: refusal }, scopeDecision: refusal }, now);
   assert.equal(unsubmittedAttempt(refused, now), null, 'a refused ask standing for the master is not a stalled worker');
   assert.equal(noSubmissionRenewalRefused(refused, now), false, 'the server keeps renewing it');
+  // An independent approver's refusal is final even while it stays on the request: the bound runs from it, so a worker ignoring it is still reclaimed.
+  const final = (minutesAgo: number) => { const decision = { ...refusal, decidedBy: 'graphyard-approver', at: iso(-minutesAgo * minute, now) }; return attempt(150, { scopeRequest: { ...request, decision }, scopeDecision: decision }, now); };
+  assert.equal(unsubmittedAttempt(final(50), now), null, 'fifty minutes since the approver refused is inside the bound');
+  const ignored = unsubmittedAttempt(final(140), now);
+  assert.ok(ignored?.reclaim && ignored.boundFrom === iso(-140 * minute, now), 'a worker ignoring the final refusal is reclaimed from it');
+  assert.equal(noSubmissionRenewalRefused(final(140), now), true, 'and the server refuses its renewal');
   // An earlier attempt's request does not cover this one.
   assert.ok(unsubmittedAttempt(attempt(150, { scopeRequest: { ...request, epoch: 0 } }, now), now)?.reclaim);
   // Answered after 100 minutes of waiting: the bound runs from the answer, not the claim.

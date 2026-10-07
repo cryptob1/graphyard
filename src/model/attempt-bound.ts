@@ -38,15 +38,17 @@ function attemptClaimedAt(work: Work, epoch: number): string | null {
   return claimed && Number.isFinite(Date.parse(claimed)) ? claimed : null;
 }
 /**
- * GY-1472: an attempt waiting on its own scope request — undecided, or refused and left open for
- * the master to decide, with its escalation standing — is waiting on that decision, not stalled, so
- * the bound does not run (null). Ending it would only launch an attempt that asks the same paths
- * again, deciding the one request twice. Once its request is answered the bound runs from the
- * answer; otherwise from the claim.
+ * GY-1472: an attempt waiting on its own scope request — undecided, or refused by the widening rule
+ * (`decidedBy` graphyard) and so with the independent approver or left open for the master, its
+ * escalation standing — is waiting on that decision, not stalled, so the bound does not run (null).
+ * Ending it would only launch an attempt that asks the same paths again, deciding the one request
+ * twice. An independent approver's refusal is the final answer the worker acts on, though it stays
+ * on the request: like any answer, the bound runs from it. Otherwise from the claim.
  */
 function boundStartedAt(work: Work, epoch: number, claimedAt: string): string | null {
-  if (work.scopeRequest?.epoch === epoch) return null;
-  const answered = work.scopeDecision;
+  const own = work.scopeRequest?.epoch === epoch ? work.scopeRequest : null;
+  if (own && (!own.decision || own.decision.decidedBy === 'graphyard')) return null;
+  const answered = own?.decision ?? work.scopeDecision;
   return answered && Date.parse(answered.requestedAt) >= Date.parse(claimedAt) && Date.parse(answered.at) > Date.parse(claimedAt) ? answered.at : claimedAt;
 }
 /**
