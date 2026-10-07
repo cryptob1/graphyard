@@ -248,10 +248,11 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   assert.equal(git(origin, ['rev-parse', 'graphyard/onboarding^']).trim(), git(origin, ['rev-parse', 'main']).trim());
   assert.deepEqual(gh.find(args => args[1] === 'create')!.slice(0, 8), ['pr', 'create', '--repo', 'acme/shop', '--base', 'main', '--head', 'graphyard/onboarding']);
   assert.equal(git(checkout, ['status', '--porcelain', '--', 'AGENTS.md']).trim(), '?? AGENTS.md', 'the operator\'s index is untouched');
-  // Rerun with the pull request open: it is reused, nothing is pushed again.
-  const before = gh.length;
+  // Rerun with the pull request open and its branch carrying these files: it is reused, nothing is pushed again.
+  const before = gh.length, pushed = git(origin, ['rev-parse', 'graphyard/onboarding']).trim();
   assert.deepEqual(await publishOnboarding(checkout, 'acme/shop', runner(() => 'https://github.com/acme/shop/pull/1\n')), { pullRequest: 'https://github.com/acme/shop/pull/1' });
-  assert.equal(gh.length, before + 1);
+  assert.ok(!gh.slice(before).some(args => args[1] === 'create'));
+  assert.equal(git(origin, ['rev-parse', 'graphyard/onboarding']).trim(), pushed);
   // Once merged into the base, there is nothing left to publish.
   git(origin, ['update-ref', 'refs/heads/main', 'graphyard/onboarding']);
   assert.equal(await publishOnboarding(checkout, 'acme/shop', runner(() => '')), null);
@@ -839,7 +840,8 @@ test('unit:onboarding-pr-visible — while the onboarding pull request is open, 
 });
 
 test('unit:onboarding-generates-workflow — onboarding a repository with no CI writes a delivery workflow (build and test for its stack, then Graphyard\'s gate) into the onboarding change, up claims only the workflows the apply wrote, and publishOnboarding refuses naming a file it means to publish that is missing', async () => {
-  const { buildProposal, collectScanInput, deliveryGateJob, deliveryWorkflowFile, hasNoCi, renderDeliveryWorkflow, writeDeliveryWorkflow } = await import('../src/onboarding.js');
+  const { buildProposal, collectScanInput, deliveryGateJob, deliveryWorkflowFile, detectStack, hasNoCi, renderDeliveryWorkflow, writeDeliveryWorkflow } = await import('../src/onboarding.js');
+  const detectStackName = (input: Parameters<typeof detectStack>[0]) => detectStack(input).name;
   const { applyProposal, repositoryScanDifference, saveProposal, scanProposal } = await import('../src/repository-setup.js');
   const { publishOnboarding, runUp } = await up();
   const gitRoot = await temporaryDirectory('graphyard-up-greenfield');
@@ -896,6 +898,37 @@ test('unit:onboarding-generates-workflow — onboarding a repository with no CI 
   const tree = git(origin, ['ls-tree', '-r', '--name-only', 'graphyard/onboarding']).trim().split('\n');
   assert.ok(tree.includes(deliveryWorkflowFile) && tree.includes('AGENTS.md') && tree.includes('graphyard.json') && tree.includes('.gitignore'), tree.join(', '));
   assert.match(gh.find(args => args[1] === 'create')!.at(-1)!, new RegExp(`delivery workflows \\(${deliveryWorkflowFile.replace(/[./]/g, '\\$&')}\\)`));
+  // A pull request already open from an earlier run or an older CLI, whose branch lacks the delivery
+  // workflow, is not reported as carrying it: its branch is rebuilt and force-pushed before it is reused.
+  const stale = git(origin, ['rev-parse', 'main']).trim();
+  git(origin, ['update-ref', 'refs/heads/graphyard/onboarding', stale]);
+  const reopened = (program: string, args: string[], env?: Record<string, string>) => program === 'gh' && args[0] === 'pr' && args[1] === 'list' ? 'https://github.com/acme/game/pull/1\n' : runner(program, args, env);
+  const created = gh.filter(args => args[1] === 'create').length;
+  assert.deepEqual(await publishOnboarding(checkout, 'acme/game', reopened, [deliveryWorkflowFile]), { pullRequest: 'https://github.com/acme/game/pull/1' });
+  assert.ok(git(origin, ['ls-tree', '-r', '--name-only', 'graphyard/onboarding']).includes(deliveryWorkflowFile), 'the open pull request now carries the workflow it is reported with');
+  assert.equal(gh.filter(args => args[1] === 'create').length, created, 'the open pull request is reused, not duplicated');
+
+  // The pull request waits for the check the generated workflow reports — its gate job — whatever the
+  // stack's scripts are named: typecheck, lint and pytest run inside its jobs and never report on their own.
+  const { requiredPullRequestChecks } = await import('../src/model/delivery-policy.js');
+  assert.deepEqual(applied.delivery!.requiredChecks, [deliveryGateJob]);
+  assert.deepEqual(requiredPullRequestChecks(JSON.parse(await readFile(join(checkout, 'graphyard.json'), 'utf8')).delivery), [deliveryGateJob], 'the committed policy requires the gate job');
+  assert.deepEqual(proposal.policy.checks, [deliveryGateJob]);
+  const emitted = (stack: Parameters<typeof renderDeliveryWorkflow>[0]) => [...renderDeliveryWorkflow(stack).content.matchAll(/^  ([\w-]+):$/gm)].map(match => match[1]);
+  for (const [label, input] of [
+    ['a Node repository with typecheck and lint scripts', { files: ['package.json'], contents: { 'package.json': JSON.stringify({ scripts: { build: 'tsc', typecheck: 'tsc --noEmit', lint: 'eslint .', test: 'vitest run', 'test:e2e': 'playwright test' }, devDependencies: { vitest: '1' } }) } }],
+    ['a pytest repository', { files: ['pyproject.toml', 'tests/test_game.py'], contents: { 'pyproject.toml': '[tool.pytest.ini_options]\n# pytest\n' } }],
+    ['a repository with no detected commands', { files: ['main.go'], contents: {} }],
+  ] as const) {
+    const scanned = buildProposal(input as any, { repository: 'acme/game' });
+    assert.equal(scanned.ci.system, 'none', label);
+    const required = requiredPullRequestChecks(scanned.delivery!);
+    assert.deepEqual(required, [deliveryGateJob], `${label}: pull requests require only the gate job`);
+    assert.deepEqual(scanned.policy.checks, [deliveryGateJob], `${label}: work items wait for the gate job`);
+    const jobs = emitted({ name: detectStackName(input as any), frameworks: [], commands: [] });
+    for (const check of required) assert.ok(jobs.includes(check), `${label}: ${check} is a job the generated workflow emits (${jobs.join(', ')})`);
+    assert.ok(scanned.delivery!.mergeGate.perCandidate.every(entry => entry.command), `${label}: a per-candidate check is one the candidate workflow runs`);
+  }
 
   // A file the publish means to carry that is missing is refused by name; nothing is pushed.
   const missing = join(gitRoot, 'missing');
@@ -958,6 +991,16 @@ test('unit:up-preflight-clean-cli — up refuses at preflight, naming the dirty 
   const green = await runUp(request(), { ...dependencies(live, await temporaryDirectory('graphyard-up-loop-live'), []), loopRefusal: async () => cause });
   assert.equal(green.exitCode, upExitCodes.failed);
   assert.match(green.next, /^master-loop: the master loop refuses to run/);
+
+  // A resumed run whose checkout was dirtied after an earlier run's preflight passed is refused before it installs anything.
+  const resumed = world();
+  const resumedRoot = await temporaryDirectory('graphyard-up-resumed-dirty');
+  await mkdir(join(resumedRoot, '.graphyard'), { recursive: true });
+  await writeFile(join(resumedRoot, '.graphyard/up.json'), JSON.stringify({ version: 1, repository: 'acme/shop', provider: 'compose', completed: ['preflight'], noHerdr: false, goal: null }));
+  const resumedResult = await runUp(request(), { ...dependencies(resumed, resumedRoot, []), cliCheckout: async () => ({ root: '/opt/graphyard', dirty: ['src/up.ts'] }) });
+  assert.equal(resumedResult.exitCode, upExitCodes.prerequisite);
+  assert.match(resumedResult.next, /^preflight: .*src\/up\.ts/);
+  assert.deepEqual(resumed.calls.filter(args => args[0] === 'install'), [], 'a resumed run installs nothing from a dirty checkout');
 
   // A checkout dirtied after preflight is refused again before the loop restarts.
   const late = world({ app: true, reviewer: true, accounts: true, onboardingMerged: true });

@@ -7,7 +7,7 @@ import { configHome } from './install/secrets.js';
 import { sessionNameField, suffixedSessionName } from './session-name.js';
 import { installDirectory, readInstallRecord } from './install/secrets.js';
 import { installIdFor } from './install/types.js';
-import { defaultCandidateSchedule, deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy, type GateCheck } from './model/delivery-policy.js';
+import { defaultCandidateSchedule, deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy, type GateCheck, type MergeGate } from './model/delivery-policy.js';
 import { onboardingBranch, onboardingWorkRequest, pullRequestNumber } from './model/onboarding-work.js';
 
 export function repositoryFromRemote(remote: string) {
@@ -393,6 +393,20 @@ export function classifyChecks(input: ScanInput, stack: StackDetection = detectS
 }
 
 /**
+ * GY-1480: the merge gate of a repository whose only CI is the generated delivery workflow. The
+ * workflow's jobs are build, test and the gate job, so pull requests require the gate job, the one
+ * check that workflow reports for every stack; a check named after a script (typecheck, lint,
+ * pytest) would never report. Long suites with a command stay per candidate, where the candidate
+ * workflow runs them; under per-pr no workflow would run them on a pull request, so none is required.
+ */
+export function deliveryWorkflowGate(classified: MergeGate, mode: DeliveryMode): MergeGate {
+  return {
+    preMerge: [{ check: deliveryGateJob, command: null, source: 'workflow', reason: `Graphyard's generated delivery workflow (${deliveryWorkflowFile}): passes only when its build and test jobs passed` }],
+    perCandidate: mode === 'per-pr' ? [] : classified.perCandidate.filter(entry => entry.command),
+  };
+}
+
+/**
  * The repository's delivery policy as a scan proposes it: the committed graphyard.json `delivery`
  * when the repository has one (its own reviewed choice, which a rescan must not undo), otherwise
  * the classified split, the adapter the deploy target implies, and the default cadence. Explicit
@@ -402,11 +416,12 @@ export function proposeDelivery(input: ScanInput, deploy: DeployDetection, stack
   let committed: DeliveryPolicy | null = null;
   const parsed = deliveryPolicySchema.safeParse(parseJson(input, 'graphyard.json')?.delivery);
   if (parsed.success) committed = parsed.data;
-  const mergeGate = committed?.mergeGate ?? classifyChecks(input, stack);
+  // A repository with no deploy target has no UAT or production to promote a candidate to, so
+  // each pull request is its own delivery and merged is its end state (setup-from-zero step 12).
+  const mode = overrides.mode ?? committed?.mode ?? (deploy.target === 'none' ? 'per-pr' : 'release-candidate');
+  const mergeGate = committed?.mergeGate ?? (hasNoCi(input) ? deliveryWorkflowGate(classifyChecks(input, stack), mode) : classifyChecks(input, stack));
   return deliveryPolicySchema.parse({
-    // A repository with no deploy target has no UAT or production to promote a candidate to, so
-    // each pull request is its own delivery and merged is its end state (setup-from-zero step 12).
-    mode: overrides.mode ?? committed?.mode ?? (deploy.target === 'none' ? 'per-pr' : 'release-candidate'),
+    mode,
     mergeGate,
     candidateSchedule: overrides.candidateSchedule !== undefined ? overrides.candidateSchedule : committed ? committed.candidateSchedule : defaultCandidateSchedule,
     deploy: committed?.deploy ?? { adapter: deploy.target === 'railway' ? 'railway' : 'command', project: null, uat: null, production: null },
@@ -489,8 +504,10 @@ export function buildProposal(input: ScanInput, options: { repository?: string |
   const fallbackJobs = prJobs.length ? prJobs : jobs;
   const checks = [...new Set([...stack.commands.map(command => command.check), ...(stack.commands.length ? [] : fallbackJobs)])].slice(0, 12);
   const delivery = proposeDelivery(input, deploy, stack, options.delivery);
-  // Under the candidate model a pull request waits only for the pre-merge set.
-  const policyChecks = delivery.mode === 'per-pr' ? checks : checks.filter(check => delivery.mergeGate.preMerge.some(entry => entry.check === check));
+  // Under the candidate model a pull request waits only for the pre-merge set. A repository with no
+  // CI waits for what the generated delivery workflow reports (GY-1480), never a script's name.
+  const policyChecks = hasNoCi(input) ? requiredPullRequestChecks(delivery).slice(0, 12)
+    : delivery.mode === 'per-pr' ? checks : checks.filter(check => delivery.mergeGate.preMerge.some(entry => entry.check === check));
   const proofs = [
     ...stack.commands.filter(command => command.purpose !== 'build').map(command => ({ name: proofName(command.purpose, command.check), command: command.command, check: command.check })),
     { name: deploy.proofName, command: null, check: null },

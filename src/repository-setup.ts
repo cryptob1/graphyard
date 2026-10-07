@@ -402,8 +402,9 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   if (delivery) { applied.push(...delivery.applied); unchanged.push(...delivery.unchanged); drift.push(...delivery.drift); }
   // GY-1480: a repository with no CI of its own gets a minimal delivery workflow — build and test
   // for its stack, then Graphyard's gate job — in the onboarding change; it is reported among the
-  // workflows only once it is on disk.
-  const deliveryWorkflow = delivery && proposal.ci.system === 'none' ? await writeDeliveryWorkflow(root) : null;
+  // workflows only once it is on disk. It decides "no CI" itself, so a rerun that finds only
+  // Graphyard's own workflows still reports it, matching the gate the proposed policy requires.
+  const deliveryWorkflow = delivery ? await writeDeliveryWorkflow(root) : null;
   if (delivery && deliveryWorkflow) { (deliveryWorkflow.state === 'written' ? applied : unchanged).push(deliveryWorkflow.path); delivery.workflows.push(deliveryWorkflow.path); }
 
   const randomToken = dependencies.token ?? (() => randomBytes(32).toString('base64url'));

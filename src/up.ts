@@ -302,6 +302,17 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   };
 
   try {
+    // GY-1480: the loop refuses to start from a CLI checkout holding uncommitted work, so that is
+    // found here, before anything is installed, rather than as a loop that never cycles.
+    const cleanCli = async (name: UpStep) => {
+      const checkout = await deps.cliCheckout?.();
+      if (checkout?.dirty.length) throw new UpStop(`${name}: the Graphyard CLI checkout the master loop runs from (${checkout.root}) holds uncommitted work, and the loop refuses to start from it: ${checkout.dirty.slice(0, 20).join(', ')}${checkout.dirty.length > 20 ? ` and ${checkout.dirty.length - 20} more` : ''}. Commit or discard these paths, then rerun ${rerun()}; nothing further was installed.`, upExitCodes.prerequisite);
+    };
+
+    // Checked on every run, outside the resumable step: a checkout dirtied since an earlier run's
+    // preflight passed is refused here too, before a resumed run installs anything from it.
+    await cleanCli('preflight');
+
     // Agent mode creates the Apps in a browser; without a profile it would hand the whole App
     // creation to a person, which only a device approval may be. It stops before anything runs.
     // A reused App (GY-1442) or one saved on this machine (GY-1476) needs no browser, so agent mode
@@ -315,15 +326,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       if (left.length) throw new UpStop(request.reuseApps?.length ? `${noProfile} --reuse-app covers no ${apps}, which would otherwise be created in that browser; reuse one for it too, or pass the profile.` : `${noProfile} No App saved on this machine covers the ${apps}.`, upExitCodes.prerequisite);
     }
 
-    // GY-1480: the loop refuses to start from a CLI checkout holding uncommitted work, so that is
-    // found here, before anything is installed, rather than as a loop that never cycles.
-    const cleanCli = async (name: UpStep) => {
-      const checkout = await deps.cliCheckout?.();
-      if (checkout?.dirty.length) throw new UpStop(`${name}: the Graphyard CLI checkout the master loop runs from (${checkout.root}) holds uncommitted work, and the loop refuses to start from it: ${checkout.dirty.slice(0, 20).join(', ')}${checkout.dirty.length > 20 ? ` and ${checkout.dirty.length - 20} more` : ''}. Commit or discard these paths, then rerun ${rerun()}; nothing was installed by this step.`, upExitCodes.prerequisite);
-    };
-
     await step('preflight', async () => {
-      await cleanCli('preflight');
       for (let attempt = 0; attempt < 2; attempt++) {
         const planned = await run('preflight', installArgs('--plan'));
         const plan = parseJson(planned);
@@ -769,8 +772,9 @@ export const onboardingRequiredFiles = ['AGENTS.md', 'graphyard.json'] as const;
 /**
  * Publish the onboarding files as one commit on the base branch's tip, on `graphyard/onboarding`,
  * and a pull request for it. The commit is built in a scratch index, so the operator's checkout,
- * branch and staged changes are untouched. Rerun, it reuses the open pull request; when the base
- * branch already holds exactly these files, nothing is published.
+ * branch and staged changes are untouched. Rerun, it reuses the open pull request, first
+ * force-pushing its branch when it does not carry exactly these files; when the base branch already
+ * holds them, nothing is published.
  */
 export async function publishOnboarding(root: string, repository: string, run: (program: string, args: string[], env?: Record<string, string>) => string, workflows: readonly string[] = []): Promise<{ pullRequest: string } | null> {
   // GY-1480: every file the publish means to carry must be on disk; one that is not is refused by
@@ -778,7 +782,6 @@ export async function publishOnboarding(root: string, repository: string, run: (
   const missing = [...onboardingRequiredFiles, ...workflows].filter(file => !existsSync(resolve(root, file)));
   if (missing.length) throw new Error(`publishOnboarding refuses: ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} missing from ${root}; rerun graphyard init --scan --apply, then graphyard up`);
   const open = run('gh', ['pr', 'list', '--repo', repository, '--head', onboardingBranch, '--state', 'open', '--json', 'url', '--jq', '.[0].url // ""']).trim();
-  if (open) return { pullRequest: open };
   const base = run('gh', ['repo', 'view', repository, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']).trim();
   run('git', ['fetch', '--quiet', 'origin', base]);
   const baseCommit = run('git', ['rev-parse', 'FETCH_HEAD']).trim();
@@ -791,10 +794,18 @@ export async function publishOnboarding(root: string, repository: string, run: (
     if (present.length) run('git', ['add', '--', ...present], env);
     const tree = run('git', ['write-tree'], env).trim();
     if (tree === run('git', ['rev-parse', `${baseCommit}^{tree}`]).trim()) return null;
+    // GY-1480: an open pull request is reused only when its branch carries exactly these files; one an
+    // earlier run or an older CLI opened without them (the delivery workflow above all) is replaced.
+    if (open) {
+      let branchTree: string | null = null;
+      try { run('git', ['fetch', '--quiet', 'origin', onboardingBranch]); branchTree = run('git', ['rev-parse', 'FETCH_HEAD^{tree}']).trim(); } catch { /* the branch is gone: push it again */ }
+      if (branchTree === tree) return { pullRequest: open };
+    }
     const commit = run('git', ['commit-tree', tree, '-p', baseCommit, '-m', 'Add Graphyard onboarding: coordination instructions, configuration and delivery workflows'], env).trim();
     // The branch is this command's own: an earlier, interrupted publish is replaced, never merged into.
     run('git', ['push', '--force', 'origin', `${commit}:refs/heads/${onboardingBranch}`]);
   } finally { await rm(index, { force: true }); }
+  if (open) return { pullRequest: open };
   const carried = onboardingFiles.filter(file => existsSync(resolve(root, file)));
   const created = run('gh', ['pr', 'create', '--repo', repository, '--base', base, '--head', onboardingBranch, '--title', 'Add Graphyard onboarding',
     '--body', `The files graphyard up wrote while onboarding this repository: ${carried.join(', ')}.${workflows.length ? ` Merging it puts Graphyard's delivery workflows (${workflows.join(', ')}) on ${base}.` : ''}`]).trim();
