@@ -28,7 +28,7 @@ graphyard rework GY-N --previous-worker-stopped "reason"                # worker
 graphyard master settle-containment GY-N "reason"                       # settleable
 graphyard recover-containment GY-N --previous-worker-stopped "reason"   # delivered, stop confirmed
 graphyard unblock GY-N "reason"                                         # unowned blocker
-systemctl --user restart graphyard-master                               # loop down, supervised
+systemctl --user restart graphyard-master-OWNER-NAME                    # loop down, supervised (units.json)
 ```
 
 Never attest a stop you have not confirmed; merged work changes only via follow-up items.

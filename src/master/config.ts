@@ -8,10 +8,11 @@ import { sessionName } from '../session-name.js';
 import { discover, assertRepository, localDirectory, saveDiscovery } from '../onboarding.js';
 import { serverOrigin, loadConnection, managedInstructions } from '../repository-setup.js';
 import { launchPlan } from '../harness.js';
-import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSupervisor, loopUnitName, unsupervisedInstruction, loopSupervisionAttention } from '../supervisor.js';
+import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSupervisor, loopUnitOf, unsupervisedInstruction, loopSupervisionAttention } from '../supervisor.js';
 import { type FilesystemProbe, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { APP_PENDING, type AgentEnvironment, type MasterBrowser, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withReviewerDefaults, withRoleDefaults } from './profiles.js';
 import { managedMasterInstructions } from './instructions.js';
+import { scopeHerdr } from './herdr.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
 import { controlPlaneAttention } from './attention.js';
 import { writeFailure } from './worktrees.js';
@@ -84,6 +85,8 @@ export async function loadStoredMasterConfig(root: string): Promise<MasterConfig
   await externalCredential(root, config.credentialFile, 'Master');
   if (!isAbsolute(config.cliPath)) throw new Error('Master CLI path must be absolute');
   try { if (!(await lstat(config.cliPath)).isFile()) throw new Error(); } catch { throw new Error('Configured Graphyard CLI launcher is unavailable'); }
+  // Every Herdr sweep this process runs acts only within the install's own workspace (GY-1441).
+  scopeHerdr(config.herdrWorkspace);
   return config;
 }
 /**
@@ -222,7 +225,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
    */
   const supervisor: LoopSupervisorInstallation | null = input.installSupervisor === true ? await installLoopSupervisor(
     { root, cliPath: config.cliPath, repository: config.repository, intervalSeconds: config.run.intervalSeconds }, dependencies.supervisorHost ?? {}, { replace: input.replaceSupervisor === true },
-  ).catch(error => ({ supported: false, unit: loopUnitName, unitPath: null, installed: false, enabled: null, active: null, linger: null, wrote: 'none' as const, refused: null, performed: [],
+  ).catch(error => ({ supported: false, unit: loopUnitOf(root), unitPath: null, installed: false, enabled: null, active: null, linger: null, wrote: 'none' as const, refused: null, performed: [],
     reason: `Installing the loop's supervisor failed: ${error instanceof Error ? error.message : String(error)}`,
     instruction: unsupervisedInstruction({ root, cliPath: config.cliPath }) })) : null;
   // A permission the installed App lacks is announced here with its exact migration steps, not

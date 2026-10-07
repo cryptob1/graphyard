@@ -90,7 +90,9 @@ Run as an OS user whose GitHub credentials workers cannot read. `--browser-profi
 
 ### The loop must be supervised
 
-`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master.service` and runs `systemctl --user enable --now` and `loginctl enable-linger` (restarts on crash, reboot, hang); never a side effect: worker checkouts and temp directories are refused. Move: `master init --token-stdin --replace-supervisor` from the new checkout. `master status` shows `setup.supervisor`.
+`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master-OWNER-NAME.service` and runs `systemctl --user enable --now` and `loginctl enable-linger` (restarts on crash, reboot, hang); never a side effect: worker checkouts and temp directories are refused. Move: `master init --token-stdin --replace-supervisor` from the new checkout. `master status` shows `setup.supervisor`.
+
+Several installs can share a host. Every unit is named for its repository (`graphyard-master-OWNER-NAME.service`, `graphyard-executor-OWNER-NAME@N.service`) and recorded in `.graphyard/units.json`; a host whose `graphyard-master.service` already runs this checkout keeps the legacy names as its recorded alias. Setup refuses, naming the checkout, to overwrite or restart a unit another checkout runs, and the master harness allows restarting only its own loop unit, denying other installs' units. Give each install its own `--herdr-workspace`: sweeps (idle-pane close, reclaim, liveness, tab cleanup) act only on panes in it.
 
 ### The pipeline doctor (on by default)
 

@@ -466,6 +466,7 @@
     "tests/mergeability-unknown.test.ts": 609,
     "tests/migration-under-load.test.ts": 5169,
     "tests/module-budgets.test.ts": 723,
+    "tests/multi-install-isolation.test.ts": 1200,
     "tests/no-dated-limit-notices.test.ts": 243,
     "tests/observation-capacity.test.ts": 51650,
     "tests/observation-rate-pacing.test.ts": 793,

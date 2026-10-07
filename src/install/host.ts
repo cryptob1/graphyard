@@ -11,6 +11,8 @@ import { proposedConcurrency, proposedRuntimes } from '../model/registry-proposa
 import type { AgentRegistry, FleetAccountInput, FleetModel, FleetRole, FleetRoleName, FleetRuntime } from '../model/registry.js';
 import type { ProfileRegistration } from './index.js';
 import { suffixedSessionName } from '../session-name.js';
+import { executorGlob, executorInstance, perInstallUnits, readInstallUnits } from './units.js';
+import { dirname } from 'node:path';
 
 /**
  * The self-contained Graphyard host (GY-717).
@@ -203,11 +205,16 @@ export function hostUnitFiles(installId: string, layout: HostLayout, owner: stri
   ];
 }
 
-/** The loop and executor units: written by `master init` and `graphyard-executor.mjs --install` on the host, from the same templates as a workstation (GY-114, GY-105). */
-export function supervisedUnits(layout: HostLayout, executors: number): HostUnit[] {
+/**
+ * The loop and executor units: written by `master init` and `graphyard-executor.mjs --install` on
+ * the host, from the same templates as a workstation (GY-114, GY-105), and named for the install's
+ * repository (GY-1441) so a second install on the same host never shares them.
+ */
+export function supervisedUnits(layout: HostLayout, executors: number, repository: string): HostUnit[] {
+  const units = perInstallUnits(repository);
   return [
-    { name: 'graphyard-master.service', scope: 'user', path: `${layout.userUnitDirectory}/graphyard-master.service`, role: 'master loop' },
-    ...Array.from({ length: executors }, (_, index) => ({ name: `graphyard-executor@${index + 1}.service`, scope: 'user' as const, path: `${layout.userUnitDirectory}/graphyard-executor@.service`, role: `executor slot ${index + 1}` })),
+    { name: units.master, scope: 'user', path: `${layout.userUnitDirectory}/${units.master}`, role: 'master loop' },
+    ...Array.from({ length: executors }, (_, index) => ({ name: executorInstance(units, index + 1), scope: 'user' as const, path: `${layout.userUnitDirectory}/${units.executorTemplate}`, role: `executor slot ${index + 1}` })),
   ];
 }
 
@@ -442,10 +449,12 @@ async function freezeOldLoop(ctx: AdapterContext) {
   const local = ctx.transport;
   // Stop the old server first to prevent new writes via webhooks and API calls after the backup.
   await local.exec('systemctl', ['stop', 'graphyard-server.service'], { allowFailure: true, timeout: 180_000 });
-  await local.exec('systemctl', ['--user', 'disable', '--now', 'graphyard-master.service'], { allowFailure: true, timeout: 180_000 });
-  await local.exec('systemctl', ['--user', 'stop', 'graphyard-executor@*.service'], { allowFailure: true, timeout: 900_000 });
-  const state = await local.exec('systemctl', ['--user', 'is-active', 'graphyard-master.service'], { allowFailure: true, timeout: 60_000 });
-  if (state.stdout.trim() === 'active') throw new Error('The old master loop is still running on this machine after systemctl --user disable --now graphyard-master.service; stop it, then rerun graphyard install --migrate --apply');
+  // Only the units the old install recorded (GY-1441): another install on this machine keeps running.
+  const old = readInstallUnits(dirname(dirname(ctx.host!.localCli)));
+  await local.exec('systemctl', ['--user', 'disable', '--now', old.master], { allowFailure: true, timeout: 180_000 });
+  await local.exec('systemctl', ['--user', 'stop', executorGlob(old)], { allowFailure: true, timeout: 900_000 });
+  const state = await local.exec('systemctl', ['--user', 'is-active', old.master], { allowFailure: true, timeout: 60_000 });
+  if (state.stdout.trim() === 'active') throw new Error(`The old master loop is still running on this machine after systemctl --user disable --now ${old.master}; stop it, then rerun graphyard install --migrate --apply`);
 }
 
 /** Backup (verified) on this machine, restore on the host; runs once, before the server starts. */
@@ -480,7 +489,7 @@ async function migrateLedger(ctx: AdapterContext, remote: Transport) {
     await asUser(remote, layout.graphyard, 'sh', ['-c', `DATABASE_URL="$(cat)"; export DATABASE_URL; exec node "$0" db restore "$1"`, layout.cli, target], { input: hostDatabase, timeout: 1_800_000 });
   } catch (error) {
     // Nothing has cut over yet: lift the fence so a failed migration leaves the old installation
-    // writable (its loop restarts with systemctl --user enable --now graphyard-master.service).
+    // writable (its loop restarts with systemctl --user enable --now on the unit it recorded).
     await fence(true).catch(() => undefined);
     throw error;
   }
@@ -569,7 +578,7 @@ export function hostPlan(ctx: AdapterContext): HostPlan {
   const accounts = hostAccounts(layout, null);
   return {
     user: layout.user, configDirectory: layout.configDirectory, checkout: layout.checkout,
-    units: [...hostUnitFiles(ctx.installId, layout, `${HOST_USER}:${HOST_USER}`).map(({ name, scope, path, role }) => ({ name, scope, path, role })), ...supervisedUnits(layout, host.executors)],
+    units: [...hostUnitFiles(ctx.installId, layout, `${HOST_USER}:${HOST_USER}`).map(({ name, scope, path, role }) => ({ name, scope, path, role })), ...supervisedUnits(layout, host.executors, ctx.repository)],
     runtimes: hostRuntimes.map(runtime => ({ kind: runtime.kind, program: runtime.program, package: runtime.package })),
     credentials: [
       ...host.principals.map(principal => ({ path: hostTokenFile(layout, principal.id), mode: '0600' as const, holds: `${principal.role} credential of ${principal.id}` })),
@@ -600,8 +609,8 @@ function hostActions(ctx: AdapterContext, observation: AdapterObservation): Plan
     { id: 'host.checkout', target: 'host', state, title: `Clone ${ctx.repository} into ${plan.checkout}, the loop's working directory, with a one-hour GitHub App installation token passed on standard input (never stored)` },
     { id: 'host.github', target: 'host', state, title: `Give workers a GitHub credential without anyone logging in: git's credential helper and the gh wrapper (${HOST_GH_WRAPPER}) mint one-hour App installation tokens narrowed to ${ctx.repository} (Contents and Pull requests write) from ${hostGithubKeyFile(host.layout)}; commits are made as the App's bot` },
     { id: 'host.environment', target: 'host', state, title: `Point the ${HOST_USER} user manager at ${host.layout.accountsDirectory} for login homes and ${host.layout.configDirectory} for credentials (${hostEnvironmentFile(host.layout)})` },
-    { id: 'host.master', target: 'host', state, title: `Configure the master loop with the coordinator credential (master init --token-stdin) and supervise it as ${host.layout.userUnitDirectory}/graphyard-master.service` },
-    { id: 'host.executors', target: 'host', state, title: `Supervise ${host.executors} executor slot(s) as graphyard-executor@N.service user units (Restart=always with a bounded RestartSec; the install fails without it, GY-1431); the resident executor registers the host's connect key and serves every dashboard connect` },
+    { id: 'host.master', target: 'host', state, title: `Configure the master loop with the coordinator credential (master init --token-stdin) and supervise it as ${host.layout.userUnitDirectory}/${perInstallUnits(ctx.repository).master}` },
+    { id: 'host.executors', target: 'host', state, title: `Supervise ${host.executors} executor slot(s) as ${executorInstance(perInstallUnits(ctx.repository), 'N')} user units (Restart=always with a bounded RestartSec; the install fails without it, GY-1431); the resident executor registers the host's connect key and serves every dashboard connect` },
     ...(host.migrate
       ? [{ id: 'host.accounts', target: 'host' as const, state, title: `Move every registry account of an installed runtime onto this host at ${host.layout.accountsDirectory}/<account> (mode 0700), copying its login (0600) when it is on this machine; any other is disabled until connected again in ${CONNECT_PATH}` }]
       : [{ id: 'host.accounts', target: 'host' as const, state, title: `Create ${host.layout.accountsDirectory} (mode 0700): each account connected from the dashboard gets its login home there (${plan.accounts.map(account => account.home).join(', ')} first) and is registered in the agent registry when its smoke prompt passes` }]),
@@ -731,7 +740,7 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
   // that cannot be set up fails the install rather than reporting success.
   const masterInit = await asUser(remote, layout.checkout, 'env', [...environment, 'node', layout.cli, 'master', 'init', '--url', request.url, '--token-stdin', '--host-id', hostName, '--cli-path', layout.cli, ...(herdrWorkspace ? ['--herdr-workspace', herdrWorkspace] : [])], { input: request.coordinatorToken, allowFailure: true });
   if (masterInit.code !== 0) throw new Error(`master init did not complete on ${hostName}: ${failure(ctx, masterInit)}`);
-  await asUser(remote, layout.checkout, 'systemctl', ['--user', 'enable', '--now', 'graphyard-master.service']);
+  await asUser(remote, layout.checkout, 'systemctl', ['--user', 'enable', '--now', perInstallUnits(ctx.repository).master]);
   const executors = await asUser(remote, layout.checkout, 'env', [...environment, 'node', `${layout.graphyard}/scripts/graphyard-executor.mjs`, '--install', '--count', String(host.executors)], { allowFailure: true });
   if (executors.code !== 0) throw new Error(`Installing ${host.executors} executor unit(s) on ${hostName} failed: ${failure(ctx, executors)}`);
 
@@ -749,7 +758,7 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
 
   const system = hostUnitFiles(ctx.installId, layout, owner).filter(unit => unit.scope === 'system');
   const systemStates = await unitStates(remote, system.map(unit => unit.name));
-  const userUnits = [{ name: 'graphyard-herdr.service', scope: 'user' as const, path: `${layout.userUnitDirectory}/graphyard-herdr.service`, role: 'herdr' }, ...supervisedUnits(layout, host.executors)];
+  const userUnits = [{ name: 'graphyard-herdr.service', scope: 'user' as const, path: `${layout.userUnitDirectory}/graphyard-herdr.service`, role: 'herdr' }, ...supervisedUnits(layout, host.executors, ctx.repository)];
   const userState = await asUser(remote, HOST_HOME, 'systemctl', ['--user', 'is-active', ...userUnits.map(unit => unit.name)], { allowFailure: true });
   const userLines = userState.stdout.split('\n');
   const units = [
@@ -760,7 +769,7 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
     host: hostName, units, runtimes, accounts, herdrWorkspace, sessionViewer: 'local',
     profiles: {
       repository: { connected: true, herdr: !!herdrWorkspace, detail: herdrWorkspace ? `Herdr workspace ${herdrWorkspace} on ${hostName}` : 'Herdr is installed but no workspace could be created' },
-      master: { configured: true, kind: null, detail: `the loop runs as graphyard-master.service on ${hostName}` },
+      master: { configured: true, kind: null, detail: `the loop runs as ${perInstallUnits(ctx.repository).master} on ${hostName}` },
       workers, reviewers: [],
     },
   };

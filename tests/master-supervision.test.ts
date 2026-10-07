@@ -12,6 +12,7 @@ import { masterStatusReport } from '../src/cli/master-status.js';
 import { loopSupervisorEvidence } from '../src/cli/master-setup.js';
 import { ChildProcessError, defaultChildTimeoutMs } from '../src/child-runner.js';
 import { installLoopSupervisor, LoopSupervisorRefusal, loopStopTimeoutSeconds, loopSupervision, loopSupervisionAttention, loopUnitDirectory, loopUnitName, loopUnitText, loopWatchdogSeconds, supervisorSupport, temporaryDirectories, testSuiteHomeGuard, underTestRunner, unsupervisedInstruction } from '../src/supervisor.js';
+import { perInstallUnits } from '../src/install/units.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -34,6 +35,8 @@ const source = (name: string) => readFileSync(fileURLToPath(new URL(`../src/${na
 // src/master.ts re-exports the modules under src/master/ (GY-177); its source is theirs.
 const masterSource = () => readdirSync(fileURLToPath(new URL('../src/master', import.meta.url))).filter(name => name.endsWith('.ts')).sort().map(name => source(`master/${name}`)).join('\n');
 const supervisedUser = String(process.getuid?.() ?? '');
+/** A new install names its loop for its repository (GY-1441); a unit placed by hand under the legacy name is an older install's. */
+const loopUnit = perInstallUnits('owner/project').master;
 
 async function repository() {
   const root = await temporaryDirectory('supervision');
@@ -94,7 +97,7 @@ test('integration:setup-installs-supervisor — setup writes, enables and starts
       coordinatorStatus as typeof fetch, { supervisorHost: { ...first.host, home } });
 
     // The unit is written from this installation, not copied from an example.
-    const unitPath = join(home, '.config/systemd/user', loopUnitName);
+    const unitPath = join(home, '.config/systemd/user', loopUnit);
     const unit = await readFile(unitPath, 'utf8');
     assert.equal(setup.supervisor!.unitPath, unitPath);
     assert.equal(setup.supervisor!.state, 'created');
@@ -117,12 +120,12 @@ test('integration:setup-installs-supervisor — setup writes, enables and starts
 
     // It is enabled (so it returns after a reboot), started now, and this user lingers.
     assert.deepEqual(changes(first.calls),
-      [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable', '--now', loopUnitName], ['loginctl', 'enable-linger']]);
+      [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable', '--now', loopUnit], ['loginctl', 'enable-linger']]);
     assert.deepEqual({ installed: setup.supervisor!.installed, enabled: setup.supervisor!.enabled, active: setup.supervisor!.active, linger: setup.supervisor!.linger },
       { installed: true, enabled: true, active: true, linger: true });
     // It reports what it installed, in the words of the commands it ran.
     assert.ok(setup.supervisor!.performed.some(step => step.includes(unitPath)));
-    assert.ok(setup.supervisor!.performed.includes(`systemctl --user enable --now ${loopUnitName}`));
+    assert.ok(setup.supervisor!.performed.includes(`systemctl --user enable --now ${loopUnit}`));
     assert.equal(setup.supervisor!.refused, null);
     assert.deepEqual(setup.attention, [], 'a supervised installation raises nothing');
 
@@ -146,7 +149,7 @@ test('integration:setup-installs-supervisor — setup writes, enables and starts
     assert.match(await readFile(unitPath, 'utf8'), new RegExp(`^WatchdogSec=${loopWatchdogSeconds(120)}$`, 'm'));
     assert.deepEqual(changes(retuned.calls).map(call => call.slice(0, 3)),
       [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable'], ['systemctl', '--user', 'restart'], ['loginctl', 'enable-linger']], 'a rewritten unit is reloaded, enabled and restarted, in that order');
-    assert.ok(rewritten.supervisor!.performed.includes(`systemctl --user restart ${loopUnitName}`), 'and setup says the loop was restarted');
+    assert.ok(rewritten.supervisor!.performed.includes(`systemctl --user restart ${loopUnit}`), 'and setup says the loop was restarted');
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); await rm(home, { recursive: true, force: true }); }
 });
 
@@ -397,13 +400,13 @@ test('integration:supervisor-install-explicit-only — the unit is written only 
     const plain = await setup();
     assert.equal(plain.supervisor, null, 'no option, no install, and nothing reported as installed');
     assert.deepEqual(plain.attention, []);
-    assert.equal(await fileState(join(home, '.config/systemd/user', loopUnitName)), null, 'the process home holds no unit');
+    assert.equal(await fileState(join(home, '.config/systemd/user', loopUnit)), null, 'the process home holds no unit');
     // A host stub given without the option is not even consulted: the host is where, not whether.
     const idle = hostStub();
     const withHost = await setup({}, { supervisorHost: { ...idle.host, home } });
     assert.equal(withHost.supervisor, null);
     assert.deepEqual(idle.calls, [], 'a supervisor host without installSupervisor runs nothing');
-    assert.equal(await fileState(join(home, '.config/systemd/user', loopUnitName)), null);
+    assert.equal(await fileState(join(home, '.config/systemd/user', loopUnit)), null);
     process.env.HOME = previous.HOME; process.env.XDG_CONFIG_HOME = previous.XDG_CONFIG_HOME;
     if (previous.XDG_CONFIG_HOME === undefined) delete process.env.XDG_CONFIG_HOME;
 
@@ -418,7 +421,7 @@ test('integration:supervisor-install-explicit-only — the unit is written only 
     assert.ok(refusedByName.supervisor!.refused!.includes(root), 'and the WorkingDirectory it refused');
     assert.match(refusedByName.supervisor!.instruction!, /master init from the coordinator checkout on durable storage/);
     assert.deepEqual(changes(temporary.calls), [], 'nothing was reloaded, enabled, started or restarted');
-    assert.equal(await fileState(join(home, '.config/systemd/user', loopUnitName)), null, 'no unit was written');
+    assert.equal(await fileState(join(home, '.config/systemd/user', loopUnit)), null, 'no unit was written');
     assert.deepEqual(refusedByName.supervisor!.performed, []);
     assert.equal(refusedByName.attention.length, 1);
     assert.ok(refusedByName.attention[0].includes(refusedByName.supervisor!.refused!) && refusedByName.attention[0].includes(refusedByName.supervisor!.instruction!), refusedByName.attention[0]);
@@ -445,14 +448,14 @@ test('integration:supervisor-install-explicit-only — the unit is written only 
     await refusal(unit(join(scratch, 'unconfigured')), /not the configured coordinator checkout/);
     await refusal(unit(await configured(join(scratch, 'durable', '.graphyard', 'worktrees', 'GY-1-1'))), /assignment worktree or session checkout/);
     await refusal(unit('relative/checkout'), /absolute path/);
-    assert.equal(await fileState(join(home, '.config/systemd/user', loopUnitName)), null, 'none of them wrote the unit');
+    assert.equal(await fileState(join(home, '.config/systemd/user', loopUnit)), null, 'none of them wrote the unit');
 
     // 4. The coordinator checkout installs; a unit that runs another loop is not replaced by a
     //    re-run from elsewhere unless the operator says so; the same loop is retuned without it.
     await configured(coordinator);
     const installed = await installLoopSupervisor(unit(coordinator), stub().host);
     assert.equal(installed.wrote, 'created');
-    const unitPath = join(home, '.config/systemd/user', loopUnitName);
+    const unitPath = join(home, '.config/systemd/user', loopUnit);
     const written = await readFile(unitPath, 'utf8');
     assert.match(written, new RegExp(`^WorkingDirectory=${coordinator}$`, 'm'));
     const other = await configured(join(scratch, 'other-checkout'));
@@ -505,7 +508,8 @@ test('integration:supervisor-install-explicit-only — the unit is written only 
       assert.match(guarded.instruction!, /home under the system temporary directory/, name);
       assert.deepEqual(changes(real.calls), [], `${name}: nothing was reloaded, enabled, started or restarted`);
       assert.deepEqual(guarded.performed, [], name);
-      assert.equal(guarded.installed, realBefore !== null, `${name}: a refusal reports the unit that exists under the real home, not a state it never read`);
+      // The coordinator recorded its per-install name above, so that is the unit a refusal reports (GY-1441).
+      assert.equal(guarded.installed, await fileState(join(realDirectory, loopUnit)) !== null, `${name}: a refusal reports the unit that exists under the real home, not a state it never read`);
       assert.deepEqual(await fileState(realUnit), realBefore, `${name}: the unit under the real user home is exactly as it was`);
     }
     // Outside the test runner — the operator's `master init` — the guard is not a test guard. That
