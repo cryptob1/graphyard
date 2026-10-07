@@ -662,3 +662,61 @@ test('unit:throughput-recorded-by-loop — after a verified deployment the loop 
     assert.equal(askedFor(served3), lagged, 'the superseded release is not asked again');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test('unit:throughput-same-millisecond-records — measurements recorded in the same millisecond each persist as a distinct file in the unchanged record format, and the ordered read keeps every record in recorded order', async () => {
+  const root = await temporaryDirectory('throughput-same-millisecond');
+  try {
+    const report = (measuredAt: string, admitted: number) => ({ measuredAt, verdict: 'verified', reason: `record ${admitted}` }) as unknown as ThroughputReport;
+    const same = '2026-10-07T04:40:48.867Z';
+    const files = [];
+    for (let index = 0; index < 12; index++) files.push(await recordThroughputMeasurement(root, report(same, index)));
+    assert.equal(new Set(files).size, 12, 'every record took its own file');
+    assert.equal(files[0], join(throughputMeasurementDirectory, '2026-10-07T04-40-48-867Z.json'), 'the first keeps the existing name');
+    assert.equal(files[11], join(throughputMeasurementDirectory, '2026-10-07T04-40-48-867Z_11.json'));
+    for (const [index, file] of files.entries()) assert.deepEqual(JSON.parse(await readFile(join(root, file), 'utf8')), { measuredAt: same, verdict: 'verified', reason: `record ${index}` }, 'the record format is unchanged');
+    assert.equal((await readdir(join(root, throughputMeasurementDirectory))).length, 12);
+    // The newest of the same millisecond reads back, and a later millisecond still orders after them.
+    assert.equal((await readThroughputMeasurement(root))!.file, files[11]);
+    const later = await recordThroughputMeasurement(root, report('2026-10-07T04:40:48.868Z', 99));
+    assert.equal((await readThroughputMeasurement(root))!.file, later);
+    // Retention retires the oldest in recorded order, numerically across the suffixes.
+    await recordThroughputMeasurement(root, report('2026-10-07T04:40:48.868Z', 100), undefined, 4);
+    assert.deepEqual((await readdir(join(root, throughputMeasurementDirectory))).sort(),
+      ['2026-10-07T04-40-48-867Z_10.json', '2026-10-07T04-40-48-867Z_11.json', '2026-10-07T04-40-48-868Z.json', '2026-10-07T04-40-48-868Z_1.json']);
+    assert.equal((await readThroughputMeasurement(root))!.report.reason, 'record 100');
+    // The by-hand run (`scripts/measure-throughput.mjs --record DIR`) records through the same
+    // recorder: a report in a millisecond already on disk takes the next suffix, never the file.
+    const directory = join(root, throughputMeasurementDirectory);
+    const reply = (body: unknown) => ({ ok: true, json: async () => body });
+    const byHand = (reason: string) => measureMain(['--record', directory], { GRAPHYARD_URL: 'http://127.0.0.1:1', GRAPHYARD_TOKEN: 'reader-token' }, {
+      fetcher: async (url: URL) => reply(url.pathname === '/api/status' ? {} : { now: '2026-10-07T04:40:49.000Z', work: [] }),
+      deployedRevision: () => ({ revision: null, source: null }), run: () => ({ status: 0, stderr: '' }),
+      measure: async () => ({ report: { ...report('2026-10-07T04:40:48.868Z', 0), reason } }), render: () => '',
+    }) as Promise<ThroughputReport & { recorded: string }>;
+    const log = console.log, exitCode = process.exitCode;
+    try {
+      console.log = () => {};
+      const first = await byHand('by hand 1'), second = await byHand('by hand 2');
+      assert.equal(first.recorded, join(directory, '2026-10-07T04-40-48-868Z_2.json'));
+      assert.equal(second.recorded, join(directory, '2026-10-07T04-40-48-868Z_3.json'));
+      assert.equal(JSON.parse(await readFile(join(directory, '2026-10-07T04-40-48-868Z_1.json'), 'utf8')).reason, 'record 100', 'the loop\'s record survives');
+      assert.equal(JSON.parse(await readFile(second.recorded, 'utf8')).reason, 'by hand 2');
+      assert.equal((await readThroughputMeasurement(root))!.report.reason, 'by hand 2');
+    } finally { console.log = log; process.exitCode = exitCode; }
+    // Retention and the read consider only names this recorder writes: another JSON file sharing
+    // the record directory (a shared reports directory) survives retention and is never read as newest.
+    const foreign = ['delivery-causes.json', 'pipeline-speed.json', '0000-report.json', '9999-12-31T23-59-59-999Z.backup.json'];
+    for (const name of foreign) await writeFile(join(directory, name), JSON.stringify({ reason: `foreign ${name}` }));
+    await recordThroughputMeasurement(root, report('2026-10-07T04:40:49.000Z', 200), undefined, 1);
+    assert.deepEqual((await readdir(directory)).sort(), [...foreign, '2026-10-07T04-40-49-000Z.json'].sort(), 'only the recorder\'s own files are retired');
+    assert.equal((await readThroughputMeasurement(root))!.report.reason, 'record 200');
+    // Past retention in one millisecond, a later record still takes a suffix above every one recorded,
+    // so it orders newest and survives instead of reusing the retired unsuffixed name.
+    const crowded = '2026-10-07T04:40:50.000Z';
+    for (let index = 0; index < 4; index++) await recordThroughputMeasurement(root, report(crowded, 300 + index), undefined, 2);
+    assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('2026-10-07T04-40-50')).sort(), ['2026-10-07T04-40-50-000Z_2.json', '2026-10-07T04-40-50-000Z_3.json']);
+    const next = await recordThroughputMeasurement(root, report(crowded, 304), undefined, 2);
+    assert.equal(next, join(throughputMeasurementDirectory, '2026-10-07T04-40-50-000Z_4.json'));
+    assert.equal((await readThroughputMeasurement(root))!.report.reason, 'record 304');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

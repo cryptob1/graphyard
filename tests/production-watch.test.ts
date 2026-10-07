@@ -443,3 +443,72 @@ test('unit:production-watch-provider-selection — a Railway token selects the R
   assert.doesNotMatch(report.incidents[0].reason, /required|needs? (a )?Railway|so the provider reports/i, 'a Railway token is not presented as required');
   assert.match(report.incidents[0].reason, /\. Configure RAILWAY_API_TOKEN \(or RAILWAY_TOKEN\) or the GitHub App: either one reads a deployment list \(Railway's, or the GitHub deployments Railway reports\) that names the failing deployment$/);
 });
+
+/** GY-1420: release/production at sha(2), GitHub's Railway deployment list still on sha(1), and GY-2's delivery carrying `observed` as its recorded deployment. */
+async function liveReleaseWatch(observed: Record<string, unknown> | null, attempt: { status: 'success' | 'failed' | 'deploying'; providerStatus: string } | null = null, releaseBranch: string | null = 'release/production') {
+  const tip = 2, observedAt = T0 + DEPLOYMENT_GRACE_MS;
+  const work = [{ id: 'work-2', key: 'GY-2', stage: 'done', delivery: { mergedAt: new Date(T0).toISOString(), mergeSha: sha(2), authorizationRevision: 1,
+    ...(observed ? { deployment: { sha: sha(2), mergeSha: sha(2), source: 'endpoint', observedAt: new Date(observedAt).toISOString(), covers: 'exact', at: new Date(observedAt).toISOString(), observer: 'graphyard-master', ...observed } } : {}) } }] as unknown as Work[];
+  const { store, events } = memoryStore(work);
+  const request = async (path: string) => {
+    if (path.startsWith('/branches/')) return { commit: { sha: sha(tip) } };
+    const [, from, to] = path.match(/^\/compare\/([0-9a-f]{40})\.\.\.([^?]+)/)!;
+    const a = parseInt(from, 16), b = to === 'main' ? tip : parseInt(decodeURIComponent(to), 16);
+    return { status: b > a ? 'ahead' : b === a ? 'identical' : 'behind', ahead_by: Math.max(0, b - a) };
+  };
+  const compare = (base: string, head: string) => request(`/compare/${base}...${head}`) as Promise<{ status: string; ahead_by: number }>;
+  const github = { request, contains: async (base: string, head: string) => ['ahead', 'identical'].includes((await compare(base, head)).status), aheadBy: async (base: string, head: string) => (await compare(base, head)).ahead_by };
+  const provider = { name: 'github', description: 'stub', list: async () => [
+    ...(attempt ? [{ id: 'd-release', ...attempt, commit: sha(2), branch: null, createdAt: new Date(T0 + 60_000).toISOString(), updatedAt: null, url: null }] : []),
+    { id: 'd-stale', status: 'success' as const, providerStatus: 'SUCCESS', commit: sha(1), branch: null, createdAt: new Date(T0 - 3_600_000).toISOString(), updatedAt: null, url: null }] };
+  // The first pass sees the promotion before the endpoint is observed; the second is past the grace period.
+  let clock = T0;
+  const watch = new ProductionWatch(store, { provider, github, build: buildIdentity({}), baseBranch: 'main', releaseBranch, now: () => clock });
+  await watch.tick(true);
+  clock = observedAt + 60_000;
+  return { report: await watch.tick(true), events };
+}
+
+test('unit:production-live-release-observation — a fresh endpoint observation of the exact release outranks a stale GitHub deployment status: production serves it and no missing-deployment incident is raised', async () => {
+  for (const branch of ['release/production', null]) {
+    const { report, events } = await liveReleaseWatch({}, null, branch);
+    assert.equal(report.serving, sha(2), 'the endpoint proved the exact release live');
+    assert.equal(report.servingSource, 'endpoint');
+    assert.deepEqual(report.deployed, ['GY-2']); assert.deepEqual(report.pending, []);
+    assert.deepEqual(report.incidents, []);
+    assert.equal(events.filter(event => event.kind === 'delivery.deployment-incident').length, 0);
+    if (branch) assert.equal(report.release?.unservedSince, null);
+    assert.equal(report.ahead?.by, 0);
+    assert.deepEqual(report.attention, []);
+  }
+  // GitHub's status of the release still in flight does not undo what the endpoint proved.
+  const deploying = (await liveReleaseWatch({}, { status: 'deploying', providerStatus: 'IN_PROGRESS' })).report;
+  assert.equal(deploying.serving, sha(2)); assert.deepEqual(deploying.incidents, []);
+});
+
+test('unit:production-live-release-observation — without proof of the exact SHA the stale release stands and the missing or failed deployment is still reported', async () => {
+  const unproven: [string, Record<string, unknown> | null][] = [
+    ['no endpoint observation', null],
+    ['an endpoint serving another commit', { sha: sha(1) }],
+    ['an abbreviated SHA', { sha: sha(2).slice(0, 12) }],
+    ['a GitHub deployment observation, not the endpoint', { source: 'github-deployment' }],
+    ['a stale observation', { observedAt: new Date(T0 - 2 * productionWatch.ENDPOINT_FRESH_MS).toISOString() }],
+  ];
+  for (const [label, observed] of unproven) {
+    const { report } = await liveReleaseWatch(observed);
+    assert.equal(report.serving, sha(1), `${label} proves nothing`);
+    assert.equal(report.servingSource, 'provider');
+    assert.deepEqual(report.incidents.map(incident => [incident.key, incident.status]), [['GY-2', 'missing']], label);
+    assert.ok(report.release?.overdue, label);
+  }
+  // The provider's newest deployment of the observed release failed: it is not running, whatever the endpoint said.
+  const { report } = await liveReleaseWatch({}, { status: 'failed', providerStatus: 'FAILURE' });
+  assert.equal(report.serving, sha(1));
+  assert.deepEqual(report.incidents.map(incident => [incident.key, incident.status]), [['GY-2', 'failed']]);
+  // A provider success newer than the observation is the later fact: the observation does not outrank it.
+  const observed = [{ delivery: { deployment: { sha: sha(2), source: 'endpoint', observedAt: new Date(T0).toISOString() } } }] as unknown as Work[];
+  const success = (at: number) => ({ id: 'd', status: 'success' as const, providerStatus: 'SUCCESS', commit: sha(3), branch: null, createdAt: new Date(at).toISOString(), updatedAt: null, url: null });
+  assert.equal(productionWatch.liveEndpointRelease(observed, [success(T0 - 60_000)], success(T0 - 60_000), sha(2), T0 + 60_000), sha(2));
+  assert.equal(productionWatch.liveEndpointRelease(observed, [success(T0 + 1_000)], success(T0 + 1_000), sha(2), T0 + 60_000), null);
+  assert.equal(productionWatch.liveEndpointRelease(observed, [], undefined, sha(3), T0 + 60_000), null, 'the release tip moved past the observed SHA');
+});
