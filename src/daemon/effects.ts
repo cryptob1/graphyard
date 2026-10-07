@@ -768,7 +768,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
     },
     // The diagnostician (GY-439) and the acceptance role (GY-1417) act only through the two identities a two-party decision needs.
-    get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnostician(config) : undefined; }, get acceptance() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? acceptanceEffects(config, root, { run, fetcher, asCoordinator, asOperatorAgent }) : undefined; },
+    get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnostician(config) : undefined; },
+    get acceptance() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? acceptanceEffects(config, root, { run, fetcher, asCoordinator, asOperatorAgent }) : undefined; },
     get fileFaultClass() { return current().operatorAgent ? (input: LoopFiledItem, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     get unblock() { return current().operatorAgent ? (work: Work, reason: string) => asOperatorAgent('POST', `work/${work.id}/unblock`, { reason, expectedRevision: work.revision }) as Promise<Work> : undefined; },
     get doctor() { const config = current(); return config.operatorAgent && doctorSettings(config.run).enabled ? doctorEffects(config, root, asOperatorAgent) : undefined; },
