@@ -123,7 +123,7 @@ test('unit:operator-sign-in-link — graphyard login prints a one-time link that
   assert.throws(() => table.issue(undeclaredAdmin, true), /undeclared-admin is not declared "sessionKind": "human" and issues none/);
 
   // A request an admin credential not declared human cannot answer, because it is not a human session; the sign-in session can.
-  const work = await park(await claimed(), ['money-or-accounts', 'A', 'hosting', 'plan', '--', 'Staging needs a paid plan']);
+  const work = await park(await claimed(), ['money-or-accounts', 'A', 'hosting', 'plan', '--ask', 'Approve the staging hosting plan', '--', 'Staging needs a paid plan']);
   const rows = (await ok(token(operator), 'human-requests')).requests as HumanRequestRow[];
   const row = rows.find(entry => entry.id === work.id)!;
   assert.equal((await call(token(undeclaredAdmin), `work/${work.id}/answer`, { ...row.choices![0].body })).status, 403, 'an undeclared admin token is not a human session');
@@ -151,7 +151,7 @@ test('unit:human-request-choices — every human-only request carries its reques
   assert.deepEqual(defaultChoices('credentials-for-people', true)[0], { id: 'provide', label: 'Provide now', outcome: 'provided', input: 'secret' });
 
   const session = (await signIn()).token;
-  const work = await park(await claimed(), ['money-or-accounts', 'A', 'Hetzner', 'Cloud', 'project', '--choice', 'Approve up to €50/month', '--choice-text', 'Approve with a different cap…', '--', 'The', 'live-install', 'proofs', 'provision', 'servers']);
+  const work = await park(await claimed(), ['money-or-accounts', 'A', 'Hetzner', 'Cloud', 'project', '--ask', 'Approve a Hetzner Cloud project for the install proofs', '--choice', 'Approve up to €50/month', '--choice-text', 'Approve with a different cap…', '--', 'The', 'live-install', 'proofs', 'provision', 'servers']);
   assert.deepEqual(requestChoices(work.humanRequest!).map(choice => choice.label), ['Approve up to €50/month', 'Approve with a different cap…', 'Decline']);
   const rows = (await ok(session, 'human-requests')).requests as HumanRequestRow[];
   const row = rows.find(entry => entry.id === work.id)!;
@@ -160,7 +160,7 @@ test('unit:human-request-choices — every human-only request carries its reques
   const sent: { id: string; command: string; body: any }[] = [];
   const markup = page({ id: operator.id, role: 'admin', sessionKind: 'human' }, rows, [work], (id, command, body) => sent.push({ id, command, body }));
   for (const label of ['Approve up to €50/month</button>', 'Approve with a different cap…</button>', 'Decline</button>']) assert.ok(markup.includes(label), label);
-  assert.match(markup, /<details><summary class="muted">From a terminal<\/summary><code>graphyard answer/);
+  assert.match(markup, /<details class="agent-details"><summary class="muted">Details for agents<\/summary>.*<dt>From a terminal<\/dt><dd><code>graphyard answer/);
   assert.ok(markup.indexOf('Approve up to €50/month</button>') < markup.indexOf('From a terminal'), 'the buttons come first');
 
   // A choice that asks for words is refused without them; one click with a note is the whole answer.
@@ -172,7 +172,7 @@ test('unit:human-request-choices — every human-only request carries its reques
   assert.deepEqual([record.outcome, record.choice, record.note, record.text, record.by], ['provided', { id: 'choice-1', label: 'Approve up to €50/month' }, 'Cancel it after the proofs', 'Approve up to €50/month: Cancel it after the proofs', operator.id]);
 
   // Declining is a button too, and keeps the item parked on the human's words.
-  const declined = await park(await claimed(), ['goals-and-priorities', 'Ship', 'the', 'beta', '--', 'Priorities']);
+  const declined = await park(await claimed(), ['goals-and-priorities', 'Ship', 'the', 'beta', '--ask', 'Decide whether to ship the beta', '--', 'Priorities']);
   const declineRow = ((await ok(session, 'human-requests')).requests as HumanRequestRow[]).find(entry => entry.id === declined.id)!;
   assert.deepEqual(declineRow.choices!.map(choice => choice.label), ['Go ahead as asked', 'Go ahead differently…', 'Decline']);
   const after = await ok(session, `work/${declined.id}/answer`, declineRow.choices!.at(-1)!.body);
@@ -180,7 +180,7 @@ test('unit:human-request-choices — every human-only request carries its reques
 
   // A credential: provided now in a secret input, sealed to the requesting host, never written in the clear.
   const secret = `hcloud-${randomUUID()}`;
-  const credential = await park(await claimed(), ['credentials-for-people', 'An', 'API', 'token', 'for', 'the', 'staging', 'project', '--', 'The', 'deploy', 'needs', 'it']);
+  const credential = await park(await claimed(), ['credentials-for-people', 'An', 'API', 'token', 'for', 'the', 'staging', 'project', '--ask', 'Provide an API token for the staging project', '--', 'The', 'deploy', 'needs', 'it']);
   assert.equal(credential.humanRequest!.sealTo, await hostSealKey('worker-host', sealHome), 'the request carries the requesting host\'s key');
   const credentialRow = ((await ok(session, 'human-requests')).requests as HumanRequestRow[]).find(entry => entry.id === credential.id)!;
   const provide = credentialRow.choices![0];

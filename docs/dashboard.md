@@ -9,7 +9,7 @@ One group per open item (a tile counts and filters it): **Needs you** (yours alo
 
 ## Needs you
 
-`graphyard login` prints the operator's single-use sign-in link. Requests offer choices; **Provide now** seals credentials for `unseal GY-N`.
+Each card leads with the request's ask, its numbered steps and one line of why, then the choices; the worker's needed/reason detail is folded under **Details for agents** (older requests lead with the first sentence of what they need). `graphyard login` prints the operator's single-use sign-in link. Requests offer choices; **Provide now** seals credentials for `unseal GY-N`.
 
 An operator approval offers **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`), answered only from a human admin's sign-in session.
 
