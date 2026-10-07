@@ -5,7 +5,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { goalSubmission, setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
-import { actionsDirectory, agentBrowserPage, passSudo, recordingPage, sudoInstruction, type BrowserPage, type RecordedStep, type SudoOptions } from './master-browser.js';
+import { actionsDirectory, agentBrowserPage, passSudo, recordingPage, sudoInstruction, takeSudoCode, type BrowserPage, type RecordedStep, type SudoOptions } from './master-browser.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
 
 /**
@@ -395,20 +395,26 @@ export function upRequestFromArgs(args: string[]): UpRequest {
 /**
  * Agent mode's App step (AC-5): the installer's manifest page, driven in the master's browser
  * profile — register the App, then install it on the repository alone (GitHub preselects it from
- * `repository_ids[]`). A Confirm-access prompt is passed with passSudo, passkey or password first
- * (GY-1442): the operator confirms at the handed-off link, and GitHub Mobile is triggered only when
- * the page offers neither or the operator chose it (`--github-mobile`, `sudo: 'mobile'`); a Mobile
- * code unapproved for a minute is handed off again with the passkey or password link beside it.
- * The handoff is the one thing a person does, after which the drive carries on by itself.
+ * `repository_ids[]`). A Confirm-access prompt is passed with passSudo, the page's own confirmation
+ * first (GY-1442): the handoff names a sudo-protected page to confirm access on once in the
+ * operator's own Chrome, which the shared GitHub session then carries, and every method the page
+ * offers; the drive re-checks every 10 s and types in an authenticator or email code handed over
+ * on the manifest page or with `graphyard up --sudo-code` (GY-1450). GitHub Mobile is triggered only
+ * when the page offers nothing else or the operator chose it (`--github-mobile`, `sudo: 'mobile'`);
+ * a Mobile code unapproved for a minute is handed off again with the passkey or password link.
+ * A re-check that reloads the App creation page drops the manifest, so once access is confirmed
+ * the manifest is submitted again from the setup page.
  */
-export function browserAppDriver(options: { page: BrowserPage; repository: string; ids: () => { owner: number; repository: number }; sleep: (ms: number) => Promise<void>; timeoutMs?: number; record?: string; sudo?: SudoOptions['prefer']; onClose?: (outcome: DriveOutcome) => Promise<void> | void }) {
+export function browserAppDriver(options: { page: BrowserPage; repository: string; ids: () => { owner: number; repository: number }; sleep: (ms: number) => Promise<void>; now?: () => Date; timeoutMs?: number; record?: string; sudo?: SudoOptions['prefer']; readCode?: SudoOptions['readCode']; onClose?: (outcome: DriveOutcome) => Promise<void> | void }) {
   const { page } = options;
   const owner = options.repository.split('/')[0];
+  let setupPage: string | null = null;
   const awaitSudo = async (handoff: Handoff) => {
     // passSudo's flow names the closest master browser flow; its rerun advice is this command's.
     try {
-      await passSudo(page, { flow: 'installation-accept', record: options.record ?? 'graphyard up', sleep: options.sleep, timeoutMs: options.timeoutMs ?? 600_000, prefer: options.sudo ?? 'passkey-or-password',
-        onCode: state => handoff(sudoInstruction(state), { url: state.fallback?.url ?? state.url ?? page.url(), code: state.code }) });
+      const passed = await passSudo(page, { flow: 'installation-accept', record: options.record ?? 'graphyard up', sleep: options.sleep, now: options.now, timeoutMs: options.timeoutMs ?? 600_000, prefer: options.sudo ?? 'passkey-or-password', readCode: options.readCode,
+        onCode: state => handoff(sudoInstruction(state, 'your phone', options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), { url: state.fallback?.url ?? state.url ?? page.url(), code: state.code }) });
+      return passed.passed;
     } catch (error: any) { throw new Error(String(error?.message ?? error).replace(/rerun master browser installation-accept/g, 'rerun graphyard up --agent')); }
   };
   const press = async (kind: 'button' | 'link', text: string, handoff: Handoff) => {
@@ -420,10 +426,19 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
   };
   return async (url: string, handoff: Handoff): Promise<DriveOutcome> => {
     let outcome: DriveOutcome;
+    setupPage = url;
     try {
-      page.open(url);
-      const register = page.locate('button', 'Register Graphyard App →') ?? page.locate('button', 'Register reviewer App →');
-      if (register) { page.click(register.selector); page.wait(2_000); await press('button', `Create GitHub App for ${owner}`, handoff); }
+      for (let submissions = 0; ; submissions += 1) {
+        page.open(url);
+        const register = page.locate('button', 'Register Graphyard App →') ?? page.locate('button', 'Register reviewer App →');
+        if (!register) break;
+        page.click(register.selector); page.wait(2_000);
+        const confirmed = await awaitSudo(handoff);
+        // Confirmed on a reloaded page: GitHub shows the plain new-App form, so submit the manifest again.
+        if (confirmed && submissions === 0 && !page.locate('button', `Create GitHub App for ${owner}`)) continue;
+        await press('button', `Create GitHub App for ${owner}`, handoff);
+        break;
+      }
       page.open(url);
       const install = page.locate('link', 'Install GitHub App');
       if (install?.href) {
@@ -464,6 +479,7 @@ export function recordedAppDriver(root: string, request: UpRequest, browser: { p
   const drive = browserAppDriver({
     page: { ...recorded, open: url => { if (!created) { created = true; mkdirSync(directory, { recursive: true, mode: 0o700 }); } return recorded.open(url); } },
     repository: request.repository, record: relative(root, directory), sleep: ms => new Promise(accept => setTimeout(accept, ms)), sudo: request.sudo,
+    readCode: () => takeSudoCode(root),
     ids: () => {
       const repo = JSON.parse(execFileSync('gh', ['api', `repos/${request.repository}`], { encoding: 'utf8', timeout: 30_000 }));
       return { owner: Number(repo.owner?.id), repository: Number(repo.id) };

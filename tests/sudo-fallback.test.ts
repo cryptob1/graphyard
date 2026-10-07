@@ -30,6 +30,7 @@ const install = () => import('../src/install/index.js');
 const noSleep = async () => {};
 const SUDO = 'https://github.com/sessions/sudo?return_to=%2Fsettings%2Fapps%2Fnew';
 const PASSWORD_LINK = 'https://github.com/sessions/sudo?type=password';
+const FIRST_LINE = "Confirm access once in your own Chrome at https://github.com/settings/apps/new with your passkey or password: GitHub then holds sudo mode for the session the agent's browser shares, and the flow continues by itself within 10 s";
 
 /** A Confirm-access page offering METHODS; `confirm()` stands for the operator confirming elsewhere. */
 function confirmPage(methods: { passkey?: boolean; password?: boolean; mobile?: boolean }, options: { approveMobileAfterPolls?: number } = {}) {
@@ -71,8 +72,8 @@ test('unit:sudo-method-fallback — a page offering a passkey or a password hand
     assert.deepEqual(result, { passed: true, attempts: 0, code: null });
     assert.deepEqual(fake.state.clicked, [], `${method}: GitHub Mobile was never activated`);
     assert.equal(codes.length, 1); assert.equal(codes[0].method, method); assert.equal(codes[0].url, SUDO);
-    assert.equal(sudoInstruction(codes[0]), `Confirm access with your passkey or password at ${SUDO} in the Chrome profile the agent drives (GitHub ties the confirmation to that browser's session)`);
-    assert.match(sudoAttention(codes[0], Date.parse(codes[0].issuedAt))!.instruction, /passkey or password at https:\/\/github\.com\/sessions\/sudo.*installation-accept flow is waiting/);
+    assert.equal(sudoInstruction(codes[0]), `${FIRST_LINE}\nGitHub's Confirm-access page (${SUDO}) offers: ${method === 'passkey' ? 'passkey, password' : 'password'}, Mobile`);
+    assert.match(sudoAttention(codes[0], Date.parse(codes[0].issuedAt))!.instruction, /^Confirm access once in your own Chrome at https:\/\/github\.com\/settings\/apps\/new[^]*installation-accept flow is waiting/);
     assert.deepEqual(methodSteps(steps), [['sudo-method', method]], 'the recorded steps name the method used');
   }
 });
@@ -139,7 +140,8 @@ test('unit:sudo-method-fallback — graphyard up hands the operator the passkey 
     const handed: { sentence: string; url: string | null }[] = [];
     const drive = browserAppDriver({ page, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: async () => { if (++polls === 2) fake.confirm(); } });
     assert.deepEqual(await drive('http://127.0.0.1:4311', (sentence, link) => { handed.push({ sentence, url: link.url ?? null }); }), { state: 'done' });
-    assert.deepEqual(handed, [{ sentence: `Confirm access with your passkey or password at ${SUDO} in the Chrome profile the agent drives (GitHub ties the confirmation to that browser's session)`, url: SUDO }], method);
+    assert.equal(handed.length, 1, method); assert.equal(handed[0].url, SUDO);
+    assert.equal(handed[0].sentence.split('\n')[0], FIRST_LINE, `${method}: the first line names the one confirmation that always works`);
     assert.ok(!fake.state.clicked.includes('#mobile'), `${method}: GitHub Mobile is only the operator's choice`);
   }
 });

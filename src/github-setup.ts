@@ -244,6 +244,13 @@ export async function appPagePortFree(port = 4311) {
   });
 }
 
+/**
+ * GY-1450: where an operator hands `graphyard up --agent`'s drive the code GitHub's Confirm-access
+ * page asks for, when it offers an authenticator app or an email code: six digits, or a request
+ * that GitHub email one. The drive types the code into the page; it is never shown or logged.
+ */
+const sudoForm = (state: string) => `<h2>GitHub asking to confirm access?</h2><p>Confirming once in your own Chrome on any sudo-protected GitHub page (such as https://github.com/settings/apps/new) lets setup continue by itself. Or hand it the 6-digit code from your authenticator app or an email:</p><form method="post" action="/sudo-code"><input type="hidden" name="state" value="${state}"><input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" aria-label="6-digit code" required> <button>Send code</button></form><form method="post" action="/sudo-code"><input type="hidden" name="state" value="${state}"><input type="hidden" name="email" value="1"><button>Email me a code</button></form>`;
+
 export async function startGithubSetup(root: string, repository: string, deployment: string, port = 4311, dependencies: {
   convert?: (code: string) => Promise<any>;
   verify?: (app: AppCredentials, installationId: number) => Promise<void>;
@@ -301,8 +308,21 @@ export async function startGithubSetup(root: string, repository: string, deploym
     const html = (code: number, text: string) => { res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Graphyard setup</title><link rel="stylesheet" href="/style.css"></head><body><main><div class="brand">g / graphyard</div><small>REPOSITORY SETUP</small><h1>Connect your work<br>to its proof.</h1><h2>Connect Graphyard to GitHub</h2>${text}<footer>Graphyard coordinates the work. Your agents write the code.</footer></main></body></html>`); };
     try {
       const address = `127.0.0.1:${(http.address() as any).port}`;
-      if (req.headers.host !== address || req.method !== 'GET') return html(400, '<p>Use the exact local setup URL.</p>');
       const url = new URL(req.url!, `http://${address}`);
+      // The one form posted to this page: a Confirm-access code for the drive waiting on it (GY-1450).
+      const posting = req.method === 'POST' && url.pathname === '/sudo-code';
+      if (req.headers.host !== address || req.method !== 'GET' && !posting) return html(400, '<p>Use the exact local setup URL.</p>');
+      if (posting) {
+        let body = '';
+        for await (const chunk of req) { body += chunk; if (body.length > 1_000) return html(413, '<p>Too long.</p>'); }
+        const form = new URLSearchParams(body);
+        const received = Buffer.from(form.get('state') ?? ''), expected = Buffer.from(state);
+        if (received.length !== expected.length || !timingSafeEqual(received, expected)) return html(409, '<p>Invalid setup session.</p>');
+        const { submitSudoCode } = await import('./master-browser.js');
+        // The code is never echoed: the answer names only what was handed over.
+        try { const kind = await submitSudoCode(root, form.get('email') ? 'email' : form.get('code') ?? ''); return html(200, `<p>${kind === 'email' ? 'Asked GitHub to email you a code: enter it here once it arrives.' : 'Code handed to setup; it is typed into GitHub\'s Confirm-access page within seconds.'}</p><p><a href="/">Back</a></p>`); }
+        catch (error) { return html(400, `<p>${escape(error instanceof Error ? error.message : String(error))}</p><p><a href="/">Back</a></p>`); }
+      }
       if (url.pathname === '/style.css') {
         res.writeHead(200, { 'Content-Type': 'text/css' });
         return res.end('html{color-scheme:dark;background:#101714;color:#e4eee7;font:17px/1.65 system-ui,sans-serif}body{margin:0}main{max-width:660px;margin:8vh auto;padding:32px}.brand{font-size:25px;font-weight:700;margin-bottom:64px;color:#a9d8bb}small{letter-spacing:.15em;color:#9eaea3}h1{font-size:clamp(38px,7vw,58px);line-height:1.08;letter-spacing:-.045em;font-weight:550;margin:20px 0 42px}h2{font-size:22px}p{color:#b5c6ba}a{color:#acd9bc}button{background:#b9e7c8;color:#132319;border:0;border-radius:8px;padding:14px 24px;font:600 16px system-ui;cursor:pointer;margin:18px 0}button:focus-visible,a:focus-visible{outline:3px solid #fff;outline-offset:4px}footer{border-top:1px solid #304337;padding-top:24px;margin-top:56px;color:#91a198;font-size:13px}');
@@ -311,13 +331,13 @@ export async function startGithubSetup(root: string, repository: string, deploym
         if (app?.installationId) return html(200, reviewer
           ? `<p>Reviewer App registered and installation verified. Add this entry to the server's <code>GRAPHYARD_REVIEWER_APPS</code> registry, then name <code>${escape(reviewer)}</code> from a reviewer profile:</p><pre>${escape(JSON.stringify({ id: reviewer, runtime: reviewer, appId: app.appId, botUserId: app.botUserId }, null, 2))}</pre><p>Set <code>runtime</code> to the agent runtime that will post the verdicts. The private key stays in this machine's credential file and is never needed by Graphyard.</p>`
           : '<p>App registered and installation verified. Credentials are saved locally with restricted file permissions. You may close setup and configure Railway.</p>');
-        if (app) return html(200, `<p>App registered. Install it only on ${escape(repository)}.</p><a href="https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new">Install GitHub App</a>`);
+        if (app) return html(200, `<p>App registered. Install it only on ${escape(repository)}.</p><a href="https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new">Install GitHub App</a>${sudoForm(state)}`);
         const manifest = reviewer ? reviewerAppManifest(reviewer, repository, deployment, `http://${address}`) : appManifest(repository, deployment, `http://${address}`);
         const reusable = dependencies.reuse ? dependencies.reusable ?? [] : [];
         const reuse = reusable.length ? `<h2>Or reuse an App you already have</h2><p>Skips creating an App: the repository is added to the chosen App's existing installation, after its permissions${reviewer ? '' : ' and webhook'} are checked.</p><form method="get" action="/reuse"><input type="hidden" name="state" value="${state}"><select name="slug" aria-label="App to reuse">${reusable.map(slug => `<option value="${escape(slug)}">${escape(slug)}</option>`).join('')}</select> <button>Reuse this App →</button></form>` : '';
         return html(200, (reviewer
           ? `<p>Register a private reviewer App named <strong>${escape(reviewer)}</strong> for <strong>${escape(repository)}</strong>. Its runtime signs in as this App to post review verdicts.</p><p>The reviewer App reads code and writes pull request comments. It cannot publish Graphyard's gate check, change branch protection, or write source code. Use a GitHub account that is not the pull request author.</p><form method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register reviewer App →</button></form>`
-          : `<p>Register a private App for <strong>${escape(repository)}</strong>. GitHub will ask you to sign in, name the App, and choose the repository.</p><p>The App reads code and branch protection, publishes its gate check and the graphyard/landable status, writes PR review requests, and moves release and revert branches, which is why it holds Contents: read and write. It never writes an agent's code and never merges a pull request: GitHub merges it once branch protection's required checks pass. Credentials return directly to this machine; no key copying is needed.</p><form method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register Graphyard App →</button></form>`) + reuse);
+          : `<p>Register a private App for <strong>${escape(repository)}</strong>. GitHub will ask you to sign in, name the App, and choose the repository.</p><p>The App reads code and branch protection, publishes its gate check and the graphyard/landable status, writes PR review requests, and moves release and revert branches, which is why it holds Contents: read and write. It never writes an agent's code and never merges a pull request: GitHub merges it once branch protection's required checks pass. Credentials return directly to this machine; no key copying is needed.</p><form method="post" action="https://github.com/settings/apps/new?state=${state}"><input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}"><button>Register Graphyard App →</button></form>`) + reuse + sudoForm(state));
       }
       if (url.pathname === '/reuse') {
         const received = Buffer.from(url.searchParams.get('state') ?? ''), expected = Buffer.from(state);
