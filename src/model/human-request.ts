@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { operatorCredentialRefusal, operatorOnlyDecision, refusedReconciliations, type Decision } from './approval.js';
+import { shortAskIssues } from './human-ask.js';
 import type { HumanAnswer } from './human-answer.js';
 import type { Work } from './work.js';
 
@@ -59,13 +60,35 @@ export const humanRequestSchema = z.object({
   reason: z.string().trim().min(1).max(2000),
   /** The exact thing the human is asked for: the account to open, the priority to set, the credential to issue. */
   needed: z.string().trim().min(1).max(2000),
+  /** The short note the human reads (GY-1408): one sentence naming their action, a few plain steps, one plain why. NEEDED and REASON are the agents' detail. */
+  ask: z.string().trim().min(1).optional(),
+  steps: z.array(z.string().trim().min(1)).min(1).optional(), why: z.string().trim().min(1).optional(),
+  /** What the requester recommends (GY-1410), shown first: a choice it offers, or the safest way to get a value. `recommendationIssues` requires it and WHY. */
+  recommendation: z.string().trim().min(1).max(600).optional(),
   /** The buttons the card offers, chosen by the requester; the kind's defaults when omitted. */
   choices: z.array(humanChoiceSchema).min(1).max(6).refine(choices => new Set(choices.map(choice => choice.id)).size === choices.length, 'Choice ids must be distinct').optional(),
   /** The requesting host's public key (PEM): a `secret` choice's value is sealed to it. */
   sealTo: z.string().trim().min(1).max(4000).optional(),
-  /** What the requester recommends (GY-1410); required by `recommendationRefusal`, so an older refusal is told first. */
-  recommendation: z.object({ text: z.string().trim().max(600), why: z.string().trim().max(300).default('') }).strict().optional(),
-}).strict().refine(data => data.sealTo || !data.choices?.some(choice => choice.input === 'secret'), 'A secret choice needs sealTo, the requesting host\'s public key');
+}).strict().refine(data => data.sealTo || !data.choices?.some(choice => choice.input === 'secret'), 'A secret choice needs sealTo, the requesting host\'s public key')
+  .superRefine((data, context) => { for (const message of shortAskIssues(data)) context.addIssue({ code: 'custom', message }); });
+/**
+ * What a request's recommendation misses (GY-1410), naming the field; empty when it has one. Every
+ * request tells the human what its requester advises: the choice it recommends or, for a value to
+ * provide, the safest way to obtain it (a fine-grained token scoped to one repository, with a short
+ * expiry and only the permissions needed), plus WHY, one plain sentence of why.
+ */
+export function recommendationIssues(data: { recommendation?: string; why?: string }): string[] {
+  return [
+    ...(data.recommendation?.trim() ? [] : ['A park needs RECOMMEND (field recommendation): the choice you recommend, or the safest way to obtain the value asked for']),
+    ...(data.why?.trim() ? [] : ['A park needs WHY (field why): one plain sentence of why you recommend it']),
+  ];
+}
+/** The id of the choice a request's recommendation names, by label or id, or null when it names none. */
+export function recommendedChoice(request: { kind: HumanDecisionKind; choices?: HumanChoice[] | null; sealTo?: string | null; recommendation?: string | null }): string | null {
+  const key = (words: string) => words.trim().replace(/[….:]+$/, '').toLowerCase();
+  const advice = request.recommendation ? key(request.recommendation) : null;
+  return advice ? requestChoices(request).find(choice => key(choice.id) === advice || key(choice.label) === advice)?.id ?? null : null;
+}
 /**
  * Why a park is refused before it reaches the human, or null when it may park (GY-1395). Two of
  * the build stage's human-only decisions were not the human's to make, or not the whole ask:
@@ -83,42 +106,6 @@ export function parkRefusal(data: { needed: string }): string | null {
 }
 
 /**
- * The requester's advice, shown first on the card (GY-1410): the choice it recommends, or, for a
- * value to provide, the safest way to obtain it (a fine-grained token scoped to one repository,
- * short-lived, with only the permissions needed), and one plain sentence of why. `choice` is the id
- * of the button `text` names, when it names one; that button is listed first and preselected.
- */
-export interface HumanRecommendation { text: string; why: string; choice?: string | null }
-export const recommendationRequired = 'A park needs a recommendation: the choice you recommend, or the safest way to obtain the value asked for (graphyard park … --recommend TEXT --why SENTENCE; API field recommendation {text, why})';
-/** Why a request's recommendation is refused, or null; the recommendation the request records otherwise. */
-export function resolveRecommendation(request: { kind: HumanDecisionKind; choices?: HumanChoice[] | null; sealTo?: string | null; recommendation?: { text: string; why: string } }): { refusal: string } | { recommendation: HumanRecommendation } {
-  const given = request.recommendation;
-  if (!given?.text.trim()) return { refusal: recommendationRequired };
-  if (!given.why.trim()) return { refusal: 'A recommendation needs recommendation.why: one plain sentence of why' };
-  const key = (words: string) => words.trim().replace(/[….]+$/, '').toLowerCase();
-  const named = requestChoices(request).find(choice => key(choice.id) === key(given.text) || key(choice.label) === key(given.text));
-  return { recommendation: { text: given.text.trim(), why: given.why.trim(), ...(named ? { choice: named.id } : {}) } };
-}
-
-const parkFlags = { '--choice': 'none', '--choice-text': 'text', '--choice-secret': 'secret', '--recommend': 'recommend', '--why': 'why' } as const;
-/**
- * NEEDED, the requester's choices and its recommendation from the park words between KIND and
- * `--`. Each flag takes the next word as its value; the choices become buttons in that order.
- */
-export function parkArgs(words: readonly string[]) {
-  const needed: string[] = [], choices: HumanChoice[] = [], advice = { text: '', why: '' };
-  for (let index = 0; index < words.length; index++) {
-    const input = parkFlags[words[index] as keyof typeof parkFlags];
-    if (!input) { needed.push(words[index]); continue; }
-    const value = words[++index]?.trim();
-    if (!value || value.startsWith('--')) throw new Error(`${words[index - 1]} needs a value, such as --choice "Approve up to €50/month" or --why "It is the cheapest plan"`);
-    if (input === 'recommend') advice.text = value; else if (input === 'why') advice.why = value;
-    else choices.push({ id: `choice-${choices.length + 1}`, label: value, outcome: 'provided', input });
-  }
-  return { needed: needed.join(' ').trim(), choices: choices.length ? choices : undefined, recommendation: advice.text || advice.why ? advice : undefined };
-}
-
-/**
  * The fields every request only a human may answer carries, whatever raised it: the exact thing
  * needed, why, who asked, and when. A `park` request is one; an approval the server will take
  * only from the operator's own credential is another, and is modelled with the same fields so
@@ -127,8 +114,10 @@ export function parkArgs(words: readonly string[]) {
 export interface HumanOnlyRequest {
   id: string; kind: string; reason: string; needed: string;
   requestedBy: string; epoch: number; at: string;
-  /** The requester's advice (GY-1410); absent only on a request recorded before it was required. */
-  recommendation?: HumanRecommendation | null;
+  /** The short note the card leads with (GY-1408); absent on older requests, which lead with `needed`'s first sentence (`humanAsk`). */
+  ask?: string | null; steps?: string[] | null; why?: string | null;
+  /** What the requester recommends (GY-1410), shown first with `why`; absent only on requests recorded before it was required. */
+  recommendation?: string | null;
 }
 export interface HumanRequest extends HumanOnlyRequest {
   kind: HumanDecisionKind;
@@ -159,8 +148,8 @@ export const declineCommand = (key: string, request: Pick<HumanRequest, 'id'>) =
  * and the field an optional note goes in (null when the button takes none).
  */
 export interface HumanOnlyChoice { label: string; input: HumanChoice['input']; declines: boolean; body: Record<string, unknown>; note: string | null; recommended?: boolean }
-/** The choices with the recommended one first and marked (GY-1410). */
-export const recommendedFirst = (choices: HumanOnlyChoice[]) => [...choices.filter(choice => choice.recommended), ...choices.filter(choice => !choice.recommended)];
+/** The choices with the recommended one first (GY-1410). */
+export const recommendedFirst = (choices: readonly HumanOnlyChoice[]) => [...choices.filter(choice => choice.recommended), ...choices.filter(choice => !choice.recommended)];
 export interface HumanOnlyPost {
   command: string;
   body: Record<string, unknown>;
@@ -187,13 +176,12 @@ export function humanOnlyStatusRow(row: HumanRequestRow) {
 /** Every open human-only request, longest wait first: the human-facing list. */
 export function openHumanRequests(work: readonly { id: string; key: string; title: string; stage: string; humanRequest?: HumanRequest | null }[], now: number): HumanRequestRow[] {
   return work.filter(item => item.stage !== 'done' && parkedOnHuman(item)).map(item => {
-    const request = item.humanRequest!;
+    const request = item.humanRequest!, recommended = recommendedChoice(request);
     return {
       rule: parkRule.kind, work: item.key, id: item.id, title: item.title, request,
       waitedMs: Math.max(0, now - Date.parse(request.at)), decision: humanDecisionLabel[request.kind],
       refusal: parkRule.refuse({ id: 'an agent identity', role: 'operator-agent', sessionKind: 'ai' })!,
-      choices: recommendedFirst(requestChoices(request).map(choice => ({ label: choice.label, input: choice.input, declines: choice.outcome === 'declined', body: { request: request.id, choice: choice.id }, note: 'note',
-        recommended: choice.id === request.recommendation?.choice }))),
+      choices: recommendedFirst(requestChoices(request).map(choice => ({ label: choice.label, input: choice.input, declines: choice.outcome === 'declined', body: { request: request.id, choice: choice.id }, note: 'note', recommended: choice.id === recommended }))),
       answer: { cli: answerCommand(item.key, request), decline: declineCommand(item.key, request), dashboard: 'Work → Needs you → Answer', api: `POST /api/work/${item.key}/answer {"request":"${request.id}","answer":"…"}`,
         post: { command: 'answer', body: { request: request.id, outcome: 'provided' }, field: 'answer', submit: `Answer and resume ${item.key}`,
           decline: { body: { request: request.id, outcome: 'declined' }, submit: 'Decline' } } },
@@ -273,7 +261,7 @@ export const operatorApprovalRule: HumanOnlyRule = {
       // The requester asked for this decision, so approving it is what it recommends (GY-1410).
       const request: HumanOnlyRequest = { id: decision.id, kind: operatorApprovalRule.kind, needed: operatorOnly.needed, reason: decision.reason,
         requestedBy: decision.requestedBy, epoch: work.epoch, at: decision.requestedAt,
-        recommendation: { text: 'Approve the delivery', why: `${decision.requestedBy} requested this decision, and no agent identity may approve it.` } };
+        recommendation: 'Approve', why: `${decision.requestedBy} asked for this decision, and only a human admin may approve it.` };
       return [{
         rule: operatorApprovalRule.kind, work: work.key, id: work.id, title: work.title, request,
         waitedMs: Math.max(0, now - Date.parse(decision.requestedAt)), decision: operatorApprovalLabel,

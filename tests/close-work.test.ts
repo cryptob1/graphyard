@@ -148,7 +148,7 @@ test('integration:close-refusals — a live lease refuses, and only the master o
 test('integration:close-withdraws-human-request — the parked human-only request is withdrawn and leaves the Needs-you list', async () => {
   const work = await released('parked on a human');
   const claimed = await ok(worker, `work/${work.id}/claim`, {}) as Work;
-  await ok(worker, `work/${work.id}/park`, { recommendation: { text: 'Approve', why: 'Nothing else unblocks the item.' }, epoch: claimed.epoch, kind: 'money-or-accounts', reason: 'Needs a paid account', needed: 'A provider account' });
+  await ok(worker, `work/${work.id}/park`, { recommendation: 'Approve', why: 'Nothing else unblocks the item.', epoch: claimed.epoch, kind: 'money-or-accounts', reason: 'Needs a paid account', needed: 'A provider account' });
   assert.equal((await ok(operator, 'human-requests')).requests.filter((row: any) => row.work === work.key).length, 1);
   const closed = await ok(coordinator, `work/${work.id}/close`, { kind: 'obsolete', reason: 'No longer wanted' }) as Work;
   assert.equal(closed.humanRequest, null);

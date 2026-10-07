@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import type { Work } from './model.js';
 import type { MasterConfig } from './master.js';
 import { observeDeployment, type DeploymentObservation } from './master-daemon.js';
@@ -18,7 +19,9 @@ import { repositoryFromRemote } from './onboarding.js';
  * post-deployment proof to. Anything weaker is refused with the reason: a stale observation, a
  * checkout that is not the deployed release, a release that does not serve the merge yet, or
  * emitted instructions that lack the loop. A refusal keeps the loop cycling; it never claims the
- * step.
+ * step. A coordinator checkout at another commit than the observed release — the supervised
+ * master upgrades past what production serves — emits nothing itself: the instructions come from
+ * an isolated clean checkout of exactly the observed commit (GY-1409), or the step is refused.
  */
 
 /** How long a deployment observation may be relied on before the release must be observed again. */
@@ -124,11 +127,42 @@ export async function emitInstructions(config: MasterConfig, run: Run = defaultR
   } finally { await rm(scratch, { recursive: true, force: true }); }
 }
 
+/** An isolated clean checkout of exactly the observed release, whose CLI emits the instructions. */
+export interface IsolatedRelease { release: InstructionRelease; emit: () => Promise<EmittedInstructions>; dispose: () => Promise<void> }
+
+/**
+ * Check out `sha` from the coordinator checkout's object store into a scratch directory outside
+ * every repository, without touching the coordinator checkout. A commit the store lacks is
+ * refused (missing), never fetched or approximated; the scratch checkout's identity is read back
+ * from git, so a checkout that is not exactly `sha` and clean is refused by the assessment.
+ */
+export async function isolateRelease(config: MasterConfig, sha: string, run: Run = defaultRun): Promise<IsolatedRelease | { reason: string }> {
+  const source = dirname(config.cliPath);
+  let top: string, modules: string;
+  try { top = run('git', ['-C', source, 'rev-parse', '--show-toplevel']).trim(); } catch (error) { return { reason: `The coordinator checkout has no release identity: ${message(error)}` }; }
+  try { run('git', ['-C', top, 'cat-file', '-e', `${sha}^{commit}`]); } catch { return { reason: `Deployed release ${sha} is missing from the coordinator checkout; fetch it and verify again` }; }
+  try { modules = createRequire(config.cliPath).resolve('tsx').replace(/\/node_modules\/.*$/, '/node_modules'); } catch (error) { return { reason: `The coordinator checkout's dependencies do not resolve: ${message(error)}` }; }
+  const scratch = await mkdtemp(join(tmpdir(), 'graphyard-release-'));
+  const dispose = () => rm(scratch, { recursive: true, force: true });
+  try {
+    const checkout = join(scratch, 'release');
+    run('git', ['clone', '-q', '--shared', '--no-checkout', top, checkout]);
+    run('git', ['-C', checkout, 'checkout', '-q', '--detach', sha]);
+    await symlink(modules, join(checkout, 'node_modules'), 'dir');
+    const cliPath = join(checkout, relative(top, config.cliPath));
+    // The clone's origin is the coordinator checkout, so the repository is the coordinator's.
+    const release = { ...checkoutRelease(cliPath, run), repository: checkoutRelease(config.cliPath, run).repository };
+    return { release, emit: () => emitInstructions({ ...config, cliPath }, run), dispose };
+  } catch (error) { await dispose(); return { reason: `Could not check out deployed release ${sha} in isolation: ${message(error)}` }; }
+}
+
 export interface VerificationEffects {
   snapshot: () => Promise<{ work: Work[]; now: string }>;
   observe: (delivered: Work[]) => Promise<DeploymentObservation>;
   release: () => InstructionRelease;
   emit: () => Promise<EmittedInstructions>;
+  /** Materialize the observed release when the coordinator checkout is at another commit. */
+  isolate?: (sha: string) => Promise<IsolatedRelease | { reason: string }>;
   /** `POST work/:id/deployment`; the control plane binds it to the delivery and refuses a second one. */
   record: (work: Work, data: VerificationRecord) => Promise<unknown>;
   /** The managed repository; see `VerificationInput.repository`. */
@@ -140,7 +174,9 @@ export interface VerificationEffects {
  * One verification attempt. The observation is taken fresh, the instructions are emitted only
  * once the cheap refusals pass, and the record is written only when the full assessment holds
  * — with `now` read again after emitting, so a slow emission cannot ride on an observation that
- * has since gone stale.
+ * has since gone stale. A coordinator checkout at another commit than the observed release is
+ * replaced, for emission, by an isolated checkout of exactly that release; the coordinator's own
+ * commit and dirt then emit nothing and decide nothing.
  */
 export async function verifyDeployment(work: Work, effects: VerificationEffects, freshnessMs = deploymentFreshnessMs) {
   const now = effects.now ?? Date.now;
@@ -150,15 +186,28 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
   // The probe reads each item's merge commit, so only a delivered item reaches it; undelivered
   // work is refused by the assessment with nothing to observe, never by a crash in the probe.
   const observation = await effects.observe(current.stage === 'done' && current.delivery ? [current] : []);
-  const release = effects.release();
+  const coordinator = effects.release();
+  const emits = emitsManagedInstructions(coordinator, effects.repository);
+  const isolate = emits && !!effects.isolate && !!observation.sha && !!coordinator.sha && coordinator.sha !== observation.sha;
+  let release = coordinator, isolated: boolean = false;
   const result = (assessment: ReturnType<typeof assessDeploymentVerification>, recorded: 'now' | 'existing' | null) => ({
     key: current.key, result: assessment.verifiable ? 'verified' as const : 'refused' as const,
     release: { sha: observation.sha, source: observation.source, observedAt: observation.at, covers: assessment.covers },
-    checkout: { sha: release.sha, clean: release.clean }, checks: assessment.checks, refusals: assessment.refusals, recorded,
+    checkout: { sha: coordinator.sha, clean: coordinator.clean }, emittedFrom: emits ? { sha: release.sha, clean: release.clean, isolated } : null,
+    checks: assessment.checks, refusals: assessment.refusals, recorded,
   });
-  const preflight = assessDeploymentVerification(current, { observation, release, now: now(), freshnessMs, repository: effects.repository });
+  // Before spending a scratch checkout, the release identity is presumed to be the one isolation
+  // will produce; the full assessment judges the identity git reads back from it.
+  const presumed = isolate ? { ...coordinator, sha: observation.sha, clean: true } : coordinator;
+  const preflight = assessDeploymentVerification(current, { observation, release: presumed, now: now(), freshnessMs, repository: effects.repository });
   if (preflight.refusals.length) return result(preflight, null);
-  const emitted = emitsManagedInstructions(release, effects.repository) ? await effects.emit() : undefined;
+  let emitted: EmittedInstructions | undefined;
+  if (isolate) {
+    const checkout = await effects.isolate!(observation.sha!);
+    if ('reason' in checkout) return result({ ...preflight, refusals: [checkout.reason] }, null);
+    release = checkout.release; isolated = true;
+    try { emitted = await checkout.emit(); } finally { await checkout.dispose(); }
+  } else if (emits) emitted = await effects.emit();
   const assessment = assessDeploymentVerification(current, { observation, release, emitted, now: now(), freshnessMs, repository: effects.repository });
   if (!assessment.verifiable) return result(assessment, null);
   if (current.delivery!.deployment?.sha === assessment.record!.sha) return result(assessment, 'existing');
@@ -175,6 +224,7 @@ export function verificationEffects(config: MasterConfig, deps: { root: string; 
     observe: delivered => observeDeployment(config, delivered, run, fetch, () => Date.now(), { root: deps.root }),
     release: () => checkoutRelease(config.cliPath, run),
     emit: () => emitInstructions(config, run),
+    isolate: sha => isolateRelease(config, sha, run),
     record: (work, data) => deps.mutate(`work/${work.id}/deployment`, data),
   };
 }

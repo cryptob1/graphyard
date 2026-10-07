@@ -11,9 +11,14 @@ import { Engine, unauthorizedMergeViolation } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { humanRequestsCommand } from '../src/cli/session-commands.js';
 import { operatorCredentialRefusal, operatorOnlyDecision } from '../src/model/approval.js';
-import { humanOnlyRefusal, humanOnlyRules, openHumanOnly, operatorApprovalRule, parkRule, type HumanOnlyRule, type HumanRequestRow } from '../src/model/human-request.js';
+import { humanOnlyRefusal, humanOnlyRules, humanRequestSchema, openHumanOnly, operatorApprovalRule, parkRule, type HumanOnlyRule, type HumanRequestRow } from '../src/model/human-request.js';
+import { humanAsk, shortAskIssues } from '../src/model/human-ask.js';
+import { parkArgs, parkCommand } from '../src/cli/session-commands.js';
+import { nextActor } from '../src/model/board.js';
+import { plainLines } from '../web/item-page.js';
+import WorkCard from '../web/components/work-card.js';
 import type { Observation, Principal, Work } from '../src/model.js';
-import HumanRequestsPage from '../web/pages/human-requests.js';
+import HumanRequestsPage, { RequestCard } from '../web/pages/human-requests.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -269,4 +274,104 @@ test('unit:human-surface-derived-from-refusals — a human-only refusal added to
   } finally {
     humanOnlyRules.splice(humanOnlyRules.indexOf(rule), 1);
   }
+});
+
+/** The recommendation every park carries (GY-1410), for the parks whose advice a test does not read. */
+const advice = { recommendation: 'Approve', why: 'Nothing else unblocks the item.' };
+/** A worker's item, claimed at epoch 1 and parked with `body` through the real route. */
+async function parked(body: Record<string, unknown>) {
+  const n = ++serial;
+  let work = await engine.execute(operator, 'create', null, { title: `Short ask ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:behaves'] }] }, id());
+  work = await engine.execute(operator, 'ready', work.id, {}, id());
+  work = await engine.execute(worker, 'claim', work.id, {}, id());
+  await post(token(worker), `work/${work.id}/park`, { epoch: 1, kind: 'money-or-accounts', ...advice, ...body });
+  return reload(work.id);
+}
+/**
+ * What a reader sees in rendered markup: a closed <details> shows only its summary, and tags and
+ * attributes are not text.
+ */
+const visibleText = (markup: string) => markup
+  .replace(/<details(?![^>]*\bopen)[^>]*>\s*<summary[^>]*>(.*?)<\/summary>.*?<\/details>/gs, ' $1 ')
+  .replace(/<textarea[^>]*>.*?<\/textarea>/gs, ' ').replace(/<[^>]+>/g, ' ').replace(/&[a-z#0-9]+;/g, ' ').replace(/\s+/g, ' ').trim();
+const occurrences = (text: string, part: string) => text.split(part).length - 1;
+/** A worker's note in agent shorthand, 150 words: what used to be the card. */
+const agentNote = Array.from({ length: 15 }, (_, index) => `Resume graphyard/gy-1384-${index} at 5bc497ab7c62 then graphyard unseal GY-1384 under GH_CONFIG_DIR.`).join(' ');
+
+test('unit:human-request-short-ask — a park carries a short human ask apart from its agent detail: ASK, STEPS and WHY are bounded and refuse agent shorthand naming it, and a request without them leads with the first sentence of NEEDED', async () => {
+  const ok = { epoch: 1, kind: 'money-or-accounts', needed: 'A repository and an admin token', reason: 'The pilot needs both', ...advice };
+  const refused = (extra: Record<string, unknown>) => { const parsed = humanRequestSchema.safeParse({ ...ok, ...extra }); assert.equal(parsed.success, false, JSON.stringify(extra)); return parsed.error!.issues.map(issue => issue.message).join(' | '); };
+  // The limits: one sentence of at most 140 characters, at most 5 steps of at most 160, a why of at most 200.
+  assert.match(refused({ ask: `Create ${'a'.repeat(140)}` }), /ASK is 147 characters; keep it to 140/);
+  assert.match(refused({ ask: 'Create the repository. Then paste the token' }), /ASK is one sentence/);
+  assert.match(refused({ ask: 'Create it', steps: ['One', 'Two', 'Three', 'Four', 'Five', 'Six'] }), /STEPS has 6 lines; keep it to 5/);
+  assert.match(refused({ ask: 'Create it', steps: ['x'.repeat(161)] }), /STEP 1 is 161 characters; keep it to 160/);
+  assert.match(refused({ ask: 'Create it', why: 'w'.repeat(201) }), /WHY is 201 characters; keep it to 200/);
+  // Agent shorthand is refused in ASK and STEPS, naming the offending text, so it goes in REASON.
+  assert.match(refused({ ask: 'Review head 5bc497ab7c62 on GitHub' }), /ASK names a commit sha \(5bc497ab7c62\); put it in REASON/);
+  assert.match(refused({ ask: 'Merge graphyard/gy-1384-2 into main' }), /ASK names a branch name \(graphyard\/gy-1384-2\)/);
+  assert.match(refused({ ask: 'Create it', steps: ['Run graphyard unseal GY-1384 on the host'] }), /STEP 1 names a graphyard or gh command \(graphyard unseal GY-1384/);
+  assert.match(refused({ ask: 'Create it', steps: ['Sign in', 'Run gh auth login as the admin'] }), /STEP 2 names a graphyard or gh command \(gh auth/);
+  assert.match(refused({ ask: 'Create it', steps: ['Edit src/model/human-request.ts'] }), /STEP 1 names a file path \(src\/model\/human-request.ts\)/);
+  assert.match(refused({ ask: 'Put the token in ~/.config/gh/hosts.yml' }), /ASK names a file path \(~\/.config\/gh\/hosts.yml\)/);
+  // A plain note passes, links included; WHY is plain words and not policed for shorthand.
+  const note = { ask: 'Create the install-proof repository and give the pilot an admin token', steps: ['Open github.com/new and create cryptob1/graphyard-install-proof as private', 'Create a classic token with repo and admin scopes', 'Paste the token in the box below'], why: 'The setup walk has to run against a fresh repository that you own.' };
+  assert.equal(humanRequestSchema.safeParse({ ...ok, ...note }).success, true, JSON.stringify(shortAskIssues(note)));
+  assert.equal(humanRequestSchema.safeParse(ok).success, true, 'a request recorded without an ask still parses');
+
+  // The CLI takes them as flags beside NEEDED and REASON, requires ASK and refuses shorthand before it posts.
+  assert.deepEqual(parkArgs(['A', 'repository', '--ask', note.ask, '--step', note.steps[0], '--step', note.steps[1], '--why', note.why]),
+    { needed: 'A repository', choices: undefined, ask: note.ask, steps: note.steps.slice(0, 2), why: note.why });
+  assert.throws(() => parkArgs(['A', 'repository', '--ask']), /--ask needs its text/);
+  const posted: unknown[] = [];
+  const run = (args: string[]) => parkCommand.run({ args: ['1', 'money-or-accounts', ...args], print: () => {}, api: async (_path: string, data?: unknown) => { posted.push(data); return {}; }, individualHostId: () => 'host' } as any, { id: 'w', key: 'GY-1', revision: 1 } as any);
+  await assert.rejects(run(['A', 'repository', '--', 'Needed for the pilot']), /--ask ASK/);
+  await assert.rejects(run(['A', 'repository', '--ask', 'Check out 5bc497ab7c62', '--', 'Needed']), /ASK names a commit sha \(5bc497ab7c62\)/);
+  assert.equal(posted.length, 0, 'nothing is posted for a refused ask');
+
+  // The route keeps them on the request; the agent detail stays as it was.
+  const work = await parked({ needed: agentNote, reason: agentNote, ...note });
+  assert.deepEqual([work.humanRequest!.ask, work.humanRequest!.steps, work.humanRequest!.why, work.humanRequest!.reason], [note.ask, note.steps, note.why, agentNote]);
+  assert.equal((await request(token(worker), 'POST', `work/${(await parked({ needed: 'x', reason: 'y' })).id}/park`, { ...ok, ask: 'Open 5bc497ab7c62' })).status, 400, 'the route refuses shorthand too');
+
+  // Fallback: an open request recorded before asks existed leads with the first sentence of NEEDED.
+  const legacy = await parked({ needed: 'Create the install-proof repository. Then resume graphyard/gy-1384-2 at 5bc497ab7c62 with graphyard unseal GY-1384.', reason: agentNote });
+  assert.equal(legacy.humanRequest!.ask, undefined);
+  assert.equal(humanAsk(legacy.humanRequest!), 'Create the install-proof repository.');
+  assert.equal(nextActor(legacy, 'needs-you', Date.now()).does, 'Create the install-proof repository.');
+  const row = openHumanOnly([{ work: legacy }], Date.now())[0];
+  const card = renderToStaticMarkup(createElement(RequestCard, { row, refusal: null, busy: false, open: () => {}, answer: async () => {} }));
+  assert.match(card, /<h3>Create the install-proof repository\.<\/h3>/);
+  assert.ok(!visibleText(card).includes('graphyard unseal'), 'the rest of NEEDED is detail for agents');
+});
+
+test('unit:human-request-card-render — each human request renders once per surface: the ask as its heading, its steps numbered, why in one line, then the choices, with the agent detail folded under a closed "Details for agents"', async () => {
+  const note = { ask: 'Create the install-proof repository and give the pilot an admin token', steps: ['Create a private repository named graphyard-install-proof', 'Paste an admin token for it in the box below'], why: 'The setup walk needs a fresh repository that you own.' };
+  assert.equal(agentNote.split(/\s+/).length, 150);
+  const work = await parked({ needed: agentNote, reason: agentNote, ...note });
+  const rows = (await get(token(operator), 'human-requests')).requests as HumanRequestRow[];
+  const row = rows.find(entry => entry.id === work.id)!;
+
+  // The Needs you page.
+  const page = renderToStaticMarkup(createElement(HumanRequestsPage, dashboard(operator, [work], [row], Date.now())));
+  const card = page.slice(page.indexOf('<div class="card human-request">'));
+  const seen = visibleText(card);
+  assert.ok(seen.split(' ').length < 80, `${seen.split(' ').length} visible words: ${seen}`);
+  assert.equal(occurrences(seen, note.ask), 1, 'the ask once');
+  assert.match(card, new RegExp(`<h3>${note.ask}</h3><p class="human-why human-recommendation"><strong>Recommended:</strong> ${advice.recommendation}<span class="muted"> ${note.why}</span></p><ol class="human-steps"><li>${note.steps[0]}</li><li>${note.steps[1]}</li></ol>`), 'heading, the recommendation with why (GY-1410), then numbered steps');
+  assert.ok(card.indexOf(note.why) < card.indexOf(row.choices![0].label), 'the choices follow');
+  assert.ok(!seen.includes('graphyard unseal') && !seen.includes('5bc497ab') && !seen.includes('Who acts next'), 'no agent detail and no restatement in view');
+  assert.match(card, /<details class="agent-details"><summary class="muted">Details for agents<\/summary>/, 'the detail is collapsed, closed by default');
+  assert.ok(card.includes(agentNote.slice(0, 30)), 'and still there for the next agent');
+
+  // The work card (overview and Work page): the ask once as its line, "You" as who acts, no reason.
+  const now = Date.now();
+  assert.deepEqual(nextActor(work, 'needs-you', now), { who: 'You', does: note.ask });
+  const row2 = visibleText(renderToStaticMarkup(createElement(WorkCard, { item: work, now, onOpen: () => {}, group: 'needs-you' })));
+  assert.equal(occurrences(row2, note.ask), 1, row2);
+  assert.ok(!row2.includes('graphyard unseal'), row2);
+  // The item page's "what is left" points at the card rather than restating the blocker's detail.
+  const ready = work.gates.find(gate => gate.name === 'ready')!;
+  assert.ok(ready.reasons.some(reason => reason.includes('graphyard unseal')), 'the blocker keeps the detail for agents');
+  assert.deepEqual(plainLines(ready).filter(line => line.includes('graphyard unseal')), []);
 });

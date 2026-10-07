@@ -1,5 +1,5 @@
 import { isClosed, type Gate, type Work } from '../src/model';
-import { parkedOnHuman } from '../src/model/human-request';
+import { humanRequestBlocker, parkedOnHuman } from '../src/model/human-request';
 import { fileConflicts } from '../src/coordination';
 import { plainReason } from '../src/model/plain-status';
 import { prSteps, stepGate, stepIds, stepLabel, waitsOn, type StepId } from '../src/model/pr-steps';
@@ -26,9 +26,14 @@ export interface LeftGroup {
 const stepOfGate = (gate: string, handedIn: boolean): StepId | undefined =>
   ({ ready: 'build', build: handedIn ? 'validate' : 'build', test: 'test', review: 'review', acceptance: 'prove', merge: 'merge' } as Record<string, StepId>)[gate];
 
-/** One gate's reasons in plain words, each once: a proof still owed is named by the proof. */
+/**
+ * One gate's reasons in plain words, each once: a proof still owed is named by the proof. A parked
+ * request's blocker carries the whole agent detail; its card states the ask, so the line here only
+ * points at it (GY-1408).
+ */
 export function plainLines(gate: Gate): string[] {
   return [...new Set(gate.reasons.map(reason => {
+    if (reason.startsWith(humanRequestBlocker)) return 'Waiting on your answer to the request on this page';
     const proof = reason.match(/^AC-\d+: (\S+) needs trusted/)?.[1];
     return proof ? `The proof ${proof} has not passed yet` : plainReason(reason, gate.name).text;
   }))];
