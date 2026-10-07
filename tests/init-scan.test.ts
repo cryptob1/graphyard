@@ -317,7 +317,8 @@ test('CLI init --scan applies nothing without approval and --apply enforces the 
     assert.equal(byId['test-formats'].status, 'ready'); assert.match(byId['test-formats'].detail, /vitest → junit-xml-v1/);
     assert.equal(byId['github-app'].status, 'unknown'); assert.match(byId['github-app'].recovery, /GITHUB_APP_ID/);
     assert.ok(status.readiness.items.every((item: any) => item.status === 'ready' || typeof item.recovery === 'string'));
-    assert.equal(status.next, status.readiness.next);
+    // While the control plane itself fails, next names the setup-from-zero step that installs it (GY-1412).
+    assert.match(status.next, /^FAIL control-plane: not reachable: .*\(fix: docs\/setup-from-zero\.md step 3/);
     const preview = JSON.parse(await runCli(root, ['doctor', '--profile', 'preview-validation'], env));
     assert.ok(preview.readiness.items.some((item: any) => item.id === 'runner-registration' && item.status === 'unknown'));
     assert.equal(preview.readiness.items.find((item: any) => item.id === 'e2e-suite').status, 'missing');
