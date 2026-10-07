@@ -9,7 +9,7 @@ import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonAct
 import { decisionKey, scopeAnsweredAt, scopeKey, scopeOutcomeAnswered } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
 import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, namePaths, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, reworkObservationWait, routineDecision, type RoutineDecision, sameAnswers, scopeRoutineDecision, blockerScopeDecision, standingVerdict, withheldDecision } from './decisions.js';
-import { decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication } from './decision-reads.js';
+import { candidateMovedMeanwhile, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
 import { record } from './effects.js';
 import type { FaultKind } from '../model/fault-classes.js';
@@ -257,10 +257,12 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     } catch (error) {
       // A history read that only missed the step's deadline judged nothing (GY-1293): one alone is
       // no decision fault, and its request is asked again next cycle; the second in a row counts.
-      // An item delivered after the snapshot needs no decision (GY-1405): the refusal is no fault.
+      // An item delivered after the snapshot needs no decision (GY-1405), and a rework bound to the
+      // snapshot's head once a new head was submitted describes nothing (GY-1430): no fault.
       const detail = `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`;
-      const moot = deliveredMeanwhile(detail), late = lateDecisionRead(detail) && !(previous?.state === 'failed' && lateDecisionRead(previous.detail));
-      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: moot ? `${detail}; ${item.key} was delivered after this cycle's snapshot, so it needs no ${decision.action} decision` : detail, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, late || moot ? null : undefined));
+      const moot = deliveredMeanwhile(detail), moved = !moot && candidateMovedMeanwhile(detail, item), late = lateDecisionRead(detail) && !(previous?.state === 'failed' && lateDecisionRead(previous.detail));
+      const why = moot ? `; ${item.key} was delivered after this cycle's snapshot, so it needs no ${decision.action} decision` : moved ? `; ${item.key}'s candidate moved after this cycle's snapshot, so the next snapshot decides afresh` : '';
+      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `${detail}${why}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, late || moot || moved ? null : undefined));
     }
   };
   /**
