@@ -4,8 +4,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig, type MasterRun } from '../src/master.js';
-import { neededDecision, proofRework, refusedAttestationWatch } from '../src/daemon/decisions.js';
-import { reworkGround, laneApprover } from '../src/model/rework-ground.js';
+import { neededDecision, proofRework } from '../src/daemon/decisions.js';
+import { reworkGround, laneApprover, refusedAttestationWatch } from '../src/model/rework-ground.js';
 import { foldInterventions, type InterventionLedgerRow } from '../src/interventions.js';
 import { producerPrompt } from '../src/producer.js';
 import { piProducerPrompt } from '../src/runner/roles.js';
@@ -167,6 +167,13 @@ test('unit:rework-ground-recorded — a trusted failure, a refused attestation o
   const conflicting = item();
   conflicting.observation = { ...conflicting.observation!, conflicting: true } as Work['observation'];
   assert.match(reworkGround(conflicting, [])!, /GitHub reports candidate .* conflicting with its base/);
+  // While the control plane's test merge onto a moved base is pending, the conflict is unconfirmed
+  // (syncConflict trusts it no more): it is no ground, and a high-lane rework waits for its approver.
+  const refreshing = item();
+  refreshing.observation = { ...refreshing.observation!, conflicting: true, baseTip: 'c'.repeat(40), baseTipContained: false } as Work['observation'];
+  assert.equal(reworkGround(refreshing, []), null);
+  refreshing.baseRefresh = { from: { sha: head }, base: 'c'.repeat(40), policyRevision: refreshing.policyRevision, conflict: 'src/a.ts' } as Work['baseRefresh'];
+  assert.match(reworkGround(refreshing, [])!, /conflicting with its base/, 'once the test merge decided, the conflict is confirmed');
   // A delivered head, or one no longer submitted, has no ground.
   assert.equal(reworkGround(item([{ executed: 3 }], { stage: 'done' }), []), null);
   assert.equal(laneApprover, 'graphyard-risk-lane');
