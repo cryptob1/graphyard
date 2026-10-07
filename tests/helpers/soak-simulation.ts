@@ -116,7 +116,9 @@ import { type DiagnosisRun, type Failover, MANUAL, type MainGuardDay, PROOF, api
  * the review ledger the dispatcher's reconciliation keeps (GY-971), with the reviews GitHub holds,
  * and names the item whose first approval raises findings classified mechanical whose bot commit
  * the fresh read accepts (`applied`) and the one whose bot commit it rejects as a misclassification
- * (`rejected`).
+ * (`rejected`). `reviewCap` runs the day under that `reviewRoundCap`: each of `items` is sent back
+ * by a change request naming a BLOCKING: finding on every head through the one past the cap, and the
+ * approver refuses the capped rework request of each of `refused` (GY-1389).
  */
 export let days = 0;
 export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; slowDeployment?: { from: number; to: number; observationMs: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
@@ -141,7 +143,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    */
   drained?: { finishAt: number; seeded: number };
   /** GY-1302: wire the loop's promotion drive over the day's moving main, with a stubbed ledger, run list and dispatch. */
-  promotion?: boolean }) {
+  promotion?: boolean;
+  /** GY-1389: the review-round cap, the items whose change requests name a blocking finding past it, and those whose capped round the approver refuses. */
+  reviewCap?: { cap: number; items: number[]; refused: number[] } }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -154,6 +158,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // GY-1354: the slow-deployment day's deliveries ask for a smoke proof the loop requests from this workflow.
     : options.slowDeployment ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, smokeWorkflow: 'smoke.yml' } })
     : options.decomposition ? masterConfigSchema.parse({ ...soakConfig, run: { ...soakConfig.run, research: { command: 'pi', model: 'research-pi-model' }, decomposition: { concurrency: options.decomposition.concurrency ?? 2 } } })
+    : options.reviewCap ? masterConfigSchema.parse({ ...soakConfig, reviewRoundCap: options.reviewCap.cap })
     : soakConfig;
   // The spent producer request (GY-496) is a main-day fault, like the blind window and the split:
   // the hand-approver, documentation and regression days exercise their own faults and would only
@@ -395,6 +400,12 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   }
   const numberOf = (work: Pick<Work, 'key'>) => items.findIndex(item => item.key === work.key) + 1;
   for (const n of plan.rework) github.verdicts.set(items[n - 1].key, ['CHANGES_REQUESTED']);
+  // GY-1389: a change request on every head through the first past the cap, each naming a blocking finding.
+  const cappedDay = options.reviewCap;
+  if (cappedDay) {
+    for (const n of cappedDay.items) github.verdicts.set(items[n - 1].key, Array.from({ length: cappedDay.cap + 1 }, () => 'CHANGES_REQUESTED' as const));
+    github.changeRequestBody = (key, review) => cappedDay.items.includes(numberOf({ key })) ? `AC-1 is judged on ${review.sha.slice(0, 12)}.\nBLOCKING: AC-1 is not met — ${key} skips the last frob.` : null;
+  }
   if (plan.unstable) github.unstable.add(items[plan.unstable - 1].key);
   if (plan.slowRecompute) github.slowRecompute.add(items[plan.slowRecompute - 1].key);
   if (plan.blockedMerge) github.blockedMerge.add(items[plan.blockedMerge - 1].key);
@@ -907,7 +918,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
 
   // ---- Approvers and producers: sessions the loop launches, each acting on the minute after. ----
   const wakes: { key: string; at: number }[] = [];
-  const approverPanes: string[] = [], approverWorks: string[] = [];
+  // The decision each launch judges beside its item (GY-1389: one approver per capped round).
+  const approverPanes: string[] = [], approverWorks: string[] = [], approverDecisions: string[] = [];
   /** A headless approver's verdict, applied as the approver identity; each run's launch is counted once it is. */
   const applyVerdict = (workId: string, run: string) => async (result: RunResult<DecidePayload>): Promise<Applied[]> => {
     if (!result.ok) return [];
@@ -975,7 +987,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     }
     await confine('approver', work.key, coordinatorRoot!);
     const agentName = approverSessionName(work, decision);
-    approverWorks.push(work.key);
+    approverWorks.push(work.key); approverDecisions.push(decision);
     const standing = (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`)).decisions.find((entry: { id: string }) => entry.id === decision);
     // Only a reworked item's worker is still there to resubmit the head that overtakes the request;
     // on any other day the attestation is judged as asked.
@@ -1045,8 +1057,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         herdr.status(pane, 'done');
         return;
       }
-      const refuseDue = !!options.refuseReworkOf?.includes(numberOf(work)) && !refused.some(entry => entry.key === work.key)
-        && current.action === 'rework';
+      const refuseDue = (!!options.refuseReworkOf?.includes(numberOf(work)) && !refused.some(entry => entry.key === work.key)
+        && current.action === 'rework') || (!!cappedDay?.refused.includes(numberOf(work)) && current.action === 'rework' && /:capped:/.test(current.input?.binding ?? ''));
       if (refuseDue) {
         await api(principals.approver, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision, reason: `Refused: ${work.key}'s rework rests on grounds this approver does not accept` });
         refused.push({ key: work.key, decision });
@@ -2319,7 +2331,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   return { promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
-    blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
+    blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
     wakes, staleMerges, restartLog, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain };
 }
 

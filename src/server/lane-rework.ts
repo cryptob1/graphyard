@@ -8,6 +8,7 @@ import { applyThroughEngine, authenticated, bookkeepingRebase, findWork, receipt
 import { withdrawDecision } from './decision-refusal.js';
 import { laneApprover, reworkGround } from '../model/rework-ground.js';
 import type { Services } from './routes.js';
+import { pastReviewCap } from '../review-cap.js';
 
 // A rework on a low- or medium-lane item needs no approver decision (GY-883 AC-2): the risk lane
 // approves and applies it. So does one on any lane whose ground the record shows (GY-1394,
@@ -68,11 +69,27 @@ export async function answerWith(services: Services, caller: Principal, key: str
   });
 }
 
+/**
+ * A rework past the review-round cap (GY-1118), as the loop requests it on `cappedReworkBinding`'s
+ * grounds (GY-1389): only an independent approver judges whether the finding is blocking, so no
+ * lane applies it. The binding is the requester's text, so it holds the round only while the record
+ * shows what it names: the item's current head, past its first review round, with the named
+ * reviewer's change request standing on it. Any other binding of that shape is applied as the lane would.
+ */
+export function cappedRework(input: unknown, work: Pick<Work, 'candidate' | 'observation' | 'pipeline'>): boolean {
+  const bound = /^([0-9a-f]{40}):capped:(.+)$/.exec(String((input as { binding?: unknown } | null)?.binding ?? ''));
+  const candidate = work.candidate, observation = work.observation;
+  if (!bound || !candidate || candidate.sha !== bound[1] || observation?.candidate?.sha !== candidate.sha || !pastReviewCap(work, 1)) return false;
+  const agent = observation.agentReview;
+  return observation.reviews.some(review => review.sha === candidate.sha && review.state === 'CHANGES_REQUESTED' && review.reviewer === bound[2])
+    || (!!agent && agent.sha === candidate.sha && !agent.approved && agent.verdict === 'changes-requested' && (agent.profile ?? agent.provider) === bound[2]);
+}
+
 export async function applyLaneRework(services: Services, requested: DecisionRecord): Promise<DecisionRecord> {
   const approved = await services.engine.store.transaction(async db => {
     const work = await findWork(db, requested.workId); demand(work, 'Work item not found', 404);
     const history = await readDecisions(db, work!), decision = history.find(entry => entry.id === requested.id)!;
-    if (decision.state !== 'requested' || decisionPrecondition(decision.action, decision.input, work!)) return decision;
+    if (decision.state !== 'requested' || cappedRework(decision.input, work!) || decisionPrecondition(decision.action, decision.input, work!)) return decision;
     // A high-lane rework still applies at once when the record itself is its ground (GY-1394); the
     // ground is recorded in any lane, and the intervention fold reads it.
     const lane = itemLane(work!), ground = reworkGround(work!, history);

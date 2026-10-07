@@ -103,7 +103,11 @@ export function docsSyncCarry(input: { from: { sha: string; baseSha: string }; b
 
 // ---- The loop's record of routed conflicts ---------------------------------------------------
 
-/** One docs-sync the loop started for a confirmed conflict, keyed by item, head and base tip. */
+/**
+ * One docs-sync the loop started for a confirmed conflict, keyed by its session's own identity:
+ * item and head, as `docsSyncSessionName` names the session. `base` is the tip it was launched
+ * against; a base that moves while the session runs does not make it another docs-sync (GY-1423).
+ */
 export const docsSyncWatchSchema = z.object({
   work: z.string().max(40), head: z.string().max(64), base: z.string().max(64), paths: z.array(z.string().max(500)).max(200),
   agentName: z.string().max(200).nullable(), pane: z.string().max(200).nullable(), session: z.string().max(200).nullable().default(null),
@@ -125,4 +129,16 @@ export type RoutedConflict = z.infer<typeof routedConflictSchema>;
 export const routedConflictRetention = 500;
 /** The window the hotspot report counts over, and how long a settled docs-sync record is kept. */
 export const routedConflictWindowMs = 24 * 3_600_000;
-export const docsSyncWatchKey = (item: Pick<Work, 'id'>, head: string, base: string) => `${item.id}:${head}:${base}`;
+/** The watch key: item and head only, the identity the session is named from (GY-1423). */
+export const docsSyncWatchKey = (item: Pick<Work, 'id'>, head: string) => `${item.id}:${head}`;
+/**
+ * The watch of the docs-sync session for this item and head, whatever base tip it was launched
+ * against. A record kept under an older key that still carried the base tip is found by its fields.
+ */
+export function docsSyncWatchFor(watches: Record<string, DocsSyncWatch>, item: Pick<Work, 'id' | 'key'>, head: string): { key: string; watch: DocsSyncWatch } | null {
+  const key = docsSyncWatchKey(item, head);
+  if (watches[key]) return { key, watch: watches[key] };
+  const held = Object.entries(watches).filter(([, watch]) => watch.work === item.key && watch.head === head);
+  const found = held.find(([, watch]) => !watch.settledAt) ?? held.at(-1);
+  return found ? { key: found[0], watch: found[1] } : null;
+}

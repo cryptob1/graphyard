@@ -1,17 +1,20 @@
 // Concern: the docs-sync route of a confirmed base conflict (GY-566) — classify it once per head
-// and base tip, hold the item while its docs-sync session runs, and log either route for the hotspot report.
+// and base tip, hold the item while its docs-sync session runs (found by the session's own item and
+// head, across base moves: GY-1423), and log either route for the hotspot report.
 import type { Work } from '../model.js';
 import type { HerdrAgent } from '../master.js';
 import { message, type DaemonActionKind, type DaemonState } from './state.js';
 import type { DaemonEffects } from './effects.js';
-import { conflictRoute, docsSyncWatchKey, docsSyncWatchSchema, routedConflictRetention, routedConflictSchema, routedConflictWindowMs, type DocsSyncWatch } from '../model/docs-sync.js';
+import { conflictRoute, docsSyncWatchFor, docsSyncWatchKey, docsSyncWatchSchema, routedConflictRetention, routedConflictSchema, routedConflictWindowMs, type DocsSyncWatch } from '../model/docs-sync.js';
 import { docsSyncMaxMs, type DocsSyncPlan } from '../docs-sync.js';
 
 /**
  * The decision step's docs-sync route. A confirmed conflict of the current head is classified once
  * per head and base tip, and logged for the hotspot report. One confined to docs pages goes to a
  * docs-sync session instead of a rework decision; `holds` is true while that session holds the
- * item. A docs-sync that ends — or runs past its bound — while an observation taken since still
+ * item. The session is found by its own identity — item and head, as it is named — so a base tip
+ * that moves while it runs leaves it holding the item rather than launching it a second time
+ * (GY-1423). A docs-sync that ends — or runs past its bound — while an observation taken since still
  * shows the same head gave the conflict up, and the rework decision follows as before, as it does
  * for every conflict that touches anything else.
  */
@@ -47,8 +50,8 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
     }
   };
   const holds = async (item: Work): Promise<boolean> => {
-    const refresh = item.baseRefresh!, head = refresh.from.sha, base = refresh.base, key = docsSyncWatchKey(item, head, base);
-    const watch = state.docsSyncs[key];
+    const refresh = item.baseRefresh!, head = refresh.from.sha, base = refresh.base;
+    const found = docsSyncWatchFor(state.docsSyncs, item, head), key = found?.key ?? docsSyncWatchKey(item, head), watch = found?.watch;
     if (!watch) {
       if (state.conflicts.some(entry => entry.work === item.key && entry.head === head && entry.base === base)) return false;
       const local = await effects.conflictPaths?.(item, head, base).catch(() => null) ?? null;
@@ -82,7 +85,7 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
     watch.failed = (overdue ? `the docs-sync session ran past ${docsSyncMaxMs / 60_000} minutes without moving ${head.slice(0, 12)}` : `docs-sync session ${watch.agentName} ended without moving ${head.slice(0, 12)}`).slice(0, 1000);
     watch.settledAt = stamp;
     await settle(item, watch, watch.failed);
-    markRework(item.key, head, base);
+    markRework(item.key, head, watch.base);
     await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the conflict returns to a worker`);
     return false;
   };
