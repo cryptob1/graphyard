@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, type spawnSync } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import { join } from 'node:path';
@@ -10,7 +10,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { commands } from '../src/cli/index.js';
 import {
   apiSuite, assessProductionServing, commandSuite, cut, deployToUat, endpointSuite, gitIn, itemsFromCommits, ledgerStatus, productionBranch, promote, readLedger,
-  servedRevision, uatBranch, validateAndRecord, type ReleaseCandidate, type Suite,
+  runZeroTouchSuite, servedRevision, uatBranch, validateAndRecord, zeroTouchScenario, type ReleaseCandidate, type Suite,
 } from '../src/release-candidate.js';
 import { loadCases, parseCase, type ReleaseContract } from '../src/e2e/case.js';
 import * as e2eCase from '../src/e2e/case.js';
@@ -538,4 +538,56 @@ test('unit:e2e-release-holds-per-risk — a failing candidate files one hold per
   assert.deepEqual(folded.map(hold => [hold.outcome, hold.state, hold.foldedInto]), [['alpha', 'folded', 'beta'], ['beta', 'open', null]]);
   assert.deepEqual(folded[1].outcomes, ['beta', 'alpha']); assert.deepEqual(folded[1].cases.map(entry => entry.case), ['b1', 'a1']);
   assert.throws(() => foldRecord(folded, decision, new Date()), /already share one hold/);
+});
+
+test('unit:release-candidate-zero-touch-suite — every release candidate runs the zero-touch onboarding scenario at its exact SHA as a required suite of its UAT validation, so a scenario that fails, naming the step that needed a person, fails the candidate and blocks its promotion', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/release-candidate.yml', import.meta.url), 'utf8');
+  const uat = workflow.slice(workflow.indexOf('\n  uat:\n'), workflow.indexOf('\n  promote:\n'));
+  // The uat job checks out the candidate's exact SHA and installs it; release validate runs the scenario there as a suite of its record.
+  assert.match(uat, /- uses: actions\/checkout@v4\n\s+with: \{ ref: '\$\{\{ env\.CANDIDATE_SHA \}\}'/);
+  assert.match(uat, /- run: npm ci\n/);
+  const validate = uat.slice(uat.indexOf('node bin/graphyard.mjs release validate'), uat.indexOf('- name: Record the E2E case runs'));
+  assert.match(validate, /--suite 'zero-touch=node --import tsx --eval "import\(\\"\.\/src\/release-candidate\.ts\\"\)\.then\(m => m\.runZeroTouchSuite\(\)\)"'/, 'release validate runs the zero-touch suite');
+  assert.doesNotMatch(uat.slice(0, uat.indexOf('node bin/graphyard.mjs release validate')), /continue-on-error/);
+  assert.match(workflow.slice(workflow.indexOf('\n  promote:\n')), /needs: \[candidate, uat\]\n\s+if: needs\.uat\.result == 'success'/, 'promotion follows only a passed UAT validation');
+  assert.equal(zeroTouchScenario, 'tests/zero-touch-onboarding.test.ts');
+  assert.match(await readFile(new URL(`../${zeroTouchScenario}`, import.meta.url), 'utf8'), /test\('unit:zero-touch-onboarding — /, 'the suite runs the zero-touch scenario');
+
+  // The suite runs the scenario through the test runner on this checkout; its failing step becomes the suite's detail.
+  const runs: string[][] = [];
+  let outcome = { status: 1, stdout: '✖ failing tests:\n\ntest at tests/zero-touch-onboarding.test.ts:1:1\n✖ unit:zero-touch-onboarding\n  AssertionError [ERR_ASSERTION]: no human step but the one App approval: a person had to merge on GitHub: #1 merged by hand\n' };
+  const fake = ((program: string, args: string[]) => { runs.push([program, ...args]); return { ...outcome, stderr: '', signal: null }; }) as unknown as typeof spawnSync;
+  const scratch = await temporaryDirectory('release-candidate-zero-touch'), detailFile = join(scratch, 'detail');
+  const exitCode = process.exitCode, written = process.stdout.write;
+  (process.stdout as any).write = () => true;
+  let failed, passed;
+  try {
+    failed = runZeroTouchSuite({ GRAPHYARD_SUITE_DETAIL: detailFile }, fake);
+    outcome = { status: 0, stdout: '✔ unit:zero-touch-onboarding\n' };
+    passed = runZeroTouchSuite({}, fake);
+  } finally { (process.stdout as any).write = written; process.exitCode = exitCode; }
+  assert.deepEqual(runs[0], [process.execPath, '--import', 'tsx', 'tests/helpers/run-tests.ts', zeroTouchScenario]);
+  assert.equal(failed.passed, false);
+  assert.equal(failed.detail, `${zeroTouchScenario} failed: AssertionError [ERR_ASSERTION]: no human step but the one App approval: a person had to merge on GitHub: #1 merged by hand`);
+  assert.equal((await readFile(detailFile, 'utf8')).trim(), failed.detail, 'release validate reads the detail the suite wrote');
+  assert.equal(passed.passed, true);
+
+  // As a suite of the candidate's record: a failed scenario fails the candidate, its follow-up names the suite and the step, and promotion is refused.
+  const repo = await repository();
+  const sha = repo.merge('GY-71', 701);
+  const { candidate } = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-01T12:00:00Z'), push: true }) as any;
+  const filed: any[] = [];
+  const scenario = (result: { passed: boolean; detail: string }): Suite => ({ name: 'zero-touch', run: async () => ({ name: 'zero-touch', ...result }) });
+  const record = await validateAndRecord(repo.git, candidate.id, 'https://uat.example.test', [scenario(failed)],
+    { base: 'main', push: true, timeoutMs: 60_000, fetcher: deployment([sha]).fetcher, sleep: async () => {}, file: async item => { filed.push(item); return 'GY-971'; } });
+  assert.equal(record.record.result, 'failed');
+  assert.match(filed[0].title, /failed UAT suite zero-touch/);
+  assert.match(filed[0].description, /a person had to merge on GitHub/, 'the follow-up names the step that needed a person');
+  const refused = promote(repo.git, candidate.id, { base: 'main', push: true, now: new Date() });
+  assert.equal(refused.promoted, false); assert.match(refused.refusals!.join(' '), /failed UAT \(zero-touch\)/, 'a failing scenario blocks promotion');
+  const next = repo.merge('GY-72', 702);
+  const { candidate: second } = cut(repo.git, { base: 'main', trigger: 'manual', now: new Date('2026-10-02T12:00:00Z'), push: true }) as any;
+  const green = await validateAndRecord(repo.git, second.id, 'https://uat.example.test', [scenario(passed)],
+    { base: 'main', push: true, timeoutMs: 60_000, fetcher: deployment([next]).fetcher, sleep: async () => {}, file: async item => { filed.push(item); return 'GY-972'; } });
+  assert.equal(green.record.result, 'passed', JSON.stringify(green.record.suites));
 });

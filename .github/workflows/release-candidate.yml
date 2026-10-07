@@ -219,7 +219,11 @@ jobs:
         # repository case under e2e/cases/ targeted at uat (docs/validation.md), writing its report for
         # the next step. Those four exercise
         # the UAT deployment itself; the long suites ran on runners at the candidate SHA, so each
-        # long-suite job's result above joins the record as a suite of its own. A failing or flaky
+        # long-suite job's result above joins the record as a suite of its own. `zero-touch` (GY-1481)
+        # runs the zero-touch onboarding scenario on this checkout of the candidate's SHA: `graphyard up
+        # --agent --goal FILE` on a throwaway repository against an in-process GitHub must reach a merged
+        # first planned item with no human step but GitHub's one App approval, so a change that adds a
+        # human step to onboarding fails the candidate and blocks its promotion. A failing or flaky
         # required case files one release hold per failed outcome of e2e/contract.json, read from
         # that report; any other failure files one follow-up item naming the failing suite and the
         # candidate SHA; only that filing uses GRAPHYARD_TOKEN, which no --suite command is given.
@@ -231,7 +235,8 @@ jobs:
             --suite 'e2e=node --import tsx --eval "import(\"./src/e2e/runner.ts\").then(m => m.runE2eSuite())"' \
             --suite 'container-acceptance=test "$CONTAINER_ACCEPTANCE" = success' \
             --suite 'container-recovery=test "$CONTAINER_RECOVERY" = success' \
-            --suite 'chart=test "$CHART" = success'
+            --suite 'chart=test "$CHART" = success' \
+            --suite 'zero-touch=node --import tsx --eval "import(\"./src/release-candidate.ts\").then(m => m.runZeroTouchSuite())"'
         env:
           CONTAINER_ACCEPTANCE: ${{ needs.container-acceptance.result }}
           CONTAINER_RECOVERY: ${{ needs.container-recovery.result }}

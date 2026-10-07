@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -387,6 +387,27 @@ export async function runBrowserSuite(env: NodeJS.ProcessEnv = process.env) {
   console.log(result.detail);
   if (!result.passed) process.exitCode = 1;
   return result;
+}
+
+/** GY-1481: the zero-touch onboarding scenario, a required suite of every candidate's UAT validation. */
+export const zeroTouchScenario = 'tests/zero-touch-onboarding.test.ts';
+/**
+ * The `zero-touch` suite: the scenario on this checkout of the candidate's SHA, which drives
+ * `graphyard up --agent --goal FILE` against an in-process GitHub to a merged first planned item and
+ * fails naming any step that needed a person but GitHub's one App approval. That step, or the run's
+ * exit, becomes the suite's detail (GRAPHYARD_SUITE_DETAIL), so the candidate's follow-up names it.
+ */
+export function runZeroTouchSuite(env: NodeJS.ProcessEnv = process.env, run: typeof spawnSync = spawnSync) {
+  const child = run(process.execPath, ['--import', 'tsx', 'tests/helpers/run-tests.ts', zeroTouchScenario], { encoding: 'utf8', env, timeout: 15 * 60_000, maxBuffer: 64 * 1024 * 1024 });
+  const output = `${child.stdout ?? ''}${child.stderr ?? ''}`;
+  process.stdout.write(output);
+  const passed = child.status === 0;
+  const failure = output.slice(output.indexOf('failing tests')).match(/^\s*((?:AssertionError|Error|TypeError)[^\n]*)/m)?.[1]?.trim();
+  const detail = passed ? `${zeroTouchScenario} passed: graphyard up reached a merged first planned item with no human step but GitHub's App approval`
+    : `${zeroTouchScenario} failed: ${failure ?? `the run exited ${child.status ?? child.signal}`}`.slice(0, 4000);
+  if (env.GRAPHYARD_SUITE_DETAIL) writeFileSync(env.GRAPHYARD_SUITE_DETAIL, `${detail}\n`);
+  if (!passed) process.exitCode = 1;
+  return { name: 'zero-touch', passed, detail };
 }
 
 export async function readServed(url: string, fetcher: typeof fetch = fetch) {
