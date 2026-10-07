@@ -59,6 +59,8 @@ export interface AdapterObservation {
   url: string | null;
   /** Variable name to a comparable, never-secret marker: plain value, or `sha:<fingerprint>`. */
   variables: Record<string, string>;
+  /** The variable listing was read in full: `variables` is the deployment's, not empty for want of a read (GY-1416). */
+  variablesObserved?: boolean;
   detail: string[];
 }
 
@@ -70,6 +72,12 @@ export interface ProviderAdapter {
   plan(ctx: AdapterContext, observation: AdapterObservation): PlanAction[];
   provision(ctx: AdapterContext, observation: AdapterObservation): Promise<void>;
   setEnv(ctx: AdapterContext, values: EnvValue[]): Promise<void>;
+  /**
+   * Sets only `values` on the running deployment, keeping every other variable, and redeploys it
+   * (GY-1416 `master setup --apply`); with none, it only redeploys. Absent on an adapter whose
+   * `setEnv` rewrites the whole environment (a Compose bundle): there `install --apply` applies it.
+   */
+  applyVariables?(ctx: AdapterContext, values: EnvValue[]): Promise<void>;
   deploy(ctx: AdapterContext): Promise<void>;
   url(ctx: AdapterContext): Promise<string>;
   health(ctx: AdapterContext, url: string): Promise<boolean>;
@@ -252,7 +260,7 @@ export const composeAdapter: ProviderAdapter = {
     const environment = await readRemote(ctx.transport, `${ctx.workdir}/server.env`);
     if (environment === null) return observation;
     observation.installed = true;
-    observation.variables = markersFromEnvFile(environment);
+    observation.variables = markersFromEnvFile(environment); observation.variablesObserved = true;
     const state = await composeRunning(ctx.transport, ctx);
     observation.database = state.database; observation.app = state.app;
     observation.url = state.app ? `http://127.0.0.1:${ctx.port}` : null;
@@ -312,7 +320,7 @@ export const dockerHostAdapter: ProviderAdapter = {
     const environment = await readRemote(remote, `${ctx.workdir}/server.env`);
     if (environment === null) return observation;
     observation.installed = true;
-    observation.variables = markersFromEnvFile(environment);
+    observation.variables = markersFromEnvFile(environment); observation.variablesObserved = true;
     const state = await composeRunning(remote, ctx);
     observation.database = state.database; observation.app = state.app;
     observation.url = state.app ? publicUrl(ctx) : null;
@@ -435,7 +443,7 @@ export const hetznerAdapter: ProviderAdapter = {
     const environment = await readRemote(remote, `${ctx.workdir}/server.env`);
     if (environment === null) return observation;
     observation.installed = true;
-    observation.variables = markersFromEnvFile(environment);
+    observation.variables = markersFromEnvFile(environment); observation.variablesObserved = true;
     const state = await composeRunning(remote, ctx);
     observation.database = state.database; observation.app = state.app;
     observation.url = state.app ? `https://${publicHostname(ctx, address)}` : null;
@@ -581,8 +589,10 @@ export const railwayAdapter: ProviderAdapter = {
     if (variables.code === 0) {
       try {
         const parsed = JSON.parse(variables.stdout) as Record<string, string>;
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not a variable listing');
         observation.installed = Object.keys(parsed).length > 0;
         for (const [name, value] of Object.entries(parsed)) observation.variables[name] = variableMarker(name, String(value));
+        observation.variablesObserved = true;
       } catch { /* an unparsable listing is reported as no observed variables */ }
     }
     const domains = await runRailway(ctx, ['domain', '--service', ctx.service, '--json'], { allowFailure: true, timeout: 180_000 });
@@ -618,6 +628,11 @@ export const railwayAdapter: ProviderAdapter = {
     if (plain.length) await runRailway(ctx, ['variables', '--service', ctx.service, '--skip-deploys', ...plain.flatMap(value => ['--set', `${value.name}=${value.value}`])], { timeout: 300_000 });
     // Secrets go over standard input: a process argument is visible to every local process.
     for (const secret of values.filter(value => value.secret)) await runRailway(ctx, ['variable', 'set', '--service', ctx.service, '--skip-deploys', '--stdin', secret.name], { input: secret.value, timeout: 300_000 });
+  },
+  async applyVariables(ctx, values) {
+    // Railway sets variables one by one and keeps the rest; the running build restarts once with them all.
+    await railwayAdapter.setEnv(ctx, values);
+    await runRailway(ctx, ['redeploy', '--service', ctx.service, '--yes'], { timeout: 600_000 });
   },
   async deploy(ctx) {
     // The source is the Graphyard checkout the CLI runs from — never the process cwd, which

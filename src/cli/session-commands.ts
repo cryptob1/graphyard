@@ -3,12 +3,12 @@ import { chmod, link, mkdir, readFile, rename, rm, stat, writeFile } from 'node:
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Work } from '../model.js';
-import type { HumanRequestRow } from '../model/human-request.js';
+import { hostDoableAsk, hostDoableRefusal, parkRefusal, type HostDoableAsk, type HumanRequestRow } from '../model/human-request.js';
 import { configHome } from '../install/secrets.js';
 import { scopeRequestOutcome } from '../model/scope.js';
 import type { CliContext } from './context.js';
 import { workMutation, type CliCommand } from './registry.js';
-import { parkCommand } from './park-command.js';
+import { parkCommand, parkInput } from './park-command.js';
 export { parkArgs, parkCommand } from './park-command.js';
 
 /**
@@ -267,5 +267,26 @@ export const loginCommand: CliCommand = {
 /** A wait as a person reads it: minutes under an hour, then hours, then days. */
 export const waitedText = (ms: number) => ms < 3_600_000 ? `${Math.max(1, Math.round(ms / 60_000))}m` : ms < 172_800_000 ? `${Math.round(ms / 3_600_000)}h` : `${Math.round(ms / 86_400_000)}d`;
 
+/** The blocker a refused host-doable park records: the master's owed action, its route and command, and the ask as written. */
+export const owedMasterAction = (ask: HostDoableAsk, needed: string) =>
+  `Owed master action (a park refused as host-doable, GY-1416): ${ask.what}. ${ask.route} — ${ask.command}. Asked as: ${needed}`.slice(0, 2000);
+/**
+ * `park` with the GY-1416 route: a NEEDED an agent identity on the host can do never parks on the
+ * human. The server refuses it too (model/human-request.ts `parkRefusal`); here the same ask is
+ * recorded instead as the master's owed action — a blocker naming the route and its command, which
+ * ends this attempt like any blocker — and the refusal is printed. Every other park is unchanged.
+ */
+export const routedParkCommand: CliCommand = {
+  ...parkCommand,
+  async run(context, work) {
+    const { epoch, kind, needed } = parkInput(context.args);
+    const ask = hostDoableAsk(needed, kind);
+    if (!ask || parkRefusal({ needed, kind }) !== hostDoableRefusal(ask)) return parkCommand.run(context, work);
+    const blocker = owedMasterAction(ask, needed);
+    await workMutation(context, work)('blocked', { epoch, reason: blocker });
+    return context.print({ parked: false, refusal: hostDoableRefusal(ask), owedAction: { owner: 'master', class: ask.class, command: ask.command, blocker } });
+  },
+};
+
 /** The session commands the CLI registers beside the master's, in the order the help prints them. */
-export const sessionCommands: CliCommand[] = [scopeRequestCommand, parkCommand, humanRequestsCommand, answerHumanCommand, unsealCommand, loginCommand];
+export const sessionCommands: CliCommand[] = [scopeRequestCommand, routedParkCommand, humanRequestsCommand, answerHumanCommand, unsealCommand, loginCommand];
