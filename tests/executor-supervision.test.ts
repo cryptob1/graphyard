@@ -23,6 +23,7 @@ import { inspectProfileAccounts, masterConfigSchema, workerPrompt, type MasterCo
 import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { executorDeclarationFile, executorSlotUndeclaredExit, executorSupervisionStatus, executorUnit, executorUnitTemplate, installExecutorSupervision, readExecutorDeclaration, renderExecutorUnit, setupRepository, writeExecutorDeclaration, type SystemctlRunner } from '../src/repository-setup.js';
 import { executorFleet } from '../src/cli/executor-report.js';
+import { perInstallUnits } from '../src/install/units.js';
 import { readExecutorRegistrations } from '../src/executor-fleet.js';
 import OverviewPage from '../web/pages/overview.js';
 import { boardFromStatus } from '../src/model/board.js';
@@ -225,10 +226,12 @@ test('integration:executor-supervised-restart: the shipped unit starts an execut
     //    declaration (kept as declared), binds the template to this checkout, enables one
     //    instance per slot, and disables an instance enabled under a larger earlier declaration.
     const systemctl: string[][] = [];
+    const units = perInstallUnits(repository);
     const runSystemctl: SystemctlRunner = args => {
       systemctl.push(args);
-      if (args[0] === 'list-units') return `graphyard-executor@1.service loaded active running Graphyard executor slot 1\ngraphyard-executor@3.service loaded inactive dead Graphyard executor slot 3\n`;
-      if (args[0] === 'list-unit-files') return 'graphyard-executor@3.service enabled -\n';
+      // The checkout's units are named for its repository (GY-1441); another install's never match its glob.
+      if (args[0] === 'list-units') return `${executorUnit(1, units)} loaded active running Graphyard executor slot 1\n${executorUnit(3, units)} loaded inactive dead Graphyard executor slot 3\ngraphyard-executor@4.service loaded active running another install\n`;
+      if (args[0] === 'list-unit-files') return `${executorUnit(3, units)} enabled -\n`;
       if (args[0] === 'is-active') return 'active';
       return '';
     };
@@ -237,10 +240,10 @@ test('integration:executor-supervised-restart: the shipped unit starts an execut
     assert.equal(setup.executors?.installed, true, JSON.stringify(setup.executors));
     const installed = setup.executors as Awaited<ReturnType<typeof installExecutorSupervision>>;
     assert.deepEqual(installed.declaration, { version: 1, count: 1, kinds: ['resync'], intervalSeconds: 1 }, 'the declaration the host already made is kept');
-    assert.equal(await readFile(join(unitDirectory, executorUnitTemplate), 'utf8'), renderExecutorUnit(template, { root: checkout, node: process.execPath }));
-    assert.deepEqual(systemctl.filter(args => ['daemon-reload', 'enable', 'disable'].includes(args[0])), [['daemon-reload'], ['enable', '--now', executorUnit(1)], ['disable', '--now', executorUnit(3)]]);
-    assert.deepEqual(installed.units, [{ slot: 1, unit: executorUnit(1), active: 'active' }]);
-    assert.deepEqual(installed.disabled, [executorUnit(3)]);
+    assert.equal(await readFile(join(unitDirectory, units.executorTemplate), 'utf8'), renderExecutorUnit(template, { root: checkout, node: process.execPath }));
+    assert.deepEqual(systemctl.filter(args => ['daemon-reload', 'enable', 'disable'].includes(args[0])), [['daemon-reload'], ['enable', '--now', executorUnit(1, units)], ['disable', '--now', executorUnit(3, units)]]);
+    assert.deepEqual(installed.units, [{ slot: 1, unit: executorUnit(1, units), active: 'active' }]);
+    assert.deepEqual(installed.disabled, [executorUnit(3, units)]);
     // A host without a coordinator credential installs nothing: it can run no executor.
     const workerOnly = await temporaryDirectory('worker-only');
     try { git(workerOnly, 'init', '-q'); assert.equal((await setupRepository(workerOnly, { url, cliPath: launcher, hostId: 'w' }, { executors: { run: runSystemctl, unitDirectory } })).executors, null); }
@@ -248,12 +251,12 @@ test('integration:executor-supervised-restart: the shipped unit starts an execut
     // And a host without a systemd user manager keeps its declaration and is told what to copy by hand.
     const unsupervised = await installExecutorSupervision(checkout, { count: 2, run: () => { throw new Error('Failed to connect to bus'); }, unitDirectory });
     assert.equal(unsupervised.installed, false);
-    assert.match(unsupervised.next, /copy examples\/master\/graphyard-executor@\.service .*graphyard-executor@1\.service graphyard-executor@2\.service/);
+    assert.match(unsupervised.next, /copy examples\/master\/graphyard-executor@\.service .*graphyard-executor-owner-project@1\.service graphyard-executor-owner-project@2\.service/);
     assert.equal((await readExecutorDeclaration(checkout))!.count, 2);
     // What `master status` reads from this host: the exact unit to start for a slot that is down.
     const status = await executorSupervisionStatus(checkout, args => { if (args[0] === 'is-active') { const error = new Error('inactive') as Error & { stdout: string }; error.stdout = 'inactive\n'; throw error; } return ''; });
     assert.deepEqual(status.units.map(unit => unit.active), ['inactive', 'inactive']);
-    assert.equal(status.start, `systemctl --user start ${executorUnit(1)} ${executorUnit(2)}`);
+    assert.equal(status.start, `systemctl --user start ${executorUnit(1, units)} ${executorUnit(2, units)}`);
   } finally {
     await new Promise<void>(resolve => plane.http.close(() => resolve()));
     await rm(checkout, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true });

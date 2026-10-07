@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { fakeTransport, type BundleFileRecord, type Transport } from '../src/install/transport.js';
 import type { InstallDependencies } from '../src/install/index.js';
 import type { Provider } from '../src/install/types.js';
+import { installUnitsFile, legacyInstallUnits, perInstallUnits } from '../src/install/units.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 export const REPOSITORY = 'owner/project';
@@ -46,8 +47,16 @@ export const HETZNER_SERVER_TYPES = JSON.stringify([
  * `cat` answers with what the installer wrote there (`files`, shared with the recording transport),
  * so a second run reads its own credentials back exactly as a real host would.
  */
-export function hostResponses(files: Map<string, BundleFileRecord>, state: { installed: boolean } = { installed: false }) {
+export function hostResponses(files: Map<string, BundleFileRecord>, state: { installed: boolean } = { installed: false }, repository = REPOSITORY) {
+  const checkout = `/home/graphyard/code/${repository.replace('/', '-')}`;
   return [
+    // master init records the units the install owns (GY-1441): the legacy names as an alias when
+    // the host's legacy loop unit already exists (an install from before them), its own otherwise.
+    { match: ' master init ', result: () => {
+      const legacy = files.has('/home/graphyard/.config/systemd/user/graphyard-master.service');
+      files.set(`${checkout}/${installUnitsFile}`, { content: `${JSON.stringify(legacy ? legacyInstallUnits : perInstallUnits(repository), null, 2)}\n`, mode: 0o600, owner: '1001:1001' });
+      return '';
+    } },
     { match: 'id -u graphyard', result: '1001' },
     { match: 'id -g graphyard', result: '1001' },
     { match: 'systemctl --version', result: 'systemd 255 (255.4-1ubuntu8)' },
@@ -177,7 +186,7 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
   // One file store per remote host, shared with its fixture responses, so a host reads back what was written to it.
   const hostFiles = options.hostFiles ?? new Map<string, BundleFileRecord>();
   const selfContained = options.provider === 'host' || !!options.selfContained;
-  const responses = [...(options.extraResponses ?? []), ...(selfContained ? hostResponses(hostFiles, { installed: state.installed }) : []), ...providerResponses(options.provider === 'host' ? 'docker-host' : options.provider, { installed: state.installed, workdir, service, envFile: options.envFile, workspaces: options.workspaces }), ...githubResponses(state, repository)];
+  const responses = [...(options.extraResponses ?? []), ...(selfContained ? hostResponses(hostFiles, { installed: state.installed }, repository) : []), ...providerResponses(options.provider === 'host' ? 'docker-host' : options.provider, { installed: state.installed, workdir, service, envFile: options.envFile, workspaces: options.workspaces }), ...githubResponses(state, repository)];
   const transport = fakeTransport({ responses });
   const remotes = new Map<string, ReturnType<typeof fakeTransport>>();
   const ssh = (host: string) => {

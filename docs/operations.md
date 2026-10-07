@@ -21,11 +21,11 @@
 ## Recovery recipes
 
 ```sh
-graphyard rework GY-N --previous-worker-stopped "reason"               # worker stopped
-graphyard master settle-containment GY-N "reason"                      # settleable
-graphyard recover-containment GY-N --previous-worker-stopped "reason"  # delivered, stop confirmed
-graphyard unblock GY-N "reason"                                        # unowned blocker
-systemctl --user restart graphyard-master                              # loop down, supervised
+graphyard rework GY-N --previous-worker-stopped "reason"                # worker stopped
+graphyard master settle-containment GY-N "reason"                       # settleable
+graphyard recover-containment GY-N --previous-worker-stopped "reason"   # delivered, stop confirmed
+graphyard unblock GY-N "reason"                                         # unowned blocker
+systemctl --user restart graphyard-master-OWNER-NAME                    # loop down, supervised (units.json)
 ```
 
 Never attest a stop you have not confirmed; merged work changes only via follow-ups. Outside the lock's PID namespace `master status` judges the loop by stall bound alone; stalled or absent, on the coordinator host (`/home/vish/code/graphyard`): stop hand-started loops, copy `examples/master/graphyard-master.service` to `~/.config/systemd/user/`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.

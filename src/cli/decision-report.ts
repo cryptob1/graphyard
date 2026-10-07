@@ -4,8 +4,10 @@ import { elapsed } from '../model/sessions.js';
 import { mapBounded, readConcurrency } from '../master/timings.js';
 import { staleReleaseAttention } from './owed-report.js';
 import { approverJudgeBoundMs, masterTurnWaitBoundMs, maxApproverLaunches } from '../daemon/decisions.js';
+import { convergibleClose, staleAttentionAttempts, staleRun } from '../model/stale-close.js';
+import type { Closure } from '../model/closure.js';
 
-type DecisionRow = { id: string; action: string; state: string; requestedAt: string; staleAt?: string; requestedBy?: string; outcome?: string | null; race?: unknown; refusal?: { approver: string; reason: string; at: string } | null };
+type DecisionRow = { id: string; action: string; state: string; input?: any; requestedAt: string; staleAt?: string; requestedBy?: string; outcome?: string | null; race?: unknown; refusal?: { approver: string; reason: string; at: string } | null };
 type ApprovalWatch = { work: string; decision: string; agentName: string | null; settledAt?: string | null; ended?: string[]; launches?: number; launchedAt?: string | null; exhaustedAt?: string | null };
 export interface UnansweredDecision { work: string; id: string; action: string; requestedAt: string; session: string; ageMs: number; age: string; ended?: string[]; inMotionUntil?: string }
 
@@ -91,7 +93,7 @@ export function unansweredDecisions(items: { key: string; decisions: DecisionRow
  * unanswered carries `inMotionUntil` for `refusalAnswerWaitBoundMs` after it, the master's turn. A refusal is answered, never retried: the server refuses an identical
  * request, so the next step is a request that cites the refused decision with what it lacked.
  */
-export async function terminalDecisions(masterApi: (path: string) => Promise<any>, work: { id: string; key: string; stage: string; ready?: boolean; capacity?: CapacityState | null }[],
+export async function terminalDecisions(masterApi: (path: string) => Promise<any>, work: { id: string; key: string; stage: string; ready?: boolean; capacity?: CapacityState | null; closure?: Closure | null }[],
   sessions: { approvals: ApprovalWatch[]; runtime: { available: boolean; agents: HerdrAgent[] }; now: number }) {
   const listed: { work: string; id: string; action: string; state: string; reason: string | null; race?: unknown; refusedBy?: string; refusedAt?: string }[] = [];
   const attentionItems: AttentionItem[] = [];
@@ -123,7 +125,14 @@ export async function terminalDecisions(masterApi: (path: string) => Promise<any
       if (decision.state !== 'stale' || latest.get(decision.action) !== decision.id) continue;
       // A stale release of an item in backlog is owed: nothing else shows that it waits (GY-1294).
       const owed = decision.action === 'release' ? staleReleaseAttention(item, decisions, sessions.now) : null;
-      if (owed) attentionItems.push(owed);
+      if (owed) { attentionItems.push(owed); continue; }
+      // GY-1439: a series of stale settles of one action is one line, not one per attempt. A revision-raced close whose
+      // grounds still hold is the loop's to request again (staleCloseStep), named by its wait, until the series reaches
+      // staleAttentionAttempts; from there one line stands for the series, its wording free of the attempt's id and count.
+      const run = staleRun(decisions, decision.action);
+      if (decision.action === 'close') { const converge = convergibleClose(item, decisions, work); if (converge && 'input' in converge) continue; }
+      if (run.length >= staleAttentionAttempts) attentionItems.push({ subject: item.key, text: `Decision ${item.key}/${decision.action} (${decision.action}) is stale on ${staleAttentionAttempts} or more requests in a row: the item moved between each request and its approval, so the loop no longer requests it again`,
+          ...agentOwner('master', `The latest is ${decision.id} (${decision.outcome ?? 'the item moved past it'}); graphyard master decide ${item.key} ${decision.action} [JSON|@FILE] REASON, then graphyard master approver ${item.key} DECISION — or act on the item yourself`, 'approver') });
       else attentionItems.push({ ...staleInMotion(decision), subject: item.key, text: `Decision ${decision.id} (${decision.action}) is stale: ${decision.outcome ?? 'the item moved past it'}; request it again, the stale decision no longer blocks`,
           ...agentOwner('master', `graphyard master decide ${item.key} ${decision.action} [JSON|@FILE] REASON, then graphyard master approver ${item.key} DECISION`, 'approver') });
     }

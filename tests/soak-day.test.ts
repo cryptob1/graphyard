@@ -198,8 +198,8 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   // status named each deploy only three minutes after the loop first asked: it waited on the
   // backoff — a handful of asks, one status read each, never one per cycle — and recorded once the
   // release served. The day's claim reads unverified (its deliveries ran beside a coordinator), so
-  // the serving release stays asked on the failure backoff, never on consecutive cycles, and is
-  // re-measured at most once per throughputRemeasureMs; a superseded or verified release is never
+  // the serving release is asked again on the backoff, never on consecutive cycles, and is
+  // re-measured at most once per throughputRemeasureMs (GY-1438); a superseded or verified release is never
   // asked again. Each measurement read whole only the deliveries in its window, which grows with
   // the day, never the ledger; master status reads the newest back for the release serving.
   const { throughput } = day;

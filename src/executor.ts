@@ -20,7 +20,7 @@ import { agentNameReadings, assertNameAvailable, attributeRefusal } from './mast
 import { agentOwner, loadMasterConfig, type AttentionItem } from './master.js';
 import { processConnectAccounts } from './master/environments.js';
 import { parseCoordinatorCheckout, checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot } from './master/profiles.js';
-import { loopUnitName } from './supervisor.js';
+import { loopUnitOf } from './supervisor.js';
 import { executorUnitDirectory } from './repository-setup.js';
 
 /**
@@ -536,7 +536,8 @@ export interface LoopMerger {
 export async function detectLoopMerger(root: string, options: { config?: MasterConfig; unitDirectory?: string; now?: number } = {}): Promise<LoopMerger | null> {
   let config = options.config ?? null;
   if (!config) { try { config = await loadMasterConfig(root); } catch { return null; } }
-  const unitPath = resolve(options.unitDirectory ?? executorUnitDirectory(), loopUnitName);
+  const loopUnit = loopUnitOf(root);
+  const unitPath = resolve(options.unitDirectory ?? executorUnitDirectory(), loopUnit);
   const installed = await access(unitPath).then(() => true, () => false);
   let lock: DaemonState['lock'] = null, live = false;
   try {
@@ -545,8 +546,8 @@ export async function detectLoopMerger(root: string, options: { config?: MasterC
     lock = live ? state.lock : null;
   } catch { /* an unreadable cursor is no evidence of a running loop */ }
   if (!installed && !live) return null;
-  const name = `the master loop (${[installed ? loopUnitName : null, lock ? `pid ${lock.pid} on ${lock.host}` : null].filter(Boolean).join(', ')}${config.autoMerge ? ', automatic merging on' : ', merging approved decisions'})`;
-  return { live, unit: installed ? loopUnitName : null, host: lock?.host ?? null, pid: lock?.pid ?? null, autoMerge: config.autoMerge, name };
+  const name = `the master loop (${[installed ? loopUnit : null, lock ? `pid ${lock.pid} on ${lock.host}` : null].filter(Boolean).join(', ')}${config.autoMerge ? ', automatic merging on' : ', merging approved decisions'})`;
+  return { live, unit: installed ? loopUnit : null, host: lock?.host ?? null, pid: lock?.pid ?? null, autoMerge: config.autoMerge, name };
 }
 
 /** Why an executor declines a merge row the loop runs. */
