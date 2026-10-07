@@ -24,6 +24,7 @@ import { decompositionHold, decompositionSettings } from '../decomposition.js';
 import { decompositionStep } from '../decomposition-step.js';
 import { judgeHostMemory } from '../master-resources.js';
 import { dispatchBlockRetryMs, dispatchFailureBlockAfter, dispatchFailureBlocker, noteDispatchFailure, planeWideFailure } from './dispatch-failures.js';
+import { closingItems } from './stale-closes.js';
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
 export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) {
@@ -40,7 +41,10 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
   //    `dispatchStarvationMs` or longer in its stage is offered before every item that has not,
   //    whatever its scope or heat. `master status` reports this same order (dispatchSchedule).
   const hot = hotspots(open, clock), hotFiles = new Set(hot.map(entry => entry.file));
+  // GY-1439: no worker round is spent on an item a close stands requested on (closingItems).
+  const closing = closingItems(cycle);
   const offered = dispatchSort(open.filter(item => {
+    if (closing.has(item.key)) return false;
     try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; }
   }), hotFiles, clock);
 

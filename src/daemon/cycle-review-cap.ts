@@ -2,6 +2,7 @@
 import { cappedReview, detailChanged, type CappedReview } from './decisions.js';
 import { record } from './effects.js';
 import { readyToRetry } from './sessions.js';
+import { closeStanding, closingItems } from './stale-closes.js';
 import type { Cycle } from './cycle.js';
 import type { Work } from '../model.js';
 
@@ -35,9 +36,11 @@ export function cappedEscalation(work: Pick<Work, 'key'>, capped: CappedReview, 
  */
 export async function reviewCapStep(cycle: Cycle) {
   const { config, state, effects, performed, isolate, now } = cycle;
+  // A withdrawal spends a fresh review on the head; an item a close stands on is not reviewed again (GY-1439).
+  const closing = closingItems(cycle);
   for (const item of cycle.open) await isolate('review', item, item.key, async () => {
     const capped = cappedReview(item, config);
-    if (!capped) return;
+    if (!capped || await closeStanding(effects, item, cycle.snapshot.work, closing)) return;
     const escalate = async (why?: string) => {
       const key = cappedEscalationKey(item, capped.sha), detail = cappedEscalation(item, capped, why);
       if (detailChanged(state.actions[key], detail))

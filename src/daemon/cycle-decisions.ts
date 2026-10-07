@@ -20,6 +20,7 @@ import { wakeObservationJob } from './cycle-delivery.js';
 import { createApproverSupervisor } from './cycle-approvers.js';
 import { decisionBudget, deferredFirst, settleDeferred } from './decision-budget.js';
 import { staleReleaseStep } from './stale-releases.js';
+import { closeStanding, closingItems, staleCloseStep } from './stale-closes.js';
 
 /** The approval-watch key prefix of a hand-launched approver, re-exported for the blocker step (GY-403). */
 export { handWatchPrefix };
@@ -406,6 +407,14 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   const noteWait = async (item: Work, detail: string) => { const waitKey = `wait:rework:${item.id}`; if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   const mechanical = effects.mechanicalFixes ? await effects.mechanicalFixes().then(read => read.requests, () => []) : []; // GY-971 planned bot rounds
   const routinePass = budget.pass(), attestPass = budget.pass();
+  // GY-1439: while a close stands requested and unapplied on an item, nothing advances it (closingItems): no
+  // bot round, rework, attestation or observation wake moves the revision under the close or spends a round on it.
+  // Its decisions are not needed meanwhile, so a request of the loop's still standing on it is withdrawn below.
+  const closing = closingItems(cycle);
+  const noteClosing = async (item: Work, action: string, close: string) => {
+    const key = `wait:closing:${item.id}`, detail = `${item.key}: close decision ${close} stands unapplied, so the loop takes no ${action} decision on it while it is being closed`;
+    if (detailChanged(state.actions[key], detail)) await note(key, item, 'decision', 'done', detail);
+  };
   // Attestations an approver refused (GY-1394), kept on their watches, indexed once per cycle by item.
   const refusedByWork = new Map<string, RefusedAttestation[]>();
   for (const watch of Object.values(state.approvals)) if (watch.action === 'attest' && watch.refusal) refusedByWork.set(watch.work, [...refusedByWork.get(watch.work) ?? [], { decision: watch.decision, refusal: watch.refusal }]);
@@ -432,6 +441,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
       if (withheld && !(item.stage !== 'done' && assessment) && detailChanged(state.actions[escalationKey], detail)) await note(escalationKey, item, 'escalation', 'done', detail);
       return;
     }
+    const close = decision.action === 'close' ? undefined : await closeStanding(effects, item, snapshot.work, closing);
+    if (close) return noteClosing(item, decision.action, close);
     let key = decisionKey(item, decision); if (routinePass.over()) { needed.add(key); budget.defer(item); return; }
     // A confirmed conflict confined to docs pages is a docs-sync's, not a worker's (GY-566).
     if (decision.action === 'rework' && !state.approvals[key] && baseRefreshConflict(item) && decision.binding === `${item.candidate!.sha}:conflict` && await docsSync.holds(item)) return;
@@ -462,7 +473,10 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   });
   // 4c+. Attestations (GY-521): one attest decision per `manual:` proof no producer may run, bound to its head, one at a time.
   for (const item of ordered) await isolate('decision', item, item.key, async () => {
-    const attestations = attestDecisions(item, snapshot.work, clock); let judging = false; if (attestations.length && attestPass.over()) { for (const decision of attestations) needed.add(decisionKey(item, decision)); budget.defer(item); return; }
+    const attestations = attestDecisions(item, snapshot.work, clock);
+    const close = attestations.length ? await closeStanding(effects, item, snapshot.work, closing) : null;
+    if (close) return noteClosing(item, 'attest', close);
+    let judging = false; if (attestations.length && attestPass.over()) { for (const decision of attestations) needed.add(decisionKey(item, decision)); budget.defer(item); return; }
     for (const decision of attestations) {
       const key = decisionKey(item, decision), watch = state.approvals[key];
       needed.add(key);
@@ -524,6 +538,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
   await settleDeferred(cycle, budget);
   await approvers.superviseHandApprovers();
   await approvers.reconcileRegistrySessions();
-  // 4c++. A stale release of a backlog item is asked again, whoever asked first (GY-1315): last, so its backlog reads hold nothing above.
+  // 4c++. A close that went stale on a revision race is requested again against the fresh revision, its grounds re-validated (GY-1439).
+  await staleCloseStep(cycle, effects);
+  // 4c+++. A stale release of a backlog item is asked again, whoever asked first (GY-1315): last, so its backlog reads hold nothing above.
   await staleReleaseStep(cycle, effects);
 }
