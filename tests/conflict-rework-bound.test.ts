@@ -5,7 +5,6 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { buildMasterStatus, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Observation, Work } from '../src/model.js';
 import type { BaseRefresh } from '../src/merge-queue.js';
-import { conflictReworkBoundMs, conflictReworkDue } from '../src/model/approval.js';
 import { docsSyncRoute } from '../src/daemon/docs-sync-route.js';
 import { routineDecision } from '../src/daemon/decisions.js';
 import { docsSyncSessionName, type DocsSyncPlan } from '../src/docs-sync.js';
@@ -31,6 +30,12 @@ const tips = { first: '1ed7e5a9de06' + '0'.repeat(28), second: '6cc15b6412a17a8c
 const recorded = { [tips.first]: at('07:42:04'), [tips.second]: at('07:47:17'), [tips.third]: at('08:07:01') };
 const since = iso(at('07:42:04'));
 const paths = ['docs/setup-from-zero.md'];
+/** The bound and its reading, loaded per test: on a base without them each case fails on its own (the proof exercise). */
+const bound10 = async () => {
+  const { conflictReworkBoundMs, conflictReworkDue } = await import('../src/model/approval.js') as any;
+  assert.equal(typeof conflictReworkDue, 'function', 'the loop-owned conflict rework has a bound');
+  return { conflictReworkBoundMs: conflictReworkBoundMs as number, conflictReworkDue: conflictReworkDue as (work: Work, now: number) => any };
+};
 
 function config(): MasterConfig {
   return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher,
@@ -68,6 +73,7 @@ function launch(record: { synced: DocsSyncPlan[]; agents: string[] }) {
 }
 
 test('unit:system-driven-conflict-rework-requested — a docs-sync holds a system-driven conflict only inside the rework\'s 10-minute bound, then gives it up in the same cycle', async () => {
+  const { conflictReworkBoundMs, conflictReworkDue } = await bound10();
   // The bound: one decision cycle after the grounds, at most ten minutes from the conflict first recorded on the head.
   assert.equal(conflictReworkBoundMs, 10 * minute);
   const due = conflictReworkDue(gy1419(tips.second, at('07:48:00')), at('07:48:00'))!;
@@ -112,6 +118,7 @@ test('unit:system-driven-conflict-rework-requested — a docs-sync holds a syste
 });
 
 test('integration:conflict-rework-decision-cycle — replaying GY-1419 through the loop\'s cycles, the rework is requested in the first cycle past the bound, not after the docs-sync\'s 30 minutes', async () => {
+  const { conflictReworkBoundMs } = await bound10();
   const decided: { action: string; binding: unknown; at: number }[] = [], record = { synced: [] as DocsSyncPlan[], agents: [] as string[] };
   let item = gy1419(tips.first, at('07:42:20')), now = at('07:42:30');
   const effects = (): DaemonEffects => ({
@@ -134,7 +141,7 @@ test('integration:conflict-rework-decision-cycle — replaying GY-1419 through t
   assert.equal(record.synced.length, 1, 'the docs-page conflict is first routed to a docs-sync session');
   await cycle('07:47:30', tips.second);
   await cycle('07:50:00', tips.second);
-  assert.deepEqual(decided, [], 'inside the bound the docs-sync holds the item');
+  assert.equal(decided.length, 0, 'inside the bound the docs-sync holds the item');
   const past = await cycle('07:52:10', tips.second);
   assert.deepEqual(decided.map(entry => [entry.action, entry.binding]), [['rework', `${head}:conflict`]], 'the loop requests the conflict rework itself on its grounds binding');
   assert.ok(decided[0].at - Date.parse(since) <= conflictReworkBoundMs + minute, 'within one decision cycle of the bound');
