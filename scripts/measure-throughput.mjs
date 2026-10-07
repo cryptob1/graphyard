@@ -10,13 +10,14 @@
 //   GRAPHYARD_URL=… GRAPHYARD_TOKEN_FILE=… node scripts/measure-throughput.mjs \
 //     [--since ISO] [--until ISO] [--claim GY-87] [--repository PATH] [--record DIR] [--json]
 //
-// `--record DIR` appends the report as one timestamped JSON file, which is what `master status`
-// reads to say whether the claim is verified against the release now serving. The loop records
-// one itself after each verified deployment (GY-1385); this script is the by-hand run. The arithmetic and
-// the population rule are the module master status uses (src/throughput.ts), loaded through tsx,
+// `--record DIR` appends the report as one timestamped JSON file (never overwriting one recorded in
+// the same millisecond, and keeping the newest 30 of its own records; other files in DIR are left alone), which is what `master status` reads to say
+// whether the claim is verified against the release now serving. The loop records one itself after
+// each verified deployment (GY-1385); this script is the by-hand run. The arithmetic, the population
+// rule and the recorder are the module master status uses (src/throughput.ts), loaded through tsx,
 // so the measurement and the report can never disagree.
 import { spawnSync } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -93,10 +94,10 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
   const readItem = id => read(`/api/work/${encodeURIComponent(id)}`, `work item ${id}`);
   const { report } = await measure(snapshot.work, readItem, now, { deployed, since: options.since, until: options.until, claimKey: options.claim });
   if (options.record) {
-    await mkdir(options.record, { recursive: true });
-    const file = join(options.record, `${report.measuredAt.replace(/[:.]/g, '-')}.json`);
-    await writeFile(file, JSON.stringify(report, null, 2) + '\n');
-    report.recorded = file;
+    // The loop's own recorder (GY-1414): a file is never overwritten — a second record in the same
+    // millisecond takes the next `_N` suffix — and the directory keeps the newest 30.
+    const { recordThroughputMeasurement } = deps.recordThroughputMeasurement ? deps : await module_();
+    report.recorded = join(options.record, await recordThroughputMeasurement(resolve(options.record), report, '.'));
   }
   const { renderThroughput } = deps.render ? { renderThroughput: deps.render } : await module_();
   console.log(options.json ? JSON.stringify(report, null, 2) : renderThroughput(report) + (report.recorded ? `\nRecorded ${report.recorded}` : ''));
