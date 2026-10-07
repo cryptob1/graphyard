@@ -49,7 +49,7 @@ GY=…/.graphyard/launch/NAME; claude … --settings …/.graphyard/harness/prod
 
 Reviewers/producers are `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once quiet past `run.acknowledgementSeconds` (90); settling resultless is **`never started`**: relaunched minute later, ≤3 (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
 
-**Idle-with-lease** (25 quiet minutes, nothing open): one re-prompt; quiet 45 min after first idle, 10 after re-prompt (brief replies don't count): new attempt on its branch <60 min from last activity. **Blocked** (Herdr `blocked`; pane read by agent name, then id): destructive-command prompts declined; folder-trust dialog relaunches, recording trust; others fail after **5 min**; unreadable screens aren't timed. Headless Pi runs (`.graphyard/runs/`) survive restarts.
+**Idle-with-lease** (25 quiet minutes, nothing open): one re-prompt; quiet 45 min after first idle, 10 after re-prompt (brief replies don't count): new attempt on its branch <60 min from last activity. **No submission** (activity and renewals don't count): **60 min** after claim unsubmitted is an `unsubmitted-attempt` stalled-gate fault; at **120 min** the server refuses renewal, so the lease lapses, work is kept on its branch, item requeued. **Blocked** (Herdr `blocked`; pane read by agent name, then id): destructive-command prompts declined; folder-trust dialog relaunches, recording trust; others fail after **5 min**; unreadable screens aren't timed. Headless Pi runs (`.graphyard/runs/`) survive restarts.
 
 ### Panes are closed and reclaimed
 

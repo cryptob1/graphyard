@@ -5,7 +5,7 @@ import type { Work } from '../model.js';
 import { createSchema } from '../model.js';
 import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
-import { openFaultClassItem } from '../model/fault-classes.js';
+import { openFaultClassItem, workerNoSubmissionBoundMs } from '../model/fault-classes.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
 import { containmentPhase, type MasterConfig } from '../master.js';
@@ -104,7 +104,7 @@ export const doctorEffects = (config: MasterConfig, root: string, post: Operator
 
 /** The fault bounds of the doctor's checks, in minutes, as the shipped template states them. */
 export const doctorBounds = {
-  blockedMinutes: 10, workerMinutes: 60, ciMinutes: 20, reviewRequestMinutes: 5, launchMinutes: 2,
+  blockedMinutes: 10, workerMinutes: workerNoSubmissionBoundMs / 60_000, ciMinutes: 20, reviewRequestMinutes: 5, launchMinutes: 2,
   proofsMinutes: 30, mergeableMinutes: 5, decisionMinutes: 10,
 } as const;
 
