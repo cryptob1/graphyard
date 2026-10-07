@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { type FileHandle, mkdir, open, utimes, writeFile } from 'node:fs/promises';
 import { readdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { wakeFromWebhook } from '../../src/store.js';
 import { GitHub, idleObservationSeconds, processJob } from '../../src/github.js';
@@ -54,7 +55,10 @@ import { watchdogPlan } from '../../src/daemon/liveness.js';
 import { loopSelfProvision, masterSetup } from '../../src/cli/master-setup.js';
 import { deploymentTarget } from '../../src/install/index.js';
 import { type Transport } from '../../src/install/transport.js';
-import { loopWatchdogSeconds } from '../../src/supervisor.js';
+import { loopUnitName, loopWatchdogSeconds } from '../../src/supervisor.js';
+import { executorUnit, writeExecutorDeclaration } from '../../src/repository-setup.js';
+import { healUserSupervision } from '../../src/user-manager.js';
+import { hostSupervisionKey } from '../../src/daemon/cycle-host.js';
 import { ChildProcessError } from '../../src/child-runner.js';
 import { probeBlocker } from '../../src/daemon/blocker-probes.js';
 import { type BlockerClass } from '../../src/model/blocker-class.js';
@@ -152,6 +156,13 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   promotion?: boolean;
   /** GY-1389: the review-round cap, the items whose change requests name a blocking finding past it, and those whose capped round the approver refuses. */
   reviewCap?: { cap: number; items: number[]; refused: number[] };
+  /**
+   * GY-1428: the loop's host-supervision step runs the real repair over a simulated host declaring
+   * two executor slots. Its user manager stops answering at `managerDown.from`, taking both slots
+   * with it, and logind refuses to start it until `managerDown.to`; a revival's waits move the
+   * day's clock. From `crashLoop.from` to `.to` slot 1 crashes half a minute after each start.
+   */
+  hostSupervision?: { managerDown: { from: number; to: number }; crashLoop: { from: number; to: number } };
   /** GY-1417: record three goals and wire the acceptance role (acceptanceWorld below). */
   acceptance?: boolean }) {
   const dayStart = clock.now();
@@ -1274,8 +1285,30 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     throughput.asks.push({ sha: observedSha, outcome: outcome.outcome, revision: outcome.revision, elapsed: clock.now() - dayStart, read: outcome.read?.length ?? 0 });
     return outcome;
   };
+  // GY-1428: the simulated host the host-supervision day's loop repairs, and what it asked of it.
+  const hostDay = options.hostSupervision && { ...options.hostSupervision, root: await temporaryDirectory('soak-host'), manager: true, revived: false,
+    slots: new Map<string, { state: string; startedAt: number }>([1, 2].map(slot => [executorUnit(slot), { state: 'active', startedAt: clock.now() }])),
+    revivals: [] as number[], starts: [] as { elapsed: number; units: string[] }[], peakRows: 0 };
+  if (hostDay) { execFileSync('git', ['init', '-q'], { cwd: hostDay.root }); await writeExecutorDeclaration(hostDay.root, { version: 1, count: 2, kinds: null, intervalSeconds: 5 }); }
+  const hostSystemctl = (args: string[]) => {
+    const day = hostDay!, down = elapsed >= day.managerDown.from && !day.revived;
+    if (down) { for (const slot of day.slots.values()) slot.state = 'inactive'; throw Object.assign(new Error('Command failed: systemctl --user'), { stderr: 'Failed to connect to user scope bus via local transport: Connection refused\n', stdout: '' }); }
+    const unit = args.at(-1)!, slot = day.slots.get(unit);
+    if (slot && unit === executorUnit(1) && elapsed >= day.crashLoop.from && elapsed < day.crashLoop.to && slot.state === 'active' && clock.now() - slot.startedAt >= 30_000) slot.state = 'failed';
+    if (args[0] === 'is-active') { const state = unit === loopUnitName ? 'active' : slot?.state ?? 'inactive'; if (state === 'active') return state; throw Object.assign(new Error(`Command failed: systemctl --user is-active ${unit}`), { stdout: `${state}\n`, stderr: '' }); }
+    if (args[0] === 'is-enabled') return 'enabled';
+    if (args[0] === 'enable') { const units = args.slice(2); day.starts.push({ elapsed, units }); for (const name of units) day.slots.set(name, { state: 'active', startedAt: clock.now() }); }
+    return '';
+  };
+  const hostLoginctl = () => {
+    hostDay!.revivals.push(elapsed);
+    if (elapsed < hostDay!.managerDown.to) throw Object.assign(new Error('Command failed: loginctl enable-linger'), { stderr: 'Could not enable linger: Access denied\n' });
+    hostDay!.revived = true; return '';
+  };
   const effects: DaemonEffects = {
     ...(promotionEffect ? { promotion: promotionEffect } : {}),
+    ...(hostDay ? { healHostSupervision: allow => healUserSupervision(hostDay.root, { systemctl: hostSystemctl, loginctl: hostLoginctl, masked: () => false, platform: 'linux',
+      wait: async ms => { fenced.drift += ms; await moveClock(ms); } }, allow) } : {}),
     measureThroughput,
     agents: () => { finishDuringCycle(); return headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(); },
     herdr: () => ({ agents: headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(), available: true }),
@@ -2262,6 +2295,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       catch (error) { failures.push(`${new Date(now).toISOString()}: ${error instanceof Error ? error.message : String(error)}`); }
       for (const key of Object.keys(state.actions)) actionKeys.add(key);
       blockerKeysPeak = Math.max(blockerKeysPeak, Object.keys(state.actions).filter(key => key.startsWith('blocker:')).length);
+      if (hostDay) hostDay.peakRows = Math.max(hostDay.peakRows, Object.keys(state.actions).filter(key => key.startsWith(hostSupervisionKey)).length);
       // Only the day that holds a merge BLOCKED pays for the extra snapshot read each cycle.
       if (plan.blockedMerge) mergeStallSightings.push(...mergeStallAttention(await snapshot()).map(line => ({ subject: line.subject, text: line.text, at: clock.now() })));
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
@@ -2379,7 +2413,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, staleMerges, restartLog, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null };
+    wakes, staleMerges, restartLog, hostDay, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null };
 }
 
 /**
