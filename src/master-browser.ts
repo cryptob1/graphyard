@@ -131,16 +131,22 @@ export const actionsDirectory = (root: string) => resolve(root, '.graphyard/mast
 const truncate = (value: unknown, max = 2_000) => { const text = typeof value === 'string' ? value : JSON.stringify(value) ?? ''; return text.length > max ? `${text.slice(0, max)}…` : text; };
 const stamp = (date: Date) => date.toISOString().replace(/[:.]/g, '-');
 
-/** Wrap a page so every call is written to the record with a screenshot after each mutation. */
+/**
+ * Wrap a page so every call is written to the record with a screenshot after each mutation. Once a
+ * value is typed (a Confirm-access code), mutations are recorded without one until the field is
+ * cleared or a page is opened afresh, since the page may still show the code (GY-1450).
+ */
 export function recordingPage(page: BrowserPage, record: { directory: string; steps: RecordedStep[]; now: () => Date }): BrowserPage {
   const capture = new Set(['open', 'click', 'setChecked', 'select']);
+  let typed = false;
   const step = <T>(action: string, args: string[], run: () => T): T => {
     const entry: RecordedStep = { n: record.steps.length + 1, at: record.now().toISOString(), action, args, result: null, screenshot: null };
     record.steps.push(entry);
     try {
       const result = run();
       entry.result = result === undefined ? null : truncate(result);
-      if (capture.has(action)) {
+      if (action === 'open') typed = false;
+      if (capture.has(action) && !typed) {
         const file = resolve(record.directory, `${String(entry.n).padStart(3, '0')}-${action}.png`);
         try { page.screenshot(file); entry.screenshot = relative(record.directory, file); } catch (error) { entry.screenshot = null; entry.error = `screenshot failed: ${error instanceof Error ? error.message : String(error)}`; }
       }
@@ -160,7 +166,10 @@ export function recordingPage(page: BrowserPage, record: { directory: string; st
     wait: ms => step('wait', [String(ms)], () => page.wait(ms)),
     close: () => step('close', [], () => page.close()),
     note: (action, args) => step(action, args, () => undefined),
-    ...(page.fill ? { fill: (selector: string, value: string) => step('fill', [selector, '[code withheld]'], () => { try { page.fill!(selector, value); } catch (error) { throw new Error(withheld(error, value)); } }) } : {}),
+    ...(page.fill ? { fill: (selector: string, value: string) => step('fill', [selector, value ? '[code withheld]' : ''], () => {
+      try { page.fill!(selector, value); } catch (error) { throw new Error(withheld(error, value)); }
+      typed = value !== '';
+    }) } : {}),
   };
 }
 
@@ -375,6 +384,9 @@ export async function passSudo(page: BrowserPage, options: SudoOptions) {
     const verify = control(verifyLabels, ['button']);
     if (verify) page.click(verify.selector);
     page.wait(Math.min(pollMs, 1_000));
+    // A refused code stays in the field: clear it before any later step screenshots the page.
+    const left = codeField();
+    if (left) { try { page.fill(left.selector, ''); } catch { page.note?.('sudo-code', [method, 'field not cleared']); } }
     page.note?.('sudo-code', [method, 'entered']);
     if (state!.method !== method) { page.note?.('sudo-method', [method]); state = { ...state!, method }; }
   };

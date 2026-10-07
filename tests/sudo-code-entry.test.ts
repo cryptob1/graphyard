@@ -96,10 +96,15 @@ test('unit:sudo-shared-session-continue — the App drive submits its manifest a
   assert.equal(handed.length, 1); assert.equal(handed[0].split('\n')[0], FIRST_LINE);
 });
 
-/** GitHub's Confirm-access page with its authenticator and email views; `typed` is what reached the code field. */
-function codePage() {
-  const state = { view: 'passkey' as 'passkey' | 'totp' | 'email' | 'done', typed: [] as string[], clicked: [] as string[] };
+/**
+ * GitHub's Confirm-access page with its authenticator and email views; `typed` is what reached the
+ * code field, `field` what it shows now (a refused code stays in it, as on GitHub's error page), and
+ * `shots` what the field showed at each screenshot.
+ */
+function codePage(refused: readonly string[] = []) {
+  const state = { view: 'passkey' as 'passkey' | 'totp' | 'email' | 'done', typed: [] as string[], clicked: [] as string[], field: '', shots: [] as string[] };
   const page: BrowserPage = { ...noop,
+    screenshot() { state.shots.push(state.field); },
     open() {}, url: () => state.view === 'done' ? NEW_APP : 'https://github.com/sessions/sudo',
     text: () => ({ passkey: PASSKEY_PAGE, totp: TOTP_PAGE, email: EMAIL_PAGE, done: 'Register new GitHub App' })[state.view],
     locate(kind, text) {
@@ -113,11 +118,11 @@ function codePage() {
     },
     click(selector) {
       state.clicked.push(selector);
-      if (selector === '#totp-link') state.view = 'totp';
-      if (selector === '#email-send') state.view = 'email';
-      if (selector === '#verify' && state.typed.at(-1) && /^\d{6}$/.test(state.typed.at(-1)!)) state.view = 'done';
+      if (selector === '#totp-link') { state.view = 'totp'; state.field = ''; }
+      if (selector === '#email-send') { state.view = 'email'; state.field = ''; }
+      if (selector === '#verify' && /^\d{6}$/.test(state.field) && !refused.includes(state.field)) { state.view = 'done'; state.field = ''; }
     },
-    fill(selector, value) { assert.ok(selector === '#app_otp' || selector === '#email_otp'); state.typed.push(value); },
+    fill(selector, value) { assert.ok(selector === '#app_otp' || selector === '#email_otp'); state.field = value; if (value) state.typed.push(value); },
   };
   return { page, state };
 }
@@ -224,4 +229,32 @@ test('unit:sudo-message-method — handoff and timeout messages name the method 
   const fake = codePage();
   await assert.rejects(passSudo(fake.page, { flow: 'installation-accept', record: 'r', prefer: 'passkey-or-password', now: () => new Date(clock), onCode: () => {}, sleep: async ms => { clock += ms; }, timeoutMs: 600_000 }),
     (failure: Error) => { assert.match(failure.message, /not approved within 600s; confirm access with your passkey, authenticator app or email code/); assert.doesNotMatch(failure.message, /GitHub Mobile/); return true; });
+});
+
+test('unit:sudo-code-entry — no screenshot is recorded while the code field holds a code, whether GitHub accepts the code or refuses it', async () => {
+  const { passSudo, recordingPage } = await browser();
+  const WRONG = '000000';
+  for (const codes of [[CODE], [WRONG, CODE]]) {
+    const fake = codePage([WRONG]);
+    const steps: RecordedStep[] = [];
+    let clock = 0;
+    const page = recordingPage(fake.page, { directory: '/nonexistent-record', steps, now: () => new Date(clock) });
+    const queue = codes.map(code => ({ kind: 'code' as const, code, at: new Date(0).toISOString() }));
+    const result = await passSudo(page, { flow: 'installation-accept', record: 'graphyard up', prefer: 'passkey-or-password', timeoutMs: 600_000, pollMs: 1_000, now: () => new Date(clock),
+      // After a refused code, the next is handed only once a re-check reload has screenshot the page.
+      readCode: () => !fake.state.typed.length || steps.some(step => step.action === 'open' && step.screenshot) ? queue.shift() ?? null : null,
+      onCode: () => {}, sleep: async ms => { clock += ms; } });
+    assert.deepEqual(result, { passed: true, attempts: 0, code: null }, codes.join(' then '));
+    assert.deepEqual(fake.state.typed, codes, 'every handed code was typed');
+    assert.ok(fake.state.shots.length >= 1, 'the flow still screenshots the page');
+    assert.deepEqual(fake.state.shots.filter(Boolean), [], `${codes.join(' then ')}: no screenshot showed a code in the field`);
+    const verify = steps.filter(step => step.action === 'click' && step.args[0] === '#verify');
+    assert.equal(verify.length, codes.length);
+    for (const click of verify) assert.equal(click.screenshot, null, 'the click submitting a code is recorded without a screenshot');
+    assert.ok(!JSON.stringify(steps).includes(CODE) && !JSON.stringify(steps).includes(WRONG), 'no recorded step holds a code');
+    if (codes.length > 1) {
+      assert.ok(steps.some(step => step.action === 'open' && step.screenshot), 'the re-check after the refused code was screenshot, with the field cleared');
+      assert.deepEqual(steps.filter(step => step.action === 'fill').map(step => step.args), [['#app_otp', '[code withheld]'], ['#app_otp', ''], ['#app_otp', '[code withheld]']], 'the refused code was cleared from the field');
+    }
+  }
 });
