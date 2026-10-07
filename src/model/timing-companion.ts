@@ -27,7 +27,8 @@ const listed = (lines: readonly string[]) => lines.length > 5 ? `${lines.slice(0
 /**
  * Whether a baseline change writes only the lines of the candidate's own test files: every field
  * but `files` unchanged, and each `files` line it adds, alters or removes names a test file the
- * candidate adds or changes (`tests`), with a non-negative duration. Anything else is refused,
+ * candidate adds or changes (`tests`), or adds a line for a test file the base records none for,
+ * with a non-negative duration. Anything else is refused,
  * naming the lines, and the file is judged as any out-of-scope rewrite.
  */
 export function timingBaselineCompanion(base: string, head: string, tests: readonly string[]): TimingCompanion {
@@ -38,9 +39,13 @@ export function timingBaselineCompanion(base: string, head: string, tests: reado
   const was = before.files && typeof before.files === 'object' ? before.files : {}, now = after.files && typeof after.files === 'object' ? after.files : {};
   const own = new Set(tests), changed = [...new Set([...Object.keys(was), ...Object.keys(now)])].filter(path => canonical(was[path]) !== canonical(now[path])).sort();
   const describe = (path: string) => `"${path}" (${!(path in now) ? 'removed' : !(path in was) ? 'added' : 'altered'})`;
-  const foreign = changed.filter(path => !own.has(path) || (path in now && !(typeof now[path] === 'number' && Number.isFinite(now[path]) && now[path] >= 0)));
-  if (foreign.length) return { allowed: false, detail: `changes the timing lines ${listed(foreign.map(describe))}, which are not for test files this change adds or changes` };
-  return { allowed: true, detail: changed.length ? `implied companion of this change's test files: writes only the lines ${listed(changed.map(describe))}` : 'implied companion of this change\'s test files: no line differs' };
+  // A line added for a test file the baseline does not record yet fills a gap nobody's line holds
+  // (GY-1397): when unrecorded files push coverage below ci-shards' floor, the change that crosses it
+  // records them without a widening. Altering or removing another file's line stays foreign.
+  const gap = (path: string) => !(path in was) && timedTestFile(path);
+  const foreign = changed.filter(path => !(own.has(path) || gap(path)) || (path in now && !(typeof now[path] === 'number' && Number.isFinite(now[path]) && now[path] >= 0)));
+  if (foreign.length) return { allowed: false, detail: `changes the timing lines ${listed(foreign.map(describe))}, which are neither for test files this change adds or changes nor new lines for test files the baseline does not record` };
+  return { allowed: true, detail: changed.length ? `implied companion of this change's test files and the baseline's unrecorded ones: writes only the lines ${listed(changed.map(describe))}` : 'implied companion of this change\'s test files: no line differs' };
 }
 
 /** True when the item's planned scope or observed diff holds a test file, so the baseline is implied by it. */
