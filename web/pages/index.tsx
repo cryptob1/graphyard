@@ -7,6 +7,7 @@ import InterventionsPage from './interventions';
 import GuidePage from './guide';
 import AutomationPage from './automation';
 import FleetPage from './fleet';
+import SetupPage from './setup';
 import WorkersPage from './workers';
 import ScenarioLibrary from '../scenarios';
 import ValidationView from '../validation';
@@ -78,6 +79,8 @@ export const views: readonly View[] = [
   // The agent registry: a Settings page for the identities that may read it, since it names hosts and login homes.
   // Every agent's runtime, account, role and launch policy is configured and shown here (GY-170).
   { id: 'agents', icon: '⛭', label: 'Agents', section: 'settings', visible: dashboard => ['admin', 'coordinator', 'reader', 'slice-lead'].includes(role(dashboard)), render: dashboard => <FleetPage api={dashboard.api} status={dashboard.status} observedAt={dashboard.observedAt}/> },
+  // The first-run checklist (GY-1419), for the admin who sets Graphyard up: opened by the address `graphyard up` prints (#setup), not from the navigation.
+  { id: 'setup', icon: '✔', label: 'Setup', adminOnly: true, render: dashboard => <SetupPage status={dashboard.status} api={dashboard.api} setView={dashboard.setView}/> },
   { id: 'guide', icon: '?', label: 'How Graphyard works', render: () => <GuidePage/> },
 ];
 

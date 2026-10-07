@@ -24,6 +24,13 @@ import { boundedSnapshot, workDocument } from '../../store/bounded-snapshot.js';
 import { doctorRoute, doctorRunEvent } from '../doctor-route.js';
 // The doctor's ledger kinds, read from here as they always were (GY-711).
 export { doctorFindingEvent, doctorRunEvent } from '../doctor-route.js';
+
+/** The first-run protection state (GY-1419): what the Setup page's branch-protection item reads. */
+async function setupProtection(github: { branchProtection?: (requireNativeReview?: boolean, shared?: boolean) => Promise<{ protected: boolean; requiredChecks: unknown[] }> } | null): Promise<'complete' | 'checks' | 'off'> {
+  if (!github || typeof github.branchProtection !== 'function') return 'off';
+  const protection = await github.branchProtection(false, true);
+  return protection.protected ? 'complete' : protection.requiredChecks.length ? 'checks' : 'off';
+}
 import { snapshotPage } from '../../store/paged-snapshot.js';
 
 /** Control-plane status and the work reads every client polls. */
@@ -93,6 +100,12 @@ export const statusRoutes = defineRoutes('status', [
         directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
         // Heartbeat latency and the renewals refused or failed server-side, this process, last 10 minutes (GY-558).
         leaseHealth: engine.leaseHealth.report(),
+        // The first-run facts the Setup page and `graphyard up` read beside the App and the fleet (GY-1419):
+        // the base branch's protection from the shared read (at most every five minutes) — `complete`
+        // once it requires Graphyard / merge, `checks` while it requires only the repository's own
+        // checks (the merge check is added after the first pull request reports it), else `off` — and
+        // whether a master loop is live.
+        setup: { protection: await setupProtection(github), loop: !!executors.loop?.live },
         now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
     },
   },

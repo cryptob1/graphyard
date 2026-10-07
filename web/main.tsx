@@ -29,7 +29,8 @@ function App() {
   const [error, setError] = useState('');
   const [connected, setConnected] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
-  const [view, setView] = useState('work');
+  // `graphyard up` prints the dashboard's address with #setup (GY-1419): that link opens the Setup page.
+  const [view, setView] = useState(() => location.hash === '#setup' ? 'setup' : 'work');
   const [filter, setFilter] = useState<OpenGroup | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [events, setEvents] = useState<any[]>([]);

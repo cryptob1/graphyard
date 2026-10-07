@@ -320,7 +320,8 @@ export default function FleetPage({ api, status, observedAt }: Pick<Dashboard, '
   const [connects, setConnects] = useState<ConnectView[]>(status?.connects ?? []);
   const [providers, setProviders] = useState<ConnectProviderView[]>([]);
   const [hosts, setHosts] = useState<ConnectHostView[]>([]);
-  const [wizard, setWizard] = useState<WizardState>(closedWizard);
+  // The Setup page's Connect button opens this page at #connect (GY-1419): the wizard starts open.
+  const [wizard, setWizard] = useState<WizardState>(() => typeof location !== 'undefined' && location.hash === '#connect' ? { ...closedWizard, open: true } : closedWizard);
   // A removed failed connect comes off this page for this browser (the ledger keeps the record):
   // the control plane holds no removal action for a finished connect, so the page keeps the ids here.
   const [removed, setRemoved] = useState<string[]>(() => { try { return JSON.parse(typeof localStorage === 'undefined' ? '[]' : localStorage.getItem('graphyard.removedConnects') ?? '[]') as string[]; } catch { return []; } });
