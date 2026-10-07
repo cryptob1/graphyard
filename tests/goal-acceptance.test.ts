@@ -123,7 +123,6 @@ function stubRunner(respond: (prompt: string) => unknown, prompts: string[], too
 }
 const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard', repository, baseBranch: 'main',
   githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-goals', autoMerge: true, mergeMethod: 'merge', workers: [] });
-let deliveringGoal: Goal;
 
 test('unit:acceptance-role-drafts-and-approval — the loop launches the acceptance role on an open goal, opens its draft as one pull request, and only an approver who did not author it approves', async () => {
   assert.ok((registryRoles as readonly string[]).includes('acceptance'));
@@ -190,9 +189,9 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   assert.equal((await read()).stage, 'planned');
   prState = 'merged';
   await acceptanceStep(cycle());
-  deliveringGoal = await read();
-  assert.equal(deliveringGoal.stage, 'delivering');
-  assert.deepEqual(deliveringGoal.protected, { cases: ['repository-signup'], outcomes: ['repository-signup'] });
+  const delivering = await read();
+  assert.equal(delivering.stage, 'delivering');
+  assert.deepEqual(delivering.protected, { cases: ['repository-signup'], outcomes: ['repository-signup'] });
   const kinds = (await ok(master, 'GET', `goals/${goal.key}`)).history.map((entry: any) => `${entry.kind}:${entry.actor}`);
   assert.deepEqual(kinds, ['goal.recorded:goal-master', 'goal.draft:acceptance-author', 'goal.refuse:goal-approver', 'goal.draft:acceptance-author', 'goal.approve:goal-approver', 'goal.merged:goal-master']);
   // A later goal cannot claim the cases this one protects.
@@ -216,23 +215,27 @@ async function claimed(plannedFiles: string[]) {
 const changed = (path: string, status: 'modified' | 'removed' | 'added' = 'modified') => ({ path, status, sha: status === 'removed' ? null : 'c'.repeat(40), additions: 1, deletions: 1, binary: false, baseSha: status === 'added' ? null : 'd'.repeat(40) });
 
 test('unit:required-cases-protected — after the acceptance PR merges, a candidate that modifies or deletes a required case or binding is refused at complete, and only an independently approved case change lets it through', async () => {
-  const goal = deliveringGoal;
-  assert.ok(goal, 'the acceptance test leaves a goal whose cases are protected');
-  const casePath = 'e2e/cases/repository-signup.json';
+  // A goal whose acceptance pull request merged: drafted by its author, approved by another identity.
+  const recorded: Goal = await ok(master, 'POST', 'goals', goalInput('Operators can sign up a repository from the setup page'));
+  await ok(author, 'POST', `goals/${recorded.key}/draft`, { outcomes: draftOf(recorded.key, 'setup-signup').outcomes, pr: 811, branch: 'graphyard/setup-signup' });
+  await ok(approver, 'POST', `goals/${recorded.key}/approve`, { reason: 'The case checks the outcome the customer asked for' });
+  const goal: Goal = await ok(master, 'POST', `goals/${recorded.key}/merged`, { pr: 811 });
+  assert.deepEqual(goal.protected, { cases: ['setup-signup'], outcomes: ['setup-signup'] });
+  const casePath = 'e2e/cases/setup-signup.json';
   const { work, pr, observe } = await claimed([casePath, 'e2e/contract.json', 'e2e/cases/new-case.json', 'src/feature.ts']);
   const submit = (files: ReturnType<typeof changed>[]) => engine.execute(worker, 'submit', work.id, { epoch: 1, pr }, randomUUID(), { observation: observe(files as never) }).then(() => null, (error: Error) => error.message);
 
   // Inside its planned files or not, a protected case is not the implementation's to change.
   const modified = await submit([changed('src/feature.ts'), changed(casePath)]);
-  assert.match(String(modified), new RegExp(`Protected case: ${casePath} modifies required case repository-signup \\(outcome repository-signup of ${goal.key}\\)`));
-  assert.match(String(await submit([changed(casePath, 'removed')])), /Protected case: .* deletes required case repository-signup/);
-  assert.match(String(await submit([changed('e2e/contract.json')])), new RegExp(`Protected case: e2e/contract.json modifies the contract binding repository-signup of ${goal.key}`));
+  assert.match(String(modified), new RegExp(`Protected case: ${casePath} modifies required case setup-signup \\(outcome setup-signup of ${goal.key}\\)`));
+  assert.match(String(await submit([changed(casePath, 'removed')])), /Protected case: .* deletes required case setup-signup/);
+  assert.match(String(await submit([changed('e2e/contract.json')])), new RegExp(`Protected case: e2e/contract.json modifies the contract binding setup-signup of ${goal.key}`));
   // A new case, and a case no goal protects, are the implementation's own.
   assert.deepEqual(protectedCaseRefusals(work, observe([changed('e2e/cases/new-case.json', 'added'), changed('e2e/cases/board.json')] as never), [goal]), []);
 
   // The decision path: a case change, judged by neither its requester nor an implementer of the item.
   assert.equal((await call(worker, 'POST', `goals/${goal.key}/case-change`, { work: work.key, cases: ['board'], reason: 'not protected here' })).status, 422);
-  const requested: Goal = await ok(author, 'POST', `goals/${goal.key}/case-change`, { work: work.key, cases: ['repository-signup'], reason: 'The sign-up form moved to /setup; the customer outcome is unchanged' });
+  const requested: Goal = await ok(author, 'POST', `goals/${goal.key}/case-change`, { work: work.key, cases: ['setup-signup'], reason: 'The sign-up form moved to /setup; the customer outcome is unchanged' });
   const change = requested.caseChanges.at(-1)!;
   assert.equal(change.state, 'requested');
   const own = await call(author, 'POST', `goals/${goal.key}/case-change-approve`, { change: change.id, reason: 'mine' });
@@ -244,7 +247,8 @@ test('unit:required-cases-protected — after the acceptance PR merges, a candid
   assert.equal(approved.caseChanges.at(-1)?.state, 'approved'); assert.equal(approved.caseChanges.at(-1)?.judgedBy, approver.id);
   assert.equal((await call(approver, 'POST', `goals/${goal.key}/case-change-approve`, { change: change.id, reason: 'again' })).status, 409);
   // With the approved change, the same candidate is accepted.
-  assert.equal(await submit([changed('src/feature.ts'), changed(casePath), changed('e2e/contract.json')]), null);
+  assert.deepEqual(protectedCaseRefusals(work, observe([changed(casePath), changed('e2e/contract.json')] as never), [approved]), []);
+  assert.equal(await submit([changed('src/feature.ts'), changed(casePath)]), null);
   // Recorded delivered, the goal leaves the open list, and its cases stay protected.
   const delivered: Goal = await ok(master, 'POST', `goals/${goal.key}/deliver`, { reason: 'Every implementation item delivered' });
   assert.equal(delivered.stage, 'delivered');
