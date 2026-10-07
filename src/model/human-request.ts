@@ -75,11 +75,17 @@ export const humanRequestSchema = z.object({
  * What a request's recommendation misses (GY-1410), naming the field; empty when it has one. Every
  * request tells the human what its requester advises: the choice it recommends or, for a value to
  * provide, the safest way to obtain it (a fine-grained token scoped to one repository, with a short
- * expiry and only the permissions needed), plus WHY, one plain sentence of why.
+ * expiry and only the permissions needed), plus WHY, one plain sentence of why. A request with
+ * choices to press names one by its label, so the card can preselect it; a value request (a secret
+ * choice, or every choice but Decline asking for the human's words) may advise in its own words.
  */
-export function recommendationIssues(data: { recommendation?: string; why?: string }): string[] {
+export function recommendationIssues(data: { kind?: HumanDecisionKind; choices?: HumanChoice[] | null; sealTo?: string | null; recommendation?: string; why?: string }): string[] {
+  const choices = data.kind ? requestChoices({ kind: data.kind, choices: data.choices, sealTo: data.sealTo }) : [];
+  const valueRequest = choices.some(choice => choice.input === 'secret') || choices.every(choice => choice.outcome === 'declined' || choice.input !== 'none');
+  const unnamed = data.kind && data.recommendation?.trim() && !valueRequest && !recommendedChoice({ ...data, kind: data.kind });
   return [
     ...(data.recommendation?.trim() ? [] : ['A park needs RECOMMEND (field recommendation): the choice you recommend, or the safest way to obtain the value asked for']),
+    ...(unnamed ? [`A park with choices needs RECOMMEND (field recommendation) to name one by its label: ${choices.map(choice => `"${choice.label}"`).join(', ')}`] : []),
     ...(data.why?.trim() ? [] : ['A park needs WHY (field why): one plain sentence of why you recommend it']),
   ];
 }

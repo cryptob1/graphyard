@@ -41,7 +41,7 @@ export const parkCommand: CliCommand = {
     const { needed, choices, ask, steps, why, recommendation } = parkArgs(args.slice(2, separator < 0 ? args.length : separator));
     const reason = separator < 0 ? '' : args.slice(separator + 1).join(' ').trim();
     if (!Number.isInteger(epoch) || epoch < 1 || !humanDecisionKinds.includes(kind as HumanDecisionKind) || !needed || !ask || !reason) throw new Error(`Use park GY-N EPOCH KIND NEEDED... --ask ASK [--step STEP]... --recommend TEXT --why WHY [--choice LABEL]... -- REASON, where KIND is ${humanDecisionKinds.join(', ')}`);
-    const issues = [...recommendationIssues({ recommendation, why }), ...shortAskIssues({ ask, steps, why })];
+    const issues = [...recommendationIssues({ kind: kind as HumanDecisionKind, choices, recommendation, why }), ...shortAskIssues({ ask, steps, why })];
     if (issues.length) throw new Error(`${issues.join('. ')}.`);
     // A credential is sealed to this host when the human provides it, so the host's key goes with the request.
     // Imported here: session-commands.ts lists this command, so a static import would be a cycle.

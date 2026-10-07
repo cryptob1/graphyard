@@ -79,9 +79,16 @@ async function claimed() {
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   return engine.execute(worker, 'claim', work.id, {}, randomUUID());
 }
-/** Advice that names no choice, for the parks whose recommendation a test does not read (GY-1410). */
-const advice = ['--recommend', 'The smallest plan that does it', '--why', 'It costs least and can be cancelled after the proofs.'];
-const advised = (args: string[]) => args.includes('--recommend') ? args : [...args.slice(0, args.indexOf('--')), ...advice.slice(0, args.includes('--why') ? 2 : 4), ...args.slice(args.indexOf('--'))];
+/**
+ * Advice for the parks whose recommendation a test does not read (GY-1410): a request with buttons
+ * names its first one by label; a value request advises in its own words.
+ */
+const advise = (args: string[]) => {
+  const choice = args.indexOf('--choice');
+  const recommend = choice >= 0 ? args[choice + 1] : args[0] === 'goals-and-priorities' ? 'Go ahead as asked' : 'The smallest plan that does it';
+  return ['--recommend', recommend, '--why', 'It costs least and can be cancelled after the proofs.'];
+};
+const advised = (args: string[]) => args.includes('--recommend') ? args : [...args.slice(0, args.indexOf('--')), ...advise(args).slice(0, args.includes('--why') ? 2 : 4), ...args.slice(args.indexOf('--'))];
 /** The worker's own `park` command, run under its own credential on a host whose Graphyard home is `sealHome`. */
 async function park(work: Work, args: string[]) {
   const previous = process.env.GRAPHYARD_CONFIG_HOME; process.env.GRAPHYARD_CONFIG_HOME = sealHome;
@@ -342,6 +349,12 @@ test('unit:human-request-recommendation-required — every park carries a recomm
     assert.equal(refused.status, 422, JSON.stringify(refused.body));
     assert.match(JSON.stringify(refused.body), new RegExp(`field ${field}`), 'the refusal names the missing field');
   }
+  // A request with buttons names one by its label, so the card can preselect it; the refusal lists the labels to copy.
+  await assert.rejects(run(['goals-and-priorities', 'Ship', 'the', 'beta', ...ask, '--recommend', 'Ship it next week', '--why', 'It is ready.', '--', 'Priorities']), /field recommendation\) to name one by its label: "Go ahead as asked", "Go ahead differently…", "Decline"/);
+  await assert.rejects(run(['money-or-accounts', 'A', 'plan', ...ask, '--choice', 'Approve up to €20/month', '--choice', 'Approve up to €50/month', '--recommend', 'the bigger plan', '--why', 'It runs the proofs.', '--', 'Staging']), /"Approve up to €20\/month", "Approve up to €50\/month", "Decline"/);
+  const unnamed = await call(token(worker), `work/${bare.id}/park`, { epoch: 1, kind: 'goals-and-priorities', needed: 'Ship the beta', reason: 'Priorities', ask: 'Decide whether to ship the beta', recommendation: 'Ship it next week', why: 'It is ready.' });
+  assert.equal(unnamed.status, 422, JSON.stringify(unnamed.body)); assert.match(JSON.stringify(unnamed.body), /name one by its label/);
+  assert.deepEqual(recommendationIssues({ kind: 'money-or-accounts', recommendation: 'A project with a €20 monthly spending cap', why: 'It is cheapest.' }), [], 'every default money choice asks for words: a value request advises in its own words');
   const kept = await reload(bare.id);
   assert.equal(kept.humanRequest ?? null, null); assert.equal(kept.lease?.epoch, 1, 'a refused park ends nothing');
 

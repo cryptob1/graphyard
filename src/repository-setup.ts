@@ -109,9 +109,10 @@ merge gate decide progression. Report blockers explicitly.
 Park a decision only a human may make with \`park GY-N EPOCH KIND NEEDED... --ask ASK
 [--step STEP]... --recommend TEXT --why WHY -- REASON\`. Write ASK, STEP, TEXT and WHY for a
 non-technical reader: ASK is one sentence naming the action they take, each STEP one plain
-instruction, TEXT the choice you recommend or the safest way to get a value asked for (such as
-a token scoped to one repository, short-lived, with only the permissions needed), WHY one
-plain sentence of why. Put branches, commit shas, file paths and resume commands only in
+instruction, TEXT the choice you recommend (its exact label when the request offers
+buttons) or the safest way to get a value asked for (such as a token scoped to one
+repository, short-lived, with only the permissions needed), WHY one plain sentence of why.
+Put branches, commit shas, file paths and resume commands only in
 NEEDED and REASON, the detail for the next agent.
 Never use an operator/producer token for implementation or weaken proof requirements.
 Herdr runs sessions; Graphyard remains the source of ownership truth.
