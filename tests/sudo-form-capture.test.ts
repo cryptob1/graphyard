@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,7 +30,9 @@ const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url))
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
 const UPDATE = 'https://github.com/settings/installations/91011/permissions/update';
-const TOKEN = 'AUTHTOKEN-s3ss10n-b0und-9f8e7d', TIMESTAMP_SECRET = 'TSSECRET-4a5b6c7d8e9f', TIMESTAMP = '1791380000000', PREFILLED = 'PREFILLED-operator-typed', NONCE = 'NONCE-v2-ab12cd34';
+// Fake session-bound values, generated at runtime so no key-like literal is committed (gitleaks).
+const fake = (label: string) => `${label}-${randomUUID()}`;
+const TOKEN = fake('AUTHTOKEN'), TIMESTAMP_SECRET = fake('TSSECRET'), TIMESTAMP = String(Date.now()), PREFILLED = fake('PREFILLED'), NONCE = fake('NONCE');
 const SECRETS = [TOKEN, TIMESTAMP_SECRET, TIMESTAMP, PREFILLED, NONCE];
 const LANDING_TEXT = 'Confirm access\n\nPasskey\nWhen you are ready, authenticate using the button below.\nUse passkey\nHaving problems?\nUse GitHub Mobile\nUse your authenticator app\nSend a code via email';
 const form = (inner: string) => `<form action="/sessions/sudo" accept-charset="UTF-8" method="post"><input type="hidden" name="authenticity_token" value="${TOKEN}" autocomplete="off" />` +
