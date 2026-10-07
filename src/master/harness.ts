@@ -153,7 +153,8 @@ export const docsSyncPushTarget = (branch: string) => `origin HEAD:refs/heads/${
  * Denies every `git push` but the docs-sync session's own one, in each spelling a rule can name. A
  * permission glob cannot say "this ref and no other", and the session runs under bypassPermissions,
  * where an unmatched command runs; so the push is fenced by where its text departs from the own
- * command: a character the own command never contains, anywhere; a different character at any
+ * command: a character the own command never contains, anywhere (`*` excepted: a rule cannot name
+ * it, and Git refuses a refspec whose destination alone is a pattern); a different character at any
  * position; text after the own refspec; a strict prefix (a shorter branch name); a flag or a push
  * behind git's global options. A `:` followed by `*` would read as Claude Code's prefix marker
  * (claudeRuleProblem), so a departure to `:` is spelled out one character further.
@@ -166,8 +167,9 @@ export function docsSyncPushDenials(branch: string): HarnessRule[] {
   const add = (body: string, reason = why) => { const rule = `Bash(git push${body ? ` ${body}` : ''})`; if (!claudeRuleProblem(rule) && !rules.has(rule)) rules.set(rule, { rule, why: reason }); };
   add('', 'A bare push reaches the upstream or every matching branch.');
   rules.set('Bash(git -* push*)', { rule: 'Bash(git -* push*)', why: `${why} Never behind git's global options.` });
-  // A character the own command never contains, anywhere.
-  for (const character of new Set([...emptySourceStarts, ...'+=,%^#!?[]}'])) if (!used.has(character)) add(`*${character}*`, `${why} The own push never contains ${JSON.stringify(character)}.`);
+  // A character the own command never contains, anywhere. A backslash is among them: bash drops
+  // the escape, so `refs/heads/\main` would otherwise reach the base ref through a text no rule names.
+  for (const character of new Set([...emptySourceStarts, ...'+=,%^#!?[]}\\<>()\t'])) if (!used.has(character)) add(`*${character}*`, `${why} The own push never contains ${JSON.stringify(character)}.`);
   // A colon followed by anything but what follows the own one (a rule may not put `*` right after `:`).
   for (const character of used) if (character !== afterColon && character !== ':' && character !== ' ') add(`*:${character}*`);
   add('*:'); add('*: *');

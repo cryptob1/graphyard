@@ -42,6 +42,10 @@ test('unit:docs-sync-harness-allows-own-branch-push — the docs-sync role allow
     'git push origin HEAD:refs/tags/v1', 'git push origin --tags', `git push upstream HEAD:refs/heads/${plan.branch}`, `git push origin HEAD~1:refs/heads/${plan.branch}`,
     `git push origin ${plan.branch}`, `git push origin :refs/heads/${plan.branch}`, `git push origin --delete ${plan.branch}`, 'git push origin HEAD:refs/heads/Graphyard/gy-1433-1',
     `git -C /w push origin HEAD:refs/heads/${plan.branch}`, `git push -u origin HEAD:refs/heads/${plan.branch}`,
+    // Bash drops a backslash escape, so these reach another item's branch or the base ref.
+    `git push origin HEAD:refs/heads/${plan.branch.slice(0, -1)}\\2`, 'git push origin HEAD:refs/heads/\\main', `git push origin HEAD:refs/heads/${plan.branch}\\2`,
+    `git push origin HEAD:refs/heads/${plan.branch}>out`, `git push origin HEAD:refs/heads/${plan.branch}<in`, 'git push origin HEAD:refs/heads/(main)',
+    `git push\torigin HEAD:refs/heads/${plan.branch.slice(0, -1)}2`,
   ]) assert.equal(decide(command), 'deny', `${command} is denied`);
   for (const command of [`${cli} claim GY-1433`, `${cli} complete GY-1433 1 909`, `${cli} evidence GY-1433 --proof unit:x`, 'gh pr review 909 --approve',
     'gh api --method POST repos/owner/project/pulls/909/reviews', 'gh pr merge 909', 'git rebase main'])
