@@ -45,7 +45,8 @@ export function revisionRace(decision: Pick<CloseHistoryRow, 'input' | 'outcome'
  * an obsolete one on the item alone: a review settled, a bot round authorized or an observation
  * refreshed moves the revision without touching either. The item must still be open, and the
  * item it names must be another one the graph holds that was not itself closed (a closed answer
- * answers nothing). A commit named as the superseding change is taken as it stands.
+ * answers nothing); a superseding item must be delivered, as the server's closureRefRefusal
+ * requires. A commit named as the superseding change is taken as it stands.
  */
 export function closeGrounds(item: Item, input: { kind?: string; ref?: string | null } | undefined, work: readonly Item[]): string | null {
   if (item.stage === 'done') return `${item.key} is no longer open`;
@@ -55,6 +56,8 @@ export function closeGrounds(item: Item, input: { kind?: string; ref?: string | 
   const named = work.find(entry => entry.key === ref);
   if (!named) return `${ref}, which the closure names, is not an item the graph holds`;
   if (named.stage === 'done' && named.closure) return `${ref}, which the closure names, was itself closed (${named.closure!.kind}${named.closure!.ref ? ` of ${named.closure!.ref}` : ''})`;
+  // The server refuses a superseded closure whose item is not delivered (closureRefRefusal); requesting it again would only be refused.
+  if (input?.kind === 'superseded' && named.stage !== 'done') return `${ref} is not delivered, so it has not superseded ${item.key}`;
   return null;
 }
 

@@ -252,18 +252,22 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
     // decisions step (4c) reads it, after this step; the item's own history, read afresh only for an
     // item a profile is about to take, holds it here, so its claim does not move the revision under the close.
     const close = await closeStanding(effects, item, snapshot.work, closing);
-    if (close) {
-      const waitKey = `wait:closing:${item.id}`, detail = `${item.key}: close decision ${close} stands unapplied, so the loop takes no dispatch decision on it while it is being closed`;
-      if (detailChanged(state.actions[waitKey], detail)) performed.push(await record(state, waitKey, { kind: 'decision', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[waitKey]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-      return;
-    }
+    if (close) { performed.push(...await closingWait(item, close)); return; }
     taken.add(choice.profile.name);
     const holds = [choice.profile.name];
     // Captured at decision time: the launch runs on the launcher after this cycle may have ended,
     // and the record it writes must name the contention this ordering acted on (GY-882).
     const beside = hotBeside(item, hot);
-    cycle.launch('dispatch', item, key, holds, sink => launch(item, key, choice!, free, pick, holds, sink, beside));
+    // A launch that waits in the launcher's queue claims later than this read, so it reads the history again when it runs.
+    const queued = cycle.launcher.pending >= Math.max(1, cycle.launcher.concurrency);
+    cycle.launch('dispatch', item, key, holds, sink => launch(item, key, choice!, free, pick, holds, sink, beside, queued));
   }) === 'stop') break; });
+
+  /** The one wait an item a close stands unapplied on records instead of a dispatch (GY-1439). */
+  async function closingWait(item: Work, close: string): Promise<DaemonAction[]> {
+    const waitKey = `wait:closing:${item.id}`, detail = `${item.key}: close decision ${close} stands unapplied, so the loop takes no dispatch decision on it while it is being closed`;
+    return detailChanged(state.actions[waitKey], detail) ? [await record(state, waitKey, { kind: 'decision', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[waitKey]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist)] : [];
+  }
 
   /**
    * GY-1078: the item's dispatches failed `dispatchFailureBlockAfter` times in a row for one cause.
@@ -298,9 +302,12 @@ export async function dispatchStep(cycle: Cycle, health: ReturnType<typeof profi
    * for the next free one. It runs on the launcher, after the cycle that chose it may have ended, so
    * what it records goes to `performed` — the launcher's sink the next cycle reports.
    */
-  async function launch(item: Work, key: string, chosen: NonNullable<ReturnType<typeof health.find>>, free: Awaited<ReturnType<typeof effects.agents>>, pick: () => ReturnType<typeof health.find>, holds: string[], performed: DaemonAction[], beside: { file: string; beside: string[] } | null) {
+  async function launch(item: Work, key: string, chosen: NonNullable<ReturnType<typeof health.find>>, free: Awaited<ReturnType<typeof effects.agents>>, pick: () => ReturnType<typeof health.find>, holds: string[], performed: DaemonAction[], beside: { file: string; beside: string[] } | null, queued = false) {
     let choice = chosen;
     const previous = state.actions[key];
+    // GY-1439: a close requested while this launch waited in the queue holds it before it claims and moves the revision.
+    const close = queued ? await closeStanding(effects, item, snapshot.work, new Map()) : null;
+    if (close) { taken.delete(chosen.profile.name); performed.push(...await closingWait(item, close)); return; }
     for (;;) {
       const current = choice;
       taken.add(current.profile.name);

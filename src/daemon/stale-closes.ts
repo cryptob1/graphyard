@@ -61,16 +61,14 @@ export async function closeStanding(effects: Pick<DaemonEffects, 'decisions'>, i
 }
 
 /**
- * The history reads of a step that runs before the decisions step (the review cap): the history the
- * loop keeps across cycles (GY-1142) when it holds one, else one read, kept for the decisions step
- * and the cycles after. A kept history goes when the ledger names its item, so a close asked since
- * is seen by the next cycle, and a step that looks every cycle reads nothing while nothing moves.
+ * The history reads of a step that runs before the decisions step (the review cap): always one fresh
+ * read, since the kept histories (GY-1142) are checked against the ledger only in step 4c and a close
+ * asked by hand since the last cycle is in none of them yet. The read replaces the kept history, so
+ * the decisions step and the cycles after reuse it. A caller reads only when it is about to act.
  */
-export function heldReads(cycle: Pick<Cycle, 'effects' | 'heldDecisions'>): Pick<DaemonEffects, 'decisions'> {
+export function freshReads(cycle: Pick<Cycle, 'effects' | 'heldDecisions'>): Pick<DaemonEffects, 'decisions'> {
   const { effects, heldDecisions } = cycle, read = effects.decisions;
   return { decisions: read && (async (item: Work) => {
-    const kept = heldDecisions.histories.get(item.id);
-    if (kept) return { decisions: structuredClone(kept) };
     const fresh = await read(item);
     heldDecisions.histories.set(item.id, structuredClone(fresh.decisions));
     return fresh;
