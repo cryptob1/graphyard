@@ -1,7 +1,7 @@
 <!-- page: Agent protocol | 6 | the `pipeline` field. -->
 # Pipeline timeline
 
-Lifecycle commands append to each item's `pipeline`; it never moves a gate.
+Lifecycle commands append to each item's `pipeline`; it never moves gate.
 
 ```json
 {"attempts":[{"epoch":1,"owner":"graphyard-claude-2","claimedAt":"…","endedAt":"…","end":"submitted"}],

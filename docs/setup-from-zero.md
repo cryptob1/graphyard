@@ -17,7 +17,7 @@ herdr --version
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true
 ```
 
-**Verify:** `gh repo view OWNER/REPO --json viewerPermission -q .viewerPermission` prints `ADMIN`. **HUMAN:** `gh auth login` as admin; a failing `bwrap` needs user namespaces allowed.
+**Verify:** `gh repo view OWNER/REPO --json viewerPermission -q .viewerPermission` prints `ADMIN`. **HUMAN:** `gh auth login` as admin; failing `bwrap` needs user namespaces allowed.
 
 ## 2. Graphyard and the repository
 
@@ -28,7 +28,7 @@ gy() { node "$GRAPHYARD_CLI" "$@"; }
 cd /path/to/REPO && gy init --scan
 ```
 
-A repository (even fresh from `git init`) needs `origin` on GitHub with its default branch, tests, and a `pull_request` workflow whose job is the required check; `node:test` is detected as `junit-xml-v1` (`--test-reporter=junit`). **Verify:** readiness `repository`, `required-checks`, `test-formats` are `ready`.
+A repository (even fresh from `git init`) needs `origin` on GitHub with its default branch, tests, and `pull_request` workflow whose job is the required check; `node:test` is detected as `junit-xml-v1` (`--test-reporter=junit`). **Verify:** readiness `repository`, `required-checks`, `test-formats` are `ready`.
 
 ## 3. Install the control plane
 
@@ -37,7 +37,7 @@ gy install --provider compose --repo OWNER/REPO --reviewer claude --plan
 gy install --provider compose --repo OWNER/REPO --reviewer claude --apply
 ```
 
-Providers differ only in `--provider` ([install](install.md)). **HUMAN:** approve the plan. **Verify:** `preflight[].ok`, `secretsRedacted` `true`; `curl -s http://127.0.0.1:4310/healthz` is `{"ok":true,…}`. `--apply` connects as a worker; use the human's operator credential:
+Providers differ only in `--provider` ([install](install.md)). **HUMAN:** approve the plan. **Verify:** `preflight[].ok`, `secretsRedacted` `true`; `curl -s http://127.0.0.1:4310/healthz` is `{"ok":true,…}`. `--apply` connects as worker; use human's operator credential:
 
 ```sh
 export GRAPHYARD_URL=http://127.0.0.1:4310
@@ -52,7 +52,7 @@ export GRAPHYARD_TOKEN_FILE=~/.config/graphyard/OWNER-REPO/tokens/OWNER-REPO-ope
 
 ## 5. Reviewer and revert-approver Apps
 
-`--reviewer NAME` registers the reviewer App every review needs (**HUMAN:** confirm) and makes it the main guard's revert approver (`GRAPHYARD_REVERT_APPROVER_*`; each `--apply` resets hand-set values); on compose the key mounts as a file (`_PRIVATE_KEY_FILE`; `server.env` takes no multi-line PEM). **Verify:** `reviewer-app`; readiness `revert-approver` `ready`. Otherwise `gy master reviewer setup` (HTTPS or loopback origin, checked before the page opens) plus the [variables](deployment.md#variables).
+`--reviewer NAME` registers the reviewer App every review needs (**HUMAN:** confirm) and makes it the main guard's revert approver (`GRAPHYARD_REVERT_APPROVER_*`; each `--apply` resets hand-set values); on compose key mounts as file (`_PRIVATE_KEY_FILE`; `server.env` takes no multi-line PEM). **Verify:** `reviewer-app`; readiness `revert-approver` `ready`. Otherwise `gy master reviewer setup` (HTTPS or loopback origin, checked before the page opens) plus the [variables](deployment.md#variables).
 
 ## 6. Onboard the checkout
 
@@ -99,4 +99,4 @@ ID: `herdr workspace list`; **HUMAN:** `--browser-profile` is a Chrome profile s
 
 ## 12. First item end to end
 
-Write an item like [work.json](../examples/work.json) (`"policy":{"checks":["test"],"review":true}`), then `master create FILE`. Local producers prove `unit:*` on compose (CI cannot reach loopback); hosted installs use [CI proofs](github.md#proofs-in-ci). **Verify:** `gy status GY-1` is `done`; `gh pr view N --json state` is `MERGED`; doctor shows `production.serving` at or past the merge, `production.aheadBy` `0`, `production.incidents` `[]` ([observation](deployment.md#production-deployment-observation)); without a deploy job `production.latest` is `null`.
+Write an item like [work.json](../examples/work.json) (`"policy":{"checks":["test"],"review":true}`), then `master create FILE`. Local producers prove `unit:*` on compose (CI cannot reach loopback); hosted installs use [CI proofs](github.md#proofs-in-ci). **Verify:** `gy status GY-1` is `done`; `gh pr view N --json state` is `MERGED`; doctor shows `production.serving` at or past merge, `production.aheadBy` `0`, `production.incidents` `[]` ([observation](deployment.md#production-deployment-observation)); without a deploy job `production.latest` is `null`.

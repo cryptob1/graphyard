@@ -17,7 +17,7 @@ Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, workflows ([candidates](deli
 
 ### Documentation policy
 
-`init --scan --apply` records found `docs/`, `site/`, `README*`, `CHANGELOG*` as `{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`; deploy the printed `GRAPHYARD_DOCUMENTATION` (differing: `doctor`'s `documentation.drift`). Features and `bug`s owe *Documentation reflects this change* (docs diff or `complete --no-docs "WHY"`); optional `"wordBudget":{"total":N,"perPage":N}` ([counted](development.md#documentation)).
+`init --scan --apply` records found `docs/`, `site/`, `README*`, `CHANGELOG*` as `{"documentation":{"paths":["site/"],"changelog":"CHANGELOG.md"}}`; deploy printed `GRAPHYARD_DOCUMENTATION` (differing: `doctor`'s `documentation.drift`). Features and `bug`s owe *Documentation reflects this change* (docs diff or `complete --no-docs "WHY"`); optional `"wordBudget":{"total":N,"perPage":N}` ([counted](development.md#documentation)).
 
 ### What the generated instructions authorize
 
@@ -33,7 +33,7 @@ Settings › **Agents** › **Connect an account** (key or login) writes and smo
 
 ### Configure the fleet
 
-Propose the **Agent registry** (Settings › **Agents**) from login homes:
+Propose **Agent registry** (Settings › **Agents**) from login homes:
 
 ```sh
 node "$GRAPHYARD_CLI" master registry propose
@@ -80,15 +80,15 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W / 2⌉` review 
 
 ### The loop must be supervised
 
-`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now`, `loginctl enable-linger` (restart on crash, reboot, hang); never a side effect (worker checkouts, temp directories refused). Move: `master init --token-stdin --replace-supervisor` from the new checkout. `master status` shows `setup.supervisor`.
+`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master.service`, runs `systemctl --user enable --now`, `loginctl enable-linger` (restart on crash, reboot, hang); never a side effect (worker checkouts, temp directories refused). Move: `master init --token-stdin --replace-supervisor` from new checkout. `master status` shows `setup.supervisor`.
 
 ### The pipeline doctor (on by default)
 
-Every `run.doctor.intervalMinutes` (10) a Pi **doctor** session fixes stuck, overdue work via `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release` (never merging, dispatching or evidencing); posts per-item findings and a summary (`master status` `doctor`); escalates the rest or files fault items, deduplicated against open items at settle (proof IDs normalised; create-refused filings escalate; control-plane refusals retry). Reportless (models died, loop stopped) or restart-lost runs are recorded failed, posted, no `loop` fault; next run re-covers. The loop itself settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (10) a Pi **doctor** session fixes stuck, overdue work via `master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release` (never merging, dispatching or evidencing); posts per-item findings and summary (`master status` `doctor`); escalates the rest or files fault items, deduplicated against open items at settle (proof IDs normalised; create-refused filings escalate; control-plane refusals retry). Reportless (models died, loop stopped) or restart-lost runs are recorded failed, posted, no `loop` fault; next run re-covers. The loop itself settles submitted lapsed fences, clears covered blockers, relaunches unanswered approvers. Off: `run.doctor.enabled=false`.
 
 ## 4. Prove the first PR
 
-`graphyard doctor --profile through-merge` names gaps; `master run` dispatches a small item, merged once protection requires `Graphyard / merge`; `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
+`graphyard doctor --profile through-merge` names gaps; `master run` dispatches small item, merged once protection requires `Graphyard / merge`; `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
 CI workflows should cancel superseded pull-request runs: group `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}`, `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled; `graphyard master protection` lists each required check whose workflow lacks cancel-in-progress under `advisories`.
 

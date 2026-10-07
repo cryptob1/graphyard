@@ -3,16 +3,16 @@
 
 ## Daily checklist
 
-- `/healthz` healthy at the expected `commit`; `/api/status` without job errors, `delegationLimits.attention` or `production.incidents`.
-- `graphyard master status`: `daemon.liveness` `running`, attention owned; a recent verified `graphyard db backup`.
+- `/healthz` healthy at expected `commit`; `/api/status` without job errors, `delegationLimits.attention` or `production.incidents`.
+- `graphyard master status`: `daemon.liveness` `running`, attention owned; recent verified `graphyard db backup`.
 
 ## Incident decision tree
 
-- **Item not moving**: fix the refusal's cause. Never weaken requirements.
+- **Item not moving**: fix refusal's cause. Never weaken requirements.
   - Escalation: a declared human session runs `graphyard resolve GY-N TRIGGER "reason"`; explained `lease-loss` needs only `admin --attestation` ([who](delegation.md#who-may-settle-what)).
   - Expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission); another attempt: [rework](operations-reference.md#submitted-implementation-needs-rework); fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
   - Moving waits fault late: owed `request-rework` head (`owed-decision`) 30min (`reworkDecisionWaitBoundMs`); lapsed containment fence 10min past grace (`containmentSettleWaitBoundMs`), never one the loop settled that cycle, an owed line restating it counting as it; unanswered decision with watch launches left 15min after its latest approver launch (`approverRelaunchWaitBoundMs`); unwatched one, owed non-containment escalation (carried too) 30min after request (`masterTurnWaitBoundMs`); stale non-release decision 30min after staling; refusal 30min after, unless re-asked, once (`decision-refused`).
-  - Plane-wide failures (502–504, startup 503, refused, timeout) retry: no `loop`/`session-liveness` fault or pre-launch lease loss; dispatch ticks read `plane-unavailable`, outside `dispatch-failures` and the dispatch blocker. Faults and deployment steps fit a fifth of the interval: reads stop waiting (`faults:deferred`, `deployment:deferred`), the rest carries (`faults:carried`); `loop-cost` names the slowest step's share.
+  - Plane-wide failures (502–504, startup 503, refused, timeout) retry: no `loop`/`session-liveness` fault or pre-launch lease loss; dispatch ticks read `plane-unavailable`, outside `dispatch-failures` and the dispatch blocker. Faults and deployment steps fit a fifth of the interval: reads stop waiting (`faults:deferred`, `deployment:deferred`), rest carries (`faults:carried`); `loop-cost` names the slowest step's share.
   - A failed manual proof a producer may run returns to a worker, never to an operator escalation; one no producer may run needs an operator witness, an unexecuted one an attestation.
 - **Merge refused**: wait or repair; never bypass. Auto-merge `BLOCKED` 10min with gates passing retries head-bound; after 30min one `merge-blocked` item names GitHub's answer. **Merged outside Graphyard**: [bypass](operations-reference.md#merge-bypass). **Wrong accepted evidence**: [revoke](operations-reference.md#accepted-evidence-turns-out-to-be-wrong). **GitHub paused or webhook silent**: [budget](operations-reference.md#github-request-budget). **Smoke proof failed**: [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
 - **Main ahead of production**: [deployment incident](deployment.md#production-deployment-observation). An up-to-date release starts without taking coordination locks; a migrating release fails fast within the health check: it touches only the tables whose DDL changed since it recorded a digest per table (unchanged tables are skipped without any lock) and retries a deadlock or expired lock wait with backoff inside one 30-second lock budget; each attempt waits at most 3 seconds for a lock, so live writes never queue behind it longer.
@@ -32,7 +32,7 @@ Never attest a stop you have not confirmed; merged work changes only via follow-
 
 ## Worker host keyring proxy
 
-Confined masters, approvers and proof producers read their GitHub login (`gh auth git-credential`) via a keyring-only D-Bus proxy; workers, reviewers use their own. Per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service`, `graphyard-secrets-bus-filter.service` to `~/.config/systemd/user/`, disable an earlier-enabled `graphyard-secrets-bus.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-secrets-bus.socket`. It listens at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` (or `GRAPHYARD_SECRETS_BUS`); absent, the bus is masked and sessions push with `GH_TOKEN`. It cannot filter keyring items: keep other secrets out, or use `GH_TOKEN`.
+Confined masters, approvers and proof producers read their GitHub login (`gh auth git-credential`) via keyring-only D-Bus proxy; workers, reviewers use their own. Per host: copy `deploy/systemd/graphyard-secrets-bus.socket`, `graphyard-secrets-bus.service`, `graphyard-secrets-bus-filter.service` to `~/.config/systemd/user/`, disable earlier-enabled `graphyard-secrets-bus.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-secrets-bus.socket`. It listens at `$XDG_RUNTIME_DIR/graphyard-secrets-bus` (or `GRAPHYARD_SECRETS_BUS`); absent, bus is masked and sessions push with `GH_TOKEN`. It cannot filter keyring items: keep other secrets out, or use `GH_TOKEN`.
 
 ## Safety facts that never change
 

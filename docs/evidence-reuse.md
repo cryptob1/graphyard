@@ -1,7 +1,7 @@
 <!-- page: Build integrations | 6 | E2E passes. -->
 # Evidence reuse and replay
 
-Under an operator `reuse` policy (`graphyard validation define`) the newest compatible E2E pass covers new heads:
+Under an operator `reuse` policy (`graphyard validation define`) newest compatible E2E pass covers new heads:
 
 ```json
 {"kind":"reuse","id":"preview-reuse","expectedRevision":0,"environment":{"id":"preview","revision":1},"enabled":true,"freshnessSeconds":86400,"artifacts":"identical","relevant":{"dependencies":["package.json","**/package.json"],"lockfiles":["package-lock.json","**/yarn.lock"],"buildInputs":["Dockerfile","tsconfig.json",".github/workflows/**"],"configuration":["config/**",".env.example","compose.yaml"],"migrations":["migrations/**"],"services":{"api":["src/**"]}},"ignorable":["docs/**","*.md"]}

@@ -14,7 +14,7 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions, each sta
 
 ## Risk lanes
 
-`src/model/policy.ts` sets a **risk lane** (`low`, `medium`, `high`) by paths.
+`src/model/policy.ts` sets **risk lane** (`low`, `medium`, `high`) by paths.
 
 - **High** (4 h): `migrations/schema`, `auth/credentials`, `src/store/`, authentication, principals, public API and its assembler, credential bootstrap (`src/server/`), operator agent, proof grants, `src/install/`, `deploy/`, Dockerfile, `compose.yaml`, unobserved changes. Producer proofs, `manual:` attestations, two-party rework.
 - **Medium** (60 min): remainder; adds producer-run `unit:`/`integration:`.
@@ -38,4 +38,4 @@ Text equivalent: operator makes human-only decisions; Herdr hosts master (`coord
 
 Text equivalent: API callers' mutations apply with events in locked Postgres transactions; reconciliation syncs GitHub, which merges passing heads; webhooks wake jobs.
 
-Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`; claims bump the epoch; latest trusted proof wins; merge is not [delivery](delivery.md).
+Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`; claims bump epoch; latest trusted proof wins; merge is not [delivery](delivery.md).

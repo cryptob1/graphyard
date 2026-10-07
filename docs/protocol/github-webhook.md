@@ -7,13 +7,13 @@
 
 ## Reads that are not repeated
 
-Commits and exact-SHA compares cache once (`github_cache`); a SHA pair's questions (ancestry, commits, landing diff, changed files) read one first page (`?per_page=100&page=1`): a base move costs each open candidate one compare. Base ref: once per 15 s per replica; protection, rulesets: every 5 min or on events. `pull_request`, `pull_request_review`, `check_run`, `check_suite`, `push` webhooks claim items first; polls they cover skip (`poll skipped: a webhook refreshed this item`). A base push wakes only open items overlapping its files or whose last `mergeable_state` was not `CLEAN`/`UNSTABLE` (all, if the payload names no files; `unit:merge-burst-request-budget`).
+Commits and exact-SHA compares cache once (`github_cache`); a SHA pair's questions (ancestry, commits, landing diff, changed files) read one first page (`?per_page=100&page=1`): base move costs each open candidate one compare. Base ref: once per 15 s per replica; protection, rulesets: every 5 min or on events. `pull_request`, `pull_request_review`, `check_run`, `check_suite`, `push` webhooks claim items first; polls they cover skip (`poll skipped: a webhook refreshed this item`). A base push wakes only open items overlapping its files or whose last `mergeable_state` was not `CLEAN`/`UNSTABLE` (all, if payload names no files; `unit:merge-burst-request-budget`).
 
 ## Prioritized wakes
 
-`POST /api/work/:id/resync` with `prioritized: true` is claimed like a webhook wake; loop wakes add `wait: false`, answering without a reconcile tick. A rework decision on a stale observation sends one and decides from what it brings (any age; candidate head; no GitHub pause); loop bookkeeping saved meanwhile (sessions, next action, gates, escalations) doesn't refuse it; decisions the candidate moved past are withdrawn. A rework dispatch refused with `Submitted PR branch changed` releases its claim with a prioritized wake, restarting from the new head.
+`POST /api/work/:id/resync` with `prioritized: true` is claimed like webhook wake; loop wakes add `wait: false`, answering without a reconcile tick. A rework decision on a stale observation sends one and decides from what it brings (any age; candidate head; no GitHub pause); loop bookkeeping saved meanwhile (sessions, next action, gates, escalations) doesn't refuse it; decisions the candidate moved past are withdrawn. A rework dispatch refused with `Submitted PR branch changed` releases its claim with a prioritized wake, restarting from new head.
 
-Decisions step budget: two fifths of `run.intervalSeconds`, ≥30 s; unreached items keep standing decisions, request nothing, show in `decisions:deferred` (superseded once a cycle reaches all). Both passes (rework; routine decisions, then attestations) resume next cycle with what they deferred, always reaching their first item even past budget.
+Decisions step budget: two fifths of `run.intervalSeconds`, ≥30 s; unreached items keep standing decisions, request nothing, show in `decisions:deferred` (superseded once cycle reaches all). Both passes (rework; routine decisions, then attestations) resume next cycle with what they deferred, always reaching their first item even past budget.
 
 ## Automatic dispatch records
 

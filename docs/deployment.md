@@ -17,7 +17,7 @@ One stateless container plus Postgres: `node "$GRAPHYARD_CLI" install --provider
 | `GRAPHYARD_MIN_REVIEWERS` | Reviewers with a lead (1)
 | `GRAPHYARD_MAX_REVIEWERS` | ≥ `producer` count (2)
 
-Installers derive the limits; an unset one is `delegationLimits` drift.
+Installers derive the limits; unset one is `delegationLimits` drift.
 
 ### CI producer
 
@@ -27,17 +27,17 @@ Installers derive the limits; an unset one is `delegationLimits` drift.
 {"id":"ci-proofs","role":"producer","runtime":"github-actions","proofs":["unit:*","integration:*"],"token":"…"}
 ```
 
-`GRAPHYARD_CI_PRODUCER_TOKEN` and `GRAPHYARD_URL` live in the default-branch-only `graphyard-reporting` environment; `scripts/configure-integrations.mjs --apply` merges `.graphyard/credentials.json` into the live roster (`--remove ID`, `--rotate ID`, `--deploy`).
+`GRAPHYARD_CI_PRODUCER_TOKEN` and `GRAPHYARD_URL` live in default-branch-only `graphyard-reporting` environment; `scripts/configure-integrations.mjs --apply` merges `.graphyard/credentials.json` into the live roster (`--remove ID`, `--rotate ID`, `--deploy`).
 
 ### Production deployment observation
 
-Unserved five minutes after a new `GRAPHYARD_BUILD_SHA`, a merge is a `delivery.deployment-incident`; until then, or while a provider attempt past the serving commit is in flight, `production` shows `aheadBy`, `rollingOut: true` and the "main is N commits ahead of production" attention waits. With `release/production` (`GRAPHYARD_PRODUCTION_BRANCH`) production is measured against it; an unpromoted merge is pipeline lag. Deployments: Railway's API (`RAILWAY_API_TOKEN`/`RAILWAY_TOKEN`), else App-read GitHub deployments to `production` (`GRAPHYARD_PRODUCTION_ENVIRONMENT`); in-flight holds the incident, failed names its log URL. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. The loop reuses its last verified observation (no GitHub reads) for `run.deploymentReuseMinutes` (15; `master config deploymentReuseMinutes=N`, `0` reads every cycle) while it serves every delivery, none pending; else reads live.
+Unserved five minutes after a new `GRAPHYARD_BUILD_SHA`, merge is a `delivery.deployment-incident`; until then, or while a provider attempt past the serving commit is in flight, `production` shows `aheadBy`, `rollingOut: true` and the "main is N commits ahead of production" attention waits. With `release/production` (`GRAPHYARD_PRODUCTION_BRANCH`) production is measured against it; unpromoted merge is pipeline lag. Deployments: Railway's API (`RAILWAY_API_TOKEN`/`RAILWAY_TOKEN`), else App-read GitHub deployments to `production` (`GRAPHYARD_PRODUCTION_ENVIRONMENT`); in-flight holds incident, failed names its log URL. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. The loop reuses its last verified observation (no GitHub reads) for `run.deploymentReuseMinutes` (15; `master config deploymentReuseMinutes=N`, `0` reads every cycle) while it serves every delivery, none pending; else reads live.
 
 The loop (coordinator credential) records GY-87's throughput claim once per verified served release in `.graphyard/measurements/throughput` (newest 30), waiting on failure backoff while another revision serves, reading only deliveries since that release; `master status` reports it verified or the shortfall (`scripts/measure-throughput.mjs --record` by hand).
 
 ## Backup, upgrade, rollback
 
-**Backup:** `graphyard db backup ./graphyard.json` (with `DATABASE_URL`), `graphyard db verify FILE`; `graphyard db fence` before a move (`--release` undoes). **Upgrade:** back up, deploy, check `/healthz` `commit`, run any [App-permission migration](install.md#upgrading-an-existing-installation); **rollback** only to a same-schema-generation image. **Restore:** `graphyard db migrate` an empty database, then `graphyard db restore FILE`.
+**Backup:** `graphyard db backup ./graphyard.json` (with `DATABASE_URL`), `graphyard db verify FILE`; `graphyard db fence` before move (`--release` undoes). **Upgrade:** back up, deploy, check `/healthz` `commit`, run any [App-permission migration](install.md#upgrading-an-existing-installation); **rollback** only to same-schema-generation image. **Restore:** `graphyard db migrate` an empty database, then `graphyard db restore FILE`.
 
 ## Manual fallback
 
@@ -46,4 +46,4 @@ Set the variables table by hand, then `node "$GRAPHYARD_CLI" github-setup https:
 - Compose: `cp .env.example .env`, replace secrets, `docker compose --profile full up -d`; TLS on 4310, Postgres private.
 - Kubernetes: `helm install graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials …`.
 - Railway: `railway init`, `railway add --database postgres`, set variables, `railway up`.
-- Railway revert approver: `node scripts/provision-railway.mjs` sets `GRAPHYARD_REVERT_APPROVER_*` (key via stdin, unprinted) from `.graphyard/revert-approver.json` (0600; `{"appId", "installationId", "privateKey"}` or `"privateKeyFile"`) or `--revert-approver-stdin`, refusing an armed guard without them; a full run also refuses `GRAPHYARD_PRINCIPALS` entries `credentials.json` lacks (named) or unreadable Railway variables; `--revert-approver-only` sets only those three on a running plane, from `~/.config/graphyard/reviewers/`. Then `railway redeploy --service graphyard -y`; `GRAPHYARD_URL=… node scripts/provision-railway.mjs --verify` exits 0 once the live guard names that App.
+- Railway revert approver: `node scripts/provision-railway.mjs` sets `GRAPHYARD_REVERT_APPROVER_*` (key via stdin, unprinted) from `.graphyard/revert-approver.json` (0600; `{"appId", "installationId", "privateKey"}` or `"privateKeyFile"`) or `--revert-approver-stdin`, refusing an armed guard without them; full run also refuses `GRAPHYARD_PRINCIPALS` entries `credentials.json` lacks (named) or unreadable Railway variables; `--revert-approver-only` sets only those three on running plane, from `~/.config/graphyard/reviewers/`. Then `railway redeploy --service graphyard -y`; `GRAPHYARD_URL=… node scripts/provision-railway.mjs --verify` exits 0 once live guard names that App.

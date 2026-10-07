@@ -8,12 +8,12 @@ Records which release each environment should run, verified only by service-scop
 Own deployment: main → candidate → uat → production; `.railway/railway.ts` deploys `release/uat`, `release/production`, moved only by `graphyard release` to a candidate's exact SHA.
 
 - `release cut [--trigger schedule|manual]` tags main's tip `rc/ID` with its items; merges never pause. `.github/workflows/release-candidate.yml` cuts on loop dispatch or best-effort two-hourly cron, running the [long suites](#pre-merge-gate-and-release-candidate-validation).
-- `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials); refused while UAT serves an unjudged candidate under four hours old; push leased on the observed tip.
+- `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials); refused while UAT serves unjudged candidate under four hours old; push leased on the observed tip.
 - `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits UAT's `/healthz` `commit`; runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser` (sign-in, Work view), suites (container, chart gate; soak, timing advisory; `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`.
 - `release promote ID` needs that (or [accepted flaky cases](validation.md#release-verdicts)), deploys production leased on the last promoted SHA, records `rc-production/ID`; `release verify --url URL` confirms.
 - Failed candidates file a [hold](validation.md#release-holds) per failed outcome, one follow-up otherwise (`release follow-up ID` retries); fix forward.
 
-**The master loop drives promotion**: dispatching the workflow (`promote=true`) when main differs from the last `rc-production/` SHA, no cut or scheduled run is queued or running, and `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 120, `0` off, empty resets) passed since the last dispatch (own, fired cron, or GitHub-listed). Fetches main, tags at most every max(5 min, 3 intervals); lists runs every max(1 min, interval). Failed `gh` attempts count (lacking `actions: write` retries next interval); failures: `promotion:failed`, backoff. `master status` `promotion`: `lastPromotedSha`, `behind` (first-parent merges production lacks), `nextDueAt`. `release status` lists candidates; `release GY-N EPOCH` gives up a lease. Needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, `GRAPHYARD_UAT_TOKEN`, `GRAPHYARD_RELEASE_TOKEN`.
+**The master loop drives promotion**: dispatching the workflow (`promote=true`) when main differs from the last `rc-production/` SHA, no cut or scheduled run is queued or running, and `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 120, `0` off, empty resets) passed since the last dispatch (own, fired cron, or GitHub-listed). Fetches main, tags at most every max(5 min, 3 intervals); lists runs every max(1 min, interval). Failed `gh` attempts count (lacking `actions: write` retries next interval); failures: `promotion:failed`, backoff. `master status` `promotion`: `lastPromotedSha`, `behind` (first-parent merges production lacks), `nextDueAt`. `release status` lists candidates; `release GY-N EPOCH` gives up lease. Needs `vars.UAT_URL`, `vars.PRODUCTION_URL`, `GRAPHYARD_UAT_TOKEN`, `GRAPHYARD_RELEASE_TOKEN`.
 
 ### Pre-merge gate and release-candidate validation
 
@@ -23,7 +23,7 @@ Required: `typecheck`, `test` (`.github/workflows/ci.yml`), under ten minutes; s
 
 Exact-head CI and review; GitHub's merge into main after build, review, required checks is the delivery (no authorization, execution, proof, queue or observation age intervenes; failing heads' merges are held violations); UAT validates [candidates](#release-candidates); promotion deploys validated ones.
 
-Every 30 s the main guard reverts a merge failing a required check its parent passed (`graphyard-revert/` PR), reopening the item naming check, commit. Last-push approval needs a non-App approver: the revert approver App (`GRAPHYARD_REVERT_APPROVER_APP_ID`/`_INSTALLATION_ID`/`_PRIVATE_KEY` or `_FILE`; reviewer App fits, control-plane App never) approves only a green exact inverse, once at head; head-bound merge, no human or review round. Missing approver (bypass merge refused): with the guard armed, `graphyard doctor` (`revert-approver`), setup attention and refusals name it. Refusals retry afresh; the third abandons (`approval-refused`). Non-inverse, conflicting, failing, hour-stalled reverts close after one attempt; abandoned ones' attention names the cause each cycle until main's check passes.
+Every 30 s the main guard reverts a merge failing a required check its parent passed (`graphyard-revert/` PR), reopening the item naming check, commit. Last-push approval needs non-App approver: the revert approver App (`GRAPHYARD_REVERT_APPROVER_APP_ID`/`_INSTALLATION_ID`/`_PRIVATE_KEY` or `_FILE`; reviewer App fits, control-plane App never) approves only green exact inverse, once at head; head-bound merge, no human or review round. Missing approver (bypass merge refused): with the guard armed, `graphyard doctor` (`revert-approver`), setup attention and refusals name it. Refusals retry afresh; third abandons (`approval-refused`). Non-inverse, conflicting, failing, hour-stalled reverts close after one attempt; abandoned ones' attention names the cause each cycle until main's check passes.
 
 ## Managed repositories
 
@@ -37,7 +37,7 @@ Every 30 s the main guard reverts a merge failing a required check its parent pa
 {"kind":"registration","id":"production-observer","expectedRevision":0,"principalId":"railway-observer","role":"observer","environment":{"id":"production","revision":1},"adapterVersion":"custom-v1","proofs":[],"enabled":true,"services":["api","web"]}
 ```
 
-`POST /api/delivery/build` attests the manifest:
+`POST /api/delivery/build` attests manifest:
 
 ```json
 {"registration":{"id":"production-builder","revision":1},"sourceSha":"0123456789abcdef0123456789abcdef01234567","buildInputsDigest":"sha256:5b8e0d3a7f21c94e6082d5b1a3f7c0e94d26b8a15f309c7e4b1d02a6f8395c7e","artifacts":[{"service":"api","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},{"service":"web","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"}],"provenanceUrl":"https://ci.example.test/builds/812"}
@@ -63,7 +63,7 @@ Observers `POST /api/delivery/observe`:
 {"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},"expectedGeneration":4,"snapshotId":"railway:snapshot:01J8Q4Z0Y3","observedAt":"2026-09-18T20:15:07Z","validFrom":"2026-09-18T20:12:31Z","validTo":"2026-09-18T20:15:07Z","services":[{"service":"api","complete":true,"deployment":{"id":"dep-a1","status":"success","deployedAt":"2026-09-18T20:12:31Z"},"instances":[{"instance":"api-1","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","measurement":"host-attestation","healthy":true}]},{"service":"web","complete":true,"deployment":{"id":"dep-w7","status":"success","deployedAt":"2026-09-18T20:12:40Z"},"instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
-Only complete listings verify; repeated `snapshotId`s return the original receipt; `POST /api/delivery/notify` only hints. Sweeps (`graphyard delivery sweep` forces) verify generations once services share an interval within `freshnessSeconds`, adding `releaseDeliveries` to items; `graphyard delivery` shows state.
+Only complete listings verify; repeated `snapshotId`s return the original receipt; `POST /api/delivery/notify` only hints. Sweeps (`graphyard delivery sweep` forces) verify generations once services share interval within `freshnessSeconds`, adding `releaseDeliveries` to items; `graphyard delivery` shows state.
 
 `master status` `delivery`: `readyToMerged`, `mergedToProduction`, `stages` (ready, implementation, build, review+rework, proof, merge, production; summing to ready→production) p50/p90 over `24h`/`7d`. A 7-day p90 over master.json `deliverySpeed` (2 h, 8 h) raises attention naming the slowest tenth's stage, or just slowest items lacking breakdowns (`statements` says why).
 

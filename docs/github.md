@@ -36,16 +36,16 @@ Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md
 
 ## Failed checks
 
-No merge queue (`master tip-cleanup --apply` deletes leftover `refs/graphyard/queue/*`). A failed required check reruns once on the unchanged head after its run completes (owed meanwhile); a second fails the test gate. A 403 quotes GitHub (or, no permission missing, the preflight's reading). Tests (`graphyard-failed-tests:`) the old base broke, fixed on the tip, refresh (`baseBreak`), not rework.
+No merge queue (`master tip-cleanup --apply` deletes leftover `refs/graphyard/queue/*`). A failed required check reruns once on the unchanged head after its run completes (owed meanwhile); second fails the test gate. A 403 quotes GitHub (or, no permission missing, the preflight's reading). Tests (`graphyard-failed-tests:`) old base broke, fixed on tip, refresh (`baseBreak`), not rework.
 
 ### Bindings and carry
 
-Reviews and proofs bind head, base, policy revision; a moved base carries all if the merge kept the patch-id, else the approval if no reviewed file changed, and disjoint-`scopeFiles` proofs. Carried approvals aren't re-posted; no merge requested.
+Reviews and proofs bind head, base, policy revision; a moved base carries all if merge kept patch-id, else the approval if no reviewed file changed, and disjoint-`scopeFiles` proofs. Carried approvals aren't re-posted; no merge requested.
 
 ### Proofs in CI
 
-Protected `pull_request_target` workflow per `graphyard/*` push: **plan** finds `unit:*`/`integration:*` proofs; **exercise** runs one secret-free job on the base-merged candidate; **publish** via `ciRun`-bound [CI producer](deployment.md#ci-producer). Dependencies, database image, candidate layers cached. Manual proofs stay producer sessions. `"deploySmoke": true` smoke-installs once the release serves the merge; failure: [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
+Protected `pull_request_target` workflow per `graphyard/*` push: **plan** finds `unit:*`/`integration:*` proofs; **exercise** runs one secret-free job on base-merged candidate; **publish** via `ciRun`-bound [CI producer](deployment.md#ci-producer). Dependencies, database image, candidate layers cached. Manual proofs stay producer sessions. `"deploySmoke": true` smoke-installs once the release serves the merge; failure: [delivered with failure](operations-reference.md#delivered-with-a-failed-smoke-proof).
 
 ## Identity-bound agent review
 
-`reviewProvider`: `codex` takes Codex's clean head result; `agent` a non-author reviewer App (`github-setup URL --reviewer claude`; `GRAPHYARD_REVIEWER_APPS`; `graphyard reviewpolicy GY-N agent REVISION "reason" --profiles` [FILE](../examples/reviewer-profiles.json)) approving via head-naming `graphyard-verdict` comments.
+`reviewProvider`: `codex` takes Codex's clean head result; `agent` non-author reviewer App (`github-setup URL --reviewer claude`; `GRAPHYARD_REVIEWER_APPS`; `graphyard reviewpolicy GY-N agent REVISION "reason" --profiles` [FILE](../examples/reviewer-profiles.json)) approving via head-naming `graphyard-verdict` comments.

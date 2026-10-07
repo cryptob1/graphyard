@@ -11,19 +11,19 @@
 
 ## Lost worker before submission
 
-Leases expire 120s after the last heartbeat (one more lease period after a recorded renewal fault); the next, higher-epoch claim keeps the worktree. Unexplained lapses raise [`lease-loss`](protocol/leases.md#how-a-lease-ends), blocking merge until [settled](delegation.md#who-may-settle-what).
+Leases expire 120s after the last heartbeat (one more lease period after recorded renewal fault); next, higher-epoch claim keeps the worktree. Unexplained lapses raise [`lease-loss`](protocol/leases.md#how-a-lease-ends), blocking merge until [settled](delegation.md#who-may-settle-what).
 
 ## Supervisor died leaving a containment quarantine
 
-On the worker, `graphyard master settle-containment GY-N "reason"` verifies nothing survives; refused: confirm the stop, then [`rework`, or `recover-containment` once delivered](operations.md#recovery-recipes) ([autosettle](protocol/leases.md#watch)).
+On worker, `graphyard master settle-containment GY-N "reason"` verifies nothing survives; refused: confirm stop, then [`rework`, or `recover-containment` once delivered](operations.md#recovery-recipes) ([autosettle](protocol/leases.md#watch)).
 
 ## Submitted implementation needs rework
 
-Stop the worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rounds by cause (55% own-change, 33% conflicts; raw median 2); `master status` `speed.reworkRounds.ownChange` excludes out-of-item causes.
+Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; the next worker resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rounds by cause (55% own-change, 33% conflicts; raw median 2); `master status` `speed.reworkRounds.ownChange` excludes out-of-item causes.
 
 ## Retro synthesis
 
-Each minute the scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables, and `master status` then flags crossed patterns as configuration faults) files an item per crossed pattern and drafts `retro.drafted` changes (wording, check, producer method, fault-catalogue entry) per recurring refusal or rework cause; a non-drafting operator agent [approves](protocol/work-commands.md) (`decision:approve`) or refuses each. Approved: [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse a failing `complete`.
+Each minute scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables, and `master status` then flags crossed patterns as configuration faults) files item per crossed pattern and drafts `retro.drafted` changes (wording, check, producer method, fault-catalogue entry) per recurring refusal or rework cause; non-drafting operator agent [approves](protocol/work-commands.md) (`decision:approve`) or refuses each. Approved: [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete`.
 
 ## Flaky CI check
 
@@ -52,7 +52,7 @@ Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
 
 ### The merge-path reserve
 
-Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observations await reset (`githubBudget.deferrals`); a token (`githubBudget.tokens`) projected below reserve at reset raises `github`.
+Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observations await reset (`githubBudget.deferrals`); token (`githubBudget.tokens`) projected below reserve at reset raises `github`.
 
 ### What an observation costs
 
@@ -72,11 +72,11 @@ A silent webhook hour: `master status` cites `https://github.com/settings/apps/A
 
 ## Control-plane resources
 
-`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes`, free `TMPDIR`/`/tmp`; `loaded-revision` counts code moves. No fault while a remedy acts: owed restart retried within bound, pane unowned <10min, the loop's own lag, `/tmp` >10% free after a pass within 30min.
+`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes`, free `TMPDIR`/`/tmp`; `loaded-revision` counts code moves. No fault while remedy acts: owed restart retried within bound, pane unowned <10min, the loop's own lag, `/tmp` >10% free after pass within 30min.
 
 Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`; managed root's `.verification-slots`); CI unbounded. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; item `memory` names top consumers; one `memory-pressure` fault per dip) until 1GB above.
 
-Merges awaiting a not-yet-due or validating [promotion](delivery.md) are normal lag: `releaseLag` and `loaded-revision` skip them, owing no restart. Sandboxed `systemctl --user` probes read could-not-verify given the cursor's unit.
+Merges awaiting a not-yet-due or validating [promotion](delivery.md) are normal lag: `releaseLag` and `loaded-revision` skip them, owing no restart. Sandboxed `systemctl --user` probes read could-not-verify given cursor's unit.
 
 ## Storage retention
 
@@ -84,15 +84,15 @@ Receipts answer retries a day; compaction deletes past `GRAPHYARD_LEDGER_RETENTI
 
 ## Bootstrap mode for a self-proving change
 
-A `policy:bootstrap` holder adds `"bootstrap":{"reason":"…","contractPaths":["src/herdr/recovery.ts"]}` to the criterion; other gates apply, `e2e:` proofs never defer, and the next item touching those paths owes it (`graphyard obligations`).
+A `policy:bootstrap` holder adds `"bootstrap":{"reason":"…","contractPaths":["src/herdr/recovery.ts"]}` to criterion; other gates apply, `e2e:` proofs never defer, and the next item touching those paths owes it (`graphyard obligations`).
 
 ## Delivered with a failed smoke proof
 
-Stays Done, **delivered with failure**; revert via a new item, never backfill.
+Stays Done, **delivered with failure**; revert via new item, never backfill.
 
 ## Merge bypass
 
-An ungated merge is a permanent violation: repair access, file a follow-up, never backfill. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
+An ungated merge is a permanent violation: repair access, file follow-up, never backfill. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Credentials
 
@@ -117,4 +117,4 @@ Only `admin` grants or revokes, to `producer` principals: exact name, `kind:*` o
 
 ### Concurrent reconciliation
 
-A 2s tick should end within 5s, else logs `reconciliation tick took N ms` (writes, longest lock wait). It opens briefly under the coordination lock (row versions, direct-merge sweep); batches evaluate ≤250ms lock-free, planning ≤8 writes, each one transaction: coordination lock (≤500ms wait, no row held), item row (`FOR NO KEY UPDATE`), commit; a moved read re-evaluates first; job wakes follow in work-id order. Three expired lock waits defer unwritten items a tick. Writes read whole only their item, overlaps and dependencies (<500ms at 1,000 items); a heartbeat locks only its item. Reconciliation yields to pending requests, waiting ≤1s for renewals, before each evaluation and write: a renewal waits on ≤1 evaluation. Stale observation snapshots retry after 2s.
+A 2s tick should end within 5s, else logs `reconciliation tick took N ms` (writes, longest lock wait). It opens briefly under the coordination lock (row versions, direct-merge sweep); batches evaluate ≤250ms lock-free, planning ≤8 writes, each one transaction: coordination lock (≤500ms wait, no row held), item row (`FOR NO KEY UPDATE`), commit; moved read re-evaluates first; job wakes follow in work-id order. Three expired lock waits defer unwritten items a tick. Writes read whole only their item, overlaps and dependencies (<500ms at 1,000 items); heartbeat locks only its item. Reconciliation yields to pending requests, waiting ≤1s for renewals, before each evaluation and write: a renewal waits on ≤1 evaluation. Stale observation snapshots retry after 2s.

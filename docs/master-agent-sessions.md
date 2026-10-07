@@ -25,7 +25,7 @@ Profile `accounts` lists [agent environments](onboarding.md#agent-environments) 
 
 ## The loop's own master session
 
-`master registry role set master ACCOUNTS …` (unset: none): one session; loop and `master start` adopt a live `masterAgentName`. Starts on master prompt plus standing-judgement handover; relaunches on exit, limit notice, `run.masterSessionMinutes` (240); changed subjects wake it; `run.masterHeartbeatMinutes` (30) silent sends a heartbeat (`daemon.master`).
+`master registry role set master ACCOUNTS …` (unset: none): one session; loop and `master start` adopt live `masterAgentName`. Starts on master prompt plus standing-judgement handover; relaunches on exit, limit notice, `run.masterSessionMinutes` (240); changed subjects wake it; `run.masterHeartbeatMinutes` (30) silent sends heartbeat (`daemon.master`).
 
 ### The request is the session's first message
 
@@ -45,7 +45,7 @@ GY=…/.graphyard/launch/NAME; claude … --settings …/.graphyard/harness/prod
 
 #### First-run consent prompts
 
-**`awaiting consent`**: answers only `hooks-continue-untrusted` (**Continue without trusting**), `telemetry-decline`, never one that grants hook execution or a sandbox escape; others (**credential**, **payment**) escalate; workspace-trust prompts fail the launch. Trust records reread before start; dropped refuses, naming the config. Held: `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops it; the item is dispatchable.
+**`awaiting consent`**: answers only `hooks-continue-untrusted` (**Continue without trusting**), `telemetry-decline`, never one that grants hook execution or a sandbox escape; others (**credential**, **payment**) escalate; workspace-trust prompts fail launch. Trust records reread before start; dropped refuses, naming the config. Held: `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** the supervisor stops renewing and stops it; the item is dispatchable.
 
 Reviewers/producers are `awaiting acknowledgement` until 30 s active (`counts.dispatchAwaiting`), re-prompted once quiet past `run.acknowledgementSeconds` (90); settling resultless is **`never started`**: relaunched a minute later, ≤3 (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
 
@@ -57,4 +57,4 @@ Ended sessions' panes close; each cycle closes ≤12 more on this host, never a 
 
 ### The dispatcher's own state
 
-The dispatcher bounds its own state where it composes it, each cut marked with an ellipsis; a cursor failing its schema is repaired, not fatal, logged once with the path that failed. A tick failure is attributed and surfaced (`dispatch.lastFailure`). Three consecutive failures raise one attention item: no reviewer or producer session is being launched for any item; `graphyard master restart` repairs the cursor. A session that exits at launch is classified from its pane: `herdr agent get` answers only `agent_not_found` for one that exits **at launch**, so the dispatcher uses `herdr pane read`; a **provider limit notice** fails over exactly as a mid-session exhaustion does, others are refused with the pane's last words and retried.
+The dispatcher bounds its own state where it composes it, each cut marked with an ellipsis; cursor failing its schema is repaired, not fatal, logged once with the path that failed. A tick failure is attributed and surfaced (`dispatch.lastFailure`). Three consecutive failures raise one attention item: no reviewer or producer session is being launched for any item; `graphyard master restart` repairs cursor. A session that exits at launch is classified from its pane: `herdr agent get` answers only `agent_not_found` for one that exits **at launch**, so the dispatcher uses `herdr pane read`; **provider limit notice** fails over exactly as a mid-session exhaustion does, others are refused with the pane's last words and retried.
