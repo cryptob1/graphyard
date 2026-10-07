@@ -858,7 +858,7 @@ test('integration:throughput-attention-retires — once a recorded measurement o
     assert.equal(short.report!.population.admitted, 9);
     const unowned = await throughputStatus(root, serving, items);
     assert.equal(unowned.owner.item, null);
-    assert.match(unowned.attention!.text, /No open item owns the verification yet \(the loop files one on its next unverified measurement of a release whose owner has not closed on an answered needs-decision, and within one cycle while a needs-decision stands\): 9 admitted of 10/);
+    assert.match(unowned.attention!.text, /No open item owns the verification yet \(the loop files one on its next unverified measurement of a release whose owner has not closed on an answered needs-decision\): 9 admitted of 10/);
     const standing = await throughputStatus(root, serving, withOwner());
     assert.equal(standing.verdict, 'unverified'); assert.ok(standing.attention);
     assert.deepEqual(standing.owner, { item: throughputOwner, admitted: 9, needed: throughputClaim.minimumDeliveries, measuredAt: short.report!.measuredAt });
@@ -1020,7 +1020,7 @@ test('integration:throughput-owner-item — the loop files one open owner item f
   // was raised at, closes nothing while the claim is unverified.
   assert.equal(throughputOwnerClosure({ ...owner, policyRevision: 2 }, { revision: deployedRevision, verdict: 'unverified' }, null), null, 'a revision without a raised needs-decision answers nothing');
   assert.equal(throughputOwnerClosure({ ...owner, policyRevision: 2 }, { revision: deployedRevision, verdict: 'unverified' }, 2), null, 'a needs-decision raised at the current revision is unanswered');
-  assert.match(throughputOwnerClosure({ ...owner, policyRevision: 3 }, { revision: deployedRevision, verdict: 'unverified' }, 2)!, /needs-decision \(raised at its requirements revision 2\) was answered by its requirements revision 3; .* files a second owner for \w+ only while a measurement of it under the applied rule still shows a needs-decision standing/);
+  assert.match(throughputOwnerClosure({ ...owner, policyRevision: 3 }, { revision: deployedRevision, verdict: 'unverified' }, 2)!, /needs-decision \(raised at its requirements revision 2\) was answered by its requirements revision 3; .* files no second owner/);
   // A closed or delivered owner owns nothing.
   const template = (await store.list()).find(item => item.stage === 'done')!;
   const open = { ...template, key: 'GY-7201', title: `${throughputOwnerTitle}: x`, stage: 'backlog' as const };
@@ -1051,8 +1051,7 @@ test('integration:throughput-owner-item — the loop files one open owner item f
     for (let cycle = 0; cycle < 8 && !openThroughputOwner(work); cycle++) await runCycle(master, state, effects, () => Date.now());
     const owner = openThroughputOwner(work)!;
     assert.ok(owner, 'filed on the backoff after the failure');
-    assert.equal(owners.filed.length, 1, 'filed once');
-    assert.match(owners.filed[0].key, new RegExp(`^throughput-owner:${sha}:[0-9a-f]{16}$`), 'under the release\'s idempotency key, bound to its exact input');
+    assert.deepEqual(owners.filed.map(entry => entry.key), [`throughput-owner:${sha}`], 'filed once, under the release\'s idempotency key');
     for (let cycle = 0; cycle < 3; cycle++) await runCycle(master, state, effects, () => Date.now());
     assert.equal(owners.filed.length, 1, 'never filed again while it is open');
     assert.equal(owners.closed.length, 0, 'open while the claim is unverified');
