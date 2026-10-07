@@ -31,6 +31,8 @@ import { loopSupervision, loopSupervisionAttention } from '../src/supervisor.js'
 import { fleetStatus } from '../src/master/attention.js';
 import type { FleetView } from '../src/model/registry.js';
 import { scopeRefusalBlocker } from '../src/model/scope.js';
+import { postRun } from '../src/daemon/doctor.js';
+import type { Cycle } from '../src/daemon/cycle.js';
 import { NOW, boardApi, boardStatus, boardWork } from '../browser-tests/ui-board.js';
 import OverviewPage from '../web/pages/overview.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
@@ -255,6 +257,21 @@ test('unit:fault-catalogue-action-kinds — a failed fault or diagnosis action i
   // A loop kind the entry keeps still counts.
   for (let index = 0; index < 3; index++) storeAction(state, `loop:${index}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: 'the loop missed its budget', attempts: 1, epoch: null, cycle: index, at: iso(index * 60_000) }, 'loop-cost');
   assert.deepEqual(recurringClasses(state.faults.instances, [], threshold, clock + 5 * 60_000).filter(entry => entry.faultClass === 'loop').map(entry => [entry.count, entry.file]), [[3, true]]);
+  // GY-1404: the step kind stays the fallback where the site names no cause — a doctor-run post the
+  // control plane refused for the run itself, not plane-wide, is still action:fault, unclassified.
+  const posting = emptyDaemonState(config());
+  const run = { at: iso(0), state: 'reported' as const, runs: [], findings: [], actions: [], filed: [], detail: '' };
+  await postRun({ state: posting, effects: { persist: async () => {} } } as unknown as Cycle, { recordRun: async () => { throw new Error('Graphyard refused the doctor run (422): findings.0.subject is required'); } }, run, () => clock);
+  assert.deepEqual(posting.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['action:fault', 'unclassified']]);
+  // A plane-wide one names its cause, and so leaves unclassified.
+  await postRun({ state: posting, effects: { persist: async () => {} } } as unknown as Cycle, { recordRun: async () => { throw new Error('The operation was aborted due to timeout'); } }, { ...run, at: iso(1) }, () => clock);
+  assert.deepEqual(posting.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['action:fault', 'unclassified'], ['plane-unavailable', 'deployment']]);
+});
+
+test('unit:fault-classes — the fix-item kind a diagnosis\'s refused fix item carries is listed exactly once, under proof', () => {
+  assert.equal(faultClasses.filter(name => (faultCatalogue[name] as readonly string[]).includes('fix-item')).join(), 'proof');
+  assert.equal(faultKinds.filter(kind => kind === 'fix-item').length, 1);
+  assert.equal(new Set(faultKinds).size, faultKinds.length, 'no kind is listed twice');
 });
 
 test('unit:recurring-class-item — below the threshold nothing is filed', async () => {

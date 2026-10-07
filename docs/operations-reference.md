@@ -76,6 +76,8 @@ A silent webhook hour: `master status` cites `https://github.com/settings/apps/A
 
 Session-started `npm test`, `test:browser`, typecheck, `tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`; managed root's `.verification-slots`); CI unbounded. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; item `memory` names top consumers; one `memory-pressure` fault per dip) until 1GB above.
 
+Merges awaiting a not-yet-due or validating [promotion](delivery.md) are normal lag: `releaseLag` and `loaded-revision` skip them, owing no restart. Sandboxed `systemctl --user` probes read could-not-verify given the cursor's unit.
+
 ## Storage retention
 
 Receipts answer retries a day; compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (14, min 1), appending `ledger.compacted`.
