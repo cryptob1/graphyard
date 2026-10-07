@@ -13,7 +13,8 @@ import { loopBlockerProbe, type BlockerClassification, type BlockerProbeRecord, 
 import { successorWidening } from '../model/successors.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
-import { type HostMemoryReading, type ResourceReclaimReport, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js'; import { healUserSupervision, type UserSupervisionAllowance, type UserSupervisionHeal } from '../user-manager.js';
+import { type HostMemoryReading, type ResourceReclaimReport, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
+import { healUserSupervision, type UserSupervisionAllowance, type UserSupervisionHeal } from '../user-manager.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
@@ -176,7 +177,9 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   /** Why the plane cannot record a dispatch's result (its /healthz verdict), or null when it can. */
   planeHealth?: () => Promise<string | null>;
   /** This host's memory (GY-612): below its floor, new launches are deferred. A loop wired without it never defers. */
-  hostMemory?: () => Promise<HostMemoryReading | null>; /** GY-1428: revive this host's silent user manager and start its declared slots found down, as the step allows (user-manager.ts). */ healHostSupervision?: (allow: UserSupervisionAllowance) => Promise<UserSupervisionHeal>;
+  hostMemory?: () => Promise<HostMemoryReading | null>;
+  /** GY-1428: revive this host's silent user manager and start its declared slots found down, as the step allows (user-manager.ts). */
+  healHostSupervision?: (allow: UserSupervisionAllowance) => Promise<UserSupervisionHeal>;
   /** GY-1008: probe a blocker's cause as the next attempt meets it (blocker-probes.ts), and record it as the coordinator; a pass clears it. */ probeBlocker?: (work: Work, classification: BlockerClassification) => Promise<BlockerProbeResult | null>; recordBlockerProbe?: (work: Work, body: BlockerProbeRecord) => Promise<Work>;
   /**
    * Requests one routine decision with the master's own operator-agent identity and returns it.

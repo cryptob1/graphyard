@@ -208,6 +208,8 @@ test('manual:fault-class-configuration — GY-1428 a manager that stays down is 
     const recovered = await loop.cycle(120);
     assert.equal(loop.state.actions[hostSupervisionKey].state, 'done');
     assert.ok(recovered.length >= 2, 'the run ended and the slots were started');
+    const { hostSlotKey } = await import('../src/daemon/cycle-host.js');
+    assert.equal(loop.state.actions[hostSlotKey(executorUnit(1))].attempts, 0, 'a slot the outage stopped counts no restart toward its crash-loop cap');
     assert.deepEqual(await loop.cycle(121), []);
   } finally { await rm(checkout, { recursive: true, force: true }); }
 });
@@ -247,6 +249,25 @@ test('manual:fault-class-configuration — GY-1428 a crash-looping slot is resta
     host.state.slots[unit] = 'active';
     await loop.cycle(61);
     assert.equal(loop.state.actions[hostSlotKey(unit)].state, 'done');
+  } finally { await rm(checkout, { recursive: true, force: true }); }
+});
+
+test('manual:fault-class-configuration — GY-1428 a slot that fails every 50 minutes is still restarted: the window counts from its first restart, not its last', async () => {
+  const { hostSlotKey } = await import('../src/daemon/cycle-host.js');
+  const checkout = await declaredCheckout(1);
+  try {
+    const unit = executorUnit(1);
+    const host = simulatedHost({ manager: true, slots: { [unit]: 'active' } });
+    const loop = await hostLoop(host, checkout);
+    const starts: number[] = [];
+    for (let minute = 0; minute <= 300; minute++) {
+      if (minute % 50 === 0) host.state.slots[unit] = 'failed'; // it runs for 50 minutes, then dies
+      const before = host.calls.filter(call => call.startsWith('systemctl --user enable --now')).length;
+      await loop.cycle(minute);
+      if (host.calls.filter(call => call.startsWith('systemctl --user enable --now')).length > before) starts.push(minute);
+      assert.notEqual(loop.state.actions[hostSlotKey(unit)]?.state, 'failed', `no 60-minute window held three restarts, yet minute ${minute} reported the slot failed`);
+    }
+    assert.deepEqual(starts, [0, 50, 100, 150, 200, 250, 300], `restarts at minutes ${starts.join(', ')}`);
   } finally { await rm(checkout, { recursive: true, force: true }); }
 });
 

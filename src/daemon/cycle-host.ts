@@ -22,8 +22,8 @@ export const slotWindowMs = 60 * minute;
  * failing run of `host-supervision`, however many slots and blockers it holds, and logind is asked
  * again only after `reviveBackoffMs`, so a manager that stays down costs no cycle the few seconds a
  * revival waits. Each slot the loop starts is a `host-supervision:UNIT` row: a slot down again
- * within `slotCooldownMs` waits, and a slot down a fourth time within the hour is reported failed
- * and left down until it is seen running. A slot an operator disabled is never started. A host with
+ * within `slotCooldownMs` waits, and a slot down a fourth time within the hour from its first
+ * restart is reported failed and left down until it is seen running. A slot an operator disabled is never started. A host with
  * nothing to repair records nothing.
  */
 export async function hostSupervisionStep(cycle: Cycle) {
@@ -32,11 +32,13 @@ export async function hostSupervisionStep(cycle: Cycle) {
   const at = now(), actions = state.actions, previous = actions[hostSupervisionKey];
   const failing = previous?.state === 'failed', since = (key: string) => at - Date.parse(actions[key]?.at ?? '');
   const revive = !failing || !previous.attempts || since(hostSupervisionKey) >= reviveBackoffMs(previous.attempts);
-  const restart = (unit: string) => { const row = actions[hostSlotKey(unit)]; return !row || (row.state !== 'failed' && since(hostSlotKey(unit)) >= slotCooldownMs && !(row.attempts >= maxSlotRestarts && since(hostSlotKey(unit)) < slotWindowMs)); };
+  // A slot's window opens at its first restart (the row's `since`) and does not slide with each later one.
+  const windowOpen = (key: string) => { const row = actions[key]; return !!row && row.attempts > 0 && at - Date.parse(row.since ?? row.at) < slotWindowMs; };
+  const restart = (unit: string) => { const key = hostSlotKey(unit), row = actions[key]; return !row || (row.state !== 'failed' && since(key) >= slotCooldownMs && !(row.attempts >= maxSlotRestarts && windowOpen(key))); };
   const heal = await effects.healHostSupervision({ revive, restart });
   // A `waiting` row is a report, not a failure: it carries no fault.
-  const note = async (key: string, outcome: 'done' | 'failed' | 'waiting', detail: string, attempts: number, kept?: string) =>
-    performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: outcome, detail, attempts, cycle: state.cycle, ...(kept ? { at: kept } : {}) }, at, effects.persist, outcome === 'waiting' ? null : undefined));
+  const note = async (key: string, outcome: 'done' | 'failed' | 'waiting', detail: string, attempts: number, kept?: string, opened?: string) =>
+    performed.push(await record(state, key, { kind: 'config', work: null, principal: null, state: outcome, detail, attempts, cycle: state.cycle, ...(kept ? { at: kept } : {}), ...(opened ? { since: opened } : {}) }, at, effects.persist, outcome === 'waiting' ? null : undefined));
   if (heal.reason) {
     const detail = `${heal.performed.length ? `${heal.performed.join('; ')}; but ` : ''}${heal.reason}`;
     // A cycle that withheld the revival keeps the run's clock, so the backoff counts from the last revival.
@@ -46,16 +48,18 @@ export async function hostSupervisionStep(cycle: Cycle) {
     await note(hostSupervisionKey, 'done', heal.revived ? `Repaired this host's supervision: ${heal.performed[0]}` : 'The systemd user manager answers again', 1);
   }
   for (const slot of heal.down) {
-    const key = hostSlotKey(slot.unit), row = actions[key], recent = !!row && since(key) < slotWindowMs;
+    const key = hostSlotKey(slot.unit), row = actions[key], open = windowOpen(key), opened = row?.since ?? row?.at;
     if (slot.outcome === 'disabled') { if (row) delete actions[key]; continue; }
-    if (slot.outcome === 'started') await note(key, 'done', `Started ${slot.unit} (slot ${slot.slot} was ${slot.active})`, recent ? row.attempts + 1 : 1);
-    else if (row && row.state !== 'failed' && recent && row.attempts >= maxSlotRestarts)
-      await note(key, 'failed', `Executor slot ${slot.slot} is ${slot.active} again after ${row.attempts} restarts within ${slotWindowMs / minute} minutes; the loop no longer restarts it: journalctl --user -u ${slot.unit} says why, and once it runs again the loop restarts it as before`, row.attempts, row.at);
+    // A slot started as the manager's outage ends was stopped by the outage, not by itself: it opens no window.
+    if (slot.outcome === 'started') await note(key, 'done', `Started ${slot.unit} (slot ${slot.slot} was ${slot.active})`, failing ? 0 : open ? row.attempts + 1 : 1, undefined, failing ? undefined : open ? opened : new Date(at).toISOString());
+    else if (row && row.state !== 'failed' && open && row.attempts >= maxSlotRestarts)
+      await note(key, 'failed', `Executor slot ${slot.slot} is ${slot.active} again after ${row.attempts} restarts within ${slotWindowMs / minute} minutes; the loop no longer restarts it: journalctl --user -u ${slot.unit} says why, and once it runs again the loop restarts it as before`, row.attempts, row.at, opened);
   }
   // A slot seen running ends its failing run; a quiet row ages out once its window has passed.
   for (const unit of heal.up) {
     const key = hostSlotKey(unit), row = actions[key];
-    if (row?.state === 'failed') await note(key, 'done', `${unit} runs again`, 1);
+    // Its next restart opens a new window.
+    if (row?.state === 'failed') await note(key, 'done', `${unit} runs again`, 0);
     else if (row && since(key) >= slotWindowMs) { delete actions[key]; await effects.persist(state); }
   }
   if (heal.loop && heal.loop !== 'active') {
