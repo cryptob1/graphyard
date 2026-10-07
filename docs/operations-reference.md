@@ -7,7 +7,7 @@
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` refuses *unobserved*, *stale* (rerun), unserving or already-recorded releases; without `--deployment-url`, the newest successful `productionEnvironment` deployment counts.
+`master verify-deployment GY-N` emits instructions from an isolated served-commit checkout, refusing *unobserved*, *stale* (rerun), unserving or already-recorded releases; without `--deployment-url`, the newest successful `productionEnvironment` deployment counts.
 
 ## Lost worker before submission
 

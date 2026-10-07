@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { operatorCredentialRefusal, operatorOnlyDecision, refusedReconciliations, type Decision } from './approval.js';
 import { demand } from './refusal.js';
+import { shortAskIssues } from './human-ask.js';
 import type { Work } from './work.js';
 
 // ---------------------------------------------------------------------------
@@ -59,11 +60,15 @@ export const humanRequestSchema = z.object({
   reason: z.string().trim().min(1).max(2000),
   /** The exact thing the human is asked for: the account to open, the priority to set, the credential to issue. */
   needed: z.string().trim().min(1).max(2000),
+  /** The short note the human reads (GY-1408): one sentence naming their action, a few plain steps, one plain why. NEEDED and REASON are the agents' detail. */
+  ask: z.string().trim().min(1).optional(),
+  steps: z.array(z.string().trim().min(1)).min(1).optional(), why: z.string().trim().min(1).optional(),
   /** The buttons the card offers, chosen by the requester; the kind's defaults when omitted. */
   choices: z.array(humanChoiceSchema).min(1).max(6).refine(choices => new Set(choices.map(choice => choice.id)).size === choices.length, 'Choice ids must be distinct').optional(),
   /** The requesting host's public key (PEM): a `secret` choice's value is sealed to it. */
   sealTo: z.string().trim().min(1).max(4000).optional(),
-}).strict().refine(data => data.sealTo || !data.choices?.some(choice => choice.input === 'secret'), 'A secret choice needs sealTo, the requesting host\'s public key');
+}).strict().refine(data => data.sealTo || !data.choices?.some(choice => choice.input === 'secret'), 'A secret choice needs sealTo, the requesting host\'s public key')
+  .superRefine((data, context) => { for (const message of shortAskIssues(data)) context.addIssue({ code: 'custom', message }); });
 /**
  * Why a park is refused before it reaches the human, or null when it may park (GY-1395). Two of
  * the build stage's human-only decisions were not the human's to make, or not the whole ask:
@@ -127,6 +132,8 @@ export interface HumanAnswer {
 export interface HumanOnlyRequest {
   id: string; kind: string; reason: string; needed: string;
   requestedBy: string; epoch: number; at: string;
+  /** The short note the card leads with (GY-1408); absent on older requests, which lead with `needed`'s first sentence (`humanAsk`). */
+  ask?: string | null; steps?: string[] | null; why?: string | null;
 }
 export interface HumanRequest extends HumanOnlyRequest {
   kind: HumanDecisionKind;

@@ -3,11 +3,13 @@ import { chmod, link, mkdir, readFile, rename, rm, stat, writeFile } from 'node:
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Work } from '../model.js';
-import { humanDecisionKinds, type HumanChoice, type HumanDecisionKind, type HumanRequestRow } from '../model/human-request.js';
+import type { HumanRequestRow } from '../model/human-request.js';
 import { configHome } from '../install/secrets.js';
 import { scopeRequestOutcome } from '../model/scope.js';
 import type { CliContext } from './context.js';
 import { workMutation, type CliCommand } from './registry.js';
+import { parkCommand } from './park-command.js';
+export { parkArgs, parkCommand } from './park-command.js';
 
 /**
  * The commands a session runs about its own item, rather than about the fleet: the worker's live
@@ -101,56 +103,6 @@ function decisionOfAttempt(work: Work, epoch: number) {
   if (decision.epoch !== undefined) return decision.epoch === epoch ? decision : null;
   const claim = work.lastAssignment?.epoch === epoch ? work.lastAssignment.claimedAt : undefined;
   return work.lease?.epoch === epoch && decision.requestedBy === work.lease.owner && !!claim && Date.parse(decision.requestedAt) >= Date.parse(claim) ? decision : null;
-}
-
-/**
- * The worker half of a human-only wait (GY-89): record the decision only a human may make as a
- * typed request. The same call ends the attempt's lease and parks the item, so the session exits
- * owning nothing; the human answers it and the loop dispatches the item again.
- */
-export const parkCommand: CliCommand = {
-  name: 'park',
-  scope: 'work',
-  help: [
-    '  park GY-N EPOCH KIND NEEDED... [--choice LABEL]... -- REASON',
-    '                                Record a decision only a human may make and end this attempt:',
-    `                                KIND is ${humanDecisionKinds.join(', ')};`,
-    '                                NEEDED is the exact thing the human must provide: every human',
-    '                                step the item still needs, never one at a time (a scope',
-    '                                widening is refused: use scope-request). The item',
-    '                                parks without a lease and nothing else waits on it. Each',
-    '                                --choice is a button the human presses (--choice-text asks for',
-    '                                their words too, --choice-secret for a value sealed to this',
-    '                                host); Decline is always offered. Without any, the kind\'s',
-    '                                defaults are offered',
-  ],
-  async run(context, work) {
-    const { args, print } = context;
-    const epoch = Number(args[0]), kind = args[1], separator = args.indexOf('--');
-    const { needed, choices } = parkArgs(args.slice(2, separator < 0 ? args.length : separator));
-    const reason = separator < 0 ? '' : args.slice(separator + 1).join(' ').trim();
-    if (!Number.isInteger(epoch) || epoch < 1 || !humanDecisionKinds.includes(kind as HumanDecisionKind) || !needed || !reason) throw new Error(`Use park GY-N EPOCH KIND NEEDED... [--choice LABEL]... -- REASON, where KIND is ${humanDecisionKinds.join(', ')}`);
-    // A credential is sealed to this host when the human provides it, so the host's key goes with the request.
-    const sealTo = kind === 'credentials-for-people' || choices?.some(choice => choice.input === 'secret') ? await hostSealKey(context.individualHostId()).catch(() => undefined) : undefined;
-    return print(await workMutation(context, work)('park', { epoch, kind, needed, reason, ...(choices ? { choices } : {}), ...(sealTo ? { sealTo } : {}) }));
-  },
-};
-
-const choiceFlags = { '--choice': 'none', '--choice-text': 'text', '--choice-secret': 'secret' } as const;
-/**
- * NEEDED and the requester's choices from the words between KIND and `--`. Each choice flag takes
- * the next word as its label; the choices become buttons in that order, each resuming the item.
- */
-export function parkArgs(words: readonly string[]) {
-  const needed: string[] = [], choices: HumanChoice[] = [];
-  for (let index = 0; index < words.length; index++) {
-    const input = choiceFlags[words[index] as keyof typeof choiceFlags];
-    if (!input) { needed.push(words[index]); continue; }
-    const label = words[++index]?.trim();
-    if (!label || label.startsWith('--')) throw new Error(`${words[index - 1]} needs a LABEL, such as --choice "Approve up to €50/month"`);
-    choices.push({ id: `choice-${choices.length + 1}`, label, outcome: 'provided', input });
-  }
-  return { needed: needed.join(' ').trim(), choices: choices.length ? choices : undefined };
 }
 
 /**
