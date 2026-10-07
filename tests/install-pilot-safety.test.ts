@@ -87,6 +87,7 @@ test('unit:init-reuses-install-identities — init --scan --apply never mints a 
     const agentsBefore = await exists(join(fixture.root, 'AGENTS.md'));
     const cli = await execFile(process.execPath, [launcher, 'init', '--scan', '--apply', '--url', 'https://graphyard.example'], { cwd: fixture.root, env }).then(() => null, error => error);
     assert.ok(cli, 'init --scan --apply exits non-zero');
+    assert.equal(cli.code, 1, String(cli.stderr));
     assert.match(String(cli.stderr), /has not finished its GitHub App step/);
     assert.doesNotMatch(String(cli.stderr), /EADDRINUSE/);
     assert.equal(await exists(join(fixture.root, 'AGENTS.md')), agentsBefore, 'AGENTS.md untouched');
@@ -272,7 +273,8 @@ test('unit:install-app-timeout-resume — an App step nobody confirms prints wha
     assert.throws(() => assertMasterBinding({ ...pending, githubAppId: 1234 }, { actor: { role: 'coordinator' }, repository: REPOSITORY, baseBranch: 'main', githubAppId: 4321 }), /GitHub App changed/);
     await setupMaster(root, { url, token, cliPath: launcher, credentialDirectory: credentials });
     assert.equal((await loadMasterConfig(root)).githubAppId, 1234, 'the run after the App step binds the confirmed App');
-    assert.equal((await cli(['master', 'harness', 'claude'])).code, 0);
+    const rebound = await cli(['master', 'harness', 'claude']);
+    assert.equal(rebound.code, 0, rebound.stderr);
   } finally {
     await new Promise<void>(accept => server.close(() => accept()));
     for (const directory of [root, credentials, environments]) await rm(directory, { recursive: true, force: true });
