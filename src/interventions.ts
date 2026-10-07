@@ -60,11 +60,11 @@ const isObject = (value: unknown): value is Record<string, any> => !!value && ty
 const workOf = (document: Record<string, any> | null): InterventionLedgerRow['work'] =>
   Object.fromEntries(workFields.map(([name, field]) => [name, document?.[field] ?? null])) as InterventionLedgerRow['work'];
 /**
- * A `rework` row's grounds fields, from its whole document or its delta resolved in SQL
- * (`graphyard_event_work`); the observation keeps only what the grounds read, so a few hundred
- * rework rows a week cost no review bodies or threads.
+ * A `rework` row's grounds fields (GY-1386), projected from a whole document like `projectedWork`;
+ * a delta row's are its base's, extended by the delta's ops on them. The observation keeps only
+ * what the grounds read, so a few hundred rework rows a week cost no review bodies or threads.
  */
-const groundsOf = (document: string) => `jsonb_build_object(${reworkGroundFields.filter(field => field !== 'observation').map(field => `'${field}', ${document}->'${field}'`).join(', ')},
+export const reworkGroundsSql = (document: string) => `jsonb_build_object(${reworkGroundFields.filter(field => field !== 'observation').map(field => `'${field}', ${document}->'${field}'`).join(', ')},
   'observation', CASE WHEN jsonb_typeof(${document}->'observation')='object' THEN jsonb_build_object(${['candidate', 'baseTip', 'conflicting', 'merged', 'checks', 'requiredChecks', 'agentReview'].map(field => `'${field}', ${document}->'observation'->'${field}'`).join(', ')},
     'reviews', COALESCE((SELECT jsonb_agg(jsonb_build_object('sha', review->'sha', 'state', review->'state')) FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${document}->'observation'->'reviews')='array' THEN ${document}->'observation'->'reviews' ELSE '[]'::jsonb END) review), '[]'::jsonb)) END)`;
 
@@ -92,7 +92,7 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
   const columns = `seq, work_id, actor, kind, created_at, payload->'details' AS details,
       CASE WHEN kind LIKE 'decision.%' OR kind IN ('intervention.recorded','judgement.recorded') THEN payload ELSE NULL END AS top,
       payload ? 'work' AS whole, ${projectedWork("payload->'work'")} AS work, CASE WHEN payload ? 'work' THEN NULL ELSE payload->'delta' END AS delta,
-      CASE WHEN kind = 'rework' AND work_id IS NOT NULL THEN (SELECT ${groundsOf('document.work')} FROM (SELECT graphyard_event_work(work_id, payload) AS work) document) END AS grounds`;
+      CASE WHEN kind = 'rework' AND payload ? 'work' THEN ${reworkGroundsSql("payload->'work'")} END AS grounds`;
   // A window is read kind by kind through the (kind, created_at) index, then ordered (GY-1381).
   // As one `kind = ANY` filter, or as `kind = k AND created_at >= since`, the planner walked the
   // primary key or the created_at index through every routine row the window holds — a busy
@@ -109,10 +109,12 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
   const window = result.rows.slice(0, limit).reverse();
 
   // The full snapshots the window's deltas extend, once each.
-  const bases = new Map<number, { workId: string | null; work: Record<string, any> | null }>();
+  const bases = new Map<number, { workId: string | null; work: Record<string, any> | null; grounds: Record<string, any> | null }>();
   const baseSeqs = [...new Set(window.flatMap(row => row.work_id && isObject(row.delta) && Number.isSafeInteger(Number(row.delta.base)) ? [Number(row.delta.base)] : []))];
-  if (baseSeqs.length) for (const row of (await db.query(`SELECT seq, work_id, ${projectedWork("payload->'work'")} AS work FROM events WHERE seq = ANY($1::bigint[])`, [baseSeqs])).rows)
-    bases.set(Number(row.seq), { workId: row.work_id, work: row.work });
+  // A rework delta's base also yields its grounds fields (GY-1386), extended by the delta's ops on them.
+  const groundBases = new Set(window.flatMap(row => row.kind === 'rework' && isObject(row.delta) ? [Number(row.delta.base)] : []));
+  if (baseSeqs.length) for (const row of (await db.query(`SELECT seq, work_id, ${projectedWork("payload->'work'")} AS work, CASE WHEN seq = ANY($2::bigint[]) THEN ${reworkGroundsSql("payload->'work'")} END AS grounds FROM events WHERE seq = ANY($1::bigint[])`, [baseSeqs, [...groundBases]])).rows)
+    bases.set(Number(row.seq), { workId: row.work_id, work: row.work, grounds: row.grounds ?? null });
 
   // Each item's stage timeline over its span of the window, and the whole row before that span.
   const spans = new Map<string, { from: number; to: number }>();
@@ -134,13 +136,17 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
   const cursors = new Map<string, number>();
   const rows = window.map((row): InterventionLedgerRow => {
     const seq = Number(row.seq);
-    let document: Record<string, any> | null = null;
+    let document: Record<string, any> | null = null, grounds: Record<string, any> | null = row.grounds ?? null;
     if (row.whole) document = row.work ?? null;
     else if (row.work_id && isObject(row.delta)) {
       const base = bases.get(Number(row.delta.base));
       if (base && base.workId === row.work_id && isObject(base.work)) {
         const delta = Array.isArray(row.delta.ops) ? { ...row.delta, ops: row.delta.ops.filter((op: DeltaOp) => projectedFields.has(op[0]?.[0])) } : row.delta;
         document = applyWorkDelta(base.work as Work, delta) as unknown as Record<string, any>;
+      }
+      if (row.kind === 'rework' && base && base.workId === row.work_id && isObject(base.grounds)) {
+        const fields = new Set<unknown>(reworkGroundFields);
+        grounds = applyWorkDelta(base.grounds as Work, Array.isArray(row.delta.ops) ? { ...row.delta, ops: row.delta.ops.filter((op: DeltaOp) => fields.has(op[0]?.[0])) } : row.delta) as unknown as Record<string, any>;
       }
     }
     let stageBefore: string | null = null;
@@ -155,7 +161,7 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
     // timestamps use (`updatedAt`); a raw row has only its insertion instant.
     const updatedAt = document?.updatedAt == null ? null : typeof document.updatedAt === 'string' ? document.updatedAt : JSON.stringify(document.updatedAt);
     return { seq, workId: row.work_id, actor: row.actor, kind: row.kind, at: instant(updatedAt, new Date(row.created_at).toISOString()), details: row.details, payload: row.top ?? undefined,
-      work: row.whole || document ? workOf(document) : null, stageBefore, ...(row.kind === 'rework' ? { grounds: row.grounds ?? null } : {}) };
+      work: row.whole || document ? workOf(document) : null, stageBefore, ...(row.kind === 'rework' ? { grounds: grounds as ReworkGroundsWork | null } : {}) };
   });
   return { rows, truncated };
 }
