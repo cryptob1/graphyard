@@ -1,6 +1,6 @@
 import type { ExhaustionRecord } from './capacity.js';
 import type { Escalation, EscalationTrigger, Lease, Work } from './work.js';
-import { submissionProgressAt, submissionProgressCadenceMs, unsubmittedAttempt, workerReclaimBoundMs } from './attempt-bound.js';
+import { lapsedAtNoSubmissionBound, workerNoSubmissionRefusalMs } from './attempt-bound.js';
 
 // The one sentence every path that discards an assignment writes, so the epoch a
 // standing lease-loss belongs to can be read back from the record itself.
@@ -35,33 +35,6 @@ export function lapsedBeforeStart(work: Pick<Work, 'sessions'>, escalation: Esca
 // was ended by the control plane's own refusal to renew it (GY-1462), which explains it too.
 export type LeaseLapse = 'expired' | 'lost';
 export type LeaseLapseCause = 'submitted' | 'blocked-awaiting-operator' | 'stopped-by-attestation' | 'exhausted-capacity' | 'no-submission-bound';
-/**
- * The server's backstop to the worker bound (GY-1462): the loop ends an attempt past
- * `workerReclaimBoundMs` with no submission and no fresh submission progress (GY-1460), and ten
- * minutes later the server refuses its renewals, so with no loop to end it the lease lapses into
- * containment and reclaim. Both bounds derive from the one declaration in attempt-bound.ts.
- */
-export const workerNoSubmissionRefusalMs = workerReclaimBoundMs + 10 * 60_000;
-/** Whether `work`'s attempt is past the renewal refusal: past the worker bound unsubmitted, with no fresh submission progress, held `workerNoSubmissionRefusalMs` since its claim. */
-export function noSubmissionRenewalRefused(work: Work, now: number): boolean {
-  const attempt = unsubmittedAttempt(work, now);
-  return !!attempt && now - Date.parse(attempt.claimedAt) >= workerNoSubmissionRefusalMs;
-}
-/**
- * Whether a lapsed `lease` ran to the no-submission refusal unsubmitted: its last renewal kept it
- * past the point from which the server refuses renewals, with no submission progress inside the
- * cadence at its expiry, so it lapsed on that refusal (renewals come well inside the lease, so a
- * lease expiring past the refusal was renewed up to it).
- */
-export function lapsedAtNoSubmissionBound(work: Pick<Work, 'submission'> & Partial<Work>, lease: Pick<Lease, 'epoch'> & Partial<Pick<Lease, 'expiresAt' | 'owner'>>): boolean {
-  if (submittedEpoch(work, lease.epoch) || !lease.expiresAt || !work.workspaces) return false;
-  const assignment = work.lastAssignment?.epoch === lease.epoch ? work.lastAssignment.claimedAt : null;
-  const claimedAt = assignment ?? work.pipeline?.attempts?.find(attempt => attempt.epoch === lease.epoch)?.claimedAt ?? null;
-  const expiresAt = Date.parse(lease.expiresAt);
-  if (!claimedAt || !Number.isFinite(Date.parse(claimedAt)) || expiresAt - Date.parse(claimedAt) < workerNoSubmissionRefusalMs) return false;
-  const progressAt = submissionProgressAt(work as Work, lease.epoch, lease.owner ?? '', claimedAt);
-  return !progressAt || expiresAt - Date.parse(progressAt) > submissionProgressCadenceMs;
-}
 export const attestationKinds = ['blocked', 'stopped-worker'] as const;
 export type AttestationKind = typeof attestationKinds[number];
 /**

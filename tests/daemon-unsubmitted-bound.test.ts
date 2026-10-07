@@ -1,6 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFile } from 'node:fs/promises';
+import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -57,10 +57,9 @@ function held(heldMs: number, overrides: Partial<Work> = {}): Work {
  */
 async function bound() {
   const declared = await import('../src/model/attempt-bound.js');
-  const backstop = await import('../src/model/escalation.js');
   assert.equal(typeof declared.workerSubmissionBoundMs, 'number', 'the product declares the worker no-submission bound');
-  assert.equal(typeof backstop.noSubmissionRenewalRefused, 'function', 'the server reads the bound to refuse renewal');
-  return { ...declared, ...backstop };
+  assert.equal(typeof declared.noSubmissionRenewalRefused, 'function', 'the server reads the bound to refuse renewal');
+  return declared;
 }
 const unsubmittedFaults = <T extends { kind: string }>(faults: T[]) => faults.filter(fault => fault.kind === 'unsubmitted-attempt');
 
@@ -135,6 +134,44 @@ test('unit:doctor-worker-bound-matches-product — the doctor\'s worker bound is
   assert.equal(doctorBounds.workerMinutes * minute, workerSubmissionBoundMs);
   const prompt = doctorPrompt({ repository: 'owner/project', cliPath: launcher }, { items: [], faults: [] });
   assert.ok(prompt.includes(`more than ${workerSubmissionBoundMs / minute} min without a submission`), 'the doctor checklist names the product bound');
+});
+
+test('unit:single-nosubmission-bound — one module declares the no-submission bound, one predicate faults and stops renewing, and the doctor reads that declaration', async () => {
+  const declared = await bound();
+  const doctor = await import('../src/daemon/doctor.js');
+  assert.equal(doctor.doctorBounds.workerMinutes * minute, declared.workerSubmissionBoundMs, 'the doctor bound and the product bound are one value');
+  const source = new URL('../src/', import.meta.url);
+  const files = (await readdir(source, { recursive: true })).filter(file => file.endsWith('.ts')).map(file => file.replaceAll('\\', '/'));
+  const texts = new Map(await Promise.all(files.map(async file => [file, await readFile(new URL(file, source), 'utf8')] as const)));
+  const home = 'model/attempt-bound.ts';
+  // The doctor's worker bound is read from the declaration, never restated as a literal.
+  const doctorText = texts.get('daemon/doctor.ts')!;
+  assert.match(doctorText, /import \{[^}]*\bworkerSubmissionBoundMs\b[^}]*\} from '\.\.\/model\/attempt-bound\.js'/, 'the doctor imports the product bound');
+  assert.match(doctorText, /workerMinutes: workerSubmissionBoundMs \/ 60_000/, 'the doctor derives workerMinutes from it');
+  // No second bound constant: every no-submission, submission-bound or reclaim-bound declaration lives in attempt-bound.ts.
+  const boundDeclaration = /\b(?:const|let|var)\s+(\w*(?:[Nn]oSubmission|[Ss]ubmissionBound|[Ww]orkerReclaim|[Uu]nsubmitted)\w*)\s*[:=]/g;
+  const boundFunction = /\bfunction\s+(\w*(?:[Nn]oSubmission|[Ss]ubmissionBound|[Uu]nsubmitted)\w*)\s*\(/g;
+  for (const [file, text] of texts) {
+    if (file === home) continue;
+    for (const pattern of [boundDeclaration, boundFunction]) {
+      const names = [...text.matchAll(pattern)].map(match => match[1]).filter(name => !/^unsubmitted$/.test(name!));
+      assert.deepEqual(names, [], `${file} declares no no-submission bound or judgement of its own`);
+    }
+  }
+  for (const name of ['workerSubmissionBoundMs', 'workerReclaimBoundMs', 'workerNoSubmissionRefusalMs', 'unsubmittedAttempt', 'noSubmissionRenewalRefused', 'lapsedAtNoSubmissionBound'])
+    assert.match(texts.get(home)!, new RegExp(`export (?:const|function) ${name}\\b`), `${home} declares ${name}`);
+  assert.equal(declared.workerReclaimBoundMs, 2 * declared.workerSubmissionBoundMs);
+  assert.equal(declared.workerNoSubmissionRefusalMs, declared.workerReclaimBoundMs + 10 * minute);
+  // One fault path: the unsubmitted-attempt fault is observed in one place, from the one predicate.
+  const faultSites = [...texts].flatMap(([file, text]) => [...text.matchAll(/'unsubmitted-attempt'/g)].map(() => file));
+  assert.deepEqual(faultSites.sort(), ['model/fault-classes.ts', 'model/fault-classes.ts'], 'the kind is catalogued once and observed once');
+  assert.match(texts.get('model/fault-classes.ts')!, /observe\('unsubmitted-attempt', work\.key, unsubmittedAttemptText\(unsubmitted\)\)/);
+  // One stop-renewing path: the loop's end and the server's refusal both judge the attempt by unsubmittedAttempt.
+  assert.match(texts.get('daemon/cycle-reclaim.ts')!, /unsubmittedAttempt\(item, clock\)/, 'the loop ends the attempt from the one predicate');
+  assert.match(texts.get('engine.ts')!, /noSubmissionRenewalRefused\(work, now\.getTime\(\)\)/, 'the server refuses renewal from the one predicate');
+  assert.match(texts.get(home)!, /function noSubmissionRenewalRefused[^{]*\{\s*const attempt = unsubmittedAttempt\(work, now\)/, 'the refusal reads the same predicate the fault and the end read');
+  const callers = [...texts].filter(([file, text]) => file !== home && /\bunsubmittedAttempt\(/.test(text)).map(([file]) => file).sort();
+  assert.deepEqual(callers, ['daemon/cycle-reclaim.ts', 'model/fault-classes.ts'], 'only the fault and the loop\'s end read the predicate directly');
 });
 
 // The server side: renewal refused, lapse, reclaim, branch kept.

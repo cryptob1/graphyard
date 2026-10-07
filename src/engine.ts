@@ -43,8 +43,7 @@ import { claimAction, openActions, reconcileActions, renewClaim, settleAction, s
 import { livenessFallback, livenessOf, livenessRepairEntry } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema, sessionObservationFields } from './model/sessions.js';
-import { observeHead } from './model/attempt-bound.js';
-import { noSubmissionRenewalRefused, workerNoSubmissionRefusalMs } from './model/escalation.js';
+import { noSubmissionRenewalRefused, observeHead, workerNoSubmissionRefusalMs } from './model/attempt-bound.js';
 import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type ExhaustionRecord } from './model/capacity.js';
 import { credentialBlockedReason, credentialFailure } from './worker-credential.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
