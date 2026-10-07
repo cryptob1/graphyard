@@ -27,7 +27,7 @@ import { docsSyncMaxMs, docsSyncSessionName, docsSyncStoppedMs, type DocsSyncPla
 export function docsSyncRoute({ config, state, effects, snapshot, sessions, note, inventorySpent, stamp, clock }: {
   config: { baseBranch: string };
   state: DaemonState;
-  effects: Pick<DaemonEffects, 'conflictPaths' | 'docsSync' | 'persist' | 'closeSession' | 'endRegistrySession'>;
+  effects: Pick<DaemonEffects, 'conflictPaths' | 'docsSync' | 'docsSyncSettled' | 'persist' | 'closeSession' | 'endRegistrySession'>;
   snapshot: { work: Work[] };
   sessions: () => Promise<{ agents: HerdrAgent[]; available: boolean }>;
   note: (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at?: number, faultKind?: FaultKind | null) => Promise<unknown>;
@@ -39,11 +39,12 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
   const markRework = (work: string, head: string, base: string) => {
     state.conflicts = state.conflicts.map(entry => entry.work === work && entry.head === head && entry.base === base ? { ...entry, route: 'rework' } : entry);
   };
-  /** Close a docs-sync session's tab, if Herdr still lists it, and give its registry session back. */
-  const settle = async (item: Work, watch: DocsSyncWatch, why: string) => {
+  /** Close a docs-sync session's tab, if Herdr still lists it, give its registry session back, and remove its role file (GY-1433). */
+  const settle = async (item: Work | undefined, watch: DocsSyncWatch, why: string) => {
     const listed = watch.agentName ? (await sessions()).agents.find(agent => agent.name === watch.agentName) : undefined;
     if (listed?.pane_id) { try { await effects.closeSession(listed.pane_id); } catch { /* the session report closes it once the pane is gone */ } inventorySpent(); }
     if (watch.session && effects.endRegistrySession) { await effects.endRegistrySession(watch.session, why.slice(0, 500)).catch(() => undefined); watch.session = null; }
+    await effects.docsSyncSettled?.({ key: watch.work, head: watch.head }).catch(() => undefined);
     await effects.persist(state);
   };
   // A docs-sync whose item moved off the reviewed head succeeded (the control plane adopted the
@@ -51,7 +52,7 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
   const sweep = async () => {
     for (const [key, watch] of Object.entries(state.docsSyncs)) {
       const item = snapshot.work.find(entry => entry.key === watch.work);
-      if (!watch.settledAt && (!item || item.stage === 'done' || item.candidate?.sha !== watch.head)) { watch.settledAt = stamp; if (item) await settle(item, watch, `the docs-sync of ${watch.work} moved its head off ${watch.head.slice(0, 12)}`); }
+      if (!watch.settledAt && (!item || item.stage === 'done' || item.candidate?.sha !== watch.head)) { watch.settledAt = stamp; await settle(item, watch, `the docs-sync of ${watch.work} moved its head off ${watch.head.slice(0, 12)}`); }
       if (watch.settledAt && clock - Date.parse(watch.settledAt) > routedConflictWindowMs) delete state.docsSyncs[key];
     }
   };
