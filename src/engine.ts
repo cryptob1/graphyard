@@ -353,10 +353,63 @@ export const actionOnlyLookback = 20;
  * that revision may then still write: what it read is what it would read now.
  */
 export async function onlyActionsMovedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number, same = sameBesideActions): Promise<boolean> {
+  const read = await revisionAt(db, work, revision, actionOnlyLookback);
+  return !!read && same(read, work);
+}
+/** The item as its save at `revision` wrote it to the ledger, when that save is at most `lookback` saves behind `work`. */
+async function revisionAt(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number, lookback: number): Promise<Work | null> {
   const behind = work.revision - revision;
-  if (!Number.isInteger(behind) || behind <= 0 || behind > actionOnlyLookback) return false;
+  if (!Number.isInteger(behind) || behind <= 0 || behind > lookback) return null;
   const read = (await db.query(`SELECT ${eventWorkSql('saved')} AS work FROM (SELECT work_id, payload FROM events WHERE work_id=$1 AND (payload ? 'work' OR payload ? 'delta') ORDER BY seq DESC OFFSET $2 LIMIT 1) saved`, [work.id, behind])).rows[0]?.work as Work | undefined;
-  return !!read && read.revision === revision && same(read, work);
+  return read && read.revision === revision ? read : null;
+}
+
+/**
+ * How many saves a requested decision's revision may fall behind and still have its grounds
+ * re-checked (GY-1463): a worker renews its lease about every 12 s, so this covers an approver's
+ * judgement of over three hours on a leased item.
+ */
+export const decisionGroundsLookback = 1000;
+/**
+ * What moved a requested decision's grounds between the item as it was requested (`read`) and as
+ * it stands, named, or null when nothing that could affect them did (GY-1463). The loop's
+ * bookkeeping (`sameBesideBookkeeping`), a lease renewal (the lease's expiry and the quarantine's
+ * copy of it), the liveness of the launch, a GitHub observation and the sessions and workspaces
+ * an attempt records cannot; a new submission or head, a stage move, a requirements or policy
+ * revision, a lease epoch change or any other change to the item can.
+ */
+export function decisionGroundsChange(read: Work, current: Work): string | null {
+  const lease = (work: Work) => work.lease ? { owner: work.lease.owner, epoch: work.lease.epoch } : null;
+  const quarantine = (work: Work) => {
+    if (!work.containmentQuarantine) return work.containmentQuarantine ?? null;
+    const { leaseExpiresAt: _lease, launchExpiresAt: _launch, launchAcknowledgedAt: _acknowledged, ...fence } = work.containmentQuarantine;
+    return fence;
+  };
+  const changed = (pick: (work: Work) => unknown) => stableJson(pick(read) ?? null) !== stableJson(pick(current) ?? null);
+  if (changed(work => work.submission)) return `a new submission (${current.submission ? `pull request #${current.submission.pr}, epoch ${current.submission.epoch}` : 'withdrawn'})`;
+  if (changed(work => work.candidate?.sha)) return `a new head (${current.candidate?.sha.slice(0, 12) ?? 'none'})`;
+  if (changed(work => [work.stage, work.ready])) return `a stage move (${read.stage} to ${current.stage}${current.ready === read.ready ? '' : current.ready ? ', released' : ', unreleased'})`;
+  if (changed(work => [work.policyRevision, work.policy, work.criteria, work.plannedFiles]))
+    return `a requirements or policy revision (policy revision ${read.policyRevision} to ${current.policyRevision})`;
+  if (changed(work => [work.epoch, lease(work)])) return `a lease epoch change (${lease(read) ? `epoch ${read.lease!.epoch}` : 'no lease'} to ${lease(current) ? `epoch ${current.lease!.epoch}` : 'no lease'})`;
+  const rest = (work: Work) => {
+    const { actionQueue: _queue, revision: _revision, updatedAt: _updated, nextAction: _next, gates: _gates, lane: _lane, speedTarget: _target, sessions: _sessions,
+      escalation: _escalation, escalations: _escalations, lease: _lease, lastAssignment: _assignment, containmentQuarantine: _quarantine, observation: _observation,
+      workspaces: _workspaces, ...others } = work as Work & Record<string, unknown>;
+    return { ...others, containmentQuarantine: quarantine(work) } as Record<string, unknown>;
+  };
+  const before = rest(read), after = rest(current);
+  const field = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort().find(key => stableJson(before[key] ?? null) !== stableJson(after[key] ?? null));
+  return field ? `a change to its ${field}` : null;
+}
+/**
+ * What moved a decision's grounds since `revision`, read from the ledger (`decisionGroundsChange`),
+ * or null when nothing that could affect them did. A revision past the lookback cannot be re-checked.
+ */
+export async function decisionGroundsMovedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number): Promise<string | null> {
+  if (revision === work.revision) return null;
+  const read = await revisionAt(db, work, revision, decisionGroundsLookback);
+  return read ? decisionGroundsChange(read, work) : `more saves than its grounds can be re-checked across (revision ${revision}, now ${work.revision})`;
 }
 
 /**

@@ -17,10 +17,11 @@ type Db = pg.PoolClient;
  * coordination lock moves the item to the terminal stage with a `closure` record, cancels every
  * open review and producer request, withdraws an open human-only request so the Needs-you page
  * stops listing it, retires the item's action rows through the ordinary evaluation, and appends
- * `work.closed` with the actor and the reason. A live worker lease or an in-flight merge execution
- * refuses it. Commit ancestry is read from GitHub before the transaction, never inside it.
+ * `work.closed` with the actor and the reason. A live worker lease refuses it, unless an approved
+ * two-party close decision applies it (`decided`, GY-1463): then the closure ends that lease, as a
+ * release. Commit ancestry is read from GitHub before the transaction, never inside it.
  */
-export async function closeWork(services: Services, caller: Principal, id: string, body: unknown, key: string) {
+export async function closeWork(services: Services, caller: Principal, id: string, body: unknown, key: string, options: { decided?: boolean } = {}) {
   const data = closeSchema.parse(body);
   const ref = data.ref ?? null;
   const fingerprint = digest({ id, close: data });
@@ -38,12 +39,12 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     if (actor.role === 'operator-agent') operatorCapability(actor, 'intent:create', work!, services.repository);
-    const refused = closeRefusal(work!, now.getTime()); demand(!refused, refused!, 409);
+    const refused = closeRefusal(options.decided && work!.lease ? { ...work!, lease: null } : work!, now.getTime()); demand(!refused, refused!, 409);
     const badRef = closureRefRefusal(work!, all, data.kind, ref); demand(!badRef, badRef!, 422);
     if (ancestry) demand(ancestry.contained, `Commit ${ref} is not an ancestor of the base branch (${ancestry.base.slice(0, 12)}); an item is superseded only by work that landed`, 422);
     const closure: Closure = { kind: data.kind, reason: data.reason, ref, by: actor.id, at: now.toISOString(), from: work!.stage };
     const settled = settleOpenRequests(work!, closure, now);
-    // A lapsed lease reconciliation never reached ends here, as released.
+    // A lapsed lease reconciliation never reached ends here, as released; so does a live one an approved close decision ends.
     if (work!.lease) { endAttempt(work!, work!.lease.epoch, 'released', now); work!.lease = null; }
     Object.assign(work!, { closure, stage: 'done', stageEnteredAt: now.toISOString(), reviewRequest: null, scopeRequest: null, blocker: null });
     services.engine.evaluate(work!, all, now);

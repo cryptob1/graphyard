@@ -6,7 +6,7 @@ import { save, wakeJob } from '../store.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionApprovalSchema, decisionInputs, decisionPrecondition, decisionRequestSchema, decisionSituation, foldDecisions, requiredDecisionCapabilities, standingRefusal, approvalApplyGraceMs, type Decision, type DecisionState } from '../model/approval.js';
 import { canonical, decisionRace, readDecisions, resolvePin, samePin, type DecisionRecord, type StaleRace } from './decision-ledger.js';
 import type { Services } from './routes.js';
-import { onlyActionsMovedSince, sameBesideBookkeeping } from '../engine.js';
+import { decisionGroundsMovedSince } from '../engine.js';
 import { refuseDecision } from './decision-refusal.js';
 import { precedentAvailability } from './escalation-context.js';
 import { applyTriageClosure } from './followups.js';
@@ -164,14 +164,30 @@ async function recordStale(services: Services, stale: Stale) {
 }
 
 /**
- * The decision as its approval judges and applies it (GY-1296): a release, an unblock or a
- * diagnostician's closure pinned to a revision that moved only in bookkeeping is rebased to the
- * current revision; anything else is returned as it is. A resumption applies the same (GY-1300).
+ * The decision as its approval judges and applies it (GY-1296, GY-1463): a release, an unblock, a
+ * diagnostician's closure or a resolve without a pin is bound to the item revision it was requested
+ * at. When the revision moved only in changes that cannot affect its grounds — the loop's
+ * bookkeeping, lease renewals, liveness, observations, session records — it is rebased to the
+ * current revision; when another decision was applied since, or anything else moved
+ * (`decisionGroundsChange`), `change` names it and the decision is returned as it is. A resumption
+ * applies the same (GY-1300).
  */
-export async function bookkeepingRebase(db: Db, decision: DecisionRecord, work: Work): Promise<DecisionRecord> {
-  const revisionPinned = decision.action === 'release' || decision.action === 'unblock' || (decision.action === 'close' && decision.input.triageAt === undefined && decision.input.expectedRevision !== undefined);
-  return revisionPinned && decision.input.expectedRevision !== work.revision && await onlyActionsMovedSince(db, work, decision.input.expectedRevision, sameBesideBookkeeping)
-    ? { ...decision, input: { ...decision.input, expectedRevision: work.revision } } : decision;
+export async function revisionRebase(db: Db, decision: DecisionRecord, work: Work): Promise<{ judged: DecisionRecord; change: string | null }> {
+  const revisionPinned = decision.action === 'release' || decision.action === 'unblock' || (decision.action === 'resolve' && !decision.pin)
+    || (decision.action === 'close' && decision.input.triageAt === undefined && decision.input.expectedRevision !== undefined);
+  if (!revisionPinned || decision.input.expectedRevision === work.revision) return { judged: decision, change: null };
+  const change = await appliedSince(db, work, decision.id) ?? await decisionGroundsMovedSince(db, work, decision.input.expectedRevision);
+  return change ? { judged: decision, change } : { judged: { ...decision, input: { ...decision.input, expectedRevision: work.revision } }, change: null };
+}
+export const bookkeepingRebase = async (db: Db, decision: DecisionRecord, work: Work): Promise<DecisionRecord> => (await revisionRebase(db, decision, work)).judged;
+/** Another decision on the item applied after this one was requested, named, or null. */
+async function appliedSince(db: Db, work: Work, id: string): Promise<string | null> {
+  const row = (await db.query(`SELECT applied.payload->>'id' AS id, requested.payload->>'action' AS action FROM events applied
+    JOIN events requested ON requested.work_id=applied.work_id AND requested.kind='decision.requested' AND requested.payload->>'id'=applied.payload->>'id'
+    WHERE applied.work_id=$1 AND applied.kind='decision.applied' AND applied.payload->>'id'<>$2
+      AND applied.seq > (SELECT seq FROM events WHERE work_id=$1 AND kind='decision.requested' AND payload->>'id'=$2 ORDER BY seq LIMIT 1)
+    ORDER BY applied.seq LIMIT 1`, [work.id, id])).rows[0];
+  return row ? `another applied decision (${row.action} ${row.id})` : null;
 }
 
 /**
@@ -218,10 +234,13 @@ export async function approveDecision(services: Services, caller: Principal, id:
       // accepted at once.
       if (decision!.action === 'resolve' && !resuming && samePin(resolvePin(work!), decision!.pin)
         && precondition?.startsWith('Task revision changed')) precondition = null;
-      // GY-1296: a revision the requesting loop moved only in bookkeeping (its approver session,
-      // gates, next action, queue) is judged and applied at the current revision; see bookkeepingRebase.
-      const judged = await bookkeepingRebase(db, decision!, work!);
+      // GY-1296, GY-1463: a revision that moved only in what cannot affect the decision's grounds (the
+      // loop's bookkeeping, lease renewals, observations, sessions) is judged and applied at the current revision; see revisionRebase.
+      const { judged, change } = await revisionRebase(db, decision!, work!);
       if (!resuming) precondition = (judged !== decision ? decisionPrecondition(judged.action, judged.input, work!) : precondition) ?? await flakyEvidence(db, judged.action, judged.input);
+      // GY-1463: a revision that moved in its grounds says what moved them.
+      const moved = !!change && !!precondition?.startsWith('Task revision changed');
+      if (moved) precondition = `${change![0].toUpperCase()}${change!.slice(1)} since revision ${decision!.input.expectedRevision} moved the decision's grounds: ${precondition}`;
       if (precondition) {
         // A pin the item has moved past can never hold again, so the decision would stay
         // 'requested' forever and block every re-request; settle it as stale instead.
@@ -308,9 +327,9 @@ export async function applyThroughEngine(services: Services, decision: DecisionR
     case 'close': {
       // A triage closure (its input carries the judgement's `triageAt`) applies through the triage
       // path; a diagnostician's closure (GY-439) closes the item directly, with the approval's own
-      // composed reason.
+      // composed reason, ending a worker's live lease (GY-1463).
       if (input.triageAt !== undefined) return applyTriageClosure(services, actor, decision.workId, input, decision.id, key);
-      const work = await closeWork(services, actor, decision.workId, { kind: input.kind, reason, ref: input.ref ?? null }, key);
+      const work = await closeWork(services, actor, decision.workId, { kind: input.kind, reason, ref: input.ref ?? null }, key, { decided: true });
       return `Closed ${work.key} as ${input.kind}${input.ref ? ` of ${input.ref}` : ''}`;
     }
     case 'grant': { const grant = await services.proofGrants.grant(actor, input.principal, { patterns: input.patterns, reason, ...(input.expectedRevision === undefined ? {} : { expectedRevision: input.expectedRevision }) }, key); return `Granted ${input.patterns.join(', ')} to ${input.principal} (grant revision ${grant.revision})`; }
