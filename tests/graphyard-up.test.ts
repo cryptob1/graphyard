@@ -78,8 +78,9 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
     serverUrl: async () => w.installed && (!w.host || (w.app && w.reviewer)) ? SERVER : null,
     masterToken: async () => w.installed ? 'm'.repeat(40) : null,
     signIn: async file => { w.signIns.push(file); return file === OPERATOR_TOKEN ? `${SERVER}/#sign-in=${CODE}` : null; },
-    // The operator's admin credential, where the install saved it on this machine (GY-1479).
-    operatorToken: async file => file ? ADMIN : null,
+    // The operator's admin credential, where the install saved it on this machine (GY-1479); a host
+    // install keeps it on the host, so its path names no file here.
+    operatorToken: async file => file && !w.host ? ADMIN : null,
     status: async () => status(w),
     publishOnboarding: async () => { w.calls.push(['publish-onboarding']); w.onboardingPullRequest ??= 'https://github.com/acme/shop/pull/1'; return w.onboardingMerged ? null : { pullRequest: w.onboardingPullRequest }; },
     // The person merges the onboarding pull request while up waits on it: the first read finds it open.
@@ -99,7 +100,7 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
         w.serving = true;
         try { for (let turns = 0; !(w.app && w.reviewer); turns++) { if (turns > (w.pauseAfter ?? 10_000)) return { code: 1, stdout: JSON.stringify({ resume: 'graphyard install --apply' }) }; await yieldTurn(); } }
         finally { w.serving = false; }
-        return { code: 0, stdout: JSON.stringify(w.host ? { ok: true, principals: [{ id: 'acme-shop-operator', role: 'admin', tokenFile: '/var/lib/graphyard/tokens/acme-shop-operator.token' }], signIn: `${SERVER}/#claim=${CODE}` } : { ok: true }) };
+        return { code: 0, stdout: JSON.stringify(w.host ? { ok: true, principals: [{ id: 'acme-shop-operator', role: 'admin', tokenFile: '/var/lib/graphyard/tokens/acme-shop-operator.token' }], signIn: `${SERVER}/#claim=${CODE}`, host: { host: 'graphyard-acme-shop', masterIdentities: true, units: [] } } : { ok: true }) };
       }
       if (joined === 'master registry propose --apply') { w.accounts = true; return { code: 0, stdout: '{}' }; }
       if (joined === 'master restart') { w.loop = true; return { code: 0, stdout: '{}' }; }
@@ -178,6 +179,10 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   assert.equal((await runUp(request({ provider: 'hetzner' }), dependencies(host, hostRoot, hostEvents))).exitCode, 0);
   assert.deepEqual(hostEvents.filter(event => event.kind === 'waiting').map(event => (event as any).setupUrl), [`${SERVER}/#claim=${CODE}&setup`]);
   assert.deepEqual(host.signIns, [], 'the claim is used; nothing is minted');
+  // GY-1479: the host install provisioned the master's identities on the host, where the admin credential stays; up runs no local autonomy.
+  assert.ok(!host.calls.some(args => args[1] === 'autonomy'), 'no local master autonomy for a host install');
+  const identities = hostEvents.find(event => event.kind === 'step' && event.step === 'master-autonomy' && event.state === 'done') as { detail?: string } | undefined;
+  assert.match(identities?.detail ?? '', /provisioned on graphyard-acme-shop, where its loop runs/);
   assert.deepEqual(requestedView(`#claim=${CODE}&setup`), { view: 'setup', hash: `#claim=${CODE}` });
 
   // Herdr bound to another server: the install runs with --no-herdr and never with --herdr-rebind.

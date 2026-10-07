@@ -14,7 +14,7 @@ cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --repo OWNER/REPO   # 
 
 A new Hetzner server waits (exit 3) for price approval; rerun: `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`.
 
-`up` runs, in order: preflight, control plane, host supervisor and Herdr, master identities (`master autonomy --apply`; no saved admin credential: exit 2), onboarding, accounts, harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to review and merge (a host install leaves it to a person); goals wait, `up` printing the wait. Reruns skip steps `.graphyard/up.json` records finished, reusing its `--repo`/`--provider`. Ctrl-C stops the child. A Herdr plugin bound elsewhere stays (`--no-herdr`). Preflight failures (exit 2) name the [prerequisite](#1-machine-prerequisites).
+`up` runs, in order: preflight, control plane, host supervisor and Herdr, master identities (`master autonomy --apply`; host installs: on the server; no admin credential: exit 2), onboarding, accounts, harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to review and merge (a host install leaves it to a person); goals wait. Reruns skip steps `.graphyard/up.json` records finished, reusing its `--repo`/`--provider`. Ctrl-C stops the child. A Herdr plugin bound elsewhere stays (`--no-herdr`). Preflight failures (exit 2) name the [prerequisite](#1-machine-prerequisites).
 
 ## The Setup page
 

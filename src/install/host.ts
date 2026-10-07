@@ -640,6 +640,8 @@ export interface HostFleetResult {
   accounts: (HostAccount & { login: HostLogin | null })[];
   herdrWorkspace: string | null;
   sessionViewer: 'local';
+  /** GY-1479: the master's agent identities were provisioned on the host (`master autonomy --apply`). */
+  masterIdentities: true;
   profiles: ProfileRegistration;
 }
 
@@ -741,6 +743,11 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
   // that cannot be set up fails the install rather than reporting success.
   const masterInit = await asUser(remote, layout.checkout, 'env', [...environment, 'node', layout.cli, 'master', 'init', '--url', request.url, '--token-stdin', '--host-id', hostName, '--cli-path', layout.cli, ...(herdrWorkspace ? ['--herdr-workspace', herdrWorkspace] : [])], { input: request.coordinatorToken, allowFailure: true });
   if (masterInit.code !== 0) throw new Error(`master init did not complete on ${hostName}: ${failure(ctx, masterInit)}`);
+  // GY-1479: the master's operator-agent and approver identities are provisioned here, where its loop
+  // runs and the admin credential is kept, so the new master creates work with no further command.
+  // The admin credential arrives on standard input; master autonomy never stores it.
+  const autonomy = await asUser(remote, layout.checkout, 'env', [...environment, 'node', layout.cli, 'master', 'autonomy', '--admin-token-stdin', '--apply'], { input: request.adminToken, allowFailure: true });
+  if (autonomy.code !== 0) throw new Error(`master autonomy did not complete on ${hostName}: ${failure(ctx, autonomy)}`);
   // The names master init recorded (GY-1441): a host installed before them keeps the legacy loop
   // unit as its alias, so the unit to enable and report is read back, never recomputed.
   // With no record, the legacy names are its alias only when no legacy unit on the host runs another checkout (GY-1452).
@@ -773,7 +780,7 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
     ...userUnits.map((unit, index) => ({ ...unit, active: (userLines[index] ?? '').trim() || 'unknown' })),
   ];
   return {
-    host: hostName, units, runtimes, accounts, herdrWorkspace, sessionViewer: 'local',
+    host: hostName, units, runtimes, accounts, herdrWorkspace, sessionViewer: 'local', masterIdentities: true,
     profiles: {
       repository: { connected: true, herdr: !!herdrWorkspace, detail: herdrWorkspace ? `Herdr workspace ${herdrWorkspace} on ${hostName}` : 'Herdr is installed but no workspace could be created' },
       master: { configured: true, kind: null, detail: `the loop runs as ${installUnits.master} on ${hostName}` },

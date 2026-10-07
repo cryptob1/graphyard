@@ -162,6 +162,8 @@ interface UpState {
   /** The work item that pull request is filed as (GY-1478), and the request id that files it once. */
   onboardingWork?: string | null;
   onboardingRequest?: string | null;
+  /** The host that provisioned the master's agent identities itself (GY-1479), where its loop runs. */
+  identitiesHost?: string | null;
 }
 export const upStateFile = (root: string) => resolve(root, '.graphyard/up.json');
 
@@ -192,17 +194,33 @@ const manifestUrl = (line: string) => line.match(/\bOpen (http:\/\/127\.0\.0\.1:
  */
 function installSignIn(stdout: string) {
   const output = parseJson(stdout);
-  if (!output || typeof output !== 'object') return { claim: null, operatorTokenFile: null };
+  if (!output || typeof output !== 'object') return { claim: null, operatorTokenFile: null, identitiesHost: null };
   const admin = Array.isArray(output.principals) ? output.principals.find((principal: any) => principal?.role === 'admin') : null;
   const operatorTokenFile = typeof admin?.tokenFile === 'string' ? admin.tokenFile as string
     : !output.host && typeof output.installDirectory === 'string' && typeof admin?.id === 'string' ? resolve(output.installDirectory, 'tokens', `${admin.id}.token`) : null;
-  return { claim: typeof output.signIn === 'string' && /#claim=[A-Za-z0-9_-]{16,200}$/.test(output.signIn) ? output.signIn as string : null, operatorTokenFile };
+  const identitiesHost = output.host?.masterIdentities === true ? String(output.host.host ?? 'the host') : null;
+  return { claim: typeof output.signIn === 'string' && /#claim=[A-Za-z0-9_-]{16,200}$/.test(output.signIn) ? output.signIn as string : null, operatorTokenFile, identitiesHost };
 }
-/** Keep where the operator's credential is saved (the path, never the secret), for the sign-in link. */
+/**
+ * Keep where the operator's credential is saved (the path, never the secret), for the sign-in link,
+ * and the host that provisioned the master's identities when a host install did.
+ */
 async function rememberSignIn(root: string, state: UpState, stdout: string) {
-  const { claim, operatorTokenFile } = installSignIn(stdout);
-  if (operatorTokenFile && operatorTokenFile !== state.operatorTokenFile) { state.operatorTokenFile = operatorTokenFile; await writeState(root, state); }
+  const { claim, operatorTokenFile, identitiesHost } = installSignIn(stdout);
+  if ((operatorTokenFile && operatorTokenFile !== state.operatorTokenFile) || (identitiesHost && identitiesHost !== state.identitiesHost)) {
+    if (operatorTokenFile) state.operatorTokenFile = operatorTokenFile;
+    if (identitiesHost) state.identitiesHost = identitiesHost;
+    await writeState(root, state);
+  }
   return claim;
+}
+
+/** Both of the master's agent identities are recorded in master.json and their credential files are readable. */
+async function provisioned(root: string) {
+  const config = await readFile(resolve(root, '.graphyard/master.json'), 'utf8').then(parseJson, () => null);
+  const identities = [config?.operatorAgent, config?.approver];
+  if (identities.some(identity => typeof identity?.credentialFile !== 'string')) return false;
+  return (await Promise.all(identities.map(identity => readFile(identity.credentialFile, 'utf8').then(text => text.trim().length >= 32, () => false)))).every(Boolean);
 }
 
 export async function runUp(request: UpRequest, deps: UpDependencies): Promise<UpResult> {
@@ -369,9 +387,11 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // with the admin credential the install saved, so the new master creates, releases and unblocks work
     // with no further command. That credential is never something an agent session may read.
     await step('master-autonomy', async () => {
+      // A host install provisions them on the host, where its loop runs and the admin credential stays.
+      if (state.identitiesHost) return `the master's agent identities were provisioned on ${state.identitiesHost}, where its loop runs`;
       const admin = await deps.operatorToken?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
-      // An install whose operator already ran the command keeps that identity; the admin credential only refreshes it.
-      if (!admin && (await readFile(resolve(deps.root, '.graphyard/master.json'), 'utf8').then(text => parseJson(text)?.operatorAgent, () => null))) return 'the master\'s operator-agent identity was already provisioned';
+      // An install whose operator already ran the command keeps those identities; the admin credential only refreshes them.
+      if (!admin && await provisioned(deps.root)) return 'the master\'s operator-agent and approver identities were already provisioned';
       if (!admin) throw new UpStop(`master-autonomy: the operator's admin credential is not on this machine${state.operatorTokenFile ? ` (${state.operatorTokenFile} is unreadable)` : ''}, so the master's agent identities cannot be provisioned; pipe it to graphyard master autonomy --admin-token-stdin --apply here, then rerun ${rerun()}`, upExitCodes.prerequisite);
       await run('master-autonomy', ['master', 'autonomy', '--admin-token-stdin', '--apply', '--harness', request.master], { stdin: admin });
       return 'the master creates, releases and unblocks work with its own operator-agent identity';
