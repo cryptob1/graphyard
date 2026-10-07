@@ -35,7 +35,7 @@ const situatedBinding = /^([0-9a-f]{40}):(conflict|sync|verdict|ci|proof|proof-e
 export function routineReworkGround(work: ReworkGroundsWork | null | undefined, binding?: string | null): string | null {
   const candidate = work?.candidate ?? null;
   const bound = typeof binding === 'string' ? situatedBinding.exec(binding) : null;
-  if (bound && (!candidate || candidate.sha === bound[1])) return bound[2];
+  if (bound && candidate?.sha === bound[1]) return bound[2];
   const observation = work?.observation;
   if (!work || !candidate || !observation) return null;
   if (work.policyRevision !== undefined && baseRefreshConflict(work as Pick<Work, 'candidate' | 'observation' | 'baseRefresh' | 'policyRevision'>)) return 'conflict';

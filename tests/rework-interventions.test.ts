@@ -55,9 +55,11 @@ test('unit:rework-instances-replayed — every listed instance is read from its 
 });
 
 test('unit:rework-instances-replayed — the grounds are read from the record, not from who asked: the same round without its binding is still routine, and a rework of a clean head is still an intervention', () => {
-  const bound = fixture.instances.filter(instance => routineReworkGround(instance.rework.grounds, instance.decision?.binding) && routineReworkGround(null, instance.decision?.binding));
+  // The binding alone: the head the rework sent back, without anything else its record shows.
+  const bindingAlone = (instance: typeof fixture.instances[number]) => routineReworkGround({ candidate: instance.rework.grounds.candidate }, instance.decision?.binding);
+  const bound = fixture.instances.filter(instance => routineReworkGround(instance.rework.grounds, instance.decision?.binding) && bindingAlone(instance));
   assert.equal(bound.length, 377, 'rounds the loop requested under its own situated binding');
-  const byHand = fixture.instances.filter(instance => !routineReworkGround(null, instance.decision?.binding) && routineReworkGround(instance.rework.grounds));
+  const byHand = fixture.instances.filter(instance => !bindingAlone(instance) && routineReworkGround(instance.rework.grounds));
   assert.equal(byHand.length, 109, 'rounds requested without one, on a ground the record shows');
   const conflicted = byHand.find(instance => routineReworkGround(instance.rework.grounds) === 'conflict')!;
   const clean = structuredClone(conflicted.rework.grounds);
