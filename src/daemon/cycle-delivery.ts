@@ -160,12 +160,13 @@ export async function deploymentStep(cycle: Cycle) {
   // 7a'''. GY-1385: GY-87's throughput claim is measured, not asserted. After a verified deployment
   //        the loop records one measurement for the release the control plane serves, at most once
   //        per verified release (an unverified one is re-measured hourly, GY-1437), with its own
-  //        coordinator credential, reading only the window's deliveries whole; master status reads it back as verified or with its shortfall. One action per
-  //        observed release: a plane that does not serve it yet answers `waiting`, asked again on
-  //        the failure backoff (one status read per ask, never one per cycle) until it serves or a
-  //        newer observation supersedes the key; a failure backs off the same way. It follows a
-  //        verification: a cycle whose observation is still in flight (cut by the budget) starts
-  //        no measurement, so the step never holds two reads in flight.
+  //        coordinator credential, reading only the window's deliveries whole; master status reads it
+  //        back as verified or with its shortfall. One action per observed release: a plane that
+  //        does not serve it yet answers `waiting`, asked again on the failure backoff (one status
+  //        read per ask, never one per cycle) until it serves or a newer observation supersedes the
+  //        key; a failure backs off the same way. It follows a verification: a cycle whose
+  //        observation is still in flight (cut by the budget) starts no measurement, so the step
+  //        never holds two reads in flight.
   const verified = observed !== stillVerifying && observed.ok ? state.deployment : null, measure = effects.measureThroughput;
   if (measure && verified && verified.source !== 'unavailable' && verified.sha) {
     const key = `throughput:${verified.sha}`, previous = state.actions[key];
