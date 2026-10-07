@@ -68,11 +68,13 @@ export function standingVerdict(work: Work): StandingVerdict | null {
  * its review-round cap, or null. One that names no `BLOCKING:` finding and was posted by the
  * configured reviewer App is a `follow-up`: its findings become the item's follow-up batch and the
  * request is withdrawn, so the head is reviewed again with no rework. One naming a blocking finding
- * is an `escalate`: the loop requests no further rework and puts the finding to an independent
- * approver. So is any other — an agent provider's verdict, or a person's review — since Graphyard
+ * is an `escalate`: the loop requests a rework decision only its independent approver may apply
+ * (`cappedReworkBinding`), which puts the finding to that approver. So is any other — an agent provider's verdict, or a person's review — since Graphyard
  * cannot withdraw it as the reviewer App.
  */
 export interface CappedReview { kind: 'follow-up' | 'escalate'; round: number; cap: number; reviewer: string; reviewId: number | null; sha: string; blocking: string[]; findings: string[]; reason: string }
+/** The binding of the loop's rework request for a capped change request (GY-1389): an approver's to judge, never the risk lane's. */
+export const cappedReworkBinding = (head: string, reviewer: string) => `${head}:capped:${reviewer}`;
 export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>): CappedReview | null {
   const cap = reviewRoundCapOf(config);
   if (work.stage === 'done' || !pastReviewCap(work, cap)) return null;
@@ -276,6 +278,13 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   const capped = pastReviewCap(work, reviewRoundCapOf(config));
   const verdict = capped ? null : standingVerdict(work);
   if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
+  // Past the cap a change request that escalates — a blocking finding, or one Graphyard cannot withdraw —
+  // is the independent approver's to judge (GY-1118). The loop requests that one round itself, kept for
+  // the approver it launches rather than its risk lane (GY-1389): the review-cap escalation had a master
+  // request it by hand, and each was then counted as a coordinator stepping in.
+  const escalated = capped && !work.reworkRequested ? cappedReview(work, config) : null;
+  if (escalated?.kind === 'escalate') return { action: 'rework', binding: cappedReworkBinding(work.candidate!.sha, escalated.reviewer),
+    reason: `${escalated.reason.replace(/\.$/, '')}. Past the review-round cap only an independent approver sends the head back: approve for one more round fixing exactly that finding, or refuse it as non-blocking and the reviewer re-reviews the head listing it as a FOLLOW-UP.`.slice(0, 2000) };
   // A failed trusted proof, or evidence the producer found does not exercise its criterion, returns
   // the head before any review (GY-193): no review comes for such a head, so the thread rule below —
   // which waits for one — must not hold this rework.

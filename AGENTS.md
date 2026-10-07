@@ -171,8 +171,10 @@ hand actions, naming the loop step. The loop drives an item created `"systemDriv
 the same way; opting out only also allows the hand actions, so check master status
 for the loop's pending step before taking one and never request a second. A hand
 `graphyard master decide GY-N rework` is refused while the loop's own rule requests that
-round on the same record (it carries the loop's grounds binding, so the intervention report
-counts it as a review round, not an intervention); answer a refused loop request with `--precedent`.
+round on the same record, judged on the loop's base failures, spent producer requests and planned
+bot rounds (it carries the loop's grounds binding, so the intervention report counts it as a review
+round, not an intervention), while the loop withdraws a capped change request, and for a head whose
+producers never started (the loop relaunches them); answer a refused loop request with `--precedent`.
 GitHub merges: a pull request whose build, review and required checks pass on its head
 is merged by GitHub on its branch protection, and the loop only records the delivery.
 There is no Graphyard merge to run. A merge of a head whose gates had not passed is held

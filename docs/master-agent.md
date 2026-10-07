@@ -11,7 +11,7 @@ Keep cycling: `master status`; `master run` dispatches (`schedule.order`); merge
 
 ### System-driven items
 
-Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, `decide attest|merge`, and a binding-free `decide rework` the loop's rule already requests (`--precedent` answers refusals), except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` when unauthorized or without an operator agent.
+Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, `decide attest|merge`, and a binding-free `decide rework` the loop owns (`--precedent` answers refusals), except stopped-loop recovery, unproduced `manual:` attestations, and `decide merge` when unauthorized or without an operator agent.
 
 The loop attests unproduced `manual:` proofs through an independent approver, once per head, base and policy revision (`loopDecisions.attestations`).
 

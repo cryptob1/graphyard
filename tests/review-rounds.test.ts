@@ -11,7 +11,8 @@ import { bindReviewer, launchReview, readReviewLedger, reviewHistory, reviewProm
 import type { Observation, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { blockingFindings, defaultReviewRoundCap, followUpFindingsOf, observedReviewBody, reviewBodyMax, reviewRoundStatus, withReviewRounds } from '../src/review-cap.js';
-import { cappedReview, neededDecision } from '../src/daemon/decisions.js';
+import { cappedReview, cappedReworkBinding, neededDecision } from '../src/daemon/decisions.js';
+import { cappedRework } from '../src/server/lane-rework.js';
 import { cappedEscalation } from '../src/daemon/cycle-review-cap.js';
 import { routedScopeStatus } from '../src/cli/owed-report.js';
 
@@ -162,7 +163,7 @@ function work(): Work {
 const pipeline = (reworkRounds: number) => ({ attempts: [], submittedAt: null, resubmittedAt: null, reworkRounds, interventions: { blocked: 0, requirements: 0 } });
 const blockingWording = 'on its own line starting BLOCKING: in the body of REQUEST_CHANGES';
 
-test('unit:review-rounds-capped — a change request past the cap is read for BLOCKING: lines: one naming none is filed as follow-ups, one naming one escalates, and neither is reworked; the round shows per item', () => {
+test('unit:review-rounds-capped — a change request past the cap is read for BLOCKING: lines: one naming none is filed as follow-ups, one naming one is put to an independent approver as the loop\'s own rework request, never the risk lane\'s; the round shows per item', () => {
   assert.deepEqual(blockingFindings('Looks fine.\nBLOCKING: AC-1 is not met\n- **BLOCKING**: the token is logged in clear\nBLOCKING: none\nNot blocking: naming'), ['AC-1 is not met', 'the token is logged in clear']);
   // GY-1169: a fully bolded line loses only its wrapper, and a finding's own trailing characters are kept.
   assert.deepEqual(blockingFindings('**BLOCKING: AC-2 is not met**\n- **BLOCKING:** the setting is named foo_\nBLOCKING: **the flag is --dry.**\n* BLOCKING finding: call `run:`\nBLOCKING: _private is read.\n**BLOCKING: none.**'),
@@ -205,11 +206,17 @@ test('unit:review-rounds-capped — a change request past the cap is read for BL
   const followUp = cappedReview(changed(3, 'Rename the helper.\n\n- Add a table test.'), config)!;
   assert.deepEqual([followUp.kind, followUp.round, followUp.cap, followUp.reviewId, followUp.findings], ['follow-up', 4, 3, 4242, ['Rename the helper.', '- Add a table test.']]);
   assert.equal(neededDecision(changed(3, 'Rename the helper.'), config), null);
-  // One naming a blocking finding escalates, and is not reworked either.
+  // One naming a blocking finding escalates to an independent approver: the loop requests that one
+  // round itself on the capped grounds, which no risk lane applies (GY-1389), instead of a master by hand.
   const blocking = cappedReview(changed(3, 'BLOCKING: AC-1 is not met'), config)!;
   assert.deepEqual([blocking.kind, blocking.blocking], ['escalate', ['AC-1 is not met']]);
   assert.match(blocking.reason, /GY-64 is in review round 4, past its cap of 3, and graphyard-reviewer\[bot\] names a blocking finding/);
-  assert.equal(neededDecision(changed(3, 'BLOCKING: AC-1 is not met'), config), null);
+  const round = neededDecision(changed(3, 'BLOCKING: AC-1 is not met'), config)!;
+  assert.deepEqual([round.action, round.binding], ['rework', cappedReworkBinding(H, reviewer)]);
+  assert.match(round.reason, /names a blocking finding on [0-9a-f]{12}: AC-1 is not met\. Past the review-round cap only an independent approver sends the head back/);
+  assert.ok(cappedRework({ binding: round.binding }) && !cappedRework({ binding: `${H}:verdict:${reviewer}` }), 'the server keeps it for the approver');
+  assert.equal(neededDecision({ ...changed(3, 'BLOCKING: AC-1 is not met'), reworkRequested: true }, config), null, 'once the round is applied the item needs a worker, not a second decision');
+  // A loop without the decision effects still escalates it for a master to request.
   assert.match(cappedEscalation({ key: 'GY-64' }, blocking), /an independent approver decides whether the finding is blocking — graphyard master decide GY-64 rework REASON/);
   // A blocking finding the observation read from the whole body escalates even when the kept body no longer shows it.
   const cut = changed(3, 'Rename the helper.');

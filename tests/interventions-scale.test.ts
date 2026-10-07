@@ -13,7 +13,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import * as interventions from '../src/interventions.js';
-import { interventionLedgerKinds, interventionLedgerLimit, interventionLedgerSince, openPatternItems, readInterventionLedger, type InterventionLedgerRow } from '../src/interventions.js';
+import { interventionLedgerKinds, interventionLedgerLimit, interventionLedgerSince, openPatternItems, readInterventionLedger, windowOutcomes, type InterventionLedgerRow } from '../src/interventions.js';
 import { interventionPolicyDefaults } from '../src/model/interventions.js';
 
 /**
@@ -159,7 +159,7 @@ async function perRowLedger(since: string, limit = interventionLedgerLimit): Pro
     await client.query('SET statement_timeout = 0');
     const result = await client.query(`SELECT ${perRowColumns} FROM (SELECT *, graphyard_event_work(work_id, payload) AS doc FROM (SELECT * FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) AND created_at >= (SELECT reach FROM unnest($1::text[], $4::timestamptz[]) AS wanted(kind, reach) WHERE wanted.kind = events.kind) ORDER BY seq DESC LIMIT $2) newest) ledger ORDER BY seq DESC`, [[...interventionLedgerKinds], limit + 1, null, interventionLedgerKinds.map(kind => interventionLedgerSince(kind, since))]);
     const instant = (value: unknown, fallback: string) => { const parsed = typeof value === 'string' ? Date.parse(value) : Number.NaN; return Number.isFinite(parsed) ? new Date(parsed).toISOString() : fallback; };
-    return { truncated: result.rows.length > limit, rows: result.rows.slice(0, limit).reverse().map(row => ({ seq: Number(row.seq), workId: row.work_id, actor: row.actor, kind: row.kind, at: instant(row.updated_at, new Date(row.created_at).toISOString()), details: row.details, payload: row.top ?? undefined, work: row.work ?? null, stageBefore: row.stage_before ?? null })) };
+    return { truncated: result.rows.length > limit, rows: windowOutcomes(result.rows.slice(0, limit).reverse(), since).map(row => ({ seq: Number(row.seq), workId: row.work_id, actor: row.actor, kind: row.kind, at: instant(row.updated_at, new Date(row.created_at).toISOString()), details: row.details, payload: row.top ?? undefined, work: row.work ?? null, stageBefore: row.stage_before ?? null })) };
   } finally { await client.query('SET statement_timeout = DEFAULT').catch(() => {}); client.release(); }
 }
 

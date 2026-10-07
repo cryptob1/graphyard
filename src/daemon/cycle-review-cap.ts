@@ -25,8 +25,9 @@ export function cappedEscalation(work: Pick<Work, 'key'>, capped: CappedReview, 
  * (`cappedReview`): one that names no blocking finding is withdrawn as the reviewer App — its
  * findings are nits, and nothing is filed for them (GY-1249) — so the review request is answered
  * afresh on the same head and the item goes on toward merge with no rework; one that names a
- * blocking finding, or that Graphyard cannot withdraw, is escalated for an independent approver's
- * decision. The routine decisions request no rework for either (`neededDecision`). Each request is
+ * blocking finding, or that Graphyard cannot withdraw, is put to an independent approver: the
+ * routine decisions request its rework decision for the approver the loop launches (`neededDecision`,
+ * GY-1389), and only a loop without the decision effects escalates it for a master to request. Each request is
  * withdrawn once, keyed on its head and review id; a failed withdrawal is retried with backoff and escalated after
  * `maxCappedFilingAttempts`. A head is withdrawn at most once: a later change request on the same
  * head, from its re-review, is escalated instead, so a reviewer that keeps requesting changes
@@ -42,7 +43,8 @@ export async function reviewCapStep(cycle: Cycle) {
       if (detailChanged(state.actions[key], detail))
         performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
     };
-    if (capped.kind === 'escalate') return escalate();
+    // A loop that requests decisions asks its approver for this round itself (neededDecision, GY-1389).
+    if (capped.kind === 'escalate') return effects.decide && effects.approver ? undefined : escalate();
     const key = cappedFilingKey(item, capped), previous = state.actions[key];
     if (previous?.state === 'done') return;
     // A head is withdrawn once: its re-review requesting changes again escalates rather than repeating the withdrawal (GY-1118 review).

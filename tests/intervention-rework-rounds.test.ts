@@ -10,7 +10,9 @@ import type { Observation, Principal, Work } from '../src/model.js';
 import * as interventions from '../src/interventions.js';
 import { foldInterventions, readInterventionLedger, type InterventionLedgerRow } from '../src/interventions.js';
 import type { InterventionReport } from '../src/model/interventions.js';
-import { loopRework } from '../src/cli/hand-rework.js';
+import { loopBaseFailed, loopRework, type HandReworkLoop } from '../src/cli/hand-rework.js';
+import type { ExhaustedProof } from '../src/daemon/decisions.js';
+import { dropRetiredQueueFields, retiredQueueFields } from '../src/model/retired-queue.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1389: 386 rework "interventions" at the review stage in seven days, every one of them the
@@ -50,7 +52,7 @@ test('unit:rework-review-rounds-not-interventions — each of the 386 linked rew
   assert.deepEqual([grounded.length, hand.length], [360, 26]);
   const reworks = (instance: Instance) => foldInterventions(rowsOf(instance), [], instance.rework.at).interventions.filter(entry => entry.kind === 'rework');
   for (const instance of grounded) assert.deepEqual(reworks(instance).map(entry => entry.id), [], `${instance.id} (${instance.work}) is the review round working, not an intervention`);
-  // A coordinator's hand request is one; master decide now refuses the 15 of them that restated the loop's round (below).
+  // A coordinator's hand request is one; master decide now refuses the 21 of them the loop's own rules own (below).
   for (const instance of hand) assert.deepEqual(reworks(instance).map(entry => entry.trigger), ['decision'], `${instance.id} (${instance.work}) was requested by hand`);
   // All of them on one ledger, in seq order, as the pattern scan reads them.
   const ids = new Map(instances.map(instance => [instance.work, randomUUID()]));
@@ -70,6 +72,10 @@ test('unit:rework-by-hand-still-counted — a rework requested without grounds, 
   assert.deepEqual(hand.map(entry => [entry.trigger, entry.stage, entry.blocked]), [['decision', 'review', `candidate ${'a'.repeat(12)} (PR #7)`]]);
   // A person approving the loop's request did the approver's job.
   assert.equal(reworks(rowsOf({ ...grounded, decision: { ...grounded.decision!, approved: { ...grounded.decision!.approved!, actor: 'human-operator', role: 'admin' } } })).length, 1);
+  // So did one approving the loop's failed-check round, which the fold otherwise reads as CI's own (GY-1387).
+  const ci = { ...grounded.decision!, binding: `${'a'.repeat(40)}:ci:test` };
+  assert.equal(reworks(rowsOf({ ...grounded, decision: ci })).length, 0);
+  assert.equal(reworks(rowsOf({ ...grounded, decision: { ...ci, approved: { ...ci.approved!, actor: 'human-operator', role: 'admin' } } })).length, 1);
   // A rework command with no decision behind it is an operator's by hand.
   assert.deepEqual(reworks(rowsOf({ ...grounded, decision: null })).map(entry => entry.trigger), ['direct']);
   // A blocked report the rework answers is somebody stepping in, grounded request or not.
@@ -83,33 +89,92 @@ test('unit:rework-by-hand-still-counted — a rework requested without grounds, 
   assert.deepEqual(waiting(null).map(entry => entry.resolvedAt), [null]);
 });
 
+test('unit:rework-reach-serves-window-outcomes — a decision row read from the reach before the window is folded only when a row inside the window names the same decision or a rework inside it may apply it; a request that only waited before the window is no signal of it', () => {
+  const since = '2026-10-06T00:00:00.000Z', before = '2026-10-05T12:00:00.000Z', inside = '2026-10-06T06:00:00.000Z';
+  const row = (seq: number, kind: string, work: string, at: string, id?: string) => ({ seq, kind, work_id: work, created_at: at, top: id ? { id } : null });
+  const rows = [row(1, 'decision.requested', 'w1', before, 'd1'), row(2, 'decision.requested', 'w2', before, 'd2'), row(3, 'decision.requested', 'w3', before, 'd3'), row(4, 'decision.approved', 'w3', before, 'd3'),
+    row(5, 'rework', 'w1', inside), row(6, 'decision.withdrawn', 'w2', inside, 'd2'), row(7, 'decision.requested', 'w4', before, 'd4')];
+  assert.deepEqual(interventions.windowOutcomes(rows, since).map(entry => entry.seq), [1, 2, 5, 6], 'w3 settled and w4 only waited before the window opened');
+});
+
 // The 26 linked instances a master requested by hand, each judged on the work document the ledger
 // held just before its request (trimmed; the trim is checked to leave the loop's verdict unchanged).
-interface HandInstance { id: string; work: string; requestedAt: string; precedent: string[] | null; loopRework: string | null; document: Work }
+interface HandInstance { id: string; work: string; requestedAt: string; precedent: string[] | null; reason: string; loopRework: string | null; document: Work }
 const handFixture = async () => JSON.parse(await readFile(new URL('./fixtures/gy-1389-hand-reworks.json', import.meta.url), 'utf8')) as { instances: HandInstance[] };
-const handRework = (instance: HandInstance, loop: Partial<Parameters<typeof loopRework>[4]> = {}, input: Record<string, unknown> = { previousWorkerStopped: true }) =>
-  loopRework(instance.document, 'rework', input, { autoMerge: true }, { now: Date.parse(instance.requestedAt), requestsDecisions: true, precedent: instance.precedent?.join(',') ?? null, ...loop });
+const reviewerApp = { appId: 1, installationId: 2, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.pem', boundAt: '2026-09-24T00:00:00Z' };
+const loopConfig = { autoMerge: true, reviewer: reviewerApp };
+/**
+ * The producer requests the loop had spent on a head, as its dispatch cursor held them: the cursor is
+ * not in the ledger, so each is rebuilt from what the hand request itself quoted — every launch on the
+ * agy account answered 'Individual quota reached', and the session never started.
+ */
+const quotaSpent = (instance: HandInstance): ExhaustedProof[] => /Individual quota reached/.test(instance.reason)
+  ? [{ requestId: `spent-${instance.work}`, work: instance.work, sha: instance.document.candidate!.sha, group: 'unit', proofs: [], reason: 'the loop stopped attempting the request',
+    attempts: ["attempt 1 on agy-producer: failed — never started: the agy account answered the launch with 'Individual quota reached'"] }] : [];
+const loopOf = (instance: HandInstance, loop: Partial<HandReworkLoop> = {}): HandReworkLoop =>
+  ({ now: Date.parse(instance.requestedAt), requestsDecisions: true, precedent: instance.precedent?.join(',') ?? null, baseFailed: new Set(), exhausted: quotaSpent(instance), mechanical: [], capEscalated: false, ...loop });
+const handRework = (instance: HandInstance, loop: Partial<HandReworkLoop> = {}, input: Record<string, unknown> = { previousWorkerStopped: true }) =>
+  loopRework(instance.document, 'rework', input, loopConfig, loopOf(instance, loop));
+/** Graphyard's own merge queue ejected the head (GY-1236 removed the queue: no speculative tip is built or ejected now). */
+const queueEjected = (instance: HandInstance) => !!(instance.document as Work & { queueEjection?: unknown }).queueEjection
+  && (instance.document.gates.find(gate => gate.name === 'merge')?.reasons ?? []).some(reason => reason.startsWith('Ejected from the merge queue:'));
 
-test('unit:hand-rework-restating-loop-refused — of the 26 hand reworks among the linked instances, the 15 that restated the round the loop\'s own rule was requesting on the same record are refused by master decide, naming the loop step; the 11 judgement calls stay open and stay counted', async () => {
+test('unit:hand-rework-restating-loop-refused — of the 26 hand reworks among the linked instances, the 21 the loop\'s own rules now own are refused by master decide (the round it requests on the same record, its mechanical bot round, a capped change request its approver judges or it withdraws, a head whose producers never started), 4 rested on the retired merge queue\'s ejections, and 1 judgement call is left: under 3 in the replayed week', async () => {
   const { instances } = await handFixture();
   assert.equal(instances.length, 26);
   const refused = instances.filter(instance => handRework(instance));
-  assert.deepEqual(refused.map(instance => instance.id), instances.filter(instance => instance.loopRework).map(instance => instance.id));
-  assert.equal(refused.length, 15);
-  for (const instance of refused) {
+  const owned = (pattern: RegExp) => refused.filter(instance => pattern.test(handRework(instance)!)).map(instance => instance.work);
+  // The round the loop's decisions step was requesting on the same record — 15 of them, the binding the fixture recorded from the loop's own rule.
+  for (const instance of instances.filter(instance => instance.loopRework)) {
     const refusal = handRework(instance)!;
-    assert.match(refusal, /the loop's decisions step requests this rework itself/);
+    assert.match(refusal, /the loop's decisions step requests this rework itself/, instance.id);
     assert.ok(refusal.includes(instance.loopRework!), `${instance.id} names the grounds the loop requests it on`);
     assert.match(refusal, /--precedent/, 'it names the way a refusal is still answered by hand');
     // Where the loop sends the master, the hand rework stays open.
     assert.equal(handRework(instance, { precedent: 'a-refused-decision' }), null, 'answering a refusal');
     assert.equal(handRework(instance, { requestsDecisions: false }), null, 'a loop with no operator-agent identity');
-    assert.equal(loopRework({ ...instance.document, systemDriven: false }, 'rework', { previousWorkerStopped: true }, { autoMerge: true }, { now: Date.parse(instance.requestedAt), requestsDecisions: true }), null, 'an item that is not system-driven');
+    assert.equal(loopRework({ ...instance.document, systemDriven: false }, 'rework', { previousWorkerStopped: true }, loopConfig, loopOf(instance)), null, 'an item that is not system-driven');
   }
-  for (const instance of instances.filter(instance => !instance.loopRework)) assert.equal(handRework(instance), null, `${instance.id} (${instance.work}): a judgement the loop does not make stays the master's`);
+  // GY-1166's change request past the cap names a blocking finding: the loop now requests that round for its approver.
+  assert.deepEqual(owned(/:capped:graphyard-reviewer\[bot\]\)/), ['GY-1166']);
+  // GY-1339's approval named a mechanical nit the worker bot's round fixes (GY-971).
+  assert.deepEqual(owned(/classified mechanical, which the worker bot fixes/), ['GY-1339']);
+  // GY-1039's capped change request named no blocking finding: the loop withdraws it, and the head is reviewed again.
+  assert.deepEqual(owned(/review-cap step withdraws such a request/), ['GY-1039']);
+  // GY-1157, GY-1114 and GY-949: no producer session ever started on the head; the loop relaunches once an account is eligible, and a precedent does not reopen it.
+  assert.deepEqual(owned(/ended without the session acting/), ['GY-1157', 'GY-1114', 'GY-949']);
+  assert.ok(instances.filter(instance => quotaSpent(instance).length).every(instance => /ended without the session acting/.test(handRework(instance, { precedent: 'c0557205-db4a-48f9-ba1b-af0bd85cf74c' }) ?? '')));
+  assert.equal(refused.length, 21);
+
+  // Left open: four ejections by Graphyard's own merge queue — retired with GY-1236, so nothing ejects a head now
+  // and every document write drops the fields — and one judgement the loop does not make.
+  const open = instances.filter(instance => !handRework(instance));
+  assert.deepEqual(open.filter(queueEjected).map(instance => instance.work), ['GY-1171', 'GY-1069', 'GY-913', 'GY-501']);
+  assert.ok(retiredQueueFields.includes('queueEjection') && !('queueEjection' in dropRetiredQueueFields({ ...open[0].document })));
+  const judgement = open.filter(instance => !queueEjected(instance));
+  assert.deepEqual(judgement.map(instance => [instance.work, instance.requestedAt]), [['GY-501', '2026-10-02T05:00:27.216Z']]);
+  assert.ok(judgement.length < 3, 'the replayed week leaves under 3 rework interventions at the review stage');
+
   // A hand request never carries the loop's grounds binding, so the report can tell the two apart.
   assert.match(handRework(instances[0], {}, { previousWorkerStopped: true, binding: 'x:verdict:y' })!, /grounds binding marks the loop's own rework request/);
-  assert.equal(loopRework(instances[0].document, 'attest', {}, { autoMerge: true }, { now: 0, requestsDecisions: true }), null, 'only rework is judged here');
+  assert.equal(loopRework(instances[0].document, 'attest', {}, loopConfig, loopOf(instances[0])), null, 'only rework is judged here');
+});
+
+test('unit:hand-rework-loop-context — the guard judges a hand rework on the loop\'s own context: a check the base fails too is no worker\'s, so it refuses nothing on it (nor on a failed check while the loop\'s base judgement is unread); a capped request the loop already escalated stays the master\'s', async () => {
+  const { instances } = await handFixture();
+  const ci = instances.find(instance => instance.loopRework?.includes(':ci:'))!;
+  const check = ci.loopRework!.split(':ci:')[1];
+  assert.ok(handRework(ci), 'a failed check the base passes is the loop\'s round');
+  assert.equal(handRework(ci, { baseFailed: new Set(check.split(',')) }), null, 'the loop raises a check the base fails too against the base and requests no rework (GY-528)');
+  assert.equal(handRework(ci, { baseFailed: null }), null, 'without the loop\'s base judgement a failed check is not known to be the worker\'s');
+  const state = (baseFailures: Record<string, { check: string; blocks: { id: string; sha: string }[] }>, actions: Record<string, { detail: string }> = {}) => ({ baseFailures, actions });
+  const head = ci.document.candidate!.sha;
+  assert.deepEqual([...loopBaseFailed(ci.document, state({ a: { check, blocks: [{ id: ci.document.id, sha: head }] }, b: { check: 'other', blocks: [{ id: 'elsewhere', sha: head }] } }))!], [check]);
+  assert.equal(loopBaseFailed(ci.document, state({}, { [`wait:base-failure:${ci.document.id}`]: { detail: `required check ${check} failed on ${head.slice(0, 12)}; rework waits for the base head` } })), null, 'still judging it');
+  assert.equal(loopBaseFailed(ci.document, null), null, 'the loop state could not be read');
+  const capped = instances.find(instance => instance.work === 'GY-1039')!;
+  assert.equal(handRework(capped, { capEscalated: true }), null, 'a capped request the loop escalated, not withdrew, is the master\'s to answer');
+  assert.equal(handRework(capped, { capEscalated: null }), null);
 });
 
 // Driven through the real decide route on a disposable Postgres: the risk lane applies the loop's
@@ -177,6 +242,11 @@ test('integration:rework-review-rounds-report — the loop\'s grounded rework ap
   assert.deepEqual(reworksOf(report, loop.key), [], 'the loop\'s own review round is no signal');
   assert.deepEqual(reworksOf(report, hand.key).map(entry => entry.trigger), ['decision'], 'a coordinator\'s hand request is one');
   assert.deepEqual(reworksOf(report, forged.key).map(entry => entry.trigger), ['decision'], 'a binding from a person\'s credential is no loop provenance');
+
+  // Past the review-round cap the loop's request is kept for its independent approver: no lane applies it (GY-1118).
+  const capped = await submitted('capped-round');
+  const requested = await rework(capped, { binding: `${capped.candidate!.sha}:capped:graphyard-reviewer[bot]` });
+  assert.deepEqual([requested.state, requested.approvedBy ?? null], ['requested', null], 'the risk lane does not apply a capped round');
 
   // The boundary: request and approval a day and more before the window — beyond the reach — the rework inside it.
   const early = await submitted('early-round');

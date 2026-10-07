@@ -56,6 +56,17 @@ export const interventionDecisionReachMs = 24 * 60 * 60_000;
 export const interventionLedgerSince = (kind: string, since: string) =>
   kind.startsWith('decision.') ? new Date(Date.parse(since) - interventionDecisionReachMs).toISOString() : new Date(Date.parse(since)).toISOString();
 
+/**
+ * The rows a window starting at `since` folds, in ledger order: every row inside it, and a decision
+ * row of the reach before it only when a row inside names the same decision or a rework inside may
+ * apply it (GY-1389). One that only waited, or settled, before the window opened is no signal of it.
+ */
+export function windowOutcomes<R extends { created_at: string | Date; kind: string; work_id: string | null; top?: { id?: unknown } | null }>(rows: R[], since: string): R[] {
+  const opened = Date.parse(since), inside = (row: R) => new Date(row.created_at).getTime() >= opened;
+  const linked = new Set(rows.filter(inside).flatMap(row => row.kind === 'rework' ? [`${row.work_id}:*`] : row.kind.startsWith('decision.') ? [`${row.work_id}:${row.top?.id}`] : []));
+  return rows.filter(row => inside(row) || linked.has(`${row.work_id}:${row.top?.id}`) || linked.has(`${row.work_id}:*`));
+}
+
 /** One ledger row as the fold reads it: the typed details, and the few document paths the row embeds. */
 export interface InterventionLedgerRow {
   seq: number; workId: string | null; actor: string; kind: string; at: string;
@@ -115,7 +126,8 @@ export async function readInterventionLedger(db: Db, options: { limit?: number; 
         ORDER BY seq DESC LIMIT $2`, [[...interventionLedgerKinds], limit + 1, options.workId ?? null, interventionLedgerKinds.map(kind => interventionLedgerSince(kind, options.since!))])
     : await db.query(`SELECT ${columns} FROM events WHERE kind = ANY($1) AND ($3::uuid IS NULL OR work_id=$3) ORDER BY seq DESC LIMIT $2`, [[...interventionLedgerKinds], limit + 1, options.workId ?? null]);
   const truncated = result.rows.length > limit;
-  const window = result.rows.slice(0, limit).reverse();
+  let window = result.rows.slice(0, limit).reverse();
+  if (options.since) window = windowOutcomes(window, options.since);
   // A decision the window acts on but whose request lies beyond the reach — one that waited longer
   // than a day — is read by its id, so the rework it applies is still judged by its request (GY-1389).
   if (options.since) {
@@ -326,6 +338,7 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
         // a standing change request, a failed check, a base conflict, a mechanical finding — it rests on.
         // Only the loop's operator-agent identity requests on grounds: a binding a person's credential
         // sent (the requester the decide route records) is not the loop's provenance, and stays counted.
+        // A row with no recorded requester predates the provenance field, when only the loop sent bindings.
         const loopRequested = !row.payload?.requester || row.payload.requester.role === 'operator-agent';
         if (row.payload?.action === 'rework') entry.reworkDecision = { seq: row.seq, at: row.at, id: row.payload.id, stage, binding: loopRequested && typeof row.payload.input?.binding === 'string' && row.payload.input.binding ? row.payload.input.binding : null, approvedBy: null };
         break;
@@ -333,7 +346,11 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
       case 'decision.approved': {
         // The product's own approvers: the risk lane (GY-883) and an operator agent the loop launched.
         const approver = row.payload?.approver ?? {};
-        if (entry.reworkDecision?.id === row.payload?.id && (approver.role === 'risk-lane' || approver.role === 'operator-agent')) entry.reworkDecision!.approvedBy = row.actor;
+        // A person approving the loop's request did the approver's job: the round is theirs, CI's or not.
+        if (entry.reworkDecision?.id === row.payload?.id) {
+          if (approver.role === 'risk-lane' || approver.role === 'operator-agent') entry.reworkDecision!.approvedBy = row.actor;
+          else entry.reworkDecision!.binding = null;
+        }
         break;
       }
       case 'decision.applied': case 'decision.failed': case 'decision.withdrawn': case 'decision.stale': case 'decision.declined': case 'decision.superseded': {

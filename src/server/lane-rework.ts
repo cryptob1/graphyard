@@ -64,11 +64,18 @@ export async function answerWith(services: Services, caller: Principal, key: str
   });
 }
 
+/**
+ * A rework past the review-round cap (GY-1118), as the loop requests it on `cappedReworkBinding`'s
+ * grounds (GY-1389): only an independent approver judges whether the finding is blocking, so no
+ * lane applies it.
+ */
+export const cappedRework = (input: unknown) => /^[0-9a-f]{7,64}:capped:/.test(String((input as { binding?: unknown } | null)?.binding ?? ''));
+
 export async function applyLaneRework(services: Services, requested: DecisionRecord): Promise<DecisionRecord> {
   const approved = await services.engine.store.transaction(async db => {
     const work = await findWork(db, requested.workId); demand(work, 'Work item not found', 404);
     const decision = (await readDecisions(db, work!)).find(entry => entry.id === requested.id)!;
-    if (decision.state !== 'requested' || reworkNeedsApprover(work!) || decisionPrecondition(decision.action, decision.input, work!)) return decision;
+    if (decision.state !== 'requested' || reworkNeedsApprover(work!) || cappedRework(decision.input) || decisionPrecondition(decision.action, decision.input, work!)) return decision;
     const lane = itemLane(work!), reason = `the ${lane} risk lane applies a rework without an approver decision (GY-883)`;
     await record(db, work!, laneApprover, 'decision.approved', { id: decision.id, action: decision.action, reason, requestedBy: decision.requestedBy, approver: { id: laneApprover, role: 'risk-lane' }, lane });
     return (await readDecisions(db, work!)).find(entry => entry.id === requested.id)!;
