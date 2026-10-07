@@ -83,14 +83,13 @@ jobs:
       # rather than start one unconfined. Ubuntu 24.04 confines unprivileged user namespaces to
       # profiled binaries, so the runner lifts that restriction for the suite.
       # A stalled apt mirror once held two shards in this step until the job timeout cancelled them
-      # (GY-1468), and three 50-second attempts outran this step's own three-minute bound twice on
-      # 2026-10-07, failing main (GY-1483). Each apt call is bounded at 25 seconds, the second and
-      # third attempts switch to another Ubuntu mirror, and the attempts fit well within the job's
-      # bound. The step has no timeout of its own: a step timeout fails the job, which the main guard
-      # judges a failing test. When every attempt fails, the step waits for the job's own timeout,
-      # so the shard concludes timed out, which the guard treats like a cancelled run: it reruns it
-      # and never reverts the merge over it.
+      # (GY-1468), and three 50-second attempts outran this step's three-minute bound twice on
+      # 2026-10-07, failing main (GY-1483). Each apt call is bounded at 25 seconds and the second and
+      # third attempts switch to another Ubuntu mirror, so the attempts fit inside the bound.
       - name: Install bubblewrap (the confinement suite runs real namespaces)
+        id: bubblewrap
+        timeout-minutes: 3
+        continue-on-error: true
         shell: bash
         run: |
           set -uo pipefail
@@ -109,12 +108,18 @@ jobs:
             if sudo timeout 25 apt-get update "${apt[@]}" && sudo timeout 25 apt-get install -y "${apt[@]}" bubblewrap; then installed=true; break; fi
             sleep 3
           done
-          if [[ $installed != true ]]; then
-            echo "::error title=Infrastructure failure, not a test failure::bubblewrap could not be installed from any mirror after 3 bounded attempts; this shard waits for the job timeout so the run concludes timed out (cancelled), which the main guard reruns and never reverts"
-            sleep 600
-            exit 1
-          fi
+          [[ $installed == true ]] || exit 1
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+      # An install that failed every attempt, or hit its step bound, is an infrastructure failure,
+      # not a test failure. A failed step fails the job, which the main guard judges a failing test
+      # and reverts; so this step instead outwaits the job's own timeout, the shard concludes timed
+      # out, and the guard treats the run like a cancelled one: it reruns it and never reverts.
+      - name: Hold an exhausted bubblewrap install to the job timeout (an infrastructure failure)
+        if: steps.bubblewrap.outcome == 'failure'
+        run: |
+          echo "::error title=Infrastructure failure, not a test failure::bubblewrap could not be installed from any mirror; this shard waits for the job timeout so it concludes timed out (cancelled), which the main guard reruns and never reverts"
+          sleep 600
+          exit 1
       - name: Select the test files this run executes
         run: node scripts/ci-tests.mjs select --out "$RUNNER_TEMP/selected-tests.txt"
       - name: Run this shard, keeping the record of its timing-dependent assertions

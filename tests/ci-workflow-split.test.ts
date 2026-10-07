@@ -184,18 +184,23 @@ test('unit:ci-bubblewrap-install-resilient — the shards install bubblewrap wit
   const bounds = [...step.matchAll(/sudo timeout (\d+) apt-get (update|install)/g)];
   assert.deepEqual(bounds.map(match => match[2]), ['update', 'install'], 'both apt calls of an attempt are bounded');
   const attempt = bounds.reduce((sum, match) => sum + Number(match[1]), 0) + Number(step.match(/^ +sleep (\d+)$/m)?.[1] ?? NaN);
-  assert.ok(3 * attempt < 3 * 60, `three attempts take at most ${3 * attempt}s, well within the job's ${shard.timeout}-minute bound`);
   const mirrors = step.match(/mirrors=\(''((?: https?:\/\/\S+)+)\)/)?.[1].trim().split(' ') ?? [];
   assert.equal(mirrors.length, 2, 'attempts 2 and 3 each switch to a fallback mirror');
   assert.match(step, /sed -i -E "s#\^URIs: \.\*#URIs: \$mirror#" \/etc\/apt\/sources\.list\.d\/ubuntu\.sources/, 'the fallback rewrites only Ubuntu\'s own sources');
   assert.match(step, /command -v bwrap >\/dev\/null && installed=true/, 'a preinstalled bubblewrap skips apt');
-  // No step timeout: a step timing out fails the job, which the guard judges a failing test. After
-  // the last attempt the step outwaits the job's own timeout instead.
-  assert.doesNotMatch(step, /timeout-minutes/, 'the step has no timeout of its own');
-  assert.ok(shard.timeout && shard.timeout <= 6, 'the job bounds it');
-  const exhausted = step.slice(step.indexOf("if [[ $installed != true ]]; then"));
-  assert.match(exhausted, /::error title=Infrastructure failure, not a test failure::/);
-  assert.ok(Number(exhausted.match(/^ +sleep (\d+)$/m)?.[1]) > shard.timeout * 60, 'it waits past the job timeout');
+  assert.match(step, /\[\[ \$installed == true \]\] \|\| exit 1/, 'an install that failed every attempt fails the step');
+  // The step is bounded, and neither its failure nor its timeout fails the job: the next step then
+  // outwaits the job's own timeout, so the shard concludes timed out rather than failed.
+  const stepTimeout = Number(step.match(/^ {8}timeout-minutes: (\d+)$/m)?.[1]);
+  assert.ok(stepTimeout > 0 && 3 * attempt < stepTimeout * 60, `the three attempts (${3 * attempt}s) fit the step's ${stepTimeout}-minute bound`);
+  assert.match(step, /^ {8}id: bubblewrap$/m);
+  assert.match(step, /^ {8}continue-on-error: true$/m, 'a failed or timed-out install never fails the job by itself');
+  const holdStart = shard.text.indexOf('      - name: Hold an exhausted bubblewrap install'), hold = shard.text.slice(holdStart, shard.text.indexOf('\n      - ', holdStart + 1));
+  assert.equal(holdStart, end + 1, 'the hold step follows the install');
+  assert.match(hold, /^ {8}if: steps\.bubblewrap\.outcome == 'failure'$/m, 'it runs only when the install failed or timed out');
+  assert.doesNotMatch(hold, /timeout-minutes/, 'the job timeout, not a step timeout, ends it');
+  assert.match(hold, /::error title=Infrastructure failure, not a test failure::/);
+  assert.ok(Number(hold.match(/^ +sleep (\d+)$/m)?.[1]) > shard.timeout! * 60, 'it waits past the job timeout');
 
   // The guard's classification of such a run: the shard timed out, the aggregate test check failed
   // because of it, so main is a cancelled run to rerun, not a culprit to revert.
