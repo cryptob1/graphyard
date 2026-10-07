@@ -151,13 +151,6 @@ export const scopeRefusalBlocker = 'Scope request refused';
 export const scopeDecisionBudgetMs = 300_000;
 /** …and no request is left undecided — no item blocked on scope — for longer than fifteen minutes. */
 export const scopeBlockedBudgetMs = 900_000;
-/**
- * GY-1484. How long `scope-request --wait` waits by default: the whole bound the loop settles a scope
- * ask in, so a refusal the rule defers to the independent approver — routed, judged within the
- * approver's ten-minute bound and applied — is read in the one wait instead of reported pending
- * while the approval is still on its way, which led workers to give the ask up before it landed.
- */
-export const scopeRequestWaitMs = scopeBlockedBudgetMs;
 export const scopeDecisionSample = 10;
 /** The most entries plannedFiles holds: the one bound the work schema, the follow-up planner and every widening share (GY-630). */
 export const plannedFilesMax = 100;

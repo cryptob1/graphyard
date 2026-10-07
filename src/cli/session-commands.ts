@@ -5,7 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { Work } from '../model.js';
 import { hostDoableAsk, hostDoableRefusal, parkRefusal, type HostDoableAsk, type HumanRequestRow } from '../model/human-request.js';
 import { configHome } from '../install/secrets.js';
-import { scopeRequestOutcome, scopeRequestWaitMs } from '../model/scope.js';
+import { scopeBlockedBudgetMs, scopeRequestOutcome } from '../model/scope.js';
 import type { CliContext } from './context.js';
 import { workMutation, type CliCommand } from './registry.js';
 import { parkCommand, parkInput } from './park-command.js';
@@ -69,6 +69,13 @@ export function scopeRequestArgs(args: readonly string[]) {
   return { paths, reason, wait };
 }
 
+/**
+ * GY-1484. How long `scope-request --wait` waits by default: the whole bound the loop settles a scope
+ * ask in, so a refusal the rule defers to the independent approver — routed, judged within the
+ * approver's ten-minute bound and applied — is read in the one wait instead of reported pending
+ * while the approval is still on its way, which led workers to give the ask up before it landed.
+ */
+export const scopeRequestWaitMs = scopeBlockedBudgetMs;
 /**
  * The outcome of this attempt's open scope request, read from the item as the control plane holds
  * it (GY-176): the worker's own command reads durable state, so nothing is pasted into its session.

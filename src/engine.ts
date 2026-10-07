@@ -260,7 +260,10 @@ export async function readAttestations(db: { query: (text: string, values: unkno
 export const scopeRequestEndedReason = 'attempt ended';
 export function closeEndedScopeRequest(work: Work, now: Date, by: string) {
   const request = work.scopeRequest;
-  if (!request || work.lease?.epoch === request.epoch) return null;
+  // An operator's unblock also closes an ask an earlier ended attempt carried (GY-1484): the next claim inherits nothing.
+  const dropped = by === 'unblock' ? work.carriedScopeRequest ?? null : null;
+  if (dropped) work.carriedScopeRequest = null;
+  if (!request || work.lease?.epoch === request.epoch) return dropped && endedScopeRecord(dropped, by, now);
   work.scopeRequest = null;
   // A blocker the worker has just reported is its own, whatever its words: only a refusal left standing is cleared.
   if (by !== 'blocked' && work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
@@ -268,9 +271,10 @@ export function closeEndedScopeRequest(work: Work, now: Date, by: string) {
   // An operator's unblock closes it on purpose, so nothing is carried then.
   const carried = by === 'unblock' ? null : carriedScopeRequest(work, request);
   if (carried) work.carriedScopeRequest = carried;
-  return { epoch: request.epoch, paths: request.paths, requestedBy: request.requestedBy, requestedAt: request.at, decision: request.decision?.state ?? null,
-    refusal: request.decision?.state === 'refused' ? request.decision.reason : null, reason: scopeRequestEndedReason, by, at: now.toISOString(), ...(carried ? { carried: true } : {}) };
+  return { ...endedScopeRecord(request, by, now), ...(carried ? { carried: true } : {}) };
 }
+const endedScopeRecord = (request: ScopeRequestState, by: string, now: Date) => ({ epoch: request.epoch, paths: request.paths, requestedBy: request.requestedBy, requestedAt: request.at,
+  decision: request.decision?.state ?? null, refusal: request.decision?.state === 'refused' ? request.decision.reason : null, reason: scopeRequestEndedReason, by, at: now.toISOString() });
 /**
  * The ask an ended attempt leaves pending with the independent approver (GY-1484): a purely additive
  * request the widening rule refused, so the loop put it (or is putting it) to the approver, whose
@@ -284,6 +288,13 @@ export function carriedScopeRequest(work: Pick<Work, 'plannedFiles'>, request: S
   if (request.decision?.state !== 'refused' || request.decision.decidedBy !== 'graphyard' || request.remove?.length || request.criteria?.length) return null;
   const paths = unplannedPaths(work.plannedFiles, request.paths);
   return paths.length ? { ...request, paths } : null;
+}
+/** Whether an approved requirements decision's recorded request is exactly the late widening applied under its key (GY-1484). */
+export function sameApprovedWidening(approval: { requester: string; input: Record<string, any> | null }, actor: string, data: { plannedFiles?: readonly string[]; answers?: { epoch: number; at: string; sha?: string | null } }): boolean {
+  const input = approval.input, asked = input?.answers, answers = data.answers;
+  if (approval.requester !== actor || !asked || !answers || !Array.isArray(input?.plannedFiles) || !data.plannedFiles) return false;
+  const files = (list: readonly string[]) => JSON.stringify([...new Set(list)].sort());
+  return asked.epoch === answers.epoch && Date.parse(asked.at) === Date.parse(answers.at) && JSON.stringify(asked.sha) === JSON.stringify(answers.sha) && files(input.plannedFiles) === files(data.plannedFiles);
 }
 /** The carried ask a fresh attempt inherits as its own open request, or null (GY-1484). */
 export function inheritedScopeRequest(work: Pick<Work, 'plannedFiles' | 'carriedScopeRequest'>, epoch: number): ScopeRequestState | null {
@@ -1142,13 +1153,17 @@ export class Engine {
           // GY-1484: the independent approver's verified judgement of the worker's reason and the
           // criteria (no head named) does not evaporate with the request: the approval routinely lands
           // minutes after the ask, when the wait window or the asking attempt may already have ended.
-          // Applied through its approved decision (its ledger records the approval, so the client's
-          // Idempotency-Key alone proves nothing, GY-1347), the additive widening stands for the item
-          // and whichever attempt holds it next. A finding-grounded widening (it names a head) and any
-          // widening outside a decision are refused exactly as before.
+          // Applied through its approved decision, the additive widening stands for the item and
+          // whichever attempt holds it next. The client's Idempotency-Key alone proves nothing (GY-1347):
+          // the ledger must hold an approved `requirements` decision of that id, requested by this actor,
+          // whose recorded input answers the same request with the same plannedFiles, so no other
+          // approval (a resolve, or an earlier widening of other paths) can authorize it. A
+          // finding-grounded widening (it names a head) and any other one are refused exactly as before.
           if ((!open || !held) && data.answers.sha === undefined && key.startsWith('decision:')) {
-            const approval = (await db.query(`SELECT actor, payload->>'reason' AS reason FROM events WHERE work_id=$1 AND kind='decision.approved' AND payload->>'id'=$2 ORDER BY seq DESC LIMIT 1`, [work.id, key.slice('decision:'.length)])).rows[0] as { actor: string; reason: string | null } | undefined;
-            if (approval) lateAnswer = { approver: approval.actor, reason: approval.reason };
+            const approval = (await db.query(`SELECT a.actor, a.payload->>'reason' AS reason, r.actor AS requester, r.payload->'input' AS input FROM events a
+              JOIN events r ON r.work_id=a.work_id AND r.kind='decision.requested' AND r.payload->>'id'=a.payload->>'id' AND r.payload->>'action'='requirements'
+              WHERE a.work_id=$1 AND a.kind='decision.approved' AND a.payload->>'id'=$2 ORDER BY a.seq DESC LIMIT 1`, [work.id, key.slice('decision:'.length)])).rows[0] as { actor: string; reason: string | null; requester: string; input: Record<string, any> | null } | undefined;
+            if (approval && sameApprovedWidening(approval, actor.id, data)) lateAnswer = { approver: approval.actor, reason: approval.reason };
           }
           demand(open || lateAnswer, 'The scope request this widening answers is no longer open');
           demand(held || lateAnswer, `Epoch ${data.answers.epoch}, which asked for this scope, no longer holds the lease`);

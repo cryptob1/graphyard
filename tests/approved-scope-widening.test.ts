@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
+// Namespace imports, so a tree without the change still loads and its cases fail on what they exercise.
+import * as engineModule from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { decisionInput } from '../src/master.js';
-import { maxDecisionRequests, uncountedScopeFailure } from '../src/daemon/decisions.js';
+import * as decisionsModule from '../src/daemon/decisions.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -111,6 +113,11 @@ test('integration:approved-scope-widening-applies — an approved widening appli
   assert.equal(failed.state, 'failed');
   assert.match(failed.outcome, /scope request this widening answers is no longer open/);
   assert.deepEqual((await reload(grounded.work.id)).plannedFiles, [layout]);
+  // The key of an approved decision authorizes only the widening that decision recorded (review B1): reused for another one, it is refused.
+  const reused = await engine.execute({ id: master.id, role: 'admin', sessionKind: 'ai' }, 'requirements', grounded.work.id,
+    { ...decisionInput('requirements', await reload(grounded.work.id), { plannedFiles: [layout, daemon], answers: { epoch: grounded.request.epoch, at: grounded.request.at } }), reason: 'reusing an approval' }, `decision:${grounded.decision.id}`).then(() => null, (error: Error) => error);
+  assert.match(String(reused?.message), /no longer open/, 'an approval of other answers does not authorize this widening');
+  assert.deepEqual((await reload(grounded.work.id)).plannedFiles, [layout]);
   const hand = await routed('Hand widening of a closed ask');
   await ok(token(implementer), 'POST', `work/${hand.work.id}/scope`, { epoch: hand.work.epoch, paths: [], reason: 'Withdrawn by the worker' });
   const current = await reload(hand.work.id);
@@ -119,23 +126,35 @@ test('integration:approved-scope-widening-applies — an approved widening appli
   assert.match(direct.body.error, /no longer open/);
 });
 
+test('integration:approved-scope-widening-applies — a late widening is bound to the exact approved request it answers', () => {
+  const answers = { epoch: 2, at: '2026-10-07T21:59:33.000Z' }, input = { plannedFiles: [layout, daemon], answers };
+  const approval = { requester: master.id, input };
+  assert.equal(engineModule.sameApprovedWidening(approval, master.id, { plannedFiles: [daemon, layout], answers }), true, 'the approved widening, in any order');
+  assert.equal(engineModule.sameApprovedWidening(approval, master.id, { plannedFiles: [layout, daemon, 'src/engine.ts'], answers }), false, 'other paths');
+  assert.equal(engineModule.sameApprovedWidening(approval, master.id, { plannedFiles: [layout, daemon], answers: { ...answers, at: '2026-10-07T22:10:00.000Z' } }), false, 'another request');
+  assert.equal(engineModule.sameApprovedWidening(approval, master.id, { plannedFiles: [layout, daemon], answers: { ...answers, epoch: 3 } }), false, 'another attempt');
+  assert.equal(engineModule.sameApprovedWidening(approval, master.id, { plannedFiles: [layout, daemon], answers: { ...answers, sha: null } }), false, 'a finding-grounded answer');
+  assert.equal(engineModule.sameApprovedWidening(approval, 'someone-else', { plannedFiles: [layout, daemon], answers }), false, 'another requester');
+  assert.equal(engineModule.sameApprovedWidening({ requester: master.id, input: { reason: 'resolve' } }, master.id, { plannedFiles: [layout, daemon], answers }), false, 'a decision that answered no request');
+});
+
 test('unit:failed-widening-not-stale-counted — a widening that failed only because its request closed is not counted toward the stop threshold while its paths stay unplanned', () => {
   const watch = { action: 'requirements' as const, scope: { epoch: 1, at: '2026-10-07T21:59:33.000Z', requestedBy: 'worker', paths: [daemon] } };
   const closed = { state: 'failed', outcome: 'The scope request this widening answers is no longer open' };
   const lapsed = { state: 'failed', outcome: 'Epoch 1, which asked for this scope, no longer holds the lease' };
   const unplanned = { plannedFiles: [layout] }, planned = { plannedFiles: [layout, 'src/daemon/'] };
-  assert.equal(uncountedScopeFailure(watch, closed, unplanned), true, 'the closed request is not counted while the blocker stands');
-  assert.equal(uncountedScopeFailure(watch, lapsed, unplanned), true, 'nor is the ended attempt');
+  assert.equal(decisionsModule.uncountedScopeFailure(watch, closed, unplanned), true, 'the closed request is not counted while the blocker stands');
+  assert.equal(decisionsModule.uncountedScopeFailure(watch, lapsed, unplanned), true, 'nor is the ended attempt');
   // The loop keeps asking: three such races in a row stay under maxDecisionRequests.
   let requests = 1;
-  for (let race = 0; race < maxDecisionRequests + 2; race++) {
-    if (uncountedScopeFailure(watch, closed, unplanned)) requests -= 1;
-    assert.ok(requests < maxDecisionRequests, `race ${race + 1} does not reach the stop threshold`);
+  for (let race = 0; race < decisionsModule.maxDecisionRequests + 2; race++) {
+    if (decisionsModule.uncountedScopeFailure(watch, closed, unplanned)) requests -= 1;
+    assert.ok(requests < decisionsModule.maxDecisionRequests, `race ${race + 1} does not reach the stop threshold`);
     requests += 1;
   }
-  assert.equal(uncountedScopeFailure(watch, closed, planned), false, 'once plannedFiles cover the paths, nothing is left to re-escalate');
-  assert.equal(uncountedScopeFailure(watch, { state: 'failed', outcome: 'Policy revision changed (now 3); reload and request again' }, unplanned), false, 'any other failure counts');
-  assert.equal(uncountedScopeFailure(watch, { state: 'refused', outcome: 'The scope request this widening answers is no longer open' }, unplanned), false, 'a refusal is a judgement');
-  assert.equal(uncountedScopeFailure({ action: 'rework', scope: watch.scope } as never, closed, unplanned), false, 'only a requirements decision');
-  assert.equal(uncountedScopeFailure({ action: 'requirements', scope: null }, closed, unplanned), false, 'only one that answers a scope request');
+  assert.equal(decisionsModule.uncountedScopeFailure(watch, closed, planned), false, 'once plannedFiles cover the paths, nothing is left to re-escalate');
+  assert.equal(decisionsModule.uncountedScopeFailure(watch, { state: 'failed', outcome: 'Policy revision changed (now 3); reload and request again' }, unplanned), false, 'any other failure counts');
+  assert.equal(decisionsModule.uncountedScopeFailure(watch, { state: 'refused', outcome: 'The scope request this widening answers is no longer open' }, unplanned), false, 'a refusal is a judgement');
+  assert.equal(decisionsModule.uncountedScopeFailure({ action: 'rework', scope: watch.scope } as never, closed, unplanned), false, 'only a requirements decision');
+  assert.equal(decisionsModule.uncountedScopeFailure({ action: 'requirements', scope: null }, closed, unplanned), false, 'only one that answers a scope request');
 });

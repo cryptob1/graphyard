@@ -355,8 +355,9 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     // the same widening interval as any refused action. The watch stays until a new request
     // replaces it, so the bound survives a request that is itself refused.
     // GY-1484: a widening that failed only because its scope request closed is given its request back while the paths stay unplanned.
+    // Given back once per failed decision: a cycle that re-reads the same failure before its re-request lands takes nothing more.
     const uncounted = uncountedScopeFailure(watch, judged, item);
-    if (uncounted) watch.requests = Math.max(0, watch.requests - 1);
+    if (uncounted && watch.givenBack !== watch.decision) Object.assign(watch, { requests: Math.max(0, watch.requests - 1), givenBack: watch.decision });
     if (watch.requests >= maxDecisionRequests) { if (!watch.exhaustedAt) await escalateUnjudged(item, watch, step.detail); return; }
     if (state.actions[key]?.state === 'failed' && !readyToRetry(state.actions[key], state.cycle)) return;
     // One the server settled stale, superseded or withdrawn never failed: it no longer describes the item, and asking again is the

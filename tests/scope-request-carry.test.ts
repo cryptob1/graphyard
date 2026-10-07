@@ -8,7 +8,9 @@ import { Store } from '../src/store.js';
 import { decisionInput } from '../src/master.js';
 import { approverJudgeBoundMs, approverSettleMs } from '../src/daemon/decisions.js';
 import { awaitScopeOutcome } from '../src/cli/session-commands.js';
-import { scopeBlockedBudgetMs, scopeRequestOutcome, scopeRequestWaitMs } from '../src/model/scope.js';
+// A namespace import, so a tree without the change still loads and the case fails on what it exercises.
+import * as sessionCommands from '../src/cli/session-commands.js';
+import { scopeBlockedBudgetMs, scopeRequestOutcome } from '../src/model/scope.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -58,8 +60,8 @@ after(async () => { http?.close(); await store?.close(); await database?.stop();
 
 test('unit:scope-request-wait-window — --wait waits as long as the escalation decision pipeline needs, not the nine minutes it used to', async () => {
   // The approver judges within its bound and the loop settles the approval after it; the wait covers both, and the loop's whole promise.
-  assert.ok(scopeRequestWaitMs >= approverJudgeBoundMs + approverSettleMs, `${scopeRequestWaitMs} covers the approver's judgement and settlement`);
-  assert.ok(scopeRequestWaitMs >= scopeBlockedBudgetMs, 'and the bound the loop settles any scope ask in');
+  assert.ok(sessionCommands.scopeRequestWaitMs >= approverJudgeBoundMs + approverSettleMs, `${sessionCommands.scopeRequestWaitMs} covers the approver's judgement and settlement`);
+  assert.ok(sessionCommands.scopeRequestWaitMs >= scopeBlockedBudgetMs, 'and the bound the loop settles any scope ask in');
   // The command's default is that window: a request still with the approver is polled past nine
   // minutes (GY-1480's approval landed at about six and a half) and reported pending only at its end.
   const start = Date.parse('2026-10-07T21:59:33.000Z');
@@ -74,7 +76,7 @@ test('unit:scope-request-wait-window — --wait waits as long as the escalation 
   mock.restoreAll();
   assert.equal(outcome.state, 'pending');
   assert.ok(polls.some(at => at >= 540_000), `still waiting past nine minutes: ${polls.at(-1)}`);
-  assert.ok(polls.at(-1)! >= scopeRequestWaitMs - 60_000, `waited the whole window: ${polls.at(-1)}`);
+  assert.ok(polls.at(-1)! >= sessionCommands.scopeRequestWaitMs - 60_000, `waited the whole window: ${polls.at(-1)}`);
 });
 
 test('integration:scope-request-survives-epoch-end — a request whose attempt ends while the approver judges it is carried to the item and inherited by the next attempt', async () => {
@@ -128,4 +130,20 @@ test('integration:scope-request-survives-epoch-end — a request whose attempt e
   const dropped = await reload(refused.id);
   assert.equal(dropped.scopeRequest, null);
   assert.equal(dropped.carriedScopeRequest ?? null, null, 'a judged refusal is not carried');
+
+  // A worker that reports blocked while its ask is with the approver carries it; the operator's
+  // unblock then closes that carried ask on purpose, so the next claim inherits nothing (review B2).
+  let unblocked = await ok(master.token, 'POST', 'work', { title: 'Unblocked carried ask', plannedFiles: [layout], criteria: [{ id: 'AC-1', text: 'The widget layout renders', proofs: ['unit:layout'] }], reason: 'Scope carry fixture' }) as Work;
+  unblocked = await ok(master.token, 'POST', `work/${unblocked.id}/ready`, { expectedRevision: unblocked.revision, reason: 'Ready' }) as Work;
+  unblocked = await claim(unblocked.id);
+  await ok(token(implementer), 'POST', `work/${unblocked.id}/scope`, { epoch: unblocked.epoch, paths: [daemon], reason: 'Wanted' });
+  await ok(token(coordinator), 'POST', `work/${unblocked.id}/autoscope`, { epoch: unblocked.epoch });
+  await engine.execute(implementer, 'blocked', unblocked.id, { epoch: unblocked.epoch, reason: 'Waiting on the widening' }, randomUUID());
+  assert.deepEqual((await reload(unblocked.id)).carriedScopeRequest?.paths, [daemon], 'the blocked attempt carries its ask');
+  await engine.execute(operator, 'unblock', unblocked.id, { reason: 'The operator decided the cycle module is out of scope' }, randomUUID());
+  const cleared = await reload(unblocked.id);
+  assert.equal(cleared.carriedScopeRequest ?? null, null, 'unblock clears the carried ask');
+  const [unblockClose] = (await store.pool.query(`SELECT payload FROM events WHERE work_id=$1 AND kind='unblock' ORDER BY seq DESC LIMIT 1`, [unblocked.id])).rows;
+  assert.equal(unblockClose.payload.details.closedScopeRequest?.by, 'unblock', 'the ledger records the closed carried ask');
+  assert.equal((await claim(unblocked.id)).scopeRequest ?? null, null, 'the next attempt inherits nothing');
 });
