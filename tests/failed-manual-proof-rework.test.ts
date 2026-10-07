@@ -150,7 +150,7 @@ const instances: [string, string, 'proof' | 'attest' | 'lane' | 'spent'][] = [
 const refusedAttest = (input: Record<string, unknown> = {}) => ({ id: 'a7e5f000-0000-4000-8000-000000000001', action: 'attest' as const, state: 'refused', refusal: { approver: 'graphyard-approver', reason: 'docs/github.md deletes shipped behaviour', at },
   input: { proof: 'manual:docs-review', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 1, skipped: 0, ...input } });
 
-test('unit:rework-ground-recorded — a trusted failure, a refused attestation or a GitHub conflict on the exact head is the rework\u2019s ground', () => {
+test('unit:rework-ground-recorded — a trusted failure, a refused attestation or a confirmed base conflict on the exact head is the rework\u2019s ground', () => {
   assert.equal(instances.length, 25, 'every listed instance is classified');
   // proof: a trusted producer judged the head and failed it.
   assert.match(reworkGround(item([{ executed: 3 }]), [])!, new RegExp(`a trusted proof failed on candidate ${head.slice(0, 12)} \\(${PROOF}\\)`));
@@ -163,17 +163,25 @@ test('unit:rework-ground-recorded — a trusted failure, a refused attestation o
   for (const other of [{ sha: 'c'.repeat(40) }, { baseSha: 'c'.repeat(40) }, { policyRevision: 2 }, { result: 'fail' }])
     assert.equal(reworkGround(item(), [refusedAttest(other)]), null, `a refusal of another binding is no ground: ${JSON.stringify(other)}`);
   assert.equal(reworkGround(item(), [{ ...refusedAttest(), state: 'requested', refusal: null }]), null, 'an attestation still awaiting judgement is no ground');
-  // conflict: GitHub reports the exact head conflicting.
-  const conflicting = item();
-  conflicting.observation = { ...conflicting.observation!, conflicting: true } as Work['observation'];
-  assert.match(reworkGround(conflicting, [])!, /GitHub reports candidate .* conflicting with its base/);
-  // While the control plane's test merge onto a moved base is pending, the conflict is unconfirmed
-  // (syncConflict trusts it no more): it is no ground, and a high-lane rework waits for its approver.
-  const refreshing = item();
-  refreshing.observation = { ...refreshing.observation!, conflicting: true, baseTip: 'c'.repeat(40), baseTipContained: false } as Work['observation'];
-  assert.equal(reworkGround(refreshing, []), null);
-  refreshing.baseRefresh = { from: { sha: head }, base: 'c'.repeat(40), policyRevision: refreshing.policyRevision, conflict: 'src/a.ts' } as Work['baseRefresh'];
-  assert.match(reworkGround(refreshing, [])!, /conflicting with its base/, 'once the test merge decided, the conflict is confirmed');
+  // conflict: GitHub's reading alone is no ground (GY-375) — neither on a base that has not moved,
+  // nor while the control plane's test merge onto a moved tip is pending, nor where that test merge
+  // never runs (a blocked or a draft item): a high-lane rework on it waits for its approver.
+  const tip = 'c'.repeat(40);
+  const conflicting = (extra: Partial<Work> = {}, observation: Record<string, unknown> = {}) => {
+    const work = item([{}], extra);
+    work.observation = { ...work.observation!, conflicting: true, mergeable: false, baseTip: tip, baseTipContained: false, ...observation } as Work['observation'];
+    return work;
+  };
+  assert.equal(reworkGround(conflicting({}, { baseTip: base, baseTipContained: true }), []), null, 'a reading on an unmoved base');
+  assert.equal(reworkGround(conflicting(), []), null, 'a reading whose test merge is pending');
+  assert.equal(reworkGround(conflicting({ blocker: 'waiting on a credential' }), []), null, 'a blocked item\u2019s reading');
+  assert.equal(reworkGround(conflicting({}, { draft: true }), []), null, 'a draft\u2019s reading');
+  // Only the control plane's own test merge of this head onto the observed tip confirms it.
+  const refresh = { at, from: { sha: head, baseSha: base }, base: tip, head: null, policyRevision: 1, conflict: 'Merge conflicts in src/a.ts' } as unknown as Work['baseRefresh'];
+  for (const extra of [{}, { blocker: 'waiting on a credential' }])
+    assert.match(reworkGround(conflicting({ ...extra, baseRefresh: refresh }), [])!, new RegExp(`candidate ${head.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)} in the control plane's own test merge`));
+  for (const stale of [{ from: { sha: 'e'.repeat(40), baseSha: base } }, { base: 'e'.repeat(40) }, { policyRevision: 2 }, { conflict: null }])
+    assert.equal(reworkGround(conflicting({ baseRefresh: { ...refresh!, ...stale } as Work['baseRefresh'] }), []), null, `a test merge of another head, tip or revision, or a clean one: ${JSON.stringify(stale)}`);
   // A delivered head, or one no longer submitted, has no ground.
   assert.equal(reworkGround(item([{ executed: 3 }], { stage: 'done' }), []), null);
   assert.equal(laneApprover, 'graphyard-risk-lane');

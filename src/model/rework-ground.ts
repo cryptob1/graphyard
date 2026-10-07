@@ -1,7 +1,7 @@
 import type { Work } from './work.js';
 import type { Decision } from './approval.js';
 import { mechanicalVerdicts, producerManualFailures } from './mechanical-proofs.js';
-import { pendingBaseRefresh } from '../merge-queue.js';
+import { baseRefreshConflict } from '../merge-queue.js';
 
 /** The ledger's approver of a rework the control plane applied itself: by its risk lane (GY-883) or on its recorded ground. */
 export const laneApprover = 'graphyard-risk-lane';
@@ -22,7 +22,10 @@ export const laneApprover = 'graphyard-risk-lane';
  * - an approver refused the attestation of a manual proof bound to the current candidate, base and
  *   policy revision — that refusal is the independent judgement, and it stands for the head
  *   (GY-141), so the proof can never pass on it;
- * - GitHub reports the current candidate conflicting with its base — only a new head moves it.
+ * - the control plane's own test merge of the current candidate onto the base tip conflicted
+ *   (`baseRefreshConflict`) — only a new head moves it. GitHub's `conflicting` reading alone is no
+ *   ground (GY-375): the test merge does not run for a blocked or draft item, a head that already
+ *   contains the tip, or a reading taken before the base moved, so such a reading was never checked.
  *
  * Every other rework, in particular one resting only on the requester's own judgement, still
  * waits for its approver on a high-lane item (GY-883).
@@ -36,10 +39,8 @@ export function reworkGround(work: Work, decisions: readonly GroundDecision[], n
   const refused = refusedAttestation(work, decisions);
   if (refused) return `${refused.refusal?.approver ?? 'an approver'} refused the attestation of ${refused.input.proof} on candidate ${head} (decision ${refused.id})`;
   const observation = work.observation;
-  // A conflict reading is not trusted while the control plane's own test merge onto the moved base
-  // is pending: GitHub can report a clean head conflicting until it decides (`syncConflict`).
-  if (observation?.conflicting && observation.candidate.sha === candidate.sha && observation.prState !== 'closed' && !pendingBaseRefresh(work))
-    return `GitHub reports candidate ${head} conflicting with its base`;
+  if (observation && observation.candidate.sha === candidate.sha && observation.prState !== 'closed' && baseRefreshConflict(work))
+    return `candidate ${head} conflicts with base branch tip ${observation.baseTip!.slice(0, 12)} in the control plane's own test merge`;
   return null;
 }
 
