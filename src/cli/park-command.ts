@@ -36,8 +36,13 @@ export const parkCommand: CliCommand = {
     '                                permissions needed; WHY, required, says why in one sentence',
   ],
   async run(context, work) {
-    const { print } = context;
-    const { epoch, kind, needed, choices, ask, steps, why, recommendation, reason } = parkInput(context.args);
+    const { args, print } = context;
+    const epoch = Number(args[0]), kind = args[1], separator = args.indexOf('--');
+    const { needed, choices, ask, steps, why, recommendation } = parkArgs(args.slice(2, separator < 0 ? args.length : separator));
+    const reason = separator < 0 ? '' : args.slice(separator + 1).join(' ').trim();
+    if (!Number.isInteger(epoch) || epoch < 1 || !humanDecisionKinds.includes(kind as HumanDecisionKind) || !needed || !ask || !reason) throw new Error(`Use park GY-N EPOCH KIND NEEDED... --ask ASK [--step STEP]... --recommend TEXT --why WHY [--choice LABEL]... -- REASON, where KIND is ${humanDecisionKinds.join(', ')}`);
+    const issues = [...recommendationIssues({ kind: kind as HumanDecisionKind, choices, recommendation, why }), ...shortAskIssues({ ask, steps, why })];
+    if (issues.length) throw new Error(`${issues.join('. ')}.`);
     // A credential is sealed to this host when the human provides it, so the host's key goes with the request.
     // Imported here: session-commands.ts lists this command, so a static import would be a cycle.
     const { hostSealKey } = await import('./session-commands.js');
@@ -45,17 +50,6 @@ export const parkCommand: CliCommand = {
     return print(await workMutation(context, work)('park', { epoch, kind, needed, reason, ask, recommendation, why, ...(steps ? { steps } : {}), ...(choices ? { choices } : {}), ...(sealTo ? { sealTo } : {}) }));
   },
 };
-
-/** The park command's arguments, validated as the server would before anything is posted: a malformed park mutates nothing. */
-export function parkInput(args: readonly string[]) {
-  const epoch = Number(args[0]), kind = args[1], separator = args.indexOf('--');
-  const { needed, choices, ask, steps, why, recommendation } = parkArgs(args.slice(2, separator < 0 ? args.length : separator));
-  const reason = separator < 0 ? '' : args.slice(separator + 1).join(' ').trim();
-  if (!Number.isInteger(epoch) || epoch < 1 || !humanDecisionKinds.includes(kind as HumanDecisionKind) || !needed || !ask || !reason) throw new Error(`Use park GY-N EPOCH KIND NEEDED... --ask ASK [--step STEP]... --recommend TEXT --why WHY [--choice LABEL]... -- REASON, where KIND is ${humanDecisionKinds.join(', ')}`);
-  const issues = [...recommendationIssues({ kind: kind as HumanDecisionKind, choices, recommendation, why }), ...shortAskIssues({ ask, steps, why })];
-  if (issues.length) throw new Error(`${issues.join('. ')}.`);
-  return { epoch, kind: kind as HumanDecisionKind, needed, choices, ask, steps, why, recommendation, reason };
-}
 
 const choiceFlags = { '--choice': 'none', '--choice-text': 'text', '--choice-secret': 'secret' } as const;
 const askFlags: readonly string[] = ['--ask', '--step', '--why', '--recommend'];
