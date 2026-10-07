@@ -456,6 +456,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   // fails here, before the App, the reviewer App and onboarding are done for nothing (GY-1413).
   const protectionGate = ghStatus.code === 0 ? await protectionAvailability(gh, session.inputs.repository, session.inputs.baseBranch) : null;
   if (protectionGate) preflight.push(protectionGate);
+  const protectionHuman = protectionGate && !protectionGate.ok && protectionGate.fix?.startsWith('HUMAN:') ? protectionGate.fix : null;
   // A declared manifest the installer cannot read would deploy a server whose regression guard
   // exempts nothing, so it blocks --apply like any other preflight until the script is fixed.
   preflight.push(session.generatedFiles.error
@@ -526,7 +527,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     ? `${plannedReviews} approving review(s), the stricter count this branch already requires`
     : `at least ${session.reviewCount} approving review(s) for the ${session.reviewPolicy} review policy`;
   if (protection && !protectionOk) drift.push({ action: 'github.protection', field: 'branch protection', expected: `required checks ${[...session.requiredChecks, ...GRAPHYARD_CHECKS].join(', ')} with "up to date" off (a candidate merges on the base it was built on); at least ${session.reviewCount} approving review(s); admin enforcement; conversation resolution off (the reviewer's verdict is the review gate)`, observed: describeProtection(protection) });
-  actions.push({ id: 'github.protection', target: 'github', state: protectionOk ? 'satisfied' : protection ? 'update' : 'create', ...(protectionGate && !protectionGate.ok ? { human: protectionGate.fix } : {}), title: `Require status checks (${[...session.requiredChecks, ...GRAPHYARD_CHECKS].join(', ')}) with "require branches to be up to date" off, so a candidate merges on the base it was built on, ${reviewPhrase} and administrator enforcement, with conversation resolution off (the reviewer's verdict is the review gate), on ${session.inputs.baseBranch}` });
+  actions.push({ id: 'github.protection', target: 'github', state: protectionOk ? 'satisfied' : protection ? 'update' : 'create', ...(protectionHuman ? { human: protectionHuman } : {}), title: `Require status checks (${[...session.requiredChecks, ...GRAPHYARD_CHECKS].join(', ')}) with "require branches to be up to date" off, so a candidate merges on the base it was built on, ${reviewPhrase} and administrator enforcement, with conversation resolution off (the reviewer's verdict is the review gate), on ${session.inputs.baseBranch}` });
   // The release-candidate pipeline's environments (GY-1102): free wiring, then every UAT and
   // production resource the deployment adapter would create, cost-bearing ones marked human.
   if (candidateModel) {
@@ -571,7 +572,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     installDirectory: session.directory, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy,
     domain: context.domain, url: observation.url ?? record?.url ?? null, existing, secretsRedacted: true,
     preflight, principals: session.principals, actions, drift,
-    humanSteps: [...(protectionGate && !protectionGate.ok ? [protectionGate.fix!] : []), CORE_HUMAN_STEPS[0], ...(saved && !appConfigured ? [] : [APP_HUMAN_STEP]), ...CORE_HUMAN_STEPS.slice(1), ...(session.inputs.reviewer ? [`Confirm the separate reviewer App "${session.inputs.reviewer}" in the browser.`] : []),
+    humanSteps: [...(protectionHuman ? [protectionHuman] : []), CORE_HUMAN_STEPS[0], ...(saved && !appConfigured ? [] : [APP_HUMAN_STEP]), ...CORE_HUMAN_STEPS.slice(1), ...(session.inputs.reviewer ? [`Confirm the separate reviewer App "${session.inputs.reviewer}" in the browser.`] : []),
       ...(host ? ['After install, sign in once with the printed link and connect each agent account on the dashboard Agents page; nobody logs into the host.'] : []),
       ...(candidateModel ? ['Approve any UAT or production resource the plan marks as costing money before rerunning with --apply --create-environments; without that flag none is created.'] : [])],
     ...(host ? { host: hostPlan(context) } : {}),
@@ -598,12 +599,23 @@ function deliverySummary(session: InstallSession): InstallPlan['delivery'] {
  */
 export async function protectionAvailability(gh: ReturnType<typeof githubCli>, repository: string, branch: string): Promise<PreflightItem> {
   const result = await gh(['api', `repos/${repository}/branches/${branch}/protection`], { allowFailure: true });
-  if (result.code !== 0 && /upgrade to github pro|make this repository public/i.test(`${result.stderr}\n${result.stdout}`)) return {
+  const answer = `${result.stderr}\n${result.stdout}`;
+  if (result.code !== 0 && /upgrade to github pro|make this repository public/i.test(answer)) return {
     name: 'Branch protection', ok: false,
     detail: `GitHub answered 403 "Upgrade to GitHub Pro or make this repository public" for ${repository}@${branch}: a private repository on a free plan cannot have branch protection, so "${CHECK_NAME}" can never be required and the merge gate is impossible`,
     fix: `HUMAN: make ${repository} public, or upgrade its GitHub plan (spending money is a human decision), then rerun the installer`,
   };
-  return { name: 'Branch protection', ok: true, detail: result.code === 0 ? `${branch} is protected; the plan reconciles it` : `${branch} is not protected yet; the plan creates its protection` };
+  if (result.code === 0) return { name: 'Branch protection', ok: true, detail: `${branch} is protected; the plan reconciles it` };
+  // Only GitHub's 404 "Branch not protected" means unprotected. Any other failure (SSO, missing
+  // admin rights, rate limit, 5xx, network) says nothing about the branch, so the preflight stops
+  // here instead of deploying and failing later at github.protection.
+  if (/branch not protected/i.test(answer)) return { name: 'Branch protection', ok: true, detail: `${branch} is not protected yet; the plan creates its protection` };
+  const error = answer.trim().split('\n').filter(Boolean).at(-1) ?? `gh exited ${result.code}`;
+  return {
+    name: 'Branch protection', ok: false,
+    detail: `GitHub did not answer the protection read for ${repository}@${branch}: ${error}. Its protection is unknown, so the merge gate cannot be planned`,
+    fix: `gh api repos/${repository}/branches/${branch}/protection, fix what GitHub answers (the gh login must administer ${repository}, with SSO authorized), then rerun the installer`,
+  };
 }
 
 /** Herdr on this machine and the server its graphyard plugin is bound to, when it is. */
@@ -885,8 +897,9 @@ async function pausedSummary(session: InstallSession, plan: InstallPlan, url: st
     url, health,
     completed: [...before, ...(profiles?.master.configured ? ['local.profiles'] : []), ...(profiles?.repository.connected ? ['local.herdr'] : []), ...(controlPlaneApp ? [] : ['github.app'])],
     github: { app: 'pending', step: controlPlaneApp ? 'github.app' : 'github.reviewer', credentials: pending.saved ? `GitHub returned the ${controlPlaneApp ? 'App' : `reviewer App "${pending.reviewer}"`} registration to ${pending.file}; it is not installed on ${session.inputs.repository} yet` : `none saved: nobody confirmed the ${controlPlaneApp ? 'App' : `reviewer App "${pending.reviewer}"`}, so ${pending.file} was never written` },
-    credentials: { principals: `saved under ${session.directory} (mode 0600)`, githubApp: controlPlaneApp ? (pending.saved ? `registration saved in ${savedFile}, installation pending` : 'not saved') : `saved in ${savedFile}` },
-    stack: { running: true, detail: `the control plane keeps running at ${url}${stop ? ` (Compose project ${context.workdir})` : ''}`, stop },
+    // A self-contained target's tokens were written on the host by its setEnv; this machine keeps fingerprints only.
+    credentials: { principals: context.host ? `saved on the host under ${context.host.layout.tokensDirectory} (mode 0600); this machine keeps fingerprints only in ${session.directory}` : `saved under ${session.directory} (mode 0600)`, githubApp: controlPlaneApp ? (pending.saved ? `registration saved in ${savedFile}, installation pending` : 'not saved') : `saved in ${savedFile}` },
+    stack: { running: true, detail: `the control plane keeps running at ${url}${stop ? ` (Compose project ${context.workdir})` : context.host ? ' on the host' : ''}`, stop },
     profiles,
     resume,
     nextSteps: [

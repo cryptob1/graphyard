@@ -50,6 +50,26 @@ test('unit:install-preflight-branch-protection — a 403 "Upgrade to GitHub Pro"
     assert.ok(!fixture.commandLines().some(line => line.includes('compose') && line.includes(' up')), 'no compose stack was started');
   } finally { await fixture.cleanup(); }
 
+  // Any other failed probe (SSO, missing admin rights, 5xx) says nothing about the branch: preflight
+  // fails naming GitHub's answer, never "not protected yet", and an apply deploys nothing.
+  for (const stderr of ['gh: Must have admin rights to Repository. (HTTP 403)', 'gh: HTTP 502: Bad Gateway (https://api.github.com/repos/owner/project/branches/main/protection)']) {
+    const failing = await harness({ provider: 'compose', extraResponses: [{ match: `gh api repos/${REPOSITORY}/branches/main/protection`, result: { stdout: '', stderr, code: 1 } }] });
+    try {
+      const plan = await buildPlan(await prepareInstall(failing.root, { repository: REPOSITORY, provider: 'compose' }, failing.deps, 'plan'));
+      const gate = plan.preflight.find(item => item.name === 'Branch protection')!;
+      assert.equal(gate.ok, false, stderr);
+      assert.doesNotMatch(gate.detail, /not protected yet/);
+      assert.ok(gate.detail.includes(stderr), gate.detail);
+      assert.match(gate.detail, /protection is unknown/);
+      assert.match(gate.fix!, /^gh api repos\/owner\/project\/branches\/main\/protection, fix what GitHub answers/);
+      assert.ok(!plan.humanSteps.some(step => step.startsWith('HUMAN:')), 'an agent-fixable probe failure is no human step');
+      const session = await prepareInstall(failing.root, { repository: REPOSITORY, provider: 'compose' }, failing.deps, 'apply');
+      await assert.rejects(applyInstall(session, await buildPlan(session)), /Preflight is incomplete; the installer changed nothing\.\n- Branch protection: GitHub did not answer the protection read/);
+      assert.equal(await exists(session.directory), false, 'a refused apply creates no credential directory');
+      assert.ok(!failing.commandLines().some(line => line.includes('compose') && line.includes(' up')), 'no compose stack was started');
+    } finally { await failing.cleanup(); }
+  }
+
   // An unprotected branch (404) is the ordinary first install: preflight passes and the plan creates protection.
   const fresh = await harness({ provider: 'compose' });
   try {
@@ -314,6 +334,26 @@ test('unit:install-app-timeout-resume — an App step nobody confirms prints wha
     await new Promise<void>(accept => server.close(() => accept()));
     for (const directory of [root, credentials, environments]) await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('unit:install-app-timeout-resume — a self-contained host names the host token directory, never a local one it never wrote', async () => {
+  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test' });
+  try {
+    const inputs = { repository: REPOSITORY, provider: 'host' as const, selfContained: true, sshHost: '203.0.113.20', sshUser: 'root', domain: 'graphyard.example.test' };
+    const session = await prepareInstall(fixture.root, inputs, { ...fixture.deps, githubApp: async request => { throw new AppStepPending(request.file, false, 900_000); } }, 'apply');
+    const paused = await applyInstall(session, await buildPlan(session)).then(() => null, error => error);
+    assert.ok(paused instanceof InstallPaused, String(paused));
+    const tokens = session.context.host!.layout.tokensDirectory;
+    assert.equal(paused.summary.credentials.principals, `saved on the host under ${tokens} (mode 0600); this machine keeps fingerprints only in ${session.directory}`);
+    for (const principal of session.principals) {
+      assert.equal(await exists(join(session.directory, `${principal.id}.token`)), false, 'no local token file exists to be claimed');
+      assert.ok(fixture.hostFiles.has(`${tokens}/${principal.id}.token`), `${principal.id} token written on the host`);
+    }
+    assert.equal(paused.summary.credentials.githubApp, 'not saved');
+    assert.equal(paused.summary.stack.stop, null, 'no Compose stop command for a host');
+    assert.match(paused.summary.stack.detail, /keeps running at https:\/\/graphyard\.example\.test on the host$/);
+    assert.match(paused.summary.resume, /^graphyard install --target host .*--apply$/);
+  } finally { await fixture.cleanup(); }
 });
 
 test('unit:install-app-timeout-resume — the resume command carries every install input, so the rerun targets the same server, identity and spend consent', async () => {
