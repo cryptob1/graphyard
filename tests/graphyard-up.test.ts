@@ -345,7 +345,7 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
   const drive = browserAppDriver({ page, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: async () => { if (sudoPolls) sudoPolls++; } });
   assert.deepEqual(await drive('http://127.0.0.1:4311', sentence => { if (!handed.includes(sentence)) handed.push(sentence); }), { state: 'done' });
   // GY-1457: every Confirm-access handoff ends with the App-import route that needs no live moment.
-  assert.deepEqual(handed, ['Approve the GitHub Mobile prompt on your phone and choose 42\nTo need no live confirmation at all, create the App at github.com/settings/apps/new whenever convenient, once for the control plane and once for the reviewer; import each with `graphyard app import --app-id ID --key-file PEM --role control-plane --repo acme/shop` and `graphyard app import --app-id ID --key-file PEM --role reviewer --repo acme/shop`, then run `graphyard up --reuse-app SLUG --reuse-app REVIEWER_SLUG --repo acme/shop --agent`, SLUG and REVIEWER_SLUG being each App\'s name in its github.com/apps/ address']);
+  assert.deepEqual(handed, [`Approve the GitHub Mobile prompt on your phone and choose 42\n${(await import('../src/github-setup.js')).appImportRoute('acme/shop', ' --agent')}`]);
   assert.deepEqual(clicked, ['#register', '#create', '#install']);
   assert.ok(opened.includes('https://github.com/apps/graphyard-acme-shop/installations/new/permissions?suggested_target_id=11&repository_ids[]=22'), 'installs on the one repository');
 
@@ -362,14 +362,15 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
   const passkeyDrive = browserAppDriver({ page: passkey, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sleep: async () => { if (++polls === 2) approved = true; } });
   assert.deepEqual(await passkeyDrive('http://127.0.0.1:4311', (sentence, link) => { passkeyHanded.push({ sentence, url: link.url ?? null, code: link.code ?? null }); }), { state: 'done' });
   assert.equal(mobile, false, 'GitHub Mobile is not triggered while the page offers a passkey');
-  assert.deepEqual(passkeyHanded, [{ sentence: "Confirm access once in your own Chrome at https://github.com/settings/apps/new with your passkey or password: GitHub then holds sudo mode for the session the agent's browser shares, and the flow continues by itself within 10 s\nGitHub's Confirm-access page (https://github.com/sessions/sudo) offers: passkey, Mobile\nTo need no live confirmation at all, create the App at github.com/settings/apps/new whenever convenient, once for the control plane and once for the reviewer; import each with `graphyard app import --app-id ID --key-file PEM --role control-plane --repo acme/shop` and `graphyard app import --app-id ID --key-file PEM --role reviewer --repo acme/shop`, then run `graphyard up --reuse-app SLUG --reuse-app REVIEWER_SLUG --repo acme/shop --agent`, SLUG and REVIEWER_SLUG being each App's name in its github.com/apps/ address", url: 'https://github.com/sessions/sudo', code: null }]);
+  const importRoute = (await import('../src/github-setup.js')).appImportRoute('acme/shop', ' --agent');
+  assert.deepEqual(passkeyHanded, [{ sentence: "Confirm access once in your own Chrome at https://github.com/settings/apps/new with your passkey or password: GitHub then holds sudo mode for the session the agent's browser shares, and the flow continues by itself within 10 s\nGitHub's Confirm-access page (https://github.com/sessions/sudo) offers: passkey, Mobile\n" + importRoute, url: 'https://github.com/sessions/sudo', code: null }]);
   // The operator chose GitHub Mobile (--github-mobile): the drive activates it and hands off only the code it shows.
   approved = false; polls = 0;
   const mobileHanded: { sentence: string; code: string | null }[] = [];
   const mobileDrive = browserAppDriver({ page: passkey, repository: 'acme/shop', ids: () => ({ owner: 11, repository: 22 }), sudo: 'mobile', sleep: async () => { if (mobile && ++polls === 2) approved = true; } });
   assert.deepEqual(await mobileDrive('http://127.0.0.1:4311', (sentence, link) => { mobileHanded.push({ sentence, code: link.code ?? null }); }), { state: 'done' });
   assert.ok(mobile, 'GitHub Mobile was triggered');
-  assert.deepEqual(mobileHanded, [{ sentence: 'Approve the GitHub Mobile prompt on your phone and choose 37\nTo need no live confirmation at all, create the App at github.com/settings/apps/new whenever convenient, once for the control plane and once for the reviewer; import each with `graphyard app import --app-id ID --key-file PEM --role control-plane --repo acme/shop` and `graphyard app import --app-id ID --key-file PEM --role reviewer --repo acme/shop`, then run `graphyard up --reuse-app SLUG --reuse-app REVIEWER_SLUG --repo acme/shop --agent`, SLUG and REVIEWER_SLUG being each App\'s name in its github.com/apps/ address', code: '37' }]);
+  assert.deepEqual(mobileHanded, [{ sentence: 'Approve the GitHub Mobile prompt on your phone and choose 37\n' + importRoute, code: '37' }]);
   assert.equal(upRequestFromArgs(['--repo', 'acme/shop', '--github-mobile', '--reuse-app', 'graphyard-acme-api']).sudo, 'mobile');
   assert.deepEqual(upRequestFromArgs(['--repo', 'acme/shop', '--reuse-app', 'graphyard-acme-api']).reuseApps, ['graphyard-acme-api']);
 

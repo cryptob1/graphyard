@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { generateKeyPairSync } from 'node:crypto';
 import { readdir, stat } from 'node:fs/promises';
 import type { BrowserPage, Located, RecordedStep, SudoMethod, SudoState } from '../src/master-browser.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -274,7 +275,11 @@ test('unit:sudo-code-entry — no screenshot is recorded while the code field ho
  * route for both Apps as runnable commands, and `up --no-wait` exits with it instead of waiting.
  */
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
-const IMPORT_ROUTE = (up: string) => new RegExp(escapeRegExp('create the App at github.com/settings/apps/new whenever convenient, once for the control plane and once for the reviewer; '
+const IMPORT_ROUTE = (up: string) => new RegExp(escapeRegExp('create the App at github.com/settings/apps/new whenever convenient, once for the control plane and once for the reviewer: '
+  + 'give the control-plane App the Repository permissions Actions: write, Administration: read, Checks: write, Contents: write, Deployments: read, Issues: read, Metadata: read, Pull requests: write, workflows: write, '
+  + 'subscribe it to pull_request, pull_request_review, issue_comment, check_run, check_suite, push and leave its webhook URL empty (setup points it at this install); '
+  + 'give the reviewer App exactly Contents: read, Issues: read, Metadata: read, Pull requests: write and nothing more; '
+  + 'install each on acme from its github.com/apps/SLUG/installations/new page with acme/shop selected; '
   + 'import each with `graphyard app import --app-id ID --key-file PEM --role control-plane --repo acme/shop` and `graphyard app import --app-id ID --key-file PEM --role reviewer --repo acme/shop`, '
   + `then run \`graphyard up --reuse-app SLUG --reuse-app REVIEWER_SLUG --repo acme/shop${up}\``));
 /** The up command a route names, as up parses it: it must run as written, reusing both Apps. */
@@ -326,8 +331,8 @@ test('unit:sudo-wait-matches-up — the drive waits at Confirm access as long as
   const pending = await readPendingSudo(rerunRoot);
   assert.equal(pending?.method, 'passkey', 'the handed-off confirmation is kept for the rerun');
   // A later up from the same checkout for another repository never resumes it: it hands off its own confirmation.
-  assert.equal(await readPendingSudo(rerunRoot, { repository: 'acme/other', provider: 'compose' }), null);
-  assert.equal(await readPendingSudo(rerunRoot, { repository: 'acme/shop', provider: 'railway' }), null);
+  assert.equal(await readPendingSudo(rerunRoot, { repository: 'acme/other', provider: 'compose', browserProfile: 'Default' }), null);
+  assert.equal(await readPendingSudo(rerunRoot, { repository: 'acme/shop', provider: 'railway', browserProfile: 'Default' }), null);
   const other: string[] = [], otherNotes: string[] = [];
   const otherRun = recordedAppDriver(rerunRoot, upRequestFromArgs(['--repo', 'acme/other', '--agent', '--wait', '1']), { profile: 'Default' }, () => appDrivePage(clock, Infinity), { ...timing, emit: event => { if (event.kind === 'note') otherNotes.push(event.text); } });
   assert.equal((await otherRun.drive(LOCAL, sentence => { other.push(sentence); })).state, 'failed');
@@ -335,7 +340,16 @@ test('unit:sudo-wait-matches-up — the drive waits at Confirm access as long as
   assert.match(other[0], /--repo acme\/other/, 'naming its own repository');
   assert.deepEqual(otherNotes, [], 'and resumes nothing');
   // Restore this repository's pending confirmation for the resume below.
-  await rememberPendingSudo(rerunRoot, pending, { repository: 'acme/shop', provider: 'compose' });
+  await rememberPendingSudo(rerunRoot, pending, { repository: 'acme/shop', provider: 'compose', browserProfile: 'Default' });
+  // A rerun that drives another browser profile gets the handoff for that profile, not the old one's.
+  assert.equal(await readPendingSudo(rerunRoot, { repository: 'acme/shop', provider: 'compose', browserProfile: '/home/operator/.config/google-chrome' }), null);
+  const switched: string[] = [], switchedNotes: string[] = [];
+  const switchedRun = recordedAppDriver(rerunRoot, await upRequest('--wait', '1'), { profile: '/home/operator/.config/google-chrome' }, () => appDrivePage(clock, Infinity), { ...timing, emit: event => { if (event.kind === 'note') switchedNotes.push(event.text); } });
+  assert.equal((await switchedRun.drive(LOCAL, sentence => { switched.push(sentence); })).state, 'failed');
+  assert.equal(switched.length, 1, 'a rerun on another profile issues its own handoff');
+  assert.match(switched[0], /^The drive uses your live Chrome session \(profile \/home\/operator\/\.config\/google-chrome\)/, "naming that profile's sharing");
+  assert.deepEqual(switchedNotes, [], 'and resumes nothing');
+  await rememberPendingSudo(rerunRoot, pending, { repository: 'acme/shop', provider: 'compose', browserProfile: 'Default' });
   const second: string[] = [], notes: string[] = [];
   const resumeAt = clock.t + 300_000;
   const rerun = recordedAppDriver(rerunRoot, await upRequest(), { profile: 'Default' }, () => appDrivePage(clock, resumeAt), { ...timing, emit: event => { if (event.kind === 'note') notes.push(event.text); } });
@@ -404,6 +418,29 @@ test('unit:sudo-offers-import-route — the handoff and the local setup page off
   const { reuseApps: _reuse, ...expected } = customRequest;
   assert.deepEqual({ ...carried, reuseApps: undefined }, { ...expected, reuseApps: undefined }, 'a non-default --reviewer, --master, --goal, SSH, price and wait survive the route');
   assert.deepEqual(carried.reuseApps, ['SLUG', 'REVIEWER_SLUG'], 'the route names its own --reuse-app per App');
+
+  // An App set up exactly as the route says passes --reuse-app's preflight for its role: the permissions
+  // it names, no webhook bound elsewhere, and an installation on the repository's owner.
+  const { reuseExistingApp } = await import('../src/github-setup.js');
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs1', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
+  const named = (role: string) => {
+    const clause = role === 'control-plane' ? handedRoute.match(/control-plane App the Repository permissions (.+?), subscribe/)![1] : handedRoute.match(/reviewer App exactly (.+?) and nothing more/)![1];
+    return Object.fromEntries(clause.split(', ').map(entry => { const [label, level] = entry.split(': '); return [label.toLowerCase().replace(' ', '_'), level]; }));
+  };
+  assert.match(handedRoute, /install each on acme from its github\.com\/apps\/SLUG\/installations\/new page with acme\/shop selected/);
+  for (const role of ['control-plane', 'reviewer'] as const) {
+    const permissions = named(role), appId = role === 'control-plane' ? 11 : 12, slug = `hand-made-${role}`;
+    const fetcher = (async (url: string) => {
+      const path = new URL(url).pathname;
+      const body = path === '/app' ? { id: appId, permissions } : path === '/app/hook/config' ? { url: '' }
+        : path === '/app/installations' ? [{ id: 5, account: { login: 'acme' }, permissions, repository_selection: 'selected' }] : null;
+      return new Response(JSON.stringify(body), { status: body ? 200 : 404 });
+    }) as typeof fetch;
+    const reused = await reuseExistingApp({ slug, role, repository: 'acme/shop', apply: false, fetcher,
+      registrations: [{ file: `${slug}.json`, role, app: { appId, slug, privateKey, installationId: 0, webhookSecret: '', repository: 'acme/shop' } as any }],
+      gh: async () => JSON.stringify({ id: 99, owner: { login: 'acme' } }) });
+    assert.equal(reused.app.installationId, 5, `a ${role} App made as the route says is reused`);
+  }
 
   const { startGithubSetup } = await import('../src/github-setup.js');
   const pageRoot = await temporaryDirectory('sudo-import-page');

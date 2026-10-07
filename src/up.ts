@@ -560,7 +560,7 @@ export function recordedAppDriver(root: string, request: UpRequest, browser: { p
   const startedAt = new Date(), id = randomUUID();
   const directory = resolve(actionsDirectory(root), `${startedAt.toISOString().replace(/[:.]/g, '-')}-app-create-${id.slice(0, 8)}`);
   const steps: RecordedStep[] = [];
-  const scope = { repository: request.repository, provider: request.provider };
+  const scope = { repository: request.repository, provider: request.provider, browserProfile: browser.profile };
   const session = `graphyard-up-${request.repository.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase()}`;
   let created = false;
   const recorded = recordingPage(page(session), { directory, steps, now: () => new Date() });
@@ -588,15 +588,16 @@ export function recordedAppDriver(root: string, request: UpRequest, browser: { p
 
 /**
  * The Confirm access an App drive handed off and is waiting on (GY-1457), so a rerun resumes it.
- * It is kept with the repository and provider it was handed off for, as up.json is: a run for
- * another one never resumes it, so its own handoff is issued.
+ * It is kept with the repository and provider it was handed off for, as up.json is, and the browser
+ * profile the drive ran in: a run for another one, or one that drives another profile (whose
+ * handoff offers other routes), never resumes it, so its own handoff is issued.
  */
 const pendingSudoFile = (root: string) => resolve(actionsDirectory(root), 'up-sudo.json');
-export interface PendingSudoScope { repository: string; provider: string }
+export interface PendingSudoScope { repository: string; provider: string; browserProfile?: string }
 export async function readPendingSudo(root: string, scope?: PendingSudoScope): Promise<SudoState | null> {
   try {
-    const { repository, provider, ...state } = JSON.parse(await readFile(pendingSudoFile(root), 'utf8'));
-    if (scope && (repository !== scope.repository || provider !== scope.provider)) return null;
+    const { repository, provider, browserProfile, ...state } = JSON.parse(await readFile(pendingSudoFile(root), 'utf8'));
+    if (scope && (repository !== scope.repository || provider !== scope.provider || (browserProfile ?? undefined) !== scope.browserProfile)) return null;
     return sudoStateSchema.parse(state);
   } catch { return null; }
 }
