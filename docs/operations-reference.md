@@ -7,11 +7,11 @@
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` emits instructions from a served-commit checkout, refusing *unobserved*, *stale* (rerun), merge-missing or already-recorded releases; without `--deployment-url`, the newest successful [`productionEnvironment`](deployment.md#production-environment-name) (Railway: `<project> / production`) deployment counts.
+`master verify-deployment GY-N` emits instructions from served-commit checkout, refusing *unobserved*, *stale* (rerun), merge-missing or already-recorded releases; without `--deployment-url`, newest successful [`productionEnvironment`](deployment.md#production-environment-name) (Railway: `<project> / production`) deployment counts.
 
 ## Lost worker before submission
 
-Leases expire 120s after last heartbeat (one more lease period after recorded renewal fault); next, higher-epoch claim keeps the worktree. Unexplained lapses raise [`lease-loss`](protocol/leases.md#how-a-lease-ends), blocking merge until [settled](delegation.md#who-may-settle-what).
+Leases expire 120s after last heartbeat (one more lease period after recorded renewal fault); next, higher-epoch claim keeps worktree. Unexplained lapses raise [`lease-loss`](protocol/leases.md#how-a-lease-ends), blocking merge until [settled](delegation.md#who-may-settle-what).
 
 ## Supervisor died leaving a containment quarantine
 
@@ -19,11 +19,11 @@ On worker, `graphyard master settle-containment GY-N "reason"` verifies nothing 
 
 ## Submitted implementation needs rework
 
-Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; the next resubmits. `scripts/rework-causes.mjs` classifies the last 100 deliveries' rounds by cause (55% own-change, 33% conflicts; raw median 2); `master status` `speed.reworkRounds.ownChange` excludes out-of-item causes.
+Stop worker; `graphyard rework GY-N --previous-worker-stopped "reason"`; next resubmits. `scripts/rework-causes.mjs` classifies last 100 deliveries' rounds by cause (55% own-change, 33% conflicts; raw median 2); `master status` `speed.reworkRounds.ownChange` excludes out-of-item causes.
 
 ## Retro synthesis
 
-A minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables, `master status` then flags crossed patterns as configuration faults) files an item per crossed pattern, drafting `retro.drafted` changes (wording, check, producer method, fault-catalogue entry) per recurring refusal or rework cause; non-drafting AI operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses each. Approved: [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete`.
+Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables, `master status` then flags crossed patterns as configuration faults) files item per crossed pattern, drafting `retro.drafted` changes (wording, check, producer method, fault-catalogue entry) per recurring refusal or rework cause; non-drafting AI operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses each. Approved: [`retroStanding`](protocol/read-endpoints.md) in `graphyard status GY-N`; checks refuse failing `complete`.
 
 ## Flaky CI check
 
@@ -82,11 +82,11 @@ Receipts answer retries day; compaction deletes past `GRAPHYARD_LEDGER_RETENTION
 
 ## Bootstrap mode for a self-proving change
 
-`policy:bootstrap` holders add `"bootstrap":{"reason":"…","contractPaths":["src/herdr/recovery.ts"]}` to criterion; other gates apply, `e2e:` proofs never defer, the next item touching those paths owes it (`graphyard obligations`).
+`policy:bootstrap` holders add `"bootstrap":{"reason":"…","contractPaths":["src/herdr/recovery.ts"]}` to criterion; other gates apply, `e2e:` proofs never defer, next item touching those paths owes it (`graphyard obligations`).
 
 ## Delivered with a failed smoke proof
 
-Stays Done, **delivered with failure**; revert via a new item.
+Stays Done, **delivered with failure**; revert via new item.
 
 ## Merge bypass
 
@@ -115,4 +115,4 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ### Concurrent reconciliation
 
-A 2s tick over 5s logs `reconciliation tick took N ms` (writes, longest lock wait). It opens briefly under the coordination lock (row versions, direct-merge sweep); batches evaluate ≤250ms lock-free, planning ≤8 writes, each one transaction: coordination lock (≤500ms wait, no row held), item row (`FOR NO KEY UPDATE`), commit; moved read re-evaluates first; job wakes follow in work-id order. Three expired lock waits defer unwritten items tick. Writes read whole only their item, overlaps, dependencies (<500ms at 1,000 items); heartbeats lock only their item. Reconciliation yields to pending requests before each evaluation and write: renewal waits ≤1 evaluation (≤1s). Stale observation snapshots retry after 2s.
+A 2s tick over 5s logs `reconciliation tick took N ms` (writes, longest lock wait). It opens briefly under coordination lock (row versions, direct-merge sweep); batches evaluate ≤250ms lock-free, planning ≤8 writes, each one transaction: coordination lock (≤500ms wait, no row held), item row (`FOR NO KEY UPDATE`), commit; moved read re-evaluates first; job wakes follow in work-id order. Three expired lock waits defer unwritten items tick. Writes read whole only their item, overlaps, dependencies (<500ms at 1,000 items); heartbeats lock only their item. Reconciliation yields to pending requests before each evaluation and write: renewal waits ≤1 evaluation (≤1s). Stale observation snapshots retry after 2s.

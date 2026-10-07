@@ -1,6 +1,6 @@
 # Graphyard
 
-**Turn a fleet of coding agents into an engineering system.** Agents write the code; Graphyard records ownership and evidence and merges only what every gate allowed.
+**Turn a fleet of coding agents into an engineering system.** Agents write code; Graphyard records ownership and evidence and merges only what every gate allowed.
 
 **Start with the [setup checklist](docs/setup-from-zero.md).**
 

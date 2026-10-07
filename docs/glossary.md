@@ -7,11 +7,11 @@
 
 ### 2. AI agent
 
-A model holding only its credential's authority. **Canonical usage:** name role.
+Model holding only its credential's authority. **Canonical usage:** name role.
 
 ### 3. Agent session (Herdr-managed session or runtime)
 
-One running agent instance. **Canonical usage:** *session*; host: *runtime*.
+Running agent instance. **Canonical usage:** *session*; host: *runtime*.
 
 ### 4. Principal, role, and credential
 
@@ -23,7 +23,7 @@ One running agent instance. **Canonical usage:** *session*; host: *runtime*.
 
 ### 6. Independent reviewer and proof producer
 
-*Reviewer*: non-author GitHub identity approving the exact head; *proof producer*: `producer` granted named proofs. Neither implements. **Canonical usage:** *reviewer*, *proof producer*.
+*Reviewer*: non-author GitHub identity approving exact head; *proof producer*: `producer` granted named proofs. Neither implements. **Canonical usage:** *reviewer*, *proof producer*.
 
 ### 7. Graphyard control plane
 
@@ -49,9 +49,9 @@ Role | Held by | May | Never
 
 Master applies non-weakening intent directly; two-party decisions (`graphyard master decide GY-N ACTION REASON`, approved by another's `graphyard master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, [high-lane](how-graphyard-works.md#risk-lanes) rework the record doesn't ground, recovery, `manual:` attestation, proof grants, triage closures, merges with automatic merging off; gates decide the rest; human-only decisions [park](master-agent-reference.md#items-scope-and-human-waits) items.
 
-An approved-but-unapplied decision never blocks the action's next request: bound to a passed head and base, it settles `superseded` (naming both heads), new one judged; else it resumes unjudged, settling applied, failed or `stale` (pinned revision moved). Requests resume it after 60 s (risk-lane rework at once; earlier refusals name `resume`); once its approver session ends (even hand-put), next cycle sends `POST /api/work/:id/decide` `{"action":"resume","decision":ID}`. Meanwhile `master status` shows `approved but unapplied since <approvedAt>`, `loop-silence` fault.
+An approved-but-unapplied decision never blocks the action's next request: bound to passed head and base, it settles `superseded` (naming both heads), new one judged; else it resumes unjudged, settling applied, failed or `stale` (pinned revision moved). Requests resume it after 60 s (risk-lane rework at once; earlier refusals name `resume`); once its approver session ends (even hand-put), next cycle sends `POST /api/work/:id/decide` `{"action":"resume","decision":ID}`. Meanwhile `master status` shows `approved but unapplied since <approvedAt>`, `loop-silence` fault.
 
-A revision-bound close settles `stale` if the item moves before approval; the loop rereads it, re-validates the grounds as the server applies them (item open; its `ref` item held, not closed, and delivered for `superseded`) and re-requests the closure at the current revision, launching its approver (a diagnosis's close is left to the diagnosis; a racing re-request re-validates on the fresh read). While a close stands requested or approved-unapplied, the loop takes no other decision on the item (no bot round, rework, attestation or observation wake), withdraws its own standing requests, and neither withdraws a capped change request nor dispatches a worker, rereading history before dispatch, at a queued launch's start and before such a withdrawal, so a close asked since last cycle holds too. Stale settles form one `wait:decision-stale:<id>:close` action (attempt count, expected and current revisions), retired when the close applies; after three in a row the loop stops, `master status` raising one `Decision GY-N/ACTION (ACTION) is stale` line for the series.
+A revision-bound close settles `stale` if the item moves before approval; the loop rereads it, re-validates the grounds as the server applies them (item open; `ref` item held, unclosed, delivered for `superseded`), re-requests at the current revision and launches its approver (a diagnosis's close is left to it; racing re-requests re-validate on the fresh read). While a close is requested or approved-unapplied, the loop takes no other decision on the item (bot round, rework, attestation, observation wake), withdraws its own standing requests, neither withdraws a capped change request nor dispatches, rereading history before dispatch, at queued launch start and before such a withdrawal. Stale settles form one `wait:decision-stale:<id>:close` action (attempt count, expected and current revisions) until the close applies; after three in a row the loop stops, `master status` raising one `Decision GY-N/ACTION (ACTION) is stale` line for the series.
 
 ## Diagram legend
 
