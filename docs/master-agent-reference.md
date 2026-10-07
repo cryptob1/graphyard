@@ -3,7 +3,7 @@
 
 ## Items, scope and human waits
 
-Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (flags before `--` refused). Auto-granted if grounded: docs; files criteria or follow-ups name; `web/`/`browser-tests/` for `docs/`-planning items; files review findings name; tests pinning planned text; symbol definitions; successors; companions (docs-budget gate, timing baseline, importing tests, planned modules' imports and importers). An `approve-scope` executor or the loop decides (standing decisions replay), else approvers judge (a partial grant's rest: same cycle). `master scope GY-N [--allow-broad-scope] REASON` applies refused requests save one the approver holds (routed, or refused <15 min ago: `master decisions`); leases stay (`--wait` reads it). Ending attempts (submit, release, lapse, rework, requirements) close open/refused requests (`attempt ended`); `master unblock GY-N` closes stale ones. Human decisions: `park GY-N EPOCH KIND NEEDED --ask ASK [--step STEP]… [--why WHY] [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you), `graphyard answer GY-N …`).
+Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON` (flags before `--` refused). Auto-granted if grounded: docs; files criteria or follow-ups name; `web/`/`browser-tests/` for `docs/`-planning items; files review findings name; tests pinning planned text; symbol definitions; successors; companions (docs-budget gate, timing baseline, importing tests, planned modules' imports and importers). An `approve-scope` executor or the loop decides (standing decisions replay), else approvers judge (a partial grant's rest: same cycle); `master scope GY-N [--allow-broad-scope] REASON` applies refused requests; leases stay (`--wait` reads it). Ending attempts (submit, release, lapse, rework, requirements) close open/refused requests (`attempt ended`); `master unblock GY-N` closes stale ones. Human decisions: `park GY-N EPOCH KIND NEEDED --ask ASK [--step STEP]… --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you), `answer`).
 
 ## Conflict avoidance
 
@@ -19,7 +19,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 ## GitHub administration through the browser
 
-`master protection --apply` reconciles protection; where only a page exists, `master browser FLOW` drives the `master init --browser-profile` profile (`master browser app-permissions`, `master browser installation-accept`, `master browser protection`):
+`master protection --apply` reconciles protection; where only a page exists, `master browser FLOW` drives the `master init --browser-profile` profile  (`master browser app-permissions`, `master browser installation-accept`, `master browser protection`):
 
 | Flow | Effect
 | --- | ---
@@ -29,15 +29,15 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 Flows read `GET /api/github/installation` (App credential) and record `.graphyard/master-actions/` `record.json`, `ledger.json`. Approving a *Confirm access* GitHub Mobile code on the device is human-only. The master never stores the profile's cookies, uses a merge bypass, pushes code or reads a worker credential.
 
-If a harness classifier refuses administration, `master harness claude --apply` (Codex: `master harness codex`) writes rules to `.claude/settings.local.json`.
+If a harness classifier refuses routine administration, `master harness claude --apply` (Codex: `master harness codex`) writes rules to `.claude/settings.local.json`.
 
 Denied, by endpoint: `gh pr merge`/`review`, `gh api` `pulls/N/merge`, `repos/R/merges`, `merge-upstream`, `pulls/N/reviews`, `access_tokens`, `PUT`/`POST`/`DELETE`; `gh api graphql` with `mutation` (merge, enqueue, auto-merge, approval) or `=@`/`--input`.
 
-Missing/retired rules (`gh api *merge*`, `gh api graphql*`) are `harness` drift; `master status` reapplies it, reporting only unrepaired drift.
+Missing/retired rules (`gh api *merge*`, `gh api graphql*`) are `harness` drift; `master status` reapplies the harness plan and reports only unrepaired drift.
 
 ## Typed actions and executors
 
-One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units, claiming rows under their own credential; `master executors restart` moves them to the current release. Verified deployments move clean checkouts to the base tip, restart executors, then the loop (`upgrade` attention if dirty). A fenced executor (`POST /api/actions/presence`) or one renewing a claim still counts as alive, never reading as `Nothing can run KIND`. Every poll and renewal upserts the executor's row in `executor_presence` (never an event), so a redeployed control plane reads the fleet at once; an empty fleet is judged only on evidence — a poll heard, or rows in that table older than the 120s window (an empty table counts once recording that long, per its first read's marker) — never by process age.
+One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units, claiming rows under their own credential; `master executors restart` moves them to the current release. Verified deployments move clean checkouts to the base tip and restart executors, then the loop (`upgrade` attention if dirty). A fenced executor (`POST /api/actions/presence`) or one renewing a claim still counts as alive, so it never reads as `Nothing can run KIND`. Every poll and renewal also upserts the executor's row in `executor_presence` (never an event), so a restarted or redeployed control plane reads the fleet live at once; an empty fleet is judged only on evidence — a poll heard, or rows in that table older than the 120s window (an empty table counts once it has been recording that long, from a marker its first read writes) — never by process age.
 
 A `resync` (`POST /api/work/:id/resync` `{ since }`) completes only on an observation newer than its claim.
 

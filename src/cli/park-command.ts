@@ -1,4 +1,4 @@
-import { humanDecisionKinds, type HumanChoice, type HumanDecisionKind } from '../model/human-request.js';
+import { humanDecisionKinds, recommendationIssues, type HumanChoice, type HumanDecisionKind } from '../model/human-request.js';
 import { shortAskIssues } from '../model/human-ask.js';
 import { workMutation, type CliCommand } from './registry.js';
 
@@ -12,7 +12,7 @@ export const parkCommand: CliCommand = {
   name: 'park',
   scope: 'work',
   help: [
-    '  park GY-N EPOCH KIND NEEDED... --ask ASK [--step STEP]... [--why WHY] [--choice LABEL]... -- REASON',
+    '  park GY-N EPOCH KIND NEEDED... --ask ASK [--step STEP]... --recommend TEXT --why WHY [--choice LABEL]... -- REASON',
     '                                Record a decision only a human may make and end this attempt:',
     `                                KIND is ${humanDecisionKinds.join(', ')};`,
     '                                ASK, STEP and WHY are what the human reads: write them for a',
@@ -29,34 +29,38 @@ export const parkCommand: CliCommand = {
     '                                --choice is a button the human presses (--choice-text asks for',
     '                                their words too, --choice-secret for a value sealed to this',
     '                                host); Decline is always offered. Without any, the kind\'s',
-    '                                defaults are offered',
+    '                                defaults are offered. --recommend is required and shown first:',
+    '                                the choice you recommend (its label, preselected), or the',
+    '                                safest way to obtain a value asked for, such as a fine-grained',
+    '                                token scoped to one repository, short expiry, only the',
+    '                                permissions needed; WHY, required, says why in one sentence',
   ],
   async run(context, work) {
     const { args, print } = context;
     const epoch = Number(args[0]), kind = args[1], separator = args.indexOf('--');
-    const { needed, choices, ask, steps, why } = parkArgs(args.slice(2, separator < 0 ? args.length : separator));
+    const { needed, choices, ask, steps, why, recommendation } = parkArgs(args.slice(2, separator < 0 ? args.length : separator));
     const reason = separator < 0 ? '' : args.slice(separator + 1).join(' ').trim();
-    if (!Number.isInteger(epoch) || epoch < 1 || !humanDecisionKinds.includes(kind as HumanDecisionKind) || !needed || !ask || !reason) throw new Error(`Use park GY-N EPOCH KIND NEEDED... --ask ASK [--step STEP]... [--why WHY] [--choice LABEL]... -- REASON, where KIND is ${humanDecisionKinds.join(', ')}`);
-    const issues = shortAskIssues({ ask, steps, why });
+    if (!Number.isInteger(epoch) || epoch < 1 || !humanDecisionKinds.includes(kind as HumanDecisionKind) || !needed || !ask || !reason) throw new Error(`Use park GY-N EPOCH KIND NEEDED... --ask ASK [--step STEP]... --recommend TEXT --why WHY [--choice LABEL]... -- REASON, where KIND is ${humanDecisionKinds.join(', ')}`);
+    const issues = [...recommendationIssues({ kind: kind as HumanDecisionKind, choices, recommendation, why }), ...shortAskIssues({ ask, steps, why })];
     if (issues.length) throw new Error(`${issues.join('. ')}.`);
     // A credential is sealed to this host when the human provides it, so the host's key goes with the request.
     // Imported here: session-commands.ts lists this command, so a static import would be a cycle.
     const { hostSealKey } = await import('./session-commands.js');
     const sealTo = kind === 'credentials-for-people' || choices?.some(choice => choice.input === 'secret') ? await hostSealKey(context.individualHostId()).catch(() => undefined) : undefined;
-    return print(await workMutation(context, work)('park', { epoch, kind, needed, reason, ask, ...(steps ? { steps } : {}), ...(why ? { why } : {}), ...(choices ? { choices } : {}), ...(sealTo ? { sealTo } : {}) }));
+    return print(await workMutation(context, work)('park', { epoch, kind, needed, reason, ask, recommendation, why, ...(steps ? { steps } : {}), ...(choices ? { choices } : {}), ...(sealTo ? { sealTo } : {}) }));
   },
 };
 
 const choiceFlags = { '--choice': 'none', '--choice-text': 'text', '--choice-secret': 'secret' } as const;
-const askFlags: readonly string[] = ['--ask', '--step', '--why'];
+const askFlags: readonly string[] = ['--ask', '--step', '--why', '--recommend'];
 /**
- * NEEDED, the short ask and the requester's choices from the words between KIND and `--`. `--ask`,
- * `--why` and each `--step` take the next word as their text; each choice flag takes the next word
- * as its label, and the choices become buttons in that order, each resuming the item.
+ * NEEDED, the short ask, the recommendation and the requester's choices from the words between KIND
+ * and `--`. `--ask`, `--why`, `--recommend` and each `--step` take the next word as their text; each
+ * choice flag takes the next word as its label, and the choices become buttons in that order.
  */
 export function parkArgs(words: readonly string[]) {
   const needed: string[] = [], choices: HumanChoice[] = [], steps: string[] = [];
-  let ask: string | undefined, why: string | undefined;
+  let ask: string | undefined, why: string | undefined, recommendation: string | undefined;
   for (let index = 0; index < words.length; index++) {
     const flag = words[index], input = choiceFlags[flag as keyof typeof choiceFlags];
     if (!input && !askFlags.includes(flag)) { needed.push(flag); continue; }
@@ -64,8 +68,9 @@ export function parkArgs(words: readonly string[]) {
     if (!value || value.startsWith('--')) throw new Error(input ? `${flag} needs a LABEL, such as --choice "Approve up to €50/month"` : `${flag} needs its text, such as --ask "Create the install-proof repository on GitHub"`);
     if (flag === '--ask') ask = value;
     else if (flag === '--why') why = value;
+    else if (flag === '--recommend') recommendation = value;
     else if (flag === '--step') steps.push(value);
     else choices.push({ id: `choice-${choices.length + 1}`, label: value, outcome: 'provided', input });
   }
-  return { needed: needed.join(' ').trim(), choices: choices.length ? choices : undefined, ...(ask ? { ask } : {}), ...(steps.length ? { steps } : {}), ...(why ? { why } : {}) };
+  return { needed: needed.join(' ').trim(), choices: choices.length ? choices : undefined, ...(ask ? { ask } : {}), ...(steps.length ? { steps } : {}), ...(why ? { why } : {}), ...(recommendation ? { recommendation } : {}) };
 }

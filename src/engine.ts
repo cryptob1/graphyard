@@ -26,7 +26,6 @@ import { readAppliedRetroChecks } from './retro-synthesis.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, type ScopeDecision } from './model/scope.js';
 import { mergedScopeRequest, plannedFilesCovered, widenedPlannedFiles } from './model/scope-collapse.js';
-import { handScopeWideningRefusal, routedScopeAsk } from './model/scope-provenance.js';
 import { configuredDocumentation, documentationObligation, recordDocumentationSubmission, type DocumentationPolicy } from './model/documentation.js';
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { submittedBranchMoved } from './model/assignment.js';
@@ -1034,19 +1033,6 @@ export class Engine {
         // names that rule, and only for a purely additive widening, so the record tells it apart
         // from a widening a person or a coordinator made.
         if (data.rule) demand(actor.role === 'operator-agent' && widening, 'Only the operator agent\'s purely additive planned-files widening is a rule-grounded re-plan');
-        // A hand widening of an ask the loop is putting to the independent approver pre-empts that
-        // judgement (GY-1388): a master or the doctor ran `master scope` minutes before the routed
-        // decision arrived, and each was an intervention the product had already taken on. While that
-        // decision is pending, or not yet requested within the bound the loop settles a scope ask in,
-        // only the loop's own answer (`answers`) or an applied decision (run as admin) widens for that
-        // ask. The Idempotency-Key is the client's to choose, so it exempts nothing.
-        const routedAsk = actor.role === 'operator-agent' && widening && !data.answers && !data.rule ? routedScopeAsk(work, data.plannedFiles, now.getTime()) : null;
-        if (routedAsk) {
-          const decisions = (await db.query(`SELECT r.payload->>'id' AS id, (SELECT s.kind FROM events s WHERE s.work_id=r.work_id AND s.seq>r.seq AND s.payload->>'id'=r.payload->>'id' AND s.kind IN ('decision.applied','decision.failed','decision.declined','decision.superseded','decision.stale','decision.withdrawn') LIMIT 1) AS ended
-            FROM events r WHERE r.work_id=$1 AND r.kind='decision.requested' AND r.payload->>'action'='requirements' AND r.payload->'input'->'answers'->>'at'=$2 AND (r.payload->'input'->'answers'->>'epoch')::int=$3`, [work.id, routedAsk.at, routedAsk.epoch])).rows as { id: string; ended: string | null }[];
-          const refusal = handScopeWideningRefusal(work.key, routedAsk, decisions.find(entry => !entry.ended)?.id ?? null, decisions.length > 0, now.getTime());
-          demand(!refusal, refusal!, 409);
-        }
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
         if (work.parent) {
           const parent: Work | undefined = (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [work.parent])).rows[0]?.document;
