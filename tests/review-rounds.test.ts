@@ -5,9 +5,9 @@ import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { setupMaster } from '../src/master.js';
+import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { expandTypedCommand, requestOf, startedAtOnce } from './helpers/launch-shell.js';
-import { bindReviewer, launchReview, readReviewLedger, reviewHistory, reviewPrompt, reviewRetryPrompt, reviewRoundCap, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
+import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewHistory, reviewPrompt, reviewRetryPrompt, reviewRoundCap, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
 import type { Observation, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { blockingFindings, defaultReviewRoundCap, followUpFindingsOf, observedReviewBody, reviewBodyMax, reviewRoundStatus, withReviewRounds } from '../src/review-cap.js';
@@ -15,6 +15,7 @@ import { cappedReview, cappedReworkBinding, neededDecision } from '../src/daemon
 import { cappedRework } from '../src/server/lane-rework.js';
 import { cappedEscalation } from '../src/daemon/cycle-review-cap.js';
 import { routedScopeStatus } from '../src/cli/owed-report.js';
+import { coordinationWork } from '../src/server/work-view.js';
 
 // GY-167, 2026-09-24: every review round re-read the whole change and found new edge cases, and
 // nothing bounded the rounds. From the second review of a pull request the reviewer judges only
@@ -222,6 +223,16 @@ test('unit:review-rounds-capped — a change request past the cap is read for BL
   assert.ok(!cappedRework({ binding: cappedReworkBinding('c'.repeat(40), reviewer) }, standing), 'not the current head');
   assert.ok(!cappedRework({ binding: round.binding }, { ...standing, observation: { ...standing.observation!, reviews: [] } }), 'no change request stands');
   assert.equal(neededDecision({ ...changed(3, 'BLOCKING: AC-1 is not met'), reworkRequested: true }, config), null, 'once the round is applied the item needs a worker, not a second decision');
+  // A failed required check or proof is a mandatory ground ahead of the capped round (GY-1389 review): the
+  // round is keyed on its own binding, so an approver's refusal of it, which the loop then never re-asks,
+  // can hold neither the check's rework on this head nor one for a check that fails after the refusal.
+  const failing = changed(3, 'BLOCKING: AC-1 is not met');
+  failing.observation!.checks = [{ name: 'test', result: 'failure', appId: 15368 }] as Observation['checks'];
+  const ciRound = neededDecision(failing, config)!;
+  assert.deepEqual([ciRound.action, ciRound.binding], ['rework', `${H}:ci:test`]);
+  assert.notEqual(ciRound.binding, round.binding, 'a refusal of the capped round names another binding');
+  failing.observation!.checks = [{ name: 'test', result: 'success', appId: 15368 }] as Observation['checks'];
+  assert.equal(neededDecision(failing, config)?.binding, round.binding, 'with every check green the capped round is asked as before');
   // A loop without the decision effects still escalates it for a master to request.
   assert.match(cappedEscalation({ key: 'GY-64' }, blocking), /an independent approver decides whether the finding is blocking — graphyard master decide GY-64 rework REASON/);
   // A blocking finding the observation read from the whole body escalates even when the kept body no longer shows it.
@@ -255,5 +266,29 @@ test('unit:review-rounds-capped — the reviewer launched for an item past its c
     await launchReview(master.root, item, 'claude-reviewer', [], new Date().toISOString(), { run, mint });
     assert.ok(request!.includes('This is review round 4 of this item, past its cap of 3 rounds'), request!);
     assert.ok(request!.includes(blockingWording));
+  } finally { await master.cleanup(); }
+});
+
+test('unit:review-rounds-capped — on the coordination view the loop reads, which drops the pipeline timeline, a change request withdrawn past the cap is reopened for the same head\'s re-review, and one within it is not', async () => {
+  // GY-1389 review: the cap readers read only work.pipeline, so the loop's reconciliation saw every head
+  // in round 1 and the withdrawal GY-1118 pairs with a re-review left the request answered by nothing.
+  const master = await boundMaster();
+  try {
+    const config = await loadMasterConfig(master.root);
+    const requestId = randomUUID(), at = new Date().toISOString();
+    const viewed = (rounds: number) => {
+      const item = work();
+      item.pipeline = pipeline(rounds) as Work['pipeline'];
+      item.autoDispatch = { review: { id: requestId, kind: 'review', pr: 64, sha: H, baseSha: B, policyRevision: 1, provider: 'github', state: 'requested', reason: 'review', requestedAt: at }, producers: [], history: [] } as unknown as Work['autoDispatch'];
+      const view = coordinationWork(item, { evidence: 0, dispatchHistory: 0, queueHistory: 0, actionHistory: 0, sessions: 0 });
+      assert.equal(view.pipeline, undefined, 'the view drops the timeline');
+      return view;
+    };
+    for (const [rounds, reopened] of [[2, false], [3, true]] as const) {
+      await updateReviewLedger(master.root, ledger => { ledger.reviews = [settled(H, 'CHANGES_REQUESTED', at, { requestId })]; });
+      const withdrawn = { state: 'DISMISSED', reviewer, reviewId: 4242, submittedAt: at };
+      const [record] = (await reconcileReviews(master.root, config, { run: herdrRun, observe: () => withdrawn, work: [viewed(rounds)] })).reviews;
+      assert.deepEqual([record.state, record.verdict!.state], reopened ? ['failed', 'DISMISSED'] : ['completed', 'CHANGES_REQUESTED'], `${rounds} rework rounds`);
+    }
   } finally { await master.cleanup(); }
 });

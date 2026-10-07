@@ -13,17 +13,8 @@ import { unproducedManualProofs } from '../model/unproduced-attestation.js';
 import { mechanicalRework, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { triageClosure } from '../model/machine-backlog.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
-import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf } from '../review-cap.js';
+import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf, reworkRoundsOf } from '../review-cap.js';
 import { sessionName } from '../session-name.js';
-
-/**
- * The rework rounds the review-round cap judges an item by (GY-1118): its pipeline timeline's
- * count, or — on the coordination view the loop reads, which drops the timeline — the count that
- * view keeps beside it (`reworkRounds`, src/server/work-view.ts). Without it the loop read every
- * head as round 1, and the cap never ran (GY-1389).
- */
-export const reworkRoundsOf = (work: Work) => work.pipeline?.reworkRounds ?? (work as Work & { reworkRounds?: number }).reworkRounds ?? 0;
-const rounds = (work: Work) => ({ pipeline: { reworkRounds: reworkRoundsOf(work) } });
 
 /** What the routine decisions read of the master configuration: automatic merging, and the review-round cap (GY-1118). */
 export type ReviewCapConfig = Pick<MasterConfig, 'autoMerge'> & Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>;
@@ -86,14 +77,14 @@ export interface CappedReview { kind: 'follow-up' | 'escalate'; round: number; c
 export const cappedReworkBinding = (head: string, reviewer: string) => `${head}:capped:${reviewer}`;
 export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>): CappedReview | null {
   const cap = reviewRoundCapOf(config);
-  if (work.stage === 'done' || !pastReviewCap(rounds(work), cap)) return null;
+  if (work.stage === 'done' || !pastReviewCap(work, cap)) return null;
   const verdict = standingVerdict(work);
   if (!verdict) return null;
   const candidate = work.candidate!, observation = work.observation!;
   const review = observation.reviews.find(entry => entry.sha === candidate.sha && entry.state === 'CHANGES_REQUESTED');
   const body = review ? review.body : observation.agentReview?.reason;
   const reviewId = review ? review.id ?? null : observation.agentReview?.verdictId ?? null;
-  const blocking = review?.blocking?.length ? review.blocking : blockingFindings(body), round = reviewRound(rounds(work));
+  const blocking = review?.blocking?.length ? review.blocking : blockingFindings(body), round = reviewRound(work);
   const own = !!review && !!config.reviewer && review.reviewer.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase();
   const findings = followUpFindingsOf(body);
   const base = { round, cap, reviewer: verdict.reviewer, reviewId, sha: candidate.sha, blocking, findings: findings.length ? findings : [verdict.reason] };
@@ -284,16 +275,9 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   // Past the review-round cap (GY-1118) no review finding sends the item back: a change request is
   // filed as follow-ups or escalated by the review-cap step (cappedReview), and threads are only
   // the reviewer's inputs. Proofs, CI, conflicts and refused merges still return the head below.
-  const capped = pastReviewCap(rounds(work), reviewRoundCapOf(config));
+  const capped = pastReviewCap(work, reviewRoundCapOf(config));
   const verdict = capped ? null : standingVerdict(work);
   if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
-  // Past the cap a change request that escalates — a blocking finding, or one Graphyard cannot withdraw —
-  // is the independent approver's to judge (GY-1118). The loop requests that one round itself, kept for
-  // the approver it launches rather than its risk lane (GY-1389): the review-cap escalation had a master
-  // request it by hand, and each was then counted as a coordinator stepping in.
-  const escalated = capped && !work.reworkRequested ? cappedReview(work, config) : null;
-  if (escalated?.kind === 'escalate') return { action: 'rework', binding: cappedReworkBinding(work.candidate!.sha, escalated.reviewer),
-    reason: `${escalated.reason.replace(/\.$/, '')}. Past the review-round cap only an independent approver sends the head back: approve for one more round fixing exactly that finding, or refuse it as non-blocking: the loop then requests it no more and escalates the refusal for the master to answer.`.slice(0, 2000) };
   // A failed trusted proof, or evidence the producer found does not exercise its criterion, returns
   // the head before any review (GY-193): no review comes for such a head, so the thread rule below —
   // which waits for one — must not hold this rework.
@@ -303,6 +287,14 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   if (ci) return { action: 'rework', ...ci };
   const spent = exhaustedProofRework(work, exhausted);
   if (spent) return { action: 'rework', ...spent };
+  // Past the cap a change request that escalates — a blocking finding, or one Graphyard cannot withdraw —
+  // is the independent approver's to judge (GY-1118). The loop requests that one round itself, kept for
+  // the approver it launches rather than its risk lane (GY-1389): the review-cap escalation had a master
+  // request it by hand, and each was then counted as a coordinator stepping in. It comes after the
+  // mandatory grounds above: an approver's refusal of it must never hide a failed proof or required check.
+  const escalated = capped && !work.reworkRequested ? cappedReview(work, config) : null;
+  if (escalated?.kind === 'escalate') return { action: 'rework', binding: cappedReworkBinding(work.candidate!.sha, escalated.reviewer),
+    reason: `${escalated.reason.replace(/\.$/, '')}. Past the review-round cap only an independent approver sends the head back: approve for one more round fixing exactly that finding, or refuse it as non-blocking: the loop then requests it no more and escalates the refusal for the master to answer.`.slice(0, 2000) };
   // The operator answered a product question the head was built on provisionally, and the answer
   // differs from that recommendation (GY-259): the head no longer builds what was asked.
   const research = researchRework(work);
