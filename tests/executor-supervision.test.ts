@@ -427,7 +427,11 @@ test('integration:unserved-queue-visible: a pending action whose kind no live ex
     assert.equal(unserved.subject, item.key);
     assert.equal(unserved.role, 'master'); assert.equal(unserved.human, false);
     assert.equal(unserved.next, `systemctl --user start ${executorUnit(1)}`, 'a declared slot that is down is the thing to start');
-    assert.ok(fleet.attention.some(entry => /Executor slot 1 is inactive although this host declares 1 slot/.test(entry.text)) === false, 'the down slot is named once, on the unserved line that already starts it');
+    // GY-1431: the down slot is also a resources fault of its own, once, naming its journalctl.
+    const slotLines = fleet.attention.filter(entry => /Executor slot 1 is inactive although this host declares 1 slot/.test(entry.text));
+    assert.equal(slotLines.length, 1, 'the down slot is paged once');
+    assert.equal(slotLines[0].faultClass, 'resources');
+    assert.ok(slotLines[0].text.includes(`journalctl --user -u ${executorUnit(1)}`));
   } finally { await rm(checkout, { recursive: true, force: true }); }
 
   // The dashboard: the home page raises it as an alert, and the item's drawer says nobody can claim

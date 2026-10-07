@@ -37,7 +37,9 @@ Missing/retired rules (`gh api *merge*`, `gh api graphql*`) are `harness` drift;
 
 ## Typed actions and executors
 
-One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units, claiming rows under their own credential; `master executors restart` moves them to the current release. Verified deployments move clean checkouts to the base tip, restart executors, then the loop (`upgrade` attention if dirty). A fenced executor (`POST /api/actions/presence`) or one renewing a claim still counts as alive, never reading as `Nothing can run KIND`. Every poll and renewal upserts the executor's row in `executor_presence` (never an event), so a redeployed control plane reads the fleet at once; an empty fleet is judged only on evidence — a poll heard, or rows in that table older than the 120s window (an empty table counts once recording that long, per its first read's marker) — never by process age.
+One typed action per item (`nextAction`: `dispatch`, `request-review`, `request-rework`, `approve-scope`, `resync`, `reclaim`, `merge`, `verify-deployment`, `escalate`); `escalate` and `request-rework` are judgements (`actions.needsHuman`). `graphyard init` starts `graphyard-executor@N` user units (own credential); `master executors restart` moves them to the current release. Verified deployments move clean checkouts to the base tip, restart executors, then the loop (`upgrade` attention if dirty). A fenced executor (`POST /api/actions/presence`) or one renewing a claim counts as alive. Polls and renewals upsert `executor_presence` (never an event); an empty fleet is judged on evidence — a poll heard, or rows older than the 120s window — never by process age.
+
+A declared slot not `active` (systemd, else `PRINCIPAL@HOST/N` presence) is a `resources` fault naming `journalctl --user -u graphyard-executor@N.service`; unserved lines say slots are down, not saturated. `graphyard-executor.mjs --install` requires `Restart=always`, `RestartSec` ≤ 60 s. Worker starts fenced under 2 minutes retry once it lapses; longer fences fail naming it.
 
 A `resync` (`POST /api/work/:id/resync` `{ since }`) completes only on an observation newer than its claim.
 
@@ -51,7 +53,7 @@ An unexplained lapsed lease raises `lease-loss` (`blocked-awaiting-operator`, `s
 
 ### Producer-runtime faults
 
-A producer request spent with no attempt acting (never started, launch refused, exited at launch) requests no rework; it relaunches on a profile none of them ran on.
+A producer request spent with no attempt acting (never started, refused, exited at launch) requests no rework; it relaunches on an unused profile.
 
 ## Fault classes
 

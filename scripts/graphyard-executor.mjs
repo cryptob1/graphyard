@@ -19,7 +19,8 @@
 // starts one instance per slot with `--slot N`: the slot takes its kinds and poll interval from the
 // declaration, claims under a stable name, and answers systemd's watchdog on every poll — whether
 // or not it claims — every settlement and every claim renewal (GY-646). `--install` writes that declaration and enables the units (src/repository-setup.ts
-// installExecutorSupervision); `graphyard init` does the same on a coordinator host. Exactly one
+// installExecutorSupervision); `graphyard init` does the same on a coordinator host. `--install`
+// reports the unit's restart policy and fails when it lacks Restart=always with a bounded RestartSec (GY-1431). Exactly one
 // component merges (GY-245): where the master loop is installed or running, `--install` declares
 // every kind but `merge`, and a slot that still serves merge refuses merge rows while the loop lives.
 //
@@ -33,6 +34,8 @@
 // through that unit, and no claim starts while its fence stands.
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export function parseArguments(argv) {
@@ -68,6 +71,24 @@ export function supervisorNotifier(env = process.env, run, log = line => console
   // Through the process's asynchronous runner (GY-125), never a synchronous child: a notification
   // is fire-and-forget, and one that fails is logged rather than awaited.
   return state => { Promise.resolve().then(() => run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1'], { timeoutMs: 10_000 })).catch(error => log(`[graphyard-executor] supervisor notification failed: ${error.message}`)); };
+}
+
+/**
+ * The install check (GY-1431): the unit the slots run under must restart a crashed slot by itself —
+ * Restart=always with a bounded RestartSec — or every slot that dies stays dead until somebody
+ * notices. The output reports the policy read from the installed unit (the shipped template when no
+ * user manager could install one), and an install whose unit lacks it fails with status 1.
+ */
+export async function installCheck(installed, executor, read, template) {
+  const unitFile = installed.unitFile ?? template;
+  const restartPolicy = { unitFile, ...executor.unitRestartPolicy(await read(unitFile)) };
+  const report = { ...installed, restartPolicy };
+  console.log(JSON.stringify(report, null, 2));
+  console.error(restartPolicy.ok
+    ? `[graphyard-executor] ${unitFile}: Restart=${restartPolicy.restart}, RestartSec=${restartPolicy.restartSec}s — a crashed slot restarts without an operator`
+    : `[graphyard-executor] ${unitFile} fails the install check: ${restartPolicy.reason}`);
+  if (!restartPolicy.ok) throw Object.assign(new Error(`The executor unit ${unitFile} fails the install check: ${restartPolicy.reason}`), { exitCode: 1, report });
+  return report;
 }
 
 /** The TypeScript modules this process is a thin entry point for; tsx is a runtime dependency already. */
@@ -124,8 +145,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     // enables would fail on start and be restarted every ten seconds.
     await m.loadMasterConfig(root);
     const installed = await s.installExecutorSupervision(root, { ...(options.count !== null ? { count: options.count } : {}), ...(options.kinds ? { kinds: options.kinds } : {}), ...(options.intervalSeconds !== null ? { intervalSeconds: options.intervalSeconds } : {}) });
-    console.log(JSON.stringify(installed, null, 2));
-    return installed;
+    return installCheck(installed, x, path => readFile(path, 'utf8'), resolve(root, 'examples/master', s.executorUnitTemplate));
   }
   // A supervised slot is configured by the host's declaration, not by its command line, so every
   // slot on a host serves the same kinds and a change to the declaration reaches all of them.
