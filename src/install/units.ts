@@ -8,10 +8,10 @@
 // host-supervision step, status, the master's harness — names the same units. A host whose single
 // install predates this keeps its legacy names through a recorded alias: the record says the
 // install owns `graphyard-master.service`, so nothing about a working host changes.
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { dirname, join, resolve, sep } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
@@ -62,23 +62,67 @@ export const executorInstancePattern = (units: Pick<InstallUnits, 'executorTempl
 /** Every unit an install owns, by exact name or template: what its harness may restart. */
 export const ownedUnits = (units: InstallUnits) => [units.master, units.executorTemplate];
 
+/** The command that records an install's own units in its checkout: `master init` resolves and writes them. */
+export const initialiseUnitsCommand = 'graphyard master init';
+/** A legacy-named unit file beside the install: where it is, and its text (null when it is not installed). */
+export interface LegacyUnitFile { path: string; text: string | null }
+/** The host's user unit directory: where every install's user units, legacy-named ones included, live. */
+export const userUnitDirectory = (env: NodeJS.ProcessEnv = process.env) =>
+  join(env.XDG_CONFIG_HOME?.trim() || join(env.HOME?.trim() || homedir(), '.config'), 'systemd', 'user');
 /**
- * The units a record names. No record (null) means an install written before GY-1441, which by
- * construction used the legacy names: those are its alias. A record that exists but cannot be read
- * fails closed: guessing the legacy names could act on another install's loop and executors.
+ * The legacy-named loop and executor units in UNIT_DIRECTORY, read synchronously. Under the test
+ * runner only a directory under the system temporary directory is read, as `testSuiteHomeGuard`
+ * (supervisor.ts) only writes one: the operator's real units belong to no checkout a test made.
  */
-export function parseInstallUnits(text: string | null, where = installUnitsFile): InstallUnits {
-  if (text === null) return legacyInstallUnits;
+export function legacyUnitFiles(unitDirectory = userUnitDirectory()): LegacyUnitFile[] {
+  const underTestRunner = !!process.env.NODE_TEST_CONTEXT || process.execArgv.includes('--test') || process.env.npm_lifecycle_event === 'test';
+  const temporary = canonical(tmpdir());
+  if (underTestRunner && !`${canonical(unitDirectory)}${sep}`.startsWith(`${temporary}${sep}`)) return [];
+  return [legacyLoopUnit, legacyExecutorTemplate].map(name => {
+    const path = join(unitDirectory, name);
+    try { return { path, text: readFileSync(path, 'utf8') }; } catch (error) { if (!absent(error)) throw error; return { path, text: null }; }
+  });
+}
+
+/** Thrown when ROOT records no units and a legacy-named unit runs another checkout: its names are that install's, never ROOT's (GY-1452). */
+export class LegacyUnitRefusal extends Error {
+  override readonly name = 'LegacyUnitRefusal';
+  constructor(readonly unitPath: string, readonly checkout: string, readonly root: string) {
+    super(`${root} records no units (${installUnitsFile} is absent), and the legacy unit ${unitPath} runs another checkout (${checkout}), not this one; run ${initialiseUnitsCommand} in ${root} to record this install's own units, rather than act on that install's loop and executors`);
+  }
+}
+
+/**
+ * The units ROOT owns when it records none: an install written before GY-1441 used the legacy names,
+ * so they are its alias only while every legacy-named unit installed beside it runs ROOT itself. A
+ * legacy unit that runs another checkout is that install's: this fails closed by naming it.
+ */
+export function unrecordedInstallUnits(root: string, legacy: LegacyUnitFile[], home = homedir()): InstallUnits {
+  for (const { path, text } of legacy) {
+    const checkout = text === null ? null : foreignUnitText(text, root, home);
+    if (checkout) throw new LegacyUnitRefusal(path, checkout, root);
+  }
+  return legacyInstallUnits;
+}
+
+/**
+ * The units a record names. No record (null) is an install written before GY-1441, which keeps the
+ * legacy names only when ABSENT (`unrecordedInstallUnits`) finds no legacy unit running another
+ * checkout. A record that exists but cannot be read fails closed: guessing the legacy names could
+ * act on another install's loop and executors.
+ */
+export function parseInstallUnits(text: string | null, where: string, absent: () => InstallUnits): InstallUnits {
+  if (text === null) return absent();
   try { return recordSchema.parse(JSON.parse(text)); }
   catch (error) { throw new Error(`${where} does not record this install's units (${error instanceof Error ? error.message.split('\n')[0] : String(error)}); fix or remove it and rerun master init, rather than guess which units are this install's`); }
 }
 const absent = (error: unknown) => (error as NodeJS.ErrnoException)?.code === 'ENOENT';
-/** The units an install recorded, read synchronously by every reader. */
-export function readInstallUnits(root: string): InstallUnits {
+/** The units an install recorded, read synchronously by every reader; with no record, the legacy alias only when it is ROOT's own. */
+export function readInstallUnits(root: string, unitDirectory = userUnitDirectory(), home = homedir()): InstallUnits {
   const file = resolve(root, installUnitsFile);
   let text: string | null;
   try { text = readFileSync(file, 'utf8'); } catch (error) { if (!absent(error)) throw error; text = null; }
-  return parseInstallUnits(text, file);
+  return parseInstallUnits(text, file, () => unrecordedInstallUnits(root, legacyUnitFiles(unitDirectory), home));
 }
 
 const canonical = (path: string) => { const absolute = resolve(path); try { return realpathSync(absolute); } catch { return absolute; } };
@@ -101,6 +145,10 @@ export function unitCheckout(text: string, home = homedir()) {
 export function foreignUnitCheckout(path: string, root: string, home = homedir()): string | null {
   let text: string;
   try { text = readFileSync(path, 'utf8'); } catch { return null; }
+  return foreignUnitText(text, root, home);
+}
+/** `foreignUnitCheckout` of a unit's TEXT, read from wherever it lives (this machine or a host). */
+export function foreignUnitText(text: string, root: string, home = homedir()): string | null {
   const { workingDirectory, execStart } = unitCheckout(text, home);
   const own = canonical(root);
   if (workingDirectory && canonical(workingDirectory) !== own) return workingDirectory;
@@ -121,6 +169,11 @@ export function assertUnitOwned(path: string, root: string, home = homedir()) {
   if (checkout) throw new ForeignUnitRefusal(path, checkout, root);
 }
 
+/** The names an install of REPOSITORY at ROOT takes when it records none yet: what `resolveInstallUnits` writes. */
+export function proposedInstallUnits(root: string, repository: string, unitDirectory: string, home = homedir()): InstallUnits {
+  const legacy = legacyUnitFiles(unitDirectory).filter(unit => unit.text !== null);
+  return legacy.length && legacy.every(unit => foreignUnitText(unit.text!, root, home) === null) ? legacyInstallUnits : perInstallUnits(repository);
+}
 /**
  * The names this install writes, decided once and recorded: an existing record stands; a host
  * whose legacy loop unit already runs this checkout keeps the legacy names (the recorded alias);
@@ -131,9 +184,8 @@ export async function resolveInstallUnits(root: string, repository: string, unit
   const file = resolve(root, installUnitsFile);
   let text: string | null;
   try { text = await readFile(file, 'utf8'); } catch (error) { if (!absent(error)) throw error; text = null; }
-  if (text !== null) return parseInstallUnits(text, file);
-  const legacy = [legacyLoopUnit, legacyExecutorTemplate].map(name => join(unitDirectory, name)).filter(path => existsSync(path));
-  const units = legacy.length && legacy.every(path => foreignUnitCheckout(path, root, home) === null) ? legacyInstallUnits : perInstallUnits(repository);
+  if (text !== null) return parseInstallUnits(text, file, () => legacyInstallUnits);
+  const units = proposedInstallUnits(root, repository, unitDirectory, home);
   await mkdir(dirname(file), { recursive: true });
   const temporary = `${file}.${randomUUID()}.tmp`;
   await writeFile(temporary, `${JSON.stringify(units, null, 2)}\n`, { mode: 0o600, flag: 'wx' });

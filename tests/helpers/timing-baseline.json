@@ -234,6 +234,7 @@
     "tests/agy-folder-trust.test.ts": 859,
     "tests/analytics-truncation.test.ts": 383,
     "tests/answered-review-request.test.ts": 5443,
+    "tests/app-import.test.ts": 700,
     "tests/approver-capacity.test.ts": 1082,
     "tests/approver-ledger-read.test.ts": 2064,
     "tests/approver-name.test.ts": 1041,

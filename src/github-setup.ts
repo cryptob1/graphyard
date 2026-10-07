@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { readdir, readFile, writeFile, rename, link, unlink } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readFile, writeFile, rename, link, unlink } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { GitHub, appJwt, installationSettingsUrl } from './github.js';
 import { localDirectory } from './onboarding.js';
@@ -131,10 +131,16 @@ export async function updateAppPermissions(root: string, options: { reviewer?: s
 }
 // ---- Reusing an App already installed on the account (GY-1442) -------------------------------
 
-export type AppRole = 'control-plane' | 'reviewer';
-/** An App registration saved on this host, with the private key an earlier install or github-setup kept. */
-export interface SavedRegistration { file: string; role: AppRole; app: AppCredentials }
-const registrationName = /^(github-app|github-reviewer-[a-z0-9][a-z0-9._-]{0,63})\.json$/;
+/** The roles a reused App can serve; a revert approver (GY-1352) approves the main guard's exact-inverse reverts. */
+export const appRoles = ['control-plane', 'reviewer', 'revert-approver'] as const;
+export type AppRole = typeof appRoles[number];
+/** An App registration saved on this host, with the private key an earlier install, github-setup or `app import` kept. */
+export interface SavedRegistration { file: string; role: AppRole; app: AppCredentials & { role?: AppRole } }
+const registrationName = /^(github-app|github-revert-approver|github-reviewer-[a-z0-9][a-z0-9._-]{0,63}|imported-app-[a-z0-9][a-z0-9-]{0,99})\.json$/;
+/** The role a saved registration serves: the one `app import` recorded, else a reviewer by its name, else the control plane. */
+const registrationRole = (app: { role?: unknown; reviewer?: unknown }): AppRole => appRoles.includes(app.role as AppRole) ? app.role as AppRole : app.reviewer ? 'reviewer' : 'control-plane';
+/** The permission declaration ROLE is held to: a revert approver approves pull requests, exactly as a reviewer may. */
+const rolePermissions = (role: AppRole) => role === 'control-plane' ? controlPlanePermissions : reviewerPermissions;
 /**
  * Every App registration saved in DIRECTORIES (each install directory under the config home, and
  * the checkout's .graphyard), first one per App. Only an App whose private key is saved on this host
@@ -147,11 +153,11 @@ export async function savedRegistrations(directories: readonly string[]): Promis
     try { names = (await readdir(directory)).filter(name => registrationName.test(name)).sort(); } catch { continue; }
     for (const name of names) {
       const file = resolve(directory, name);
-      let app: AppCredentials;
+      let app: SavedRegistration['app'];
       try { app = JSON.parse(await readFile(file, 'utf8')); } catch { continue; }
       if (!Number.isSafeInteger(app?.appId) || typeof app.slug !== 'string' || !app.slug || typeof app.privateKey !== 'string' || !app.privateKey) continue;
       if (found.some(entry => entry.app.appId === app.appId)) continue;
-      found.push({ file, role: app.reviewer ? 'reviewer' : 'control-plane', app });
+      found.push({ file, role: registrationRole(app), app });
     }
   }
   return found;
@@ -187,7 +193,7 @@ export async function reuseExistingApp(request: AppReuseRequest): Promise<AppReu
     return response.json() as Promise<any>;
   };
   const levels = (value: unknown) => value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).filter(([, level]) => typeof level === 'string')) as Record<string, string> : {};
-  const set = role === 'reviewer' ? reviewerPermissions : controlPlanePermissions;
+  const set = rolePermissions(role);
   const list = (shortfalls: PermissionShortfall[]) => shortfalls.map(shortfall => describePermission(shortfall.permission, shortfall.required)).join(', ');
   const registration = await call('/app');
   if (registration?.id !== app.appId) throw new Error(`GitHub returned a different App for the key saved in ${saved.file}`);
@@ -196,7 +202,7 @@ export async function reuseExistingApp(request: AppReuseRequest): Promise<AppReu
   // A reviewer never holds more than its declaration (never Contents: write or Checks), the same rule
   // inspectAppPermissions applies: an App that does could write code or publish Graphyard's gate check.
   const beyond = (levels: Record<string, string>, where: string) => {
-    const excess = role === 'reviewer' ? excessPermissions(levels, requiredPermissions(reviewerPermissions)) : [];
+    const excess = role !== 'control-plane' ? excessPermissions(levels, requiredPermissions(reviewerPermissions)) : [];
     if (excess.length) throw new Error(`App ${app.slug}${where} holds ${excess.map(entry => describePermission(entry.permission, entry.granted as PermissionLevel)).join(', ')}, beyond the reviewer declaration; a reviewer App must never hold more than its declaration, so reduce it at https://github.com/settings/apps/${encodeURIComponent(app.slug)}/permissions, or choose another App`);
   };
   beyond(levels(registration.permissions), '');
@@ -224,6 +230,159 @@ export async function reuseExistingApp(request: AppReuseRequest): Promise<AppReu
     if (String(reached?.full_name ?? '').toLowerCase() !== request.repository.toLowerCase()) throw new Error(`App ${app.slug}'s installation cannot reach ${request.repository} after it was added`);
   }
   return { file: saved.file, app: { ...app, repository: request.repository, installationId: installation.id }, account, selection, added };
+}
+
+// ---- Importing an App's id and key, and listing the Apps reuse can choose from (GY-1451) ------
+
+/** The JWT-authenticated GitHub call an App makes as itself: null on 404, a named error otherwise. */
+function appCall(appId: number, privateKey: string, label: string, fetcher: typeof fetch) {
+  return async (path: string, init: { auth?: boolean } = {}) => {
+    const response = await fetcher(`https://api.github.com${path}`, { headers: { ...(init.auth === false ? {} : { Authorization: `Bearer ${appJwt(appId, privateKey)}` }), Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }, signal: AbortSignal.timeout(20_000) });
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(`GitHub GET ${path} failed for ${label} (${response.status})${response.status === 401 ? '; GitHub rejected a JWT signed with its key: the key belongs to another App, was deleted, or the App id is wrong' : ''}`);
+    return response.json() as Promise<any>;
+  };
+}
+/** The webhook a control-plane App may keep: none, or this install's own. Anything else is another control plane's. */
+const otherControlPlane = (hook: any, webhookUrl: string | null | undefined) => {
+  const bound = typeof hook?.url === 'string' ? hook.url.trim() : '';
+  return bound && bound !== (webhookUrl ?? '') ? bound : null;
+};
+export interface AppImportRequest {
+  appId: number; keyFile: string; role: AppRole; repository: string;
+  /** The install directory (`~/.config/graphyard/<install>`), where the registration is kept outside every checkout. */
+  directory: string;
+  /** This install's own webhook URL once it has one: a control-plane App whose webhook delivers anywhere else is refused. */
+  webhookUrl?: string | null;
+  fetcher?: typeof fetch; now?: () => number;
+}
+export interface AppImport { appId: number; slug: string; role: AppRole; repository: string; file: string; mode: '0600'; botUserId?: number; next: string }
+/**
+ * `graphyard app import`: bring an App created elsewhere (its id, and a private key generated on its
+ * settings page) into this install, so `up --reuse-app` and `install --reuse-app` can reuse it with
+ * no browser and no GitHub sudo. The key is proven by minting an App JWT GitHub accepts for that id;
+ * a control-plane App whose webhook serves another install is refused. The registration is written
+ * 0600 to the install directory as imported-app-SLUG.json, and the key is never printed.
+ */
+export async function importApp(request: AppImportRequest): Promise<AppImport> {
+  const { appId, role, keyFile } = request, fetcher = request.fetcher ?? fetch;
+  if (!Number.isSafeInteger(appId) || appId <= 0) throw new Error('--app-id takes the numeric App ID shown on the App\'s settings page');
+  if (!appRoles.includes(role)) throw new Error(`--role takes ${appRoles.join(', ')}`);
+  let privateKey: string;
+  try { privateKey = await readFile(keyFile, 'utf8'); } catch (error: any) { throw new Error(`Cannot read the key file ${keyFile} (${error.code ?? 'unreadable'})`); }
+  // The signing error is replaced, never passed on, so no part of the file reaches output.
+  try { appJwt(appId, privateKey); } catch { throw new Error(`${keyFile} holds no usable RSA private key; generate one under Private keys on the App's settings page and pass the downloaded .pem`); }
+  const call = appCall(appId, privateKey, `App ${appId}`, fetcher);
+  const registration = await call('/app');
+  if (!registration || registration.id !== appId) throw new Error(`GitHub returned no App ${appId} for the key in ${keyFile}`);
+  const slug = String(registration.slug ?? '');
+  if (!/^[a-z0-9][a-z0-9-]{0,99}$/i.test(slug)) throw new Error(`GitHub returned an unusable slug for App ${appId}`);
+  if (role === 'control-plane') {
+    const bound = otherControlPlane(await call('/app/hook/config'), request.webhookUrl);
+    if (bound) throw new Error(`App ${slug} is bound to another install's control plane: its webhook delivers to ${bound}. One App has one webhook, so it is refused as this install's control-plane App; import it with --role reviewer or revert-approver, or let install register a new control-plane App.`);
+  }
+  let botUserId: number | undefined;
+  if (role === 'reviewer') {
+    const bot = await call(`/users/${encodeURIComponent(`${slug}[bot]`)}`, { auth: false });
+    if (!Number.isSafeInteger(bot?.id) || bot.id <= 0 || bot.type !== 'Bot') throw new Error(`GitHub did not return the bot identity of App ${slug}, which a reviewer App posts its verdicts as`);
+    botUserId = bot.id;
+  }
+  await mkdir(request.directory, { recursive: true, mode: 0o700 });
+  const file = resolve(request.directory, `imported-app-${slug.toLowerCase()}.json`);
+  // A control-plane App gets a fresh webhook secret: install sets it on the App with the App's own JWT.
+  const saved = { appId, slug, privateKey, webhookSecret: role === 'control-plane' ? randomBytes(32).toString('hex') : '', repository: request.repository, role,
+    ...(botUserId ? { botUserId } : {}), importedAt: new Date(request.now?.() ?? Date.now()).toISOString() };
+  const temporary = `${file}.${randomBytes(8).toString('hex')}.tmp`;
+  await writeFile(temporary, JSON.stringify(saved, null, 2), { mode: 0o600, flag: 'wx' });
+  await rename(temporary, file); await chmod(file, 0o600);
+  return { appId, slug, role, repository: request.repository, file, mode: '0600', ...(botUserId ? { botUserId } : {}),
+    next: `graphyard up --repo ${request.repository} --reuse-app ${slug} (or install --reuse-app ${slug}) reuses it with no browser step` };
+}
+
+export interface ListedApp {
+  slug: string; appId: number;
+  /** The saved registration holding its key, or null when no key for it is on this host. */
+  file: string | null; savedRole: AppRole | null;
+  owner: string | null; ownedByAccount: boolean | null;
+  /** Installed on the repository (GET /repos/OWNER/NAME/installation as the App), or on its account. */
+  installedOnRepository: boolean | null; installedOnAccount: boolean | null; installationId: number | null;
+  /** Per role: null when the App can serve it, else why not. */
+  roles: Record<AppRole, string | null>;
+  reusableFor: AppRole[];
+  summary: string;
+}
+export interface AppListing { repository: string; account: string; accountType: string; apps: ListedApp[]; accountApps: { listed: boolean; detail: string } }
+export interface AppListRequest {
+  repository: string; registrations: readonly SavedRegistration[];
+  webhookUrl?: string | null;
+  /** `gh` with the host's login: resolves stdout, rejects on a non-zero exit. */
+  gh: (args: string[]) => Promise<string>;
+  fetcher?: typeof fetch;
+}
+/**
+ * `graphyard app list`: the Apps reuse can choose from, read without `/user/installations` (which
+ * gh's OAuth token is refused). Each App whose key is saved on this host is read as itself (its App
+ * JWT: GET /app, /repos/OWNER/NAME/installation, /app/installations, its webhook); an organization's
+ * installations are read with gh where its login may. Each App says which roles it is reusable for,
+ * or why not, and an App without a key here names the `app import` that makes it reusable.
+ */
+export async function listApps(request: AppListRequest): Promise<AppListing> {
+  const fetcher = request.fetcher ?? fetch;
+  const repository = JSON.parse(await request.gh(['api', `repos/${request.repository}`]));
+  const account = String(repository?.owner?.login ?? ''), accountType = String(repository?.owner?.type ?? 'User');
+  if (!account) throw new Error(`gh could not read ${request.repository}`);
+  const levels = (value: unknown) => value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).filter(([, level]) => typeof level === 'string')) as Record<string, string> : {};
+  const apps: ListedApp[] = [];
+  for (const saved of request.registrations) {
+    const { app } = saved, call = appCall(app.appId, app.privateKey, `App ${app.slug}`, fetcher);
+    const entry: ListedApp = { slug: app.slug, appId: app.appId, file: saved.file, savedRole: saved.role, owner: null, ownedByAccount: null, installedOnRepository: null, installedOnAccount: null, installationId: null,
+      roles: Object.fromEntries(appRoles.map(role => [role, 'not read'])) as Record<AppRole, string | null>, reusableFor: [], summary: '' };
+    try {
+      const registration = await call('/app');
+      if (registration?.id !== app.appId) throw new Error(`GitHub returned a different App for the key saved in ${saved.file}`);
+      entry.owner = registration.owner?.login ?? null; entry.ownedByAccount = String(entry.owner ?? '').toLowerCase() === account.toLowerCase();
+      const onRepository = await call(`/repos/${request.repository}/installation`);
+      const installations: any[] = onRepository ? [onRepository] : await call('/app/installations?per_page=100') ?? [];
+      const installation = installations.find(item => String(item?.account?.login ?? '').toLowerCase() === account.toLowerCase()) ?? null;
+      entry.installedOnRepository = !!onRepository; entry.installedOnAccount = !!installation; entry.installationId = installation?.id ?? null;
+      const hook = await call('/app/hook/config');
+      for (const role of appRoles) {
+        const set = requiredPermissions(rolePermissions(role));
+        const missing = permissionShortfalls(levels(registration.permissions), rolePermissions(role)), excess = role === 'control-plane' ? [] : excessPermissions(levels(registration.permissions), set);
+        const bound = role === 'control-plane' ? otherControlPlane(hook, request.webhookUrl) : null;
+        entry.roles[role] = missing.length ? `does not request ${missing.map(shortfall => describePermission(shortfall.permission, shortfall.required)).join(', ')}`
+          : excess.length ? `holds ${excess.map(item => describePermission(item.permission, item.granted as PermissionLevel)).join(', ')}, beyond the reviewer declaration`
+          : bound ? `its webhook serves another install's control plane (${bound})`
+          : !installation ? `not installed on ${account}; install it at https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new`
+          : installation.suspended_at ? `its installation on ${account} is suspended`
+          : permissionShortfalls(levels(installation.permissions), rolePermissions(role)).length ? `its installation on ${account} does not grant ${permissionShortfalls(levels(installation.permissions), rolePermissions(role)).map(shortfall => describePermission(shortfall.permission, shortfall.required)).join(', ')}`
+          : role !== saved.role ? `saved as the ${saved.role} App; rerun graphyard app import --role ${role} to reuse it so`
+          : null;
+      }
+    } catch (error) { for (const role of appRoles) entry.roles[role] = error instanceof Error ? error.message : String(error); }
+    entry.reusableFor = appRoles.filter(role => entry.roles[role] === null);
+    entry.summary = entry.reusableFor.length ? `${app.slug}: reusable as the ${entry.reusableFor.join(' and ')} App with --reuse-app ${app.slug}` : `${app.slug}: not reusable as its ${saved.role} App: ${entry.roles[saved.role]}`;
+    apps.push(entry);
+  }
+  // The account's own listing: an organization's installations, where gh's login may read them; a
+  // personal account has no endpoint gh's OAuth token may list its Apps with.
+  let accountApps: AppListing['accountApps'];
+  if (accountType !== 'Organization') accountApps = { listed: false, detail: `GitHub offers gh's login no endpoint listing ${account}'s Apps; find them at https://github.com/settings/apps and import each with graphyard app import --app-id ID --key-file PEM` };
+  else {
+    try {
+      const listed = JSON.parse(await request.gh(['api', `orgs/${account}/installations?per_page=100`]));
+      const installations: any[] = Array.isArray(listed?.installations) ? listed.installations : [];
+      for (const installation of installations) {
+        const appId = Number(installation?.app_id), slug = String(installation?.app_slug ?? '');
+        if (!Number.isSafeInteger(appId) || !slug || apps.some(entry => entry.appId === appId)) continue;
+        const why = `no private key for it is saved on this host; generate one at https://github.com/organizations/${account}/settings/apps/${encodeURIComponent(slug)} and run graphyard app import --app-id ${appId} --key-file PEM`;
+        apps.push({ slug, appId, file: null, savedRole: null, owner: null, ownedByAccount: null, installedOnRepository: installation.repository_selection === 'all' ? true : null, installedOnAccount: true, installationId: Number.isSafeInteger(installation.id) ? installation.id : null,
+          roles: Object.fromEntries(appRoles.map(role => [role, why])) as Record<AppRole, string | null>, reusableFor: [], summary: `${slug}: installed on ${account}, not reusable until imported: ${why}` });
+      }
+      accountApps = { listed: true, detail: `${installations.length} App installation${installations.length === 1 ? '' : 's'} on ${account}, read with gh` };
+    } catch (error) { accountApps = { listed: false, detail: `gh could not list ${account}'s App installations (${error instanceof Error ? error.message : String(error)}); an organization owner's login with admin:read lists them` }; }
+  }
+  return { repository: request.repository, account, accountType, apps, accountApps };
 }
 
 /**

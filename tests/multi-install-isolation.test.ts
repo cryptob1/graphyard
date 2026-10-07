@@ -27,7 +27,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // What GY-1441 adds is read when a test runs, never at load: a checkout without it fails each test, not the file.
 const units = () => import('../src/install/units.js');
-const loopUnitOf = (root: string) => (supervisorModule as unknown as { loopUnitOf: (root: string) => string }).loopUnitOf(root);
+const loopUnitOf = (root: string, unitDirectory?: string, home?: string) => (supervisorModule as unknown as { loopUnitOf: (root: string, unitDirectory?: string, home?: string) => string }).loopUnitOf(root, unitDirectory, home);
 const scope = herdrModule as unknown as { scopeHerdr: (workspace: string | null) => void; herdrScope: () => string | null };
 const legacyLoopUnit = 'graphyard-master.service';
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -139,9 +139,52 @@ test('unit:per-install-units — two installs on one host write, enable and rest
   await installLoopSupervisor({ root: pilot, cliPath: launcher, repository: 'cryptob1/graphyard-game-pilot', intervalSeconds: 20 }, legacy.loopHost(legacyHome));
   await installExecutorSupervision(pilot, { count: 1, run: legacy.run, unitDirectory: legacyDirectory, template, node: process.execPath, loop: null });
   assert.deepEqual(legacy.calls.slice(pilotCalls).filter(args => args.some(arg => arg === legacyLoopUnit || arg.startsWith('graphyard-executor@'))), [], 'the pilot never names production\'s legacy units');
-  // An install written before GY-1441 has no record at all: its readers keep the legacy names.
+  // An install written before GY-1441 has no record at all: its readers keep the legacy names it runs.
   const unrecorded = await checkout('install-unrecorded', 'owner/project');
-  assert.equal(loopUnitOf(unrecorded), legacyLoopUnit);
+  assert.equal(loopUnitOf(unrecorded, join(legacyHome, 'empty/systemd/user'), legacyHome), legacyLoopUnit);
+});
+
+test('unit:unit-names-fail-closed — with no units.json, a legacy-named unit that runs another checkout fails every unit-name resolution closed by naming it; one that runs this checkout still resolves', async () => {
+  const { LegacyUnitRefusal, parseInstallUnits, readInstallUnits, unrecordedInstallUnits } = await units();
+  const home = await temporaryDirectory('fail-closed-home');
+  const unitDirectory = join(home, '.config/systemd/user');
+  await mkdir(unitDirectory, { recursive: true });
+  const production = await checkout('fail-closed-production', 'cryptob1/graphyard');
+  const pilot = await checkout('fail-closed-pilot', 'cryptob1/graphyard-game-pilot');
+  // Production's pre-GY-1441 units: the loop's WorkingDirectory and the executor's ExecStart script are production's checkout.
+  await writeFile(join(unitDirectory, legacyLoopUnit), loopUnitText({ root: production, cliPath: launcher, repository: 'cryptob1/graphyard', intervalSeconds: 20 }));
+  await writeFile(join(unitDirectory, 'graphyard-executor@.service'), `[Service]\nExecStart=${process.execPath} ${production}/scripts/graphyard-executor.mjs --slot %i\n`);
+  const refusal = (checkoutPath: string) => (error: unknown) => {
+    assert.ok(error instanceof LegacyUnitRefusal, String(error));
+    assert.match(error.message, new RegExp(`${legacyLoopUnit.replace('.', '\\.')}.*runs another checkout \\(${checkoutPath}\\)`));
+    assert.match(error.message, /run graphyard master init in /);
+    return true;
+  };
+  // The pilot records nothing yet: every reader refuses rather than return production's names.
+  assert.throws(() => readInstallUnits(pilot, unitDirectory, home), refusal(production));
+  assert.throws(() => loopUnitOf(pilot, unitDirectory, home), refusal(production));
+  const environment = { XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+  process.env.XDG_CONFIG_HOME = join(home, '.config');
+  try {
+    assert.throws(() => readInstallUnits(pilot), refusal(production), 'the default reader reads the host\'s own unit directory');
+    assert.throws(() => loopUnitOf(pilot), refusal(production));
+    assert.equal(readInstallUnits(production).master, legacyLoopUnit, 'production keeps its legacy names for backward compatibility');
+  } finally { if (environment.XDG_CONFIG_HOME === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = environment.XDG_CONFIG_HOME; }
+  // The executor template alone running another checkout refuses as well, naming it.
+  const executorOnly = join(home, 'executor-only');
+  await mkdir(executorOnly, { recursive: true });
+  await writeFile(join(executorOnly, 'graphyard-executor@.service'), `[Service]\nExecStart=${process.execPath} ${production}/scripts/graphyard-executor.mjs --slot %i\n`);
+  assert.throws(() => readInstallUnits(pilot, executorOnly, home), (error: unknown) => error instanceof LegacyUnitRefusal && error.unitPath === join(executorOnly, 'graphyard-executor@.service') && error.checkout === production);
+  // A legacy unit serving this same checkout still resolves to the legacy alias.
+  assert.deepEqual(readInstallUnits(production, unitDirectory, home), { version: 1, slug: null, master: legacyLoopUnit, executorTemplate: 'graphyard-executor@.service', alias: true });
+  // The host installer reads a remote host's record and legacy units the same way.
+  const remote = [{ path: `/home/graphyard/.config/systemd/user/${legacyLoopUnit}`, text: 'WorkingDirectory=/home/graphyard/code/cryptob1-graphyard\n' }, { path: '/home/graphyard/.config/systemd/user/graphyard-executor@.service', text: null }];
+  assert.throws(() => parseInstallUnits(null, 'units.json on host', () => unrecordedInstallUnits('/home/graphyard/code/owner-project', remote, '/home/graphyard')), refusal('/home/graphyard/code/cryptob1-graphyard'));
+  assert.equal(parseInstallUnits(null, 'units.json on host', () => unrecordedInstallUnits('/home/graphyard/code/cryptob1-graphyard', remote, '/home/graphyard')).master, legacyLoopUnit);
+  // Once the pilot records its own units, it reads them and never the legacy names.
+  const { resolveInstallUnits, perInstallUnits } = await units();
+  assert.deepEqual(await resolveInstallUnits(pilot, 'cryptob1/graphyard-game-pilot', unitDirectory, home), perInstallUnits('cryptob1/graphyard-game-pilot'));
+  assert.deepEqual(readInstallUnits(pilot, unitDirectory, home), perInstallUnits('cryptob1/graphyard-game-pilot'));
 });
 
 // ---- Herdr scope ------------------------------------------------------------------------------
