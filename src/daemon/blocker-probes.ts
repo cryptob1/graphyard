@@ -12,6 +12,7 @@ import { accountLaunch, checkAgentEnvironment, readEnvironmentLog, selectionKey,
 import { readFleet, type FleetLaunchAccount, type FleetProbe } from '../fleet.js';
 import { rolePolicy } from '../model/registry.js';
 import { sessionConfinement } from '../master/launch.js';
+import { loopUnitName } from '../supervisor.js';
 
 /** What the loop writes on the item for one probe (POST work/ID/blocker-probe). */
 export interface BlockerProbeRecord { blocker: string; class: BlockerClass; probe: string; result: 'pass' | 'fail'; detail: string; nextAt: string | null }
@@ -91,6 +92,16 @@ export async function probeBlocker(item: Work, classification: BlockerClassifica
       if (!deps.planeHealth) return null;
       const refusal = await deps.planeHealth().catch(error => `the health read failed: ${firstLine(error)}`);
       return { probe: 'the Graphyard server health check', passed: !refusal, detail: refusal ? bound(refusal) : 'the server reports healthy' };
+    }
+    case 'host-supervisor': {
+      // GY-1406: the host's state, read from the host. The worker's sandbox masks the user bus, so
+      // its failure says nothing about the host; the loop runs there, outside any worker confinement.
+      const probe = `systemctl --user show-environment and is-active ${loopUnitName} on the loop's host`;
+      try {
+        await deps.run('systemctl', ['--user', 'show-environment'], { cwd: deps.cwd, env });
+        await deps.run('systemctl', ['--user', 'is-active', '--quiet', loopUnitName], { cwd: deps.cwd, env });
+        return { probe, passed: true, detail: `the user manager answers and ${loopUnitName} is active; the worker sandbox masks the user bus, not the host` };
+      } catch (error) { return { probe, passed: false, detail: bound(firstLine(error)) }; }
     }
     case 'worktree-mismatch': {
       const live = !!item.lease && Date.parse(item.lease.expiresAt) > deps.clock;
