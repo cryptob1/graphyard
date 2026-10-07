@@ -265,7 +265,8 @@ export function closeEndedScopeRequest(work: Work, now: Date, by: string) {
   // A blocker the worker has just reported is its own, whatever its words: only a refusal left standing is cleared.
   if (by !== 'blocked' && work.blocker?.startsWith(scopeRefusalBlocker)) work.blocker = null;
   // GY-1484: an ask still with the independent approver is carried to the item, not dropped: the next attempt inherits it.
-  const carried = carriedScopeRequest(work, request);
+  // An operator's unblock closes it on purpose, so nothing is carried then.
+  const carried = by === 'unblock' ? null : carriedScopeRequest(work, request);
   if (carried) work.carriedScopeRequest = carried;
   return { epoch: request.epoch, paths: request.paths, requestedBy: request.requestedBy, requestedAt: request.at, decision: request.decision?.state ?? null,
     refusal: request.decision?.state === 'refused' ? request.decision.reason : null, reason: scopeRequestEndedReason, by, at: now.toISOString(), ...(carried ? { carried: true } : {}) };
