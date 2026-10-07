@@ -14,7 +14,7 @@ cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --repo OWNER/REPO   # 
 
 A new Hetzner server waits (exit 3) for price approval; rerun: `--confirm-price X` or `--max-monthly N` and `--ssh-key NAME`.
 
-`up` runs, in order: preflight, control plane, host supervisor and Herdr, onboarding, accounts (registers host agent logins, asks for missing roles), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to review and merge (a host install leaves it to a person); goals wait while `up` prints its wait. `.graphyard/up.json` records finished steps; a rerun skips them, reusing its `--repo`/`--provider`. Ctrl-C stops the install child. A Herdr plugin bound elsewhere stays (`--no-herdr`). A preflight failure (exit 2) names the [prerequisite](#1-machine-prerequisites).
+`up` runs, in order: preflight, control plane, host supervisor and Herdr, master identities (`master autonomy --apply`; host installs: on the server; no admin credential: exit 2), onboarding, accounts (registers host agent logins, asks for missing roles), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to review and merge (a host install leaves it to a person); goals wait. Reruns skip steps `.graphyard/up.json` records finished, reusing its `--repo`/`--provider`. Ctrl-C stops the child. A Herdr plugin bound elsewhere stays (`--no-herdr`). Preflight failures (exit 2) name the [prerequisite](#1-machine-prerequisites).
 
 ## The Setup page
 
@@ -27,7 +27,7 @@ A step needing a person prints one link (`SERVER/#sign-in=CODE&setup`, minted fr
 | Branch protection, coordinator running | none (automatic)
 | Onboarding change: its wait | **Open the change**
 
-Once green (onboarding merged), **Describe what you want built** records a goal, like `graphyard goal`.
+Once green (onboarding merged), **Describe what you want built** records a goal (`graphyard goal`).
 
 ## Agent setup: up --agent
 
@@ -35,7 +35,7 @@ Agents run `graphyard up --agent --repo OWNER/REPO [--goal FILE] [--browser-prof
 
 ## Troubleshooting: manual steps
 
-What `up` runs; **HUMAN** marks what agents cannot. `graphyard doctor` prints `setupFromZero.lines`, a `PASS`/`FAIL` line per prerequisite naming its step; `next` names the first gap.
+What `up` runs; **HUMAN** marks what agents cannot. `graphyard doctor` prints `setupFromZero.lines`: `PASS`/`FAIL` per prerequisite, failures naming their step, `next` the first gap.
 
 ## 1. Machine prerequisites
 

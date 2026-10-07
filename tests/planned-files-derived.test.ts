@@ -61,6 +61,22 @@ test('integration:nonexistent-planned-path-refused — a planned path the criter
   assert.equal(describedAsNew('src/registry.ts', [{ id: 'AC-1', text: 'The registry in src/registry.ts is read.' }]), null, 'naming a path is not describing its creation');
 });
 
+test('unit:planned-files-dotfile-creation — a dotfile a criterion describes creating (.gitignore, a .github path) is accepted as any other new path, and one no criterion describes is still refused', async () => {
+  // GY-1479: `master create` refused .gitignore although its criterion said "It creates a new .gitignore file".
+  for (const [path, text] of [['.gitignore', 'It creates a new .gitignore file that ignores the build output.'], ['.github/workflows/ci.yml', 'It adds .github/workflows/ci.yml, which runs the tests.'], ['.env.example', 'A new `.env.example` lists every variable.']]) {
+    const criteria = [{ id: 'AC-1', text, proofs: ['unit:x'] }];
+    assert.equal(describedAsNew(path, criteria), 'AC-1', `${path} is described as new`);
+    const { sent, deps } = recorder();
+    await derivedIntent(root, { baseBranch: 'main' }, 'create', [await intentFile({ title: 'Dotfile', criteria, plannedFiles: [path, 'src/master.ts'] }), 'file it'], deps);
+    assert.ok(sent[0].data.plannedFiles.includes(path), `${path} is recorded in plannedFiles`);
+  }
+  const { sent, deps } = recorder();
+  await assert.rejects(derivedIntent(root, { baseBranch: 'main' }, 'create', [await intentFile({ title: 'Dotfile', criteria: [{ id: 'AC-1', text: 'The master reads its config.', proofs: ['unit:x'] }], plannedFiles: ['.gitignore', '.github/workflows/ci.yml'] }), 'file it'], deps),
+    /paths that main does not hold and no criterion describes creating: \.gitignore, \.github\/workflows\/ci\.yml/);
+  assert.equal(sent.length, 0);
+  assert.equal(describedAsNew('.gitignore', [{ id: 'AC-1', text: 'It creates a new src/gitignore.ts module.' }]), null, 'a dot inside a word names no dotfile');
+});
+
 test('integration:nonexistent-planned-path-refused — master requirements resolves the revised plannedFiles the same way', async () => {
   const work = { id: '00000000-0000-4000-8000-000000000001', key: 'GY-9', policyRevision: 3, criteria: [{ id: 'AC-1', text: 'The supervisor stops renewing.', proofs: ['unit:x'] }], dependencies: [], plannedFiles: ['src/supervisor.ts'] } as unknown as Work;
   const refused = recorder([work]);

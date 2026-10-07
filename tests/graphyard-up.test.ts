@@ -30,6 +30,8 @@ const CODE = 'c'.repeat(43);
 const OPERATOR_TOKEN = '/install/acme-shop/tokens/acme-shop-operator.token';
 /** The admin credential a host install's claim yields: held in memory by up, never printed. */
 const HOST_SECRET = 'h'.repeat(48);
+/** The admin credential that file holds. */
+const ADMIN = 'a'.repeat(40);
 
 interface World {
   calls: string[][]; installed: boolean; app: boolean; reviewer: boolean; accounts: boolean; loop: boolean;
@@ -84,6 +86,9 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
     signIn: async (file, token) => { w.signIns.push(token ? 'memory' : file); return file === OPERATOR_TOKEN || token === HOST_SECRET ? `${SERVER}/#sign-in=${CODE}` : null; },
     // The server spends a claim once: a second redemption is refused.
     redeemClaim: async claim => { const spent = (w.redeemed ??= []).includes(claim); w.redeemed.push(claim); return !spent && claim === `${SERVER}/#claim=${CODE}` ? HOST_SECRET : null; },
+    // The operator's admin credential, where the install saved it on this machine (GY-1479); a host
+    // install keeps it on the host, so its path names no file here.
+    operatorToken: async file => file && !w.host ? ADMIN : null,
     status: async () => status(w),
     publishOnboarding: async () => { w.calls.push(['publish-onboarding']); w.onboardingPullRequest ??= 'https://github.com/acme/shop/pull/1'; return w.onboardingMerged ? null : { pullRequest: w.onboardingPullRequest }; },
     // The person merges the onboarding pull request while up waits on it: the first read finds it open.
@@ -103,7 +108,7 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
         w.serving = true;
         try { for (let turns = 0; !(w.app && w.reviewer); turns++) { if (turns > (w.pauseAfter ?? 10_000)) return { code: 1, stdout: JSON.stringify({ resume: 'graphyard install --apply' }) }; await yieldTurn(); } }
         finally { w.serving = false; }
-        return { code: 0, stdout: JSON.stringify(w.host ? { ok: true, principals: [{ id: 'acme-shop-operator', role: 'admin', tokenFile: '/var/lib/graphyard/tokens/acme-shop-operator.token' }], signIn: `${SERVER}/#claim=${CODE}` } : { ok: true }) };
+        return { code: 0, stdout: JSON.stringify(w.host ? { ok: true, principals: [{ id: 'acme-shop-operator', role: 'admin', tokenFile: '/var/lib/graphyard/tokens/acme-shop-operator.token' }], signIn: `${SERVER}/#claim=${CODE}`, host: { host: 'graphyard-acme-shop', masterIdentities: true, units: [] } } : { ok: true }) };
       }
       if (joined === 'master registry propose --apply') { if (!w.noLogins) w.accounts = true; return { code: 0, stdout: '{}' }; }
       if (joined === 'master restart') { w.loop = true; return { code: 0, stdout: '{}' }; }
@@ -125,8 +130,8 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   const events: UpEvent[] = [];
   const result = await runUp(request(), dependencies(fresh, root, events));
   assert.equal(result.exitCode, 0, result.next);
-  assert.deepEqual(result.completed, ['preflight', 'control-plane', 'host-supervisor', 'onboarding', 'accounts', 'harness', 'master-loop']);
-  assert.deepEqual(fresh.calls.map(args => args.slice(0, 2).join(' ')), ['install --provider', 'install --provider', 'master init', 'init --scan', 'init --scan', 'publish-onboarding', 'master registry', 'master harness', 'master restart', 'onboarding-merged?', 'onboarding-merged?'], 'preflight, control plane, host supervisor, onboarding (applied, then published), accounts, harness, master loop, in order; then the onboarding pull request merges');
+  assert.deepEqual(result.completed, ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop']);
+  assert.deepEqual(fresh.calls.map(args => args.slice(0, 2).join(' ')), ['install --provider', 'install --provider', 'master init', 'master autonomy', 'init --scan', 'init --scan', 'publish-onboarding', 'master registry', 'master harness', 'master restart', 'onboarding-merged?', 'onboarding-merged?'], 'preflight, control plane, host supervisor, master identities, onboarding (applied, then published), accounts, harness, master loop, in order; then the onboarding pull request merges');
   // Onboarding is done only once its files are published: init --scan --apply writes them to this checkout alone.
   assert.ok(events.some(event => event.kind === 'step' && event.step === 'onboarding' && event.state === 'done' && /published in https:\/\/github\.com\/acme\/shop\/pull\/1/.test(event.detail ?? '')));
   assert.ok(events.some(event => event.kind === 'note' && /onboarding pull request .* to merge/.test(event.text)), 'it says what it waits on');
@@ -155,13 +160,13 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   const first = await runUp(request(), dependencies(interrupted, interruptedRoot, []));
   assert.equal(first.exitCode, 1);
   assert.match(first.next, /^onboarding: graphyard init exited 1/);
-  assert.deepEqual(first.completed, ['preflight', 'control-plane', 'host-supervisor']);
+  assert.deepEqual(first.completed, ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy']);
   const resumedEvents: UpEvent[] = [];
   const resumed = await runUp(request(), dependencies(interrupted, interruptedRoot, resumedEvents));
   assert.equal(resumed.exitCode, 0, resumed.next);
   assert.equal(installApplies(interrupted), 1, 'the resumed run does not install again');
   assert.equal(interrupted.calls.filter(args => args.join(' ').startsWith('master init')).length, 1, 'nor register the supervisor again');
-  assert.deepEqual(resumedEvents.filter(event => event.kind === 'step' && event.state === 'skipped').map(event => (event as any).step), ['preflight', 'control-plane', 'host-supervisor']);
+  assert.deepEqual(resumedEvents.filter(event => event.kind === 'step' && event.state === 'skipped').map(event => (event as any).step), ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy']);
 
   // Blocked on the App step: the run waits, without failing, until the App turns green.
   const blockedRoot = await temporaryDirectory('graphyard-up-blocked');
@@ -187,6 +192,10 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   assert.equal(hosted.signIn, `${SERVER}/#sign-in=${CODE}&setup`, 'a remote-host install also ends with a sign-in link');
   assert.ok(hosted.next.includes(hosted.signIn!), 'carried by the final summary');
   assert.ok(!JSON.stringify(hosted).includes(HOST_SECRET) && !hostEvents.some(event => JSON.stringify(event).includes(HOST_SECRET)), 'and no token value appears in the summary or any printed line');
+  // GY-1479: the host install provisioned the master's identities on the host, where the admin credential stays; up runs no local autonomy.
+  assert.ok(!host.calls.some(args => args[1] === 'autonomy'), 'no local master autonomy for a host install');
+  const identities = hostEvents.find(event => event.kind === 'step' && event.step === 'master-autonomy' && event.state === 'done') as { detail?: string } | undefined;
+  assert.match(identities?.detail ?? '', /provisioned on graphyard-acme-shop, where its loop runs/);
   assert.deepEqual(requestedView(`#claim=${CODE}&setup`), { view: 'setup', hash: `#claim=${CODE}` });
 
   // Herdr bound to another server: the install runs with --no-herdr and never with --herdr-rebind.
@@ -539,7 +548,7 @@ test('unit:up-resume-from-state — a resumed up takes --repo and --provider fro
   assert.equal(recordedUp(root), null, 'no run recorded here');
   assert.throws(() => upRequestFromArgs(['--agent'], recordedUp(root)), /--repo OWNER\/NAME/, 'a first run still needs --repo');
   await mkdir(join(root, '.graphyard'), { recursive: true });
-  await writeFile(upStateFile(root), JSON.stringify({ version: 1, repository: 'acme/shop', provider: 'hetzner', completed: ['preflight', 'control-plane', 'host-supervisor', 'onboarding', 'accounts', 'harness', 'master-loop'], noHerdr: false, goal: null }));
+  await writeFile(upStateFile(root), JSON.stringify({ version: 1, repository: 'acme/shop', provider: 'hetzner', completed: ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop'], noHerdr: false, goal: null }));
   assert.deepEqual(recordedUp(root), { repository: 'acme/shop', provider: 'hetzner' });
 
   // Resumed without --repo or --provider: both come from the recorded run, which then skips every done step.
@@ -733,6 +742,79 @@ test('unit:up-final-signin-link — a green up ends with one single-use sign-in 
   const failed = await runUp(request(), dependencies(stopped, stoppedRoot, []));
   assert.equal(failed.exitCode, 1);
   assert.equal(failed.signIn, null);
+});
+
+test('unit:up-provisions-master-autonomy — up gives the master its operator-agent identity with the admin credential the install saved, lists the step, and master create then succeeds with no further command', async () => {
+  const { runUp } = await up();
+  const { agentToken, loadStoredMasterConfig, runAutonomyCommand, setupMaster } = await import('../src/master.js');
+  const { derivedIntent } = await import('../src/cli/planned-files-intent.js');
+  // The control plane, as the master, the admin and the identity autonomy provisions each reach it.
+  const masterToken = 'm'.repeat(40), agents: { id: string; token: string }[] = [], created: { credential: string; body: any }[] = [];
+  const plane: typeof fetch = async (input, init) => {
+    const path = String(input).replace(`${SERVER}/api/`, ''), bearer = String((init?.headers as Record<string, string>)?.Authorization ?? '').replace('Bearer ', '');
+    const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+    const answer = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
+    if (path === 'status') return bearer === ADMIN ? answer({ actor: { id: 'acme-shop-operator', role: 'admin' } }) : answer({ actor: { id: 'acme-shop-master', role: 'coordinator' }, repository: 'acme/shop', baseBranch: 'main', githubAppId: 1234 });
+    if (path === 'operator-agents' && bearer === ADMIN) { if (body) agents.push({ id: body.id, token: body.token }); return answer(body ? { id: body.id } : agents.map(({ id }) => ({ id, capabilities: [], scope: {}, revision: 1 }))); }
+    if (path === 'work' && agents.some(agent => agent.token === bearer && /-operator$/.test(agent.id))) { created.push({ credential: bearer, body }); return answer({ key: 'GY-1', revision: 1 }); }
+    return answer({ error: 'forbidden' }, 403);
+  };
+  const runInstall = async (label: string, admin: string | null) => {
+    const root = await temporaryDirectory(label), credentials = await temporaryDirectory(`${label}-credentials`);
+    execFileSync('git', ['init', '-q', root]);
+    execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/acme/shop.git'], { cwd: root });
+    const w = world({ app: true, reviewer: true, accounts: true });
+    const base = dependencies(w, root, [], { operatorToken: async file => file === OPERATOR_TOKEN ? admin : null });
+    // `master init` and `master autonomy` are the real commands, against the simulated control plane.
+    const cli: UpDependencies['cli'] = async (args, options = {}) => {
+      if (args[0] === 'master' && args[1] === 'init') { w.calls.push(args); assert.equal(options.stdin, masterToken); await setupMaster(root, { url: SERVER, token: options.stdin!, cliPath: resolve(import.meta.dirname, '../bin/graphyard.mjs'), credentialDirectory: credentials }, plane); return { code: 0, stdout: '{}' }; }
+      if (args[0] === 'master' && args[1] === 'autonomy') {
+        w.calls.push(args);
+        await runAutonomyCommand(root, await loadStoredMasterConfig(root), 'autonomy', args.slice(2), { coordinator: async () => ({}), readSecret: async () => options.stdin ?? '', agents: () => [], daemonLock: async () => null, fetcher: plane });
+        return { code: 0, stdout: '{}' };
+      }
+      return base.cli(args, options);
+    };
+    return { root, w, result: await runUp(request(), { ...base, cli }) };
+  };
+  // `graphyard master create FILE REASON`, as src/cli/master/intent.ts runs it.
+  const masterCreate = async (root: string) => {
+    const config = await loadStoredMasterConfig(root), file = join(root, 'intent.json');
+    await writeFile(file, JSON.stringify({ title: 'Sign-up page', criteria: [{ id: 'AC-1', text: 'It creates a new .gitignore file.', proofs: ['unit:x'] }], plannedFiles: ['.gitignore'] }));
+    return derivedIntent(root, config, 'create', [file, 'operator goal'], { coordinator: async () => ({ work: [] }), tree: async () => ({ ref: 'origin/main', files: new Set(['README.md']) }),
+      token: () => agentToken(root, config, 'operatorAgent'),
+      mutate: async (path, data, _id, credential) => { const response = await plane(`${SERVER}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${credential}` }, body: JSON.stringify(data) }); const result = await response.json(); if (!response.ok) throw new Error(JSON.stringify(result)); return result; } });
+  };
+
+  const { root, w, result } = await runInstall('graphyard-up-autonomy', ADMIN);
+  assert.equal(result.exitCode, 0, result.next);
+  assert.ok(result.completed.includes('master-autonomy'), 'the step is on up\'s checklist');
+  assert.deepEqual(w.calls.find(args => args[1] === 'autonomy'), ['master', 'autonomy', '--admin-token-stdin', '--apply', '--harness', 'claude'], 'the admin credential goes on stdin, never in the arguments');
+  assert.deepEqual(agents.map(agent => agent.id), ['graphyard-master-shop-operator', 'graphyard-approver-shop']);
+  const config = await loadStoredMasterConfig(root);
+  assert.equal(config.operatorAgent?.id, 'graphyard-master-shop-operator', 'recorded in the master configuration');
+  const answer = await masterCreate(root);
+  assert.equal(answer.key, 'GY-1', 'master create succeeds right after up');
+  assert.equal(created[0].credential, agents[0].token, 'as the master\'s operator-agent identity');
+  assert.ok(created[0].body.plannedFiles.includes('.gitignore'));
+  // A rerun leaves the done step alone: the identity is provisioned once.
+  assert.equal((await runUp(request(), { ...dependencies(w, root, []), operatorToken: async () => ADMIN })).exitCode, 0);
+  assert.equal(w.calls.filter(args => args[1] === 'autonomy').length, 1);
+
+  // With no admin credential on this machine, up stops (exit 2) at that step naming the one command, and master create is refused as before.
+  agents.length = 0; created.length = 0;
+  const missing = await runInstall('graphyard-up-autonomy-missing', null);
+  assert.equal(missing.result.exitCode, 2, missing.result.next);
+  assert.match(missing.result.next, /^master-autonomy: the operator's admin credential is not on this machine .*graphyard master autonomy --admin-token-stdin --apply/);
+  assert.deepEqual(missing.result.completed, ['preflight', 'control-plane', 'host-supervisor']);
+  await assert.rejects(masterCreate(missing.root), /No master operator-agent identity is provisioned/);
+  // Once the operator has provisioned it by hand, the resumed run keeps that identity and carries on.
+  const { setupAutonomy } = await import('../src/master.js');
+  await setupAutonomy(missing.root, { adminToken: ADMIN, apply: true }, plane);
+  const kept = await runUp(request(), { ...dependencies(missing.w, missing.root, []), operatorToken: async () => null });
+  assert.equal(kept.exitCode, 0, kept.next);
+  assert.ok(kept.completed.includes('master-autonomy'));
+  assert.equal((await masterCreate(missing.root)).key, 'GY-1');
 });
 
 /**

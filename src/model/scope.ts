@@ -98,24 +98,24 @@ export const itemDocumentationPaths = (item: { documentation?: ItemDocumentation
 /**
  * The surfaces that render, test or point users at the documentation: the web app that links to
  * and embeds doc pages, the browser tests that pin their text, and the integrations whose messages
- * name a guide. An item that plans the whole `docs/` tree
- * rewrites or moves pages these files consume, so a single file under them is implied scope.
+ * name a guide. An item that plans the whole `docs/` tree rewrites or moves pages these files consume, so a single file under them is implied scope.
  * A directory request is not: the implication covers the consumer a rewrite breaks, never a tree.
  */
 export const documentationConsumerScopes = ['web/', 'browser-tests/', 'integrations/'] as const;
 
-const pathToken = /(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.*-]*|[A-Za-z0-9_-]+\.[A-Za-z0-9]{1,5}/g;
+const pathToken = /(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.*-]*|[A-Za-z0-9_-]+\.[A-Za-z0-9]{1,5}|(?<![\w./-])\.[A-Za-z_][\w.-]*/g;
+const fileToken = /^[\w-]+\.[A-Za-z0-9]{1,5}$|^\.[A-Za-z_][\w.-]*$/;
 export const wellFormed = (path: string) => {
   const segments = pathScope(path).path.split('/');
   return segments.length > 0 && segments.every((segment, index) => segment !== '.' && segment !== '..' && (segment !== '' || index === segments.length - 1));
 };
 /**
  * The repository paths a sentence names, in the same bounded syntax plannedFiles uses: `src/a.ts`,
- * `docs/`, `tests/*`. Prose is not a glob language, so only tokens that look like a path are read
- * as one — a token that matches nothing the request asks for simply never implies anything.
+ * `docs/`, `tests/*`, and a root dotfile (`.gitignore`; GY-1479: a dot that starts a word, never one inside it). Prose is not a glob
+ * language, so only tokens that look like a path are read as one — a token that matches nothing the request asks for never implies anything.
  */
 export function namedPaths(text: string) {
-  return [...new Set((text.match(pathToken) ?? []).map(token => token.replace(/[.,;:)\]]+$/, '')).filter(token => token.includes('/') || /^[\w-]+\.[A-Za-z0-9]{1,5}$/.test(token)).filter(wellFormed))];
+  return [...new Set((text.match(pathToken) ?? []).map(token => token.replace(/[.,;:)\]]+$/, '')).filter(token => token.includes('/') || fileToken.test(token)).filter(wellFormed))];
 }
 export interface ScopeImplication { scope: string; kind: 'criteria' | 'documentation' | 'documentation-consumer' | 'companion' | 'timing-companion'; why: string }
 /**
