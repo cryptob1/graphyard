@@ -1,0 +1,48 @@
+[
+  {
+    "id": "actorless|GY-1357|2026-10-06T06:37:07.077Z",
+    "kind": "actorless",
+    "subject": "GY-1357",
+    "at": "2026-10-06T06:37:07.077Z",
+    "submittedAt": "2026-10-06T06:31:33.650Z",
+    "observedAt": "2026-10-06T06:34:41.195Z",
+    "pr": 833,
+    "epoch": 1,
+    "sha": "1ca7e6b482ae8f1579a994fe40063ef8b13442c0",
+    "baseSha": "590030955a0774fa6ea6f2d4b7600d7d8794c18b",
+    "baseTip": "590030955a0774fa6ea6f2d4b7600d7d8794c18b",
+    "mergeable": false,
+    "conflicting": true,
+    "movedAt": "2026-10-06T06:37:32.699Z",
+    "moved": "the loop requested the sync rework decision (graphyard-risk-lane approved and applied it at 06:37:34)"
+  },
+  {
+    "id": "blocker|GY-1292|2026-10-07T03:05:03.860Z",
+    "kind": "blocker",
+    "subject": "GY-1292",
+    "at": "2026-10-07T03:05:03.860Z",
+    "epoch": 3,
+    "claimedAt": "2026-10-07T02:22:10.604Z",
+    "blockedAt": "2026-10-07T03:03:23.334Z",
+    "blocker": "blocked on epoch 3: AC-1's 11,400-word limit cannot be met without dropping documented facts, and the human already chose to revise the limit. The decision on record for GY-1292 (goals-and-priorities) says: 'Accept the trimmed set: revise AC-1's 11,400 limit or raise the 12,000 budget' [approved by production-operator-admin]. AC-1 still reads 'at most 11400 words'. PR #859 head 7a1c1b2fab trims README.md+docs/ from 17,760 to 13,183 words and keeps every documented behaviour, command, configuration and API: the reviewer's base-vs-head identifier diff (backticked tokens, [A-Z_]{4,} names, --flags) now leaves 0 of the 257 previously dropped identifiers missing. It also keeps every sentence the docs-text tests pin exactly and the How Graphyard works/glossary structure the browser suite checks; those 7 browser tests pass. A worker cannot revise criteria. Needed: the master applies the human's decision with 'graphyard master requirements GY-1292 FILE', setting AC-1's limit to the fact-preserving total (e.g. at most 13,200 words, with every documented behaviour, command, configuration and API kept); a further trim belongs in a follow-up item. Then the item can be resubmitted on this head.",
+    "movedAt": "2026-10-07T03:07:05.761Z",
+    "moved": "the master requested the requirements decision revising AC-1 (approved and applied at 03:27:09; unblocked at 03:32:46)"
+  },
+  {
+    "id": "actorless|GY-1292|2026-10-07T03:52:53.875Z",
+    "kind": "actorless",
+    "subject": "GY-1292",
+    "at": "2026-10-07T03:52:53.875Z",
+    "submittedAt": "2026-10-07T03:47:35.861Z",
+    "observedAt": "2026-10-07T03:48:20.096Z",
+    "pr": 859,
+    "epoch": 4,
+    "sha": "aec6ccb6ccc6519bed5140941bf747496c456f07",
+    "baseSha": "326811e8bae1b92c93cbbb207600fbc3c4e38a04",
+    "baseTip": "8b8c4d3be2aa67d3abcf2583f4d84e4c60b1ff60",
+    "mergeable": null,
+    "conflicting": false,
+    "movedAt": "2026-10-07T03:53:14.831Z",
+    "moved": "the control plane test-merged the head, recorded the conflict and raised the request-rework row"
+  }
+]

@@ -27,6 +27,7 @@ import { containmentGraceMs, containmentPhase, containmentSettleWaitBoundMs } fr
 import { openAction } from '../model/next-action.js';
 import { carriedDecision } from '../model/concerns.js';
 import { masterTurnWaitBoundMs } from './decisions.js';
+import type { PipelineTimeline } from '../pipeline-speed.js';
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
 export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[];
@@ -71,7 +72,9 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
   // A fence the loop settled — this cycle's reclaim step included — is gone, though the snapshot the cycle began with still shows it (GY-1299).
   const work = snapshot.map(item => fenceSettled(state, item) ? { ...item, containmentQuarantine: null } : item);
   const byKey = new Map(work.map(item => [item.key, item]));
-  const own = work.flatMap(item => workFaults(item, now, routes)).filter(fault => !(containmentKinds.has(fault.kind) && containmentInMotion(byKey.get(fault.subject), now)));
+  const recorded = work.flatMap(item => workFaults(item, now, routes)).filter(fault => !(containmentKinds.has(fault.kind) && containmentInMotion(byKey.get(fault.subject), now)));
+  // A blocker inside its actor's turn is not counted, nor is a derived line restating it (`shown` below keeps it).
+  const own = recorded.filter(fault => !(fault.kind === 'blocker' && blockerInMotion(byKey.get(fault.subject), now)));
   const derived: FaultObservation[] = [], attributed: FaultObservation[] = [];
   // The owed lines that restate a standing fence's escalation (owedContainmentLine): past the settle bound they are the item's own `containment` fault.
   const fenceLines = new Set<FaultObservation>();
@@ -118,8 +121,24 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
   // A scope request the product is still settling (standingScopeRequest) is no fault however its attention line reads: the snapshot may
   // predate the rule's decision this cycle took, so the line can still name a refusal the approver is about to judge (GY-1085).
   const settling = new Set(work.filter(item => item.scopeRequest && !standingScopeRequest(item, now, routes)).map(item => item.key));
-  const shown = new Set([...own.map(fault => `${fault.subject}|${fault.kind}`), ...[...settling].map(key => `${key}|scope-request`)]);
+  const shown = new Set([...recorded.map(fault => `${fault.subject}|${fault.kind}`), ...[...settling].map(key => `${key}|scope-request`)]);
   return [...own, ...derived.filter(fault => ![fault.kind, ...(restatements[fault.kind] ?? []), ...(fenceLines.has(fault) ? ['containment'] : [])].some(kind => shown.has(`${fault.subject}|${kind}`)))];
+}
+/**
+ * GY-1403. Whether an item's blocker is still in motion: it was raised within `masterTurnWaitBoundMs`
+ * of now, dated by the end of the attempt that recorded it (a blocked worker releases its lease). A
+ * blocker is handed on at once — the loop's blocker step re-probes a routine class every cycle and
+ * hands any other to the master, whose turn moves the remedy — so one that recent is the ordinary
+ * pace of work, as an owed escalation is (owedEscalationInMotion). On 7 October 2026 GY-1292's
+ * blocker counted 100s after it was raised; the master requested the requirements decision that
+ * applied the operator's approved revision of its AC-1 within four minutes, and the item was
+ * unblocked in thirty. A blocker the record cannot date counts at once, as before.
+ */
+export function blockerInMotion(work: Work | undefined, now: number): boolean {
+  if (!work?.blocker) return false;
+  const attempt = ((work as Work & { pipeline?: PipelineTimeline }).pipeline?.attempts ?? []).filter(entry => entry.epoch === work.epoch).at(-1);
+  const since = attempt?.endedAt ? Date.parse(attempt.endedAt) : Number.NaN;
+  return Number.isFinite(since) && now - since <= masterTurnWaitBoundMs;
 }
 /** Whether the loop recorded the settlement of the item's standing fence: its settle action for the fence's epoch is done. */
 const fenceSettled = (state: Pick<DaemonState, 'actions'>, item: Work) =>

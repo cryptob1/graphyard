@@ -3,6 +3,7 @@ import { reviewNeed, type ReviewState } from '../model/dispatch.js';
 import { pendingBaseRefresh } from '../merge-queue.js';
 import { standingEscalations } from '../model/escalation.js';
 import type { Work } from '../model/work.js';
+import { baseConflictWaitBoundMs } from '../daemon/faults.js';
 
 /**
  * A submitted item nobody is acting for (GY-191).
@@ -14,6 +15,14 @@ import type { Work } from '../model/work.js';
  * or a named wait — a blocker, an escalation, a queue entry, a base refresh in flight, a review a
  * provider answers on its own. Past `actorlessBoundMs` with none of them, the item is named with
  * the actor that is missing, so the gap is a line in `master status` instead of a silent stall.
+ *
+ * GY-1403. A head that does not contain the base tip is one the loop returns on its own: GitHub's
+ * conflict is a sync rework decision (`syncConflict`) the loop requests once a fresh observation
+ * describes it, and a mergeability GitHub has not computed yet is read by the next observation and
+ * then test-merged (`baseRefreshNeeded`), whose conflict raises the `request-rework` row. That path
+ * spans observations and loop cycles, so its line carries `inMotionUntil` for the bound the base
+ * conflict keeps (`baseConflictWaitBoundMs`) and counts as a fault only past it. GY-1357 (6 October
+ * 2026) and GY-1292 (7 October) were each counted at 5 minutes and returned 25s and 21s later.
  */
 export const actorlessBoundMs = 5 * 60_000;
 
@@ -82,7 +91,7 @@ export function actorlessSubmissions(work: Work[], now: Date, reworkDecisions: R
     if (!(idleMs > boundMs)) return [];
     const missing = missingActor[need.state];
     return [{ subject: item.key, text: `${item.key} candidate ${item.candidate.sha.slice(0, 12)} has been submitted for ${Math.round(idleMs / 60_000)}m with no review request, no producer request, no rework request and no named wait; missing ${missing.actor} (${need.reason})`,
-      ...agentOwner('master', missing.next(item.key)) }];
+      ...agentOwner('master', missing.next(item.key)), ...(need.state === 'base-not-contained' ? { inMotionUntil: new Date(now.getTime() - idleMs + baseConflictWaitBoundMs).toISOString() } : {}) }];
   });
 }
 
