@@ -8,6 +8,7 @@ import { loadMasterConfig } from './master/config.js';
 import { accountLaunch } from './master/environments.js';
 import { closeFailedLaunch, launchStartMs, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from './master/launch.js';
 import { checkoutGitDirectory } from './master/checkout-git.js';
+import { prepareSessionHarness } from './master/harness.js';
 import { sessionGitAdminDirectory } from './master/profiles.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson, observeHerdrAgents } from './master/herdr.js';
 import { autonomousSession, destructivePromptGuidance, herdrAttach } from './master/dispatch.js';
@@ -150,6 +151,19 @@ export async function docsSyncCheckoutRefusal(checkout: string, confinement: Coo
 }
 
 /**
+ * The docs-sync session's role harness (GY-1433): like every session the master launches under a
+ * repository that carries project settings, a Claude docs-sync session loads only the operator's
+ * user settings plus its own role file (`--setting-sources user --settings FILE`), never the
+ * repository's .claude/settings.local.json where the master's `git push` deny lives. The role file
+ * allows the merge, the commit and the one plain push to the item's own branch and denies every
+ * other push, graphyard claim/complete/evidence, review verdicts and the secret paths. The file is
+ * named per plan, so two docs-sync sessions never share one.
+ */
+export async function docsSyncHarness(root: string, config: MasterConfig, plan: Pick<DocsSyncPlan, 'key' | 'head' | 'branch'>, kind: string) {
+  return prepareSessionHarness(root, config, { role: 'docs-sync', kind, profile: `${plan.key}-${plan.head.slice(0, 7)}`, branch: plan.branch });
+}
+
+/**
  * Launch the docs-sync session for one plan on a reviewer-class account: the accounts the reviewer
  * profiles name, chosen as an approver's are (`selectApproverAccount`). The instruction is the
  * session's own first request, like every session Graphyard launches.
@@ -173,7 +187,7 @@ export async function launchDocsSync(root: string, work: Work, plan: DocsSyncPla
   // this process holds it against the reclaim pass for the session's bounded life and settles it
   // after; a loop that dies first leaves it to the orphan reclaim. `.graphyard/docs-sync` is only
   // swept, for checkouts launches before GY-866 left there.
-  let checkout: string | undefined, launch: ReturnType<typeof accountLaunch>, managed: Awaited<ReturnType<typeof coordinationCheckout>> | undefined, unhold = () => {};
+  let checkout: string | undefined, launch: ReturnType<typeof accountLaunch>, harness: Awaited<ReturnType<typeof docsSyncHarness>>, managed: Awaited<ReturnType<typeof coordinationCheckout>> | undefined, unhold = () => {};
   const unwind = async () => { unhold(); if (managed) await settleCheckout(root, managed.directory); };
   // A launch that fails leaves a checkout no session will ever own, so it is reclaimed now, its
   // worktree registration with it, rather than at the next launch (GY-1273).
@@ -184,6 +198,8 @@ export async function launchDocsSync(root: string, work: Work, plan: DocsSyncPla
     unhold = holdCheckout(managed.directory);
     checkout = await prepareDocsSyncCheckout(root, plan, run, managed.worktree);
     launch = accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, chosen.account ?? null, { writable: docsSyncWritablePaths(root, checkout) });
+    // The harness follows the chosen account's runtime: a Claude account loads its role file, never the master's rules.
+    harness = await docsSyncHarness(root, config, plan, kind);
     const refusal = await docsSyncCheckoutRefusal(checkout, await (seams.confinement ?? sessionConfinement)(kind, launch.args, { directory: checkout }));
     if (refusal) throw new Error(refusal);
   } catch (error) {
@@ -198,7 +214,7 @@ export async function launchDocsSync(root: string, work: Work, plan: DocsSyncPla
     await registeredLaunch(register, { id: `docs-sync:${plan.head}:${plan.base}`, kind: 'coordination', role: 'docs-sync', runtime: kind, host: config.hostId, head: plan.head,
       agentName: name, pane: created.pane, attach: herdrAttach(created.pane, config.herdrWorkspace), ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
       subject: `${work.key}: docs-sync onto ${plan.base.slice(0, 12)}`, state: 'running' },
-    () => startAgentSession(name, kind, created.pane, launch.args, docsSyncPrompt(config, plan, root, checkout), run, { directory: checkout, retry: `docs-sync of ${work.key}`, contract: launch.contract, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined);
+    () => startAgentSession(name, kind, created.pane, [...launch.args, ...harness.args], docsSyncPrompt(config, plan, root, checkout), run, { directory: checkout, retry: `docs-sync of ${work.key}`, contract: launch.contract, environment: launch.environment, timeoutMs: launchStartMs(config), role: harness.role }), () => undefined);
   } catch (error) {
     if (pane || tab) await closeFailedLaunch(pane, tab, run).catch(() => undefined);
     await reclaim();
