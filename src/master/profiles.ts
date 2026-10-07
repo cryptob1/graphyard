@@ -228,6 +228,10 @@ export const masterRunSchema = z.object({
   // promote=true when the base branch has moved past the last promoted SHA and no candidate is in
   // validation. Unset: 120 (`defaultPromoteEveryMinutes`); 0 turns the loop's promotion off.
   promoteEveryMinutes: z.number().int().min(0).max(10080).optional(),
+  // GY-1398: how long the deployment step reuses its last verified release observation while every
+  // delivery is already served and none is pending, instead of reading GitHub every cycle. Unset: 15
+  // (`defaultDeploymentReuseMinutes`); 0 reads live every cycle.
+  deploymentReuseMinutes: z.number().int().min(0).max(1440).optional(),
   // Automatic dispatch at submit: how often the loop reads the control plane's review and
   // producer requests (the launch bound is 30 seconds from the request), which reviewer profile
   // answers a request when more than one is configured, and how long a producer session may run.

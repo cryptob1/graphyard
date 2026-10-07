@@ -601,7 +601,9 @@ test('unit:throughput-recorded-by-loop — after a verified deployment the loop 
     const token = join(directory, 'coordinator.token');
     await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: token, cliPath: launcher, repository: 'owner/project', baseBranch: 'main',
-      githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
+      githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [],
+      // Each cycle here serves a new release a few ms after the last: read live every cycle, not reused (GY-1398).
+      run: { deploymentReuseMinutes: 0 } });
     const state = emptyDaemonState(master);
     state.lock = { id: 'lock', pid: process.pid, host: master.hostId, startedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString() };
     const delivered = (await store.list()).find(item => item.stage === 'done')!;

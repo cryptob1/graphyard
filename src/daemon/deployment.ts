@@ -339,6 +339,27 @@ export async function withinDeploymentBudget<T>(owner: object, name: string, rea
   } finally { clearTimeout(timer); }
 }
 
+// ——— Reusing the last verified observation (GY-1398) ———
+
+/** How long a verified release observation is reused when nothing awaits it; `run.deploymentReuseMinutes` overrides. */
+export const defaultDeploymentReuseMinutes = 15;
+/**
+ * Whether the step may stand on the last observation rather than read GitHub again. At a 300s
+ * interval the live read cost ~9-14s of gh/git child-wait every cycle for an answer that almost
+ * never changed, holding cycle p90 over its 30s bound. The last observation is reused only when it
+ * verified a release (not unavailable), is younger than the window, left nothing pending, and
+ * already places every delivered item — in its deployed set or its retained containment, which
+ * records each delivery that release lineage serves. Anything else — an expired window, a delivery
+ * landed since, a pending one, an unavailable observation — reads live exactly as before.
+ */
+export function reusableDeployment(last: DeploymentObservation | null | undefined, delivered: Work[], now: number, windowMs: number) {
+  if (!last || last.source === 'unavailable' || !last.sha || last.pending.length || windowMs <= 0) return false;
+  const age = now - Date.parse(last.at);
+  if (!Number.isFinite(age) || age < 0 || age >= windowMs) return false;
+  const deployed = new Set(last.deployed), settled = last.containment?.release === last.sha ? last.containment.settled : {};
+  return delivered.every(item => deployed.has(item.key) || Object.hasOwn(settled, item.key));
+}
+
 // ——— Promotion (GY-1302): the loop, not GitHub's cron, moves production along. ———
 
 /** The workflow the loop dispatches with `promote=true`: it cuts main's tip, validates it in UAT, then promotes it. */
@@ -354,6 +375,15 @@ export const promotionRunsReadMs = 60_000;
  * of main, and `behind` in `master status` is at most this old.
  */
 export const promotionLedgerReadMs = 5 * 60_000;
+/**
+ * GY-1398: the promotion reads' reuse windows at a loop interval. A window at or under the interval
+ * is no window at all — every cycle reads — so at 300s both reads ran each cycle. The ledger is
+ * reused for max(5 min, 3 intervals) and the run list for max(60 s, one interval); a promotion then
+ * waits at most three intervals for a move of main, inside the `promoteEveryMinutes` cadence.
+ */
+export function promotionReadWindows(intervalMs: number) {
+  return { ledgerMs: Math.max(promotionLedgerReadMs, 3 * intervalMs), runsMs: Math.max(promotionRunsReadMs, intervalMs) };
+}
 /** Run states of a release candidate still being cut or validated. */
 const runningStates = new Set(['queued', 'in_progress', 'waiting', 'pending', 'requested']);
 
@@ -379,13 +409,13 @@ const later = (...times: (string | null | undefined)[]) => times.filter((time): 
  * starts validate one pinned commit and promote nothing, so they never hold a promotion back.
  *
  * It never throws. A failed read or dispatch comes back as `failure` with the cycle's stamps kept:
- * a failed ledger read waits out `promotionLedgerReadMs` and a failed run read `promotionRunsReadMs`
+ * a failed ledger read waits out its window and a failed run read its own (`promotionReadWindows`)
  * like a successful one, and a dispatch attempt is stamped before it is made, so a dispatch that
  * fails (or that GitHub accepted before `gh` failed) counts toward the interval and is never
  * repeated cycle after cycle.
  */
-export async function promotionCycle(previous: PromotionState | null, reads: PromotionReads, options: { now: number; everyMinutes: number }): Promise<{ state: PromotionState; dispatched: boolean; failure: string | null }> {
-  const at = new Date(options.now).toISOString(), everyMs = options.everyMinutes * 60_000;
+export async function promotionCycle(previous: PromotionState | null, reads: PromotionReads, options: { now: number; everyMinutes: number; intervalMs?: number }): Promise<{ state: PromotionState; dispatched: boolean; failure: string | null }> {
+  const at = new Date(options.now).toISOString(), everyMs = options.everyMinutes * 60_000, windows = promotionReadWindows(options.intervalMs ?? 0);
   const settle = (state: Omit<PromotionState, 'nextDueAt' | 'reason'>, reason: string, due: boolean) => ({ ...state, reason: reason.slice(0, 500),
     nextDueAt: due && state.lastDispatchAt ? new Date(Math.max(options.now, Date.parse(state.lastDispatchAt) + everyMs)).toISOString() : due ? at : null });
   const done = (state: Omit<PromotionState, 'nextDueAt' | 'reason'>, reason: string, due: boolean, dispatched = false) => ({ state: settle(state, reason, due), dispatched, failure: null });
@@ -395,7 +425,7 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
   // Off reads nothing at all: no fetch, no GitHub request.
   if (options.everyMinutes <= 0) return done({ checkedAt: at, ...kept, ...carried }, 'Promotion by the loop is off (run.promoteEveryMinutes is 0)', false);
   let ledger = kept;
-  if (!kept.ledgerReadAt || options.now - Date.parse(kept.ledgerReadAt) >= promotionLedgerReadMs) {
+  if (!kept.ledgerReadAt || options.now - Date.parse(kept.ledgerReadAt) >= windows.ledgerMs) {
     try { ledger = { ...await reads.ledger(), ledgerReadAt: at }; } catch (error) {
       return failed({ checkedAt: at, ...kept, ledgerReadAt: at, ...carried }, `The base branch and the promotion record could not be read: ${message(error)}`);
     }
@@ -406,7 +436,7 @@ export async function promotionCycle(previous: PromotionState | null, reads: Pro
   const sinceLast = base.lastDispatchAt ? options.now - Date.parse(base.lastDispatchAt) : Number.POSITIVE_INFINITY;
   if (sinceLast < everyMs) return done(base, `The last promotion was dispatched ${Math.round(sinceLast / 60_000)} minute(s) ago; the next is due ${options.everyMinutes} minute(s) after it`, true);
   let state = base;
-  if (!base.runsReadAt || options.now - Date.parse(base.runsReadAt) >= promotionRunsReadMs) {
+  if (!base.runsReadAt || options.now - Date.parse(base.runsReadAt) >= windows.runsMs) {
     let listed: PromotionRun[];
     try { listed = await reads.runs(); } catch (error) {
       return failed({ ...base, runsReadAt: at }, `The ${promotionWorkflow} runs could not be read: ${message(error)}`);
