@@ -80,9 +80,10 @@ export const scopeRequestWaitMs = scopeBlockedBudgetMs;
  * The outcome of this attempt's open scope request, read from the item as the control plane holds
  * it (GY-176): the worker's own command reads durable state, so nothing is pasted into its session.
  * Polls until the request is decided or no longer open, or the wait (`scopeRequestWaitMs`, the whole
- * bound the loop settles an ask in, approver included: GY-1484) runs out, and reports it pending then. Every read carries the control
- * plane's own time, which is what the lease deadline is measured against. An approval clears the request, so one
- * decided before the worker waits is read from the decision this attempt's request received.
+ * bound the loop settles an ask in, approver included: GY-1484) runs out, and reports it pending
+ * then. Every read carries the control plane's own time, which is what the lease deadline is
+ * measured against. An approval clears the request, so one decided before the worker waits is read
+ * from the decision this attempt's request received.
  */
 export async function awaitScopeOutcome(context: Pick<CliContext, 'api'>, work: Work, epoch: number, options: { waitMs?: number; everyMs?: number; cli?: string } = {}) {
   const decided = decisionOfAttempt(work, epoch);
