@@ -397,6 +397,11 @@ export type LoopRelease = z.infer<typeof loopReleaseSchema>;
  * of repeating it: which verified release the checkout was aligned with, what restarts a previous
  * alignment still owes, what the last one did, and why a checkout was left untouched.
  */
+/** The causes an owed self-upgrade restart stalls on (GY-1445). */
+export const upgradeStallCauses = ['executors-refused', 'supervisor-unreachable', 'checkout-dirty', 'checkout-not-detached', 'fetch-failed', 'checkout-failed'] as const;
+export type UpgradeStallCause = typeof upgradeStallCauses[number];
+export const upgradeStallSchema = z.object({ cause: z.enum(upgradeStallCauses), reason: z.string().max(500), since: z.string(), at: z.string() }).strict();
+export type UpgradeStall = z.infer<typeof upgradeStallSchema>;
 export const upgradeStateSchema = z.object({
   /** The verified deployed release the checkout was last aligned with: a new sha is a new trigger. */
   alignedRelease: z.string().regex(/^[0-9a-f]{7,40}$/).nullable().default(null),
@@ -406,6 +411,12 @@ export const upgradeStateSchema = z.object({
   last: z.object({ at: z.string(), from: z.string().nullable(), to: z.string(), code: z.boolean(), executors: z.string().max(300).nullable(), self: z.boolean() }).strict().nullable().default(null),
   /** Why the checkout was left untouched (dirty, not detached): master status names it until it clears. */
   refused: z.object({ at: z.string(), reason: z.string().max(500), commit: z.string().nullable() }).strict().nullable().default(null),
+  /**
+   * Why the restart the self-upgrade owes cannot complete (GY-1445): one named wait, kept while its
+   * cause stands — `since` when it began, `at` the latest attempt — and removed by the next pass that
+   * aligns or upgrades. Absent while nothing stalls it.
+   */
+  stalled: upgradeStallSchema.optional(),
 }).strict().default(() => ({ alignedRelease: null, pending: null, last: null, refused: null }));
 export type UpgradeState = z.infer<typeof upgradeStateSchema>;
 
@@ -707,6 +718,7 @@ export function boundDaemonState(state: DaemonState): DaemonState {
   if (state.upgrade) {
     state.upgrade.refused = state.upgrade.refused ? { ...state.upgrade.refused, reason: cut(state.upgrade.refused.reason, 500) } : null;
     if (state.upgrade.pending) state.upgrade.pending = { ...state.upgrade.pending, from: cut(state.upgrade.pending.from, 40), to: cut(state.upgrade.pending.to, 40) };
+    if (state.upgrade.stalled) state.upgrade.stalled = { ...state.upgrade.stalled, reason: cut(state.upgrade.stalled.reason, 500) };
     if (state.upgrade.last) state.upgrade.last = { ...state.upgrade.last, from: cut(state.upgrade.last.from, 40), to: cut(state.upgrade.last.to, 40), executors: cut(state.upgrade.last.executors, 300) };
   }
   if (state.config) state.config = { ...state.config, changed: state.config.changed.slice(0, 100).map(entry => cut(entry, 100)), refused: cut(state.config.refused, 1000) };

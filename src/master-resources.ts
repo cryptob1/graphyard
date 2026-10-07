@@ -8,6 +8,7 @@ import { pinnedSessionRecords, readReviewLedger, sessionLedgerBound, SessionLedg
 import { readProducerLedger, saveProducerLedger, type ProducerRecord } from './producer.js';
 import { describeTmpReclaim, hostTmpRoots, reclaimTmpDirectories, testTempMinAgeMs, testTempPatterns, tmpReclaimLimitPerCycle, tmpReclaimWorkMsPerCycle, type TmpReclaimOptions, type TmpReclaimReport } from './tmp-reclaim.js';
 import { upgradeTouchesCode } from './daemon/upgrade.js';
+import type { UpgradeStall } from './daemon/state.js';
 import { describePromotion, promotionOnSchedule, promotionWait, type PromotionWait } from './master/release-lag.js';
 import type { LoopState } from './daemon/liveness.js';
 import type { Work } from './model.js';
@@ -82,8 +83,9 @@ export interface ResourceInputs {
    * and the time of its latest attempt (GY-1198): absent or null when none is owed and the cursor
    * names no promotion wait, or the cursor is unread. With none owed, `to` is null and `code` false.
    * `promotion` is the cursor's promotion wait (GY-1400): what the verified release does not serve yet, and when the promotion that would serve it is due.
+   * `stalled` is the cursor's named stall (GY-1445): why the owed restart cannot complete, since when, and its latest attempt.
    */
-  upgrade?: { from: string | null; to: string | null; code: boolean; attemptedAt: number | null; promotion?: PromotionWait | null } | null;
+  upgrade?: { from: string | null; to: string | null; code: boolean; attemptedAt: number | null; promotion?: PromotionWait | null; stalled?: UpgradeStall | null } | null;
   /** The reclaim pass's seen-unowned map (pane → first seen), from .graphyard/resource-reclaims.json; absent or null when unread. */
   reclaimSeen?: Record<string, string> | null;
   disk: { path: string; totalBytes: number; freeBytes: number; thresholdBytes: number } | null;
@@ -370,7 +372,7 @@ export const resourceRegistry: ResourceDefinition[] = [
     id: 'loaded-revision', title: 'Loop loaded-code revision', unit: 'commits behind',
     bound: 'zero: the loop must run the code its checkout holds',
     usage: 'commits the coordinator checkout moved past the one the running loop process loaded, from the checkout\'s HEAD reflog and the process start time; a move that touches no loaded code (src/, scripts/, bin/, package.json) counts none, as the self-upgrade restarts nothing for it', owner: 'the master loop process and the coordinator checkout',
-    reclaim: `the between-cycles self-upgrade restarts the loop onto the checkout's revision; a move it has not loaded within ${selfUpgradeBoundMs / 60_000} minutes counts, unless the restart it owes onto that revision was attempted within the same bound (retried each cycle while an executor holds a claim), or the loop runs the verified release production serves and what it has not loaded waits on a promotion not yet due or in validation`,
+    reclaim: `the between-cycles self-upgrade restarts the loop onto the checkout's revision; a move it has not loaded within ${selfUpgradeBoundMs / 60_000} minutes counts, unless the restart it owes onto that revision was attempted within the same bound (retried each cycle while an executor holds a claim, whether or not production is verified), or the loop runs the verified release production serves and what it has not loaded waits on a promotion not yet due or in validation`,
     remedy: 'graphyard master restart so the loop runs the code the checkout holds',
     warnBelow: () => 0, symptoms: [],
     // A move the self-upgrade is still within its bound for is the upgrade under way (GY-1196):
@@ -390,11 +392,15 @@ export const resourceRegistry: ResourceDefinition[] = [
       // schedule, the loop could not have loaded them, and a restart would reload the same release.
       const wait = input.upgrade?.promotion ?? null;
       const promoting = !pending && !restarting && revision.behind > 0 && !!wait && wait.pending.length > 0 && sameCommit(revision.loaded, wait.deployedSha) && promotionOnSchedule(wait, input.now);
+      // Why the owed restart cannot complete, beside the two revisions (GY-1445): a named cause and
+      // its latest attempt, never a silent pin at the bound.
+      const stalled = revision.behind > 0 ? input.upgrade?.stalled ?? null : null;
+      const cause = stalled ? `; the self-upgrade's restart is stalled on ${stalled.cause} since ${stalled.since}, last attempted ${stalled.at}: ${stalled.reason}` : '';
       return [{ id: '', used: pending || restarting || promoting ? 0 : revision.behind, bound: 0, reclaimable: 0,
         detail: `the loop loaded ${revision.loaded.slice(0, 12)}; the checkout is at ${revision.checkout.slice(0, 12)}${pending ? ` (${revision.behind} commits behind since ${new Date(revision.movedAt!).toISOString()}; the self-upgrade has until ${new Date(revision.movedAt! + bound).toISOString()})`
           : promoting ? ` (${revision.behind} commits behind; the loop runs the verified release production serves, and ${wait!.pending.join(', ')} wait on ${describePromotion(wait!)}: no restart is owed, as one would reload the same release)`
           : restarting ? ` (${revision.behind} commits behind; the self-upgrade's owed restart onto it is under way, last attempted ${new Date(owed!.attemptedAt!).toISOString()} and retried each cycle until ${new Date(owed!.attemptedAt! + bound).toISOString()})`
-          : owed ? ` (the self-upgrade owes a restart onto it, ${owed.attemptedAt === null ? 'with no attempt recorded' : `last attempted ${new Date(owed.attemptedAt).toISOString()}`})` : ''}` }];
+          : owed ? ` (the self-upgrade owes a restart onto it, ${owed.attemptedAt === null ? 'with no attempt recorded' : `last attempted ${new Date(owed.attemptedAt).toISOString()}`})` : ''}${cause}` }];
     },
   },
   {
@@ -785,14 +791,14 @@ export async function readReclaimState(root: string): Promise<{ reports: Resourc
  * The restart the loop's self-upgrade owes, from the daemon cursor (GY-1198): its pending move and
  * the latest attempt the upgrade recorded (its `upgrade:<release>` action), or null when none is owed.
  */
-export function owedUpgrade(state: { upgrade?: { pending: { from: string | null; to: string; code: boolean } | null; alignedRelease?: string | null } | null; actions?: Record<string, { at: string }> } & Parameters<typeof promotionWait>[0] | null): ResourceInputs['upgrade'] {
+export function owedUpgrade(state: { upgrade?: { pending: { from: string | null; to: string; code: boolean } | null; alignedRelease?: string | null; stalled?: UpgradeStall | null } | null; actions?: Record<string, { at: string }> } & Parameters<typeof promotionWait>[0] | null): ResourceInputs['upgrade'] {
   const pending = state?.upgrade?.pending;
-  // The promotion wait rides along (GY-1400): the loaded-revision reading needs it with no restart owed.
-  const promotion = promotionWait(state);
-  if (!pending) return promotion ? { from: null, to: null, code: false, attemptedAt: null, promotion } : null;
+  // The promotion wait and the named stall ride along (GY-1400, GY-1445): the loaded-revision reading needs them with no restart owed.
+  const promotion = promotionWait(state), stalled = state?.upgrade?.stalled ?? null;
+  if (!pending) return promotion || stalled ? { from: null, to: null, code: false, attemptedAt: null, ...(promotion ? { promotion } : {}), ...(stalled ? { stalled } : {}) } : null;
   const attempts = Object.entries(state!.actions ?? {}).filter(([key]) => key.startsWith('upgrade:') && key !== 'upgrade:refused' && key !== 'upgrade:unit')
     .map(([, action]) => Date.parse(action.at)).filter(Number.isFinite);
-  return { from: pending.from, to: pending.to, code: pending.code, attemptedAt: attempts.length ? Math.max(...attempts) : null, ...(promotion ? { promotion } : {}) };
+  return { from: pending.from, to: pending.to, code: pending.code, attemptedAt: attempts.length ? Math.max(...attempts) : null, ...(promotion ? { promotion } : {}), ...(stalled ? { stalled } : {}) };
 }
 
 /**
