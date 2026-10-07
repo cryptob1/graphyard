@@ -3,7 +3,7 @@ import { endedLeaseLoss, leaseLossSettleMs, type Escalation, type Stage, type Wo
 import { containmentGraceMs, containmentSettleWaitBoundMs } from './model/containment.js';
 import { laneApprover } from './model/rework-ground.js';
 import { routedWideningDecision, wideningSettlement } from './model/scope-provenance.js';
-import { reworkGroundFields, routineReworkGround, type ReworkGroundsWork } from './rework-grounds.js';
+import { reworkGroundFields, routineReworkGround as routineGround, type ReworkGroundsWork } from './rework-grounds.js';
 import { applyWorkDelta, type DeltaOp } from './store/snapshot-delta.js';
 
 /**
@@ -54,7 +54,7 @@ export const loopRound = (decision: ReworkDecision | null) => !!decision?.bindin
  * it returns (GY-1387): its grounds binding names that head and the failed checks
  * (`failedCheckRework`, `<sha>:ci:<checks>`), and the head is the candidate the rework sent back.
  */
-export const failedCheckRound = (binding: string | null, candidate: { sha: string } | null | undefined) => {
+export const failedCheckBinding = (binding: string | null, candidate: { sha: string } | null | undefined) => {
   const match = binding ? /^([a-f0-9]{40}):ci:.+$/.exec(binding) : null;
   return !!match && match[1] === candidate?.sha;
 };
@@ -199,11 +199,11 @@ export const unstartedReplan = rule('unstarted-replan', moment => moment.at === 
  * A round answering a ground the loop's own rule acts on needed nobody (GY-1386, rework-grounds.ts):
  * whoever asked for it first, the product handled it, and the asks it ended went with it.
  */
-export const routineReworkGroundRule = rule('routine-rework-ground', moment => { const rework = reworkMoment(moment); return !!rework && !!routineReworkGround(rework.grounds, rework.decision?.binding); });
+export const routineReworkGround = rule('routine-rework-ground', moment => { const rework = reworkMoment(moment); return !!rework && !!routineGround(rework.grounds, rework.decision?.binding); });
 /** A rework the control plane approved on a ground it recorded (GY-1394), when no ask preceded it. */
 export const laneReworkGround = rule('lane-rework-ground', moment => { const rework = reworkMoment(moment); return !!rework && !rework.asked && !!rework.decision?.self; });
 /** The loop's own round for required checks that failed on the head it returns (GY-1387), when no ask preceded it. */
-export const failedCheckReworkRound = rule('failed-check-round', moment => { const rework = reworkMoment(moment); return !!rework && !rework.asked && failedCheckRound(rework.decision?.binding ?? null, rework.candidate); });
+export const failedCheckRound = rule('failed-check-round', moment => { const rework = reworkMoment(moment); return !!rework && !rework.asked && failedCheckBinding(rework.decision?.binding ?? null, rework.candidate); });
 /**
  * A round the loop requested on its recorded grounds that its own approver applied (GY-1389): the
  * reviewer asked for changes, CI failed, the base moved, the review cap put a finding to the
@@ -237,7 +237,7 @@ export const leaseLossResolve = rule('lease-loss-resolve', moment => moment.at =
 /** Every exemption rule, in the order the fold consults them: the first that holds names the exemption. */
 export const interventionExemptions: readonly InterventionExemption[] = [
   approvedAutoscope, successorReplan, auditedScopeWidening, routedScopeWidening, unstartedReplan,
-  routineReworkGroundRule, laneReworkGround, failedCheckReworkRound, loopReworkRound,
+  routineReworkGround, laneReworkGround, failedCheckRound, loopReworkRound,
   directMergeWindow, loopAutosettleInBound, answeredOffLedger, undecidedScopeRequest, leaseLossResolve,
 ];
 
