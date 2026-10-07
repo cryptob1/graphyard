@@ -559,8 +559,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     return writeDaemonState(current(), state);
   };
   const upgradeDeps = (keepAlive?: () => Promise<void>): SelfUpgradeDeps => ({ root, run, // shared with the moved-HEAD recovery (GY-1356)
-    // A slot that already restarted itself onto the tip is left running (GY-1432): stopping it again only took it down twice.
-    restartExecutors: to => restartExecutors(current(), { actions: () => asCoordinator('actions'), coordinatorCommit: to, onWait: keepAlive, skipCurrent: true }),
+    restartExecutors: to => restartExecutors(current(), { actions: () => asCoordinator('actions'), coordinatorCommit: to, onWait: keepAlive, skipCurrent: true }), // a slot already on the tip is left running (GY-1432)
     restartSelf: async () => {
       const unit = detectLoopSupervisorUnit();
       if (!unit) throw new Error('this loop runs under no graphyard-master supervisor unit, so it cannot re-execute itself; run it under the packaged unit (examples/master/graphyard-master.service), or restart it by hand with systemctl --user restart graphyard-master');
