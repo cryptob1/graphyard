@@ -262,12 +262,12 @@ export function requiredDecisionCapabilities(action: DecisionAction, input: any,
   return capabilities;
 }
 
-/** The item must still be in the state the decision was requested against. */
 /** The head a situated rework binding names (`${sha}:${grounds}`, as the loop's routine rule writes it), or null. */
 export const reworkBoundHead = (input: unknown): string | null => {
   const binding = (input as { binding?: unknown } | null)?.binding;
   return typeof binding === 'string' ? /^([0-9a-f]{40}):/.exec(binding)?.[1] ?? null : null;
 };
+/** The item must still be in the state the decision was requested against. */
 export function decisionPrecondition(action: DecisionAction, input: any, work: Work): string | null {
   if (action === 'recover') return work.stage === 'done' && work.containmentQuarantine ? null : 'Containment recovery applies to delivered work that is still quarantined';
   if (work.stage === 'done') return 'Delivered work is immutable; create a follow-up task';

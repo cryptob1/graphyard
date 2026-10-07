@@ -16,7 +16,7 @@ A GitHub credential failure ends the attempt `blocked`, branch kept; once the `g
 ## How a lease ends
 
 - `submit` (CLI `complete`); later heartbeats get `Implementation lease for epoch N ended when GY-N was submitted; stop heartbeating after complete`.
-- `park`: records a human-only request, releases; `blocked` with a reason records the blocker, releases, keeps partial work.
+- `park`: records a human-only request naming every human step at once (a scope widening or a deferred step is refused: use `scope-request`), releases; `blocked` with a reason records the blocker, releases, keeps partial work.
 - Coordinator `capacity` report (`event: "exhausted"`): freed for another account.
 - Expiry, classified by the epoch's ledger: unwithdrawn `blocked` report (from before a blocked release) → `lease.expired` cause `blocked-awaiting-operator`; admin `--previous-worker-stopped` → `stopped-by-attestation`; `capacity.exhausted` → `exhausted-capacity`; none → `lease-loss` escalation, auto-settled once a record explains it ([settling](../delegation.md#who-may-settle-what)).
 

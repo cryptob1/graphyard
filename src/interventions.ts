@@ -191,6 +191,18 @@ interface WorkState {
 const stageOf = (value: unknown): Stage | null => typeof value === 'string' ? value as Stage : null;
 const ms = (from: string, to: string) => Math.max(0, Date.parse(to) - Date.parse(from));
 const text = (value: unknown, fallback = '') => typeof value === 'string' && value ? value : fallback;
+/**
+ * Whether a rework decision is the loop's own round for required checks that failed on the head
+ * it returns (GY-1387): its grounds binding names that head and the failed checks
+ * (`failedCheckRework`, `<sha>:ci:<checks>`), and the head is the candidate the rework sent back.
+ * CI found a defect and the control plane returned the head to a worker by itself, as it applies
+ * a scope widening the implication rule approved; nobody stepped in, so it is no signal. A rework
+ * a master asked for by hand, on any grounds, still is.
+ */
+const failedCheckRound = (binding: string | null, candidate: { sha: string } | null | undefined) => {
+  const match = binding ? /^([a-f0-9]{40}):ci:.+$/.exec(binding) : null;
+  return !!match && match[1] === candidate?.sha;
+};
 
 /**
  * Fold the ledger rows into interventions and judgements. `work` is the current snapshot: it
@@ -312,13 +324,14 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
         break;
       }
       case 'rework': {
-        // A round answering a ground the loop's own rule acts on needed nobody (GY-1386, rework-grounds.ts):
-        // whoever asked for it first, the product handled it, and the asks it ended went with it.
-        if (routineReworkGround(row.grounds ?? null, entry.reworkDecision?.binding)) { entry.asks = []; entry.reworkDecision = null;
+        // A round answering a ground the loop's own rule acts on needed nobody (GY-1386, rework-grounds.ts),
+        // nor did the loop's own round for checks that failed on the head it returns (GY-1387): whoever asked
+        // for it first, the product handled it, and the asks it ended went with it.
+        const candidate = row.work?.candidate, submission = row.work?.submission;
+        if (routineReworkGround(row.grounds ?? null, entry.reworkDecision?.binding) || (!entry.asks.length && failedCheckRound(entry.reworkDecision?.binding ?? null, candidate))) { entry.asks = []; entry.reworkDecision = null;
         } else {
           const sources = [...entry.asks.flatMap(ask => ask.sources), ...(entry.reworkDecision ? [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] : []), source];
           const opened = [entry.reworkDecision?.at, ...entry.asks.map(ask => ask.at)].filter((at): at is string => !!at).sort()[0] ?? row.at;
-          const candidate = row.work?.candidate, submission = row.work?.submission;
           const blocked = candidate ? `candidate ${candidate.sha.slice(0, 12)} (PR #${candidate.pr})` : submission ? `PR #${submission.pr}` : `attempt ${row.work?.epoch ?? '?'}`;
           emit(row, 'rework', { id: entry.reworkDecision ? `rework:${row.workId}:${entry.reworkDecision.id}` : undefined, requestedAt: opened, blocked, stage: entry.asks[0]?.stage ?? entry.reworkDecision?.stage ?? stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: text(details.reason ?? details.intent?.reason, 'rework authorized'), trigger: entry.asks[0]?.kind ?? (entry.reworkDecision ? 'decision' : 'direct'), sources });
           entry.asks = []; entry.reworkDecision = null;
@@ -396,7 +409,7 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
       if (ask.kind === 'scope-request' && !ask.trigger) continue;
       open(ask.kind === 'scope-request' ? 'scope-widening' : 'escalation', { requestedAt: ask.at, blocked: ask.blocked, stage: ask.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: ask.trigger ?? ask.kind, sources: ask.sources });
     }
-    if (entry.reworkDecision && !routineReworkGround(item, entry.reworkDecision.binding)) open('rework', { id: `rework:${id}:${entry.reworkDecision.id}`, requestedAt: entry.reworkDecision.at, blocked: item.candidate ? `candidate ${item.candidate.sha.slice(0, 12)} (PR #${item.candidate.pr})` : `attempt ${item.epoch}`, stage: entry.reworkDecision.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'decision', sources: [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] });
+    if (entry.reworkDecision && !routineReworkGround(item, entry.reworkDecision.binding) && !failedCheckRound(entry.reworkDecision.binding, item.candidate)) open('rework', { id: `rework:${id}:${entry.reworkDecision.id}`, requestedAt: entry.reworkDecision.at, blocked: item.candidate ? `candidate ${item.candidate.sha.slice(0, 12)} (PR #${item.candidate.pr})` : `attempt ${item.epoch}`, stage: entry.reworkDecision.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'decision', sources: [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] });
     if (entry.bypass) open('bypass', { requestedAt: entry.bypass.at, blocked: entry.bypass.blocked, stage: entry.bypass.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'refused-reconciliation', sources: [{ seq: entry.bypass.seq, kind: 'merge.reconciliation.refused' }] });
     if (entry.quarantine?.concernAt && item.containmentQuarantine) open('containment-settlement', { requestedAt: entry.quarantine.concernAt, blocked: `containment fence of epoch ${entry.quarantine.epoch}`, stage: entry.quarantine.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'unsettled', sources: [{ seq: entry.quarantine.seq, kind: 'quarantine' }] });
     for (const escalation of standingEscalations(item)) {
