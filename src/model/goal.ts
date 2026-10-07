@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { caseDirectory, caseId, caseSchema, contractFile, type ReleaseContract } from '../e2e/case.js';
+import { applyPlanCommand, isPlanCommand, planCommandSchemas, planNext, type GoalPlan } from './goal-plan.js';
 import { demand } from './refusal.js';
 import type { Observation, Principal, ScopeFile, Work } from './work.js';
 
@@ -16,13 +17,18 @@ import type { Observation, Principal, ScopeFile, Work } from './work.js';
  * through an approved case change whose approver is neither its requester nor an implementer of
  * the item that asked. People who write the tests are not the people who write the code.
  *
+ * Once the acceptance pull request merged, the `planner` role (GY-1418, src/daemon/planner.ts) turns the
+ * goal into a short architecture note and a dependency-ordered set of work items with file
+ * boundaries; an approver who is not its author approves the plan, and only then are its items
+ * created and released, so the goal moves planned → delivering → delivered.
+ *
  * A goal lives in the event ledger (work_id NULL, kinds `goal.*`): each event carries the whole goal
  * after the change, so the newest event per goal is its record and the rest is its history.
  */
-export const goalStages = ['acceptance-drafting', 'awaiting-approval', 'planned', 'delivering', 'delivered'] as const;
+export const goalStages = ['acceptance-drafting', 'awaiting-approval', 'accepted', 'planning', 'plan-review', 'planned', 'delivering', 'delivered'] as const;
 export type GoalStage = typeof goalStages[number];
 /** The stages a goal's cases are protected in: its acceptance pull request merged. */
-export const protectingStages: readonly GoalStage[] = ['delivering', 'delivered'];
+export const protectingStages: readonly GoalStage[] = ['planning', 'plan-review', 'planned', 'delivering', 'delivered'];
 /** Drafts the loop writes for one goal; past them a refused or closed draft is the master's to answer. */
 export const maxDraftRounds = 3;
 /** An approved acceptance pull request not merged this long after its approval is the master's to answer. */
@@ -71,6 +77,7 @@ export const goalCommandSchemas = {
   land: z.object({}).strict(),
   closed: z.object({ pr: z.number().int().positive(), reason }).strict(),
   deliver: z.object({ items: z.array(z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/)).min(1).max(100), reason }).strict(),
+  ...planCommandSchemas,
   'case-change': z.object({ work: z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/), cases: z.array(caseId).min(1).max(50), reason }).strict(),
   'case-change-approve': z.object({ change: z.string().uuid(), reason }).strict(),
   'case-change-refuse': z.object({ change: z.string().uuid(), reason }).strict(),
@@ -97,6 +104,16 @@ export interface Goal extends GoalInput {
   /** What stays protected once the acceptance pull request merged: the case ids and outcome ids it added. */
   protected: { cases: string[]; outcomes: string[] };
   caseChanges: CaseChange[];
+  /** The planner's plan (GY-1418): who wrote it, its architecture note and its items; null until one is drafted (absent on a goal recorded before planning existed). */
+  plan?: (GoalPlan & { author: string; draftedAt: string }) | null;
+  /** The plan's approval, by an identity other than its author. */
+  planApproval?: { by: string; at: string; reason: string } | null;
+  /** The last refused plan's reason, so the next plan answers it. */
+  planRefusal?: { by: string; at: string; reason: string } | null;
+  /** How many plans were drafted; the loop drafts at most maxPlanRounds. */
+  planDrafts?: number;
+  /** The work items created and released for the approved plan, in dependency order. */
+  items?: { ref: string; key: string; id: string }[];
 }
 
 /** The contract bindings a draft adds to e2e/contract.json: one outcome, its criteria and its one case. */
@@ -130,13 +147,16 @@ export interface GoalContext {
   implementers?: readonly string[];
   /** For a delivery: the named items that are not delivered (the route reads them); delivery waits on every one. */
   undelivered?: readonly string[];
+  /** For a release: what is wrong with the created items (missing, unreleased, a dependency not carried); the route reads them. */
+  unreleased?: readonly string[];
 }
 
 /** A new goal, in acceptance drafting. */
 export function recordGoal(input: unknown, key: string, context: GoalContext): Goal {
   const data = goalInputSchema.parse(input);
   return { id: randomUUID(), key, ...data, stage: 'acceptance-drafting', revision: 1, recordedBy: context.actor.id, recordedAt: context.at, updatedAt: context.at,
-    acceptance: null, approval: null, refusal: null, drafts: 0, merged: null, protected: { cases: [], outcomes: [] }, caseChanges: [] };
+    acceptance: null, approval: null, refusal: null, drafts: 0, merged: null, protected: { cases: [], outcomes: [] }, caseChanges: [],
+    plan: null, planApproval: null, planRefusal: null, planDrafts: 0, items: [] };
 }
 
 /**
@@ -144,7 +164,7 @@ export function recordGoal(input: unknown, key: string, context: GoalContext): G
  * of a draft never judges it, and a case change is judged by neither its requester nor any
  * implementer of its item; each refusal names who may act instead.
  */
-export function applyGoalCommand(goal: Goal, command: Exclude<GoalCommand, 'record' | 'land'>, input: unknown, context: GoalContext): Goal {
+export function applyGoalCommand(goal: Goal, command: Exclude<GoalCommand, 'record' | 'land' | 'release'>, input: unknown, context: GoalContext): Goal {
   const next: Goal = structuredClone(goal);
   const { actor, at } = context;
   if (command === 'draft') {
@@ -160,25 +180,30 @@ export function applyGoalCommand(goal: Goal, command: Exclude<GoalCommand, 'reco
     const data = goalCommandSchemas[command].parse(input);
     demand(goal.stage === 'awaiting-approval' && goal.acceptance, `${goal.key} is ${goal.stage}; only a draft awaiting approval is judged`);
     demand(actor.id !== goal.acceptance.author, `Self-approval refused: ${actor.id} authored the acceptance draft of ${goal.key}; an approver on a different identity judges it`, 403);
-    if (command === 'approve') { next.approval = { by: actor.id, at, reason: data.reason, head: goal.acceptance.head }; next.stage = 'planned'; }
+    if (command === 'approve') { next.approval = { by: actor.id, at, reason: data.reason, head: goal.acceptance.head }; next.stage = 'accepted'; }
     else { next.refusal = { by: actor.id, at, reason: data.reason, pr: goal.acceptance.pr, branch: goal.acceptance.branch }; next.acceptance = null; next.stage = 'acceptance-drafting'; }
   } else if (command === 'closed') {
-    // A draft's pull request closed unmerged: the goal goes back to drafting with the reason recorded, so it is never left planned.
+    // A draft's pull request closed unmerged: the goal goes back to drafting with the reason recorded, so it is never left accepted.
     const data = goalCommandSchemas.closed.parse(input);
-    demand((goal.stage === 'awaiting-approval' || goal.stage === 'planned') && goal.acceptance, `${goal.key} is ${goal.stage}; only an open acceptance draft is recorded closed`);
+    demand((goal.stage === 'awaiting-approval' || goal.stage === 'accepted') && goal.acceptance, `${goal.key} is ${goal.stage}; only an open acceptance draft is recorded closed`);
     demand(data.pr === goal.acceptance.pr, `${goal.key}'s acceptance pull request is #${goal.acceptance.pr}, not #${data.pr}`, 422);
     next.refusal = { by: actor.id, at, reason: data.reason, pr: data.pr, branch: goal.acceptance.branch };
     next.acceptance = null; next.approval = null; next.stage = 'acceptance-drafting';
   } else if (command === 'merged') {
     const data = goalCommandSchemas.merged.parse(input);
-    demand(goal.stage === 'planned' && goal.acceptance && goal.approval, `${goal.key} is ${goal.stage}; only an approved acceptance draft is recorded merged`);
+    demand(goal.stage === 'accepted' && goal.acceptance && goal.approval, `${goal.key} is ${goal.stage}; only an approved acceptance draft is recorded merged`);
     demand(data.pr === goal.acceptance.pr, `${goal.key}'s acceptance pull request is #${goal.acceptance.pr}, not #${data.pr}`, 422);
     next.merged = { at, by: actor.id, pr: data.pr, mergeSha: data.mergeSha };
     next.protected = { cases: goal.acceptance.outcomes.map(outcome => outcome.case.id), outcomes: goal.acceptance.outcomes.map(outcome => outcome.id) };
-    next.stage = 'delivering';
+    // The planner turns the merged acceptance into the items that deliver it (GY-1418).
+    next.stage = 'planning'; next.plan = null; next.planApproval = null; next.planDrafts = 0; next.items = [];
+  } else if (isPlanCommand(command)) {
+    applyPlanCommand(goal, next, command, input, context);
   } else if (command === 'deliver') {
     const data = goalCommandSchemas.deliver.parse(input);
     demand(goal.stage === 'delivering', `${goal.key} is ${goal.stage}; only a goal being delivered is recorded delivered`);
+    const unnamed = (goal.items ?? []).map(item => item.key).filter(key => !data.items.includes(key));
+    demand(!unnamed.length, `${goal.key} is delivered by every item of its plan: name ${unnamed.join(', ')} too`, 422);
     // Delivery is the named implementation items' own: each must exist and have merged, never a bare assertion.
     demand(context.undelivered && !context.undelivered.length, `${goal.key} is delivered only by delivered work: ${(context.undelivered ?? data.items).join(', ')} ${(context.undelivered ?? data.items).length === 1 ? 'is' : 'are'} not delivered`, 422);
     next.stage = 'delivered';
@@ -207,9 +232,11 @@ export function goalNext(goal: Goal, now = Date.now()): { who: string; command: 
   if (goal.stage === 'acceptance-drafting' && (goal.drafts ?? 0) >= maxDraftRounds) return { who: `master: ${maxDraftRounds} acceptance drafts were refused or closed (last: ${goal.refusal?.reason ?? 'none recorded'}); the loop drafts no more`, command: `graphyard goal draft ${goal.key} DRAFT.json` };
   if (goal.stage === 'acceptance-drafting') return { who: 'acceptance role (the master loop launches it once its operator-agent and approver identities are provisioned)', command: `graphyard goal draft ${goal.key} DRAFT.json` };
   if (goal.stage === 'awaiting-approval') return { who: `an approver other than ${goal.acceptance!.author}`, command: `graphyard goal approve ${goal.key} -- REASON (or goal refuse)` };
-  if (goal.stage === 'planned' && goal.approval && now - Date.parse(goal.approval.at) > acceptanceStuckMs)
+  if (goal.stage === 'accepted' && goal.approval && now - Date.parse(goal.approval.at) > acceptanceStuckMs)
     return { who: `master: acceptance pull request #${goal.acceptance!.pr} was approved ${goal.approval.at} and has not merged; read why on the pull request, then close it (the loop drafts again) or land it`, command: `graphyard goal closed ${goal.key} ${goal.acceptance!.pr} -- REASON` };
-  if (goal.stage === 'planned') return { who: `the loop: Graphyard publishes its gate verdicts on acceptance pull request #${goal.acceptance!.pr} and merges it at its approved head, once its required checks pass`, command: `graphyard goal land ${goal.key}` };
+  if (goal.stage === 'accepted') return { who: `the loop: Graphyard publishes its gate verdicts on acceptance pull request #${goal.acceptance!.pr} and merges it at its approved head, once its required checks pass`, command: `graphyard goal land ${goal.key}` };
+  const planning = planNext(goal);
+  if (planning) return planning;
   if (goal.stage === 'delivering') return { who: 'master: create and deliver the implementation items, then name them once every one has merged', command: `graphyard goal deliver ${goal.key} GY-N... -- REASON` };
   return null;
 }
@@ -262,13 +289,16 @@ export function protectedCaseRefusals(work: Pick<Work, 'key'> & Partial<Pick<Wor
 }
 
 // ---- The ledger: one event per change, each carrying the whole goal ------------------------------
-export const goalEventKinds = ['goal.recorded', 'goal.draft', 'goal.approve', 'goal.refuse', 'goal.closed', 'goal.merged', 'goal.deliver', 'goal.case-change', 'goal.case-change-approve', 'goal.case-change-refuse'] as const;
+export const goalEventKinds = ['goal.recorded', 'goal.draft', 'goal.approve', 'goal.refuse', 'goal.closed', 'goal.merged', 'goal.deliver', 'goal.case-change', 'goal.case-change-approve', 'goal.case-change-refuse',
+  'goal.plan', 'goal.plan-approve', 'goal.plan-refuse', 'goal.plan-invalid', 'goal.released'] as const;
+/** A goal recorded before planning existed (GY-1418) said `planned` for an approved, unmerged acceptance draft: that stage is `accepted` now. */
+export const currentGoal = (goal: Goal): Goal => goal.stage === 'planned' && !goal.merged ? { ...goal, stage: 'accepted' } : goal;
 interface Queryable { query(sql: string, params?: unknown[]): Promise<{ rows: any[] }> }
 /** Every goal's record, newest first: the newest event of each. */
 export async function readGoals(db: Queryable): Promise<Goal[]> {
   const rows = (await db.query(`SELECT DISTINCT ON (payload->'goal'->>'id') payload->'goal' AS goal, seq FROM events
     WHERE work_id IS NULL AND kind = ANY($1::text[]) ORDER BY payload->'goal'->>'id', seq DESC`, [goalEventKinds])).rows;
-  return rows.sort((a, b) => Number(b.seq) - Number(a.seq)).map(row => row.goal as Goal);
+  return rows.sort((a, b) => Number(b.seq) - Number(a.seq)).map(row => currentGoal(row.goal as Goal));
 }
 /** The goals whose cases are protected: read by the submit path under the coordination lock. */
 export const readProtectingGoals = async (db: Queryable) => (await readGoals(db)).filter(goal => protectingStages.includes(goal.stage));

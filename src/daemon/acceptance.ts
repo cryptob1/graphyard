@@ -172,7 +172,7 @@ export async function acceptanceStep(cycle: Cycle) {
       if (result && result.revision !== goal.revision) pending.delete(goal.id);
       if (goal.stage === 'acceptance-drafting') return drafting(cycle, acceptance, goal, note);
       if (goal.stage === 'awaiting-approval') return awaiting(cycle, acceptance, goal, note);
-      if (goal.stage === 'planned') return planned(cycle, acceptance, goal, note);
+      if (goal.stage === 'accepted') return accepted(cycle, acceptance, goal, note);
     });
   }
 }
@@ -254,7 +254,7 @@ async function awaiting(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal,
  * moved off its approved head, it was closed: the same outcomes are opened again from the current
  * base without another run, and judged again. Not merged a day after its approval, it is the master's.
  */
-async function planned(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal, note: Note) {
+async function accepted(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal, note: Note) {
   const { pr, outcomes } = goal.acceptance!;
   if (!due(cycle, goal, 'land')) return;
   later(cycle, goal, 'land', acceptancePollMs);

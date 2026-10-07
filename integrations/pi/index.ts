@@ -163,6 +163,35 @@ export const acceptanceJudgementParameters: JsonSchema = {
   },
 };
 
+/** The planner's plan (GY-1418, src/model/goal.ts goalPlanSchema): an architecture note and the items that deliver the goal's approved outcomes. */
+export const planParameters: JsonSchema = {
+  type: 'object', additionalProperties: false, required: ['goal', 'note', 'items'],
+  properties: {
+    goal: { type: 'string', pattern: '^GOAL-\\d+$', description: 'The goal you were asked to plan, exactly as given' },
+    note: text(6000, 'The architecture note, at most 400 words: stack, module layout, data and deploy approach'),
+    items: { type: 'array', minItems: 1, maxItems: 30, items: { type: 'object', additionalProperties: false, required: ['ref', 'title', 'outcomes', 'cases', 'criteria', 'plannedFiles'],
+      properties: {
+        ref: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,39}$', description: 'A short id for this item within the plan' }, title: text(200, 'The item title'),
+        description: text(20000, 'What to build and why'), type: { type: 'string', enum: ['feature', 'bug', 'chore'] }, priority: { type: 'integer', minimum: 0, maximum: 4 },
+        outcomes: { type: 'array', minItems: 1, maxItems: 30, items: text(100, 'An approved outcome id this item serves') },
+        cases: { type: 'array', minItems: 1, maxItems: 30, items: text(100, 'A required case id this item must make pass') },
+        criteria: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', additionalProperties: false, required: ['id', 'text', 'proofs'],
+          properties: { id: { type: 'string', pattern: '^AC-\\d+$', description: 'AC-1, AC-2, ...' }, text: text(2000, 'A testable criterion'), proofs: { type: 'array', minItems: 1, maxItems: 10, items: proof } } } },
+        plannedFiles: { type: 'array', minItems: 1, maxItems: 100, items: text(500, 'A file or directory the item changes') },
+        dependsOn: { type: 'array', maxItems: 20, items: text(40, 'The ref of an item this one lands after') },
+      } } },
+  },
+};
+
+/** The approver's verdict on one plan (GY-1418, src/daemon/planner.ts planJudgementSchema). */
+export const planJudgementParameters: JsonSchema = {
+  type: 'object', additionalProperties: false, required: ['goal', 'verdict', 'reason'],
+  properties: {
+    goal: { type: 'string', pattern: '^GOAL-\\d+$', description: 'The goal whose plan you judged, exactly as given' },
+    verdict: { type: 'string', enum: ['approve', 'refuse'] }, reason: text(2000, 'Why; for a refusal, what the next plan must change'),
+  },
+};
+
 /** The triage judgement (GY-402, src/model/machine-backlog.ts triageJudgementSchema): release at a priority, close with a reason, or merge into another item. */
 export const triageParameters: JsonSchema = {
   type: 'object', additionalProperties: false, required: ['outcome', 'reason'],
@@ -229,6 +258,8 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
   if (role === 'diagnostician') return [tool('graphyard_diagnose', 'Graphyard diagnose', 'Record your diagnosis of the recurring fault or invariant violation you were asked to diagnose: its cause, the log lines and commands it rests on, its fault class, and either the existing open item that covers it or the fix item to file. Call it exactly once; it is your result.', diagnoseParameters, params => `diagnosis ${params.subject}`, true)];
   if (role === 'acceptance') return [tool('graphyard_acceptance', 'Graphyard acceptance', 'Record the acceptance draft for the goal you were asked to draft: each customer outcome in plain language with its criteria and the one required uat E2E case that proves it. Call it exactly once; it is your result.', acceptanceParameters, params => `acceptance ${params.goal}`, true)];
   if (role === 'acceptance-judge') return [tool('graphyard_acceptance_judgement', 'Graphyard acceptance judgement', 'Record your verdict on the acceptance draft you were asked to judge: approve, or refuse naming what the next draft must change. Call it exactly once; it is your result.', acceptanceJudgementParameters, params => `judgement ${params.goal}`, true)];
+  if (role === 'planner') return [tool('graphyard_plan', 'Graphyard plan', 'Record the plan for the goal you were asked to plan: an architecture note of at most 400 words and the work items that deliver its approved outcomes, each with the cases it must make pass, its criteria, planned files and dependencies. Call it exactly once; it is your result.', planParameters, params => `plan ${params.goal}`, true)];
+  if (role === 'plan-judge') return [tool('graphyard_plan_judgement', 'Graphyard plan judgement', 'Record your verdict on the plan you were asked to judge: approve, or refuse naming what the next plan must change. Call it exactly once; it is your result.', planJudgementParameters, params => `plan judgement ${params.goal}`, true)];
   if (role === 'decomposition') return [tool('graphyard_decompose', 'Graphyard decompose', 'Record how the broad item you were asked to split divides into small child items, each with the parent criterion IDs it takes, its planned files and the earlier children it lands after; or an empty children list to keep it whole. Call it exactly once; it is your result.', decomposeParameters, () => 'the split', true)];
   if (role === 'doctor') return [tool(doctorReportToolName, 'Graphyard doctor report', 'Record the report of your doctor run: one entry per finding (what was stuck, under which check bound, and whether you could act), one per sanctioned command you ran and what it changed, and one per fault item to file for a finding no open item covers. Call it exactly once; it is your result.', doctorReportParameters, () => 'the doctor report', true)];
   if (role === 'research') return [tool('graphyard_research_brief', 'Graphyard research brief', 'Record the research brief for the item you were asked to research: existing code to reuse, patterns and prior art with sources, risks, the approach you recommend, and the operator\'s product questions with your recommended answers. Call it exactly once; it is your result.', researchParameters, () => 'the brief', true)];

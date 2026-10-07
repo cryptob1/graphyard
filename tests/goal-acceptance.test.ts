@@ -261,13 +261,13 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   assert.equal(current.stage, 'awaiting-approval'); assert.equal(current.acceptance?.pr, 702); assert.equal(current.drafts, 2);
   await cycle(); await cycle();
   current = await read();
-  assert.equal(current.stage, 'planned'); assert.equal(current.approval?.by, approver.id); assert.equal(current.approval?.head, '2'.repeat(40));
+  assert.equal(current.stage, 'accepted'); assert.equal(current.approval?.by, approver.id); assert.equal(current.approval?.head, '2'.repeat(40));
 
   // The control plane lands the approved pull request: it publishes both App-bound Graphyard checks on exactly the approved head,
   // and GitHub refuses the head-bound merge until CI passed; landing is asked at most once per poll interval.
   await cycle();
   assert.deepEqual(lands, [`702@${'2'.repeat(40)}`]);
-  assert.equal((await read()).stage, 'planned');
+  assert.equal((await read()).stage, 'accepted');
   assert.deepEqual(fake.runs.filter(run => run.head_sha === '2'.repeat(40)).map(run => [run.name, run.conclusion, run.external_id]).sort(), [['Graphyard / merge', 'success', goal.id], ['graphyard/landable', 'success', goal.id]]);
   assert.match(state.actions[`acceptance:${goal.id}`].detail, /asked GitHub to merge it: GitHub has not merged #702 yet: Required status check "test" is expected/);
   await cycle(60_000); await cycle(60_000);
@@ -277,8 +277,9 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   await cycle();
   assert.deepEqual(fake.merges, [{ pr: 702, head: '2'.repeat(40) }], 'merged at exactly the approved head');
   assert.equal(fake.runs.length, 2);
+  // Merged, the goal is the planner's (GY-1418): its cases are protected from here on.
   const delivering = await read();
-  assert.equal(delivering.stage, 'delivering');
+  assert.equal(delivering.stage, 'planning');
   assert.deepEqual(delivering.protected, { cases: ['repository-signup'], outcomes: ['repository-signup'] });
   const kinds = (await ok(master, 'GET', `goals/${goal.key}`)).history.map((entry: any) => `${entry.kind}:${entry.actor}`);
   assert.deepEqual(kinds, ['goal.recorded:goal-master', 'goal.draft:acceptance-author', 'goal.refuse:goal-approver', 'goal.draft:acceptance-author', 'goal.approve:goal-approver', 'goal.merged:goal-master']);
@@ -288,7 +289,7 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   const taken = await call(author, 'POST', `goals/${other.key}/draft`, { ...draftOf(other.key, 'repository-signup'), goal: undefined, pr: 900, branch: 'graphyard/other', head: 'e'.repeat(40) });
   assert.equal(taken.status, 422); assert.match(taken.text, new RegExp(`belongs to ${goal.key}`));
 
-  // An approved pull request closed unmerged is not left planned: the goal goes back to drafting with the reason, and the loop stops after its draft rounds.
+  // An approved pull request closed unmerged is not left accepted: the goal goes back to drafting with the reason, and the loop stops after its draft rounds.
   const third: Goal = await ok(master, 'POST', 'goals', goalInput('A third goal'));
   for (let round = 1; round <= maxDraftRounds; round++) {
     await ok(author, 'POST', `goals/${third.key}/draft`, { outcomes: draftOf(third.key, `third-${round}`).outcomes, pr: 950 + round, branch: `graphyard/third-${round}`, head: 'f'.repeat(40) });
@@ -307,7 +308,7 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   await cycle(); await cycle();
   assert.equal((await read(fourth.key)).acceptance?.pr, 703);
   await cycle(); await cycle();
-  assert.equal((await read(fourth.key)).stage, 'planned');
+  assert.equal((await read(fourth.key)).stage, 'accepted');
   const drafted = tools.filter(entry => entry.startsWith(acceptanceTool)).length;
   fake.pulls.get(703)!.mergeable = false;
   await cycle();
@@ -324,7 +325,7 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   assert.ok(!closes.includes(703), 'the loop does not close again what the control plane closed');
   // Approved again, an unmerged pull request a day after its approval is the master's.
   await cycle(); await cycle();
-  assert.equal((await read(fourth.key)).stage, 'planned');
+  assert.equal((await read(fourth.key)).stage, 'accepted');
   clock = Date.now() + 25 * 60 * 60_000;
   await cycle(0);
   assert.equal(state.actions[`acceptance:${fourth.id}`].state, 'failed');
@@ -333,7 +334,7 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   assert.match(stuck.next!.who, /^master: acceptance pull request #704 was approved/);
   fake.pulls.get(704)!.ciPassed = true;
   await cycle();
-  assert.equal((await read(fourth.key)).stage, 'delivering');
+  assert.equal((await read(fourth.key)).stage, 'planning');
 
   // Without a GitHub App the control plane cannot land, and says so.
   (http as any).services.github = null;
@@ -405,7 +406,7 @@ test('unit:required-cases-protected — after the acceptance PR merges, a candid
   await ok(approver, 'POST', `goals/${recorded.key}/approve`, { reason: 'The case checks the outcome the customer asked for' });
   // Merged is never a client's say-so: there is no route that records it, only the land route reading GitHub.
   assert.equal((await call(master, 'POST', `goals/${recorded.key}/merged`, { pr: 811 })).status, 404);
-  assert.equal((await ok(master, 'GET', `goals/${recorded.key}`)).goal.stage, 'planned');
+  assert.equal((await ok(master, 'GET', `goals/${recorded.key}`)).goal.stage, 'accepted');
   const fake = fakeGitHub();
   (http as any).services.github = fake.github;
   fake.pulls.set(811, { state: 'open', merged: false, head: 'a'.repeat(40), branch: 'graphyard/setup-signup', mergeable: true, ciPassed: true, mergeSha: null });
@@ -475,14 +476,8 @@ test('unit:required-cases-protected — after the acceptance PR merges, a candid
   assert.match(pushed.violations.join('; '), new RegExp(`Protected case: ${casePath} modifies required case setup-signup`));
   pushed = await engine.observe(pushed.id, pushed.revision, later.observe([changed('src/other.ts')] as never));
   assert.deepEqual(pushed.violations, [], 'a later head that leaves the case alone clears it');
-  // Delivered only by delivered work: a goal naming an item that has not merged stays delivering.
+  // Delivered only through its approved plan (GY-1418, tests/goal-planner.test.ts): a goal still being planned is not delivered by naming an item.
   assert.equal((await call(master, 'POST', `goals/${goal.key}/deliver`, { reason: 'Said so' })).status, 400);
   const early = await call(master, 'POST', `goals/${goal.key}/deliver`, { items: [work.key], reason: 'Every implementation item delivered' });
-  assert.equal(early.status, 422); assert.match(early.text, new RegExp(`delivered only by delivered work: ${work.key} is not delivered`));
-  await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{stage}', '"done"') WHERE id = $1`, [work.id]);
-  // Recorded delivered, the goal leaves the open list, and its cases stay protected.
-  const delivered: Goal = await ok(master, 'POST', `goals/${goal.key}/deliver`, { items: [work.key], reason: 'Every implementation item delivered' });
-  assert.equal(delivered.stage, 'delivered');
-  assert.ok(!(await ok(master, 'GET', 'goals?open=1')).goals.some((entry: Goal) => entry.id === goal.id));
-  assert.equal(protectedCaseRefusals({ key: 'GY-999' }, observe([changed(casePath)] as never), [delivered]).length, 1);
+  assert.equal(early.status, 409); assert.match(early.text, new RegExp(`${goal.key} is planning; only a goal being delivered is recorded delivered`));
 });

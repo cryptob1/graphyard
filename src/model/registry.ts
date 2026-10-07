@@ -110,11 +110,11 @@ export const fleetRoles = ['worker', 'reviewer', 'producer', 'approver', 'escala
  * Every role the registry may define: the proposed ones, the diagnostician (GY-439), which turns a
  * recurring-fault item into its root cause and a fix item, and the doctor (GY-711), which finds
  * stuck and overdue work and fixes it through its sanctioned commands, and the acceptance role
- * (GY-1417), which turns a goal into customer outcomes and required E2E cases. Each runs headless
- * on Pi from `run.diagnostician`/`run.doctor` until an operator names accounts for it here, so
- * none is proposed nor reported missing.
+ * (GY-1417), which turns a goal into customer outcomes and required E2E cases, and the planner
+ * (GY-1418), which plans its work items. Each runs headless on Pi from `run.diagnostician`/
+ * `run.doctor` until an operator names accounts for it here, so none is proposed nor reported missing.
  */
-export const registryRoles = [...fleetRoles, 'diagnostician', 'doctor', 'acceptance'] as const;
+export const registryRoles = [...fleetRoles, 'diagnostician', 'doctor', 'acceptance', 'planner'] as const;
 export type FleetRoleName = typeof registryRoles[number];
 /**
  * How every session of a role is launched, whichever account serves it (GY-170): the runtime

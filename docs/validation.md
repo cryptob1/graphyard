@@ -24,7 +24,7 @@ Flaky required cases block promotion until an `evidence` decision (`{"case": ID,
 
 ## Goals and acceptance
 
-`graphyard goal FILE` records a goal (`statement`, `users`, `constraints`, `deployTarget`); `master status` lists open goals. With both master identities, the loop's `acceptance` role (`run.diagnostician` models; a full registry role defers it) drafts outcomes, one required `uat` case each, contract bindings in one pull request, judged by the approver identity (never its author), redrafted when refused (≤3 drafts). Graphyard merges it at the approved head once CI passes (`goal land`), else redrafts. Then `complete` and later heads refuse changes to a protected case or `e2e/contract.json` lacking that item's `goal case-change`, approved by neither requester nor implementer. `goal deliver GOAL-N GY-N...` needs those items merged.
+`graphyard goal FILE` records a goal (`statement`, `users`, `constraints`, `deployTarget`); `master status` lists open goals. With both master identities, the loop's `acceptance` role (`run.diagnostician` models) drafts outcomes, one required `uat` case each, contract bindings in one pull request, judged by the approver identity (never its author), redrafted when refused (≤3 drafts). Graphyard merges it at the approved head once CI passes (`goal land`), else redrafts. Then `complete` and later heads refuse changes to a protected case or `e2e/contract.json` lacking that item's `goal case-change`, approved by neither requester nor implementer. The [planner](how-graphyard-works.md#from-goal-to-work-items) then plans the items; `goal deliver` needs each done and served in production.
 
 ## Release holds
 
