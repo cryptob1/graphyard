@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { throughputClaim, type ThroughputReport } from './throughput.js';
@@ -67,7 +67,9 @@ export async function readThroughputLedger(directory: string): Promise<Throughpu
 
 /** A failed attempt's blocker, read from its error: the credential, the URL, or neither. */
 export function classifyThroughputFailure(message: string): ThroughputBlocker {
-  if (/GRAPHYARD_TOKEN|credential|token|\((401|403)\)|ENOENT/i.test(message)) return 'missing-credentials';
+  // Only the credential's own failures: its variables (an unreadable token file names its variable)
+  // or an auth refusal. A bare ENOENT or "token" elsewhere (a missing checkout path) is not one.
+  if (/GRAPHYARD_TOKEN|credential|\((401|403)\)/i.test(message)) return 'missing-credentials';
   if (/GRAPHYARD_URL|fetch failed|ECONN|ENOTFOUND|EAI_AGAIN|timed? ?out|abort|\((404|5\d\d)\)/i.test(message)) return 'unreachable-url';
   return 'measurement-failed';
 }
@@ -98,18 +100,43 @@ export function failedEntry(error: unknown, input: { source: ThroughputLedgerEnt
     file: null, deliveries: [], blocker: classifyThroughputFailure(detail), detail, output: input.output ?? detail };
 }
 
+/** How long a ledger lock may stand before it is taken as left by a dead writer. */
+const lockStaleMs = 30_000;
+
+/**
+ * One writer at a time across processes: the loop and a by-hand `--record` run may finish together,
+ * and a read-modify-write without the lock would let the later rename drop the other's attempt.
+ */
+async function withLedgerLock<T>(directory: string, run: () => Promise<T>, waitMs = 10_000): Promise<T> {
+  const lock = join(directory, `.${throughputLedgerFile}.lock`), deadline = Date.now() + waitMs;
+  for (;;) {
+    try { await (await open(lock, 'wx')).close(); break; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const held = await stat(lock).then(info => Date.now() - info.mtimeMs, () => 0);
+      if (held > lockStaleMs) { await unlink(lock).catch(() => undefined); continue; }
+      if (Date.now() >= deadline) throw new Error(`the throughput ledger ${join(directory, throughputLedgerFile)} stayed locked for ${waitMs} ms`);
+      await new Promise(done => setTimeout(done, 25));
+    }
+  }
+  try { return await run(); } finally { await unlink(lock).catch(() => undefined); }
+}
+
 /**
  * Appends one attempt and moves the pursuit clock: a verified attempt stops it, any other opens it
- * if it is not running. Written whole through a rename, so a reader never sees half a ledger.
+ * if it is not running. Serialized by a lock file and written whole through a rename, so concurrent
+ * writers never lose an attempt and a reader never sees half a ledger.
  */
 export async function appendThroughputLedger(directory: string, entry: ThroughputLedgerEntry, retention = throughputLedgerRetention): Promise<ThroughputLedger> {
   await mkdir(directory, { recursive: true });
-  const ledger = await readThroughputLedger(directory);
-  const next: ThroughputLedger = { version: 1, openedAt: entry.verdict === 'verified' ? null : ledger.openedAt ?? entry.at, entries: [...ledger.entries, entry].slice(-retention) };
-  const temporary = join(directory, `.${throughputLedgerFile}.${randomUUID()}`);
-  await writeFile(temporary, JSON.stringify(next, null, 2) + '\n');
-  await rename(temporary, join(directory, throughputLedgerFile));
-  return next;
+  return withLedgerLock(directory, async () => {
+    const ledger = await readThroughputLedger(directory);
+    const next: ThroughputLedger = { version: 1, openedAt: entry.verdict === 'verified' ? null : ledger.openedAt ?? entry.at, entries: [...ledger.entries, entry].slice(-retention) };
+    const temporary = join(directory, `.${throughputLedgerFile}.${randomUUID()}`);
+    await writeFile(temporary, JSON.stringify(next, null, 2) + '\n');
+    await rename(temporary, join(directory, throughputLedgerFile));
+    return next;
+  });
 }
 
 const blockerText: Record<ThroughputBlocker, (entry: ThroughputLedgerEntry) => string> = {

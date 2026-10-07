@@ -61,7 +61,10 @@ export function claimContainment({ revision, mergeSha, claim, repository }, run 
 }
 
 async function readToken(env) {
-  if (env.GRAPHYARD_TOKEN_FILE) return (await readFile(resolve(env.GRAPHYARD_TOKEN_FILE), 'utf8')).trim();
+  if (env.GRAPHYARD_TOKEN_FILE) {
+    try { return (await readFile(resolve(env.GRAPHYARD_TOKEN_FILE), 'utf8')).trim(); }
+    catch (error) { throw new Error(`GRAPHYARD_TOKEN_FILE ${env.GRAPHYARD_TOKEN_FILE} cannot be read as the credential: ${error.message}`); }
+  }
   if (env.GRAPHYARD_TOKEN) return env.GRAPHYARD_TOKEN;
   throw new Error('Set GRAPHYARD_TOKEN or GRAPHYARD_TOKEN_FILE to a credential that can read the work snapshot (coordinator, reader or operator)');
 }

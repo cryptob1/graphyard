@@ -187,3 +187,36 @@ test('integration:throughput-measurement-ledger — failures classify into the b
   for (let cycles = 0; cycles < 3; cycles++) await runCycle(master, state, effects, () => Date.now());
   assert.equal(asks, count, 'and it is never asked again');
 });
+
+test('integration:throughput-measurement-ledger — a status read the loop cannot make is ledgered with its blocker, only credential and session-free blockers escalate to a human, and concurrent appends keep every attempt', async () => {
+  const { appendThroughputLedger, classifyThroughputFailure, failedEntry, readThroughputLedger, throughputEscalationMs, throughputPursuit } = await ledgerModule();
+  // An unrelated missing file is not a credential blocker; an unreadable token file is.
+  assert.equal(classifyThroughputFailure("ENOENT: no such file or directory, open '/srv/checkout/package.json'"), 'measurement-failed');
+  assert.equal(classifyThroughputFailure("GRAPHYARD_TOKEN_FILE /run/token cannot be read as the credential: ENOENT"), 'missing-credentials');
+
+  // The plane's status read rejects before any measurement: the attempt is still ledgered and opens the pursuit.
+  const root = await temporaryDirectory('throughput-ledger-preliminary');
+  const directory = join(root, throughputMeasurementDirectory);
+  const clock = Date.parse('2100-01-01T02:00:00.000Z');
+  const base = { work: [claim], observedSha: served, now: () => clock, origin: 'https://graphyard.example',
+    readItem: async () => { throw new Error('unread'); }, contains: async () => true as boolean | null };
+  await assert.rejects(loopThroughputMeasurement(root, { ...base, status: async () => { throw new Error('Graphyard refused the control-plane status (401)'); } }), /401/);
+  let ledger = await readThroughputLedger(directory);
+  assert.equal(ledger.entries.at(-1)!.blocker, 'missing-credentials'); assert.equal(ledger.openedAt, new Date(clock).toISOString());
+  await assert.rejects(loopThroughputMeasurement(root, { ...base, status: async () => ({ release: { revision: served } }), contains: async () => { throw new TypeError('fetch failed'); } }), /fetch failed/);
+  ledger = await readThroughputLedger(directory);
+  assert.equal(ledger.entries.at(-1)!.blocker, 'unreachable-url'); assert.equal(ledger.entries.at(-1)!.revision, served, 'the ancestry failure names the release it was reading');
+
+  // Past the bound, an unreachable plane escalates on master status but stays the master's to repair.
+  const due = Date.parse(ledger.openedAt!) + throughputEscalationMs;
+  const unreachable = throughputClaimVisibility(null, { revision: served, version: null }, 1, throughputPursuit(ledger, due));
+  assert.match(unreachable.attention!.text, /escalated: .* the blocker is unreachable URL/);
+  assert.equal(unreachable.attention!.human, false); assert.equal(unreachable.attention!.role, 'master');
+
+  // Two writers finishing together (the loop and a by-hand --record) both land.
+  const concurrent = await temporaryDirectory('throughput-ledger-concurrent');
+  await Promise.all(Array.from({ length: 12 }, (_, index) => appendThroughputLedger(concurrent, failedEntry(new Error(`attempt ${index}`), { source: index % 2 ? 'script' : 'loop', needed: 10, at: new Date(clock + index).toISOString() }))));
+  const written = await readThroughputLedger(concurrent);
+  assert.deepEqual(written.entries.map(entry => entry.detail).sort(), Array.from({ length: 12 }, (_, index) => `attempt ${index}`).sort(), 'no attempt is lost to a concurrent rename');
+  assert.deepEqual((await readdir(concurrent)).filter(name => name !== 'ledger.json'), [], 'no lock or temporary file is left behind');
+});

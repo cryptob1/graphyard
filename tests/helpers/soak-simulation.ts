@@ -1279,10 +1279,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // real loopThroughputMeasurement, recorded under a directory of this day's own. The plane's status
   // names a deployed release only statusLagMs after the loop first asks for it, as a rollout that
   // lags the deployment record does, so the loop's wait and its bounded re-asks run on every day.
+  // A release measured unverified stays asked on the backoff and is re-measured hourly (GY-1437).
   // The claim is the day's first merged item: before it merges there is no window, and nothing is measured.
   const initialProduction = production.sha;
   const throughput = { root: await temporaryDirectory('soak-measurements'), statusLagMs: 3 * minute, statusReads: 0, firstAsk: new Map<string, number>(),
-    asks: [] as { sha: string; outcome: string; revision: string | null; elapsed: number; read: number }[], claim: () => github.merges[0]?.key ?? throughputClaim.item };
+    asks: [] as { sha: string; outcome: string; revision: string | null; elapsed: number; read: number; cycle: number; verdict: string | null }[], claim: () => github.merges[0]?.key ?? throughputClaim.item };
   const servingRevision = () => {
     const last = production.deploys.at(-1), since = last && throughput.firstAsk.get(last.sha);
     return last && (since === undefined || clock.now() < since + throughput.statusLagMs) ? production.deploys.at(-2)?.sha ?? initialProduction : production.sha;
@@ -1293,7 +1294,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       status: async () => { throughput.statusReads++; return { now: new Date(clock.now()).toISOString(), release: { version: '0.9.1', revision: servingRevision() } }; },
       readItem: id => api(principals.coordinator, 'GET', `work/${encodeURIComponent(id)}`),
       contains: async (ancestor, descendant) => github.contains(descendant, ancestor) });
-    throughput.asks.push({ sha: observedSha, outcome: outcome.outcome, revision: outcome.revision, elapsed: clock.now() - dayStart, read: outcome.read?.length ?? 0 });
+    throughput.asks.push({ sha: observedSha, outcome: outcome.outcome, revision: outcome.revision, elapsed: clock.now() - dayStart, read: outcome.read?.length ?? 0, cycle: cycles, verdict: outcome.report?.verdict ?? null });
     return outcome;
   };
   // GY-1428: the simulated host the host-supervision day's loop repairs, and what it asked of it.

@@ -159,8 +159,8 @@ export async function deploymentStep(cycle: Cycle) {
 
   // 7a'''. GY-1385: GY-87's throughput claim is measured, not asserted. After a verified deployment
   //        the loop records one measurement for the release the control plane serves, at most once
-  //        per verified release (an unverified one is re-measured hourly, GY-1437), with its own coordinator credential, reading only the window's deliveries
-  //        whole; master status reads it back as verified or with its shortfall. One action per
+  //        per verified release (an unverified one is re-measured hourly, GY-1437), with its own
+  //        coordinator credential, reading only the window's deliveries whole; master status reads it back as verified or with its shortfall. One action per
   //        observed release: a plane that does not serve it yet answers `waiting`, asked again on
   //        the failure backoff (one status read per ask, never one per cycle) until it serves or a
   //        newer observation supersedes the key; a failure backs off the same way. It follows a
