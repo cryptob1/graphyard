@@ -2,7 +2,9 @@ import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
-import { decisionGroundsChange, Engine } from '../src/engine.js';
+import { Engine } from '../src/engine.js';
+// A namespace import: on a tree without the export each case still runs, and fails as a case.
+import * as engineModule from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import type { Principal } from '../src/model.js';
@@ -144,6 +146,7 @@ test('integration:decision-moved-revision-independence — on a moved revision t
 });
 
 test('unit:decision-grounds-change — renewals, liveness, observations and sessions never move a decision\'s grounds; submissions, heads, stages, requirements and lease epochs do', () => {
+  const decisionGroundsChange: typeof engineModule.decisionGroundsChange = (...args) => engineModule.decisionGroundsChange(...args);
   const base = {
     id: 'w', key: 'GY-1', stage: 'build', ready: true, revision: 10, policyRevision: 1, policy: { checks: ['test'], review: true }, criteria: [], plannedFiles: ['src/a.ts'],
     epoch: 1, lease: { owner: 'worker', epoch: 1, expiresAt: '2030-01-01T00:00:00.000Z' }, lastAssignment: { owner: 'worker', epoch: 1 },
