@@ -5,8 +5,6 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { assessContainment, masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { stopUnboundedAttempts, unboundedAttemptKey } from '../src/daemon/cycle-reclaim.js';
-import { submissionProgressCadenceMs, unsubmittedAttempt, workerReclaimBoundMs, workerSubmissionBoundMs } from '../src/model/attempt-bound.js';
 import { faultClassOf, workFaults } from '../src/model/fault-classes.js';
 import { sessionObservationFreshMs } from '../src/model/session-state.js';
 import type { Cycle } from '../src/daemon/cycle.js';
@@ -14,6 +12,10 @@ import type { SupervisorProbeReport } from '../src/containment-probe.js';
 import type { Work } from '../src/model.js';
 import type { SessionHandle } from '../src/model/sessions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+// Imported when each test runs, so against a base without them each proof fails as a test case.
+const bound = () => import('../src/model/attempt-bound.js');
+const reclaim = () => import('../src/daemon/cycle-reclaim.js') as Promise<typeof import('../src/daemon/cycle-reclaim.js')>;
 
 // GY-1460: GY-1457 epoch 1 held its lease 60m11s without a submission while its live session's
 // supervisor renewed the lease every cycle, and nothing recorded it: the lapse-to-containment path
@@ -73,7 +75,8 @@ test('unit:stalled-gate-on-renewed-attempt — an attempt past the 60-minute bou
   assert.match(unsubmittedFaults(timeline, now)[0]?.text ?? '', /15 minutes past the 60-minute worker bound/);
 });
 
-test('unit:inside-bound-no-fault — no fault and no lease stop inside the bound, once the attempt submitted, or while submission progress is inside the cadence', () => {
+test('unit:inside-bound-no-fault — no fault and no lease stop inside the bound, once the attempt submitted, or while submission progress is inside the cadence', async () => {
+  const { submissionProgressCadenceMs, unsubmittedAttempt, workerReclaimBoundMs, workerSubmissionBoundMs } = await bound();
   const now = Date.now();
   assert.equal(submissionProgressCadenceMs, sessionObservationFreshMs, 'the cadence is the session reporting cadence');
   assert.equal(workerSubmissionBoundMs, 60 * minute);
@@ -124,6 +127,7 @@ async function configured() {
 }
 
 test('unit:lease-stop-renewal — past the reclaim bound the loop stops the attempt\'s supervisor once, and nothing else; inside it, or with progress, it stops nothing', async () => {
+  const { stopUnboundedAttempts, unboundedAttemptKey } = await reclaim();
   const { config, cleanup } = await configured();
   try {
     const stops: { key: string; epoch: number; unit: string; signal: string }[] = [];
@@ -155,6 +159,7 @@ test('unit:lease-stop-renewal — past the reclaim bound the loop stops the atte
 });
 
 test('integration:unbounded-attempt-reclaimed — a live, renewing attempt past both bounds is faulted, then its renewal stops, its lease lapses, its fence settles and the item returns to the queue with its worktree kept', async () => {
+  const { unboundedAttemptKey } = await reclaim();
   const { config, cleanup } = await configured();
   // The plane's record, renewed by the supervisor on every read while it runs, as `graphyard watch` does.
   const plane = { item: attempt(119), preserved: [] as string[] };
