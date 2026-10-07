@@ -133,7 +133,7 @@ import { type DiagnosisRun, type Failover, MANUAL, type MainGuardDay, PROOF, api
  * approver refuses the capped rework request of each of `refused` (GY-1389).
  */
 export let days = 0;
-export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; unbounded?: { stuck: number; progressing: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; unbounded?: { stuck: number; progressing: number; pushedOnce: number; rework: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
   staleDiagnosis?: boolean;
@@ -524,8 +524,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // ---- Workers: the loop dispatches, the simulated session claims, works, pushes and submits (or dies). ----
   interface Session { work: string; key: string; branch: string; profile: WorkerProfile; epoch: number; attempt: number; pane: string; pushAt: number; diesAt: number | null; exitsAt: number | null; dispatchAt: number; state: 'working' | 'submitted' | 'dead' | 'exited' | 'idling' | 'reclaimed' | 'credential-blocked' | 'blocked' | 'failed-over'; syncs: number; syncedFor?: string; refusedSince?: number;
     scopeAt: number | null; misreadAt: number | null; misread: boolean; credentialAt: number | null; blockAt: number | null; retryingAt: number | null; settlementToken?: string; files?: string[]; bot?: MechanicalFixRequest;
-    /** GY-1460: the unbounded day's attempt that renews without submitting, or the long one that pushes as it goes, and when it last pushed. */
-    unbounded?: 'stuck' | 'progressing'; pushedAt?: number }
+    /** GY-1460: the unbounded day's attempt that renews without submitting (a first attempt, or a rework on the linked pull request), the one that pushes once and stalls, or the long one that pushes as it goes, and when it last pushed. */
+    unbounded?: 'stuck' | 'progressing' | 'pushed-once'; pushedAt?: number }
   const sessions: Session[] = [], lost: string[] = [], launches: number[] = [];
   // GY-973: what each pane's screen tail shows, where it is not a session at work, and the
   // accounts the loop held. OpenCode 1.18 on a spent account prints its limit banner with a retry
@@ -558,7 +558,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     return done;
   };
   const attempts = new Map<string, number>();
-  // GY-1460: the unbounded day. The stuck attempt stays `working` and renewing for ever without a
+  // GY-1460: the unbounded day. The stuck attempts stay `working` and renewing for ever without a
+  // submission — a first attempt, a rework attempt on its item's open pull request (polled every
+  // cycle), and one that bound its session to a pushed head once and stalled (its handle rewritten
+  // on every session report);
   // submission; the progressing one runs well past both bounds but pushes as it goes, then submits.
   const unboundedPlan = { progressingMs: 150 * minute, pushEveryMs: 10 * minute };
   const unboundedDay = { stops: [] as { key: string; epoch: number; elapsed: number; unit: string }[], pushes: [] as { key: string; epoch: number; elapsed: number }[] };
@@ -663,9 +666,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     // GY-811: the containment day's supervisor fences its session as `watch` does — a quarantine
     // whose settlement token only it holds, acknowledged by the launch — and lowers the fence
     // itself when the session ends on its own; a session that dies leaves it for the loop.
-    // GY-1460: the unbounded day's two first attempts run fenced under a supervisor scope the loop
-    // can stop, as a supervised launch records it.
-    const unbounded = options.unbounded && !attempts.has(key) ? (n === options.unbounded.stuck ? 'stuck' as const : n === options.unbounded.progressing ? 'progressing' as const : undefined) : undefined;
+    // GY-1460: the unbounded day's attempts run fenced under a supervisor scope the loop can stop,
+    // as a supervised launch records it: the first attempts, and the rework item's second.
+    const plain = options.unbounded && !attempts.has(key), reworked = options.unbounded && attempts.get(key) === 1 && n === options.unbounded.rework;
+    const unbounded = !options.unbounded ? undefined : reworked || (plain && n === options.unbounded.stuck) ? 'stuck' as const : plain && n === options.unbounded.progressing ? 'progressing' as const : plain && n === options.unbounded.pushedOnce ? 'pushed-once' as const : undefined;
     const settlementToken = options.containment || unbounded ? createHash('sha256').update(`settle\0${key}\0${epoch}`).digest('hex') : undefined;
     if (settlementToken) {
       const settlementHash = createHash('sha256').update(settlementToken).digest('hex');
@@ -712,7 +716,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     if (fastPush) baseBreakFrom = clock.now();
     const pushAfterMs = fastPush ? plan.baseBreak.pushAfterMs : plan.workMs;
     sessions.push({ work: work.id, key, branch, profile, epoch, attempt, pane, unbounded, pushedAt: undefined,
-      pushAt: idling || unbounded === 'stuck' ? Number.MAX_SAFE_INTEGER : unbounded === 'progressing' ? clock.now() + unboundedPlan.progressingMs : clock.now() + pushAfterMs,
+      pushAt: idling || unbounded === 'stuck' || unbounded === 'pushed-once' ? Number.MAX_SAFE_INTEGER : unbounded === 'progressing' ? clock.now() + unboundedPlan.progressingMs : clock.now() + pushAfterMs,
       diesAt: !options.capacityWait && !idling && plan.deaths.has(n) && attempt === 1 ? clock.now() + plan.deathAfterMs : null,
       exitsAt: !idling && plan.exits.has(n) && attempt === 1 ? clock.now() + plan.exitAfterMs : null, dispatchAt: clock.now(), state: idling ? 'idling' : 'working', syncs: 0,
       scopeAt: !idling && plan.scoped.has(n) && attempt === 1 ? clock.now() + plan.scopeAfterMs : null, misreadAt: !idling && plan.misread.has(n) && attempt === 1 ? clock.now() + plan.misreadAfterMs : null, misread: false,
@@ -818,7 +822,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       // scope, so it neither pushes nor submits.
       // GY-1460: the long attempt pushes a commit every few minutes and binds its session to it,
       // the submission progress that keeps the loop from stopping it however long it runs.
-      if (session.unbounded === 'progressing' && now < session.pushAt && now - (session.pushedAt ?? session.dispatchAt) >= unboundedPlan.pushEveryMs) {
+      // The pushed-once attempt binds one head ten minutes in and never moves it again.
+      if ((session.unbounded === 'progressing' || (session.unbounded === 'pushed-once' && session.pushedAt === undefined)) && now < session.pushAt && now - (session.pushedAt ?? session.dispatchAt) >= unboundedPlan.pushEveryMs) {
         session.pushedAt = now;
         const head = sha('progress', session.key, session.epoch, now);
         await engine.execute(principal, 'session', session.work, { id: `${principal.id}:${session.epoch}`, kind: 'implementation', epoch: session.epoch, runtime: 'claude', host: config.hostId, subject: `${session.key}: long work`, head }, id());

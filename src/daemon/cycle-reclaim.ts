@@ -196,6 +196,36 @@ export async function settleEndedAttemptFence(cycle: Cycle, item: Work, ending: 
 }
 
 /**
+ * Why the stopped supervisor of `item`'s fenced attempt is not verified gone on this host, or null
+ * once it is (GY-1460): its recorded scope ended and nothing left running in its worktree. Probed
+ * within the bound the cycle's endings share. An attempt with no recorded scope here, or a loop
+ * that cannot inspect the host, has nothing more to verify than the pane it closed.
+ */
+export async function supervisorStillRunning(cycle: Cycle, item: Work, ending: { epoch: number; owner: string }, wait: { boundMs: number; pollMs: number } = { boundMs: endedFenceWaitMs, pollMs: 500 }) {
+  const { effects, config, clockOffset, snapshot, now } = cycle;
+  const fence = item.containmentQuarantine;
+  if (fence?.epoch !== ending.epoch || fence.owner !== ending.owner || !fence.scope || !effects.containment || !containmentQuarantines([item], config.hostId).length) return null;
+  const ended = endedRecord(item, ending, new Date(now()).toISOString());
+  const measured = await containmentClock(clockOffset, effects.controlPlaneClock);
+  const observed: ContainmentObservation = { now: snapshot.now, clockOffset: measured.clockOffset, clockRoundTripMs: measured.roundTripMs, clockSource: measured.source };
+  const deadline = endedFenceDeadlines.get(cycle) ?? Date.now() + wait.boundMs;
+  endedFenceDeadlines.set(cycle, deadline);
+  for (;;) {
+    let running: string;
+    try {
+      const verification = (await effects.containment([ended], observed))[item.id]?.verification ?? null, recorded = verification?.recordedScope;
+      running = !verification ? 'the host reported no inspection of it'
+        : recorded?.unit !== fence.scope.unit || !endedScopeStates.includes(recorded.activeState) ? `scope ${fence.scope.unit} is ${recorded?.unit === fence.scope.unit ? recorded.activeState : 'unread'}`
+          : verification.processes.length || verification.scopes.some(scope => scope.processes.length) ? `${verification.processes.length + verification.scopes.reduce((sum, scope) => sum + scope.processes.length, 0)} processes still run in ${verification.workspacePath}`
+            : '';
+    } catch (error) { return `the host could not be inspected: ${message(error)}`; }
+    if (!running) return null;
+    if (Date.now() + wait.pollMs > deadline) return running;
+    await new Promise(resolve => setTimeout(resolve, wait.pollMs));
+  }
+}
+
+/**
  * How many leftover panes one pass closes, so a backlog drains over cycles rather than in one burst
  * of closes (GY-842). Twelve a pass drains 300 in 25 closing cycles: under an hour even at
  * two-minute cycles, with the first cycle spent on sightings (GY-980).
@@ -478,7 +508,7 @@ export async function stopUnboundedAttempts(cycle: Cycle) {
       const pane = recorded && agents.some(agent => agent.pane_id === recorded) && !checkPaneStillBelongs(item, handleId, recorded) ? recorded : null;
       const held = `held its lease past the ${workerReclaimBoundMs / 60_000}-minute reclaim bound without a submission (claimed at ${attempt.claimedAt})`;
       try {
-        const next = await endWorkerAttempt(cycle, item, profile, attempt.epoch, pane, held, `ended without submitting: it ${held}`);
+        const next = await endWorkerAttempt(cycle, item, profile, attempt.epoch, pane, held, `ended without submitting: it ${held}`, { stopFirst: true });
         performed.push(await entry('done', `${item.key} epoch ${attempt.epoch} (${attempt.owner}) ${held}; the loop stopped renewing it: ${next}, with its worktree kept`));
       } catch (error) {
         performed.push(await entry('failed', `${unsubmittedAttemptText(attempt)}; but the loop could not end the attempt: ${message(error)}`));

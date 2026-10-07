@@ -10,7 +10,7 @@ import { sessionObservationFreshMs } from '../src/model/session-state.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { SupervisorProbeReport } from '../src/containment-probe.js';
 import type { Work } from '../src/model.js';
-import type { SessionHandle } from '../src/model/sessions.js';
+import { recordSession, type SessionHandle } from '../src/model/sessions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Imported when each test runs, so against a base without them each proof fails as a test case.
@@ -76,7 +76,7 @@ test('unit:stalled-gate-on-renewed-attempt — an attempt past the 60-minute bou
 });
 
 test('unit:inside-bound-no-fault — no fault and no lease stop inside the bound, once the attempt submitted, or while submission progress is inside the cadence', async () => {
-  const { submissionProgressCadenceMs, unsubmittedAttempt, workerReclaimBoundMs, workerSubmissionBoundMs } = await bound();
+  const { observeHead, submissionProgressCadenceMs, unsubmittedAttempt, workerReclaimBoundMs, workerSubmissionBoundMs } = await bound();
   const now = Date.now();
   assert.equal(submissionProgressCadenceMs, sessionObservationFreshMs, 'the cadence is the session reporting cadence');
   assert.equal(workerSubmissionBoundMs, 60 * minute);
@@ -90,13 +90,41 @@ test('unit:inside-bound-no-fault — no fault and no lease stop inside the bound
   assert.deepEqual(unsubmittedFaults(submitted, now), []);
   // An earlier epoch's submission does not cover a rework attempt that has not submitted.
   assert.ok(unsubmittedAttempt(attempt(150, { submission: { epoch: 0, pr: 77 } }, now), now)?.reclaim);
-  // Submission progress inside the cadence: a pull request observed on the attempt's own branch…
-  const observed = (at: string) => attempt(150, { observation: { at, candidate: { sha: 'b'.repeat(40), baseSha: 'c'.repeat(40), pr: 77, branch: 'graphyard/gy-1457-1', author: 'worker-a' } } as Work['observation'] }, now);
+  // Submission progress inside the cadence: a pull request or head first observed on the attempt's own branch during the attempt…
+  const candidate = { sha: 'b'.repeat(40), baseSha: 'c'.repeat(40), pr: 77, branch: 'graphyard/gy-1457-1', author: 'worker-a' };
+  const observed = (at: string, poll = iso(-1 * minute, now)) => {
+    const item = attempt(150, { candidate, observation: { at: poll, candidate } as Work['observation'] }, now);
+    observeHead(item, candidate, at);
+    return item;
+  };
   assert.equal(unsubmittedAttempt(observed(iso(-5 * minute, now)), now), null);
   assert.deepEqual(unsubmittedFaults(observed(iso(-5 * minute, now)), now), []);
-  // …or the attempt's session bound to the commit it pushed.
-  const pushed = attempt(150, { sessions: [handle({ head: 'd'.repeat(40), updatedAt: iso(-3 * minute, now) })] }, now);
+  // …or the attempt's session bound to a commit it pushed.
+  const pushed = attempt(150, { sessions: [handle({ head: 'd'.repeat(40), headAt: iso(-3 * minute, now) })] }, now);
   assert.equal(unsubmittedAttempt(pushed, now), null);
+  // A refresh of an unchanged reading is not progress. A rework attempt reuses the linked pull
+  // request's branch, so every poll observes it again: a head first observed before the claim,
+  // however recent the poll, holds nothing — and observing the same head again keeps its first time.
+  const rework = observed(iso(-160 * minute, now), iso(-1 * minute, now));
+  observeHead(rework, candidate, iso(-1 * minute, now));
+  assert.equal(rework.headObserved?.at, iso(-160 * minute, now), 'the same head polled again keeps when it was first observed');
+  assert.ok(unsubmittedAttempt(rework, now)?.reclaim, 'an idle rework attempt with an existing pull request is still past the bound');
+  assert.ok(unsubmittedAttempt(attempt(150, { candidate, observation: { at: iso(-1 * minute, now), candidate } as Work['observation'] }, now), now)?.reclaim, 'a poll with no head observation is not progress');
+  const moved = clone(rework);
+  observeHead(moved, { ...candidate, sha: 'f'.repeat(40) }, iso(-2 * minute, now));
+  assert.equal(unsubmittedAttempt({ ...moved, candidate: { ...candidate, sha: 'f'.repeat(40) } }, now), null, 'a head that moved during the attempt is progress');
+  // The loop rewrites a live session's handle on its observation cadence: a head bound once, long
+  // ago, with a fresh `updatedAt` is not progress — only a new head moves `headAt`.
+  const rewritten = attempt(150, { sessions: [handle({ head: 'd'.repeat(40), headAt: iso(-140 * minute, now), updatedAt: iso(-1 * minute, now) })] }, now);
+  assert.ok(unsubmittedAttempt(rewritten, now)?.reclaim, 'a pushed-once attempt that stalled is still past the bound');
+  assert.ok(unsubmittedAttempt(attempt(150, { sessions: [handle({ head: 'd'.repeat(40), updatedAt: iso(-1 * minute, now) })] }, now), now)?.reclaim, 'a head with no recorded push time is not progress');
+  // The handle records when its head changed, and only then: a rewrite of the same head, or one that omits it, keeps the time.
+  const recorded = attempt(150, { sessions: [] }, now), entry = { id: 'worker-a:1', kind: 'implementation' as const, runtime: 'claude', host, subject: 'GY-1457', state: 'running' as const };
+  assert.equal(recordSession(recorded, entry, 'worker-a', new Date(now - 30 * minute)).headAt, undefined, 'no head, no push time');
+  assert.equal(recordSession(recorded, { ...entry, head: 'd'.repeat(40) }, 'worker-a', new Date(now - 20 * minute)).headAt, iso(-20 * minute, now));
+  assert.equal(recordSession(recorded, { ...entry, head: 'd'.repeat(40) }, 'worker-a', new Date(now - 10 * minute)).headAt, iso(-20 * minute, now), 'the same head again');
+  assert.equal(recordSession(recorded, entry, 'worker-a', new Date(now - 5 * minute)).headAt, iso(-20 * minute, now), 'a write that omits the head');
+  assert.equal(recordSession(recorded, { ...entry, head: 'a'.repeat(40) }, 'worker-a', new Date(now - 1 * minute)).headAt, iso(-1 * minute, now), 'a new head');
   // Progress older than the cadence does not hold it, and a renewed lease or a working session alone never does.
   const stale = unsubmittedAttempt(observed(iso(-20 * minute, now)), now);
   assert.ok(stale?.reclaim, 'progress past the cadence is not progress');
@@ -131,17 +159,17 @@ test('unit:lease-stop-renewal — past the reclaim bound the loop ends the attem
   const { stopUnboundedAttempts, unboundedAttemptKey } = await reclaim();
   const { config, cleanup } = await configured();
   try {
-    const stops: { key: string; epoch: number; unit: string; signal: string }[] = [], ended: { key: string; epoch: number; cause: unknown; partialWork: unknown }[] = [], closed: string[] = [];
+    const stops: { key: string; epoch: number; unit: string; signal: string }[] = [], ended: { key: string; epoch: number; cause: unknown; partialWork: unknown }[] = [], closed: string[] = [], order: string[] = [];
     const effects: Partial<DaemonEffects> = {
-      stopSupervisor: (orphan: { key: string; epoch: number; scope: { unit: string } }, signal: string) => { stops.push({ key: orphan.key, epoch: orphan.epoch, unit: orphan.scope.unit, signal }); },
-      preserveWork: async (work: Work) => ({ state: 'committed', commit: 'e'.repeat(40), branch: work.workspaces[0].branch, path }),
+      stopSupervisor: (orphan: { key: string; epoch: number; scope: { unit: string } }, signal: string) => { order.push('stop'); stops.push({ key: orphan.key, epoch: orphan.epoch, unit: orphan.scope.unit, signal }); },
+      preserveWork: async (work: Work) => { order.push('preserve'); return { state: 'committed', commit: 'e'.repeat(40), branch: work.workspaces[0].branch, path }; },
       reportCapacity: async (work: Work, event: { epoch: number; cause?: string; partialWork?: unknown }) => { ended.push({ key: work.key, epoch: event.epoch, cause: event.cause, partialWork: event.partialWork }); return work; },
-      closeSession: async (pane: string) => { closed.push(pane); }, recordSession: async () => {}, persist: async () => {},
+      closeSession: async (pane: string) => { order.push('close'); closed.push(pane); }, recordSession: async () => {}, persist: async () => {},
     } as unknown as Partial<DaemonEffects>;
     const live = [{ name: 'graphyard-claude-1', pane_id: 'w1:p4', agent: 'claude', agent_status: 'working' }];
     const cycle = (item: Work) => ({ ...cycleFor(state, config, effects, item), agents: live }) as Cycle;
     const state = emptyDaemonState(config);
-    for (const quiet of [attempt(119), attempt(150, { submission: { epoch: 1, pr: 77 } }), attempt(150, { sessions: [handle({ head: 'd'.repeat(40), updatedAt: iso(-2 * minute) })] })])
+    for (const quiet of [attempt(119), attempt(150, { submission: { epoch: 1, pr: 77 } }), attempt(150, { sessions: [handle({ head: 'd'.repeat(40), headAt: iso(-2 * minute) })] })])
       await stopUnboundedAttempts(cycle(quiet));
     assert.deepEqual([stops, ended, closed], [[], [], []], 'inside the bound, submitted, or progressing: the lease keeps renewing');
     const item = attempt(121);
@@ -150,6 +178,7 @@ test('unit:lease-stop-renewal — past the reclaim bound the loop ends the attem
     assert.deepEqual(ended.map(entry => [entry.key, entry.epoch, entry.cause]), [['GY-1457', 1, 'interrupted']], 'the attempt is ended on the record, so the lapse is explained and no lease-loss escalation waits on an operator');
     assert.equal((ended[0].partialWork as { state: string }).state, 'committed', 'what it left is kept on its branch');
     assert.deepEqual(closed, ['w1:p4'], 'its own pane is closed');
+    assert.deepEqual(order, ['stop', 'close', 'preserve'], 'a session still at work is stopped and its pane closed before its worktree is kept, so the snapshot never races the agent');
     const action = state.actions[unboundedAttemptKey(item, 1)];
     assert.equal(action?.state, 'done');
     assert.match(action!.detail, /held its lease past the 120-minute reclaim bound without a submission .*; the loop stopped renewing it: the attempt ended on the record, its supervisor \(pid 4242\) was stopped through /);
@@ -168,11 +197,27 @@ test('unit:lease-stop-renewal — past the reclaim bound the loop ends the attem
     await stopUnboundedAttempts({ ...cycleFor(state, config, refusing, refused), agents: live } as Cycle);
     assert.equal(state.actions[unboundedAttemptKey(refused, 1)]?.state, 'failed');
     assert.match(state.actions[unboundedAttemptKey(refused, 1)]!.detail, /but the loop could not end the attempt: /);
+    // A supervisor the host still shows running after the stop: nothing is snapshotted while the
+    // agent may still be writing; the end is recorded failed with why, and retried on the backoff.
+    const lingering = attempt(121, { id: 'work-1461', key: 'GY-1461' }), before = ended.length;
+    const stillRunning = { ...effects, controlPlaneClock: async () => ({ clockOffset: { min: 0, max: 0 }, roundTripMs: 1, source: 'timed read' }),
+      containment: (work: Work[]) => Object.fromEntries(work.map(entry => [entry.id, { verification: { workspacePath: path, processes: [{ pid: 4243, evidence: 'workspace' }], scopes: [], recordedScope: { ...scope, activeState: 'deactivating' } } }])) } as unknown as Partial<DaemonEffects>;
+    const { supervisorStillRunning } = await reclaim();
+    assert.match(await supervisorStillRunning({ ...cycleFor(state, config, stillRunning, lingering), agents: live } as Cycle, lingering, { epoch: 1, owner: 'worker-a' }, { boundMs: 0, pollMs: 1 }) ?? '', /scope graphyard-watch-4242-0c1e\.scope is deactivating/);
+    const quick = { ...stillRunning, containment: (work: Work[]) => Object.fromEntries(work.map(entry => [entry.id, { verification: { workspacePath: path, processes: [{ pid: 4243, evidence: 'workspace' }], scopes: [], recordedScope: { ...scope, activeState: 'inactive' } } }])) } as unknown as Partial<DaemonEffects>;
+    // One cycle: the probe's bound, which the cycle's endings share, is already spent.
+    const lingeringCycle = { ...cycleFor(state, config, quick, lingering), agents: live } as Cycle;
+    await supervisorStillRunning(lingeringCycle, lingering, { epoch: 1, owner: 'worker-a' }, { boundMs: 0, pollMs: 1 });
+    await stopUnboundedAttempts(lingeringCycle);
+    assert.equal(ended.length, before, 'its worktree is not snapshotted while a process still runs there');
+    assert.equal(state.actions[unboundedAttemptKey(lingering, 1)]?.state, 'failed');
+    assert.match(state.actions[unboundedAttemptKey(lingering, 1)]!.detail, /not yet verified gone, so its worktree is not kept yet: 1 processes still run in /);
     // Another host's attempt is left to that host's loop.
     const elsewhere = attempt(121, { id: 'work-1459', key: 'GY-1459', workspaces: [{ host: 'other-host', path, epoch: 1, owner: 'worker-a', branch: 'graphyard/gy-1459-1' }] });
+    const stopped = stops.length;
     await stopUnboundedAttempts(cycle(elsewhere));
     assert.equal(state.actions[unboundedAttemptKey(elsewhere, 1)], undefined);
-    assert.equal(stops.length, 1);
+    assert.equal(stops.length, stopped, 'nothing stopped on this host');
   } finally { await cleanup(); }
 });
 

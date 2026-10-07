@@ -1,7 +1,7 @@
 // Concern: the worker bound (GY-1460) — an attempt holding its lease past the no-submission bound, read from the item's own record.
 import { isClosed } from './closure.js';
-import type { Work } from './work.js';
-import type { PipelineTimeline } from '../pipeline-speed.js';
+import type { Candidate, Work } from './work.js';
+import type {} from '../pipeline-speed.js'; // the timeline's `Work.pipeline`
 
 /**
  * GY-1460: the worker bound. An attempt holding its lease this long without a submission is a
@@ -23,7 +23,7 @@ export interface UnsubmittedAttempt {
   leaseExpiresAt: string; live: boolean;
   /** What the loop last observed of the attempt's session, when it did. */
   session: { state: string; at: string } | null;
-  /** The newest submission-progress observation, older than the cadence, if any. */
+  /** The newest submission-progress observation since the claim, if any: when present, older than the cadence. */
   progressAt: string | null;
   /** Past `workerReclaimBoundMs`: the loop stops renewing the lease. */
   reclaim: boolean;
@@ -31,21 +31,35 @@ export interface UnsubmittedAttempt {
 const minutes = (ms: number) => Math.floor(ms / 60_000);
 /** When the attempt holding `epoch` was claimed, from the assignment or the pipeline timeline. */
 function attemptClaimedAt(work: Work, epoch: number): string | null {
-  const attempts = (work as Work & { pipeline?: PipelineTimeline }).pipeline?.attempts ?? [];
+  const attempts = work.pipeline?.attempts ?? [];
   const claimed = (work.lastAssignment?.epoch === epoch ? work.lastAssignment.claimedAt : null) ?? attempts.find(attempt => attempt.epoch === epoch)?.claimedAt ?? null;
   return claimed && Number.isFinite(Date.parse(claimed)) ? claimed : null;
 }
 /**
- * The newest observation that the attempt is getting its submission out: a pull request observed
- * on the attempt's own branch, or the attempt's session bound to a commit it pushed. A session
- * merely observed `working` is not progress — that observation is what kept the lease renewed.
+ * When the loop first observed the candidate's current head (GY-1460): set by the observation
+ * write only when the pull request or its head differs from the one recorded, so a routine poll of
+ * an unchanged pull request never reads as a push.
  */
-export function submissionProgressAt(work: Work, epoch: number, owner: string): string | null {
+export interface HeadObserved { pr: number; sha: string; at: string }
+declare module './work.js' { interface Work { headObserved?: HeadObserved } }
+export function observeHead(work: Work, candidate: Pick<Candidate, 'pr' | 'sha'>, at: string) {
+  if (work.headObserved?.pr !== candidate.pr || work.headObserved.sha !== candidate.sha) work.headObserved = { pr: candidate.pr, sha: candidate.sha, at };
+}
+/**
+ * The newest observation that the attempt is getting its submission out, made since it was claimed:
+ * a pull request or head on the attempt's own branch first observed during the attempt, or the
+ * attempt's session bound to a new commit. Only a change counts, never a refresh of an unchanged
+ * reading: a rework attempt reuses the linked pull request's branch, which every poll observes
+ * again, and the loop rewrites a live session's handle on its observation cadence. A session merely
+ * observed `working` is not progress either — that observation is what kept the lease renewed.
+ */
+export function submissionProgressAt(work: Work, epoch: number, owner: string, claimedAt: string): string | null {
   const branch = work.workspaces.find(workspace => workspace.epoch === epoch && workspace.owner === owner)?.branch ?? null;
+  const head = work.headObserved, candidate = work.candidate ?? work.observation?.candidate;
   const readings = [
-    branch && work.observation && work.observation.candidate?.branch === branch ? work.observation.at : null,
-    ...(work.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.principal === owner && handle.head && (handle.epoch === epoch || handle.id === `${owner}:${epoch}`)).map(handle => handle.updatedAt),
-  ].filter((at): at is string => !!at && Number.isFinite(Date.parse(at)));
+    branch && head && candidate?.branch === branch && candidate.pr === head.pr && candidate.sha === head.sha ? head.at : null,
+    ...(work.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.principal === owner && handle.head && (handle.epoch === epoch || handle.id === `${owner}:${epoch}`)).map(handle => handle.headAt),
+  ].filter((at): at is string => !!at && Number.isFinite(Date.parse(at)) && Date.parse(at) >= Date.parse(claimedAt));
   return readings.sort().at(-1) ?? null;
 }
 /**
@@ -62,7 +76,7 @@ export function unsubmittedAttempt(work: Work, now: number): UnsubmittedAttempt 
   if (pastBoundMs <= 0) return null;
   // A lease that lapsed inside the bound was never held past it: the lapse and containment path owns that attempt.
   if (Date.parse(lease.expiresAt) - Date.parse(claimedAt) <= workerSubmissionBoundMs) return null;
-  const progressAt = submissionProgressAt(work, lease.epoch, lease.owner);
+  const progressAt = submissionProgressAt(work, lease.epoch, lease.owner, claimedAt);
   if (progressAt && now - Date.parse(progressAt) <= submissionProgressCadenceMs) return null;
   const handle = (work.sessions ?? []).find(entry => entry.kind === 'implementation' && entry.id === `${lease.owner}:${lease.epoch}`);
   const observed = handle?.observed && handle.observedAt ? { state: handle.observed, at: handle.observedAt } : handle ? { state: handle.state, at: handle.updatedAt } : null;
