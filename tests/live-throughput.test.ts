@@ -10,7 +10,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
-import { actionExecution, actionIdleSpans, claimWindow, coordinatorFingerprints, deliveryActions, deployedRevision as revisionOf, loopThroughputMeasurement, measureThroughput, populationRule, recordThroughputMeasurement, throughputStatus, type LoopThroughputOutcome, readThroughputMeasurement, renderThroughput, throughputClaim, throughputClaimVisibility, throughputMeasurementCommand, throughputMeasurementDirectory, unrealReasons, verifyThroughput, type DeployedRelease, type ThroughputReport } from '../src/throughput.js';
+import { actionExecution, actionIdleSpans, claimWindow, coordinatorFingerprints, deployedRevision as revisionOf, loopThroughputMeasurement, measureThroughput, populationRule, recordThroughputMeasurement, throughputStatus, type LoopThroughputOutcome, readThroughputMeasurement, renderThroughput, throughputClaim, throughputClaimVisibility, throughputMeasurementCommand, throughputMeasurementDirectory, unrealReasons, verifyThroughput, type DeployedRelease, type ThroughputReport } from '../src/throughput.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { actionRetryDelay } from '../src/model/actions.js';
 import { emptyDaemonState, runCycle, writeDaemonState, type DaemonEffects } from '../src/master-daemon.js';
@@ -131,10 +131,10 @@ test('integration:live-throughput-population — the population rule reads the r
   const fast: Work[] = [];
   for (let index = 0; index < 10; index++) fast.push(await executorDelivery(`Routine delivery ${index}`, (12 + index * 2) * minute));
 
-  // Two deliveries a coordinator was present for. The first had its dispatch row superseded before
-  // any executor ran it — the queue's own record of something outside it moving the item on; the
-  // second was handed to a master by a blocked report. Both are real deliveries; neither is
-  // evidence about a pipeline with no master session.
+  // Two deliveries a coordinator was present for. The first had a master coordination session
+  // recorded on it (its dispatch row was also superseded before any executor ran it, which by
+  // itself excludes nothing: GY-1455); the second was handed to a master by a blocked report. Both
+  // are real deliveries; neither is evidence about a pipeline with no master session.
   let handRun = await ready('Dispatched by hand');
   await engine.reconcile();
   await backdateQueue(handRun, 20 * minute);
@@ -146,6 +146,8 @@ test('integration:live-throughput-population — the population rule reads the r
   handRun = await deliver(handRun, 24 * minute);
   const handRunRow = (await reload(handRun)).actionQueue!.history.find(row => row.kind === 'dispatch');
   assert.ok(handRunRow?.history.some(record => record.event === 'cancelled'), 'the dispatch row really was superseded before an executor ran it');
+  await patch(handRun, { sessions: [{ id: 'master-1', kind: 'coordination', role: 'master', principal: 'operator', epoch: null, runtime: 'claude', host: 'machine-a', workspace: null, tab: null, pane: null, agentName: null, head: null, attach: null, transcript: null, startedAt: new Date().toISOString() }] });
+  handRun = await reload(handRun);
 
   let blocked = await executorDelivery('Blocked and cleared', 18 * minute);
   await patch(blocked, { pipeline: { ...(await reload(blocked)).pipeline, interventions: { blocked: 1, requirements: 0 } } });
@@ -180,7 +182,8 @@ test('integration:live-throughput-population — the population rule reads the r
   assert.deepEqual(Object.keys(excluded).sort(), [handRun.key, blocked.key, reworked.key].sort());
   assert.match(excluded[reworked.key].exclusions.join('; '), /it took 2 rework rounds, so it is not one of the routine deliveries/);
   assert.equal(excluded[reworked.key].submitToMergeMs, 55 * minute);
-  assert.match(excluded[handRun.key].exclusions.join('; '), /dispatch action was superseded before any executor ran it/);
+  assert.match(excluded[handRun.key].exclusions.join('; '), /a master coordination session \(master-1 on machine-a\) was recorded on it/);
+  assert.doesNotMatch(excluded[handRun.key].exclusions.join('; '), /superseded/, 'a superseded control-plane action excludes nothing');
   assert.equal(excluded[handRun.key].submitToMergeMs, 24 * minute, 'an excluded delivery still carries the figure it measured');
   assert.match(excluded[blocked.key].exclusions.join('; '), /1 blocked report\(s\) handed it to a master or operator/);
   assert.equal(report.population.delivered, 13, 'the claim item merged before the window and is not in it');
@@ -289,8 +292,8 @@ test('integration:live-throughput-population — the population rule reads the r
     { at: at(7 * minute), event: 'cancelled', requester: 'graphyard', executor: null, result: null, reason: 'now needs merge instead' },
   ] }, Date.parse(windowStart) + 60 * minute).map(span => span.ms), [7 * minute], 'a row superseded before anybody ran it waited for exactly as long as it stood');
   // And the fingerprints are read from the item, not asserted about it.
-  assert.deepEqual(coordinatorFingerprints(fast[0], deliveryActions(fast[0], now)), []);
-  assert.match(coordinatorFingerprints({ ...fast[0], sessions: [{ id: 'master-1', kind: 'coordination', host: 'machine-a' }] } as unknown as Work, [])[0], /a coordination session \(master-1 on machine-a\) was recorded on it/);
+  assert.deepEqual(coordinatorFingerprints(fast[0]), []);
+  assert.match(coordinatorFingerprints({ ...fast[0], sessions: [{ id: 'master-1', kind: 'coordination', role: 'master', host: 'machine-a' }] } as unknown as Work)[0], /a master coordination session \(master-1 on machine-a\) was recorded on it/);
   const failedThenSuperseded = actionExecution({ id: 'failed-action', kind: 'merge', work: fast[0].id, key: fast[0].key,
     inputs: { kind: 'merge', pr: 1, sha: commit('candidate'), baseSha: commit('base'), policyRevision: 1 },
     gate: 'merge', refusal: null, reason: '', binding: 'merge:1', requestedBy: 'graphyard', requestedAt: at(0), state: 'pending', claim: null, attempts: 1,
@@ -301,7 +304,6 @@ test('integration:live-throughput-population — the population rule reads the r
       { at: at(3 * minute), event: 'cancelled', requester: 'graphyard', executor: null, result: null, reason: 'now needs another action' },
     ] }, now);
   assert.equal(failedThenSuperseded.supersededUnexecuted, false);
-  assert.deepEqual(coordinatorFingerprints(fast[0], [failedThenSuperseded]), [], 'an executor-run action that failed before supersession is not a coordinator fingerprint');
 
   // The script the producer sessions run, end to end against a server serving these documents.
   assert.deepEqual(parseArguments(['--claim', 'GY-87', '--since', windowStart]).claim, 'GY-87');

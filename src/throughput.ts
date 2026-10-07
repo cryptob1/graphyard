@@ -254,21 +254,21 @@ export function unrealReasons(work: Work): string[] {
 }
 
 /**
- * Every trace of a coordinator on this delivery.
+ * Every trace of a coordinator on this delivery, under the admission rule the approvers settled
+ * (GY-1449 revision 48a9e55a, GY-1454 AC-1; applied here by GY-1455).
  *
- * A master session leaves marks the item itself keeps. It moves an item past an action the queue
- * had open, which retires that row unexecuted — the queue's own record of somebody else deciding.
- * It records a coordination session handle. It takes the hand-offs the pipeline timeline counts:
- * a blocked report somebody had to clear, and a requirements revision of an item already under
- * way. None of these is a judgement about whether the delivery went well; each is a statement
- * that a coordinator was present for it, which is what the claim excludes.
+ * A master or operator session leaves marks the item itself keeps: a coordination session handle
+ * whose role is not the approver's (or that records no role at all), a blocked report somebody had
+ * to clear, and a requirements revision of an item already under way. Each is a statement that a
+ * coordinator was present for it, which is what the claim excludes. Two marks are not: an action
+ * row the control plane retired unexecuted (escalate, request-rework, resync, request-review,
+ * dispatch, approve-scope, reclaim, merge) is the queue's own cycle moving on, and an approver
+ * session is the independent two-party decision the pipeline requests for itself.
  */
-export function coordinatorFingerprints(work: Work, actions: ActionExecution[]): string[] {
+export function coordinatorFingerprints(work: Work): string[] {
   const marks: string[] = [];
-  for (const action of actions.filter(entry => entry.supersededUnexecuted))
-    marks.push(`its ${action.kind} action was superseded before any executor ran it (${action.resolution ?? 'no reason recorded'}), so something outside the queue moved the item on`);
-  for (const handle of (work.sessions ?? []).filter(entry => entry.kind === 'coordination'))
-    marks.push(`a coordination session (${handle.id} on ${handle.host}) was recorded on it`);
+  for (const handle of (work.sessions ?? []).filter(entry => entry.kind === 'coordination' && entry.role !== 'approver'))
+    marks.push(`${handle.role ? `${/^[aeiou]/i.test(handle.role) ? 'an' : 'a'} ${handle.role}` : 'a'} coordination session (${handle.id} on ${handle.host}${handle.role ? '' : ', no role recorded'}) was recorded on it`);
   const interventions = work.pipeline?.interventions;
   if (interventions?.blocked) marks.push(`${interventions.blocked} blocked report(s) handed it to a master or operator to clear`);
   if (interventions?.requirements) marks.push(`${interventions.requirements} requirements revision(s) were applied to it while it was under way`);
@@ -281,9 +281,7 @@ export function coordinatorFingerprints(work: Work, actions: ActionExecution[]):
  * `coordinator: true`; any other reason keeps its own words up to its first detail, digits folded.
  */
 export function exclusionClass(exclusion: string): { reason: string; coordinator: boolean } {
-  const superseded = /^its (\S+) action was superseded before any executor ran it/.exec(exclusion);
-  if (superseded) return { reason: `its ${superseded[1]} action was superseded before any executor ran it`, coordinator: true };
-  if (/^a coordination session \(.*\) was recorded on it$/.test(exclusion)) return { reason: 'a coordination session was recorded on it', coordinator: true };
+  if (/^an? (?:\S+ )?coordination session \(.*\) was recorded on it$/.test(exclusion)) return { reason: 'a coordination session other than an approver\'s was recorded on it', coordinator: true };
   if (/^\d+ blocked report\(s\) handed it to a master or operator to clear$/.test(exclusion)) return { reason: 'a blocked report handed it to a master or operator to clear', coordinator: true };
   if (/^\d+ requirements revision\(s\) were applied to it while it was under way$/.test(exclusion)) return { reason: 'a requirements revision was applied to it while it was under way', coordinator: true };
   return { reason: exclusion.split(' (')[0]!.replace(/\d+/g, 'N').trim(), coordinator: false };
@@ -295,7 +293,7 @@ export function deliveryRecord(work: Work, now: number): DeliveryRecord {
   const actions = deliveryActions(work, now);
   const executed = actions.filter(action => action.executor && action.result === 'done');
   const idle = actions.reduce((worst, action) => !worst || action.idleMs > worst.idleMs ? action : worst, null as ActionExecution | null);
-  const exclusions = [...unrealReasons(work), ...coordinatorFingerprints(work, actions)];
+  const exclusions = [...unrealReasons(work), ...coordinatorFingerprints(work)];
   if (speed.submitToMergeMs === null) exclusions.push(`its timeline records no submission (${speed.coverage}), so submit→merge cannot be measured for it`);
   // The claim is stated over routine deliveries, in the same words the speed target uses: at most
   // one rework round. A delivery that went round three times is a real delivery and is reported
@@ -322,7 +320,7 @@ export function windowDeliveries(work: Work[], since: string | null, until?: str
 }
 
 /** The population rule in one sentence, carried in every report so the reader judges the rule, not the number. */
-export const populationRule = 'A delivery is counted when it is a merged pull request of this repository with a recorded submission, at most one rework round, at least one action an executor claimed and completed, and no trace of a coordinator on it: no action superseded before an executor ran it, no coordination session recorded, no blocked report and no requirements revision while it was under way. Every delivery the window holds is listed either way, with its own figures and, when it is excluded, the reason.';
+export const populationRule = 'A delivery is counted when it is a merged pull request of this repository (delivered with a merge commit, a pull request number, a work-item key and a worker that held it) with a recorded submission, at most one rework round and at least one action an executor claimed and completed, and is excluded for a coordination session whose role is master, operator or anything but approver (or that records no role), a blocked report, or a requirements revision applied while it was under way, while a control-plane action (escalate, request-rework, resync, request-review, dispatch, approve-scope, reclaim, merge) superseded before any executor ran it and an approver session never exclude it. Every delivery the window holds is listed either way, with its own figures and, when it is excluded, the reason.';
 
 /**
  * Verify GY-87's throughput claim against one deployed release, over the real deliveries of one
