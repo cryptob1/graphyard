@@ -1,0 +1,3 @@
+// Concern: the words that name the systemd user bus refused or masked (GY-1406, GY-1428). A leaf: the blocker classes and the fault catalogue both read it.
+/** GY-1406: what a worker meets asking the host's user manager from inside its sandbox (bwrap masks /run/user/UID/bus), so the loop reads the host instead. A worker's report that `systemctl --user` could not reach the user manager: the host's supervisor, which the loop probes and heals from the host. */
+export const userBusRefusal = /Failed to connect to (?:the )?(?:user scope )?bus\b|\bsystemctl --user\b[^.\n]*\b(?:fail\w*|refused)\b|\buser (?:scope )?bus\b[^.\n]*\bmask\w*|\bmask\w*[^.\n]*\/run\/user\/\d+\/bus\b/i;
