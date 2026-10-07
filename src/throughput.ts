@@ -460,14 +460,33 @@ export async function measureThroughput(summaries: Work[], readItem: (id: string
 export const throughputMeasurementRetention = 30;
 
 /**
+ * Measurement files in recorded order: by the `measuredAt` stem, then by the `_N` sequence a
+ * later record in the same millisecond takes (GY-1414), the unsuffixed first.
+ */
+function measurementOrder(names: string[]): string[] {
+  const key = (name: string) => { const match = /^(.*?)(?:_(\d+))?\.json$/.exec(name)!; return { stem: match[1]!, sequence: Number(match[2] ?? 0) }; };
+  return names.filter(name => name.endsWith('.json')).sort((a, b) => {
+    const left = key(a), right = key(b);
+    return left.stem < right.stem ? -1 : left.stem > right.stem ? 1 : left.sequence - right.sequence;
+  });
+}
+
+/**
  * Writes one report as a timestamped JSON file under `directory`, returning the path relative to
  * `root`, and retires the oldest files past `retention`: `master status` reads only the newest.
+ * A file is never overwritten: a second record in the same millisecond takes the next `_N` suffix.
  */
 export async function recordThroughputMeasurement(root: string, report: ThroughputReport, directory = throughputMeasurementDirectory, retention = throughputMeasurementRetention): Promise<string> {
   await mkdir(join(root, directory), { recursive: true });
-  const file = join(directory, `${report.measuredAt.replace(/[:.]/g, '-')}.json`);
-  await writeFile(join(root, file), JSON.stringify(report, null, 2) + '\n');
-  const kept = (await readdir(join(root, directory))).filter(name => name.endsWith('.json')).sort();
+  const stem = report.measuredAt.replace(/[:.]/g, '-');
+  const body = JSON.stringify(report, null, 2) + '\n';
+  let file = '';
+  for (let sequence = 0; ; sequence++) {
+    file = join(directory, `${stem}${sequence ? `_${sequence}` : ''}.json`);
+    try { await writeFile(join(root, file), body, { flag: 'wx' }); break; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+  }
+  const kept = measurementOrder(await readdir(join(root, directory)));
   for (const name of kept.slice(0, Math.max(0, kept.length - retention))) await unlink(join(root, directory, name)).catch(() => undefined);
   return file;
 }
@@ -533,7 +552,7 @@ export async function loopThroughputMeasurement(root: string, input: {
 /** The newest recorded measurement, with the file it came from; null when none was ever taken. */
 export async function readThroughputMeasurement(root: string, directory = throughputMeasurementDirectory): Promise<{ report: ThroughputReport; file: string } | null> {
   const path = join(root, directory);
-  const files = (await readdir(path).catch(() => [] as string[])).filter(name => name.endsWith('.json')).sort();
+  const files = measurementOrder(await readdir(path).catch(() => [] as string[]));
   for (const name of [...files].reverse()) {
     try { return { report: JSON.parse(await readFile(join(path, name), 'utf8')) as ThroughputReport, file: join(directory, name) }; }
     catch { continue; }
