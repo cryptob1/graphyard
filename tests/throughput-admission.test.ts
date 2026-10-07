@@ -31,7 +31,7 @@ const session = (id: string, role: string | null) => ({ id, kind: 'coordination'
 
 function delivery(key: string, shape: { history?: ActionRow[]; sessions?: unknown[]; blocked?: number; requirements?: number; reworkRounds?: number } = {}): Work {
   return {
-    id: key.toLowerCase(), key, stage: 'done', implementers: ['worker-1'], workspaces: [], sessions: shape.sessions ?? [],
+    id: key.toLowerCase(), key, title: `Delivery ${key}`, stage: 'done', policy: { checks: [], review: true }, implementers: ['worker-1'], workspaces: [], sessions: shape.sessions ?? [],
     submission: { pr: Number(key.split('-')[1]) }, candidate: null, updatedAt: at(40),
     delivery: { mergeSha: sha('a'), mergedAt: at(30) },
     pipeline: { attempts: [{ epoch: 1, owner: 'worker-1', claimedAt: at(0), endedAt: at(10), end: 'submitted' }], submittedAt: at(10), reworkRounds: shape.reworkRounds ?? 0,
@@ -127,4 +127,143 @@ test('unit:throughput-rule-stated — populationRule names every exclusion class
   const stall = throughputStall(report)!;
   assert.equal(report.population.rule, populationRule);
   assert.ok(stall.text.includes(populationRule), 'the needs-decision quotes the rule');
+});
+
+// GY-1458: the loop re-measures the serving release at most every hour while its attention stands,
+// a window the applied rule admits retires the needs-decision, and the attention never re-arms the
+// decision the approvers already answered.
+const revision = sha('d');
+const deployed = { revision, version: '1', origin: 'https://example.invalid', observedAt: at(0), containsClaim: true, reason: null };
+const claim = { id: 'claim', key: throughputClaim.item, title: 'The throughput claim', stage: 'done', policy: { checks: [], review: true }, delivery: { mergeSha: sha('c'), mergedAt: at(-120), deployment: { sha: revision, observedAt: at(-60) } } } as unknown as Work;
+/** A window past the stall bound whose every delivery the pre-GY-1455 rule excluded and the applied rule admits. */
+const admittedWindow = () => Array.from({ length: throughputStallBound }, (_, index) => index % 2
+  ? delivery(`GY-${200 + index}`, { sessions: [session(`approver:GY-${200 + index}`, 'approver')] })
+  : delivery(`GY-${200 + index}`, { history: [executed('request-review', 11), superseded('dispatch', 12), superseded('merge', 13)] }));
+/** A window every delivery of which a master session drove: a stall under any rule. */
+const masterWindow = () => Array.from({ length: throughputStallBound }, (_, index) => delivery(`GY-${300 + index}`, { sessions: [session(`master-${index}`, 'master')] }));
+/** The measurement the loop recorded before the admitting fix merged: the same window judged under the earlier rule, a stall. */
+const preFixRule = 'A delivery is counted when … and is excluded for any coordination session or any superseded control-plane action.';
+function preFixMeasurement(measuredAt: number) {
+  const report = verifyThroughput([claim, ...masterWindow()], measuredAt, { deployed });
+  return { ...report, population: { ...report.population, rule: preFixRule } };
+}
+
+test('unit:throughput-remeasure-due — an unverified answer naming its re-measure time is asked in the cycle that finds it due, however far the failure backoff has grown; before it, and for a verified or failed answer, the backoff alone decides', async () => {
+  const { throughputAskDue } = await import('../src/daemon/cycle-delivery.js');
+  const { throughputRemeasureAt, throughputRemeasureDue, throughputRemeasureFrom, throughputRemeasureMs } = await import('../src/throughput.js');
+  const measuredAt = at(0), dueAt = base + throughputRemeasureMs;
+  assert.equal(throughputRemeasureMs, 60 * minute, 'the bound the loop promises');
+  assert.equal(throughputRemeasureFrom(measuredAt), new Date(dueAt).toISOString());
+  const answer = (state: 'waiting' | 'done' | 'failed', detail: string) => ({ kind: 'deployment' as const, work: null, principal: null, state, detail, attempts: 12, epoch: null, cycle: 100, at: measuredAt });
+  const current = answer('waiting', `GY-87's throughput is already measured for ${revision.slice(0, 12)} (unverified, f.json); measured again from ${throughputRemeasureFrom(measuredAt)} as deliveries accumulate`);
+  const recorded = answer('waiting', `Recorded GY-87's throughput measurement for ${revision.slice(0, 12)} in f.json, reading 20 deliveries whole: unverified: short; measured again from ${throughputRemeasureFrom(measuredAt)} as deliveries accumulate`);
+  for (const waiting of [current, recorded]) {
+    assert.equal(throughputRemeasureAt(waiting.detail), dueAt);
+    // Twelve asks put the backoff at its 30-cycle cap: three cycles later it alone would not ask.
+    assert.equal(throughputAskDue(waiting, 103, dueAt - minute), false, 'inside the hour the backoff decides');
+    assert.equal(throughputAskDue(waiting, 103, dueAt), true, 'at the hour the re-measure is asked in that cycle');
+    assert.equal(throughputAskDue(waiting, 103, dueAt + 20 * minute), true);
+    assert.equal(throughputAskDue(waiting, 130, dueAt - minute), true, 'the backoff still asks on its own schedule');
+  }
+  assert.equal(throughputAskDue(answer('done', 'Re-measured …: verified: holds'), 200, dueAt + 10 * throughputRemeasureMs), false, 'a verified answer is final');
+  assert.equal(throughputAskDue(answer('failed', `could not be recorded; measured again from ${throughputRemeasureFrom(measuredAt)}`), 103, dueAt), false, 'a failure waits on its backoff');
+  assert.equal(throughputAskDue(answer('waiting', 'The control plane serves abc, not yet measured while the verified deployment is def'), 103, dueAt), false, 'a wait on the plane names no re-measure time');
+  assert.equal(throughputAskDue(undefined, 0, base), true, 'a release never asked is asked now');
+  assert.equal(throughputRemeasureDue({ verdict: 'unverified', measuredAt }, dueAt), true);
+  assert.equal(throughputRemeasureDue({ verdict: 'unverified', measuredAt }, dueAt - 1), false);
+});
+
+test('unit:throughput-stall-null-after-admission — once the applied rule admits the window, throughputStall is null; the same window was a stall only under the earlier rule, and a report judged under a rule since revised raises no stall', async () => {
+  const { throughputRuleSuperseded } = await import('../src/throughput.js');
+  const applied = verifyThroughput([claim, ...admittedWindow()], now, { deployed });
+  assert.equal(applied.population.rule, populationRule);
+  assert.equal(applied.population.delivered, throughputStallBound);
+  assert.equal(applied.population.admitted, throughputStallBound, applied.excluded.map(record => record.exclusions.join('; ')).join(' | '));
+  assert.equal(applied.verdict, 'verified', applied.reason);
+  assert.equal(throughputStall(applied), null, 'the applied rule admits deliveries: no stall');
+  // A window the applied rule still cannot admit is a genuine, undecided stall.
+  const masters = verifyThroughput([claim, ...masterWindow()], now, { deployed });
+  assert.ok(throughputStall(masters), 'every delivery master-driven: still a stall');
+  assert.equal(throughputRuleSuperseded(masters), false);
+  // The same figures judged under the earlier rule: the question it asked is answered, so no stall.
+  const stale = preFixMeasurement(now);
+  assert.equal(throughputRuleSuperseded(stale), true);
+  assert.equal(throughputStall(stale), null);
+});
+
+test('unit:throughput-attention-remedy-matches-record — the throughput attention never instructs master decide for a population rule already revised, approved and applied; it says none remains and names the re-measure, and only a stall under the applied rule carries the decision', async () => {
+  const { throughputClaimVisibility, throughputRemeasureFrom } = await import('../src/throughput.js');
+  const serving = { revision, version: '1' }, owner = { key: 'GY-1449' };
+  for (const ownerItem of [null, owner]) {
+    const stale = preFixMeasurement(now);
+    const visible = throughputClaimVisibility({ report: stale, file: 'old.json' }, serving, throughputStallBound, null, ownerItem);
+    assert.equal(visible.verdict, 'unverified'); assert.equal(visible.stall, null);
+    const attention = visible.attention!;
+    assert.doesNotMatch(`${attention.text} ${attention.next}`, /master decide|master approver|needs decision/, 'no refused remedy');
+    assert.match(attention.text, /No population-rule decision remains: the newest measurement was judged under a population rule since revised, approved and applied/);
+    assert.ok(attention.text.includes(`re-measures the serving release under the applied rule from ${throughputRemeasureFrom(stale.measuredAt)}`));
+    assert.equal(attention.role, 'master'); assert.equal(attention.human, false);
+  }
+  // A stall under the applied rule is a genuinely undecided question: it keeps the typed decision.
+  const genuine = verifyThroughput([claim, ...masterWindow()], now, { deployed });
+  const decided = throughputClaimVisibility({ report: genuine, file: 'new.json' }, serving, throughputStallBound, null, owner);
+  assert.ok(decided.stall);
+  assert.match(decided.attention!.next, /graphyard master decide GY-1449 requirements/);
+  assert.doesNotMatch(decided.attention!.text, /No population-rule decision remains/);
+});
+
+test('integration:throughput-remeasure-cadence — a loop cycle that finds the serving release\'s newest measurement past the hour re-measures it in that cycle under the applied rule, so a window the earlier rule stalled is admitted, the stall is gone and the attention retires', async () => {
+  const { writeFile, rm } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const { temporaryDirectory } = await import('./helpers/temp-dirs.js');
+  const { emptyDaemonState, runCycle } = await import('../src/master-daemon.js');
+  const { masterConfigSchema } = await import('../src/master.js');
+  const { loopThroughputMeasurement, readThroughputMeasurement, recordThroughputMeasurement, throughputClaimVisibility, throughputRemeasureFrom, throughputRemeasureMs } = await import('../src/throughput.js');
+  const root = await temporaryDirectory('throughput-cadence');
+  try {
+    const items = [claim, ...admittedWindow()];
+    const takenAt = now - 30 * minute;
+    const file = await recordThroughputMeasurement(root, preFixMeasurement(takenAt));
+    const token = join(root, 'coordinator.token');
+    await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+    const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: token, cliPath: join(fileURLToPath(new URL('..', import.meta.url)), 'bin/graphyard.mjs'),
+      repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], run: { deploymentReuseMinutes: 0 } });
+    const state = emptyDaemonState(master);
+    state.lock = { id: 'lock', pid: process.pid, host: master.hostId, startedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString() };
+    // The loop answered `current` many times since the pre-fix measurement: its backoff is at the 30-cycle cap.
+    const key = `throughput:${revision}`;
+    state.actions[key] = { kind: 'deployment', work: null, principal: null, state: 'waiting', attempts: 12, cycle: state.cycle, epoch: null, at: new Date(takenAt).toISOString(),
+      detail: `${throughputClaim.item}'s throughput is already measured for ${revision.slice(0, 12)} (unverified, ${file}); measured again from ${throughputRemeasureFrom(new Date(takenAt).toISOString())} as deliveries accumulate` } as never;
+    let clock = takenAt + throughputRemeasureMs - minute, measured = 0;
+    const effects = {
+      agents: () => [], credentials: async (profiles: { name: string }[]) => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
+      snapshot: async () => ({ work: items, now: new Date(clock).toISOString() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+      observeDeployment: async () => ({ source: 'endpoint', sha: revision, at: new Date(clock).toISOString(), reason: null, deployed: items.map(item => item.key), pending: [], requests: 0 }),
+      recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+      measureThroughput: async (work: Work[], observedSha: string) => { measured++; return loopThroughputMeasurement(root, { work, observedSha, now: () => clock, origin: 'https://example.invalid',
+        status: async () => ({ now: new Date(clock).toISOString(), release: { version: '1', revision } }), readItem: async (id: string) => items.find(item => item.id === id)!, contains: async () => true }); },
+    } as never;
+
+    // Inside the hour, with the backoff at its cap, the stale record stands and the attention says no decision remains.
+    await runCycle(master, state, effects, () => clock);
+    assert.equal(measured, 0, 'inside the hour nothing is measured');
+    const before = throughputClaimVisibility(await readThroughputMeasurement(root), { revision, version: '1' }, items.length);
+    assert.doesNotMatch(before.attention!.next, /master decide/);
+
+    // The cycle that finds it past the hour re-measures in that same cycle, whatever the backoff says.
+    clock = takenAt + throughputRemeasureMs + minute;
+    await runCycle(master, state, effects, () => clock);
+    assert.equal(measured, 1, 'the due re-measure runs in the cycle that finds it due');
+    const fresh = (await readThroughputMeasurement(root))!;
+    assert.equal(fresh.report.measuredAt, new Date(clock).toISOString(), 'a fresh measurement timestamp');
+    assert.equal(fresh.report.population.rule, populationRule, 'judged under the applied rule');
+    assert.equal(fresh.report.population.admitted, throughputStallBound, 'the window the earlier rule stalled is admitted');
+    assert.equal(throughputStall(fresh.report), null);
+    assert.equal(state.actions[key]!.state, 'done'); assert.match(state.actions[key]!.detail, /: verified:/);
+    const after = throughputClaimVisibility(fresh, { revision, version: '1' }, items.length);
+    assert.equal(after.stall, null);
+    assert.equal(after.verdict, 'verified', after.reason);
+    assert.equal(after.attention, null, 'the attention retires on its own, with no new requirements decision');
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

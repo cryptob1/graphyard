@@ -327,6 +327,7 @@ test('unit:sudo-wait-matches-up — the drive waits at Confirm access as long as
   const gaveUp = await short.drive(LOCAL, sentence => { first.push(sentence); });
   assert.equal(gaveUp.state, 'failed');
   assert.match(gaveUp.state === 'failed' ? gaveUp.reason : '', /not approved within 60s.*rerun graphyard up --repo acme\/shop --provider compose --agent/);
+  assert.doesNotMatch(gaveUp.state === 'failed' ? gaveUp.reason : '', /own Chrome/, 'a copied profile\'s timeout never offers the confirmation that cannot reach it');
   assert.equal(first.length, 1);
   const pending = await readPendingSudo(rerunRoot);
   assert.equal(pending?.method, 'passkey', 'the handed-off confirmation is kept for the rerun');
@@ -453,6 +454,15 @@ test('unit:sudo-offers-import-route — the handoff and the local setup page off
     assert.equal(upRequestFromArgs(routeUp(shown)).repository, 'acme/shop', 'its up command parses');
   }
   finally { await new Promise<void>(accept => setup.http.close(() => accept())); }
+  // A reviewer App's page names that App alone: no control-plane permissions, events or webhook.
+  const reviewerSetup = await startGithubSetup(pageRoot, 'acme/shop', 'http://127.0.0.1:4320', 0, {}, 'claude');
+  try {
+    const shown = (await (await fetch(reviewerSetup.url)).text()).replace(/<\/?code>/g, '`').replace(/&#39;/g, "'");
+    assert.match(shown, /create the reviewer App at github\.com\/settings\/apps\/new whenever convenient: give it exactly Contents: read, Issues: read, Metadata: read, Pull requests: write and nothing more; install it on acme .*`graphyard app import --app-id ID --key-file PEM --role reviewer --repo acme\/shop`, then run `graphyard up --reuse-app REVIEWER_SLUG --repo acme\/shop` with every other option/);
+    assert.doesNotMatch(shown, /webhook|control-plane/, 'the reviewer page never asks for the control-plane App');
+    assert.equal(upRequestFromArgs(routeUp(shown)).repository, 'acme/shop', 'its up command parses');
+  }
+  finally { await new Promise<void>(accept => reviewerSetup.http.close(() => accept())); }
 
   // --no-wait: the drive meets Confirm access, up ends the install it drives and exits 3 with the route.
   const root = await temporaryDirectory('sudo-no-wait');

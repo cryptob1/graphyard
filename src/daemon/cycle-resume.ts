@@ -9,7 +9,7 @@ import { launchAppearanceMs, preserveInterruptedAttempt, record } from './effect
 import { roleSessionMaximumMs } from '../model/sessions.js';
 import { credentialBlockedKey, credentialBlockedReason, credentialFailure } from '../worker-credential.js';
 import type { Cycle } from './cycle.js';
-import { settleEndedAttemptFence } from './cycle-reclaim.js';
+import { settleEndedAttemptFence, supervisorStillRunning } from './cycle-reclaim.js';
 
 /** A worker's implementation handle, written by the loop: the one record `master status` and the item's history show of it. */
 export function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, outcome: string, finished: boolean) {
@@ -26,17 +26,27 @@ export function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, e
  * (which ends the lease, so the dispatch step claims the item again next cycle and the next
  * attempt's request names that commit), its supervisor is stopped and its pane closed.
  */
-export async function endWorkerAttempt(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, reason: string, observed: string, options: { endsBlocker?: true } = {}) {
+export async function endWorkerAttempt(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, reason: string, observed: string, options: { endsBlocker?: true; stopFirst?: true } = {}) {
   const { state, effects, now, performed } = cycle;
-  const preserved = await preserveInterruptedAttempt(state, effects, item, epoch, profile, observed, now, performed, options);
-  if (preserved && preserved.state !== 'done') throw new Error(`its attempt could not be ended on the record: ${preserved.detail}`);
   const scope = item.containmentQuarantine?.epoch === epoch && item.containmentQuarantine.owner === profile.principal ? item.containmentQuarantine.scope : undefined;
   let stop = 'its supervisor stops on the ended lease';
-  try {
-    if (scope && effects.stopSupervisor) { await effects.stopSupervisor({ id: item.id, key: item.key, epoch, owner: profile.principal, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: item.lease!.expiresAt }, 'SIGTERM'); stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`; }
-  } catch (error) { stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; }
-  // A session already gone from Herdr has no pane left to close (GY-867 ends such attempts too).
-  if (pane) await effects.closeSession(pane);
+  const halt = async () => {
+    try {
+      if (scope && effects.stopSupervisor) { await effects.stopSupervisor({ id: item.id, key: item.key, epoch, owner: profile.principal, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: item.lease!.expiresAt }, 'SIGTERM'); stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`; }
+    } catch (error) { stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; }
+    // A session already gone from Herdr has no pane left to close (GY-867 ends such attempts too).
+    if (pane) await effects.closeSession(pane);
+  };
+  // GY-1460: a session still at work is stopped, and verified gone, before its worktree is kept, so
+  // the snapshot never races an agent still editing or running git there.
+  if (options.stopFirst) {
+    await halt();
+    const running = await supervisorStillRunning(cycle, item, { epoch, owner: profile.principal });
+    if (running) throw new Error(`${stop}, but it is not yet verified gone, so its worktree is not kept yet: ${running}`);
+  }
+  const preserved = await preserveInterruptedAttempt(state, effects, item, epoch, profile, observed, now, performed, options.endsBlocker ? { endsBlocker: true } : {});
+  if (preserved && preserved.state !== 'done') throw new Error(`its attempt could not be ended on the record: ${preserved.detail}`);
+  if (!options.stopFirst) await halt();
   await workerHandle(cycle, item, profile, epoch, pane ?? 'none', `closed as failed: ${reason}`, true);
   // GY-1155: the ending is on the record and the supervisor was stopped, so the fence is settled
   // in this same action once the host verifies it gone, rather than waiting out the grace window.

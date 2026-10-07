@@ -6,6 +6,7 @@ import { decisionReadConcurrency, emptyHeldDecisions } from '../src/daemon/decis
 import { Launcher, type Cycle } from '../src/daemon/cycle.js';
 import { Timings } from '../src/master/timings.js';
 import { approverSessionName } from '../src/master/autonomy.js';
+import { workerSubmissionBoundMs } from '../src/model/attempt-bound.js';
 import { clearDoctorRuns, clearCoveredBlockers, coveredScopePaths, decisionCheckMs, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorReportPayloadSchema, doctorRunsSettled, doctorSanctionedCommands, doctorSessionArgs, doctorSessionTools, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, stopDoctorRuns, unansweredDecisionMs, type DoctorEffects } from '../src/daemon/doctor.js';
 import { applyDoctorRun, doctorTool } from '../src/daemon/doctor.js';
 import { loopAttention, type LoopLiveness } from '../src/daemon/liveness.js';
@@ -256,6 +257,8 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
   const prompt = doctorPrompt({ repository: master.repository, cliPath: master.cliPath }, { items: [], faults: [] });
   assert.ok(prompt.includes(`node ${master.cliPath}`), 'the template names node <cliPath>');
   for (const [bound, minutes] of Object.entries(doctorBounds)) assert.ok(prompt.includes(`${minutes} min`), `the template names the ${bound} bound (${minutes} min)`);
+  // GY-1462: the worker bound is the product's no-submission bound, one declaration behind both.
+  assert.equal(doctorBounds.workerMinutes * 60_000, workerSubmissionBoundMs, 'the doctor\'s worker bound is the bound the loop and the server enforce');
   assert.ok(prompt.includes('lapsed containment') && prompt.includes('refusal') && prompt.includes('overdue'), 'the template names the non-minute checks: lapsed containment, stale refusal text, overdue items');
   for (const command of doctorSanctionedCommands) assert.ok(prompt.includes(`master ${command}`), `the template names the sanctioned command master ${command}`);
   for (const never of ['never merge', 'dispatch', 'evidence', 'lease']) assert.ok(prompt.includes(never), `the template refuses ${never}`);

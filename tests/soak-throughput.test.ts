@@ -24,8 +24,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  *   bounded however long the release serves;
  * - one whose every delivery carries a coordinator fingerprint (a blocked report), so past the bound
  *   the population cannot accumulate: the needs-decision is raised once on the one owner, and while
- *   it stands unanswered the loop measures nothing more and raises nothing more, however the finding
- *   grows; once it is answered the loop closes the owner and files no second one for the release.
+ *   it stands unanswered the loop re-measures hourly (GY-1458) but raises nothing more, however the
+ *   finding grows; once it is answered the loop closes the owner and files no second one for the release.
  */
 const minute = 60_000, hour = 60 * minute, day = 24 * hour, start = Date.parse('2026-10-07T00:00:00.000Z');
 const sha = (label: string) => createHash('sha1').update(label).digest('hex');
@@ -113,7 +113,7 @@ test('unit:soak-throughput-remeasure — over a simulated day of one unverified 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('unit:soak-throughput-stall — over a simulated day whose every delivery carries a coordinator fingerprint, the needs-decision is raised once on the one owner, nothing is measured or raised while it stands, and its answer closes the owner', { timeout: 300_000 }, async () => {
+test('unit:soak-throughput-stall — over a simulated day whose every delivery carries a coordinator fingerprint, the needs-decision is raised once on the one owner, the release is re-measured hourly but nothing raised again while it stands, and its answer closes the owner', { timeout: 300_000 }, async () => {
   const root = await temporaryDirectory('soak-throughput-stall');
   try {
     const stalled = await world(root, true);
@@ -125,10 +125,13 @@ test('unit:soak-throughput-stall — over a simulated day whose every delivery c
     assert.equal(escalations.length, 1, 'the needs-decision is raised once');
     assert.equal(escalations[0][1].work, owner.key); assert.equal(escalations[0][1].attempts, 1);
     assert.match(escalations[0][1].detail, new RegExp(`^needs decision on ${owner.key}: session-free deliveries cannot accumulate`));
-    // Raised by the first measurement whose window reached the bound; after it, the window kept growing — a changed finding — and nothing was asked.
+    // Raised by the first measurement whose window reached the bound; after it, the window kept growing — a changed finding —
+    // and the loop re-measured it every hour (GY-1458), in the first cycle past the hour, without raising it again.
     const raisedAt = Date.parse(escalations[0][1].at);
     assert.ok(raisedAt < start + day / 2, `raised once the window passed the bound of ${throughputStallBound}, early in the day`);
-    assert.deepEqual(asks.filter(ask => ask.at > raisedAt), [], 'no ask while the needs-decision stands unanswered');
+    const remeasured = asks.filter(ask => ask.outcome === 'recorded' && ask.at >= raisedAt);
+    assert.ok(remeasured.length >= 12, `re-measured hourly while the needs-decision stands: ${remeasured.length}`);
+    for (let index = 1; index < remeasured.length; index++) assert.equal(remeasured[index].at - remeasured[index - 1].at, throughputRemeasureMs, 'each re-measure in the cycle that finds the hour passed');
     assert.deepEqual(closed, [], 'still open: neither verified nor answered');
 
     // The answer: an approved requirements revision applied to the owner. The loop closes it and files no second one for this release.

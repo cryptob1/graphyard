@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { goalSubmission, setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
-import { actionsDirectory, agentBrowserPage, browserProfileMode, passSudo, recordingPage, submitSudoCode, sudoInstruction, sudoStateSchema, takeSudoCode, type BrowserPage, type BrowserProfileMode, type RecordedStep, type SudoOptions, type SudoState } from './master-browser.js';
+import { actionsDirectory, agentBrowserPage, browserProfileMode, passSudo, recordingPage, submitSudoCode, sudoInstruction, sudoProtectedPage, sudoStateSchema, takeSudoCode, type BrowserPage, type BrowserProfileMode, type RecordedStep, type SudoOptions, type SudoState } from './master-browser.js';
 import { appImportRoute } from './github-setup.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
 
@@ -293,11 +293,17 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // before the drive reaches Confirm access, so it gets a minute more than the drive waits.
       const deadline = deps.now() + humanWaitMs;
       const appWait = Number.isFinite(humanWaitMs) ? { GRAPHYARD_APP_WAIT_MS: String(humanWaitMs + 60_000) } : null;
+      // GY-1466: a drive that gives up (Confirm access unanswered) leaves the page to the operator. The
+      // page stays served and up keeps waiting, to its overall wait, on the manual route; nothing drives
+      // again in this run, so the operator's browser and the agent's never both register an App.
+      const gaveUp: string[] = [];
+      const manual = (url: string) => handoff('control-plane')(`The agent's browser could not finish the App page (${gaveUp.join('; ')}). Open ${url} in your own browser${/^http:\/\/127\.0\.0\.1:/.test(url) ? ` (on SSH, forward port ${new URL(url).port} to this machine first)` : ''} and finish it there: graphyard up keeps serving it and carries on once the App is confirmed.`, { url });
       for (;;) {
         // A drive that stops at Confirm access under --no-wait ends the install it drives too.
         const stopped = new AbortController();
-        // One browser drive at a time, in the order the installer serves its App pages; every outcome is reported.
-        let drives: Promise<DriveOutcome[]> = Promise.resolve([]);
+        const waiting: string[] = [];
+        // One browser drive at a time, in the order the installer serves its App pages.
+        let drives: Promise<void> = Promise.resolve();
         let running = true;
         const watcher = (async () => {
           while (running) {
@@ -310,23 +316,22 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         const result = await deps.cli(installArgs('--apply'), { ...(appWait ? { env: appWait } : {}), signal: stopped.signal, onLine: line => {
           const url = manifestUrl(line);
           if (!url || !request.agent || !deps.driveApp) return;
-          drives = drives.then(async outcomes => {
-            if (stopped.signal.aborted) return outcomes;
+          drives = drives.then(async () => {
+            if (stopped.signal.aborted) return;
+            if (gaveUp.length) return manual(url);
             const outcome = await deps.driveApp!(url, handoff('control-plane'));
-            if (outcome.state === 'waiting') stopped.abort();
-            return [...outcomes, outcome];
+            if (outcome.state === 'waiting') { waiting.push(outcome.next); stopped.abort(); }
+            if (outcome.state === 'failed') { gaveUp.push(outcome.reason); manual(url); }
           });
         } }).catch(error => { if (stopped.signal.aborted) return { code: 1, stdout: '' }; throw error; }).finally(() => { running = false; });
         await watcher;
-        const outcomes = await drives;
-        const waiting = outcomes.find((outcome): outcome is Extract<DriveOutcome, { state: 'waiting' }> => outcome.state === 'waiting');
-        if (waiting) throw new UpStop(waiting.next, upExitCodes.waiting);
-        const failed = outcomes.filter((outcome): outcome is Extract<DriveOutcome, { state: 'failed' }> => outcome.state === 'failed');
+        await drives;
+        if (waiting.length) throw new UpStop(waiting[0], upExitCodes.waiting);
         claim = await rememberSignIn(deps.root, state, result.stdout) ?? claim;
         if (result.code === 0) return 'control plane installed with its GitHub Apps';
-        if (failed.length) throw new UpStop(`control-plane: the browser could not finish the App page (${failed.map(outcome => outcome.reason).join('; ')}); its record is under .graphyard/master-actions, and rerunning graphyard up --agent resumes`, upExitCodes.failed);
         const paused = parseJson(result.stdout);
-        if (!paused?.resume || deps.now() >= deadline) throw new UpStop(`control-plane: graphyard install exited ${result.code}${paused?.resume ? '; the App page is still unconfirmed, rerun graphyard up to resume' : ''}`, paused?.resume ? upExitCodes.waiting : upExitCodes.failed);
+        const drove = gaveUp.length ? `; the browser could not finish the App page (${gaveUp.join('; ')}), its record is under .graphyard/master-actions` : '';
+        if (!paused?.resume || deps.now() >= deadline) throw new UpStop(`control-plane: graphyard install exited ${result.code}${drove}${paused?.resume ? '; the App page is still unconfirmed, rerun graphyard up to resume' : ''}`, paused?.resume ? upExitCodes.waiting : upExitCodes.failed);
         deps.emit({ kind: 'note', text: 'The App page is still waiting for a person; serving it again' });
       }
     });
@@ -404,6 +409,21 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   }
 }
 
+/**
+ * The `graphyard up` command: a code handed with --sudo-code, else a run whose omitted --repo and
+ * --provider come from .graphyard/up.json, and whose children a SIGINT or SIGTERM reaches (GY-1466).
+ */
+export async function upCommand(root: string, cliPath: () => Promise<string>, args: string[]): Promise<UpResult | NonNullable<Awaited<ReturnType<typeof upSudoCode>>>> {
+  const handed = await upSudoCode(root, args);
+  if (handed) return handed;
+  const request = upRequestFromArgs(args, recordedUp(root));
+  const emit = (event: UpEvent) => console.error(request.agent ? JSON.stringify(event) : describeUpEvent(event));
+  const dependencies = upDependencies(root, await cliPath(), request, emit);
+  // Ctrl-C or SIGTERM stops the install child too, so nothing keeps serving its App page on 4311.
+  const release = forwardSignals(dependencies.children);
+  return runUp(request, dependencies).finally(release);
+}
+
 /** `graphyard up --sudo-code CODE|email` (GY-1450): hands the run waiting at Confirm access a code, never echoing it; null without the flag. */
 export async function upSudoCode(root: string, args: string[]) {
   const at = args.findIndex(arg => arg === '--sudo-code' || arg.startsWith('--sudo-code='));
@@ -433,19 +453,37 @@ export function upCommandFlags(request: UpRequest) {
   option('--ssh-host', request.install?.sshHost);
   option('--ssh-user', request.install?.sshUser);
   if (request.sudo === 'mobile') flags.push('--github-mobile');
-  if (request.waitMs) option('--wait', String(Math.round(request.waitMs / 60_000)));
+  if (request.waitMs) option('--wait', String(request.waitMs / 60_000));
   return flags.map(shellWord).map(word => ` ${word}`).join('');
 }
 
-/** `graphyard up`'s flags. */
-export function upRequestFromArgs(args: string[]): UpRequest {
+/**
+ * The repository and provider an earlier run recorded in .graphyard/up.json (GY-1466), so a resumed
+ * `up` needs neither flag again; null when no run is recorded here.
+ */
+export function recordedUp(root: string): { repository: string; provider: string } | null {
+  try {
+    const state = JSON.parse(readFileSync(upStateFile(root), 'utf8'));
+    return state?.version === 1 && typeof state.repository === 'string' && typeof state.provider === 'string' ? { repository: state.repository, provider: state.provider } : null;
+  } catch (error: any) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return null; throw error; }
+}
+
+/**
+ * `graphyard up`'s flags. With a run RECORDED in this checkout, an omitted --repo or --provider is
+ * the recorded one, and one that differs is refused, naming both: its steps say nothing about it.
+ */
+export function upRequestFromArgs(args: string[], recorded: { repository: string; provider: string } | null = null): UpRequest {
   const { values } = parseArgs({ args, options: { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, reviewer: { type: 'string' }, master: { type: 'string' }, goal: { type: 'string' }, 'browser-profile': { type: 'string' },
     'confirm-price': { type: 'string' }, 'max-monthly': { type: 'string' }, 'ssh-key': { type: 'string' }, 'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' },
     'reuse-app': { type: 'string', multiple: true }, 'github-mobile': { type: 'boolean' }, wait: { type: 'string' }, 'no-wait': { type: 'boolean' } }, allowPositionals: false });
-  if (!values.repo || !/^[\w.-]+\/[\w.-]+$/.test(values.repo)) throw new Error('Use graphyard up --repo OWNER/NAME [--provider compose|railway|hetzner] [--agent]');
+  for (const [flag, given, kept] of [['--repo', values.repo, recorded?.repository], ['--provider', values.provider, recorded?.provider]] as const) {
+    if (given !== undefined && kept !== undefined && given !== kept) throw new Error(`graphyard up ${flag} ${given} conflicts with ${kept}, which the run recorded in .graphyard/up.json resumes; omit ${flag} (or pass ${kept}) to resume it, or remove .graphyard/up.json to start over for ${given}`);
+  }
+  const repository = values.repo ?? recorded?.repository;
+  if (!repository || !/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Use graphyard up --repo OWNER/NAME [--provider compose|railway|hetzner] [--agent]');
   const minutes = values.wait === undefined ? null : Number(values.wait);
   if (minutes !== null && (!Number.isSafeInteger(minutes) || minutes < 1 || minutes > 1_440)) throw new Error('Use --wait with whole minutes from 1 to 1440');
-  return { repository: values.repo, provider: values.provider ?? 'compose', agent: !!values.agent, reviewer: values.reviewer ?? 'claude', master: values.master ?? 'claude',
+  return { repository, provider: values.provider ?? recorded?.provider ?? 'compose', agent: !!values.agent, reviewer: values.reviewer ?? 'claude', master: values.master ?? 'claude',
     goalFile: values.goal ?? null, browserProfile: values['browser-profile'] ?? null,
     install: { confirmPrice: values['confirm-price'] ?? null, maxMonthly: values['max-monthly'] ?? null, sshKey: values['ssh-key'] ?? null, sshHost: values['ssh-host'] ?? null, sshUser: values['ssh-user'] ?? null },
     ...(values['reuse-app']?.length ? { reuseApps: values['reuse-app'] } : {}), ...(values['github-mobile'] ? { sudo: 'mobile' as const } : {}),
@@ -500,7 +538,9 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
       return passed.passed;
     } catch (error: any) {
       if (error instanceof SudoNoWait) throw error;
-      throw new Error(String(error?.message ?? error).replace(/rerun master browser installation-accept/g, `rerun ${rerun}`));
+      const reason = String(error?.message ?? error).replace(/rerun master browser installation-accept/g, `rerun ${rerun}`);
+      // A copied profile never sees a confirmation in the operator's own Chrome, so the timeout does not offer it.
+      throw new Error(options.profile?.mode === 'copy' ? reason.replace(`, or once in your own Chrome at ${sudoProtectedPage}`, '') : reason);
     }
   };
   const press = async (kind: 'button' | 'link', text: string, handoff: Handoff) => {
@@ -655,19 +695,48 @@ export async function publishOnboarding(root: string, repository: string, run: (
   return { pullRequest: created.split('\n').filter(Boolean).pop()! };
 }
 
+/**
+ * GY-1466: SIGINT or SIGTERM to `up` is passed to every child it runs (the install serving the App
+ * page on 4311 above all), and `up` exits once they have, 128 + the signal's number; a child still
+ * running after GRACE_MS, or at a second signal, is killed. Returns what removes the handlers.
+ */
+export function forwardSignals(children: Set<ChildProcess>, options: { exit?: (code: number) => void; graceMs?: number } = {}) {
+  const exit = options.exit ?? (code => process.exit(code));
+  let stopping = false;
+  const handler = (signal: NodeJS.Signals) => {
+    const code = 128 + (signal === 'SIGINT' ? 2 : 15);
+    const live = [...children].filter(child => child.exitCode === null && child.signalCode === null);
+    if (stopping) { for (const child of live) child.kill('SIGKILL'); return; }
+    stopping = true;
+    if (!live.length) return exit(code);
+    let left = live.length;
+    const force = setTimeout(() => { for (const child of live) child.kill('SIGKILL'); }, options.graceMs ?? 10_000);
+    for (const child of live) {
+      child.once('exit', () => { if (--left === 0) { clearTimeout(force); exit(code); } });
+      child.kill(signal);
+    }
+  };
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, handler);
+  return () => { for (const signal of ['SIGINT', 'SIGTERM'] as const) process.off(signal, handler); };
+}
+
 /** The real dependencies: this CLI's own commands as children, the master identity's status read. */
-export function upDependencies(root: string, cliPath: string, request: UpRequest, emit: (event: UpEvent) => void): UpDependencies {
+export function upDependencies(root: string, cliPath: string, request: UpRequest, emit: (event: UpEvent) => void): UpDependencies & { children: Set<ChildProcess> } {
+  // The children still running, for forwardSignals.
+  const children = new Set<ChildProcess>();
   const serverUrl = async () => { try { return String(JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8')).url ?? '') || null; } catch { return null; } };
   const masterToken = async () => { const url = await serverUrl(); return url ? (await masterCredential(root, url))?.token ?? null : null; };
   const browser = request.agent ? upBrowserProfile(root, request) : null;
   return {
-    root, emit, serverUrl, masterToken,
+    root, emit, serverUrl, masterToken, children,
     publishOnboarding: () => publishOnboarding(root, request.repository, (program, args, env) => execFileSync(program, args, { cwd: root, encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env: { ...process.env, ...env } } : {}) })),
     onboardingMerged: async url => execFileSync('gh', ['pr', 'view', url, '--json', 'state', '--jq', '.state'], { encoding: 'utf8', timeout: 60_000 }).trim() === 'MERGED',
     signIn: async file => { const url = await serverUrl(); return url ? mintSignIn(url, file) : null; },
     sleep: ms => new Promise(accept => setTimeout(accept, ms)), now: () => Date.now(),
     cli: (args, options = {}) => new Promise((accept, reject) => {
       const child = spawn(process.execPath, [cliPath, ...args], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'], ...(options.signal ? { signal: options.signal } : {}), ...(options.env ? { env: { ...process.env, ...options.env } } : {}) });
+      children.add(child);
+      child.on('exit', () => children.delete(child));
       let stdout = '', pending = '';
       child.stdout.on('data', chunk => { stdout += chunk; });
       child.stderr.on('data', chunk => {

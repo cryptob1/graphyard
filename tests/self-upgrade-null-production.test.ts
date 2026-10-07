@@ -316,9 +316,10 @@ test('unit:loaded-revision-fetch-failure-is-no-restart-attempt — an origin out
   assert.match(resourceAttention([counted])[0].text, /stalled on fetch-failed/);
 });
 
-test('unit:self-upgrade-observed-production-keeps-promotion-wait — production observed serving none of the awaited deliveries is not unverified: the checkout ahead of the loop waits on the promotion, with no fetch and no restart', async () => {
+test('unit:self-upgrade-observed-production-keeps-promotion-wait — production observed serving none of the awaited deliveries is not unverified: while the loop runs the release production serves and the promotion is on schedule, the checkout ahead of the loop waits on it, with no fetch and no restart', async () => {
   const state = faultState({ owed: false }), fake = new FakeGit(checkout, tip), fleet = { held: false, self: 0, executors: [] as string[] };
   state.deployment = { source: 'endpoint', sha: loaded, at: iso(faultAt), reason: null, deployed: [], pending: ['GY-1436', 'GY-1437'] };
+  state.promotion = { checkedAt: iso(faultAt), mainSha: tip, promotedSha: loaded, promotedAt: null, behind: 2, ledgerReadAt: null, inFlight: false, runsReadAt: null, dispatchedAt: null, lastDispatchAt: null, nextDueAt: iso(faultAt + 30 * minute), reason: null };
   assert.deepEqual(await performSelfUpgrade(master, state, deps(fake, { now: faultAt }, fleet)), { outcome: 'skipped', reason: 'no delivered item is verified deployed yet' });
   assert.deepEqual({ fetches: fake.fetches, checkouts: fake.checkouts, executors: fleet.executors, self: fleet.self }, { fetches: 0, checkouts: [], executors: [], self: 0 });
   // The same cursor with production unobservable is the gap GY-1445 closes.

@@ -59,7 +59,7 @@ function held(id: string, key: string, principal: string, epoch: number, overrid
     policy: { checks: ['test'], review: true }, plannedFiles: ['src/a.ts'], stage: 'build', revision: 3, policyRevision: 1,
     createdAt: iso(-minutes(600)), updatedAt: iso(0), stageEnteredAt: iso(-minutes(300)), ready: true, epoch,
     lease: { owner: principal, epoch, expiresAt: iso(minutes(600)) },
-    lastAssignment: { owner: principal, epoch, claimedAt: iso(-minutes(300)) },
+    lastAssignment: { owner: principal, epoch, claimedAt: iso(-minutes(20)) },
     workspaces: [{ host: 'machine-a', path: `/srv/worktrees/${key}-${epoch}`, epoch, owner: principal, branch: `graphyard/${key.toLowerCase()}-${epoch}` }],
     candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }], violations: [],
@@ -151,7 +151,7 @@ test('unit:reprompt-own-pane — a pane the item records for another of its sess
     // A freshly dispatched attempt whose coordinates the launcher has not recorded yet: the name
     // listing is the only address there is, and it resolves to the pane the item still records
     // for its previous attempt's session. That paste is refused, with the reason, on the record.
-    const item = { current: [held('work-252', 'GY-252', 'alpha-principal', 2, { blocker: 'waiting on a decision', lastAssignment: { owner: 'alpha-principal', epoch: 2, claimedAt: iso(-minutes(300)) },
+    const item = { current: [held('work-252', 'GY-252', 'alpha-principal', 2, { blocker: 'waiting on a decision', lastAssignment: { owner: 'alpha-principal', epoch: 2, claimedAt: iso(-minutes(20)) },
       sessions: [handle('alpha-principal', 1, 'w1:pOld', { state: 'running' }), handle('alpha-principal', 2, null)] })] };
     const listing: HerdrAgent[] = [{ name: sharedName, pane_id: 'w1:pOld', agent_status: 'idle', agent: 'claude' }];
     const { log, effects } = harness(item, () => listing);
@@ -161,7 +161,7 @@ test('unit:reprompt-own-pane — a pane the item records for another of its sess
 
     // The blocker clears: the resolution cannot be pasted into the pane the name now holds, and
     // the refusal is recorded with its reason.
-    item.current = [held('work-252', 'GY-252', 'alpha-principal', 2, { lastAssignment: { owner: 'alpha-principal', epoch: 2, claimedAt: iso(-minutes(300)) },
+    item.current = [held('work-252', 'GY-252', 'alpha-principal', 2, { lastAssignment: { owner: 'alpha-principal', epoch: 2, claimedAt: iso(-minutes(20)) },
       sessions: [handle('alpha-principal', 1, 'w1:pOld', { state: 'running' }), handle('alpha-principal', 2, null)] })];
     await runCycle(master, state, effects, () => clock + 30_000);
     assert.equal(log.targets.length, 0, 'nothing is pasted into the pane of the attempt before this one');
@@ -169,7 +169,7 @@ test('unit:reprompt-own-pane — a pane the item records for another of its sess
     assert.ok(refused, `the refusal is recorded with its reason: ${JSON.stringify(Object.values(state.actions).map(action => action.detail))}`);
 
     // Once the launcher records this attempt's pane, the re-prompt is delivered there.
-    item.current = [held('work-252', 'GY-252', 'alpha-principal', 2, { lastAssignment: { owner: 'alpha-principal', epoch: 2, claimedAt: iso(-minutes(300)) },
+    item.current = [held('work-252', 'GY-252', 'alpha-principal', 2, { lastAssignment: { owner: 'alpha-principal', epoch: 2, claimedAt: iso(-minutes(20)) },
       sessions: [handle('alpha-principal', 1, 'w1:pOld', { state: 'running' }), handle('alpha-principal', 2, 'w1:pNew')] })];
     listing[0] = { name: sharedName, pane_id: 'w1:pNew', agent_status: 'idle', agent: 'claude' };
     await runCycle(master, state, effects, () => clock + 30_000);

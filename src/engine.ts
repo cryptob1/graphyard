@@ -43,6 +43,7 @@ import { claimAction, openActions, reconcileActions, renewClaim, settleAction, s
 import { livenessFallback, livenessOf, livenessRepairEntry } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema, sessionObservationFields } from './model/sessions.js';
+import { noSubmissionRenewalRefused, observeHead, workerNoSubmissionRefusalMs } from './model/attempt-bound.js';
 import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type ExhaustionRecord } from './model/capacity.js';
 import { credentialBlockedReason, credentialFailure } from './worker-credential.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
@@ -353,10 +354,92 @@ export const actionOnlyLookback = 20;
  * that revision may then still write: what it read is what it would read now.
  */
 export async function onlyActionsMovedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number, same = sameBesideActions): Promise<boolean> {
+  const read = await revisionAt(db, work, revision, actionOnlyLookback);
+  return !!read && same(read, work);
+}
+/** The item as its save at `revision` wrote it to the ledger, when that save is at most `lookback` saves behind `work`. */
+async function revisionAt(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number, lookback: number): Promise<Work | null> {
   const behind = work.revision - revision;
-  if (!Number.isInteger(behind) || behind <= 0 || behind > actionOnlyLookback) return false;
+  if (!Number.isInteger(behind) || behind <= 0 || behind > lookback) return null;
   const read = (await db.query(`SELECT ${eventWorkSql('saved')} AS work FROM (SELECT work_id, payload FROM events WHERE work_id=$1 AND (payload ? 'work' OR payload ? 'delta') ORDER BY seq DESC OFFSET $2 LIMIT 1) saved`, [work.id, behind])).rows[0]?.work as Work | undefined;
-  return !!read && read.revision === revision && same(read, work);
+  return read && read.revision === revision ? read : null;
+}
+
+/**
+ * How many saves a requested decision's revision may fall behind and still have its grounds
+ * re-checked (GY-1463): a worker renews its lease about every 12 s, so this covers an approver's
+ * judgement of over three hours on a leased item.
+ */
+export const decisionGroundsLookback = 1000;
+/**
+ * What moved a requested decision's grounds between the item as it was requested (`read`) and as
+ * it stands, named, or null when nothing that could affect them did (GY-1463). The loop's
+ * bookkeeping (`sameBesideBookkeeping`), a lease renewal (the lease's expiry and the quarantine's
+ * copy of it), the liveness of the launch, a GitHub observation and the sessions and workspaces
+ * an attempt records cannot; a new submission or head, a stage move, a requirements or policy
+ * revision, a lease epoch change or any other change to the item can. A resolve judged without a
+ * pin rests on the escalation it names, so for it (`escalations`) a change to the standing
+ * escalations moves its grounds too.
+ */
+export function decisionGroundsChange(read: Work, current: Work, options: { escalations?: boolean } = {}): string | null {
+  const lease = (work: Work) => work.lease ? { owner: work.lease.owner, epoch: work.lease.epoch } : null;
+  const quarantine = (work: Work) => {
+    if (!work.containmentQuarantine) return null;
+    const { leaseExpiresAt: _lease, launchExpiresAt: _launch, launchAcknowledgedAt: _acknowledged, ...fence } = work.containmentQuarantine;
+    return fence;
+  };
+  const changed = (pick: (work: Work) => unknown) => stableJson(pick(read) ?? null) !== stableJson(pick(current) ?? null);
+  if (changed(work => work.submission)) return `a new submission (${current.submission ? `pull request #${current.submission.pr}, epoch ${current.submission.epoch}` : 'withdrawn'})`;
+  if (changed(work => work.candidate?.sha)) return `a new head (${current.candidate?.sha.slice(0, 12) ?? 'none'})`;
+  if (changed(work => [work.stage, work.ready])) return `a stage move (${read.stage} to ${current.stage}${current.ready === read.ready ? '' : current.ready ? ', released' : ', unreleased'})`;
+  if (changed(work => [work.policyRevision, work.policy, work.criteria, work.plannedFiles]))
+    return `a requirements or policy revision (policy revision ${read.policyRevision} to ${current.policyRevision})`;
+  if (options.escalations && changed(work => [work.escalation, work.escalations])) return 'a change to its escalations';
+  if (changed(work => [work.epoch, lease(work)])) return `a lease epoch change (${lease(read) ? `epoch ${read.lease!.epoch}` : 'no lease'} to ${lease(current) ? `epoch ${current.lease!.epoch}` : 'no lease'})`;
+  const rest = (work: Work) => {
+    const { actionQueue: _queue, revision: _revision, updatedAt: _updated, nextAction: _next, gates: _gates, lane: _lane, speedTarget: _target, sessions: _sessions,
+      escalation: _escalation, escalations: _escalations, lease: _lease, lastAssignment: _assignment, containmentQuarantine: _quarantine, observation: _observation,
+      workspaces: _workspaces, ...others } = work as Work & Record<string, unknown>;
+    return { ...others, containmentQuarantine: quarantine(work) } as Record<string, unknown>;
+  };
+  const before = rest(read), after = rest(current);
+  const field = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort().find(key => stableJson(before[key] ?? null) !== stableJson(after[key] ?? null));
+  return field ? `a change to its ${field}` : null;
+}
+/**
+ * What moved a decision's grounds since `revision`, read from the ledger (`decisionGroundsChange`),
+ * or null when nothing that could affect them did. A revision past the lookback cannot be re-checked.
+ */
+export async function decisionGroundsMovedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number, options: { escalations?: boolean } = {}): Promise<string | null> {
+  if (revision === work.revision) return null;
+  const read = await revisionAt(db, work, revision, decisionGroundsLookback);
+  return read ? decisionGroundsChange(read, work, options) : `more saves than its grounds can be re-checked across (revision ${revision}, now ${work.revision})`;
+}
+
+/**
+ * The decision as its approval judges and applies it (GY-1296, GY-1463): a release, an unblock, a
+ * diagnostician's closure or a resolve without a pin is bound to the item revision it was requested
+ * at. When the revision moved only in changes that cannot affect its grounds — the loop's
+ * bookkeeping, lease renewals, liveness, observations, session records — it is rebased to the
+ * current revision; when another decision was applied since, or anything else moved
+ * (`decisionGroundsChange`), `change` names it and the decision is returned as it is. A resumption
+ * applies the same (GY-1300).
+ */
+export async function revisionRebase<D extends Pick<Decision, 'id' | 'action' | 'input'> & { pin: unknown }>(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, decision: D, work: Work): Promise<{ judged: D; change: string | null }> {
+  const revisionPinned = decision.action === 'release' || decision.action === 'unblock' || (decision.action === 'resolve' && !decision.pin)
+    || (decision.action === 'close' && decision.input.triageAt === undefined && decision.input.expectedRevision !== undefined);
+  if (!revisionPinned || decision.input.expectedRevision === work.revision) return { judged: decision, change: null };
+  const change = await decisionAppliedSince(db, work, decision.id) ?? await decisionGroundsMovedSince(db, work, decision.input.expectedRevision, { escalations: decision.action === 'resolve' });
+  return change ? { judged: decision, change } : { judged: { ...decision, input: { ...decision.input, expectedRevision: work.revision } }, change: null };
+}
+/** Another decision on the item applied after this one was requested, named, or null. */
+async function decisionAppliedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, id: string): Promise<string | null> {
+  const row = (await db.query(`SELECT applied.payload->>'id' AS id, requested.payload->>'action' AS action FROM events applied
+    JOIN events requested ON requested.work_id=applied.work_id AND requested.kind='decision.requested' AND requested.payload->>'id'=applied.payload->>'id'
+    WHERE applied.work_id=$1 AND applied.kind='decision.applied' AND applied.payload->>'id'<>$2
+      AND applied.seq > (SELECT seq FROM events WHERE work_id=$1 AND kind='decision.requested' AND payload->>'id'=$2 ORDER BY seq LIMIT 1)
+    ORDER BY applied.seq LIMIT 1`, [work.id, id])).rows[0];
+  return row ? `another applied decision (${row.action} ${row.id})` : null;
 }
 
 /**
@@ -2149,6 +2232,10 @@ export class Engine {
   private renewLease(work: Work, actor: Principal, epoch: number, now: Date) {
     endedBySubmission(work, epoch);
     activeLease(work, actor, epoch, now);
+    // GY-1462: the backstop to the loop's end past the reclaim bound (GY-1460): an attempt held
+    // unsubmitted past workerNoSubmissionRefusalMs is not renewed, so its lease lapses into containment and reclaim.
+    demand(!noSubmissionRenewalRefused(work, now.getTime()),
+      `Implementation lease for epoch ${epoch} of ${work.key} is not renewed: no submission in ${workerNoSubmissionRefusalMs / 60_000} minutes, past the worker no-submission bound; the attempt ends and its branch is kept for the next`);
     work.lease!.expiresAt = new Date(now.getTime() + this.leaseSeconds * 1000).toISOString();
     delete (work.lease as GracedLease).renewalFault;
   }
@@ -2577,6 +2664,8 @@ export class Engine {
       // GitHub's queue state is read after the observation, by the check publication; it is kept
       // across observations of the same pull request until that read replaces it.
       if (observation.githubQueue === undefined && previousObservation?.githubQueue && previousObservation.candidate?.pr === observation.candidate.pr) observation.githubQueue = previousObservation.githubQueue;
+      // When this pull request's head was first observed (GY-1460): the worker bound reads a push from it, never a poll.
+      observeHead(work, observation.candidate, observation.at);
       work.candidate = observation.candidate;
       // A conflict the control plane's own test merge of this head onto this tip found clean is
       // GitHub's stale reading (GY-375): it is stored disproved — the head merges cleanly, which is

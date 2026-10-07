@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { connect } from 'node:net';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { UpDependencies, UpEvent, UpRequest } from '../src/up.js';
@@ -49,6 +50,10 @@ interface World {
   priceUnconfirmed: boolean;
   /** The plan's Apps still to create in a browser (GY-1442); absent from the plan when undefined. */
   browserApps?: string[];
+  /** Turns an install waits on its App page before it pauses (exit 1, resumable); 10,000 when undefined. */
+  pauseAfter?: number;
+  /** Whether an install is serving its App page right now. */
+  serving?: boolean;
 }
 
 function world(overrides: Partial<World> = {}): World {
@@ -87,7 +92,9 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
       if (args[0] === 'install' && args.includes('--apply')) {
         w.installed = true;
         options.onLine?.('Open http://127.0.0.1:4311 in a browser on this machine and confirm the Graphyard App');
-        for (let turns = 0; !(w.app && w.reviewer); turns++) { if (turns > 10_000) return { code: 1, stdout: JSON.stringify({ resume: 'graphyard install --apply' }) }; await yieldTurn(); }
+        w.serving = true;
+        try { for (let turns = 0; !(w.app && w.reviewer); turns++) { if (turns > (w.pauseAfter ?? 10_000)) return { code: 1, stdout: JSON.stringify({ resume: 'graphyard install --apply' }) }; await yieldTurn(); } }
+        finally { w.serving = false; }
         return { code: 0, stdout: JSON.stringify(w.host ? { ok: true, principals: [{ id: 'acme-shop-operator', role: 'admin', tokenFile: '/var/lib/graphyard/tokens/acme-shop-operator.token' }], signIn: `${SERVER}/#claim=${CODE}` } : { ok: true }) };
       }
       if (joined === 'master registry propose --apply') { w.accounts = true; return { code: 0, stdout: '{}' }; }
@@ -478,4 +485,104 @@ test('unit:up-goal-uses-pipeline — `up --goal FILE` and the Setup page submit 
   assert.equal(key, 'GOAL-2');
   assert.deepEqual(posts, [{ path: 'goals', body: input }]);
   assert.doesNotThrow(() => goalInputSchema.parse(posts[0].body));
+});
+
+test('unit:up-agent-keeps-serving — in agent mode a drive that gives up on Confirm access leaves the App page served and up waiting, handing the operator the manual route, instead of exiting', async () => {
+  const { runUp } = await up();
+  // The drive gives up (its 600 s Confirm-access wait ended); the install pauses once and is served again;
+  // the operator then finishes the page in their own browser.
+  const root = await temporaryDirectory('graphyard-up-keeps-serving');
+  let drives = 0, gaveUpAt = -1, servedAfter = 0;
+  const w = world({ accounts: true, pauseAfter: 50, onSleep: (current, ticks) => {
+    if (gaveUpAt < 0) return;
+    if (current.serving) servedAfter++;
+    if (ticks === gaveUpAt + 120) { current.app = true; current.reviewer = true; }
+  } });
+  const result = await runUp(request({ agent: true }), dependencies(w, root, [], {
+    driveApp: async () => { drives++; gaveUpAt = w.ticks; return { state: 'failed', reason: 'Confirm access was not completed within 600 s' }; },
+  }));
+  assert.equal(result.exitCode, 0, result.next);
+  assert.ok(servedAfter > 0, 'the App page was still served after the drive gave up');
+  assert.ok(installApplies(w) >= 2, 'a paused install is served again rather than up exiting');
+  assert.equal(drives, 1, 'the page is the operator\'s once the drive gave up: it is never driven again, so no App is registered twice');
+  assert.equal(result.handoffs.length, 1, 'the manual route is handed off once');
+  assert.equal(result.handoffs[0].url, 'http://127.0.0.1:4311');
+  assert.match(result.handoffs[0].sentence, /could not finish the App page \(Confirm access was not completed within 600 s\)\. Open http:\/\/127\.0\.0\.1:4311 in your own browser \(on SSH, forward port 4311 to this machine first\) and finish it there: graphyard up keeps serving it/);
+  assert.ok(result.completed.includes('control-plane'));
+
+  // Up to its overall wait only: past it, the run stops resumable (exit 3, waiting), naming why, never as a failure.
+  const late = world({ accounts: true, pauseAfter: 5 });
+  const stopped = await runUp(request({ agent: true }), dependencies(late, await temporaryDirectory('graphyard-up-keeps-serving-late'), [], {
+    humanWaitMs: 1, driveApp: async () => ({ state: 'failed', reason: 'Confirm access was not completed within 600 s' }),
+  }));
+  assert.equal(stopped.exitCode, 3, stopped.next);
+  assert.match(stopped.next, /the browser could not finish the App page \(Confirm access was not completed within 600 s\).*rerun graphyard up to resume/);
+});
+
+test('unit:up-resume-from-state — a resumed up takes --repo and --provider from .graphyard/up.json and refuses only a conflicting value, naming both', async () => {
+  const { recordedUp, runUp, upRequestFromArgs, upStateFile } = await up();
+  const root = await temporaryDirectory('graphyard-up-resume-state');
+  assert.equal(recordedUp(root), null, 'no run recorded here');
+  assert.throws(() => upRequestFromArgs(['--agent'], recordedUp(root)), /--repo OWNER\/NAME/, 'a first run still needs --repo');
+  await mkdir(join(root, '.graphyard'), { recursive: true });
+  await writeFile(upStateFile(root), JSON.stringify({ version: 1, repository: 'acme/shop', provider: 'hetzner', completed: ['preflight', 'control-plane', 'host-supervisor', 'onboarding', 'accounts', 'harness', 'master-loop'], noHerdr: false, goal: null }));
+  assert.deepEqual(recordedUp(root), { repository: 'acme/shop', provider: 'hetzner' });
+
+  // Resumed without --repo or --provider: both come from the recorded run, which then skips every done step.
+  const resumed = upRequestFromArgs(['--agent'], recordedUp(root));
+  assert.equal(resumed.repository, 'acme/shop');
+  assert.equal(resumed.provider, 'hetzner');
+  assert.equal(upRequestFromArgs(['--repo', 'acme/shop', '--agent'], recordedUp(root)).provider, 'hetzner', 'the same --repo, with --provider omitted');
+  const w = world({ app: true, reviewer: true, accounts: true, installed: true, loop: true, onboardingMerged: true });
+  const result = await runUp(resumed, dependencies(w, root, [], { driveApp: async () => ({ state: 'done' }) }));
+  assert.equal(result.exitCode, 0, result.next);
+  assert.equal(w.calls.filter(args => args[0] === 'install').length, 0, 'the recorded run resumes: nothing is installed again');
+
+  // A conflicting value is refused, naming both.
+  assert.throws(() => upRequestFromArgs(['--repo', 'acme/other', '--agent'], recordedUp(root)), /--repo acme\/other conflicts with acme\/shop, which the run recorded in \.graphyard\/up\.json resumes/);
+  assert.throws(() => upRequestFromArgs(['--provider', 'compose'], recordedUp(root)), /--provider compose conflicts with hetzner/);
+});
+
+test('unit:up-signal-forwarding — SIGINT or SIGTERM to up reaches its install child; both exit and the App page port is freed', async () => {
+  const root = await temporaryDirectory('graphyard-up-signals');
+  // The stub stands in for `graphyard install`: its plan passes preflight; --apply serves an App page and waits forever.
+  const stub = join(root, 'stub-cli.mjs');
+  await writeFile(stub, `import { createServer } from 'node:http';
+import { writeFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+if (args.includes('--plan')) { console.log(JSON.stringify({ preflight: [{ name: 'GitHub CLI', ok: true }] })); process.exit(0); }
+const server = createServer((_, response) => response.end('App page')).listen(0, '127.0.0.1', () => {
+  const port = server.address().port;
+  writeFileSync(process.env.STUB_SERVING, JSON.stringify({ pid: process.pid, port }));
+  console.error('Open http://127.0.0.1:' + port + ' in a browser on this machine and confirm the Graphyard App');
+});
+`);
+  const listening = (port: number) => new Promise<boolean>(accept => { const socket = connect(port, '127.0.0.1'); socket.once('connect', () => { socket.destroy(); accept(true); }); socket.once('error', () => accept(false)); });
+  const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error.code !== 'ESRCH'; } };
+  const launcher = resolve(import.meta.dirname, '../bin/graphyard.mjs');
+  await Promise.all((['SIGINT', 'SIGTERM'] as const).map(async signal => {
+    const serving = join(root, `${signal}.json`);
+    const upProcess = spawn(process.execPath, [launcher, 'up', '--repo', 'acme/shop'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, GRAPHYARD_CLI: stub, GRAPHYARD_REPOSITORY_ROOT: root, STUB_SERVING: serving } });
+    let output = '';
+    upProcess.stdout.on('data', chunk => { output += chunk; }); upProcess.stderr.on('data', chunk => { output += chunk; });
+    const exited = new Promise<number | null>(accept => upProcess.once('exit', code => accept(code)));
+    let child: { pid: number; port: number } | null = null;
+    try {
+      for (let waited = 0; !child; waited += 100) {
+        assert.ok(waited < 60_000 && upProcess.exitCode === null, `${signal}: the install child never served its page: ${output}`);
+        child = await readFile(serving, 'utf8').then(text => JSON.parse(text), () => null);
+        if (!child) await new Promise(accept => setTimeout(accept, 100));
+      }
+      assert.ok(await listening(child.port), `${signal}: the child serves its App page`);
+      upProcess.kill(signal);
+      assert.equal(await exited, signal === 'SIGINT' ? 130 : 143, `${signal}: up exits once its child has: ${output}`);
+      assert.equal(alive(child.pid), false, `${signal}: no install child survives up`);
+      assert.equal(await listening(child.port), false, `${signal}: its port is free`);
+    } finally {
+      // A failed assertion leaves nothing running behind the test.
+      if (child && alive(child.pid)) process.kill(child.pid, 'SIGKILL');
+      if (upProcess.exitCode === null && upProcess.signalCode === null) upProcess.kill('SIGKILL');
+    }
+  }));
 });
