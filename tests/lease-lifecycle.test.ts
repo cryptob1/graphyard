@@ -142,7 +142,8 @@ test('integration:lease-release-on-submit: complete ends the lease with the cand
   await engine.reconcile();
   abandoned = await reload(abandoned);
   assert.deepEqual(standingEscalations(abandoned).map(entry => entry.trigger), ['lease-loss'], 'reconciliation never settles an unsubmitted loss');
-  // The replacement claim records the loss it overwrites, and that one stands too.
+  // The replacement claim records the loss it overwrites; reconciliation then settles it, since the
+  // replacement now holds the item and nothing from the lost epoch can act (GY-1390).
   let replaced = await engine.execute(operator, 'create', null, input('lease-replacement-claim'), id());
   replaced = await engine.execute(operator, 'ready', replaced.id, {}, id());
   replaced = await expiring.execute(worker, 'claim', replaced.id, {}, id());
@@ -151,7 +152,8 @@ test('integration:lease-release-on-submit: complete ends the lease with the cand
   assert.equal(replaced.lease!.owner, replacement.id);
   assert.deepEqual(standingEscalations(replaced).map(entry => entry.reason), [`Worker ${worker.id} lost lease epoch ${replacedEpoch}`]);
   await engine.reconcile();
-  assert.deepEqual(standingEscalations(await reload(replaced)).map(entry => entry.trigger), ['lease-loss']);
+  assert.deepEqual(standingEscalations(await reload(replaced)), []);
+  assert.deepEqual((await events(replaced, 'escalation.auto-settled')).map(event => [event.payload.details.epoch, event.payload.details.cause]), [[replacedEpoch, 'superseded']]);
   // Rework that discards a live, unsubmitted lease records its end as history under the
   // admin's own stopped-worker attestation, not as a silently vanished worker (GY-62).
   let discarded = await claimed('lease-rework-discards');

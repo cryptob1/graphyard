@@ -5,7 +5,7 @@ All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#th
 
 `POST /api/work` ([example](../../examples/work.json)): `title`, `criteria`; optionally `dependencies`, `exclusiveResources`, `plannedFiles`, `split` ([decomposition](#splitting-an-item) opt-out/in), `producerProofs` (producer-runnable `manual:` proofs); `parent`/`children` only a split sets. Others: `POST /api/work/KEY/COMMAND`:
 
-- `requirements`: document, `expectedPolicyRevision`, `reason`; `admin` (operator agents additively); omitted `split` kept; stale revisions refused (`Policy revision changed`) before lease/quarantine checks; a partly widened scope request's findings aren't re-read mid-approval.
+- `requirements`: document, `expectedPolicyRevision`, `reason`; `admin` (operator agents additively); omitted `split` kept; stale revisions refused (`Policy revision changed`) before lease/quarantine checks; a partly widened scope request's findings aren't re-read mid-approval. `rule: "successor"` (operator agents, additive) marks the loop's re-plan onto split or renamed files; interventions skip it.
 - `decomposition` (coordinator): `{event:"started"|"decided"|"failed",…}`; `decided` (`payload.children`) makes the [split](#splitting-an-item).
 - `ready`, `unblock`: `{"reason":…}` (operator agents: `expectedRevision`; `master unblock` retries stale refusals (≤3) while the blocker stands). Two-party `release`/`unblock`/pinned `close` decisions survive loop-bookkeeping moves (sessions, gates, next action, action queue); others settle them `stale`.
 - `resolve`: `{"trigger":…, "expectedRevision":…, "reason":…}`; human `admin`, or `admin` with `"attestation":{"kind":"blocked"|"stopped-worker","epoch":N}` explaining a `lease-loss`.
