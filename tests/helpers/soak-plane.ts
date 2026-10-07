@@ -256,7 +256,10 @@ export async function failoverInstalled() {
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', `https://github.com/${repository}.git`], { cwd: root });
   const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository, baseBranch: 'main', githubAppId: 1234 }));
-  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wS' }, coordinatorStatus as typeof fetch);
+  // The install's Herdr workspace is the one the world's panes live in (`w1:pN`): since GY-1441 the
+  // launcher closes only panes in its own workspace, so a scope the world never serves would keep
+  // every failed start's pane, and with it its epoch.
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'w1' }, coordinatorStatus as typeof fetch);
   const homes = await temporaryDirectory('soak-homes');
   const opencodeHome = join(homes, 'opencode-a');
   await mkdir(join(opencodeHome, 'opencode'), { recursive: true });
