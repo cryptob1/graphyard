@@ -39,6 +39,10 @@ A flaky required case blocks promotion until an `evidence` decision accepts it: 
 
 `e2e/contract.json` lists each required customer outcome: `id`, `title`, optional `criteria` (how a customer would state it) and the `cases` that prove it. A case may prove several outcomes. `graphyard release contract`, the pre-cut check the release-candidate workflow runs before `release cut`, refuses the cut, naming the outcome and case, when a bound case is missing, invalid, not targeted at `uat` or not required, or when a required case is bound to no outcome.
 
+## Goals and acceptance
+
+`graphyard goal FILE` (an operator, or the master's identity) records a goal from JSON: `statement`, `users`, `constraints`, `deployTarget`. The loop launches the `acceptance` role on it, on the diagnostician's models unless the registry's `acceptance` role names accounts: it drafts plain-language outcomes, one required `uat` case per outcome, and their contract bindings, opened as one pull request. Its author never approves it; `goal approve|refuse GOAL-N -- REASON` by another identity does. After the merge (`goal merged`), `complete` refuses a candidate that modifies or deletes a protected case or `e2e/contract.json`, unless `goal case-change` was approved by neither its requester nor an item implementer. `goal list` and `master status` show each open goal's stage.
+
 ## Release holds
 
 A failing candidate files one release hold per failed outcome, never one per suite or case: a work item with the failed or flaky cases, their failing steps and the outcome's unmet criteria, and a ledger tag `rc-hold/OUTCOME/CANDIDATE`. A later failure of an outcome whose hold is open is attached to that hold instead of filed again. A hold clears only when every case attached to it passes on a newer candidate UAT serves at its exact SHA. `graphyard release holds` lists them.

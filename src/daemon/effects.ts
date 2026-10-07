@@ -52,6 +52,7 @@ import type { DecompositionEvent } from '../decomposition.js';
 import { doctorEffects, doctorSettings, type DoctorEffects } from './doctor.js';
 import { docsSyncEffects, type DocsSyncEffects } from '../docs-sync.js';
 import { diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
+import { acceptanceRole, openAcceptancePullRequest, type AcceptanceEffects } from './acceptance.js';
 import { diagnosticianSettings } from '../runner/payloads.js';
 import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
@@ -356,6 +357,12 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * recurring-fault items are then filed and left for the master, as before.
    */
   diagnostician?: DiagnosticianEffects;
+  /**
+   * The acceptance role (GY-1417): it drafts each open goal's outcomes and required cases on the
+   * diagnostician's models (or the registry's acceptance role) and posts the draft as the master's
+   * operator-agent identity. Absent under the same conditions as the diagnostician.
+   */
+  acceptance?: AcceptanceEffects;
   /** The recurrence rule; the environment's (GRAPHYARD_FAULT_CLASS_*) or the shipped default when absent. */
   faultClassPolicy?: FaultClassPolicy;
   /**
@@ -550,6 +557,29 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       }),
       file: (input, key) => asOperatorAgent('POST', 'work', input, key) as Promise<Work>,
       decide: (work, action, reason, input) => asOperatorAgent('POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }),
+    };
+  };
+  /** The acceptance role's effects (GY-1417): runners as the diagnostician's, goals read and posted through /api/goals. */
+  const acceptance = (config: MasterConfig): AcceptanceEffects => {
+    const settings = diagnosticianSettings(config.run);
+    return {
+      settings, cwd: root,
+      goals: async () => (await asCoordinator('goals?open=1')).goals,
+      runner: async (attempt, goal) => {
+        if (attempt === 'primary') {
+          const fleet = await selectFleetSession(config, acceptanceRole, { name: acceptanceRole, principal: config.operatorAgent!.id }, { work: goal.key });
+          if (fleet) { const launch = registryHeadlessLaunch(fleet.account); return { runner: registryRunner(fleet.account), runtime: launch.command, model: launch.model, release: fleet.release }; }
+        }
+        const model = attempt === 'primary' ? settings.model : settings.fallbackModel;
+        return { runner: piRunner({ command: settings.command, model }), runtime: 'pi', model };
+      },
+      open: (goal, draft) => openAcceptancePullRequest(run, root, config, goal, draft),
+      draft: (goal, input) => asOperatorAgent('POST', `goals/${goal.key}/draft`, input, `acceptance:${goal.id}:${goal.revision}`),
+      pullRequest: async pr => {
+        const read = JSON.parse(String(await run('gh', ['pr', 'view', String(pr), '--repo', config.repository, '--json', 'state,mergeCommit'])));
+        return { state: read.state === 'MERGED' ? 'merged' : read.state === 'CLOSED' ? 'closed' : 'open', mergeSha: read.mergeCommit?.oid ?? null };
+      },
+      merged: (goal, pr, mergeSha) => asOperatorAgent('POST', `goals/${goal.key}/merged`, { pr, mergeSha }, `acceptance:${goal.id}:merged`),
     };
   };
   let publishedEnvironment: string | null = null, publishedMergeQueue: string | null = null;
@@ -769,6 +799,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     // The diagnostician acts only through the two identities a two-party decision needs (GY-439).
     get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnostician(config) : undefined; },
+    get acceptance() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? acceptance(config) : undefined; },
     get fileFaultClass() { return current().operatorAgent ? (input: LoopFiledItem, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     get unblock() { return current().operatorAgent ? (work: Work, reason: string) => asOperatorAgent('POST', `work/${work.id}/unblock`, { reason, expectedRevision: work.revision }) as Promise<Work> : undefined; },
     get doctor() { const config = current(); return config.operatorAgent && doctorSettings(config.run).enabled ? doctorEffects(config, root, asOperatorAgent) : undefined; },
