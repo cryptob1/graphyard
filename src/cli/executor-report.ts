@@ -1,8 +1,8 @@
-import { agentOwner, type AttentionItem } from '../master.js';
+import { agentOwner, loadMasterConfig, type AttentionItem } from '../master.js';
 import type { Work } from '../model.js';
 import { openActions } from '../model/actions.js';
 import { describeUnserved, executorLiveMs, withLoopMerger, type ExecutorReport, type ReportedLoopMerger } from '../model/executor-presence.js';
-import { executorSupervisionStatus, type SystemctlRunner } from '../repository-setup.js';
+import { executorSupervisionStatus, executorUnit, type SystemctlRunner } from '../repository-setup.js';
 import { detectLoopMerger } from '../executor.js';
 
 /**
@@ -26,6 +26,8 @@ export interface ExecutorFleet {
   supervision: Awaited<ReturnType<typeof executorSupervisionStatus>>;
   /** One line per unserved kind, longest wait first. */
   unserved: ReturnType<typeof describeUnserved>;
+  /** Each declared slot as systemd or, without a user manager, the control plane sees it (GY-1431). */
+  slots: SlotObservation[];
   attention: AttentionItem[];
 }
 
@@ -37,7 +39,38 @@ export interface ExecutorFleet {
  */
 export const slotDown = (active: string) => active !== 'active' && active !== 'deactivating' && active !== 'reloading';
 
-export async function executorFleet(root: string, masterApi: (path: string) => Promise<any>, snapshot: { work: Work[]; now: string }, run?: SystemctlRunner, merger?: ReportedLoopMerger | null | (() => Promise<{ name: string; live?: boolean } | null>)): Promise<ExecutorFleet> {
+/**
+ * One declared slot as it can be seen (GY-1431): systemd's state where this host has a user manager
+ * to ask, otherwise the control plane's presence — a supervised slot claims as `<principal>@<host>/<slot>`,
+ * so a declared slot with no live executor of that name on this host is down. On 2026-10-07 the loop
+ * read no user manager, and both slots of this host lay inactive with three dispatches requested.
+ */
+export interface SlotObservation { slot: number; unit: string; active: string; seenBy: 'systemd' | 'presence' }
+export function executorSlots(supervision: ExecutorFleet['supervision'], presence: ExecutorFleet['presence'], hostId: string | null): SlotObservation[] {
+  if (supervision.units.length) return supervision.units.map(unit => ({ ...unit, seenBy: 'systemd' as const }));
+  if (!supervision.declaration || supervision.supervised || !presence.available || (presence as ExecutorReport).listening || !hostId) return [];
+  return Array.from({ length: supervision.declaration.count }, (_, index) => {
+    const slot = index + 1;
+    const live = presence.live.some(entry => entry.host === hostId && entry.executor.endsWith(`@${hostId}/${slot}`));
+    return { slot, unit: executorUnit(slot), active: live ? 'active' : 'inactive', seenBy: 'presence' as const };
+  });
+}
+
+/**
+ * A declared slot that is down is a resources fault of its own (GY-1431): the host is one executor
+ * short of what it declared, and nothing it would claim is queued behind other work — the fleet is
+ * down, not saturated. The line names the unit and the journalctl command that says why it stopped,
+ * and it stands until the unit is observed active again; a stop in progress is a transition (GY-1086).
+ */
+export function executorSlotFaults(slots: SlotObservation[], declared: number, reason: string | null = null): AttentionItem[] {
+  return slots.filter(entry => slotDown(entry.active)).map(entry => ({
+    subject: 'executors', kind: 'resource-bound' as const, faultClass: 'resources' as const, resource: entry.unit,
+    text: `Executor slot ${entry.slot} is ${entry.active} although this host declares ${declared} slot(s)${entry.seenBy === 'presence' ? ` (read from the control plane: no executor claims as slot ${entry.slot} of this host${reason ? `; ${reason}` : ''})` : ''}; journalctl --user -u ${entry.unit} -n 200 says why it stopped, and the fault stands until ${entry.unit} is active again`,
+    ...agentOwner('master', `systemctl --user start ${entry.unit} on this host, then journalctl --user -u ${entry.unit} -n 200 for why it stopped`),
+  }));
+}
+
+export async function executorFleet(root: string, masterApi: (path: string) => Promise<any>, snapshot: { work: Work[]; now: string }, run?: SystemctlRunner, merger?: ReportedLoopMerger | null | (() => Promise<{ name: string; live?: boolean } | null>), hostId?: string | null): Promise<ExecutorFleet> {
   const resolvedLoop = typeof merger === 'function' ? await merger().catch(() => null) : merger;
   // The loop on this host, read from its cursor's live lock when the caller did not name it.
   const loop: ReportedLoopMerger | null = resolvedLoop !== undefined
@@ -50,18 +83,22 @@ export async function executorFleet(root: string, masterApi: (path: string) => P
     presence = answer ? { ...withLoopMerger(answer, loop), available: true } : { available: false, reason: 'the deployed server reports no executor presence; deploy main so GET /api/actions carries executors', live: [], served: [], unserved: [], liveMs: executorLiveMs };
   } catch (error) { presence = { available: false, reason: `GET /api/actions failed: ${error instanceof Error ? error.message : String(error)}`, live: [], served: [], unserved: [], liveMs: executorLiveMs }; }
   const unserved = describeUnserved(presence);
-  const attention: AttentionItem[] = unserved.map(entry => ({ subject: entry.keys[0], text: entry.text, ...agentOwner('master', supervision.declaration && supervision.units.some(unit => slotDown(unit.active)) ? supervision.start : `${entry.start}; on this host: ${supervision.start}`) }));
+  const slots = executorSlots(supervision, presence, hostId !== undefined ? hostId : await loadMasterConfig(root).then(config => config.hostId ?? null, () => null));
+  const down = slots.filter(entry => slotDown(entry.active));
+  // The dispatcher's two reasons for an unrun row are told apart (GY-1431): slots this host declared
+  // are down, which a start answers, or every live executor is busy, which only capacity answers.
+  const startDown = `systemctl --user start ${down.map(entry => entry.unit).join(' ')}`;
+  const attention: AttentionItem[] = unserved.map(entry => ({ subject: entry.keys[0],
+    text: down.length ? `${entry.text} This host's executor slots are down, not saturated: ${down.map(slot => `${slot.unit} ${slot.active}`).join(', ')}.` : entry.text,
+    ...agentOwner('master', supervision.declaration && down.length ? (supervision.units.length ? supervision.start : startDown) : `${entry.start}; on this host: ${supervision.start}`) }));
   // Without presence the control plane cannot say who is alive, but a host whose every declared
   // slot is down while rows are pending is unserved from here, and is named as such.
   const pending = openActions(snapshot.work, new Date(snapshot.now)).filter(({ row }) => !(loop?.live && row.kind === 'merge'));
   if (!presence.available && pending.length && supervision.units.length && supervision.units.every(unit => slotDown(unit.active))) {
     attention.push({ subject: pending[0].row.key, text: `Every declared executor slot on this host is down (${supervision.units.map(unit => `${unit.unit} ${unit.active}`).join(', ')}) while ${pending.length} action(s) are pending, the oldest ${pending[0].row.kind} for ${pending[0].row.key} since ${pending[0].row.requestedAt}; ${presence.reason}`, ...agentOwner('master', supervision.start) });
   }
-  // A declared slot that is not running is worth a line on its own: the fleet is one short of
-  // what the host said it runs, whether or not anything is unserved yet.
-  for (const unit of supervision.units.filter(entry => slotDown(entry.active))) {
-    if (attention.some(item => item.next === `systemctl --user start ${unit.unit}` || item.next.includes(unit.unit))) continue;
-    attention.push({ subject: 'executors', text: `Executor slot ${unit.slot} is ${unit.active} although this host declares ${supervision.declaration!.count} slot(s); journalctl --user -u ${unit.unit} says why`, ...agentOwner('master', `systemctl --user start ${unit.unit}`) });
-  }
-  return { presence, supervision, unserved, attention };
+  // A declared slot that is not running is a fault on its own: the fleet is one short of what the
+  // host said it runs, whether or not anything is unserved yet, and it pages until the slot is back.
+  if (supervision.declaration) attention.push(...executorSlotFaults(slots, supervision.declaration.count, supervision.reason));
+  return { presence, supervision, unserved, slots, attention };
 }
