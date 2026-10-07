@@ -33,7 +33,7 @@ import { loopThroughputMeasurement, throughputClaim } from '../../src/throughput
 import { type RunOptions, type RunRecord, type RunResult, type Runner } from '../../src/runner/types.js';
 import { type DiagnosticianEffects } from '../../src/daemon/diagnosis.js';
 import { type AcceptanceEffects, clearDrafts, draftsSettled } from '../../src/daemon/acceptance.js';
-import type { Goal } from '../../src/model/goal.js';
+import type { Goal, Landing } from '../../src/model/goal.js';
 import { terminalDecisions } from '../../src/cli/decision-report.js';
 import { Launcher } from '../../src/daemon/cycle.js';
 import { wakeOwnObservation } from '../../src/master/base-break-refresh.js';
@@ -2366,18 +2366,19 @@ export const memoryDay = { memoryDip: { from: 0, until: 15 * minute } };
  * and the loop drives them through `acceptanceStep` with headless runs faked and GitHub's pull
  * requests held here. `signup`'s first open and first post fail and its first draft is refused;
  * `billing`'s approved pull request is closed unmerged by a person; `audit`'s first draft run
- * returns nothing. An enabled auto-merge lands its pull request half an hour later.
+ * returns nothing and its first approved pull request conflicts with the base. The control plane's
+ * land answers waiting until half an hour after it was first asked, then merged.
  */
 export async function acceptanceWorld(dayStart: number) {
   const day = {
     goals: {} as Record<string, string>, runs: [] as { goal: string; role: 'draft' | 'judge'; at: number }[], opens: [] as { goal: string; pr: number; revision: number; at: number }[],
-    posts: [] as { goal: string; ok: boolean; at: number }[], reads: [] as { pr: number; at: number }[], closes: [] as number[], enqueues: [] as string[],
+    posts: [] as { goal: string; ok: boolean; at: number }[], reads: [] as { pr: number; at: number }[], closes: [] as number[], lands: [] as { pr: number; at: number }[],
     pulls: new Map<number, { goal: string; branch: string; head: string; state: 'open' | 'closed' | 'merged'; autoAt: number | null }>(),
   };
   for (const name of ['signup', 'billing', 'audit'])
     day.goals[name] = (await api(principals.operatorAgent, 'POST', 'goals', { statement: `Customers can use ${name} without help`, users: ['Repository operators'], constraints: [], deployTarget: 'uat' })).key;
   const named = (key: string) => Object.entries(day.goals).find(([, goal]) => goal === key)![0];
-  let next = 5000, openFailed = false, billingClosed = false;
+  let next = 5000, openFailed = false, billingClosed = false, auditConflicted = false;
   const runner = (role: 'draft' | 'judge', goal: Goal): Runner => ({ name: 'soak-acceptance', start<T>(_prompt: string, options: RunOptions<T>) {
     const name = named(goal.key), drafts = day.runs.filter(run => run.goal === name && run.role === role).length;
     day.runs.push({ goal: name, role, at: clock.now() - dayStart });
@@ -2393,12 +2394,28 @@ export async function acceptanceWorld(dayStart: number) {
   const read = (pr: number) => {
     day.reads.push({ pr, at: clock.now() - dayStart });
     const pull = day.pulls.get(pr)!;
-    // Auto-merge lands the approved head half an hour after it is enabled; a person closes billing's first approved pull request instead.
-    if (pull.state === 'open' && pull.autoAt !== null && clock.now() - pull.autoAt >= 30 * minute) {
+    return { state: pull.state, mergeSha: pull.state === 'merged' ? sha('acceptance-merge', pr) : null, head: pull.head };
+  };
+  // POST /api/goals/:key/land as the control plane answers it, its GitHub held here: the merge lands half an hour after it is
+  // first asked; a person closes billing's first approved pull request instead, and audit's first conflicts with the base.
+  const land = async (goal: Goal) => {
+    const pr = goal.acceptance!.pr, pull = day.pulls.get(pr)!;
+    assert.equal(pull.head, goal.approval!.head, 'an acceptance pull request is landed only at its approved head');
+    day.lands.push({ pr, at: clock.now() - dayStart });
+    pull.autoAt ??= clock.now();
+    let state: Landing['state'] = 'waiting';
+    if (pull.goal === 'audit' && !auditConflicted) { auditConflicted = true; pull.state = 'closed'; state = 'conflicting'; }
+    else if (pull.state === 'open' && clock.now() - pull.autoAt >= 30 * minute) {
       pull.state = pull.goal === 'billing' && !billingClosed ? 'closed' : 'merged';
       billingClosed ||= pull.goal === 'billing';
+      state = pull.state;
     }
-    return { state: pull.state, mergeSha: pull.state === 'merged' ? sha('acceptance-merge', pr) : null, head: pull.head };
+    const detail = state === 'conflicting' ? `acceptance pull request #${pr} conflicts with main` : state === 'closed' ? `acceptance pull request #${pr} was closed without merging` : state === 'merged' ? `#${pr} merged` : 'Required status check "test" is expected';
+    const landing: Landing = { state, detail, mergeSha: state === 'merged' ? sha('acceptance-merge', pr) : null };
+    if (state === 'waiting') return { goal, landing };
+    const recorded = state === 'merged' ? await api(principals.operatorAgent, 'POST', `goals/${goal.key}/merged`, { pr, mergeSha: landing.mergeSha }, `acceptance:${goal.id}:merged`)
+      : await api(principals.operatorAgent, 'POST', `goals/${goal.key}/closed`, { pr, reason: detail }, `acceptance:${goal.id}:${goal.revision}:landed-closed`);
+    return { goal: recorded as Goal, landing };
   };
   const effects: AcceptanceEffects = {
     settings: diagnosticianSettings({}), cwd: coordinatorRoot!,
@@ -2423,9 +2440,8 @@ export async function acceptanceWorld(dayStart: number) {
     },
     judge: (goal, judgement) => api(principals.approver, 'POST', `goals/${goal.key}/${judgement.verdict}`, { reason: judgement.reason }, `acceptance:${goal.id}:${goal.revision}:judged`),
     pullRequest: async pr => read(pr),
-    enqueue: async (pr, head) => { const pull = day.pulls.get(pr)!; assert.equal(pull.head, head, 'auto-merge is enabled at the approved head'); pull.autoAt ??= clock.now(); day.enqueues.push(`${pr}@${head}`); },
+    land,
     close: async pr => { const pull = day.pulls.get(pr)!; if (pull.state === 'open') pull.state = 'closed'; day.closes.push(pr); },
-    merged: (goal, pr, mergeSha) => api(principals.operatorAgent, 'POST', `goals/${goal.key}/merged`, { pr, mergeSha }, `acceptance:${goal.id}:merged`),
     closed: (goal, pr, reason) => api(principals.operatorAgent, 'POST', `goals/${goal.key}/closed`, { pr, reason }, `acceptance:${goal.id}:${goal.revision}:closed`),
   };
   return { day, effects };

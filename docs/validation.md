@@ -41,7 +41,7 @@ A flaky required case blocks promotion until an `evidence` decision accepts it: 
 
 ## Goals and acceptance
 
-`graphyard goal FILE` records a goal: `statement`, `users`, `constraints`, `deployTarget`. The loop's `acceptance` role (diagnostician models unless the registry names accounts) drafts plain-language outcomes, one required `uat` case each, and their contract bindings as one pull request. A headless run on the approver identity, never the author, judges it (or `goal approve|refuse GOAL-N -- REASON`). A refused draft's pull request is closed and redrafted, at most three times. The approved pull request auto-merges at its approved head; closed unmerged, the goal is redrafted. Once merged, `complete` refuses a candidate changing a protected case or `e2e/contract.json` without a `goal case-change` approved by neither requester nor implementer. `master status` lists open goals.
+`graphyard goal FILE` records a goal (`statement`, `users`, `constraints`, `deployTarget`). The loop's `acceptance` role drafts plain-language outcomes, one required `uat` case each, plus contract bindings, as one pull request; the approver identity, never the author, judges it (`goal approve|refuse`). Refused drafts are redrafted, at most three times. Graphyard publishes its merge checks on the approved head, merging once CI passes (`goal land`); closed, moved or conflicting, it is redrafted; unmerged a day after approval, the master decides. Once merged, `complete` refuses a candidate changing a protected case or `e2e/contract.json` unless that existing item's `goal case-change` was approved by neither its requester nor any implementer. `master status` lists open goals.
 
 ## Release holds
 

@@ -10,7 +10,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import type { Observation, Principal, Work } from '../src/model.js';
-import { acceptanceDraftSchema, applyGoalCommand, draftFiles, maxDraftRounds, protectedCaseRefusals, type Goal } from '../src/model/goal.js';
+import { acceptanceDraftSchema, applyGoalCommand, draftFiles, goalSummary, maxDraftRounds, protectedCaseRefusals, type Goal } from '../src/model/goal.js';
 import { registryRoles, roleSchema } from '../src/model/registry.js';
 import { checkContract, parseCase, parseContract } from '../src/e2e/case.js';
 import { goalCommands } from '../src/cli/goal.js';
@@ -54,8 +54,8 @@ before(async () => {
 });
 after(async () => { clearDrafts(); if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); });
 
-const call = async (principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown) => {
-  const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token(principal)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+const call = async (principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown, key: string = randomUUID()) => {
+  const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token(principal)}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const text = await response.text();
   return { status: response.status, text, body: JSON.parse(text) as any };
 };
@@ -93,6 +93,13 @@ test('unit:goal-intake — `graphyard goal FILE` records a goal with history, an
   assert.equal((await call(reader, 'POST', 'goals', goalInput('Not mine to set'))).status, 403);
   assert.equal((await call(worker, 'POST', 'goals', goalInput('Not mine to set'))).status, 403);
   assert.equal((await call(master, 'POST', 'goals', { statement: 'No users', users: [], deployTarget: 'uat' })).status, 400);
+  // A retried record after a lost response answers the first goal, never a second; the same key with other input is refused.
+  const key = randomUUID();
+  const first = await call(master, 'POST', 'goals', goalInput('Recorded once however often it is retried'), key);
+  const retried = await call(master, 'POST', 'goals', goalInput('Recorded once however often it is retried'), key);
+  assert.equal(first.status, 200, first.text); assert.deepEqual(retried.body, first.body);
+  assert.equal((await call(master, 'POST', 'goals', goalInput('Other input under the same key'), key)).status, 409);
+  assert.equal((await call(master, 'POST', 'goals', goalInput('No key'), '')).status, 400);
   // The history is the ledger: one event per change, carrying who made it.
   const shown = await cli(master, ['show', recorded.key]);
   assert.equal(shown.goal.id, recorded.id);
@@ -102,7 +109,7 @@ test('unit:goal-intake — `graphyard goal FILE` records a goal with history, an
   const summary = listed.find((entry: any) => entry.key === recorded.key);
   assert.equal(summary.stage, 'acceptance-drafting');
   assert.match(summary.next.who, /acceptance role/);
-  assert.equal(listed.length, 2);
+  assert.equal(listed.length, 3);
   const masterStatus = await readFile(join(root, 'src/cli/master-status.ts'), 'utf8');
   assert.match(masterStatus, /goals: await sections\.optional\('goals', 'GET \/api\/goals', async \(\) => \(await masterApi\('goals\?open=1&view=summary'\)\)\.goals/);
 });
@@ -124,6 +131,42 @@ function stubRunner(respond: (prompt: string) => unknown, prompts: string[], too
 const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard', repository, baseBranch: 'main',
   githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-goals', autoMerge: true, mergeMethod: 'merge', workers: [] });
 
+/**
+ * GitHub as the control plane's land route sees it: each pull request's state, the check runs the App
+ * publishes, and a head-bound merge GitHub refuses until CI passed and both App-bound Graphyard checks
+ * stand on that head, as a managed base branch requires.
+ */
+function fakeGitHub() {
+  const pulls = new Map<number, { state: 'open' | 'closed'; merged: boolean; head: string; branch: string; mergeable: boolean | null; ciPassed: boolean; mergeSha: string | null }>();
+  const runs: { id: number; name: string; head_sha: string; conclusion: string; external_id: string; output: { title: string; summary: string }; app: { id: number } }[] = [];
+  const comments: { pr: number; body: string }[] = [], deleted: string[] = [], merges: { pr: number; head: string }[] = [];
+  const view = (pr: number) => { const pull = pulls.get(pr)!; return { number: pr, node_id: `PR_${pr}`, state: pull.state, merged: pull.merged, merge_commit_sha: pull.mergeSha, head: { sha: pull.head, ref: pull.branch }, base: { ref: 'main' }, mergeable: pull.mergeable, mergeable_state: pull.mergeable === false ? 'dirty' : 'clean' }; };
+  const github = {
+    config: { base: 'main', appId: 15368 },
+    async request(path: string, method = 'GET', body?: any) {
+      const pr = Number(path.match(/^\/(?:pulls|issues)\/(\d+)/)?.[1]);
+      if (method === 'GET' && path.startsWith('/pulls/')) return view(pr);
+      if (method === 'PATCH' && path.startsWith('/pulls/')) { pulls.get(pr)!.state = body.state; return view(pr); }
+      if (path.startsWith('/issues/')) { comments.push({ pr, body: body.body }); return {}; }
+      if (method === 'DELETE') { deleted.push(path); return {}; }
+      if (path === '/check-runs') { runs.push({ ...body, id: runs.length + 1, app: { id: 15368 } }); return {}; }
+      if (path.startsWith('/check-runs/')) { Object.assign(runs.find(run => run.id === Number(path.split('/')[2]))!, body); return {}; }
+      throw new Error(`unexpected GitHub call ${method} ${path}`);
+    },
+    async pages(path: string) { const [, head, name] = path.match(/^\/commits\/([0-9a-f]+)\/check-runs\?check_name=([^&]+)/)!; return runs.filter(run => run.head_sha === head && run.name === decodeURIComponent(name)); },
+    async upsertLandable(body: any) { const existing = runs.find(run => run.head_sha === body.head_sha && run.name === body.name); if (existing) Object.assign(existing, body); else runs.push({ ...body, id: runs.length + 1, app: { id: 15368 } }); },
+    async graphql(_query: string, variables: { id: string; head: string }) {
+      const pr = Number(variables.id.slice(3)), pull = pulls.get(pr)!;
+      if (pull.head !== variables.head) throw new Error('Head branch was modified');
+      for (const name of ['Graphyard / merge', 'graphyard/landable']) if (!runs.some(run => run.head_sha === pull.head && run.name === name && run.conclusion === 'success')) throw new Error(`Required status check "${name}" is expected`);
+      if (!pull.ciPassed) throw new Error('Required status check "test" is expected');
+      merges.push({ pr, head: variables.head }); pull.merged = true; pull.state = 'closed'; pull.mergeSha = 'c'.repeat(40);
+      return {};
+    },
+  };
+  return { github, pulls, runs, comments, deleted, merges };
+}
+
 test('unit:acceptance-role-drafts-and-approval — the loop launches the acceptance role on an open goal, opens its draft as one pull request, and only an approver who did not author it approves', async () => {
   clearDrafts();
   assert.ok((registryRoles as readonly string[]).includes('acceptance'));
@@ -134,27 +177,31 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   assert.deepEqual(schemaErrors(acceptanceParameters, draftOf('GOAL-9', 'pi-outcome')), []);
   assert.deepEqual(schemaErrors(acceptanceJudgementParameters, { goal: 'GOAL-9', verdict: 'refuse', reason: 'The case checks the wrong page' }), []);
   const goal: Goal = await ok(master, 'POST', 'goals', goalInput('Operators can sign up a repository in one step'));
-  const prompts: string[] = [], tools: string[] = [], opened: { goal: string; draft: unknown }[] = [], closes: number[] = [], enqueues: string[] = [];
+  const prompts: string[] = [], tools: string[] = [], opened: { goal: string; draft: unknown }[] = [], closes: number[] = [], lands: string[] = [];
   let respond: (prompt: string) => unknown = () => draftOf(goal.key, 'goal-signup');
   let verdict: { verdict: 'approve' | 'refuse'; reason: string } = { verdict: 'refuse', reason: 'The case checks the board, not the sign-up the customer asked for' };
-  const prState = new Map<number, 'open' | 'closed' | 'merged'>();
+  const fake = fakeGitHub();
+  (http as any).services.github = fake.github;
+  const focus = new Set([goal.id]);
   let failOpen = 1, failPost = 1, reads = 0;
   const fx: AcceptanceEffects = {
     settings: diagnosticianSettings({}), cwd: root,
-    goals: async () => (await ok(master, 'GET', 'goals?open=1')).goals.filter((entry: Goal) => entry.id === goal.id),
-    runner: async (role, attempt) => ({ runner: stubRunner(prompt => role === 'judge' ? { goal: goal.key, ...verdict } : respond(prompt), prompts, tools), runtime: 'stub', model: attempt }),
+    goals: async () => (await ok(master, 'GET', 'goals?open=1')).goals.filter((entry: Goal) => focus.has(entry.id)),
+    runner: async (role, attempt, target) => ({ runner: stubRunner(prompt => role === 'judge' ? { goal: target.key, ...verdict } : respond(prompt), prompts, tools), runtime: 'stub', model: attempt }),
     open: async (target, draft) => {
       if (failOpen-- > 0) throw new Error('gh pr create: HTTP 502');
-      opened.push({ goal: target.key, draft }); prState.set(700 + opened.length, 'open');
-      return { pr: 700 + opened.length, branch: `graphyard/${target.key.toLowerCase()}-acceptance-${target.revision}`, head: String(opened.length).repeat(40) };
+      opened.push({ goal: target.key, draft });
+      const pr = 700 + opened.length, branch = `graphyard/${target.key.toLowerCase()}-acceptance-${target.revision}`, head = String(opened.length).repeat(40);
+      fake.pulls.set(pr, { state: 'open', merged: false, head, branch, mergeable: true, ciPassed: false, mergeSha: null });
+      return { pr, branch, head };
     },
     // The draft is posted by the identity that runs the role, its author; the verdict by the approver identity.
     draft: async (target, input) => { if (failPost-- > 0) throw new Error('Graphyard refused goals (502)'); return ok(author, 'POST', `goals/${target.key}/draft`, input); },
     judge: (target, judgement) => ok(approver, 'POST', `goals/${target.key}/${judgement.verdict}`, { reason: judgement.reason }),
-    pullRequest: async pr => { reads++; const state = prState.get(pr) ?? 'open'; return { state, mergeSha: state === 'merged' ? 'c'.repeat(40) : null, head: null }; },
-    enqueue: async (pr, head) => { enqueues.push(`${pr}@${head}`); },
-    close: async pr => { closes.push(pr); prState.set(pr, 'closed'); },
-    merged: (target, pr, mergeSha) => ok(master, 'POST', `goals/${target.key}/merged`, { pr, mergeSha }),
+    pullRequest: async pr => { reads++; const pull = fake.pulls.get(pr)!; return { state: pull.merged ? 'merged' : pull.state, mergeSha: pull.mergeSha, head: pull.head }; },
+    // The control plane's land route, run here against the fake GitHub.
+    land: target => { lands.push(`${target.acceptance!.pr}@${target.approval!.head}`); return ok(master, 'POST', `goals/${target.key}/land`, {}); },
+    close: async pr => { closes.push(pr); fake.pulls.get(pr)!.state = 'closed'; },
     closed: (target, pr, reason) => ok(master, 'POST', `goals/${target.key}/closed`, { pr, reason }),
   };
   const state = emptyDaemonState(config);
@@ -164,7 +211,7 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
     await acceptanceStep({ config, state, effects: { acceptance: fx, persist: async () => {} }, now: () => clock, clock, performed: [], isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as unknown as Cycle);
     await draftsSettled();
   };
-  const read = async () => (await ok(master, 'GET', `goals/${goal.key}`)).goal as Goal;
+  const read = async (key = goal.key) => (await ok(master, 'GET', `goals/${key}`)).goal as Goal;
 
   // Drafting: the role runs headless on the goal once; a failed open and a failed post are retried with that same draft, never another run.
   await cycle();
@@ -216,15 +263,20 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   current = await read();
   assert.equal(current.stage, 'planned'); assert.equal(current.approval?.by, approver.id); assert.equal(current.approval?.head, '2'.repeat(40));
 
-  // The approved pull request auto-merges at exactly its approved head, enabled once; it is recorded merged once GitHub merged it.
-  await cycle(); await cycle(60_000);
-  assert.deepEqual(enqueues, [`702@${'2'.repeat(40)}`]);
-  const polls = reads;
-  await cycle(60_000); await cycle(60_000);
-  assert.equal(reads, polls, 'the pull request is read at most once per poll interval');
-  assert.equal((await read()).stage, 'planned');
-  prState.set(702, 'merged');
+  // The control plane lands the approved pull request: it publishes both App-bound Graphyard checks on exactly the approved head,
+  // and GitHub refuses the head-bound merge until CI passed; landing is asked at most once per poll interval.
   await cycle();
+  assert.deepEqual(lands, [`702@${'2'.repeat(40)}`]);
+  assert.equal((await read()).stage, 'planned');
+  assert.deepEqual(fake.runs.filter(run => run.head_sha === '2'.repeat(40)).map(run => [run.name, run.conclusion, run.external_id]).sort(), [['Graphyard / merge', 'success', goal.id], ['graphyard/landable', 'success', goal.id]]);
+  assert.match(state.actions[`acceptance:${goal.id}`].detail, /asked GitHub to merge it: GitHub has not merged #702 yet: Required status check "test" is expected/);
+  await cycle(60_000); await cycle(60_000);
+  assert.equal(lands.length, 1, 'landing is asked at most once per poll interval');
+  assert.equal(fake.runs.length, 2, 'a standing verdict is not published again');
+  fake.pulls.get(702)!.ciPassed = true;
+  await cycle();
+  assert.deepEqual(fake.merges, [{ pr: 702, head: '2'.repeat(40) }], 'merged at exactly the approved head');
+  assert.equal(fake.runs.length, 2);
   const delivering = await read();
   assert.equal(delivering.stage, 'delivering');
   assert.deepEqual(delivering.protected, { cases: ['repository-signup'], outcomes: ['repository-signup'] });
@@ -246,6 +298,49 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   }
   const held = (await ok(master, 'GET', 'goals?open=1&view=summary')).goals.find((entry: any) => entry.key === third.key);
   assert.match(held.next.who, new RegExp(`${maxDraftRounds} acceptance drafts were refused or closed`));
+
+  // Concurrent goals edit the same contract: an approved pull request that conflicts once another merged is closed by the control plane
+  // (with a comment, its branch deleted) and recorded closed, and the loop opens the same outcomes again from the current base — no new run.
+  const fourth: Goal = await ok(master, 'POST', 'goals', goalInput('A fourth goal drafted beside another'));
+  focus.clear(); focus.add(fourth.id);
+  respond = () => draftOf(fourth.key, 'fourth-outcome');
+  await cycle(); await cycle();
+  assert.equal((await read(fourth.key)).acceptance?.pr, 703);
+  await cycle(); await cycle();
+  assert.equal((await read(fourth.key)).stage, 'planned');
+  const drafted = tools.filter(entry => entry.startsWith(acceptanceTool)).length;
+  fake.pulls.get(703)!.mergeable = false;
+  await cycle();
+  let moved = await read(fourth.key);
+  assert.equal(moved.stage, 'acceptance-drafting'); assert.match(moved.refusal?.reason ?? '', /#703 conflicts with main/);
+  assert.equal(fake.pulls.get(703)!.state, 'closed'); assert.match(fake.comments.at(-1)!.body, /Closed by Graphyard: acceptance pull request #703 conflicts with main/);
+  assert.deepEqual(fake.deleted, [`/git/refs/heads/graphyard/${fourth.key.toLowerCase()}-acceptance-1`]);
+  assert.equal(fake.merges.length, 1, 'a conflicting pull request is never merged');
+  await cycle();
+  moved = await read(fourth.key);
+  assert.equal(moved.stage, 'awaiting-approval'); assert.equal(moved.acceptance?.pr, 704);
+  assert.deepEqual(moved.acceptance?.outcomes.map(outcome => outcome.id), ['fourth-outcome']);
+  assert.equal(tools.filter(entry => entry.startsWith(acceptanceTool)).length, drafted, 'the same outcomes were reopened without another draft run');
+  assert.ok(!closes.includes(703), 'the loop does not close again what the control plane closed');
+  // Approved again, an unmerged pull request a day after its approval is the master's.
+  await cycle(); await cycle();
+  assert.equal((await read(fourth.key)).stage, 'planned');
+  clock = Date.now() + 25 * 60 * 60_000;
+  await cycle(0);
+  assert.equal(state.actions[`acceptance:${fourth.id}`].state, 'failed');
+  assert.match(state.actions[`acceptance:${fourth.id}`].detail, /has not merged: GitHub has not merged #704 yet.*The master decides/);
+  const stuck = goalSummary(await read(fourth.key), Date.now() + 25 * 60 * 60_000);
+  assert.match(stuck.next!.who, /^master: acceptance pull request #704 was approved/);
+  fake.pulls.get(704)!.ciPassed = true;
+  await cycle();
+  assert.equal((await read(fourth.key)).stage, 'delivering');
+
+  // Without a GitHub App the control plane cannot land, and says so.
+  (http as any).services.github = null;
+  await ok(author, 'POST', `goals/${third.key}/draft`, { outcomes: draftOf(third.key, 'third-late').outcomes, pr: 990, branch: 'graphyard/third-late', head: 'f'.repeat(40) });
+  await ok(approver, 'POST', `goals/${third.key}/approve`, { reason: 'Right' });
+  const unlanded = await call(master, 'POST', `goals/${third.key}/land`, {});
+  assert.equal(unlanded.status, 503); assert.match(unlanded.text, /No GitHub App/);
 });
 
 /** A claimed item with its workspace, and the observation of a candidate changing `files` on its branch. */
@@ -286,7 +381,14 @@ test('unit:required-cases-protected — after the acceptance PR merges, a candid
 
   // The decision path: a case change, judged by neither its requester nor an implementer of the item.
   assert.equal((await call(worker, 'POST', `goals/${goal.key}/case-change`, { work: work.key, cases: ['board'], reason: 'not protected here' })).status, 422);
-  const requested: Goal = await ok(author, 'POST', `goals/${goal.key}/case-change`, { work: work.key, cases: ['setup-signup'], reason: 'The sign-up form moved to /setup; the customer outcome is unchanged' });
+  // A change for an item that does not exist yet is refused: whoever approved it could later implement that item.
+  const future = await call(author, 'POST', `goals/${goal.key}/case-change`, { work: 'GY-999999', cases: ['setup-signup'], reason: 'for an item not yet created' });
+  assert.equal(future.status, 404); assert.match(future.text, /GY-999999 is no work item/);
+  // A retried request after a lost response records one case change, not two.
+  const changeKey = randomUUID(), changeInput = { work: work.key, cases: ['setup-signup'], reason: 'The sign-up form moved to /setup; the customer outcome is unchanged' };
+  const requested: Goal = (await call(author, 'POST', `goals/${goal.key}/case-change`, changeInput, changeKey)).body;
+  assert.deepEqual((await call(author, 'POST', `goals/${goal.key}/case-change`, changeInput, changeKey)).body, requested);
+  assert.equal(requested.caseChanges.length, 1);
   const change = requested.caseChanges.at(-1)!;
   assert.equal(change.state, 'requested');
   const own = await call(author, 'POST', `goals/${goal.key}/case-change-approve`, { change: change.id, reason: 'mine' });
@@ -301,6 +403,9 @@ test('unit:required-cases-protected — after the acceptance PR merges, a candid
   const wider: Goal = { ...approved, protected: { cases: ['setup-signup', 'setup-audit'], outcomes: ['setup-signup', 'setup-audit'] } };
   assert.match(protectedCaseRefusals(work, observe([changed('e2e/contract.json')] as never), [wider]).join('; '), /no approved case change covers setup-audit/);
   assert.deepEqual(protectedCaseRefusals(work, observe([changed(casePath)] as never), [wider]), [], 'the granted case itself passes');
+  // A grant is void once its approver has implemented the item — assigned it, holding its lease, or its last assignee.
+  for (const held of [{ implementers: [approver.id] }, { lease: { owner: approver.id } }, { lastAssignment: { owner: approver.id } }])
+    assert.match(protectedCaseRefusals({ ...work, ...held } as Work, observe([changed(casePath)] as never), [approved]).join('; '), /modifies required case setup-signup/);
   // With the approved change, the same candidate is accepted.
   assert.deepEqual(protectedCaseRefusals(work, observe([changed(casePath), changed('e2e/contract.json')] as never), [approved]), []);
   assert.equal(await submit([changed('src/feature.ts'), changed(casePath)]), null);

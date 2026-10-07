@@ -1,11 +1,11 @@
 // Concern: the acceptance role (GY-1417) — each open goal is drafted headless into customer outcomes and
-// required cases on one pull request, judged headless by the approver identity, auto-merged at its
-// approved head, and recorded merged (or closed unmerged and drafted again).
+// required cases on one pull request, judged headless by the approver identity, landed by the control
+// plane at its approved head and recorded merged (or closed unmerged, or conflicting, and drafted again).
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { caseDirectory, contractFile, parseContract } from '../e2e/case.js';
-import { acceptanceDraftSchema, draftFiles, maxDraftRounds, type AcceptanceDraft, type Goal } from '../model/goal.js';
+import { acceptanceDraftSchema, acceptanceStuckMs, draftFiles, maxDraftRounds, type AcceptanceDraft, type Goal, type Landing } from '../model/goal.js';
 import { agentToken } from '../master/autonomy.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { selectFleetSession } from '../fleet.js';
@@ -27,9 +27,9 @@ export const acceptanceJudgeRole = 'acceptance-judge';
 export const acceptanceJudgementTool = 'graphyard_acceptance_judgement';
 /** A run that returned nothing is tried again after this long: each try is a paid model run. */
 export const acceptanceRetryMs = 60 * 60_000;
-/** A step that only talks to GitHub or the control plane (open, post, close, enqueue) is retried after this long, reusing the draft. */
+/** A step that only talks to GitHub or the control plane (open, post, close) is retried after this long, reusing the draft. */
 export const acceptanceStepRetryMs = 10 * 60_000;
-/** An acceptance pull request's state is read at most this often per goal. */
+/** An acceptance pull request's state is read, or its landing asked, at most this often per goal. */
 export const acceptancePollMs = 5 * 60_000;
 export const acceptancePayloadSchema = z.object({ goal: z.string().min(1).max(40), outcomes: z.unknown() }).strict()
   .transform(({ goal, outcomes }) => ({ goal, ...acceptanceDraftSchema.parse({ outcomes }) }));
@@ -51,11 +51,14 @@ export interface AcceptanceEffects {
   /** Post the verdict as the approver identity, which never authored a draft. */
   judge: (goal: Goal, judgement: Judgement) => Promise<Goal>;
   pullRequest: (pr: number) => Promise<PullRequestState>;
-  /** Auto-merge the approved pull request at exactly its approved head, once its required checks pass. */
-  enqueue: (pr: number, head: string) => Promise<void>;
+  /**
+   * Ask the control plane to land the approved pull request (POST /api/goals/:key/land): it publishes
+   * the App-bound gate verdicts on the approved head and merges it there once GitHub's own checks pass,
+   * recording it merged; a pull request closed, moved off that head or conflicting is closed and recorded closed.
+   */
+  land: (goal: Goal) => Promise<{ goal: Goal; landing: Landing }>;
   /** Close a refused or abandoned acceptance pull request with a comment and delete its branch; nothing when it is no longer open. */
   close: (pr: number, comment: string) => Promise<void>;
-  merged: (goal: Goal, pr: number, mergeSha: string | null) => Promise<Goal>;
   closed: (goal: Goal, pr: number, reason: string) => Promise<Goal>;
 }
 
@@ -66,11 +69,10 @@ const pending = new Map<string, Pending>();
 /** When each goal's next try of a step may run: `${goal.id}:${step}`. */
 const retryAt = new Map<string, number>();
 const polledAt = new Map<string, number>();
-/** Pull requests closed, and heads auto-merge was enabled at, by this loop. */
+/** Pull requests closed by this loop or the control plane. */
 const closedPulls = new Set<number>();
-const enqueued = new Set<string>();
 export async function draftsSettled() { await Promise.all([...live.values()]); }
-export function clearDrafts() { for (const store of [live, pending, retryAt, polledAt]) store.clear(); closedPulls.clear(); enqueued.clear(); }
+export function clearDrafts() { for (const store of [live, pending, retryAt, polledAt]) store.clear(); closedPulls.clear(); }
 
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 type Note = (goal: Goal, outcome: DaemonAction['state'], detail: string) => Promise<void>;
@@ -220,16 +222,30 @@ async function awaiting(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal,
   await note(goal, 'done', `Launched the approver's judgement of ${goal.key}'s acceptance draft #${goal.acceptance!.pr}, drafted by ${goal.acceptance!.author}`);
 }
 
+/**
+ * An approved draft is landed by the control plane, asked at most once per poll interval. Merged, its
+ * cases are protected. Conflicting with its base (another goal's contract binding merged first) or
+ * moved off its approved head, it was closed: the same outcomes are opened again from the current
+ * base without another run, and judged again. Not merged a day after its approval, it is the master's.
+ */
 async function planned(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal, note: Note) {
-  const { pr } = goal.acceptance!, head = goal.approval?.head ?? goal.acceptance!.head;
-  if (!enqueued.has(`${pr}@${head}`) && due(cycle, goal, 'enqueue')) {
-    try { await acceptance.enqueue(pr, head); enqueued.add(`${pr}@${head}`); await note(goal, 'done', `Enabled auto-merge of ${goal.key}'s approved acceptance pull request #${pr} at its approved head ${head.slice(0, 12)}`); }
-    catch (error) { later(cycle, goal, 'enqueue', acceptanceStepRetryMs); return note(goal, 'failed', `Could not enable auto-merge of ${goal.key}'s acceptance pull request #${pr}: ${message(error)}; it is tried again in ten minutes`); }
+  const { pr, outcomes } = goal.acceptance!;
+  if (!due(cycle, goal, 'land')) return;
+  later(cycle, goal, 'land', acceptancePollMs);
+  let answer: { goal: Goal; landing: Landing };
+  try { answer = await acceptance.land(goal); }
+  catch (error) { return note(goal, 'failed', `Could not land ${goal.key}'s approved acceptance pull request #${pr}: ${message(error)}; it is asked again in five minutes`); }
+  const { landing } = answer;
+  if (landing.state === 'merged') return note(goal, 'done', `${goal.key}'s acceptance pull request #${pr} merged; its cases ${outcomes.map(outcome => outcome.case.id).join(', ')} are protected`);
+  if (landing.state === 'waiting') {
+    const approved = goal.approval ? Date.parse(goal.approval.at) : cycle.clock;
+    if (cycle.clock - approved > acceptanceStuckMs)
+      return note(goal, 'failed', `${goal.key}'s acceptance pull request #${pr} was approved ${goal.approval!.at} and has not merged: ${landing.detail}. The master decides: graphyard goal closed ${goal.key} ${pr} -- REASON drafts it again`);
+    return note(goal, 'done', `Published the gate verdicts on ${goal.key}'s approved acceptance pull request #${pr} and asked GitHub to merge it: ${landing.detail}; asked again in five minutes`);
   }
-  const read = await polled(cycle, acceptance, goal, note);
-  if (read?.state !== 'merged') return;
-  await acceptance.merged(goal, pr, read.mergeSha);
-  await note(goal, 'done', `${goal.key}'s acceptance pull request #${pr} merged; its cases ${goal.acceptance!.outcomes.map(outcome => outcome.case.id).join(', ')} are protected`);
+  closedPulls.add(pr);
+  if (landing.state !== 'closed') pending.set(goal.id, { revision: answer.goal.revision, draft: { outcomes }, runs: [] });
+  return note(goal, 'done', `${goal.key}'s ${landing.detail}, so it went back to drafting${landing.state === 'closed' ? ' with that reason recorded' : '; the same outcomes are opened again from the current base and judged again'}`);
 }
 
 export async function openAcceptancePullRequest(run: ChildRun, root: string, scratch: string, config: { repository: string; baseBranch: string }, goal: Goal, draft: AcceptanceDraft) {
@@ -254,7 +270,7 @@ export async function openAcceptancePullRequest(run: ChildRun, root: string, scr
     const open = JSON.parse(String(await run('gh', ['pr', 'list', '--repo', config.repository, '--head', branch, '--state', 'open', '--json', 'number', '--limit', '1']))) as { number: number }[];
     if (open[0]) return { pr: open[0].number, branch, head };
     const body = [`Acceptance for ${goal.key}: ${goal.statement}`, '', ...draft.outcomes.map(outcome => `- **${outcome.title}** (${outcome.id}), proved by required uat case \`${outcome.case.id}\`: ${outcome.criteria.join('; ')}`), '',
-      'Drafted by the acceptance role and judged by the approver identity, never its author; once approved it auto-merges at the approved head, and its cases and bindings are protected from then on.'].join('\n');
+      'Drafted by the acceptance role and judged by the approver identity, never its author; once approved Graphyard lands it at the approved head, and its cases and bindings are protected from then on.'].join('\n');
     const url = String(await run('gh', ['pr', 'create', '--repo', config.repository, '--base', config.baseBranch, '--head', branch, '--title', `${goal.key}: acceptance — ${clip(goal.statement, 80)}`, '--body', body])).trim();
     const pr = Number(url.match(/\/pull\/(\d+)/)?.[1]);
     if (!Number.isSafeInteger(pr) || pr <= 0) throw new Error(`gh pr create answered ${clip(url, 200)}, which names no pull request`);
@@ -306,9 +322,8 @@ export function acceptanceEffects(config: MasterConfig, root: string, calls: Cal
     draft: (goal, input) => calls.asOperatorAgent('POST', `goals/${goal.key}/draft`, input, `acceptance:${goal.id}:${goal.revision}`),
     judge: (goal, judgement) => asApprover(`goals/${goal.key}/${judgement.verdict}`, { reason: judgement.reason }, `acceptance:${goal.id}:${goal.revision}:judged`),
     pullRequest: read,
-    enqueue: async (pr, head) => { await gh(['pr', 'merge', String(pr), '--auto', `--${config.mergeMethod ?? 'merge'}`, '--match-head-commit', head]); },
+    land: goal => calls.asOperatorAgent('POST', `goals/${goal.key}/land`, {}, `acceptance:${goal.id}:${goal.revision}:land:${Date.now()}`),
     close: async (pr, comment) => { if ((await read(pr)).state === 'open') await gh(['pr', 'close', String(pr), '--comment', comment, '--delete-branch']); },
-    merged: (goal, pr, mergeSha) => calls.asOperatorAgent('POST', `goals/${goal.key}/merged`, { pr, mergeSha }, `acceptance:${goal.id}:merged`),
     closed: (goal, pr, reason) => calls.asOperatorAgent('POST', `goals/${goal.key}/closed`, { pr, reason }, `acceptance:${goal.id}:${goal.revision}:closed`),
   };
 }
