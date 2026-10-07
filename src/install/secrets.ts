@@ -41,6 +41,8 @@ export const installRecordSchema = z.object({
   baseBranch: z.string().min(1),
   reviewPolicy: z.enum(['github', 'agent']).default('github'),
   domain: z.string().nullable().default(null),
+  /** The provider service install named (`--server-name`), so `master setup` finds that service again (GY-1416). */
+  service: z.string().min(1).nullable().default(null),
   url: z.string().nullable().default(null),
   principals: z.array(principalRecordSchema).default([]),
   github: z.object({ appId: z.number().int().positive(), installationId: z.number().int().positive(), slug: z.string().min(1), webhookFingerprint: z.string().length(12), ciAppIds: z.array(z.number().int().positive()).default([]) }).nullable().default(null),

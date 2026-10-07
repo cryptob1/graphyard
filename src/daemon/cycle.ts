@@ -262,6 +262,8 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // 7d. The pipeline doctor (GY-711): the deterministic remedies every cycle, and one doctor run
   //     every `run.doctor.intervalMinutes`. It shares the deployment step's clock too.
   await timings.step('doctor', () => doctorStep(cycle));
+  // 7e. Setup (GY-1416): derived deployment variables the deployment lacks are set by the loop, never asked of a human.
+  if (effects.selfProvision) await timings.step('setup', () => cycle.isolate('config', null, 'setup self-provision', () => effects.selfProvision!()));
   spent('deployment');
 
   await settleLaunches();
