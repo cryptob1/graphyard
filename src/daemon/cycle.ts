@@ -219,7 +219,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   const { settled, budget } = await timings.step('scope', () => scopeStep(cycle));
   // 2c. Open items planning a file the base split or renamed are re-planned onto its successors.
   await timings.step('successors', () => successorStep(cycle, settled));
-  // 2c'. The host's systemd user manager revived and its declared executor slots started (GY-1428), before the probes below read it.
+  // 2c2. The host's systemd user manager revived and its declared executor slots started (GY-1428), before the probes below read it.
   await timings.step('host supervision', () => cycle.isolate('config', null, 'host supervision', () => hostSupervisionStep(cycle)));
   // 2d. Every standing blocker is re-checked: its cause probed, cleared once the probe passes (GY-1008).
   await timings.step('blockers', () => blockerStep(cycle));

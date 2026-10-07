@@ -55,8 +55,8 @@ const blockedItem = (blocker: string) => item('GY-1399', { blocker, capacity: { 
  * A host whose user manager can stop answering. While it is down every `systemctl --user` call fails
  * the way the worker and the loop saw it; `loginctl enable-linger` starts it when logind allows.
  */
-function simulatedHost(options: { manager: boolean; slots: Record<string, string>; logind?: boolean; isActiveUnreachable?: boolean }) {
-  const state = { manager: options.manager, slots: { [loopUnitName]: 'active', ...options.slots } as Record<string, string> };
+function simulatedHost(options: { manager: boolean; slots: Record<string, string>; logind?: boolean; isActiveUnreachable?: boolean; disabled?: string[] }) {
+  const state = { manager: options.manager, slots: { [loopUnitName]: 'active', ...options.slots } as Record<string, string>, disabled: new Set(options.disabled ?? []) };
   const calls: string[] = [];
   const refuse = () => { throw Object.assign(new Error(`Command failed: systemctl --user\n${busRefused}`), { stderr: `${busRefused}\n`, stdout: '' }); };
   const systemctl: SystemctlRunner = args => {
@@ -69,7 +69,11 @@ function simulatedHost(options: { manager: boolean; slots: Record<string, string
       if (active === 'active') return 'active';
       throw Object.assign(new Error(`Command failed: systemctl --user is-active ${args.at(-1)}`), { stdout: `${active}\n`, stderr: '' });
     }
-    if (args[0] === 'enable' && args[1] === '--now') { for (const unit of args.slice(2)) state.slots[unit] = 'active'; return ''; }
+    if (args[0] === 'is-enabled') {
+      if (!state.disabled.has(args.at(-1)!)) return 'enabled';
+      throw Object.assign(new Error(`Command failed: systemctl --user is-enabled ${args.at(-1)}`), { stdout: 'disabled\n', stderr: '' });
+    }
+    if (args[0] === 'enable' && args[1] === '--now') { for (const unit of args.slice(2)) { state.slots[unit] = 'active'; state.disabled.delete(unit); } return ''; }
     return '';
   };
   const loginctl = (args: string[]) => {
@@ -143,7 +147,7 @@ test('manual:fault-class-configuration — GY-1428 the dead user manager is revi
     assert.match((await healUserSupervision(checkout, { systemctl: denied.systemctl, loginctl: denied.loginctl, masked: () => false, wait: async () => {}, platform: 'linux' })).reason!, /logind refused to start it: Could not enable linger: Access denied/);
     // A host that declares no slot is left alone.
     const bare = await temporaryDirectory('user-manager-bare');
-    try { const idle = simulatedHost({ manager: false, slots: {} }); assert.deepEqual(await healUserSupervision(bare, { systemctl: idle.systemctl, loginctl: idle.loginctl, masked: () => false, platform: 'linux' }), { performed: [], reason: null }); assert.ok(!idle.calls.includes('loginctl enable-linger')); }
+    try { const idle = simulatedHost({ manager: false, slots: {} }); const left = await healUserSupervision(bare, { systemctl: idle.systemctl, loginctl: idle.loginctl, masked: () => false, platform: 'linux' }); assert.deepEqual([left.performed, left.reason], [[], null]); assert.ok(!idle.calls.includes('loginctl enable-linger')); }
     finally { await rm(bare, { recursive: true, force: true }); }
   } finally { await rm(checkout, { recursive: true, force: true }); }
 });
@@ -172,22 +176,95 @@ test('manual:fault-class-configuration — GY-1428 sandbox-blocker instances: GY
   } finally { await rm(checkout, { recursive: true, force: true }); }
 });
 
-test('manual:fault-class-configuration — GY-1428 a manager that stays down is one failing run of the loop\'s step, ended when it answers', async () => {
-  const { hostSupervisionStep, hostSupervisionKey } = await import('../src/daemon/cycle-host.js');
+/** The real step over the real repair on a simulated host, one cycle a minute. */
+async function hostLoop(host: ReturnType<typeof simulatedHost>, checkout: string) {
+  const { hostSupervisionStep } = await import('../src/daemon/cycle-host.js');
+  const { healUserSupervision } = await import('../src/user-manager.js');
   const state = emptyDaemonState(config());
-  let heal = { performed: ['loginctl enable-linger, to start the systemd user manager that stopped answering'], reason: 'the systemd user manager still does not answer after loginctl enable-linger: no manager' as string | null };
-  const effects = { persist: async () => {}, healHostSupervision: async () => heal } as unknown as DaemonEffects;
-  const cycle = (at: number) => ({ effects, state, now: () => at, performed: [] } as unknown as Cycle);
-  for (let index = 0; index < 3; index++) await hostSupervisionStep(cycle(clock + index * 300_000));
-  assert.equal(state.actions[hostSupervisionKey].state, 'failed');
-  assert.equal(state.actions[hostSupervisionKey].attempts, 3);
-  assert.equal(Object.keys(state.actions).filter(key => key.includes('host-supervision')).length, 1, 'one record for the condition, not one per slot or blocker');
-  heal = { performed: [], reason: null };
-  const recovered = cycle(clock + 900_000);
-  await hostSupervisionStep(recovered);
-  assert.equal(state.actions[hostSupervisionKey].state, 'done');
-  // A healthy host with nothing to repair records nothing more.
-  const quiet = cycle(clock + 1_200_000);
-  await hostSupervisionStep(quiet);
-  assert.equal((quiet as any).performed.length, 0);
+  let waited = 0;
+  const effects = { persist: async () => {}, healHostSupervision: (allow: any) => healUserSupervision(checkout, { systemctl: host.systemctl, loginctl: host.loginctl, masked: () => false, wait: async (ms: number) => { waited += ms; }, platform: 'linux' }, allow) } as unknown as DaemonEffects;
+  return { state, waited: () => waited, cycle: async (minute: number) => { const performed: unknown[] = []; await hostSupervisionStep({ effects, state, now: () => clock + minute * 60_000, performed } as unknown as Cycle); return performed; } };
+}
+
+test('manual:fault-class-configuration — GY-1428 a manager that stays down is one failing run of the loop\'s step, revived with backoff, ended when it answers', async () => {
+  const { hostSupervisionKey } = await import('../src/daemon/cycle-host.js');
+  const checkout = await declaredCheckout(2);
+  try {
+    const host = simulatedHost({ manager: false, slots: {}, logind: false });
+    const loop = await hostLoop(host, checkout);
+    const revivals: number[] = [];
+    for (let minute = 0; minute < 120; minute++) {
+      const before = host.calls.filter(call => call === 'loginctl enable-linger').length;
+      await loop.cycle(minute);
+      if (host.calls.filter(call => call === 'loginctl enable-linger').length > before) revivals.push(minute);
+    }
+    // Backoff: 1, 2, 4, 8, 16, 30, 30 … minutes between revivals, never one a cycle.
+    assert.deepEqual(revivals, [0, 1, 3, 7, 15, 31, 61, 91], `revivals at minutes ${revivals.join(', ')}`);
+    assert.equal(loop.state.actions[hostSupervisionKey].state, 'failed');
+    assert.equal(loop.state.actions[hostSupervisionKey].attempts, revivals.length);
+    assert.equal(Object.keys(loop.state.actions).filter(key => key.startsWith('host-supervision')).length, 1, 'one record for the condition, not one per slot or blocker');
+    // The manager comes back on its own: the run ends, the slots are started, and a quiet host records nothing more.
+    host.state.manager = true;
+    const recovered = await loop.cycle(120);
+    assert.equal(loop.state.actions[hostSupervisionKey].state, 'done');
+    assert.ok(recovered.length >= 2, 'the run ended and the slots were started');
+    assert.deepEqual(await loop.cycle(121), []);
+  } finally { await rm(checkout, { recursive: true, force: true }); }
+});
+
+test('manual:fault-class-configuration — GY-1428 a revival waits at most three seconds, and only on the cycles it is attempted', async () => {
+  const checkout = await declaredCheckout(1);
+  try {
+    // logind accepts, but the manager never answers.
+    const host = simulatedHost({ manager: false, slots: {} });
+    const silent = { ...host, loginctl: (args: string[]) => { host.calls.push(`loginctl ${args.join(' ')}`); return ''; } };
+    const loop = await hostLoop(silent, checkout);
+    await loop.cycle(0);
+    assert.equal(loop.waited(), 3000);
+    await loop.cycle(0.5);
+    assert.equal(loop.waited(), 3000, 'a cycle inside the backoff neither asks logind nor waits');
+  } finally { await rm(checkout, { recursive: true, force: true }); }
+});
+
+test('manual:fault-class-configuration — GY-1428 a crash-looping slot is restarted with a cooldown, then reported failed and left down', async () => {
+  const { hostSlotKey } = await import('../src/daemon/cycle-host.js');
+  const checkout = await declaredCheckout(1);
+  try {
+    const unit = executorUnit(1);
+    const host = simulatedHost({ manager: true, slots: { [unit]: 'failed' } });
+    const loop = await hostLoop(host, checkout);
+    const starts: number[] = [];
+    for (let minute = 0; minute < 60; minute++) {
+      host.state.slots[unit] = 'failed'; // it dies again within a minute of every start
+      const before = host.calls.filter(call => call.startsWith('systemctl --user enable --now')).length;
+      await loop.cycle(minute);
+      if (host.calls.filter(call => call.startsWith('systemctl --user enable --now')).length > before) starts.push(minute);
+    }
+    assert.deepEqual(starts, [0, 10, 20], `restarts at minutes ${starts.join(', ')}`);
+    assert.equal(loop.state.actions[hostSlotKey(unit)].state, 'failed');
+    assert.match(loop.state.actions[hostSlotKey(unit)].detail, /no longer restarts it: journalctl --user -u graphyard-executor@1/);
+    // Seen running again (an operator started it), the failing run ends.
+    host.state.slots[unit] = 'active';
+    await loop.cycle(61);
+    assert.equal(loop.state.actions[hostSlotKey(unit)].state, 'done');
+  } finally { await rm(checkout, { recursive: true, force: true }); }
+});
+
+test('manual:fault-class-configuration — GY-1428 a slot an operator disabled is left down, and a loop outside its unit is reported, never started', async () => {
+  const { hostLoopUnitKey } = await import('../src/daemon/cycle-host.js');
+  const checkout = await declaredCheckout(2);
+  try {
+    const host = simulatedHost({ manager: true, slots: { [loopUnitName]: 'inactive' }, disabled: [executorUnit(2)] });
+    const loop = await hostLoop(host, checkout);
+    await loop.cycle(0);
+    assert.ok(host.calls.includes(`systemctl --user enable --now ${executorUnit(1)}`), host.calls.join('\n'));
+    assert.ok(!host.calls.some(call => call.startsWith('systemctl --user enable') && call.includes(executorUnit(2))), 'the disabled slot stays down');
+    assert.ok(!host.calls.some(call => call.startsWith('systemctl --user enable') && call.includes(loopUnitName)), 'the loop never starts its own unit under itself');
+    assert.equal(loop.state.actions[hostLoopUnitKey].state, 'waiting');
+    assert.match(loop.state.actions[hostLoopUnitKey].detail, /loop's unit is inactive/);
+    assert.deepEqual(await loop.cycle(1), [], 'reported once while nothing changes');
+    host.state.slots[loopUnitName] = 'active';
+    await loop.cycle(2);
+    assert.equal(loop.state.actions[hostLoopUnitKey], undefined);
+  } finally { await rm(checkout, { recursive: true, force: true }); }
 });
