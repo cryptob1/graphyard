@@ -4,6 +4,8 @@ import { activeLease, demand, operatorScopeIncludes, type Principal, type Work }
 import { capacityEventSchema, capacityRetryAt, capacitySignature, retainedExhaustions, type CapacityState, type ExhaustionRecord } from '../model/capacity.js';
 import { describeHumanRequest, humanAnswerSchema, humanDecisionLabel, humanOnlyReadsDecisions, humanOnlyRefusal, humanRequestBlocker, humanRequestSchema, openHumanOnly, parkRefusal, parkRule, resolveHumanAnswer, retainedHumanRequests, type HumanOnlySubject, type HumanRequest } from '../model/human-request.js';
 import { decisionsByWork } from './decision-ledger.js';
+import { scopeAskPaths } from '../model/blocker-class.js';
+import { closeEndedScopeRequest } from '../engine.js';
 import { endAttempt, recordIntervention } from '../pipeline-speed.js';
 import { save } from '../store.js';
 import { eventWorkSql } from '../store/snapshot-delta.js';
@@ -40,12 +42,18 @@ async function commit(services: Services, db: Db, now: Date, work: Work, all: Wo
   await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
   return work;
 }
-/** An attempt that stops without finishing ends on the record as released, never as a silent lapse. */
-function endLease(work: Work, epoch: number, now: Date) {
+/**
+ * An attempt that stops without finishing ends on the record as released, never as a silent lapse.
+ * The scope request of an attempt that no longer exists is moot; a fresh attempt asks afresh. It
+ * closes as every other attempt-ending command closes it (GY-597), lifting the refusal it wrote as
+ * the item's blocker: left standing, that refusal held the released item at the ready gate with
+ * no request for the loop or the approver to answer, until a coordinator widened it by hand (GY-1396).
+ */
+async function endLease(db: Db, work: Work, epoch: number, now: Date, by: string) {
   endAttempt(work, epoch, 'released', now);
   work.lease = null;
-  // The scope request of an attempt that no longer exists is moot; a fresh attempt asks afresh.
-  work.scopeRequest = null;
+  const closed = closeEndedScopeRequest(work, now, by);
+  if (closed) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'scope.closed', JSON.stringify({ details: closed })]);
 }
 
 /** Whether the item's latest `blocked` report was written by `owner` during attempt `epoch`. */
@@ -71,13 +79,18 @@ export async function requestHumanDecision(services: Services, actor: Principal,
     demand(work!.stage !== 'done', 'Delivered work is immutable');
     activeLease(work!, actor, data.epoch, now);
     demand(!work!.humanRequest, `${work!.key} already waits on human request ${work!.humanRequest?.id}; answer it before recording another`);
+    // GY-1396: files outside plannedFiles are a scope request, which the loop and the independent
+    // approver answer within minutes. Parked as a human-only decision, the ask waited for a
+    // coordinator to widen the item by hand once it was back at ready.
+    const scope = scopeAskPaths(`${data.needed}\n${data.reason}`, work!.plannedFiles);
+    demand(!scope.length, `A plannedFiles widening is not a human-only decision: ask for ${scope.join(', ')} with \`graphyard scope-request ${work!.key} ${data.epoch} ${scope.join(' ')} -- REASON\` and wait for its answer with \`graphyard scope-request ${work!.key} ${data.epoch} --wait\``, 409);
     // The requester's choices are kept as they chose them; a request without any offers its kind's defaults (`requestChoices`).
     const request: HumanRequest = { id: randomUUID(), kind: data.kind, reason: data.reason, needed: data.needed, requestedBy: actor.id, epoch: data.epoch, at: now.toISOString(),
       ...(data.choices ? { choices: data.choices } : {}), ...(data.sealTo ? { sealTo: data.sealTo } : {}) };
     work!.humanRequest = request;
     work!.blocker = describeHumanRequest(request);
     recordIntervention(work!, 'blocked');
-    endLease(work!, data.epoch, now);
+    await endLease(db, work!, data.epoch, now, 'human.requested');
     return commit(services, db, now, work!, all, actor, 'human.requested', { request, decision: humanDecisionLabel[request.kind], leaseEnded: { owner: actor.id, epoch: data.epoch } }, key, fingerprint);
   });
 }
@@ -190,7 +203,7 @@ export async function recordCapacity(services: Services, actor: Principal, id: s
           endedBlocker = work!.blocker;
           work!.blocker = null;
         }
-        if (work!.lease?.epoch === report.epoch) endLease(work!, report.epoch, now);
+        if (work!.lease?.epoch === report.epoch) await endLease(db, work!, report.epoch, now, report.cause === 'interrupted' ? 'capacity.interrupted' : 'capacity.exhausted');
       }
       const record: ExhaustionRecord = { ...report, at: now.toISOString(), owner, recordedBy: actor.id };
       work!.capacity = { ...capacity, exhaustions: [...capacity.exhaustions, record].slice(-retainedExhaustions) };

@@ -27,7 +27,7 @@ Each cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `linge
 
 ## Research and diagnosis
 
-`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); human-only parks: no fix; quota refusals wait in `daemon.diagnoses` until `retryAt`, then probe; `stale`/`withdrawn` decisions and stale backlog releases: re-requested ≤3 times, then escalated (30m fault); raced, delivered and [plane-wide](operations.md#incident-decision-tree) requests retry; restart-lost diagnoses and approver refusals raise no `loop` fault; base conflicts under 30m and restart-resumed merges no `merge` fault.
+`Recurring <class> faults` and `invariant:` faults past `invariantBoundMinutes` get a read-only diagnostician (`run.diagnostician`); human-only parks: no fix; quota refusals wait in `daemon.diagnoses` until `retryAt`, then probe; `stale`/`withdrawn` decisions and stale backlog releases: re-requested ≤3 times, then escalated (30m fault, `decision-stale`); raced, delivered and [plane-wide](operations.md#incident-decision-tree) requests retry; restart-lost diagnoses and approver refusals raise no `loop` fault; base conflicts under 30m and restart-resumed merges no `merge` fault.
 
 ## Machine-filed backlog
 

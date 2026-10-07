@@ -25,4 +25,4 @@ Settings › **Agents**: **Can launch now?** role chips (titles name next accoun
 
 ## Insights
 
-**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats filed `bug`), **Validation**, **Releases**.
+**Flow** (landed/day, merges/hour, waits); **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), flow analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats filed `bug`), **Validation**, **Releases**. Rework rounds answering a ground the loop acts on itself (base conflict, failed required check, change request, merge refusal, failed proof) aren't interventions, whoever requested; once an approver declines that request, a head rework counts again.

@@ -17,6 +17,7 @@ import type { Cycle } from '../src/daemon/cycle.js';
 import type { DoctorRunRecord } from '../src/daemon/state.js';
 import { diagnosticianSettings } from '../src/runner/payloads.js';
 import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
+import { graphyardTools as piTools } from '../integrations/pi/index.js';
 
 // GY-1091, 2026-10-01: five unclassified faults in 24 hours, from two shared causes.
 //
@@ -105,6 +106,27 @@ test('manual:fault-class-unclassified — GY-1141, GY-1039, GY-1158, GY-1167: a 
   const record: FaultRecord = { instances: [], open: {}, failing: {} };
   const opened = trackFaults(record, classifyAttention(launchWaitInstances.flatMap(wait => launchWaitAttention([wait]))), '2026-10-03T21:43:18.514Z');
   assert.deepEqual(opened.map(entry => [entry.subject, entry.kind, entry.faultClass]), launchWaitInstances.map(wait => [wait.work, ...wait.expected]));
+});
+
+// GY-1402: GY-1404 classifies the failed filing of a malformed fix (fix-item); the diagnose and doctor
+// tools also refuse a proof master create would refuse at the call, so the agent corrects it in its run
+// and the GY-1401 instance is not reached at all.
+// The diagnostician's fix item for GY-1401, as the loop's cursor recorded it: each proof an id followed by prose.
+const gy1401Criteria = [
+  { id: 'AC-1', text: 'The pass removes a candidate with bounded retries.', proofs: ['unit:tmp-reclaim: a tree that gains files while the pass removes it is retried and removed rather than failed ENOTEMPTY'] },
+  { id: 'AC-2', text: 'One entry\'s failure is isolated and named.', proofs: ['unit:tmp-reclaim: one entry\'s removal failure does not stop the pass\'s other removals'] },
+  { id: 'AC-3', text: 'A persistently failing entry cannot recur silently.', proofs: ['unit:tmp-reclaim: the loop\'s reclaim step keeps a failing /tmp entry visible until it is removed'] },
+];
+const gy1401 = (criteria: typeof gy1401Criteria) => ({ subject: 'GY-1401', cause: 'The /tmp reclaim pass removes a tree once and fails ENOTEMPTY when it gains files meanwhile',
+  evidence: { logLines: ['reclaim: ENOTEMPTY: directory not empty, rmdir /tmp/graphyard-x'], commands: [] }, faultClass: 'resources',
+  fix: { title: 'Retry a /tmp removal that meets a transient ENOTEMPTY', description: 'The reclaim pass fails a tree that gains files while it is removed.', type: 'bug', priority: 1, criteria, plannedFiles: ['src/daemon/reclaim.ts', 'tests/tmp-reclaim.test.ts'] } });
+const wellFormed = gy1401Criteria.map((criterion, index) => ({ ...criterion, proofs: [`unit:tmp-reclaim-${['retry', 'isolation', 'visible'][index]}`] }));
+
+test('manual:fault-class-unclassified — action:diagnosis|GY-1401: the diagnose tool refuses a proof master create would refuse, so the agent corrects it in its run', async () => {
+  const [diagnose] = piTools('diagnostician');
+  await assert.rejects(diagnose.execute('call-1', gy1401(gy1401Criteria)), /graphyard_diagnose was not recorded: input\.fix\.criteria\[0\]\.proofs\[0\] must match .*Correct the call and make it again/);
+  const accepted = await diagnose.execute('call-2', gy1401(wellFormed));
+  assert.match(accepted.content[0].text, /recorded diagnosis GY-1401/);
 });
 
 // GY-1402, 2026-10-06: three unclassified faults in 24 hours, each a failed maintenance action the loop

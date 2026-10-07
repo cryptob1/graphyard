@@ -1,6 +1,7 @@
 import { humanRequestBlocker } from './human-request.js';
 import { RefusedResponse, planeUnavailable } from './refusal.js';
-import { namedPaths, pathScopeContains, scopeRefusalBlocker } from './scope.js';
+import { blockedAttemptMarker } from './capacity.js';
+import { namedPaths, pathScopeContains, scopeRefusalBlocker, unplannedPaths } from './scope.js';
 import { widenedPlannedFiles } from './scope-collapse.js';
 // Types only from work.ts: work.ts reaches this module through its own field types.
 import type { Work } from './work.js';
@@ -160,8 +161,7 @@ export function classifyBlocker(text: string | null | undefined, context: { huma
   const path = refusedPath(blocker);
   if (readOnlyFileSystem.test(blocker) || (fileRefusal.test(blocker) && path)) return { class: 'sandbox-path', ...none, path };
   if (blocker.startsWith(scopeRefusalBlocker) || scopeWords.test(blocker)) {
-    // A URL is a reference, not a file: its host and path never become planned paths or a commit.
-    const unlinked = blocker.replace(/\b(?:https?:\/\/|www\.)\S+/gi, ' ');
+    const unlinked = unlinkedText(blocker);
     const paths = namedPaths(unlinked);
     const unclaimed = (token: string) => !paths.some(path => path.includes(token));
     const commit = [...unlinked.matchAll(namedCommit)].map(match => match[1].toLowerCase()).find(unclaimed) ?? unlinked.match(commitToken)?.find(unclaimed) ?? null;
@@ -171,10 +171,38 @@ export function classifyBlocker(text: string | null | undefined, context: { huma
   return { class: 'genuine', ...none };
 }
 
-/** The class of an item's standing blocker, or null when it has none. */
-export function itemBlockerClass(work: Pick<Work, 'blocker' | 'humanRequest'>): BlockerClassification | null {
+// A URL is a reference, not a file: its host and path never become planned paths or a commit.
+const unlinkedText = (text: string) => text.replace(/\b(?:https?:\/\/|www\.)\S+/gi, ' ');
+/**
+ * The files a text asks for in scope words, outside `plannedFiles` (GY-1396): a park or a blocker
+ * that is a scope request in other words. Empty when the text uses no scope words or every file it
+ * names is already planned.
+ */
+export const scopeAskPaths = (text: string, plannedFiles: readonly string[] | undefined) =>
+  scopeWords.test(text) ? unplannedPaths(plannedFiles, namedPaths(unlinkedText(text))) : [];
+
+/**
+ * The head a blocked attempt kept on the record (GY-1396): `blocked` ends its attempt and the CLI
+ * records the attempt's commit as its partial work, so a scope blocker that names its files but no
+ * commit was written for that one.
+ */
+function blockedAttemptCommit(work: Partial<Pick<Work, 'epoch' | 'capacity'>>) {
+  const marker = `${blockedAttemptMarker}${work.epoch}:`;
+  return work.capacity?.exhaustions.findLast(entry => entry.role === 'worker' && entry.epoch === work.epoch && entry.reason.startsWith(marker) && entry.partialWork.commit)?.partialWork.commit ?? null;
+}
+
+/**
+ * The class of an item's standing blocker, or null when it has none. A scope ask that names its
+ * files and no commit is `genuine` as text alone, but recorded by `blocked` it carries its
+ * attempt's kept head: then it is the planned-file-scope blocker the approver widens, not one a
+ * coordinator widens by hand once the item is back at ready (GY-1396).
+ */
+export function itemBlockerClass(work: Pick<Work, 'blocker' | 'humanRequest'> & Partial<Pick<Work, 'epoch' | 'capacity'>>): BlockerClassification | null {
   if (!work.blocker) return null;
-  return classifyBlocker(work.blocker, { humanRequest: !!work.humanRequest && !work.humanRequest.answer });
+  const classification = classifyBlocker(work.blocker, { humanRequest: !!work.humanRequest && !work.humanRequest.answer });
+  if (classification.class !== 'genuine' || work.blocker.startsWith(scopeRefusalBlocker) || !scopeWords.test(work.blocker)) return classification;
+  const paths = namedPaths(unlinkedText(work.blocker)), commit = paths.length ? blockedAttemptCommit(work) : null;
+  return commit ? { ...classification, class: 'planned-file-scope', paths, commit } : classification;
 }
 
 /** The planned-file-scope blocker's files that plannedFiles do not yet cover. */
