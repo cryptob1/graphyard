@@ -11,7 +11,7 @@ import { guardBroadScope, type MasterConfig, type ContainmentAssessment, contain
 import { researchRework } from '../research.js'; import { baseBreakHold } from '../master/base-break-refresh.js';
 import { unproducedManualProofs } from '../model/unproduced-attestation.js';
 import { mechanicalRework, type MechanicalFixRequest } from '../mechanical-findings.js';
-import { triageClosure } from '../model/machine-backlog.js';
+import { triageClosure } from '../model/machine-backlog.js'; import { refusedAttestationRework, type RefusedAttestation } from '../model/rework-ground.js';
 import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf, reworkRoundsOf } from '../review-cap.js';
 import { sessionName } from '../session-name.js';
@@ -231,8 +231,8 @@ export function blockerScopeDecision(work: Work): RoutineDecision | null {
  * Recovery releases a delivered item whose supervisor is still quarantined. A merge decision is
  * needed only where automatic merging is off, and then for the exact candidate that is mergeable.
  */
-export function routineDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = []): RoutineDecision | null {
-  const needed = neededDecision(work, config, baseFailed, exhausted, mechanical);
+export function routineDecision(work: Work, config: ReviewCapConfig, now: number, assessment?: ContainmentAssessment | null, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = [], refused: readonly RefusedAttestation[] = []): RoutineDecision | null {
+  const needed = neededDecision(work, config, baseFailed, exhausted, mechanical, refused);
   if (!needed) return null;
   // None attests anything about a worker: a merge is of a mergeable candidate, a triage closure of an unreleased backlog item,
   // and an attestation's approver judges the proof.
@@ -248,7 +248,7 @@ export function routineDecision(work: Work, config: ReviewCapConfig, now: number
  * What the item calls for, before asking whether the loop may attest that its worker is stopped.
  * `baseFailed` names required checks the base head fails too (GY-528); `exhausted`, spent producer requests (GY-496).
  */
-export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = []): RoutineDecision | null {
+export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = [], attestRefusals: readonly RefusedAttestation[] = []): RoutineDecision | null {
   if (work.stage === 'done') {
     return work.containmentQuarantine
       ? { action: 'recover', reason: `${work.key} is delivered and still fenced by its epoch ${work.containmentQuarantine.epoch} containment quarantine; recovery releases it without touching the delivery.`, binding: String(work.containmentQuarantine.epoch) } : null;
@@ -287,6 +287,8 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   if (ci) return { action: 'rework', ...ci };
   const spent = exhaustedProofRework(work, exhausted);
   if (spent) return { action: 'rework', ...spent };
+  const attestRefused = refusedAttestationRework(work, attestRefusals);
+  if (attestRefused) return { action: 'rework', ...attestRefused };
   // Past the cap a change request that escalates — a blocking finding, or one Graphyard cannot withdraw —
   // is the independent approver's to judge (GY-1118). The loop requests that one round itself, kept for
   // the approver it launches rather than its risk lane (GY-1389): the review-cap escalation had a master

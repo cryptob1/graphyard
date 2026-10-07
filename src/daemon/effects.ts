@@ -52,6 +52,7 @@ import type { DecompositionEvent } from '../decomposition.js';
 import { doctorEffects, doctorSettings, type DoctorEffects } from './doctor.js';
 import { docsSyncEffects, type DocsSyncEffects } from '../docs-sync.js';
 import { diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
+import { acceptanceEffects, type AcceptanceEffects } from './acceptance.js';
 import { diagnosticianSettings } from '../runner/payloads.js';
 import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
@@ -133,12 +134,10 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * when the repository has no such workflow, absent on a loop wired without it.
    */
   promotion?: PromotionReads | null;
-  /**
-   * Publishes `mergeQueue.rerunFailedChecks` to the control plane, which reruns a failed required
-   * check by it (GY-516); sent only on a change, and read at the start of every cycle so a
-   * reconfiguration applies before the next observation.
-   */
+  /** Publishes `mergeQueue.rerunFailedChecks` to the control plane, which reruns a failed required check by it (GY-516); sent only on a change, and read at the start of every cycle so a reconfiguration applies before the next observation. */
   publishMergeSettings?: () => Promise<unknown>;
+  /** GY-1416: the loop's setup step, `master setup --apply` beside the cycle at most hourly; it sets derived deployment variables only where the provider adapter applies them in place. */
+  selfProvision?: () => Promise<unknown>;
   /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
   requestSmoke: (work: Work) => void | Promise<void>;
   /**
@@ -349,13 +348,9 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   doctor?: DoctorEffects;
   /** Clears an item's blocker as the operator-agent identity, bound to the revision the loop read (GY-711 remedy 2): only for a scope refusal plannedFiles already covers. */
   unblock?: (work: Work, reason: string) => Promise<Work>;
-  /**
-   * The diagnostician (GY-439): its settings, the runners of its primary and fallback runs, the
-   * excerpts it reads, and filing and deciding as the master's operator-agent identity. Absent while
-   * `run.diagnostician.enabled` is false or the operator-agent or approver identity is missing:
-   * recurring-fault items are then filed and left for the master, as before.
-   */
+  /** The diagnostician (GY-439), absent while `run.diagnostician.enabled` is false, and the acceptance role (GY-1417); each absent while either master identity is missing. */
   diagnostician?: DiagnosticianEffects;
+  acceptance?: AcceptanceEffects;
   /** The recurrence rule; the environment's (GRAPHYARD_FAULT_CLASS_*) or the shipped default when absent. */
   faultClassPolicy?: FaultClassPolicy;
   /**
@@ -707,6 +702,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('production-environment', { environment });
       publishedEnvironment = environment;
     },
+    selfProvision: async () => (await import('../cli/master-setup.js')).loopSelfProvision(root, current()), // imported when first run: only this step reads the install modules
     publishMergeSettings: async () => {
       const config = { rerunFailedChecks: rerunFailedChecks(current()) };
       const published = JSON.stringify(config);
@@ -767,8 +763,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       // A required check red on the clock is named as master status names it, after buildMasterStatus.
       return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
     },
-    // The diagnostician acts only through the two identities a two-party decision needs (GY-439).
+    // The diagnostician (GY-439) and the acceptance role (GY-1417) act only through the two identities a two-party decision needs.
     get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnostician(config) : undefined; },
+    get acceptance() { const config = current(); return config.operatorAgent && config.approver ? acceptanceEffects(config, root, { run, fetcher, asCoordinator, asOperatorAgent }) : undefined; },
     get fileFaultClass() { return current().operatorAgent ? (input: LoopFiledItem, key: string) => asOperatorAgent('POST', 'work', input, key) as Promise<Work> : undefined; },
     get unblock() { return current().operatorAgent ? (work: Work, reason: string) => asOperatorAgent('POST', `work/${work.id}/unblock`, { reason, expectedRevision: work.revision }) as Promise<Work> : undefined; },
     get doctor() { const config = current(); return config.operatorAgent && doctorSettings(config.run).enabled ? doctorEffects(config, root, asOperatorAgent) : undefined; },

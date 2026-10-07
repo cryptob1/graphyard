@@ -33,6 +33,9 @@ import { stoppedStates } from '../../src/daemon/effects.js';
 import { loopThroughputMeasurement, throughputClaim } from '../../src/throughput.js';
 import { type RunOptions, type RunRecord, type RunResult, type Runner } from '../../src/runner/types.js';
 import { type DiagnosticianEffects } from '../../src/daemon/diagnosis.js';
+import { type AcceptanceEffects, clearDrafts, draftsSettled } from '../../src/daemon/acceptance.js';
+import type { Goal, Landing } from '../../src/model/goal.js';
+import { recordLanding } from '../../src/server/routes/goals.js';
 import { terminalDecisions } from '../../src/cli/decision-report.js';
 import { Launcher } from '../../src/daemon/cycle.js';
 import { wakeOwnObservation } from '../../src/master/base-break-refresh.js';
@@ -49,6 +52,9 @@ import { temporaryDirectory } from './temp-dirs.js';
 import { lostRunReason, sessionRetry } from '../../src/producer.js';
 import { type SelfUpgradeOutcome, performSelfUpgrade } from '../../src/daemon/upgrade.js';
 import { watchdogPlan } from '../../src/daemon/liveness.js';
+import { loopSelfProvision, masterSetup } from '../../src/cli/master-setup.js';
+import { deploymentTarget } from '../../src/install/index.js';
+import { type Transport } from '../../src/install/transport.js';
 import { loopUnitName, loopWatchdogSeconds } from '../../src/supervisor.js';
 import { executorUnit, writeExecutorDeclaration } from '../../src/repository-setup.js';
 import { healUserSupervision } from '../../src/user-manager.js';
@@ -125,7 +131,7 @@ import { type DiagnosisRun, type Failover, MANUAL, type MainGuardDay, PROOF, api
  * approver refuses the capped rework request of each of `refused` (GY-1389).
  */
 export let days = 0;
-export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; slowDeployment?: { from: number; to: number; observationMs: number }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
+export async function simulateDay(options: { hours: number; backlog?: boolean; master?: { exitAt: number; refuseRelease: { from: number; to: number }; sessionMinutes: number; heartbeatMinutes: number; working?: { from: number; retryAt: number } }; regression?: ('approvers-left-open' | 'docs-syncs-left-open')[]; headless?: boolean; handApprovers?: boolean; stranded?: boolean | 'resume'; staleRework?: boolean; staleMerge?: number; capacityWait?: { from: number; to: number }; diagnosisLimit?: { from: number; to: number }; scope?: boolean; refuseReworkOf?: number[]; reassigned?: number | null; workspaceFailure?: { item: number; until: number }; credentialBlocked?: { recovers: number; never: number }; blockers?: boolean; retrying?: { worker: number; approver: number }; starved?: { items: number[]; dropFirst: number }; docs?: { budget: { total: number; perPage: number } }; dispatchFailing?: { constant: number; changing: number; refuseBlocks: number; unblockAfterMs: number }; mainGuard?: MainGuardDay; containment?: { failUntil: number; slowUntil: number; refuseSettle?: number }; mechanical?: { applied: number; rejected: number }; slowDecisions?: { from: number; to: number; ms: number }; slowObservation?: { from: number; to: number; attentionMs: number }; slowDeployment?: { from: number; to: number; observationMs: number }; selfProvision?: { redeployFails: { from: number; to: number } }; plan?: Partial<typeof basePlan>; github806?: boolean; remedies?: boolean;
   decomposition?: { broadItems: number[]; concurrency?: number };
   /** GY-1294: the loop's own write moves a diagnosed item's revision before its approver reads the diagnosis decision, so the decision settles stale. */
   staleDiagnosis?: boolean;
@@ -156,7 +162,9 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * with it, and logind refuses to start it until `managerDown.to`; a revival's waits move the
    * day's clock. From `crashLoop.from` to `.to` slot 1 crashes half a minute after each start.
    */
-  hostSupervision?: { managerDown: { from: number; to: number }; crashLoop: { from: number; to: number } } }) {
+  hostSupervision?: { managerDown: { from: number; to: number }; crashLoop: { from: number; to: number } };
+  /** GY-1417: record three goals and wire the acceptance role (acceptanceWorld below). */
+  acceptance?: boolean }) {
   const dayStart = clock.now();
   // A day may restage the shared scenario: the day-scoped view of the plan is what every fault
   // below arms from, while each test's own assertions still read the shared base plan.
@@ -1170,6 +1178,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // operator-agent identity.
   const settings = diagnosticianSettings({ diagnostician: { invariantBoundMinutes: 30 } });
   const diagnosed: DiagnosisRun[] = [];
+  clearDrafts();
+  const acceptance = options.acceptance ? await acceptanceWorld(dayStart) : null;
   // GY-1092: for `diagnosisLimit` the provider refuses every run for its spent quota, naming no reset.
   const limited = () => !!options.diagnosisLimit && clock.now() - dayStart >= options.diagnosisLimit.from && clock.now() - dayStart < options.diagnosisLimit.to;
   const diagnostician: DiagnosticianEffects = {
@@ -1338,6 +1348,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       return engine.execute(principals.operatorAgent, 'create', null, input, key);
     },
     diagnostician,
+    ...(acceptance ? { acceptance: acceptance.effects } : {}),
     baseSuccessions: async since => ({ tip: github.tip, successions: github.successions.filter(entry => github.commits.get(entry.commit)!.at >= Date.parse(since)), files: new Set(github.files) }),
     replan: (work, paths, reason) => api(principals.operatorAgent, 'POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)),
     // The scope scenarios run the loop's own deciding and widening effects: the rule decides the
@@ -1649,6 +1660,41 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       return api(principals.coordinator, 'POST', `work/${item.id}/deployment`, { sha: observation.sha, mergeSha: item.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt });
     };
     effects.requestSmoke = async item => { deploymentDay.smokes.push(item.key); };
+  }
+  // ---- GY-1416: the loop's setup step (7e) on a Railway deployment that lacks the revert approver.
+  // ---- The real `master setup --apply` runs against a scripted Railway CLI on the simulated clock;
+  // ---- at `redeployFails.from` the variables vanish and every redeploy fails until `redeployFails.to`.
+  const provisionDay = { runs: [] as number[], sets: [] as { name: string; at: number }[], redeploys: [] as { at: number; ok: boolean }[], actions: [] as { at: number; keys: string[] }[] };
+  if (options.selfProvision) {
+    const window = options.selfProvision.redeployFails, provisionRoot = await temporaryDirectory('soak-self-provision');
+    const at = () => clock.now() - dayStart, failing = () => at() >= window.from && at() < window.to;
+    const deployed: Record<string, string> = { GITHUB_APP_ID: '1234' };
+    let vanished = false;
+    const transport: Transport = {
+      description: 'soak railway',
+      async exec(_program, args, options = {}) {
+        if (args[0] === 'status') return { code: 0, stdout: JSON.stringify({ name: 'graphyard', services: { edges: [{ node: { name: 'graphyard' } }] } }), stderr: '' };
+        if (args[0] === 'variables' && args.includes('--json')) return { code: 0, stdout: JSON.stringify(deployed), stderr: '' };
+        if (args[0] === 'variable' && args[1] === 'set') { deployed[args[args.length - 1]] = options.input ?? ''; provisionDay.sets.push({ name: args[args.length - 1], at: at() }); }
+        args.forEach((arg, index) => { if (args[index - 1] === '--set') { deployed[arg.slice(0, arg.indexOf('='))] = arg.slice(arg.indexOf('=') + 1); provisionDay.sets.push({ name: arg.slice(0, arg.indexOf('=')), at: at() }); } });
+        if (args[0] === 'redeploy') { provisionDay.redeploys.push({ at: at(), ok: !failing() }); if (failing()) throw new Error('railway redeploy exited 1: deployment failed'); }
+        return { code: args[0] === 'domain' ? 1 : 0, stdout: '', stderr: '' };
+      },
+      async putFile() { throw new Error('Railway variables are never written as files'); },
+    };
+    const target = deploymentTarget({ provider: 'railway', repository, service: 'graphyard', linkDirectory: provisionRoot, transport });
+    const derived = [{ name: 'GRAPHYARD_REVERT_APPROVER_APP_ID', value: '55001', secret: false, source: 'the reviewer App registration' },
+      { name: 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY', value: 'soak-reviewer-private-key-material', secret: true, source: 'the reviewer App registration' }];
+    const setup = ((root: string, master: Parameters<typeof masterSetup>[1], setupOptions: Parameters<typeof masterSetup>[2]) => {
+      provisionDay.runs.push(at());
+      return masterSetup(root, master, setupOptions, { locate: async () => ({ ...target, derived }), now: () => clock.now() });
+    }) as typeof masterSetup;
+    effects.selfProvision = async () => {
+      // The variables vanish from the deployment as the failing window opens (a service recreated by hand).
+      if (!vanished && at() >= window.from) { vanished = true; for (const value of derived) delete deployed[value.name]; }
+      provisionDay.actions.push({ at: at(), keys: Object.keys(state.actions).filter(key => key.includes('self-provision')) });
+      return loopSelfProvision(provisionRoot, { repository: config.repository }, { now: clock.now(), setup });
+    };
   }
   if (options.staleRelease) {
     // The backlog's history reads take real time, as a slow control plane's do; master status's own
@@ -2217,6 +2263,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         if (options.slowDeployment) { deploymentDay.land(); await new Promise(resolve => setImmediate(resolve)); }
         const cycleStart = clock.now(); budgetDay.cycleSlow = 0;
         const result = await runCycle(config, state, effects, clock.now, launcher); cycles++;
+        if (acceptance) await draftsSettled();
         if (options.staleRelease) { staleReleaseDay.steps.push({ elapsed, ms: result.metrics.steps?.decisions?.ms ?? 0, backlogReads: staleReleaseDay.backlogReads }); staleReleaseDay.backlogReads = 0; }
         if (options.slowDecisions) budgetDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, slow: budgetDay.cycleSlow, deferred: [...state.decisionsDeferred] });
         if (options.slowDeployment) deploymentDay.cycles.push({ cycle: cycles - 1, elapsed, spentMs: clock.now() - cycleStart, cut: result.actions.some(action => action.kind === 'deployment' && /spent its \d+s budget/.test(action.detail)), pending: deploymentStep.deploymentReadsPending(state) });
@@ -2362,11 +2409,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: readdirSync(tmpRoot) };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, staleMerges, restartLog, hostDay, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain };
+    wakes, staleMerges, restartLog, hostDay, guardDay, budgetDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null };
 }
 
 /**
@@ -2398,3 +2445,88 @@ export function assertLaunchesConfined(day: { confined: { role: string; key: str
 // GY-612: the main day starts below the host's memory floor — the way the day that item records
 // began — and recovers a quarter hour in, so the only launch it holds back is the first item's.
 export const memoryDay = { memoryDip: { from: 0, until: 15 * minute } };
+
+/**
+ * GY-1417: the acceptance role's day. Three goals are recorded on the soak plane's real /api/goals
+ * and the loop drives them through `acceptanceStep` with headless runs faked and GitHub's pull
+ * requests held here. `signup`'s first open and first post fail and its first draft is refused;
+ * `billing`'s approved pull request is closed unmerged by a person; `audit`'s first draft run
+ * returns nothing and its first approved pull request conflicts with the base. The control plane's
+ * land answers waiting until half an hour after it was first asked, then merged.
+ */
+export async function acceptanceWorld(dayStart: number) {
+  const day = {
+    goals: {} as Record<string, string>, runs: [] as { goal: string; role: 'draft' | 'judge'; at: number }[], opens: [] as { goal: string; pr: number; revision: number; at: number }[],
+    posts: [] as { goal: string; ok: boolean; at: number }[], reads: [] as { pr: number; at: number }[], closes: [] as number[], lands: [] as { pr: number; at: number }[],
+    pulls: new Map<number, { goal: string; branch: string; head: string; state: 'open' | 'closed' | 'merged'; autoAt: number | null }>(),
+  };
+  for (const name of ['signup', 'billing', 'audit'])
+    day.goals[name] = (await api(principals.operatorAgent, 'POST', 'goals', { statement: `Customers can use ${name} without help`, users: ['Repository operators'], constraints: [], deployTarget: 'uat' })).key;
+  const named = (key: string) => Object.entries(day.goals).find(([, goal]) => goal === key)![0];
+  let next = 5000, openFailed = false, billingClosed = false, auditConflicted = false;
+  const runner = (role: 'draft' | 'judge', goal: Goal): Runner => ({ name: 'soak-acceptance', start<T>(_prompt: string, options: RunOptions<T>) {
+    const name = named(goal.key), drafts = day.runs.filter(run => run.goal === name && run.role === role).length;
+    day.runs.push({ goal: name, role, at: clock.now() - dayStart });
+    const failed = role === 'draft' && name === 'audit' && drafts < 2;
+    const outcome = `${name}-${goal.revision}`;
+    const payload = role === 'draft' ? { goal: goal.key, outcomes: [{ id: outcome, title: `A customer completes ${name}`, criteria: [`The ${name} page answers`], case: { id: outcome, title: `${name} answers`, tags: ['api'], target: 'uat', required: true,
+      steps: [{ kind: 'http', name: 'read the board', method: 'GET', path: '/api/board', status: 200 }] } }] }
+      : { goal: goal.key, verdict: name === 'signup' && goal.drafts === 1 ? 'refuse' : 'approve', reason: name === 'signup' && goal.drafts === 1 ? 'The case checks the board, not the sign-up' : 'Each outcome is what a customer asked for' };
+    const result: RunResult<T> = failed ? { ok: false, failure: { reason: 'no-payload', detail: 'the run ended without a graphyard_acceptance call' }, payloads: [] }
+      : { ok: true, tool: options.tool, payload: options.validate(payload), payloads: [] };
+    return { id: `soak-acceptance-${day.runs.length}`, events: [], onEvent: () => () => {}, cancel() {}, result: async () => result };
+  } });
+  const read = (pr: number) => {
+    day.reads.push({ pr, at: clock.now() - dayStart });
+    const pull = day.pulls.get(pr)!;
+    return { state: pull.state, mergeSha: pull.state === 'merged' ? sha('acceptance-merge', pr) : null, head: pull.head };
+  };
+  // POST /api/goals/:key/land as the control plane answers it, its GitHub held here: the merge lands half an hour after it is
+  // first asked; a person closes billing's first approved pull request instead, and audit's first conflicts with the base.
+  const land = async (goal: Goal) => {
+    const pr = goal.acceptance!.pr, pull = day.pulls.get(pr)!;
+    assert.equal(pull.head, goal.approval!.head, 'an acceptance pull request is landed only at its approved head');
+    day.lands.push({ pr, at: clock.now() - dayStart });
+    pull.autoAt ??= clock.now();
+    let state: Landing['state'] = 'waiting';
+    if (pull.goal === 'audit' && !auditConflicted) { auditConflicted = true; pull.state = 'closed'; state = 'conflicting'; }
+    else if (pull.state === 'open' && clock.now() - pull.autoAt >= 30 * minute) {
+      pull.state = pull.goal === 'billing' && !billingClosed ? 'closed' : 'merged';
+      billingClosed ||= pull.goal === 'billing';
+      state = pull.state;
+    }
+    const detail = state === 'conflicting' ? `acceptance pull request #${pr} conflicts with main` : state === 'closed' ? `acceptance pull request #${pr} was closed without merging` : state === 'merged' ? `#${pr} merged` : 'Required status check "test" is expected';
+    const landing: Landing = { state, detail, mergeSha: state === 'merged' ? sha('acceptance-merge', pr) : null };
+    if (state === 'waiting') return { goal, landing };
+    // Recorded as the land route records it: merged has no route of its own.
+    return { goal: await recordLanding(store, goal, landing, principals.operatorAgent), landing };
+  };
+  const effects: AcceptanceEffects = {
+    settings: diagnosticianSettings({}), cwd: coordinatorRoot!,
+    goals: async () => (await api(principals.coordinator, 'GET', 'goals?open=1')).goals,
+    runner: async (role, attempt, goal) => ({ runner: runner(role, goal), runtime: `soak-${attempt}`, model: attempt }),
+    open: async (goal, draft) => {
+      const name = named(goal.key), branch = `graphyard/${goal.key.toLowerCase()}-acceptance-${goal.revision}`;
+      if (name === 'signup' && !openFailed) { openFailed = true; throw new Error('gh pr create: HTTP 502'); }
+      const existing = [...day.pulls].find(([, pull]) => pull.branch === branch && pull.state === 'open');
+      const head = sha('acceptance', goal.key, goal.revision, JSON.stringify(draft));
+      if (existing) { existing[1].head = head; return { pr: existing[0], branch, head }; }
+      const pr = next++;
+      day.pulls.set(pr, { goal: name, branch, head, state: 'open', autoAt: null });
+      day.opens.push({ goal: name, pr, revision: goal.revision, at: clock.now() - dayStart });
+      return { pr, branch, head };
+    },
+    draft: async (goal, input) => {
+      const name = named(goal.key), first = !day.posts.some(entry => entry.goal === name);
+      day.posts.push({ goal: name, ok: !(name === 'signup' && first), at: clock.now() - dayStart });
+      if (name === 'signup' && first) throw new Error('Graphyard refused goals (502): Bad Gateway');
+      return api(principals.operatorAgent, 'POST', `goals/${goal.key}/draft`, input, `acceptance:${goal.id}:${goal.revision}`);
+    },
+    judge: (goal, judgement) => api(principals.approver, 'POST', `goals/${goal.key}/${judgement.verdict}`, { reason: judgement.reason }, `acceptance:${goal.id}:${goal.revision}:judged`),
+    pullRequest: async pr => read(pr),
+    land,
+    close: async pr => { const pull = day.pulls.get(pr)!; if (pull.state === 'open') pull.state = 'closed'; day.closes.push(pr); },
+    closed: (goal, pr, reason) => api(principals.operatorAgent, 'POST', `goals/${goal.key}/closed`, { pr, reason }, `acceptance:${goal.id}:${goal.revision}:closed`),
+  };
+  return { day, effects };
+}

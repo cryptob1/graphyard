@@ -3,6 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { defineCommands } from './registry.js';
 import { cycleBudget } from './master-status.js';
 import { masterInit } from './master-init.js';
+import { masterSetupCommand } from './master-setup.js';
+import { loadStoredMasterConfig } from '../master.js';
 import { sessionCommands } from './session-commands.js';
 import { registryHelp } from './master-registry.js';
 import { executorsHelp } from './master-executors.js';
@@ -34,6 +36,10 @@ export const masterCommands = defineCommands([
       '  master review GY-N [PROFILE]  Launch the bound reviewer on the exact current candidate as the',
       '                                open request\'s next attempt; master run does this on its own,',
       '                                so it is the recovery path for a request nothing else answers',
+      '  master setup [--apply] [--provider P --service NAME --link-dir DIR]',
+      '                                Plan, or set, each deployment variable derived from credentials',
+      '                                saved on this host that the deployment lacks (the revert approver',
+      '                                from the reviewer App); secrets piped, audited by fingerprint',
       '  master protection [--apply]   Reconcile branch protection with every open review policy',
       '  master tip-cleanup [--apply]  Delete the speculative-tip refs the removed merge queue left',
       '  master browser FLOW [--dry-run]',
@@ -87,6 +93,7 @@ export const masterCommands = defineCommands([
       // The guide's first line is its docs-index entry, not guide body.
       if (id === 'guide') return console.log((await readFile(fileURLToPath(new URL('../../docs/master-agent.md', import.meta.url)), 'utf8')).replace(/^<!-- page:[^\n]*\n/, ''));
       if (id === 'init') return masterInit(context, root);
+      if (id === 'setup') return masterSetupCommand(context, root, await loadStoredMasterConfig(root));
       const session = await openMasterSession(context, root);
       // Each concern under ./master/ answers its own subcommands; the first that knows the id handles it.
       for (const command of [intentCommand, fleetCommand, operationsCommand, loopCommand]) if (await command(session) !== unhandled) return;

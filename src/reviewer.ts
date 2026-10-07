@@ -686,7 +686,7 @@ async function writeReviewerSession(directory: string, token: string) {
  */
 export class ReviewSessionPending extends Error {
   readonly reviewSessionPending = true;
-  constructor(message: string, readonly work: string, readonly pending: { sha: string; agentName: string; requestId?: string; answered?: { state: string; reviewId: number } }) { super(message); }
+  constructor(message: string, readonly work: string, readonly pending: { sha: string; agentName: string; requestId?: string; answered?: { state: string; reviewId: number; at: string } }) { super(message); }
 }
 /**
  * GY-1083: the session that already answered a review request — settled `completed` on a standing
@@ -774,7 +774,7 @@ export async function launchReview(root: string, work: Work, profileName: string
     // control plane's observation, and a second session's verdict would conflict with it.
     const answered = dependencies.requestId ? answeringRecord(ledger.reviews, dependencies.requestId, binding.sha, work.observation) : null;
     if (answered) return { refusal: new ReviewSessionPending(`Reviewer session ${answered.agentName} already answered ${work.key} review request ${dependencies.requestId} on ${binding.sha.slice(0, 7)} with ${answered.verdict!.state} (review ${answered.verdict!.reviewId}); one request yields one verdict, so no second session is launched and the control plane settles the request once it observes that verdict`,
-      work.key, { sha: binding.sha, agentName: answered.agentName, requestId: dependencies.requestId!, answered: { state: answered.verdict!.state, reviewId: answered.verdict!.reviewId } }) };
+      work.key, { sha: binding.sha, agentName: answered.agentName, requestId: dependencies.requestId!, answered: { state: answered.verdict!.state, reviewId: answered.verdict!.reviewId, at: answered.closedAt ?? answered.verdict!.submittedAt } }) };
     for (const pending of pendings) await closeReviewSession(root, pending, { run: dependencies.run, now }, { state: 'cancelled', resolution: staleReviewReason(pending, [work])!, force: true });
     // A Herdr session already serving this request is the same launch twice, whatever the ledger says.
     const serving = requestSessionInHerdr(ledger.reviews, agents, config.reviewers, { key: work.key, sha: binding.sha, requestId: dependencies.requestId });

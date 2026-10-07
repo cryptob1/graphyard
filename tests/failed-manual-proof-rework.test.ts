@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig, type MasterRun } from '../src/master.js';
 import { neededDecision, proofRework } from '../src/daemon/decisions.js';
+import { reworkGround, laneApprover, refusedAttestationWatch } from '../src/model/rework-ground.js';
+import { foldInterventions, type InterventionLedgerRow } from '../src/interventions.js';
 import { producerPrompt } from '../src/producer.js';
 import { piProducerPrompt } from '../src/runner/roles.js';
 import type { Evidence, Work } from '../src/model.js';
@@ -121,4 +123,105 @@ test('unit:producer-manual-proof-never-escalated — docs/operations.md states t
   assert.match(page, /an unexecuted one an attestation/);
   const words = page.split(/\s+/).filter(Boolean).length;
   assert.ok(words <= 1200, `docs/operations.md stays within the 1,200-word page budget (${words} words)`);
+});
+
+// GY-1394. 25 rework decisions at the acceptance stage in the week to 2026-10-07 each waited on an
+// approver or a master although the record had already decided the question. Every instance, by
+// its decision id, and the ground that now applies it with nobody stepping in:
+// - proof: a trusted proof failed on the exact head (the loop's proofRework, or the same ground
+//   restated by a master) — the server applies it on that ground (reworkGround);
+// - attest: an approver refused the head's attestation — the loop requests the rework on the
+//   refusal itself (refusedAttestationRework) and the server applies it on that ground;
+//   GY-711's master judged the docs review itself before any attestation; the master instructions
+//   now leave that judgement to the attestation, whose refusal returns the head;
+// - lane: the risk lane already applied it with no approver (GY-883): a base conflict (GY-971
+//   924dfe75, GY-1107) now records that ground, and the fold no longer counts a grounded rework;
+// - spent: every producer session ended unacted (never started, quota spent); since GY-1153 the loop asks no
+//   rework for such a head and relaunches the request once an eligible account exists.
+const instances: [string, string, 'proof' | 'attest' | 'lane' | 'spent'][] = [
+  ['GY-1190', '17911573', 'proof'], ['GY-717', 'd0573f13', 'proof'], ['GY-971', '924dfe75', 'lane'], ['GY-1098', 'c6358977', 'attest'],
+  ['GY-711', 'ebccbd40', 'attest'], ['GY-1098', '9439a8f4', 'attest'], ['GY-1052', '62f1eeb8', 'spent'], ['GY-980', '8d431a81', 'spent'],
+  ['GY-1107', '714832d0', 'lane'], ['GY-1048', 'c020f65d', 'proof'], ['GY-1039', 'afa1c1c4', 'proof'], ['GY-717', '6711eaba', 'proof'],
+  ['GY-1048', '4485e840', 'proof'], ['GY-1052', 'fbd8c016', 'proof'], ['GY-1039', 'dd0c1b80', 'proof'], ['GY-1048', 'acdceb88', 'proof'],
+  ['GY-1039', 'f69445c1', 'proof'], ['GY-1052', '3abd907e', 'proof'], ['GY-971', '6b56ae07', 'spent'], ['GY-1048', 'c14f480e', 'proof'],
+  ['GY-1052', '5b3b9187', 'proof'], ['GY-717', '7cb58672', 'proof'], ['GY-1048', '7e8b07a5', 'proof'], ['GY-1039', 'd611f71b', 'proof'],
+  ['GY-957', 'a3afe3bf', 'proof'],
+];
+const refusedAttest = (input: Record<string, unknown> = {}) => ({ id: 'a7e5f000-0000-4000-8000-000000000001', action: 'attest' as const, state: 'refused', refusal: { approver: 'graphyard-approver', reason: 'docs/github.md deletes shipped behaviour', at },
+  input: { proof: 'manual:docs-review', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 1, skipped: 0, ...input } });
+
+test('unit:rework-ground-recorded — a trusted failure, a refused attestation or a confirmed base conflict on the exact head is the rework\u2019s ground', () => {
+  assert.equal(instances.length, 25, 'every listed instance is classified');
+  // proof: a trusted producer judged the head and failed it.
+  assert.match(reworkGround(item([{ executed: 3 }]), [])!, new RegExp(`a trusted proof failed on candidate ${head.slice(0, 12)} \\(${PROOF}\\)`));
+  // Nothing judged (executed 0), an untrusted record, or a pass is no ground: such a rework still waits for its approver.
+  assert.equal(reworkGround(item(), []), null);
+  assert.equal(reworkGround(item([{ executed: 3, trusted: false }]), []), null);
+  assert.equal(reworkGround(item([{ result: 'pass', executed: 3 }]), []), null);
+  // attest: the refusal binds exactly this head, base and policy revision.
+  assert.match(reworkGround(item(), [refusedAttest()])!, /graphyard-approver refused the attestation of manual:docs-review/);
+  for (const other of [{ sha: 'c'.repeat(40) }, { baseSha: 'c'.repeat(40) }, { policyRevision: 2 }, { result: 'fail' }])
+    assert.equal(reworkGround(item(), [refusedAttest(other)]), null, `a refusal of another binding is no ground: ${JSON.stringify(other)}`);
+  assert.equal(reworkGround(item(), [{ ...refusedAttest(), state: 'requested', refusal: null }]), null, 'an attestation still awaiting judgement is no ground');
+  // conflict: GitHub's reading alone is no ground (GY-375) — neither on a base that has not moved,
+  // nor while the control plane's test merge onto a moved tip is pending, nor where that test merge
+  // never runs (a blocked or a draft item): a high-lane rework on it waits for its approver.
+  const tip = 'c'.repeat(40);
+  const conflicting = (extra: Partial<Work> = {}, observation: Record<string, unknown> = {}) => {
+    const work = item([{}], extra);
+    work.observation = { ...work.observation!, conflicting: true, mergeable: false, baseTip: tip, baseTipContained: false, ...observation } as Work['observation'];
+    return work;
+  };
+  assert.equal(reworkGround(conflicting({}, { baseTip: base, baseTipContained: true }), []), null, 'a reading on an unmoved base');
+  assert.equal(reworkGround(conflicting(), []), null, 'a reading whose test merge is pending');
+  assert.equal(reworkGround(conflicting({ blocker: 'waiting on a credential' }), []), null, 'a blocked item\u2019s reading');
+  assert.equal(reworkGround(conflicting({}, { draft: true }), []), null, 'a draft\u2019s reading');
+  // Only the control plane's own test merge of this head onto the observed tip confirms it.
+  const refresh = { at, from: { sha: head, baseSha: base }, base: tip, head: null, policyRevision: 1, conflict: 'Merge conflicts in src/a.ts' } as unknown as Work['baseRefresh'];
+  for (const extra of [{}, { blocker: 'waiting on a credential' }])
+    assert.match(reworkGround(conflicting({ ...extra, baseRefresh: refresh }), [])!, new RegExp(`candidate ${head.slice(0, 12)} conflicts with base branch tip ${tip.slice(0, 12)} in the control plane's own test merge`));
+  for (const stale of [{ from: { sha: 'e'.repeat(40), baseSha: base } }, { base: 'e'.repeat(40) }, { policyRevision: 2 }, { conflict: null }])
+    assert.equal(reworkGround(conflicting({ baseRefresh: { ...refresh!, ...stale } as Work['baseRefresh'] }), []), null, `a test merge of another head, tip or revision, or a clean one: ${JSON.stringify(stale)}`);
+  // A delivered head, or one no longer submitted, has no ground.
+  assert.equal(reworkGround(item([{ executed: 3 }], { stage: 'done' }), []), null);
+  // A head already returned to a worker has spent its ground: the failure stays on record until a
+  // new head is submitted, but a later rework (the retry cap's, GY-885) waits for its approver.
+  assert.equal(reworkGround(item([{ executed: 3 }], { reworkRequested: true }), []), null, 'a returned head\u2019s failed proof');
+  assert.equal(reworkGround(item([{}], { reworkRequested: true }), [refusedAttest()]), null, 'a returned head\u2019s refused attestation');
+  assert.equal(reworkGround(conflicting({ reworkRequested: true, baseRefresh: refresh }), []), null, 'a returned head\u2019s test-merge conflict');
+  assert.equal(laneApprover, 'graphyard-risk-lane');
+});
+
+test('unit:rework-ground-recorded — a refused attestation of the head returns it to a worker through the loop\u2019s routine rework', () => {
+  const refusal = refusedAttestationWatch(refusedAttest())!;
+  assert.deepEqual({ ...refusal, at: undefined }, { approver: 'graphyard-approver', reason: 'docs/github.md deletes shipped behaviour', at: undefined, proof: 'manual:docs-review', sha: head, baseSha: base, policyRevision: 1 });
+  assert.equal(refusedAttestationWatch({ ...refusedAttest(), state: 'applied' }), null);
+  assert.equal(refusedAttestationWatch({ ...refusedAttest(), action: 'rework' }), null);
+  const passed = item([{ result: 'pass', executed: 3 }]);
+  assert.equal(neededDecision(passed, { autoMerge: true }), null, 'nothing is asked without the refusal');
+  const needed = neededDecision(passed, { autoMerge: true }, undefined, [], [], [{ decision: 'a7e5f000', refusal }]);
+  assert.equal(needed?.action, 'rework');
+  assert.equal(needed?.binding, `${head}:attest-refused:a7e5f000`);
+  assert.match(needed!.reason, /refused the attestation of manual:docs-review on candidate .*"docs\/github.md deletes shipped behaviour"/);
+  // A refusal of an earlier head asks for nothing on this one.
+  assert.equal(neededDecision(passed, { autoMerge: true }, undefined, [], [], [{ decision: 'old', refusal: { ...refusal, sha: 'c'.repeat(40) } }]), null);
+  assert.equal(neededDecision({ ...passed, reworkRequested: true } as Work, { autoMerge: true }, undefined, [], [], [{ decision: 'a7e5f000', refusal }]), null);
+});
+
+test('unit:rework-ground-recorded — a rework the control plane applied on a recorded ground is no intervention; one an approver judged, or the lane applied without a ground, still is', () => {
+  const work = 'f0f0f0f0-0000-4000-8000-000000000001', stamp = (seconds: number) => new Date(Date.parse(at) + seconds * 1000).toISOString();
+  const document = { key: 'GY-901', stage: 'acceptance', candidate: { sha: head, pr: 901 } };
+  const rows = (approver: string, ground: string | null = 'a trusted proof failed on candidate aaaaaaaaaaaa'): InterventionLedgerRow[] => [
+    { seq: 1, workId: work, actor: 'graphyard-master', kind: 'decision.requested', at: stamp(1), details: null, payload: { id: 'd1', action: 'rework' }, work: null, stageBefore: 'acceptance' },
+    { seq: 2, workId: work, actor: approver, kind: 'decision.approved', at: stamp(30), details: null, payload: { id: 'd1', action: 'rework', ...(ground ? { ground } : {}) }, work: null, stageBefore: 'acceptance' },
+    { seq: 3, workId: work, actor: 'graphyard-master', kind: 'rework', at: stamp(31), details: { reason: 'a trusted proof failed' }, work: document, stageBefore: 'acceptance' },
+  ];
+  assert.deepEqual(foldInterventions(rows(laneApprover), [], stamp(60)).interventions, [], 'a rework the record grounded waited on nobody');
+  const judged = foldInterventions(rows('graphyard-approver-graphyard'), [], stamp(60)).interventions;
+  assert.deepEqual(judged.map(entry => [entry.kind, entry.stage, entry.id]), [['rework', 'acceptance', `rework:${work}:d1`]]);
+  // A lane approval with no recorded ground still counts: only a grounded rework waited on nobody.
+  assert.deepEqual(foldInterventions(rows(laneApprover, null), [], stamp(60)).interventions.map(entry => entry.kind), ['rework']);
+  // Approved by the control plane but not yet applied: it is not reported as waiting either.
+  const open = foldInterventions(rows(laneApprover).slice(0, 2), [{ ...item(), id: work }], stamp(60)).interventions;
+  assert.deepEqual(open.filter(entry => entry.kind === 'rework'), []);
 });
