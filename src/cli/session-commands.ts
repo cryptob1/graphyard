@@ -8,7 +8,7 @@ import { configHome } from '../install/secrets.js';
 import { scopeRequestOutcome } from '../model/scope.js';
 import type { CliContext } from './context.js';
 import { workMutation, type CliCommand } from './registry.js';
-import { parkArgs, parkCommand } from './park-command.js';
+import { parkCommand, parkInput } from './park-command.js';
 export { parkArgs, parkCommand } from './park-command.js';
 
 /**
@@ -279,10 +279,9 @@ export const owedMasterAction = (ask: HostDoableAsk, needed: string) =>
 export const routedParkCommand: CliCommand = {
   ...parkCommand,
   async run(context, work) {
-    const { args } = context, epoch = Number(args[0]), separator = args.indexOf('--');
-    const { needed } = parkArgs(args.slice(2, separator < 0 ? args.length : separator));
-    const ask = needed ? hostDoableAsk(needed) : null;
-    if (!ask || !Number.isInteger(epoch) || epoch < 1 || parkRefusal({ needed }) !== hostDoableRefusal(ask)) return parkCommand.run(context, work);
+    const { epoch, kind, needed } = parkInput(context.args);
+    const ask = hostDoableAsk(needed, kind);
+    if (!ask || parkRefusal({ needed, kind }) !== hostDoableRefusal(ask)) return parkCommand.run(context, work);
     const blocker = owedMasterAction(ask, needed);
     await workMutation(context, work)('blocked', { epoch, reason: blocker });
     return context.print({ parked: false, refusal: hostDoableRefusal(ask), owedAction: { owner: 'master', class: ask.class, command: ask.command, blocker } });

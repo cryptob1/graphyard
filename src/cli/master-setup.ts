@@ -4,11 +4,11 @@ import { loopSupervision, loopSupervisionAttention, type LoopSupervisorEvidence,
 import { readDaemonState } from '../master-daemon.js';
 import { detectLoopSupervisorUnit } from '../daemon/upgrade.js';
 import type { MainGuardReadiness } from '../main-guard.js';
-import { appendFile, mkdir } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import type { CliContext } from './context.js';
-import { deploymentTarget, derivedFrom, derivedVariables, installIdFor, prepareInstall, providers, revertApproverFromFile, selfProvision, type DerivedVariable, type Provider, type SelfProvisionAudit } from '../install/index.js';
+import { deploymentTarget, derivedFrom, derivedVariables, installIdFor, prepareInstall, providers, revertApproverFromFile, selfProvision, type DerivedVariable, type PendingRedeploy, type Provider, type SelfProvisionAudit } from '../install/index.js';
 import type { AdapterContext, ProviderAdapter } from '../install/adapters.js';
 import { installDirectory, readInstallRecord } from '../install/secrets.js';
 
@@ -44,8 +44,8 @@ export async function loopSupervisorEvidence(root: string, master: MasterConfig,
 
 export async function setupHealth(root: string, master: MasterConfig, supervisorHost?: LoopSupervisorHost, coordinator?: { mainGuard?: MainGuardReadiness | null } | null,
   evidence: (root: string, master: MasterConfig) => Promise<LoopSupervisorEvidence | null> = loopSupervisorEvidence) {
-  // What the loop's own setup step last did, when this is the loop reading its own section; null in a status read.
-  const selfProvisioned = lastLoopSelfProvision(root);
+  // What the loop's own setup step last did (GY-1416), from this process or the file it keeps.
+  const selfProvisioned = await lastLoopSelfProvision(root);
   const reviewer = await reviewerBindingHealth(master);
   const supervisor = await loopSupervision({ root, cliPath: master.cliPath }, supervisorHost);
   // The cursor is read only when this vantage could not reach the user manager.
@@ -59,35 +59,44 @@ export async function setupHealth(root: string, master: MasterConfig, supervisor
   for (const text of reviewer.attention) attention.push({ subject: 'setup', text, ...agentOwner('master', 'graphyard master reviewer setup (or graphyard master reviewer bind FILE --key-stdin) to bind the reviewer App') });
   if (herdrWorkspace.exists === false) attention.push({ subject: 'setup', text: herdrWorkspace.reason!, ...agentOwner('master', 'Set herdrWorkspace in .graphyard/master.json to a workspace herdr workspace list shows; master run adopts it on its next tick') });
   if (revertApprover) attention.push({ subject: 'setup', text: revertApprover, ...agentOwner('master', setupApplyNext) });
+  if (selfProvisioned?.failed) attention.push({ subject: 'setup', text: `The loop's master setup --apply ${selfProvisioned.outcome} (${selfProvisioned.at})`, ...agentOwner('master', setupApplyNext) });
   if (!master.browser) attention.push({ subject: 'setup', text: browserProfileMissing, ...humanOwner('issuing credentials to people', browserProfileNext(master.cliPath)) });
   return { setup, attention };
 }
 
 /** The loop's latest own run of `master setup --apply`: when it started and what it did (`running` until it settles). */
-export interface LoopSelfProvision { at: string; outcome: string }
-const loopProvisionIntervalMs = 3_600_000;
-const loopProvisionRuns = new Map<string, { at: number; running: boolean; outcome: string }>();
+export interface LoopSelfProvision { at: string; outcome: string; failed: boolean }
+const loopProvisionIntervalMs = 3_600_000, loopProvisionRetryMs = 600_000;
+const loopProvisionRuns = new Map<string, { at: number; running: boolean; outcome: string; failed: boolean; reported: boolean }>();
+/** Where the loop's latest run is kept, so `master status` in another process reads its outcome. */
+export const loopProvisionFile = (root: string) => resolve(root, '.graphyard', 'setup-self-provision.json');
 /**
  * The loop's setup step (GY-1416 AC-2, src/daemon/cycle.ts): `master setup --apply` runs beside
- * the cycle at most once an hour. It sets variables only where the provider adapter applies them in
- * place; elsewhere it plans, and the setup attention keeps naming the command. A `master status`
- * read never runs it.
+ * the cycle (a redeploy outlasts a cycle) at most once an hour, ten minutes after a failure. It sets
+ * variables only where the provider adapter applies them in place; elsewhere it plans, and the setup
+ * attention keeps naming the command. A failed run is thrown on the next step, so the cycle records
+ * the failed config action, and its outcome is kept for `master status`, which never runs it.
  */
-export function loopSelfProvision(root: string, master: Pick<MasterConfig, 'repository' | 'reviewer'>, options: { now?: number; setup?: typeof masterSetup } = {}): LoopSelfProvision {
+export async function loopSelfProvision(root: string, master: Pick<MasterConfig, 'repository' | 'reviewer'>, options: { now?: number; setup?: typeof masterSetup } = {}): Promise<LoopSelfProvision> {
   const now = options.now ?? Date.now(), last = loopProvisionRuns.get(root);
-  if (!last || (!last.running && now - last.at >= loopProvisionIntervalMs)) {
-    const entry = { at: now, running: true, outcome: 'running' };
+  if (last && !last.running && last.failed && !last.reported) { last.reported = true; throw new Error(`setup self-provision ${last.outcome}`); }
+  if (!last || (!last.running && now - last.at >= (last.failed ? loopProvisionRetryMs : loopProvisionIntervalMs))) {
+    const entry = { at: now, running: true, outcome: 'running', failed: false, reported: false };
     loopProvisionRuns.set(root, entry);
     void (options.setup ?? masterSetup)(root, master, { apply: true })
-      .then(report => { entry.outcome = report.set.length ? `set ${report.set.join(', ')}` : report.next ?? 'every derived variable is present'; },
-        error => { entry.outcome = `failed: ${error instanceof Error ? error.message : String(error)}`; })
-      .finally(() => { entry.running = false; });
+      .then(report => { entry.outcome = report.set.length ? `set ${report.set.join(', ')}` : report.redeployed.length ? `redeployed ${report.redeployed.join(', ')}` : report.next ?? 'every derived variable is present'; },
+        error => { entry.outcome = `failed: ${error instanceof Error ? error.message : String(error)}`; entry.failed = true; })
+      .finally(async () => {
+        entry.running = false;
+        await mkdir(resolve(root, '.graphyard'), { recursive: true }).then(() => writeFile(loopProvisionFile(root), `${JSON.stringify({ at: new Date(entry.at).toISOString(), outcome: entry.outcome, failed: entry.failed })}\n`)).catch(() => undefined);
+      });
   }
-  return lastLoopSelfProvision(root)!;
+  return (await lastLoopSelfProvision(root))!;
 }
-export function lastLoopSelfProvision(root: string): LoopSelfProvision | null {
+export async function lastLoopSelfProvision(root: string): Promise<LoopSelfProvision | null> {
   const current = loopProvisionRuns.get(root);
-  return current ? { at: new Date(current.at).toISOString(), outcome: current.outcome } : null;
+  if (current) return { at: new Date(current.at).toISOString(), outcome: current.outcome, failed: current.failed };
+  return readFile(loopProvisionFile(root), 'utf8').then(text => JSON.parse(text) as LoopSelfProvision, () => null);
 }
 
 /** Where `master setup --apply` appends one audit line per variable it set: name, source and fingerprint, never a value. */
@@ -107,7 +116,9 @@ export async function recordedDeployment(root: string, master: Pick<MasterConfig
   if (options.provider) return { ...deploymentTarget({ provider: options.provider, repository: master.repository, service: options.service ?? 'graphyard', linkDirectory: resolve(options.linkDirectory ?? root), workspace: options.workspace ?? null }), derived: [] as DerivedVariable[] };
   const record = await readInstallRecord(installDirectory(installIdFor(master.repository)));
   if (!record) return null;
-  const session = await prepareInstall(root, { repository: record.repository, provider: record.provider, baseBranch: record.baseBranch, reviewPolicy: record.reviewPolicy, ...(record.domain ? { domain: record.domain } : {}),
+  // The service install named (--server-name) is recorded; --service names it for a record written before it was.
+  const serverName = options.service ?? record.service ?? undefined;
+  const session = await prepareInstall(root, { repository: record.repository, provider: record.provider, baseBranch: record.baseBranch, reviewPolicy: record.reviewPolicy, ...(record.domain ? { domain: record.domain } : {}), ...(serverName ? { serverName } : {}),
     workers: record.principals.filter(principal => principal.role === 'worker').length || undefined, producerProofs: record.principals.flatMap(principal => principal.proofs ?? []), ...(record.selfContained ? { selfContained: true } : {}) }, {}, 'plan');
   return { adapter: session.adapter, context: session.context, derived: await derivedVariables(session) };
 }
@@ -120,11 +131,17 @@ export async function recordedDeployment(root: string, master: Pick<MasterConfig
  */
 export async function masterSetup(root: string, master: Pick<MasterConfig, 'repository' | 'reviewer'>, options: MasterSetupOptions, deps: MasterSetupDependencies = {}) {
   const located = await (deps.locate ?? recordedDeployment)(root, master, options);
-  if (!located) return { mode: options.apply ? 'apply' as const : 'plan' as const, target: null, observed: false, canApply: false, missing: [], set: [], audit: [],
+  if (!located) return { mode: options.apply ? 'apply' as const : 'plan' as const, target: null, observed: false, canApply: false, missing: [], set: [], redeployed: [] as string[], pendingRedeploy: [] as string[], audit: [],
     next: `No deployment is recorded for ${master.repository} on this host (no graphyard install record): name it with graphyard master setup --provider railway --service NAME --link-dir DIR${options.apply ? ' --apply' : ''}` };
   const reviewer = master.reviewer ? derivedFrom(await revertApproverFromFile(master.reviewer.credentialFile), `the reviewer App ${master.reviewer.slug} registration ${master.reviewer.credentialFile}`) : [];
   const audit = async (entry: SelfProvisionAudit) => { await mkdir(resolve(root, '.graphyard'), { recursive: true }); await appendFile(setupAuditFile(root), `${JSON.stringify(entry)}\n`, { mode: 0o600 }); };
-  return { target: { provider: located.context.provider, service: located.context.service }, ...await selfProvision(located, [...located.derived, ...reviewer], { apply: options.apply, audit, now: deps.now }) };
+  const pendingFile = resolve(root, '.graphyard', `setup-redeploy-${located.context.provider}-${located.context.service}.json`);
+  const pending: PendingRedeploy = {
+    read: () => readFile(pendingFile, 'utf8').then(text => JSON.parse(text) as string[], () => []),
+    write: async names => { await mkdir(resolve(root, '.graphyard'), { recursive: true }); await (names.length ? writeFile(pendingFile, `${JSON.stringify(names)}\n`) : rm(pendingFile, { force: true })); },
+  };
+  // The reviewer bound now comes first: the first occurrence of a name wins, and the install record's reviewer may since have been replaced.
+  return { target: { provider: located.context.provider, service: located.context.service }, ...await selfProvision(located, [...reviewer, ...located.derived], { apply: options.apply, audit, now: deps.now, pending }) };
 }
 
 export async function masterSetupCommand(context: CliContext, root: string, master: Pick<MasterConfig, 'repository' | 'reviewer'>) {

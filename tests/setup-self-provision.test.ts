@@ -22,7 +22,7 @@ const reviewerApp = { appId: 4242, installationId: 99, slug: 'graphyard-reviewer
 const revertNames = ['GRAPHYARD_REVERT_APPROVER_APP_ID', 'GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID', 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY'];
 
 /** A Railway project whose `graphyard` service runs with the control-plane App but no revert approver. */
-function railway(deployed: Record<string, string>) {
+function railway(deployed: Record<string, string>, faults: { listing?: boolean; redeploys?: number } = {}) {
   const calls: { args: string[]; input?: string; cwd?: string }[] = [];
   const transport: Transport = {
     description: 'scripted railway',
@@ -30,7 +30,12 @@ function railway(deployed: Record<string, string>) {
       assert.equal(program, 'railway');
       calls.push({ args, ...(options.input !== undefined ? { input: options.input } : {}), cwd: options.cwd });
       if (args[0] === 'status') return { code: 0, stdout: JSON.stringify({ name: 'graphyard', services: { edges: [{ node: { name: 'graphyard' } }, { node: { name: 'Postgres' } }] } }), stderr: '' };
-      if (args[0] === 'variables' && args.includes('--json')) return { code: 0, stdout: JSON.stringify(deployed), stderr: '' };
+      if (args[0] === 'variables' && args.includes('--json')) return faults.listing ? { code: 1, stdout: '', stderr: 'Unauthorized' } : { code: 0, stdout: JSON.stringify(deployed), stderr: '' };
+      // Railway keeps what is set, deployed or not.
+      args.forEach((arg, index) => { if (args[index - 1] === '--set') deployed[arg.slice(0, arg.indexOf('='))] = arg.slice(arg.indexOf('=') + 1); });
+      if (args[0] === 'variable' && args[1] === 'set') deployed[args[args.length - 1]] = options.input ?? '';
+      // As the local transport does, a failure without allowFailure throws.
+      if (args[0] === 'redeploy' && faults.redeploys && faults.redeploys-- > 0) throw new Error('railway redeploy exited 1: redeploy failed');
       if (args[0] === 'domain') return { code: 1, stdout: '', stderr: 'no domain' };
       return { code: 0, stdout: '', stderr: '' };
     },
@@ -120,6 +125,39 @@ test('unit:setup-self-provision — a deployment that already has the key file-m
     assert.deepEqual(planned.set, []);
     assert.equal(planned.canApply, false);
     assert.match(planned.next!, /rewrites the whole environment: graphyard install --provider railway --repo owner\/project --apply/);
+
+    // A variable listing that could not be read is not an empty one: nothing is applied from it.
+    const unread = railway({}, { listing: true });
+    const blind = deploymentTarget({ provider: 'railway', repository: 'owner/project', service: 'graphyard', linkDirectory: root, transport: unread.transport });
+    const refused = await masterSetup(root, master, { apply: true }, { locate: async () => ({ ...blind, derived: [{ name: 'GITHUB_APP_ID', value: '1234', secret: false, source: 'the control-plane App registration' }] }) });
+    assert.deepEqual([refused.observed, refused.missing, refused.set], [false, [], []]);
+    assert.match(refused.next!, /variables could not be read on railway; nothing is applied/);
+    assert.equal(unread.calls.some(call => call.args[0] === 'variable' || call.args.includes('--set') || call.args[0] === 'redeploy'), false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('unit:setup-self-provision — the reviewer bound now wins over the install record\'s, and variables set before a failed redeploy are redeployed by the next run', async () => {
+  const { root, master } = await fixture();
+  try {
+    const deployed: Record<string, string> = {};
+    const staged = railway(deployed, { redeploys: 1 });
+    const target = deploymentTarget({ provider: 'railway', repository: 'owner/project', service: 'graphyard', linkDirectory: root, transport: staged.transport });
+    // The install record still derives the reviewer it was installed with; `master reviewer bind` has since bound another.
+    const recorded = [{ name: 'GRAPHYARD_REVERT_APPROVER_APP_ID', value: '1111', secret: false, source: 'the reviewer App registration in the install record' }];
+    const locate = async () => ({ ...target, derived: recorded });
+    const plan = await masterSetup(root, master, { apply: false }, { locate });
+    assert.equal(plan.missing.find(value => value.name === 'GRAPHYARD_REVERT_APPROVER_APP_ID')?.value, '4242', 'the bound reviewer, not the recorded one');
+
+    await assert.rejects(masterSetup(root, master, { apply: true }, { locate }), /redeploy failed/);
+    assert.deepEqual(Object.keys(deployed), revertNames, 'set, but never redeployed');
+    const owed = await masterSetup(root, master, { apply: false }, { locate });
+    assert.deepEqual([owed.missing, owed.pendingRedeploy, owed.next], [[], revertNames, 'graphyard master setup --apply'], 'present variables still owe their redeploy');
+    staged.calls.length = 0;
+    const retried = await masterSetup(root, master, { apply: true }, { locate });
+    assert.deepEqual([retried.set, retried.redeployed, retried.pendingRedeploy], [[], revertNames, []]);
+    assert.deepEqual(staged.calls.filter(call => !['status', 'domain'].includes(call.args[0]) && !call.args.includes('--json')).map(call => call.args), [['redeploy', '--service', 'graphyard', '--yes']], 'only the redeploy, nothing set again');
+    const settled = await masterSetup(root, master, { apply: true }, { locate });
+    assert.deepEqual([settled.redeployed, settled.next], [[], null], 'and only once');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -141,16 +179,32 @@ test('unit:setup-attention-owner — a missing derivable deployment variable is 
 
     // The loop's own run: master setup --apply, at most once an hour.
     const runs: boolean[] = [];
-    const setupStub = (async (_root: string, _master: unknown, options: { apply: boolean }) => { runs.push(options.apply); return { set: ['GRAPHYARD_REVERT_APPROVER_APP_ID'], next: null }; }) as unknown as typeof masterSetup;
+    const setupStub = (async (_root: string, _master: unknown, options: { apply: boolean }) => { runs.push(options.apply); return { set: ['GRAPHYARD_REVERT_APPROVER_APP_ID'], redeployed: [], next: null }; }) as unknown as typeof masterSetup;
     const now = Date.parse('2026-10-07T05:00:00.000Z');
-    assert.equal(loopSelfProvision(root, master, { now, setup: setupStub }).outcome, 'running');
-    await new Promise(resolve => setImmediate(resolve));
+    assert.equal((await loopSelfProvision(root, master, { now, setup: setupStub })).outcome, 'running');
+    await new Promise(resolve => setTimeout(resolve, 20));
     assert.deepEqual(runs, [true], 'the loop runs master setup --apply');
-    assert.deepEqual(loopSelfProvision(root, master, { now: now + 60_000, setup: setupStub }), { at: '2026-10-07T05:00:00.000Z', outcome: 'set GRAPHYARD_REVERT_APPROVER_APP_ID' });
+    const done = { at: '2026-10-07T05:00:00.000Z', outcome: 'set GRAPHYARD_REVERT_APPROVER_APP_ID', failed: false };
+    assert.deepEqual(await loopSelfProvision(root, master, { now: now + 60_000, setup: setupStub }), done);
     assert.deepEqual(runs, [true], 'not again within the hour');
-    assert.deepEqual((await setupHealth(root, master, host, null, async () => null)).setup.selfProvision, { at: '2026-10-07T05:00:00.000Z', outcome: 'set GRAPHYARD_REVERT_APPROVER_APP_ID' }, 'the setup section reports what the loop did');
-    loopSelfProvision(root, master, { now: now + 3_600_000, setup: setupStub });
+    assert.deepEqual((await setupHealth(root, master, host, null, async () => null)).setup.selfProvision, done, 'the setup section reports what the loop did');
+    await loopSelfProvision(root, master, { now: now + 3_600_000, setup: setupStub });
     assert.deepEqual(runs, [true, true], 'and again after it');
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    // A failed run fails the loop's next step, is kept for master status in another process, and is retried ten minutes on.
+    const failing = (async () => { runs.push(true); throw new Error('railway is not logged in'); }) as unknown as typeof masterSetup;
+    await loopSelfProvision(root, master, { now: now + 7_200_000, setup: failing });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    await assert.rejects(loopSelfProvision(root, master, { now: now + 7_260_000, setup: failing }), /setup self-provision failed: railway is not logged in/);
+    const kept = JSON.parse(await readFile(join(root, '.graphyard', 'setup-self-provision.json'), 'utf8'));
+    assert.deepEqual([kept.failed, kept.outcome], [true, 'failed: railway is not logged in']);
+    const failedItem = (await setupHealth(root, master, host, null, async () => null)).attention.find(entry => /master setup --apply failed/.test(entry.text));
+    assert.deepEqual([failedItem?.role, failedItem?.human], ['master', false], 'the failure is the master\'s attention');
+    assert.equal((await loopSelfProvision(root, master, { now: now + 7_260_000, setup: failing })).failed, true, 'reported once, not retried at once');
+    assert.equal(runs.length, 3);
+    await loopSelfProvision(root, master, { now: now + 7_800_000, setup: setupStub });
+    assert.equal(runs.length, 4, 'retried ten minutes after the failure');
 
     // The step is the cycle's own: every cycle offers it, isolated, and a throw fails only that step.
     let offered = 0;

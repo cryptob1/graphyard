@@ -393,9 +393,9 @@ test('unit:park-refuses-host-doable — park refuses a NEEDED an agent identity 
     ['a derived variable by phrase', 'money-or-accounts', 'Set the deployment variables for the reviewer App on Railway and redeploy', 'deployment-variable', 'graphyard master setup --apply'],
   ] as const;
   for (const [label, kind, needed, cls, command] of refused) {
-    const ask = hostDoableAsk(needed);
+    const ask = hostDoableAsk(needed, kind);
     assert.equal(ask?.class, cls, label);
-    const refusal = parkRefusal({ needed })!;
+    const refusal = parkRefusal({ needed, kind })!;
     assert.match(refusal, /^Not a human-only decision: .*the master's owed action, not the human's\. Agent route: /, label);
     assert.ok(refusal.includes(command), `${label}: the refusal names ${command}`);
     // The server refuses it, and the item never reaches the human: the worker keeps its lease.
@@ -408,7 +408,9 @@ test('unit:park-refuses-host-doable — park refuses a NEEDED an agent identity 
     assert.equal((await reload(work.id)).humanRequest ?? null, null, `${label} never parks`);
     // The CLI records the same ask as the master's owed action, a blocker naming the route, instead of a park.
     const posted: { path: string; data: any }[] = [], printed: any[] = [];
-    await routedParkCommand.run({ args: ['1', kind, ...needed.split(' '), '--ask', 'Do the thing', '--', 'as recorded'], print: (value: unknown) => { printed.push(value); }, api: async (path: string, data?: unknown) => { posted.push({ path, data }); return {}; }, individualHostId: () => 'host' } as any, { id: work.id, key: work.key, revision: work.revision } as any);
+    // A malformed park is refused before anything is recorded: no --ask.
+    await assert.rejects(routedParkCommand.run({ args: ['1', kind, ...needed.split(' '), '--', 'as recorded'], print: () => {}, api: async (path: string) => { throw new Error(`posted ${path}`); }, individualHostId: () => 'host' } as any, { id: work.id, key: work.key, revision: work.revision } as any), /^Error: Use park GY-N EPOCH KIND/, `${label}: validated first`);
+    await routedParkCommand.run({ args: ['1', kind, ...needed.split(' '), '--ask', 'Do the thing', '--recommend', 'Approve', '--why', 'Only the operator decides it.', '--', 'as recorded'], print: (value: unknown) => { printed.push(value); }, api: async (path: string, data?: unknown) => { posted.push({ path, data }); return {}; }, individualHostId: () => 'host' } as any, { id: work.id, key: work.key, revision: work.revision } as any);
     assert.deepEqual(posted.map(entry => entry.path), [`work/${work.id}/blocked`], `${label}: recorded, not parked`);
     assert.equal(posted[0].data.epoch, 1);
     assert.match(posted[0].data.reason, /^Owed master action \(a park refused as host-doable, GY-1416\): /);
@@ -424,9 +426,13 @@ test('unit:park-refuses-host-doable — park refuses a NEEDED an agent identity 
     ['money-or-accounts', 'Open a paid Railway team plan for the staging environment'],
     ['credentials-for-people', 'Issue a dashboard sign-in for the new teammate who reviews releases'],
     ['credentials-for-people', 'Give the new contractor a GitHub token scoped to the docs repository'],
+    // A credential issued to a named person stays the human's, whoever the recipient is.
+    ['credentials-for-people', 'Provide Alice a GitHub token'],
+    // A human-only step beside a host-doable one keeps the whole request the human's.
+    ['money-or-accounts', 'Open a paid Railway account, then set the deployment variables'],
   ] as const;
   for (const [kind, needed] of accepted) {
-    assert.equal(parkRefusal({ needed }), null, needed);
+    assert.equal(parkRefusal({ needed, kind }), null, needed);
     const work = await parked({ kind, needed, reason: 'a decision only the operator makes', ...(kind === 'goals-and-priorities' ? { recommendation: 'Go ahead as asked' } : {}) });
     assert.equal(work.humanRequest?.kind, kind, `${needed} parks`);
     // The CLI passes it straight to park.

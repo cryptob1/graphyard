@@ -353,13 +353,18 @@ export interface DerivedVariable extends EnvValue { source: string }
 export interface SelfProvisionAudit { at: string; variable: string; secret: boolean; fingerprint: string; source: string; provider: Provider; service: string }
 export interface SelfProvisionReport {
   provider: Provider; service: string; mode: 'plan' | 'apply';
-  /** The application service was observed, so `missing` is exact; false when the provider could not be read. */
+  /** The service and its variables were read, so `missing` is exact; false when either could not be (nothing is then applied). */
   observed: boolean;
   /** The adapter sets a subset of variables in place (`applyVariables`); without it `install --apply` sets them with the rest. */
   canApply: boolean;
   missing: (PlanValue & { source: string })[];
-  set: string[]; audit: SelfProvisionAudit[]; next: string | null;
+  set: string[];
+  /** Variables an earlier run set whose redeploy failed: this run redeployed them (or, planning, owes it). */
+  redeployed: string[]; pendingRedeploy: string[];
+  audit: SelfProvisionAudit[]; next: string | null;
 }
+/** Variables set on the deployment whose redeploy has not yet succeeded; kept between runs so a failed redeploy is retried. */
+export interface PendingRedeploy { read(): Promise<string[]>; write(names: string[]): Promise<void> }
 export const derivedFrom = (values: EnvValue[], source: string): DerivedVariable[] => values.map(value => ({ ...value, source }));
 
 /**
@@ -385,23 +390,33 @@ const presentOn = (variables: Record<string, string>, name: string) => variables
  * `install --plan`'s to report). The report and every audit entry carry fingerprints, never a secret.
  */
 export async function selfProvision(target: { adapter: ProviderAdapter; context: AdapterContext }, derived: DerivedVariable[],
-  options: { apply: boolean; audit?: (entry: SelfProvisionAudit) => Promise<void>; now?: () => number }): Promise<SelfProvisionReport> {
+  options: { apply: boolean; audit?: (entry: SelfProvisionAudit) => Promise<void>; now?: () => number; pending?: PendingRedeploy }): Promise<SelfProvisionReport> {
   const { adapter, context } = target, vault = context.vault;
   for (const value of derived) if (value.secret) vault.add(value.value);
   const observation = await adapter.observe(context);
+  // A listing that failed reads as no variables: applying from it would overwrite every live value.
+  const observed = observation.app && observation.variablesObserved === true;
   const canApply = typeof adapter.applyVariables === 'function';
   const names = new Set<string>();
-  const missing = !observation.app ? [] : derived.filter(value => value.value !== '' && !names.has(value.name) && !!names.add(value.name) && !presentOn(observation.variables, value.name));
+  const missing = !observed ? [] : derived.filter(value => value.value !== '' && !names.has(value.name) && !!names.add(value.name) && !presentOn(observation.variables, value.name));
+  const pending = canApply && observed ? await options.pending?.read() ?? [] : [];
   const report: SelfProvisionReport = {
-    provider: context.provider, service: context.service, mode: options.apply ? 'apply' : 'plan', observed: observation.app, canApply,
-    missing: missing.map(value => ({ ...planValue(value, true), source: value.source })), set: [], audit: [],
-    next: !observation.app ? `The ${context.service} service was not observed on ${context.provider}; check the provider CLI's login and link (${context.railwayDir}), then rerun`
-      : !missing.length ? null
+    provider: context.provider, service: context.service, mode: options.apply ? 'apply' : 'plan', observed, canApply,
+    missing: missing.map(value => ({ ...planValue(value, true), source: value.source })), set: [], redeployed: [], pendingRedeploy: pending, audit: [],
+    next: !observation.app ? `The ${context.service} service was not observed on ${context.provider}; check the provider CLI's login and link (${context.railwayDir}), or name the service with --service NAME, then rerun`
+      : !observed ? `The ${context.service} service's variables could not be read on ${context.provider}; nothing is applied from an unread listing. Rerun once the provider CLI lists them`
+      : !missing.length && !pending.length ? null
       : !canApply ? `The ${context.provider} adapter rewrites the whole environment: graphyard install --provider ${context.provider} --repo ${context.repository} --apply sets these with the rest`
       : options.apply ? null : 'graphyard master setup --apply',
   };
-  if (options.apply && missing.length && canApply) {
+  if (options.apply && canApply && (missing.length || pending.length)) {
+    // Recorded before the writes: variables set but never redeployed read as present on the next run, which then redeploys them.
+    const staged = [...new Set([...pending, ...missing.map(value => value.name)])];
+    await options.pending?.write(staged);
+    // With no values, applyVariables only redeploys.
     await adapter.applyVariables!(context, missing.map(({ name, value, secret }) => ({ name, value, secret })));
+    await options.pending?.write([]);
+    report.redeployed = pending; report.pendingRedeploy = [];
     const at = new Date((options.now ?? Date.now)()).toISOString();
     for (const value of missing) {
       const entry: SelfProvisionAudit = { at, variable: value.name, secret: value.secret, fingerprint: fingerprint(value.value), source: value.source, provider: context.provider, service: context.service };
@@ -687,7 +702,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   if (migratedFrom) for (const principal of session.principals) {
     if (migratedFrom.principals.some(old => old.fingerprint === fingerprint(session.tokens.get(principal.id)!))) throw new Error(`The host reuses a credential of the old installation (${principal.id}); the old loop would keep its leases`);
   }
-  record = { ...record, url, domain: context.domain, provider: context.provider, selfContained: !!context.host, migratedFrom, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, principals: session.principals.map(principal => ({ id: principal.id, role: principal.role, ...(principal.sessionKind ? { sessionKind: principal.sessionKind } : {}), ...(principal.proofs?.length ? { proofs: principal.proofs } : {}), fingerprint: fingerprint(session.tokens.get(principal.id)!) })), updatedAt: new Date(deps.now()).toISOString() };
+  record = { ...record, url, domain: context.domain, service: context.service, provider: context.provider, selfContained: !!context.host, migratedFrom, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, principals: session.principals.map(principal => ({ id: principal.id, role: principal.role, ...(principal.sessionKind ? { sessionKind: principal.sessionKind } : {}), ...(principal.proofs?.length ? { proofs: principal.proofs } : {}), fingerprint: fingerprint(session.tokens.get(principal.id)!) })), updatedAt: new Date(deps.now()).toISOString() };
   await writeInstallRecord(session.directory, record, vault);
 
   // GitHub: the App manifest flow needs the live HTTPS origin, so it runs after the URL exists.

@@ -116,15 +116,20 @@ const hostDoable: (HostDoableAsk & { test: RegExp })[] = [
 ];
 /** Who a credential is issued to, when it is a person: that stays the human's (`credentials-for-people`). */
 const personRecipient = /\b(?:teammate|contractor|colleague|employee|engineer|person|people|developer|new hire)s?\b/i;
-export function hostDoableAsk(needed: string): HostDoableAsk | null {
-  const found = hostDoable.find(entry => entry.test.test(needed) && !(entry.class === 'host-credential' && personRecipient.test(needed)));
+/** A credential asked under `credentials-for-people` is the host's only when an agent's work is its stated purpose. */
+const agentPurpose = /\b(?:pilot|worker|agent|master|loop|host|install(?:er|ation)?|deployment|control plane|CI|webhooks?)\b/i;
+/** A step only the human takes, which a host-doable step beside it never hides: money, a paid account, a goal. */
+const humanStep = /\b(?:paid|pay|purchase|buy|billing|subscription|budget|spend|invoice|goals?|priorit(?:y|ies|ize))\b|[€$]\s?\d|\b\d+(?:\.\d+)?\s?(?:EUR|USD)\b|\/month\b|\ba month\b/i;
+export function hostDoableAsk(needed: string, kind?: string): HostDoableAsk | null {
+  if (humanStep.test(needed)) return null;
+  const found = hostDoable.find(entry => entry.test.test(needed) && !(entry.class === 'host-credential' && (personRecipient.test(needed) || (kind === 'credentials-for-people' && !agentPurpose.test(needed)))));
   return found ? { class: found.class, what: found.what, route: found.route, command: found.command } : null;
 }
 export const hostDoableRefusal = (ask: HostDoableAsk) => `Not a human-only decision: NEEDED asks for ${ask.what}, which an agent identity on the host can do; it is the master's owed action, not the human's. Agent route: ${ask.route} — ${ask.command}`;
-export function parkRefusal(data: { needed: string }): string | null {
+export function parkRefusal(data: { needed: string; kind?: string }): string | null {
   if (scopeWideningAsk.test(data.needed)) return 'A scope widening is not a human-only decision: ask for it with graphyard scope-request GY-N EPOCH PATH… -- REASON, which an approver decides';
   if (deferredAsk.test(data.needed)) return 'Ask for every human step the item still needs in this one request: NEEDED may not leave steps to later parks';
-  const doable = hostDoableAsk(data.needed);
+  const doable = hostDoableAsk(data.needed, data.kind);
   return doable ? hostDoableRefusal(doable) : null;
 }
 
