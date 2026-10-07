@@ -1,10 +1,10 @@
 // Concern: cycle steps 5–7 — shepherd reviews, reconcile what GitHub merged, deployment verification.
+import { createHash } from 'node:crypto';
 import { reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, deploySmokeRequired, deliveryState, rollbackGuidance } from '../model.js';
 import { type Work } from '../model.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
 import { boundDeployment, type DaemonAction, deploymentObservationSchema, maxProofAttempts, message, retainedActions } from './state.js';
 import { candidateKey } from './reconcile.js';
-import { createHash } from 'node:crypto';
 import { readyToRetry } from './sessions.js';
 import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, githubPause, observationWakeDue, standingVerdict } from './decisions.js';
 import { record } from './effects.js';
@@ -278,6 +278,8 @@ export function answeredVerdict(answer: DaemonAction | undefined): 'verified' | 
  * needs-decision asked on an owner, keyed by the owner's requirements revision when it was raised,
  * so only a revision applied after it answers it (`throughputOwnerAnswered`).
  */
+/** How many closed owners of one release a single filing follows to reach (or file) the open one. */
+export const throughputOwnerSuccessions = 8;
 export const throughputOwnerKey = (revision: string) => `throughput:owner:${revision}`;
 export const throughputEscalationKey = (owner: string, policyRevision: number) => `escalation:throughput:${owner}:${policyRevision}`;
 /** The owner's requirements revision at which the loop raised its needs-decision (the earliest, should a key repeat), or null when it raised none. */
@@ -315,17 +317,27 @@ async function throughputOwnerStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
       return;
     }
   } else if (verdict === 'unverified' && effects.fileThroughputOwner) {
-    // GY-1465: once an owner of this release was filed (and closed, by the loop on an answered
-    // decision or by anyone), a needs-decision that still stands on the newest measurement files
-    // another within the cycle, so the attention is never left with no item to decide on.
-    if (ownerAction?.state === 'done') stall ??= await effects.standingThroughputStall?.(revision).catch(() => null) ?? null;
+    // GY-1465: with no owner open, a needs-decision that still stands on the newest measurement
+    // files one within the cycle, whether or not the record of an earlier owner was retained, so
+    // the attention is never left with no item to decide on.
+    stall ??= await effects.standingThroughputStall?.(revision).catch(() => null) ?? null;
     if (ownerAction?.state === 'done' ? !stall : !readyToRetry(ownerAction, state.cycle)) return;
-    // The key binds the owner it succeeds and the exact input, so a retry after a lost reply returns
-    // the item already filed, while a later filing for the same release is neither refused as a
-    // reused key (409) nor answered with the closed predecessor.
-    const input = throughputOwnerItem(revision, stall?.admitted ?? null), predecessor = ownerAction?.work ?? null;
+    // The key binds the owner it succeeds, the measurement the decision stands on and the exact
+    // input, so a retry after a lost reply returns the item already filed, while a later filing for
+    // the same release is neither refused as a reused key (409) nor answered with a closed predecessor.
+    const input = throughputOwnerItem(revision, stall?.admitted ?? null), digest = createHash('sha256').update(JSON.stringify(input)).digest('hex').slice(0, 16);
+    const file = (predecessor: string | null) => effects.fileThroughputOwner!(input, `throughput-owner:${revision}:${predecessor ? `${predecessor}:` : ''}${stall ? `${stall.measuredAt}:` : ''}${digest}`);
+    let predecessor = ownerAction?.work ?? null;
     try {
-      const filed = await effects.fileThroughputOwner(input, `throughput-owner:${revision}:${predecessor ? `${predecessor}:` : ''}${createHash('sha256').update(JSON.stringify(input)).digest('hex').slice(0, 16)}`);
+      let filed = await file(predecessor);
+      // A key whose record was pruned is answered with the owner it filed before, since closed: that
+      // one is the predecessor, never the new owner, and is succeeded only while a decision stands.
+      // Each succession key answers the owner filed after it, so the chain is followed to its open end.
+      for (let hop = 0; filed && !openThroughputOwner([filed]); hop++) {
+        predecessor = filed.key;
+        filed = stall && hop < throughputOwnerSuccessions ? await file(predecessor) : null;
+        if (!filed) { performed.push(await note(predecessor, 'done', `${predecessor} already owned GY-87's throughput verification on ${revision.slice(0, 12)} and is closed${stall ? '; the needs-decision standing on it files its successor next cycle' : ''}`)); return; }
+      }
       if (filed) { owner = filed; performed.push(await note(filed.key, 'done', `Filed ${filed.key} to own GY-87's throughput verification on ${revision.slice(0, 12)}${stall ? ' and the needs-decision standing on it' : ''}; it closes once the claim verifies or its needs-decision is answered`)); }
     } catch (error) { performed.push(await note(predecessor, 'failed', `Could not file the item that owns GY-87's throughput verification on ${revision.slice(0, 12)}: ${message(error)}`)); }
   }

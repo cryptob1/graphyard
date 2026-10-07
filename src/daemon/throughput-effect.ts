@@ -39,13 +39,16 @@ export function throughputEffects(root: string, current: () => MasterConfig, run
     // The identity is read on each call, as a configuration reload may provision it after the loop starts.
     fileThroughputOwner: async (input, key) => current().operatorAgent ? asOperatorAgent('POST', 'work', input, key) as Promise<Work> : null,
     closeThroughputOwner: async (owner, reason, key) => current().operatorAgent ? asOperatorAgent('POST', `work/${owner.id}/close`, { kind: 'obsolete', reason }, key) as Promise<Work> : null,
-    standingThroughputStall: async revision => {
-      const newest = await readThroughputMeasurement(root);
-      return newest?.report.deployed?.revision === revision ? throughputStall(newest.report) : null;
-    },
+    standingThroughputStall: standingThroughputStall(root),
     measureThroughput: (work, observedSha) => loopThroughputMeasurement(root, { work, observedSha, now: () => Date.now(), origin: new URL(current().url).origin,
       status: () => asCoordinator('status') as Promise<ControlPlaneStatus & Record<string, unknown>>,
       readItem: id => asCoordinator(`work/${encodeURIComponent(id)}`) as Promise<Work>,
       contains: localAncestry(root, current().baseBranch, run).contains }),
   };
 }
+
+/** The needs-decision standing on the newest measurement recorded under `root` when it measured `revision` (`throughputStall`), else null. */
+export const standingThroughputStall = (root: string) => async (revision: string): Promise<ThroughputStall | null> => {
+  const newest = await readThroughputMeasurement(root);
+  return newest?.report.deployed?.revision === revision ? throughputStall(newest.report) : null;
+};

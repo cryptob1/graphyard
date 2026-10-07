@@ -6,7 +6,7 @@ import type { ActionRow } from '../src/model/actions.js';
 import type { Work } from '../src/model.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
-import { openThroughputOwner, populationRule, throughputClaimVisibility, throughputOwnerItem, throughputStall, throughputStallBound, verifyThroughput, type ThroughputReport } from '../src/throughput.js';
+import { openThroughputOwner, populationRule, recordThroughputMeasurement, throughputClaimVisibility, throughputOwnerItem, throughputStall, throughputStallBound, verifyThroughput, type ThroughputReport } from '../src/throughput.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1465: the throughput needs-decision applies the population rule settled by requirements
@@ -206,5 +206,49 @@ test('integration:throughput-owner-filed-when-masterless — a needs-decision st
     effects.standingThroughputStall = async () => null;
     for (let cycle = 0; cycle < 3; cycle++) await runCycle(master, state, effects, () => Date.now());
     assert.equal(filed.length, 2, 'with no needs-decision standing, a release whose owner closed gets no second');
+
+    // The owner record for the release is pruned (the action retention) while a needs-decision stands
+    // again: the plane answers the original key with the closed first owner, then the succession key
+    // with the closed second. Neither is accepted as the owner; the loop files a third in that cycle.
+    effects.standingThroughputStall = async served => served === revision ? stall : null;
+    delete state.actions[`throughput:owner:${revision}`];
+    await runCycle(master, state, effects, () => Date.now());
+    const third = openThroughputOwner(work)!;
+    assert.ok(third && ![first.key, second.key].includes(third.key), 'a pruned record never makes a closed owner the new one');
+    assert.equal(filed.length, 3);
+    assert.equal(filed[2]!.key, filed[0]!.key.replace(`${revision}:`, `${revision}:${second.key}:`), 'filed as the successor of the newest closed owner');
+    assert.equal(state.actions[`throughput:owner:${revision}`]!.work, third.key);
+    assert.equal(state.actions[`escalation:throughput:${third.key}:1`]?.work, third.key, 'the decision is asked on the open owner, never a closed one');
+    assert.equal(Object.keys(state.actions).filter(key => key.startsWith('escalation:throughput:')).length, 3, 'one escalation per owner');
+
+    // Pruned again with nothing standing: the closed chain is not taken as an owner. The unverified
+    // release is filed the ordinary owner once (its once-per-release record is gone), open, and nothing is escalated.
+    Object.assign(third, { stage: 'done', closure: { kind: 'obsolete', reason: 'answered', ref: null, by: 'operator-agent', at: new Date().toISOString(), from: 'backlog' } });
+    effects.standingThroughputStall = async () => null;
+    delete state.actions[`throughput:owner:${revision}`];
+    for (let cycle = 0; cycle < 3; cycle++) await runCycle(master, state, effects, () => Date.now());
+    assert.equal(filed.length, 4, 'one ordinary owner, filed once');
+    const ordinary = openThroughputOwner(work)!;
+    assert.equal(ordinary.key, `GY-${7400 + 3}`);
+    assert.equal(state.actions[`throughput:owner:${revision}`]!.work, ordinary.key);
+    assert.equal(Object.keys(state.actions).filter(key => key.startsWith('escalation:throughput:')).length, 3, 'nothing stands, so nothing is escalated');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('unit:throughput-standing-stall-recorded — the production read of a standing needs-decision judges the newest recorded measurement of the serving release, and of no other', async () => {
+  const directory = await temporaryDirectory('throughput-standing-recorded');
+  try {
+    // Imported dynamically so the proof file loads (and this case fails alone) on a tree without the read.
+    const { standingThroughputStall } = await import('../src/daemon/throughput-effect.js') as { standingThroughputStall: (root: string) => (revision: string) => Promise<{ kind: string; revision: string | null } | null> };
+    const read = standingThroughputStall(directory);
+    assert.equal(await read(revision), null, 'no measurement recorded: nothing stands');
+    await recordThroughputMeasurement(directory, measure(blockedWindow()));
+    const standing = await read(revision);
+    assert.equal(standing?.kind, 'needs-decision');
+    assert.equal(standing?.revision, revision);
+    assert.equal(await read(sha('f')), null, 'a measurement of another release asks nothing of this one');
+    // A newer measurement whose only exclusions are the superseded family (pre-rule words) stands no decision.
+    await recordThroughputMeasurement(directory, { ...preRuleReport(preRule), measuredAt: new Date(now + minute).toISOString() });
+    assert.equal(await read(revision), null, 'the newest measurement is judged under the settled rule');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
