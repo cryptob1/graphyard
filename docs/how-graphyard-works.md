@@ -1,30 +1,34 @@
-<!-- page: Start here | 1 | lifecycle, authority. -->
+<!-- page: Start here | 1 | lifecycle and authority. -->
 # How Graphyard works
 
-Graphyard decides whether work advances; runtimes (Herdr) run sessions, each starting with role-scoped ≤500-word digest (decisions, recurring faults, recent merges) from applied records (`.graphyard/project-memory.json`; `projectMemory` in `master status`).
+Graphyard decides whether work advances; runtimes (Herdr) run sessions.
 
 ## One trip from setup to Done
 
 1. **Ready**: released, unblocked, criteria name proofs.
-2. **Build**: worker claims lease, worktree; submits PR.
-3. **Review**: independent reviewer approves exact commit.
+2. **Build**: a worker claims lease, worktree; submits a PR.
+3. **Review**: an independent reviewer approves the exact commit.
 4. **Test**: Graphyard observes CI.
 5. **Acceptance**: granted producers report proofs its [lane](#risk-lanes) requires.
 6. **Done**: Graphyard rechecks gates, merges, observes.
 
 ## From goal to work items
 
-Goal passes intake, acceptance, approval, planning, approval and delivery. `graphyard goal FILE` records it; acceptance role writes outcomes and required `uat` cases ([validation](validation.md)), non-author-approved. Once merged, `planner` role writes architecture note (at most 400 words) and items, each naming outcomes served, cases to pass, `plannedFiles` and predecessors. A plan leaving outcome uncovered, letting parallel items share file (`dir/**` included), naming a criterion twice or touching a required case is refused with the reason; three refused rounds (before or at approval) hand goal to master. A role at its registry concurrency defers, never starting fallback. Another identity approves the plan (`goal plan-approve`); loop creates and releases items (`planned`, then `delivering`), dispatching none before its dependencies are delivered. Goal is `delivered` once every item is done and production serves it: loop-recorded deployment covering its merge, plus passing smoke proof where policy asks.
+A goal reaches work items through intake, acceptance, approval, planning, approval and delivery. `graphyard goal FILE` records it; the acceptance role writes its customer outcomes and required `uat` cases ([validation](validation.md)), approved by an identity other than their author. Once that pull request merges, the `planner` role writes an architecture note (at most 400 words) and items, each naming the outcomes it serves, the cases it must pass, its `plannedFiles` and the items it lands after. A plan leaving an outcome uncovered, letting parallel items share a file (`dir/**` boundaries included), naming a criterion twice or touching a required case is refused with the reason. Plans refused before or at approval count toward three plan rounds; after them the goal is the master's. Either role at its registry concurrency defers its run instead of starting a fallback. Another identity approves the plan (`goal plan-approve`); only then does the loop create and release the items (`planned`, then `delivering`), and the dispatcher starts none before its dependencies are delivered. The goal is `delivered` once every item is done and production serves it: a deployment observed covering its merge (the loop records it), and a passing smoke proof where its policy asks for one.
+
+## Shared project memory
+
+Sessions start with a role-scoped digest (≤500 words) of decisions, recurring faults and recent merges, built from applied records (`.graphyard/project-memory.json`; `projectMemory` in `master status`).
 
 ## Risk lanes
 
-`src/model/policy.ts` sets **risk lane** (`low`, `medium`, `high`) by paths.
+`src/model/policy.ts` sets a **risk lane** (`low`, `medium`, `high`) by paths; landability requires facts by lane.
 
-- **High** (4 h): `migrations/schema`, `auth/credentials`, `src/store/`, authentication, principals, public API and its assembler, credential bootstrap (`src/server/`), operator agent, proof grants, `src/install/`, `deploy/`, Dockerfile, `compose.yaml`, unobserved changes. Producer proofs, `manual:` attestations, two-party rework.
+- **High** (4 h): `migrations/schema`, `auth/credentials`, `src/store/`, authentication, principals, public API, its assembler, credential bootstrap (`src/server/`), operator agent, proof grants, `src/install/`, `deploy/`, Dockerfile, `compose.yaml`, unobserved changes. Producer proofs, `manual:` attestations, two-party rework.
 - **Medium** (60 min): remainder; adds producer-run `unit:`/`integration:`.
-- **Low** (30 min): test-only, docs-only, single-module. Required CI and one approval only.
+- **Low** (30 min): test-only, docs-only, single-module. Required CI, one approval; no producer proofs or `manual:` attestations.
 
-All lanes require `e2e:` proofs; low/medium reworks need no approver (approved by `graphyard-risk-lane`), nor does any lane's rework whose ground the record shows on the exact head: trusted proof failed on it, approver refused its `manual:` attestation (loop then requests that rework itself), or control plane's own test merge onto moved base conflicted, not GitHub's reading alone (`src/model/rework-ground.ts`). A head already returned to worker has spent its ground (a later retry-cap rework waits). Grounded reworks are no [intervention](dashboard.md).
+All lanes require `e2e:` proofs; low/medium reworks need no approver (recorded as approved by `graphyard-risk-lane`). Neither does a rework in any lane whose ground the record shows on the exact head: a trusted proof failed on it, an approver refused its `manual:` attestation, or the control plane's own test merge onto the moved base conflicted, not GitHub's reading alone (`src/model/rework-ground.ts`). A head already returned to a worker has spent its ground, so a later rework of it (the retry cap's) still waits. The loop turns a refused attestation into that rework itself, and a rework applied on such a ground is no [intervention](dashboard.md).
 
 ## Who holds which authority
 
@@ -40,6 +44,6 @@ Text equivalent: operator makes human-only decisions; Herdr hosts master (`coord
 
 ![Control plane: callers, engine, Postgres, reconciliation worker, GitHub.](diagrams/control-plane-components.svg)
 
-Text equivalent: mutations, events commit in locked Postgres transactions; reconciliation syncs GitHub, which merges passing heads; webhooks wake jobs.
+Text equivalent: callers use the API; the engine applies mutations with events in locked Postgres transactions; reconciliation syncs GitHub and hands passing heads to GitHub to merge; webhooks wake jobs.
 
-Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`; claims bump epoch; latest trusted proof wins; merge is not [delivery](delivery.md).
+Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`; claims bump the epoch; latest trusted proof wins; merge is not [delivery](delivery.md).

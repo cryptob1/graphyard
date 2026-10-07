@@ -247,17 +247,18 @@ test('manual:workers-tab-docs-review — docs/dashboard.md documents the Workers
   const docs = await read('docs/dashboard.md');
   const section = docs.slice(docs.indexOf('## Workers'), docs.indexOf('## The status sentence'));
   assert.ok(section.length > 0, 'a Workers section');
-  assert.match(section, /a row is one \[session handle\]/);
+  assert.match(section, /A row is one \[session handle\]/);
   assert.match(section, /not from Herdr/);
-  assert.match(section, /\*\*15 minutes\*\* by default \(`sessionStaleThresholdMs`/);
-  assert.match(section, /reads \*not seen for <time since that observation>\*, never as running, and isn't counted open/);
+  assert.match(section, /\*\*15 minutes\*\* by default, `sessionStaleThresholdMs`/);
+  assert.match(section, /reads \*not seen for <time since that observation>\*, never as running, and is not counted among the open sessions/);
   assert.match(section, /\*\*Copy local\*\*/); assert.match(section, /\*\*Copy remote\*\*/);
-  assert.match(section, /`herdr --machine <label-or-id> <command>`, `herdr --remote <ssh-target>` per `herdr --help`/);
+  assert.match(section, /`herdr --help` documents `herdr --machine <label-or-id> <command>`/);
   assert.ok(section.includes('`herdr agent attach w1V:pJD`'), 'the local form');
   assert.ok(section.includes('`herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`'), 'the exact remote form');
-  assert.match(section, /attachment isn't forwarded/);
-  assert.match(section, /the loop's \[session report\]\(master-agent\.md#session-liveness-is-reconciled-not-trusted\) ends a dead handle/);
-  assert.match(section, /\*\*Workers\*\* \(sidebar, beside Shipped and Insights; `web\/pages\/index\.tsx`\)/);
+  assert.match(section, /interactive attachment is not forwarded/);
+  assert.match(section, /the loop's \[session report\]\(master-agent\.md#session-liveness-is-reconciled-not-trusted\) is what ends a dead handle/);
+  assert.match(section, /registered beside Shipped and Insights in `web\/pages\/index\.tsx`/);
+  assert.match(docs, /\*\*Workers\*\* is its own sidebar entry/);
   // The anchor the section links to exists, and the page's own copy states the same threshold.
   assert.match(await read('docs/master-agent.md'), /### Session liveness is reconciled, not trusted/);
   assert.match(renderToStaticMarkup(createElement(WorkersPage, dashboard([]))), /not seen for 15 minutes is marked, never shown as live/);
