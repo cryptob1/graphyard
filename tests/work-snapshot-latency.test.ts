@@ -17,7 +17,7 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, missingProofs, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { dispatchSummary, emptyDispatchCursor, runAutoDispatch, tickRetryDelay, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 import { proofOutcome } from '../src/producer.js';
-import { coordinationHistoryLimit, coordinationViewHeader, coordinationSnapshot as trimInProcess, coordinationWork } from '../src/server/work-view.js';
+import { coordinationHistoryLimit, coordinationViewHeader, coordinationSnapshot as trimInProcess, coordinationWork, type CoordinationRounds } from '../src/server/work-view.js';
 import { cycleBudget } from '../src/cli/master.js';
 import { assertTiming, minimumSamples, steadyState } from './helpers/timing.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -147,11 +147,11 @@ test('integration:work-snapshot-latency — the coordination snapshot of a 100-i
       assert.equal(proofOutcome(item, request, proof), proofOutcome(whole, request, proof));
   }
   // The header the CLI sends selects the same view.
-  // The full read backfills each item's pipeline timeline, whose rework-round count the view then carries (GY-1389), so both are read after it.
+  // The full read backfills each item's pipeline timeline, whose rework-round count the view then keeps (GY-1389), so both are read after it.
   const byQuery = await read('work-snapshot?view=coordination'), byHeader = await read('work-snapshot', { [coordinationViewHeader]: 'coordination' });
   assert.equal(byHeader.body.view, 'coordination'); assert.equal(byHeader.bytes, byQuery.bytes);
   for (const [index, item] of (byHeader.body.work as Work[]).entries()) if (item.stage !== 'done')
-    assert.equal(item.pipeline?.reworkRounds, (full.body.work[index] as Work).pipeline?.reworkRounds, `${item.key}: the review-round cap reads the same round`);
+    assert.equal((item as CoordinationRounds).reworkRounds, (full.body.work[index] as Work).pipeline?.reworkRounds, `${item.key}: the review-round cap reads the same round`);
   // The full view stays available and unchanged for readers that want whole documents.
   assert.equal(full.body.view, undefined); assert.ok((full.body.work[0] as Work).evidence.length === HEADS_PER_ITEM * 3);
   const refused = await fetch(`${origin}/api/work-snapshot?view=everything`, { headers: { Authorization: `Bearer ${coordinatorToken}` } });
@@ -220,8 +220,7 @@ test('integration:store-bounded-waits — the store pool bounds the wait for a c
       for (const row of rows) for (const document of [row.document, ...(Array.isArray(row.work) ? row.work : [])]) {
         if (!document || typeof document !== 'object') continue;
         assert.ok((document.actionQueue?.history?.length ?? 0) <= coordinationHistoryLimit, 'the SQL trimmed the action-queue history before it left the database');
-        // Of the pipeline timeline only the rework-round count the review-round cap reads leaves the database (GY-1389).
-        if (document.pipeline !== undefined) assert.deepEqual(Object.keys(document.pipeline), ['reworkRounds']);
+        assert.equal(document.pipeline, undefined);
         assert.equal(document.observation?.scopeFiles, undefined);
         assert.ok(!(document.evidence ?? []).some((entry: Evidence) => entry.sha === superseded), 'the SQL filtered superseded-head evidence before it left the database');
       }

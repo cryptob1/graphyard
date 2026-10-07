@@ -166,7 +166,7 @@ test('unit:projection-contract — an open item\'s projection leaves out its per
   const projection = (await lockedWork(store.pool, [])).find(item => item.id === peer.id)!;
   assert.ok(isStandIn(projection));
   assert.equal(projection.observation?.scopeFiles, undefined, 'the projection carries no per-file scope');
-  assert.deepEqual((projection as any).pipeline, { reworkRounds: 0 }, 'of the pipeline only the rework-round count the review-round cap reads (GY-1389)');
+  assert.equal((projection as any).pipeline, undefined);
   assert.throws(() => { (projection as any).title = 'edited'; }, TypeError);
   const whole = (await withWhole(store.pool, await lockedWork(store.pool, []), item => item.stage !== 'done' && !!item.submission)).find(item => item.id === peer.id)!;
   assert.ok(!isStandIn(whole));

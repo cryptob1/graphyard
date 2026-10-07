@@ -16,6 +16,15 @@ import { actionDetailMax, type ApprovalWatch, message } from './state.js';
 import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf } from '../review-cap.js';
 import { sessionName } from '../session-name.js';
 
+/**
+ * The rework rounds the review-round cap judges an item by (GY-1118): its pipeline timeline's
+ * count, or — on the coordination view the loop reads, which drops the timeline — the count that
+ * view keeps beside it (`reworkRounds`, src/server/work-view.ts). Without it the loop read every
+ * head as round 1, and the cap never ran (GY-1389).
+ */
+export const reworkRoundsOf = (work: Work) => work.pipeline?.reworkRounds ?? (work as Work & { reworkRounds?: number }).reworkRounds ?? 0;
+const rounds = (work: Work) => ({ pipeline: { reworkRounds: reworkRoundsOf(work) } });
+
 /** What the routine decisions read of the master configuration: automatic merging, and the review-round cap (GY-1118). */
 export type ReviewCapConfig = Pick<MasterConfig, 'autoMerge'> & Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>;
 
@@ -77,14 +86,14 @@ export interface CappedReview { kind: 'follow-up' | 'escalate'; round: number; c
 export const cappedReworkBinding = (head: string, reviewer: string) => `${head}:capped:${reviewer}`;
 export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>): CappedReview | null {
   const cap = reviewRoundCapOf(config);
-  if (work.stage === 'done' || !pastReviewCap(work, cap)) return null;
+  if (work.stage === 'done' || !pastReviewCap(rounds(work), cap)) return null;
   const verdict = standingVerdict(work);
   if (!verdict) return null;
   const candidate = work.candidate!, observation = work.observation!;
   const review = observation.reviews.find(entry => entry.sha === candidate.sha && entry.state === 'CHANGES_REQUESTED');
   const body = review ? review.body : observation.agentReview?.reason;
   const reviewId = review ? review.id ?? null : observation.agentReview?.verdictId ?? null;
-  const blocking = review?.blocking?.length ? review.blocking : blockingFindings(body), round = reviewRound(work);
+  const blocking = review?.blocking?.length ? review.blocking : blockingFindings(body), round = reviewRound(rounds(work));
   const own = !!review && !!config.reviewer && review.reviewer.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase();
   const findings = followUpFindingsOf(body);
   const base = { round, cap, reviewer: verdict.reviewer, reviewId, sha: candidate.sha, blocking, findings: findings.length ? findings : [verdict.reason] };
@@ -275,7 +284,7 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   // Past the review-round cap (GY-1118) no review finding sends the item back: a change request is
   // filed as follow-ups or escalated by the review-cap step (cappedReview), and threads are only
   // the reviewer's inputs. Proofs, CI, conflicts and refused merges still return the head below.
-  const capped = pastReviewCap(work, reviewRoundCapOf(config));
+  const capped = pastReviewCap(rounds(work), reviewRoundCapOf(config));
   const verdict = capped ? null : standingVerdict(work);
   if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
   // Past the cap a change request that escalates — a blocking finding, or one Graphyard cannot withdraw —
@@ -535,7 +544,7 @@ export const botThreadReworkRounds = 2;
  */
 export function reworkThreads(work: Work): ReviewThread[] {
   const threads = openThreads(work);
-  return (work.pipeline?.reworkRounds ?? 0) >= botThreadReworkRounds ? threads.filter(thread => !botThread(thread)) : threads;
+  return reworkRoundsOf(work) >= botThreadReworkRounds ? threads.filter(thread => !botThread(thread)) : threads;
 }
 /** How many unresolved threads a rework reason names; the binding still carries every one, and the worker reads them all from the pull request. */
 const reworkThreadsNamed = 5;
