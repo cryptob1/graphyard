@@ -7,10 +7,12 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { executorsCommand } from '../src/cli/master-executors.js';
-import { executorRegistrar, readExecutorRegistrations, readRestartFence, restartExecutors, runsRelease, writeExecutorRegistration, type ExecutorRegistration, type ExecutorRestartResult } from '../src/executor-fleet.js';
+import * as fleet_ from '../src/executor-fleet.js';
+import { executorRegistrar, readExecutorRegistrations, readRestartFence, restartExecutors, writeExecutorRegistration, type ExecutorRegistration, type ExecutorRestartResult } from '../src/executor-fleet.js';
 import { performSelfUpgrade } from '../src/daemon/upgrade.js';
 import { deploymentObservationSchema, emptyDaemonState } from '../src/master-daemon.js';
-import { executorFleet, slotPaged, slotUpgradeBoundMs } from '../src/cli/executor-report.js';
+import * as report_ from '../src/cli/executor-report.js';
+import { executorFleet } from '../src/cli/executor-report.js';
 import { writeExecutorDeclaration, type SystemctlRunner } from '../src/repository-setup.js';
 import { ExecutorRegistry, executorReport } from '../src/model/executor-presence.js';
 import { attentionKind } from '../src/model/fault-classes.js';
@@ -29,6 +31,11 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * The supervisor is a stub: told to restart a unit, it records the slot down, and a moment later
  * registers the unit's new process on the checkout's commit, as a restarted executor does.
  */
+
+// Reached through their modules, so this file loads on a base without them and each case fails on its own.
+const runsRelease: typeof fleet_.runsRelease = (...args) => fleet_.runsRelease(...args);
+const slotPaged: typeof report_.slotPaged = slot => report_.slotPaged(slot);
+const slotUpgradeBoundMs = () => report_.slotUpgradeBoundMs ?? 120_000;
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const hex = (letter: string) => letter.repeat(40);
@@ -229,12 +236,12 @@ test('unit:slot-down-past-bound-pages-operator — a declared slot inactive past
     try { return (await executorFleet(root, async () => ({ executors: report }), { work: [], now: new Date(now).toISOString() }, run, async () => null)).attention.filter(item => /^Executor slot \d is /.test(item.text)); }
     finally { await rm(root, { recursive: true, force: true }); }
   };
-  const past = await slotLines(['inactive', 'active'], slotUpgradeBoundMs + 1_000);
+  const past = await slotLines(['inactive', 'active'], slotUpgradeBoundMs() + 1_000);
   assert.equal(past.length, 1);
   assert.match(past[0].text, /^Executor slot 1 is inactive for 2m, past the 2m upgrade bound although this host declares 2 slot\(s\); journalctl --user -u graphyard-executor@1\.service -n 200 says why/);
   assert.ok(past[0].next.startsWith(`systemctl --user start ${unit(1)} `), 'the operator-paged start attention names the unit');
   assert.equal(past[0].role, 'master');
-  assert.deepEqual(await slotLines(['inactive', 'active'], slotUpgradeBoundMs - 1_000), [], 'inside the bound the slot is mid-upgrade');
+  assert.deepEqual(await slotLines(['inactive', 'active'], slotUpgradeBoundMs() - 1_000), [], 'inside the bound the slot is mid-upgrade');
   assert.deepEqual(await slotLines(['deactivating', 'active'], null), [], 'a stopping slot is a restart in passage');
   // A failed slot, or one systemd cannot date, is no upgrade: it is named at once.
   assert.equal((await slotLines(['failed', 'active'], 1_000)).length, 1);
