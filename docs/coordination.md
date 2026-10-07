@@ -21,7 +21,7 @@ Each nit is a `Nit: PATH:LINE — FINDING` line ending with its class: `(mechani
 
 ## Refuse candidates that revert shipped code outside their scope
 
-`plannedFiles` bounds changes at `complete`, new heads and landings: files in scope, new files and touched `tests/helpers/timing-baseline.json` lines pass; others must match base byte-for-byte. Scope requests or audited revisions widen it.
+`plannedFiles` bounds changes at `complete`, new heads and landings: files in scope, new files and `tests/helpers/timing-baseline.json` lines for changed or unrecorded tests pass; others must match base byte-for-byte. Scope requests or audited revisions widen it.
 
 `evaluateLandability` (`src/model/landability.ts`) is the single authority on landing: gate failures are its non-sticky refusals, published as required check `graphyard/landable`, never a verdict input. Its acceptance (proof) family gates no merge and is not published.
 

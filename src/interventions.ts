@@ -7,6 +7,7 @@ import type { Store } from './store.js';
 import { boundedSnapshot } from './store/bounded-snapshot.js';
 import { applyWorkDelta, type DeltaOp } from './store/snapshot-delta.js';
 import { workIdByRef } from './store/locked-read.js';
+import { containmentGraceMs, containmentSettleWaitBoundMs } from './model/containment.js';
 
 /**
  * Interventions read from the ledger (GY-98; see model/interventions.ts for the concept).
@@ -23,6 +24,17 @@ import { workIdByRef } from './store/locked-read.js';
  * Nothing here decides a gate. The report is a reading of history; the one thing it writes is a
  * work item when a kind of intervention at a stage keeps recurring (`openPatternItems`).
  */
+
+/**
+ * Whether an `autosettle` row is the loop's own settlement inside the settle bound: the loop marked
+ * it (`origin: 'loop'`) and it landed within the grace window and `containmentSettleWaitBoundMs` of
+ * the fence's lapse, which the control plane recorded from the record it lowered. A row with no
+ * lapse to date it, or one by hand, stays a signal.
+ */
+export function loopSettledInBound(details: { origin?: unknown; lapsedAt?: unknown } | null | undefined, at: string) {
+  const lapsed = typeof details?.lapsedAt === 'string' ? Date.parse(details.lapsedAt) : Number.NaN;
+  return details?.origin === 'loop' && Number.isFinite(lapsed) && Date.parse(at) - lapsed <= containmentGraceMs + containmentSettleWaitBoundMs;
+}
 
 /** The event kinds the fold reads. Every other row of the ledger is left unread. */
 export const interventionLedgerKinds = [
@@ -259,6 +271,14 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
           || entry.asks.some(ask => ask.kind === 'scope-request' && ask.paths.length > 0 && ask.paths.every(covers));
         if (after) entry.plannedFiles = after;
         const reason = text(details.reason ?? details.intent?.reason, 'requirements revised');
+        // The loop's own re-plan onto the successors of files the base split or renamed (GY-1397) is
+        // the control plane doing its job, as an approved autoscope is: nobody stepped in, so neither
+        // it nor an ask it covers is a signal. Rows written before the rule was recorded carry the
+        // re-plan's own wording (successorStep). Only an operator agent's row carries `intent`.
+        if (widened && isObject(details.intent) && (details.intent.rule === 'successor' || /^Re-planned \S+ onto the successors of the files it plans/.test(reason))) {
+          entry.asks = entry.asks.filter(ask => !(ask.kind === 'scope-request' && ask.paths.length > 0 && ask.paths.every(covers)));
+          break;
+        }
         const cleared = row.work ? !row.work.blocker : true;
         if (entry.asks.length && (widened || cleared)) {
           // A widening answers the scope request; a blocker it clears beside one was an escalation of its own.
@@ -333,6 +353,10 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
       }
       case 'settle': entry.quarantine = null; break;
       case 'autosettle': case 'recover': {
+        // GY-1392: the loop settling a verified-dead fence within the settle bound is the product
+        // doing its own job, as the faults pass reads it (containmentInMotion); only a settlement
+        // by hand, a recovery, or a loop settlement that came past the bound is an intervention.
+        if (entry.quarantine && row.kind === 'autosettle' && loopSettledInBound(details, row.at)) { entry.quarantine = null; break; }
         if (entry.quarantine) emit(row, 'containment-settlement', { requestedAt: entry.quarantine.concernAt ?? entry.quarantine.at, blocked: `containment fence of epoch ${entry.quarantine.epoch}`, stage: entry.quarantine.stage, resolvedAt: row.at, resolvedBy: row.actor, resolution: text(details.reason, row.kind === 'autosettle' ? 'verified dead and settled' : 'recovered'), trigger: row.kind === 'autosettle' ? 'verified-dead' : 'recovered', sources: [{ seq: entry.quarantine.seq, kind: 'quarantine' }, source] });
         entry.quarantine = null;
         break;
