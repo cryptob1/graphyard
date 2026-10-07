@@ -34,6 +34,7 @@ import { type RunOptions, type RunRecord, type RunResult, type Runner } from '..
 import { type DiagnosticianEffects } from '../../src/daemon/diagnosis.js';
 import { type AcceptanceEffects, clearDrafts, draftsSettled } from '../../src/daemon/acceptance.js';
 import type { Goal, Landing } from '../../src/model/goal.js';
+import { recordLanding } from '../../src/server/routes/goals.js';
 import { terminalDecisions } from '../../src/cli/decision-report.js';
 import { Launcher } from '../../src/daemon/cycle.js';
 import { wakeOwnObservation } from '../../src/master/base-break-refresh.js';
@@ -2425,9 +2426,8 @@ export async function acceptanceWorld(dayStart: number) {
     const detail = state === 'conflicting' ? `acceptance pull request #${pr} conflicts with main` : state === 'closed' ? `acceptance pull request #${pr} was closed without merging` : state === 'merged' ? `#${pr} merged` : 'Required status check "test" is expected';
     const landing: Landing = { state, detail, mergeSha: state === 'merged' ? sha('acceptance-merge', pr) : null };
     if (state === 'waiting') return { goal, landing };
-    const recorded = state === 'merged' ? await api(principals.operatorAgent, 'POST', `goals/${goal.key}/merged`, { pr, mergeSha: landing.mergeSha }, `acceptance:${goal.id}:merged`)
-      : await api(principals.operatorAgent, 'POST', `goals/${goal.key}/closed`, { pr, reason: detail }, `acceptance:${goal.id}:${goal.revision}:landed-closed`);
-    return { goal: recorded as Goal, landing };
+    // Recorded as the land route records it: merged has no route of its own.
+    return { goal: await recordLanding(store, goal, landing, principals.operatorAgent), landing };
   };
   const effects: AcceptanceEffects = {
     settings: diagnosticianSettings({}), cwd: coordinatorRoot!,

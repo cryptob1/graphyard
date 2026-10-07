@@ -70,7 +70,7 @@ export const goalCommandSchemas = {
   merged: z.object({ pr: z.number().int().positive(), mergeSha: sha.nullable().default(null) }).strict(),
   land: z.object({}).strict(),
   closed: z.object({ pr: z.number().int().positive(), reason }).strict(),
-  deliver: z.object({ reason }).strict(),
+  deliver: z.object({ items: z.array(z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/)).min(1).max(100), reason }).strict(),
   'case-change': z.object({ work: z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/), cases: z.array(caseId).min(1).max(50), reason }).strict(),
   'case-change-approve': z.object({ change: z.string().uuid(), reason }).strict(),
   'case-change-refuse': z.object({ change: z.string().uuid(), reason }).strict(),
@@ -113,8 +113,11 @@ export function draftFiles(draft: Pick<AcceptanceDraft, 'outcomes'>, contract: R
   ];
 }
 
-/** What landing an approved acceptance pull request found (POST /api/goals/:key/land, src/server/routes/goals.ts). */
-export interface Landing { state: 'merged' | 'waiting' | 'conflicting' | 'moved' | 'closed'; detail: string; mergeSha: string | null }
+/**
+ * What landing an approved acceptance pull request found (POST /api/goals/:key/land, src/server/routes/goals.ts).
+ * `unapproved`: GitHub merged a head or base no approver judged, so nothing is protected and the goal is drafted again.
+ */
+export interface Landing { state: 'merged' | 'waiting' | 'conflicting' | 'moved' | 'closed' | 'unapproved'; detail: string; mergeSha: string | null }
 /** Everyone who has implemented an item: every identity assigned it, its lease owner and its last assignee. */
 export const implementersOf = (work: Partial<Pick<Work, 'implementers' | 'lease' | 'lastAssignment'>> | null | undefined): string[] =>
   [...new Set([...(work?.implementers ?? []), ...(work?.lease ? [work.lease.owner] : []), ...(work?.lastAssignment ? [work.lastAssignment.owner] : [])])];
@@ -125,6 +128,8 @@ export interface GoalContext {
   others?: readonly Goal[];
   /** For a case-change judgement: who has implemented the item the change is for. */
   implementers?: readonly string[];
+  /** For a delivery: the named items that are not delivered (the route reads them); delivery waits on every one. */
+  undelivered?: readonly string[];
 }
 
 /** A new goal, in acceptance drafting. */
@@ -172,8 +177,10 @@ export function applyGoalCommand(goal: Goal, command: Exclude<GoalCommand, 'reco
     next.protected = { cases: goal.acceptance.outcomes.map(outcome => outcome.case.id), outcomes: goal.acceptance.outcomes.map(outcome => outcome.id) };
     next.stage = 'delivering';
   } else if (command === 'deliver') {
-    goalCommandSchemas.deliver.parse(input);
+    const data = goalCommandSchemas.deliver.parse(input);
     demand(goal.stage === 'delivering', `${goal.key} is ${goal.stage}; only a goal being delivered is recorded delivered`);
+    // Delivery is the named implementation items' own: each must exist and have merged, never a bare assertion.
+    demand(context.undelivered && !context.undelivered.length, `${goal.key} is delivered only by delivered work: ${(context.undelivered ?? data.items).join(', ')} ${(context.undelivered ?? data.items).length === 1 ? 'is' : 'are'} not delivered`, 422);
     next.stage = 'delivered';
   } else if (command === 'case-change') {
     const data = goalCommandSchemas['case-change'].parse(input);
@@ -198,18 +205,20 @@ export function applyGoalCommand(goal: Goal, command: Exclude<GoalCommand, 'reco
 /** Who acts next on a goal, and with which command; null once it is delivered. */
 export function goalNext(goal: Goal, now = Date.now()): { who: string; command: string } | null {
   if (goal.stage === 'acceptance-drafting' && (goal.drafts ?? 0) >= maxDraftRounds) return { who: `master: ${maxDraftRounds} acceptance drafts were refused or closed (last: ${goal.refusal?.reason ?? 'none recorded'}); the loop drafts no more`, command: `graphyard goal draft ${goal.key} DRAFT.json` };
-  if (goal.stage === 'acceptance-drafting') return { who: 'acceptance role (the master loop launches it)', command: `graphyard goal draft ${goal.key} DRAFT.json` };
+  if (goal.stage === 'acceptance-drafting') return { who: 'acceptance role (the master loop launches it once its operator-agent and approver identities are provisioned)', command: `graphyard goal draft ${goal.key} DRAFT.json` };
   if (goal.stage === 'awaiting-approval') return { who: `an approver other than ${goal.acceptance!.author}`, command: `graphyard goal approve ${goal.key} -- REASON (or goal refuse)` };
   if (goal.stage === 'planned' && goal.approval && now - Date.parse(goal.approval.at) > acceptanceStuckMs)
     return { who: `master: acceptance pull request #${goal.acceptance!.pr} was approved ${goal.approval.at} and has not merged; read why on the pull request, then close it (the loop drafts again) or land it`, command: `graphyard goal closed ${goal.key} ${goal.acceptance!.pr} -- REASON` };
   if (goal.stage === 'planned') return { who: `the loop: Graphyard publishes its gate verdicts on acceptance pull request #${goal.acceptance!.pr} and merges it at its approved head, once its required checks pass`, command: `graphyard goal land ${goal.key}` };
-  if (goal.stage === 'delivering') return { who: 'master: create and deliver the implementation items', command: `graphyard goal deliver ${goal.key} -- REASON` };
+  if (goal.stage === 'delivering') return { who: 'master: create and deliver the implementation items, then name them once every one has merged', command: `graphyard goal deliver ${goal.key} GY-N... -- REASON` };
   return null;
 }
 /** A goal as `master status` lists it. */
 export const goalSummary = (goal: Goal, now = Date.now()) => ({ key: goal.key, stage: goal.stage, statement: goal.statement, deployTarget: goal.deployTarget, pr: goal.acceptance?.pr ?? null,
   outcomes: goal.acceptance?.outcomes.map(outcome => outcome.id) ?? [], updatedAt: goal.updatedAt, next: goalNext(goal, now) });
 
+/** Every protected-case refusal starts so: the observation path replaces its own violations by this prefix. */
+export const protectedCasePrefix = 'Protected case: ';
 /** The case id a path names when it is a case file: `e2e/cases/board.json` → `board`. */
 const caseOf = (path: string) => path.startsWith(`${caseDirectory}/`) && path.endsWith('.json') && !path.slice(caseDirectory.length + 1).includes('/') ? path.slice(caseDirectory.length + 1, -5) : null;
 /** Whether the candidate changes or removes what the base holds at `path` (a new file changes nothing protected). */
@@ -240,13 +249,13 @@ export function protectedCaseRefusals(work: Pick<Work, 'key'> & Partial<Pick<Wor
       if (!id || (!moved && !touches(file))) continue;
       for (const goal of guarding) if (goal.protected.cases.includes(id) && !granted(goal, id)) {
         const outcome = goal.acceptance?.outcomes.find(entry => entry.case.id === id)?.id ?? 'its outcome';
-        refusals.push(`Protected case: ${path} ${file.status === 'removed' || moved ? 'deletes' : 'modifies'} required case ${id} (outcome ${outcome} of ${goal.key}); ${how(goal)}`);
+        refusals.push(`${protectedCasePrefix}${path} ${file.status === 'removed' || moved ? 'deletes' : 'modifies'} required case ${id} (outcome ${outcome} of ${goal.key}); ${how(goal)}`);
       }
     }
     const renamedAway = file.status === 'renamed' && file.previousPath === contractFile && file.path !== contractFile;
     if ((file.path === contractFile && touches(file)) || renamedAway) for (const goal of guarding) {
       const ungranted = goal.protected.cases.filter(id => !granted(goal, id));
-      if (ungranted.length) refusals.push(`Protected case: ${contractFile} ${file.status === 'removed' || renamedAway ? 'deletes' : 'modifies'} the contract binding${goal.protected.outcomes.length === 1 ? '' : 's'} ${goal.protected.outcomes.join(', ')} of ${goal.key}, and no approved case change covers ${ungranted.join(', ')}; ${how(goal)}`);
+      if (ungranted.length) refusals.push(`${protectedCasePrefix}${contractFile} ${file.status === 'removed' || renamedAway ? 'deletes' : 'modifies'} the contract binding${goal.protected.outcomes.length === 1 ? '' : 's'} ${goal.protected.outcomes.join(', ')} of ${goal.key}, and no approved case change covers ${ungranted.join(', ')}; ${how(goal)}`);
     }
   }
   return refusals;

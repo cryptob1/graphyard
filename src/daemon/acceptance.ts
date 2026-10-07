@@ -8,7 +8,8 @@ import { caseDirectory, contractFile, parseContract } from '../e2e/case.js';
 import { acceptanceDraftSchema, acceptanceStuckMs, draftFiles, maxDraftRounds, type AcceptanceDraft, type Goal, type Landing } from '../model/goal.js';
 import { agentToken } from '../master/autonomy.js';
 import { worktreeRoot } from '../install/worktree-root.js';
-import { selectFleetSession } from '../fleet.js';
+import { capacityRefusal, selectFleetSession } from '../fleet.js';
+import { Refusal, RefusedResponse } from '../model/refusal.js';
 import type { MasterConfig } from '../master.js';
 import { diagnosticianSettings, type DiagnosticianSettings } from '../runner/payloads.js';
 import { piRunner } from '../runner/pi.js';
@@ -62,8 +63,11 @@ export interface AcceptanceEffects {
   closed: (goal: Goal, pr: number, reason: string) => Promise<Goal>;
 }
 
-/** A finished run, kept until it is posted: the draft (and the pull request it was opened as) or the verdict. */
-interface Pending { revision: number; draft?: AcceptanceDraft | null; opened?: { pr: number; branch: string; head: string }; judgement?: Judgement | null; runs: string[] }
+/** A finished run, kept until it is posted: the draft (and the pull request it was opened as) or the verdict; `deferred` names the full role no run started on. */
+interface Pending { revision: number; draft?: AcceptanceDraft | null; opened?: { pr: number; branch: string; head: string }; judgement?: Judgement | null; runs: string[]; deferred?: string }
+/** A draft the current base can never take (an outcome, case or file it names already exists): it is dropped and drafted again, never reopened. */
+export class UnopenableDraft extends Error {}
+const unopenable = (error: unknown) => error instanceof UnopenableDraft || ((error instanceof Refusal || error instanceof RefusedResponse) && error.status === 422);
 const live = new Map<string, Promise<void>>();
 const pending = new Map<string, Pending>();
 /** When each goal's next try of a step may run: `${goal.id}:${step}`. */
@@ -104,13 +108,21 @@ export function judgementPrompt(config: { repository: string }, goal: Goal) {
     + `The goal and its draft, as JSON:\n${clip(JSON.stringify(input), 80_000)}`;
 }
 
-/** One headless run, primary then fallback, as the diagnostician runs (GY-439). */
-async function runHeadless<T>(acceptance: AcceptanceEffects, role: 'draft' | 'judge', goal: Goal, prompt: string, validate: (payload: unknown) => T): Promise<{ payload: T | null; runs: string[] }> {
+/**
+ * One headless run, primary then fallback, as the diagnostician runs (GY-439). A registry role at
+ * its concurrency (or paused) defers the goal instead: no fallback starts, so the operator's limit
+ * holds however many goals are open.
+ */
+async function runHeadless<T>(acceptance: AcceptanceEffects, role: 'draft' | 'judge', goal: Goal, prompt: string, validate: (payload: unknown) => T): Promise<{ payload: T | null; runs: string[]; deferred?: string }> {
   const runs: string[] = [];
   const [env, tool] = role === 'draft' ? [acceptanceRole, acceptanceTool] : [acceptanceJudgeRole, acceptanceJudgementTool];
   for (const attempt of ['primary', 'fallback'] as const) {
     let chosen: AcceptanceRun;
-    try { chosen = await acceptance.runner(role, attempt, goal); } catch (error) { runs.push(`no ${attempt} runner: ${message(error)}`); continue; }
+    try { chosen = await acceptance.runner(role, attempt, goal); } catch (error) {
+      const full = capacityRefusal(error);
+      if (full) return { payload: null, runs, deferred: `${full}: ${clip(message(error), 300)}` };
+      runs.push(`no ${attempt} runner: ${message(error)}`); continue;
+    }
     const run = chosen.runner.start(prompt, { cwd: acceptance.cwd, env: { GRAPHYARD_PI_ROLE: env }, tool, timeoutMs: acceptance.settings.timeoutMinutes * 60_000, validate });
     const result = await run.result();
     await Promise.resolve(chosen.release?.(`the ${attempt} acceptance ${role} of ${goal.key} ended`)).catch(() => {});
@@ -125,14 +137,19 @@ function launch(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal, role: '
   const run = role === 'draft'
     ? declared(acceptance.cwd).then(existing => runHeadless(acceptance, role, goal, acceptancePrompt(cycle.config, goal, existing), payload => {
       const parsed = acceptancePayloadSchema.parse(payload); ofGoal(goal)(parsed); return { outcomes: parsed.outcomes };
-    })).then(result => ({ revision: goal.revision, draft: result.payload, runs: result.runs }))
+    })).then(result => ({ revision: goal.revision, draft: result.payload, runs: result.runs, deferred: result.deferred }))
     : runHeadless(acceptance, role, goal, judgementPrompt(cycle.config, goal), payload => { const parsed = judgementPayloadSchema.parse(payload); ofGoal(goal)(parsed); return parsed; })
-      .then(result => ({ revision: goal.revision, judgement: result.payload, runs: result.runs }));
+      .then(result => ({ revision: goal.revision, judgement: result.payload, runs: result.runs, deferred: result.deferred }));
   live.set(goal.id, run.catch(error => ({ revision: goal.revision, [role === 'draft' ? 'draft' : 'judgement']: null, runs: [message(error)] }))
     .then(result => { pending.set(goal.id, result); }).finally(() => live.delete(goal.id)));
 }
 const due = (cycle: Cycle, goal: Goal, step: string) => cycle.clock >= (retryAt.get(`${goal.id}:${step}`) ?? -Infinity);
 const later = (cycle: Cycle, goal: Goal, step: string, ms: number) => { retryAt.set(`${goal.id}:${step}`, cycle.clock + ms); };
+/** A run the full role deferred: dropped, and launched again after one poll interval. */
+function deferred(cycle: Cycle, goal: Goal, result: Pending, step: 'draft' | 'judge', note: Note) {
+  pending.delete(goal.id); later(cycle, goal, step, acceptancePollMs);
+  return note(goal, 'waiting', `The ${step === 'draft' ? 'acceptance role' : 'approver'} is at its registry capacity (${result.deferred}); ${goal.key}'s ${step === 'draft' ? 'draft' : 'judgement'} starts no fallback and is launched again in five minutes`);
+}
 
 /**
  * One loop step over every open goal (GY-1417). Each goal moves at most one transition a cycle;
@@ -168,21 +185,29 @@ async function drafting(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal,
       await acceptance.close(refused.pr, `Closed by the Graphyard loop: ${goal.key}'s acceptance draft was not taken (${clip(refused.reason, 500)}, by ${refused.by}). The next draft opens on a new pull request.`);
       closedPulls.add(refused.pr);
       await note(goal, 'done', `Closed ${goal.key}'s refused acceptance pull request #${refused.pr} and deleted its branch`);
-    } catch (error) { later(cycle, goal, 'close', acceptanceStepRetryMs); await note(goal, 'failed', `Could not close ${goal.key}'s refused acceptance pull request #${refused.pr}: ${message(error)}; it is tried again in ten minutes`); }
+    } catch (error) { later(cycle, goal, 'close', acceptanceStepRetryMs); return note(goal, 'failed', `Could not close ${goal.key}'s refused acceptance pull request #${refused.pr}: ${message(error)}; it is tried again in ten minutes, and the next draft waits for it`); }
   }
+  // Closed before the next draft: until then nothing else moves.
+  if (refused && !closedPulls.has(refused.pr)) return;
   if ((goal.drafts ?? 0) >= maxDraftRounds)
     return note(goal, 'done', `${goal.key} has had ${goal.drafts} acceptance drafts refused or closed (last: ${clip(refused?.reason ?? 'none recorded', 300)}); the loop drafts no more and leaves it to the master`);
   const result = pending.get(goal.id);
   if (result && 'draft' in result) {
+    if (!result.draft && result.deferred) return deferred(cycle, goal, result, 'draft', note);
     if (!result.draft) {
       pending.delete(goal.id); later(cycle, goal, 'draft', acceptanceRetryMs);
       return note(goal, 'failed', `The acceptance role returned no draft for ${goal.key}: ${result.runs.join('; ')}; it is drafted again in an hour`);
     }
     if (!due(cycle, goal, 'post')) return;
+    // A draft the base or the control plane can never take is dropped, so the role drafts new ids within the hourly retry rather than reopening it forever.
+    const drop = (error: unknown) => { pending.delete(goal.id); later(cycle, goal, 'draft', acceptanceRetryMs); return note(goal, 'failed', `The acceptance draft for ${goal.key} can never be opened: ${message(error)}; it is dropped and drafted again in an hour`); };
     try { result.opened ??= await acceptance.open(goal, result.draft); }
-    catch (error) { later(cycle, goal, 'post', acceptanceStepRetryMs); return note(goal, 'failed', `The acceptance draft for ${goal.key} could not be opened as a pull request: ${message(error)}; the same draft is opened again in ten minutes, reusing its branch and pull request`); }
+    catch (error) { if (unopenable(error)) return drop(error); later(cycle, goal, 'post', acceptanceStepRetryMs); return note(goal, 'failed', `The acceptance draft for ${goal.key} could not be opened as a pull request: ${message(error)}; the same draft is opened again in ten minutes, reusing its branch and pull request`); }
     try { await acceptance.draft(goal, { ...result.draft, ...result.opened }); }
-    catch (error) { later(cycle, goal, 'post', acceptanceStepRetryMs); return note(goal, 'failed', `Opened #${result.opened.pr} for ${goal.key}, but its draft could not be recorded: ${message(error)}; it is posted again in ten minutes`); }
+    catch (error) {
+      if (unopenable(error)) { await acceptance.close(result.opened.pr, `Closed by the Graphyard loop: ${clip(message(error), 500)}`).catch(() => {}); return drop(error); }
+      later(cycle, goal, 'post', acceptanceStepRetryMs); return note(goal, 'failed', `Opened #${result.opened.pr} for ${goal.key}, but its draft could not be recorded: ${message(error)}; it is posted again in ten minutes`);
+    }
     pending.delete(goal.id);
     return note(goal, 'done', `Opened acceptance pull request #${result.opened.pr} for ${goal.key}: ${result.draft.outcomes.map(entry => `${entry.id} (case ${entry.case.id})`).join(', ')}; it awaits an approver other than its author`);
   }
@@ -206,6 +231,7 @@ async function polled(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal, n
 async function awaiting(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal, note: Note) {
   const result = pending.get(goal.id);
   if (result && 'judgement' in result) {
+    if (!result.judgement && result.deferred) return deferred(cycle, goal, result, 'judge', note);
     if (!result.judgement) {
       pending.delete(goal.id); later(cycle, goal, 'judge', acceptanceRetryMs);
       return note(goal, 'failed', `The approver returned no judgement on ${goal.key}'s draft #${goal.acceptance!.pr}: ${result.runs.join('; ')}; it is judged again in an hour`);
@@ -244,6 +270,7 @@ async function planned(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal, 
     return note(goal, 'done', `Published the gate verdicts on ${goal.key}'s approved acceptance pull request #${pr} and asked GitHub to merge it: ${landing.detail}; asked again in five minutes`);
   }
   closedPulls.add(pr);
+  if (landing.state === 'unapproved') return note(goal, 'failed', `${goal.key}'s ${landing.detail}. It went back to drafting with that reason recorded; the master decides what the merged files stand for`);
   if (landing.state !== 'closed') pending.set(goal.id, { revision: answer.goal.revision, draft: { outcomes }, runs: [] });
   return note(goal, 'done', `${goal.key}'s ${landing.detail}, so it went back to drafting${landing.state === 'closed' ? ' with that reason recorded' : '; the same outcomes are opened again from the current base and judged again'}`);
 }
@@ -255,9 +282,10 @@ export async function openAcceptancePullRequest(run: ChildRun, root: string, scr
   try {
     await run('git', ['-C', root, 'worktree', 'add', '--detach', directory, `origin/${config.baseBranch}`]);
     const contract = await readFile(join(directory, contractFile), 'utf8').then(source => parseContract(source), () => null);
-    const files = draftFiles(draft, contract);
+    let files: ReturnType<typeof draftFiles>;
+    try { files = draftFiles(draft, contract); } catch (error) { throw new UnopenableDraft(message(error)); }
     for (const file of files) {
-      if (file.path !== contractFile && await stat(join(directory, file.path)).then(() => true, () => false)) throw new Error(`${file.path} already exists on ${config.baseBranch}; the draft must name a new case`);
+      if (file.path !== contractFile && await stat(join(directory, file.path)).then(() => true, () => false)) throw new UnopenableDraft(`${file.path} already exists on ${config.baseBranch}; the draft must name a new case`);
       await writeFile(join(directory, file.path), file.content);
     }
     // One branch per draft revision, owned by the loop: a retry force-pushes it and reuses its open pull request.
@@ -289,11 +317,12 @@ interface Calls {
 /**
  * The acceptance role's effects under the live configuration: runners as the diagnostician's (the
  * registry's acceptance or approver role when an operator defines one, else Pi on
- * `run.diagnostician`), drafts posted as the master's operator-agent identity and verdicts as the
+ * `run.diagnostician`'s models, whatever its `enabled`), drafts posted as the master's operator-agent identity and verdicts as the
  * approver identity, so the author of a draft never judges it, and GitHub through `gh`.
  */
 export function acceptanceEffects(config: MasterConfig, root: string, calls: Calls): AcceptanceEffects {
-  const { run } = calls, settings = diagnosticianSettings(config.run);
+  // The diagnostician's model settings, but enabled on its own: `run.diagnostician.enabled: false` never holds a goal.
+  const { run } = calls, settings = { ...diagnosticianSettings(config.run), enabled: true };
   const gh = async (args: string[]) => String(await run('gh', [...args, '--repo', config.repository]));
   const asApprover = async (path: string, body: unknown, key: string) => {
     const response = await calls.fetcher(`${config.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${await agentToken(root, config, 'approver')}`, 'Content-Type': 'application/json', 'Idempotency-Key': key },

@@ -9,8 +9,8 @@ import type { CliContext } from './context.js';
  * goal or move it on, each a call to /api/goals that the server authorizes and records in the
  * goal's history. A reason is everything after `--`.
  */
-const usage = `Use goal FILE | goal list [--all] | goal show GOAL-N | goal draft GOAL-N DRAFT.json | goal approve|refuse|deliver GOAL-N -- REASON
-  | goal land GOAL-N | goal merged GOAL-N PR [MERGE_SHA] | goal closed GOAL-N PR -- REASON | goal case-change GOAL-N GY-N CASE... -- REASON | goal case-change-approve|case-change-refuse GOAL-N CHANGE_ID -- REASON`;
+const usage = `Use goal FILE | goal list [--all] | goal show GOAL-N | goal draft GOAL-N DRAFT.json | goal approve|refuse GOAL-N -- REASON
+  | goal land GOAL-N | goal closed GOAL-N PR -- REASON | goal deliver GOAL-N GY-N... -- REASON | goal case-change GOAL-N GY-N CASE... -- REASON | goal case-change-approve|case-change-refuse GOAL-N CHANGE_ID -- REASON`;
 /** The words before `--`, and the reason after it. */
 function split(args: string[]) {
   const at = args.indexOf('--');
@@ -31,12 +31,12 @@ async function goal(context: CliContext) {
   if (!sub || sub === 'help') throw new Error(usage);
   if (sub === 'list') return print((await api(`goals?view=summary${args.includes('--all') ? '' : '&open=1'}`)).goals);
   if (sub === 'show') return print(await api(`goals/${encodeURIComponent(ref ?? '')}`));
-  if (['draft', 'approve', 'refuse', 'deliver', 'land', 'merged', 'closed', 'case-change', 'case-change-approve', 'case-change-refuse'].includes(sub) && !ref) throw new Error(usage);
+  if (['draft', 'approve', 'refuse', 'deliver', 'land', 'closed', 'case-change', 'case-change-approve', 'case-change-refuse'].includes(sub) && !ref) throw new Error(usage);
   if (sub === 'draft') return print(await post('draft', await json(rest[0])));
-  if (sub === 'approve' || sub === 'refuse' || sub === 'deliver') return print(await post(sub, { reason: needReason(reason) }));
+  if (sub === 'approve' || sub === 'refuse') return print(await post(sub, { reason: needReason(reason) }));
+  if (sub === 'deliver') return print(await post('deliver', { items: rest, reason: needReason(reason) }));
   if (sub === 'land') return print(await post('land', {}));
   if (sub === 'closed') return print(await post('closed', { pr: Number(rest[0]), reason: needReason(reason) }));
-  if (sub === 'merged') return print(await post('merged', { pr: Number(rest[0]), ...(rest[1] ? { mergeSha: rest[1] } : {}) }));
   if (sub === 'case-change') return print(await post('case-change', { work: rest[0], cases: rest.slice(1), reason: needReason(reason) }));
   if (sub === 'case-change-approve' || sub === 'case-change-refuse') return print(await post(sub, { change: rest[0], reason: needReason(reason) }));
   // Anything else names the goal file to record.
@@ -53,11 +53,12 @@ export const goalCommands = defineCommands([{
     '                                Open goals with stage and next actor; one goal with history',
     '  goal approve|refuse GOAL-N -- REASON',
     '                                Judge an acceptance draft (never its author)',
-    '  goal land GOAL-N              Land the approved acceptance PR at its approved head',
-    '  goal merged GOAL-N PR [SHA] | goal closed GOAL-N PR -- REASON',
-    '                                Record the acceptance PR merged (its cases are then',
-    '                                protected) or closed unmerged (drafted again)',
-    '  goal deliver GOAL-N -- REASON Record the goal delivered',
+    '  goal land GOAL-N              Land the approved acceptance PR at its approved head;',
+    '                                merged there, its cases are protected',
+    '  goal closed GOAL-N PR -- REASON',
+    '                                Record the acceptance PR closed unmerged (drafted again)',
+    '  goal deliver GOAL-N GY-N... -- REASON',
+    '                                Record the goal delivered by those merged items',
     '  goal case-change GOAL-N GY-N CASE... -- REASON',
     '                                Ask to change protected cases for one item; judged by',
     '                                goal case-change-approve|case-change-refuse GOAL-N ID --',

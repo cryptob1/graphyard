@@ -4,6 +4,7 @@ import { CHECK_NAME, demand, operatorCapability, type OperatorCapability, type P
 import { appendGoal, applyGoalCommand, goalCommandSchemas, goalHistory, goalKeyPattern, goalSummary, implementersOf, readGoals, recordGoal, type Goal, type GoalCommand, type Landing } from '../../model/goal.js';
 import { landableCarried } from '../../landable-check.js';
 import type { GitHub } from '../../github.js';
+import type { Store } from '../../store.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
 
 /**
@@ -21,9 +22,12 @@ function allow({ actor, services }: RouteContext, roles: Principal['role'][], ca
   if (actor.role === 'operator-agent') return operatorCapability(actor, capability, undefined, services.repository);
   demand(roles.includes(actor.role), `${actor.id} is a ${actor.role}; this goal command needs ${roles.join(' or ')} or an operator agent holding ${capability}`, 403);
 }
-/** Who may run each command on an existing goal. A case change is asked by whoever works on the item. */
-const permitted: Record<Exclude<GoalCommand, 'record'>, (context: RouteContext) => void> = {
-  draft: intent, approve: judge, refuse: judge, merged: intent, closed: intent, deliver: intent, land: intent, 'case-change-approve': judge, 'case-change-refuse': judge,
+/**
+ * Who may run each command on an existing goal. A case change is asked by whoever works on the item.
+ * `merged` is no route: only the land route records it, from what GitHub reports.
+ */
+const permitted: Record<Exclude<GoalCommand, 'record' | 'merged'>, (context: RouteContext) => void> = {
+  draft: intent, approve: judge, refuse: judge, closed: intent, deliver: intent, land: intent, 'case-change-approve': judge, 'case-change-refuse': judge,
   'case-change': context => demand(!['reader', 'producer'].includes(context.actor.role), 'A reader or producer cannot request a case change', 403),
 };
 const find = (goals: Goal[], ref: string) => goals.find(goal => goal.key === ref || goal.id === ref);
@@ -57,14 +61,18 @@ const mergeMethod = () => (['MERGE', 'SQUASH', 'REBASE'] as const).find(method =
  * here the control-plane App publishes both on exactly the approved head — the approval by an identity
  * other than its author is its gate — and merges head-bound, as the main guard lands a revert. GitHub
  * still enforces CI and its review rules, so a merge it refuses is `waiting`. A pull request whose
- * head moved off the approved one, or that conflicts with its base, is never landed.
+ * head moved off the approved one, or that conflicts with its base, is never landed; one GitHub merged
+ * at any other head or base (an administrative bypass) is `unapproved`, never accepted after the fact.
  */
 export async function landAcceptance(github: LandingGitHub, goal: Goal): Promise<Landing> {
   const { pr } = goal.acceptance!, { head, by, reason } = goal.approval!;
   const pull = await github.request(`/pulls/${pr}`);
-  if (pull?.merged) return { state: 'merged', mergeSha: pull.merge_commit_sha ?? null, detail: `#${pr} merged` };
+  const elsewhere = () => `acceptance pull request #${pr} is at ${String(pull.head?.sha).slice(0, 12)} on ${pull.base?.ref}, not its approved head ${head.slice(0, 12)} on ${github.config.base}`;
+  const approvedHead = () => pull.head?.sha === head && pull.base?.ref === github.config.base;
+  if (pull?.merged) return approvedHead() ? { state: 'merged', mergeSha: pull.merge_commit_sha ?? null, detail: `#${pr} merged` }
+    : { state: 'unapproved', mergeSha: pull.merge_commit_sha ?? null, detail: `${elsewhere()}, yet GitHub merged it: no approver judged what merged, so no case is protected` };
   if (pull?.state !== 'open') return { state: 'closed', mergeSha: null, detail: `acceptance pull request #${pr} was closed without merging` };
-  if (pull.head?.sha !== head || pull.base?.ref !== github.config.base) return { state: 'moved', mergeSha: null, detail: `acceptance pull request #${pr} is at ${String(pull.head?.sha).slice(0, 12)} on ${pull.base?.ref}, not its approved head ${head.slice(0, 12)} on ${github.config.base}` };
+  if (!approvedHead()) return { state: 'moved', mergeSha: null, detail: elsewhere() };
   if (pull.mergeable === false || pull.mergeable_state === 'dirty') return { state: 'conflicting', mergeSha: null, detail: `acceptance pull request #${pr} conflicts with ${github.config.base}` };
   const summary = `Acceptance of ${goal.key} at ${head}: approved by ${by}, not its author ${goal.acceptance!.author}: ${reason}`.slice(0, 4000);
   const existing = (await github.pages(`/commits/${head}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=latest`, 'check_runs')).find(run => run.app?.id === github.config.appId);
@@ -75,7 +83,21 @@ export async function landAcceptance(github: LandingGitHub, goal: Goal): Promise
   try { await github.graphql(mergeMutation, { id: pull.node_id, head, method: mergeMethod() }); }
   catch (error) { return { state: 'waiting', mergeSha: null, detail: `GitHub has not merged #${pr} yet: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1000) }; }
   const merged = await github.request(`/pulls/${pr}`);
-  return merged?.merged ? { state: 'merged', mergeSha: merged.merge_commit_sha ?? null, detail: `#${pr} merged` } : { state: 'waiting', mergeSha: null, detail: `GitHub accepted the merge of #${pr} but has not reported it merged yet` };
+  return merged?.merged && merged.head?.sha === head ? { state: 'merged', mergeSha: merged.merge_commit_sha ?? null, detail: `#${pr} merged` } : { state: 'waiting', mergeSha: null, detail: `GitHub accepted the merge of #${pr} but has not reported it merged yet` };
+}
+
+/** What landing found, recorded under the lock unless the goal moved on meanwhile: merged at its approved head, else closed and drafted again. */
+export async function recordLanding(store: Pick<Store, 'transaction'>, goal: Goal, landing: Landing, actor: Principal): Promise<Goal> {
+  const pr = goal.acceptance!.pr;
+  return store.transaction(async (db, now) => {
+    const current = find(await readGoals(db), goal.id);
+    demand(current, 'Goal not found', 404);
+    if (current.stage !== 'planned' || current.acceptance?.pr !== pr) return current;
+    const [command, input] = landing.state === 'merged' ? ['merged', { pr, mergeSha: landing.mergeSha }] as const : ['closed', { pr, reason: landing.detail }] as const;
+    const changed = applyGoalCommand(current, command, input, { actor, at: now.toISOString() });
+    await appendGoal(db, actor.id, command, changed, input);
+    return changed;
+  });
 }
 
 export const goalRoutes = defineRoutes('goals', [
@@ -110,7 +132,7 @@ export const goalRoutes = defineRoutes('goals', [
     },
   },
   {
-    // The loop lands an approved acceptance pull request: merged, it is recorded merged; closed, moved or conflicting, it is closed and recorded closed, so the goal is drafted again.
+    // The loop lands an approved acceptance pull request: merged at its approved head, it is recorded merged; closed, moved, conflicting or merged unapproved, it is closed (when open) and recorded closed, so the goal is drafted again.
     method: 'POST', path: /^\/api\/goals\/([^/]+)\/land$/,
     async handle(context, [ref]) {
       intent(context);
@@ -124,27 +146,18 @@ export const goalRoutes = defineRoutes('goals', [
       const landing = await landAcceptance(github, goal);
       if (landing.state === 'waiting') return { goal, landing };
       const { pr, branch } = goal.acceptance;
-      if (landing.state !== 'merged' && landing.state !== 'closed') {
+      if (landing.state === 'moved' || landing.state === 'conflicting') {
         await github.request(`/issues/${pr}/comments`, 'POST', { body: `Closed by Graphyard: ${landing.detail}. ${goal.key}'s outcomes are opened again on a new pull request from the current base and judged again.` });
         await github.request(`/pulls/${pr}`, 'PATCH', { state: 'closed' });
         if (branch.startsWith('graphyard/')) await github.request(`/git/refs/heads/${branch}`, 'DELETE').catch(() => undefined);
       }
-      const next = await engine.store.transaction(async (db, now) => {
-        const current = find(await readGoals(db), goal.id);
-        demand(current, 'Goal not found', 404);
-        if (current.stage !== 'planned' || current.acceptance?.pr !== pr) return current;
-        const [command, input] = landing.state === 'merged' ? ['merged', { pr, mergeSha: landing.mergeSha }] as const : ['closed', { pr, reason: landing.detail }] as const;
-        const changed = applyGoalCommand(current, command, input, { actor: context.actor, at: now.toISOString() });
-        await appendGoal(db, context.actor.id, command, changed, input);
-        return changed;
-      });
-      return { goal: next, landing };
+      return { goal: await recordLanding(engine.store, goal, landing, context.actor), landing };
     },
   },
   {
-    method: 'POST', path: /^\/api\/goals\/([^/]+)\/(draft|approve|refuse|merged|closed|deliver|case-change|case-change-approve|case-change-refuse)$/,
+    method: 'POST', path: /^\/api\/goals\/([^/]+)\/(draft|approve|refuse|closed|deliver|case-change|case-change-approve|case-change-refuse)$/,
     async handle(context, [ref, verb]) {
-      const command = verb as Exclude<GoalCommand, 'record' | 'land'>;
+      const command = verb as Exclude<GoalCommand, 'record' | 'land' | 'merged'>;
       permitted[command](context);
       const input = await parseJson(context, 262_144);
       const { engine } = context.services;
@@ -157,7 +170,8 @@ export const goalRoutes = defineRoutes('goals', [
         demand(goal, 'Goal not found', 404);
         // A case change names an item that exists, and is judged against everyone who has implemented it:
         // a grant for an item not yet created could be approved by whoever later implements it.
-        let implementers: string[] = [];
+        let implementers: string[] = [], undelivered: string[] | undefined;
+        if (command === 'deliver') undelivered = (await Promise.all(goalCommandSchemas.deliver.parse(input).items.map(async key => (await workByKey(db, key))?.stage === 'done' ? null : key))).filter((key): key is string => !!key);
         if (command === 'case-change') demand(await workByKey(db, goalCommandSchemas[command].parse(input).work), `${input.work} is no work item; a case change names the existing item that needs it`, 404);
         if (command === 'case-change-approve' || command === 'case-change-refuse') {
           const change = goal.caseChanges.find(entry => entry.id === goalCommandSchemas[command].parse(input).change);
@@ -167,7 +181,7 @@ export const goalRoutes = defineRoutes('goals', [
             implementers = implementersOf(work);
           }
         }
-        const next = applyGoalCommand(goal, command, input, { actor, at: now.toISOString(), others: goals, implementers });
+        const next = applyGoalCommand(goal, command, input, { actor, at: now.toISOString(), others: goals, implementers, undelivered });
         await appendGoal(db, actor.id, command, next, input);
         return next;
       });
