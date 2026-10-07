@@ -9,7 +9,7 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { daemonSummary, deploymentObservationSchema, emptyDaemonState, readDaemonState, runDaemon, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { describeSelfUpgrade, performSelfUpgrade, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
-import { releaseLag, readBaseTip, releaseLagGraceMs, upgradeRefusalAttention, type PromotionWait } from '../src/master/release-lag.js';
+import { releaseLag, promotionWait, readBaseTip, releaseLagGraceMs, upgradeRefusalAttention, type PromotionWait } from '../src/master/release-lag.js';
 import { owedUpgrade, readResources, resourceAttention } from '../src/master-resources.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { executorRegistrar, readExecutorRegistration, readExecutorRegistrations, readRelease, readRestartFence, restartExecutors, writeExecutorRegistration, type ExecutorRegistration } from '../src/executor-fleet.js';
@@ -679,6 +679,14 @@ test('unit:release-lag-promotion-grace — deliveries inside one promotion windo
   const unread = await lagOf(null);
   assert.ok(unread.components.every(row => row.late));
   assert.equal(unread.promotion, null);
+  // An unavailable observation verified no release and lists every delivery as pending: it grants
+  // no grace, however soon the promotion is due, so the lag is named exactly as with no cursor.
+  const unavailable = promotionWait({ deployment: { source: 'unavailable', sha: null, pending: ['GY-1365', 'GY-1385', 'GY-1398'] }, promotion: { nextDueAt: wait().nextDueAt, inFlight: true }, upgrade: { alignedRelease: hex('a') } });
+  assert.equal(unavailable, null);
+  const unverified = await lagOf(unavailable);
+  assert.ok(unverified.components.every(row => row.late && !row.awaitingPromotion.length));
+  assert.equal(unverified.attention.length, 2);
+  assert.ok(promotionWait({ deployment: { source: 'endpoint', sha: hex('a'), pending: [] }, promotion: null }));
 });
 
 test('unit:loop-lag-remedy-names-promotion — a loop aligned with the verified deployment is never told to restart: the lag text and the loaded-revision detail name the promotion and its due time', async () => {

@@ -27,9 +27,13 @@ export interface PromotionWait { deployedSha: string | null; alignedRelease: str
 
 const sameCommit = (a: string | null | undefined, b: string | null | undefined) => !!a && !!b && (a.startsWith(b) || b.startsWith(a));
 
-/** The cursor's promotion wait: null when it holds no deployment observation. */
-export function promotionWait(state: { deployment?: { sha: string | null; pending?: string[] } | null; promotion?: { nextDueAt: string | null; inFlight: boolean } | null; upgrade?: { alignedRelease?: string | null } | null } | null | undefined): PromotionWait | null {
-  if (!state?.deployment) return null;
+/**
+ * The cursor's promotion wait: null when it holds no deployment observation, or one that verified
+ * no release (an unavailable observation lists every delivery as pending, served or not, so it can
+ * never ground the promotion grace).
+ */
+export function promotionWait(state: { deployment?: { source?: string; sha: string | null; pending?: string[] } | null; promotion?: { nextDueAt: string | null; inFlight: boolean } | null; upgrade?: { alignedRelease?: string | null } | null } | null | undefined): PromotionWait | null {
+  if (!state?.deployment || !state.deployment.sha || state.deployment.source === 'unavailable') return null;
   return { deployedSha: state.deployment.sha, alignedRelease: state.upgrade?.alignedRelease ?? null, pending: state.deployment.pending ?? [],
     nextDueAt: state.promotion?.nextDueAt ?? null, inFlight: state.promotion?.inFlight === true };
 }

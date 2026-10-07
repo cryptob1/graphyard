@@ -74,7 +74,7 @@ A silent hour: `master status` points to `https://github.com/settings/apps/APP-S
 
 Per `resources` entry: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume and `GRAPHYARD_DATABASE_MAX_BYTES` (default 10 GiB); `tmp-inodes`, free `/tmp` (TMPDIR, `/tmp`); `loaded-revision` counts code moves. No reading faults while its remedy acts: an owed restart retried within bound, a pane unowned under 10 minutes, the loop's own lag, `/tmp` above a tenth free after a pass within 30 minutes.
 
-Merges awaiting a due-later or validating [promotion](delivery.md) owe no restart: `releaseLag` and `loaded-revision` skip them. Sandboxed `systemctl --user` probes read unverified given the cursor's unit.
+Merges awaiting a due-later or validating [promotion](delivery.md) owe no restart: `releaseLag` and `loaded-revision` skip them (never on an unavailable observation). Sandboxed `systemctl --user` probes read unverified given the cursor's unit.
 
 ## Storage retention
 
